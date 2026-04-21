@@ -12,6 +12,7 @@ Configuration:
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import time
@@ -125,6 +126,8 @@ async def collect_summary(date_utc: str) -> dict[str, Any]:
         "halts_today": 0,
         "drift_alerts_today": 0,
         "top_movers": [],
+        "by_vertical": [],
+        "by_persona": [],
     }
     # Realized + settled count
     try:
@@ -211,6 +214,151 @@ async def collect_summary(date_utc: str) -> dict[str, Any]:
         ]
     except Exception as e:
         error_log("daily_summary.movers", f"{type(e).__name__}: {e}")
+    # Per-vertical breakdown — pull today's vertical_daily_pnl rows and
+    # join the latest 24h Brier from calibration_snapshots.
+    try:
+        rows = await db.fetch(
+            """
+            SELECT v.vertical,
+                   v.trades_count::int                    AS n,
+                   v.wins::int                            AS wins,
+                   v.losses::int                          AS losses,
+                   coalesce(v.daily_pnl, 0)::float        AS pnl,
+                   coalesce(v.cumulative_pnl, 0)::float   AS cum_pnl,
+                   coalesce(v.win_rate, 0)::float         AS win_rate,
+                   coalesce(v.avg_edge, 0)::float         AS avg_edge,
+                   (
+                     SELECT cs.brier_score::float
+                       FROM calibration_snapshots cs
+                      WHERE cs.vertical = v.vertical
+                        AND cs.sub_category = '24h'
+                      ORDER BY cs.created_at DESC
+                      LIMIT 1
+                   )                                      AS brier
+              FROM vertical_daily_pnl v
+             WHERE v.report_date = $1::date
+             ORDER BY v.vertical
+            """,
+            date_utc,
+        )
+        out["by_vertical"] = [
+            {
+                "vertical": r["vertical"],
+                "trades": int(r["n"] or 0),
+                "wins": int(r["wins"] or 0),
+                "losses": int(r["losses"] or 0),
+                "pnl_cents": int(round(float(r["pnl"] or 0.0) * 100)),
+                "cumulative_pnl_cents": int(round(float(r["cum_pnl"] or 0.0) * 100)),
+                "win_rate_pct": float(r["win_rate"] or 0.0),
+                "avg_edge": float(r["avg_edge"] or 0.0),
+                "brier": float(r["brier"]) if r["brier"] is not None else None,
+            }
+            for r in rows
+        ]
+    except Exception as e:
+        error_log("daily_summary.by_vertical", f"{type(e).__name__}: {e}")
+    # Per-persona contribution — debates *opened* today that have since
+    # settled (we filter on swarm_debates.created_at because there is no
+    # settled_at column on the debate row; outcome IS NOT NULL is the
+    # post-settlement marker stamped by settlement.pipeline).  Walk the
+    # analyst_verdicts JSON in Python so we tolerate both the legacy
+    # `analyst_id` key and the current `persona` key.
+    try:
+        debates = await db.fetch(
+            """
+            SELECT id, outcome, analyst_verdicts
+              FROM swarm_debates
+             WHERE outcome IS NOT NULL
+               AND date_trunc('day', created_at AT TIME ZONE 'UTC') = $1::date
+            """,
+            date_utc,
+        )
+        agg: dict[str, dict[str, Any]] = {}
+        for d in debates:
+            outcome = (d["outcome"] or "").upper()
+            if outcome not in ("WIN", "LOSS"):
+                continue
+            y = 1 if outcome == "WIN" else 0
+            verdicts = d["analyst_verdicts"]
+            if isinstance(verdicts, str):
+                try:
+                    verdicts = json.loads(verdicts)
+                except Exception:
+                    continue
+            if not isinstance(verdicts, list):
+                continue
+            for v in verdicts:
+                if not isinstance(v, dict):
+                    continue
+                pid = v.get("persona") or v.get("analyst_id")
+                if not pid:
+                    continue
+                prob = v.get("probability")
+                if prob is None:
+                    continue
+                try:
+                    p = float(prob)
+                except Exception:
+                    continue
+                lean = (v.get("lean") or "").upper() or (
+                    "YES" if p >= 0.5 else "NO"
+                )
+                conf = v.get("confidence")
+                try:
+                    conf_f = float(conf) if conf is not None else None
+                except Exception:
+                    conf_f = None
+                slot = agg.setdefault(
+                    pid,
+                    {
+                        "persona_id": pid,
+                        "debates": 0,
+                        "_sq_err": 0.0,
+                        "_correct": 0,
+                        "_conf_sum": 0.0,
+                        "_conf_n": 0,
+                        "lean_yes": 0,
+                        "lean_no": 0,
+                        "lean_pass": 0,
+                    },
+                )
+                slot["debates"] += 1
+                slot["_sq_err"] += (p - y) ** 2
+                slot["_correct"] += 1 if (p >= 0.5) == (y == 1) else 0
+                if conf_f is not None:
+                    slot["_conf_sum"] += conf_f
+                    slot["_conf_n"] += 1
+                if lean == "YES":
+                    slot["lean_yes"] += 1
+                elif lean == "NO":
+                    slot["lean_no"] += 1
+                elif lean == "PASS":
+                    slot["lean_pass"] += 1
+        personas: list[dict[str, Any]] = []
+        for pid, s in agg.items():
+            n = max(1, int(s["debates"]))
+            personas.append(
+                {
+                    "persona_id": pid,
+                    "debates": int(s["debates"]),
+                    "brier": round(float(s["_sq_err"]) / n, 4),
+                    "accuracy_pct": round(100.0 * float(s["_correct"]) / n, 1),
+                    "avg_confidence": (
+                        round(float(s["_conf_sum"]) / s["_conf_n"], 3)
+                        if s["_conf_n"]
+                        else None
+                    ),
+                    "lean_yes": int(s["lean_yes"]),
+                    "lean_no": int(s["lean_no"]),
+                    "lean_pass": int(s["lean_pass"]),
+                }
+            )
+        # Sort: best (lowest) Brier first so operators see the day's
+        # most accurate persona at the top of the table.
+        personas.sort(key=lambda r: (r["brier"], -r["debates"]))
+        out["by_persona"] = personas
+    except Exception as e:
+        error_log("daily_summary.by_persona", f"{type(e).__name__}: {e}")
     return out
 
 

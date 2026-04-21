@@ -207,6 +207,8 @@ def daily_pnl_summary(
     halts_today: int,
     drift_alerts_today: int,
     top_movers: list[dict[str, Any]] | None = None,
+    by_vertical: list[dict[str, Any]] | None = None,
+    by_persona: list[dict[str, Any]] | None = None,
     dry_run: bool = False,
 ) -> dict[str, Any]:
     fmt_cents = lambda c: f"{'+' if c >= 0 else '-'}${abs(c) / 100.0:,.2f}"
@@ -235,7 +237,66 @@ def daily_pnl_summary(
                 f"realized={fmt_cents(int(m.get('realized_pnl_cents') or 0))} "
                 f"position={m.get('position','?')}\n"
             )
+    body += _render_by_vertical(by_vertical, fmt_cents)
+    body += _render_by_persona(by_persona)
     return _dispatch(subject, body, tag="daily-summary", dry_run=dry_run)
+
+
+def _render_by_vertical(
+    rows: list[dict[str, Any]] | None,
+    fmt_cents,
+) -> str:
+    out = "\nBy vertical:\n"
+    if not rows:
+        out += "  (no settled trades by vertical today)\n"
+        return out
+    header = (
+        f"  {'vertical':<10} {'trades':>6} {'W/L':>7} "
+        f"{'pnl':>11} {'win%':>6} {'edge':>6} {'brier':>6}\n"
+    )
+    out += header
+    for r in rows:
+        wl = f"{int(r.get('wins') or 0)}/{int(r.get('losses') or 0)}"
+        brier = r.get("brier")
+        brier_s = f"{brier:.3f}" if isinstance(brier, (int, float)) else "  -  "
+        out += (
+            f"  {str(r.get('vertical') or '?'):<10} "
+            f"{int(r.get('trades') or 0):>6} "
+            f"{wl:>7} "
+            f"{fmt_cents(int(r.get('pnl_cents') or 0)):>11} "
+            f"{float(r.get('win_rate_pct') or 0.0):>5.1f}% "
+            f"{float(r.get('avg_edge') or 0.0):>+6.3f} "
+            f"{brier_s:>6}\n"
+        )
+    return out
+
+
+def _render_by_persona(rows: list[dict[str, Any]] | None) -> str:
+    out = "\nBy persona (debates opened today that have since settled):\n"
+    if not rows:
+        out += "  (no settled swarm debates from today)\n"
+        return out
+    header = (
+        f"  {'persona':<20} {'debates':>7} {'brier':>6} "
+        f"{'acc%':>5} {'conf':>5}  {'leans (Y/N/PASS)':<18}\n"
+    )
+    out += header
+    for r in rows:
+        conf = r.get("avg_confidence")
+        conf_s = f"{conf:.2f}" if isinstance(conf, (int, float)) else "  -  "
+        leans = (
+            f"{int(r.get('lean_yes') or 0)}/"
+            f"{int(r.get('lean_no') or 0)}/"
+            f"{int(r.get('lean_pass') or 0)}"
+        )
+        out += (
+            f"  {str(r.get('persona_id') or '?'):<20} "
+            f"{int(r.get('debates') or 0):>7} "
+            f"{float(r.get('brier') or 0.0):>6.3f} "
+            f"{float(r.get('accuracy_pct') or 0.0):>5.1f} "
+            f"{conf_s:>5}  {leans:<18}\n"
+        )
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -256,7 +317,7 @@ def _dispatch(
             "dry_run": True,
             "tag": tag,
             "subject": subject,
-            "body_preview": text_body[:600],
+            "body_preview": text_body[:4000],
             "would_send_to": postmark.alert_recipients(),
             "configured": postmark.is_configured(),
         }
