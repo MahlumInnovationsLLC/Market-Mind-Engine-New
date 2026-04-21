@@ -639,15 +639,27 @@ async def settle_market(
 
 
 async def _open_kalshi_market_ids(limit: int = 50) -> list[str]:
+    """Discover candidate kalshi markets to settle.  Unions two sources:
+      (a) currently-open positions on kalshi
+      (b) un-settled kalshi trades that no longer have a corresponding
+          open position (data drift / external system inconsistencies).
+    Without (b) those orphaned trades would never auto-settle.
+    """
     try:
         rows = await db.fetch(
             """
-            SELECT DISTINCT market_id
-              FROM positions
-             WHERE coalesce(status, 'open') = 'open'
-               AND exchange = 'kalshi'
-               AND market_id IS NOT NULL
-             LIMIT $1
+            SELECT market_id FROM (
+              SELECT DISTINCT market_id FROM positions
+               WHERE coalesce(status, 'open') = 'open'
+                 AND exchange = 'kalshi'
+                 AND market_id IS NOT NULL
+              UNION
+              SELECT DISTINCT market_id FROM trades
+               WHERE settled_at IS NULL
+                 AND exchange = 'kalshi'
+                 AND market_id IS NOT NULL
+            ) m
+            LIMIT $1
             """,
             limit,
         )
