@@ -142,10 +142,20 @@ function SignUpPage() {
 }
 
 function HomeRoute() {
-  // Public marketing landing page is shown to everyone — even signed-in
-  // operators (who get an "Open Console" CTA in the nav). This avoids
-  // surprising paid subscribers who follow a public link.
-  return <MarketingPage />;
+  // Spec: signed-out visitors get the marketing page; authenticated
+  // users land on the operator console (`/app`). Anyone who explicitly
+  // wants the marketing copy can still reach it via a logged-out
+  // browser or by signing out.
+  return (
+    <>
+      <Show when="signed-in">
+        <Redirect to="/app" />
+      </Show>
+      <Show when="signed-out">
+        <MarketingPage />
+      </Show>
+    </>
+  );
 }
 
 function AppRoute() {

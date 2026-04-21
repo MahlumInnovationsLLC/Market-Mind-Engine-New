@@ -488,52 +488,7 @@ export default function MarketingPage() {
                   />
                 ))
               : paidTiers.map((tier) => (
-                  <div
-                    key={tier.id}
-                    className={`border ${
-                      tier.highlight ? "border-primary" : "border-border"
-                    } bg-card p-6 flex flex-col`}
-                    data-testid={`card-marketing-tier-${tier.id}`}
-                  >
-                    <div className="flex items-center justify-between mb-2">
-                      <h3 className="text-sm uppercase tracking-widest font-bold">
-                        {tier.name}
-                      </h3>
-                      {tier.highlight && (
-                        <span className="text-[10px] uppercase tracking-widest text-primary border border-primary px-1">
-                          Popular
-                        </span>
-                      )}
-                    </div>
-                    <p className="text-xs text-muted-foreground min-h-[32px]">
-                      {tier.tagline}
-                    </p>
-                    <div className="text-3xl text-primary font-bold mt-4">
-                      ${tier.monthly_usd}
-                      <span className="text-xs text-muted-foreground ml-1">
-                        /mo
-                      </span>
-                    </div>
-                    <ul className="text-xs text-foreground/80 space-y-1 my-5 flex-1">
-                      {tier.features.slice(0, 5).map((f) => (
-                        <li key={f} className="flex gap-2">
-                          <span className="text-primary">›</span>
-                          <span>{f}</span>
-                        </li>
-                      ))}
-                    </ul>
-                    <Link
-                      href="/pricing"
-                      className={`w-full py-3 text-xs uppercase tracking-widest font-bold border text-center ${
-                        tier.highlight
-                          ? "bg-primary text-primary-foreground border-primary hover:opacity-90"
-                          : "border-border text-foreground hover:border-primary hover:text-primary"
-                      }`}
-                      data-testid={`link-marketing-cta-${tier.id}`}
-                    >
-                      {tier.cta}
-                    </Link>
-                  </div>
+                  <TierCard key={tier.id} tier={tier} isSignedIn={!!isSignedIn} />
                 ))}
           </div>
           <div className="mt-6 text-center">
@@ -650,6 +605,87 @@ export default function MarketingPage() {
           </div>
         </div>
       </footer>
+    </div>
+  );
+}
+
+function TierCard({
+  tier,
+  isSignedIn,
+}: {
+  tier: PricingTier;
+  isSignedIn: boolean;
+}) {
+  // Carry the chosen monthly price_id through Clerk sign-up so the user
+  // lands on /pricing with `?checkout=<price_id>`, which auto-fires
+  // Stripe Checkout. Falls back to the plain pricing page if the slot
+  // isn't configured yet.
+  const priceId = tier.monthly?.configured ? tier.monthly?.price_id : null;
+  const target = priceId
+    ? `/pricing?checkout=${encodeURIComponent(priceId)}`
+    : "/pricing";
+
+  const cls = `w-full py-3 text-xs uppercase tracking-widest font-bold border text-center ${
+    tier.highlight
+      ? "bg-primary text-primary-foreground border-primary hover:opacity-90"
+      : "border-border text-foreground hover:border-primary hover:text-primary"
+  }`;
+
+  return (
+    <div
+      className={`border ${
+        tier.highlight ? "border-primary" : "border-border"
+      } bg-card p-6 flex flex-col`}
+      data-testid={`card-marketing-tier-${tier.id}`}
+    >
+      <div className="flex items-center justify-between mb-2">
+        <h3 className="text-sm uppercase tracking-widest font-bold">
+          {tier.name}
+        </h3>
+        {tier.highlight && (
+          <span className="text-[10px] uppercase tracking-widest text-primary border border-primary px-1">
+            Popular
+          </span>
+        )}
+      </div>
+      <p className="text-xs text-muted-foreground min-h-[32px]">
+        {tier.tagline}
+      </p>
+      <div className="text-3xl text-primary font-bold mt-4">
+        ${tier.monthly_usd}
+        <span className="text-xs text-muted-foreground ml-1">/mo</span>
+      </div>
+      <ul className="text-xs text-foreground/80 space-y-1 my-5 flex-1">
+        {tier.features.slice(0, 5).map((f) => (
+          <li key={f} className="flex gap-2">
+            <span className="text-primary">›</span>
+            <span>{f}</span>
+          </li>
+        ))}
+      </ul>
+      {isSignedIn ? (
+        <Link
+          href={target}
+          className={cls}
+          data-testid={`link-marketing-cta-${tier.id}`}
+        >
+          {tier.cta}
+        </Link>
+      ) : (
+        <SignUpButton
+          mode="modal"
+          forceRedirectUrl={target}
+          signInForceRedirectUrl={target}
+        >
+          <button
+            type="button"
+            className={cls}
+            data-testid={`button-marketing-cta-${tier.id}`}
+          >
+            {tier.cta}
+          </button>
+        </SignUpButton>
+      )}
     </div>
   );
 }

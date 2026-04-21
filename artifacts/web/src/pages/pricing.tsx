@@ -1,5 +1,5 @@
-import { useEffect, useMemo, useState } from "react";
-import { Link } from "wouter";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { Link, useSearch } from "wouter";
 import { useAuth, useClerk, SignInButton } from "@clerk/react";
 import { apiFetch, ApiError } from "@/lib/api";
 
@@ -29,6 +29,12 @@ interface PricingCatalog {
 
 export default function PricingPage() {
   const { isSignedIn, getToken } = useAuth();
+  const search = useSearch();
+  const autoCheckoutPriceId = useMemo(() => {
+    const params = new URLSearchParams(search);
+    return params.get("checkout");
+  }, [search]);
+  const autoCheckoutFired = useRef(false);
   const [catalog, setCatalog] = useState<PricingCatalog | null>(null);
   const [interval, setInterval] = useState<"month" | "year">("month");
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -50,6 +56,55 @@ export default function PricingPage() {
   }, []);
 
   const tiers = catalog?.tiers ?? [];
+
+  // Tier-aware CTA handoff from the marketing page (`/pricing?checkout=<price_id>`).
+  // After Clerk sign-up the user lands here; if they're authenticated and the
+  // requested price_id matches a configured slot we go straight to Stripe.
+  useEffect(() => {
+    if (autoCheckoutFired.current) return;
+    if (!autoCheckoutPriceId || !catalog || !isSignedIn) return;
+    const target = catalog.tiers.find(
+      (t) =>
+        t.monthly?.price_id === autoCheckoutPriceId ||
+        t.annual?.price_id === autoCheckoutPriceId,
+    );
+    if (!target) return;
+    autoCheckoutFired.current = true;
+    if (target.annual?.price_id === autoCheckoutPriceId) {
+      setInterval("year");
+    } else {
+      setInterval("month");
+    }
+    void (async () => {
+      setActionTier(target.id);
+      setActionError(null);
+      try {
+        const res = await apiFetch<{ url: string }>(
+          "/api/billing/checkout-session",
+          {
+            method: "POST",
+            body: { price_id: autoCheckoutPriceId },
+            getToken: async () => (await getToken()) ?? null,
+          },
+        );
+        if (res.url) {
+          window.location.href = res.url;
+          return;
+        }
+        setActionError("Stripe did not return a checkout URL.");
+      } catch (e) {
+        const msg =
+          e instanceof ApiError
+            ? `Checkout failed (HTTP ${e.status})`
+            : e instanceof Error
+              ? e.message
+              : String(e);
+        setActionError(msg);
+      } finally {
+        setActionTier(null);
+      }
+    })();
+  }, [autoCheckoutPriceId, catalog, isSignedIn, getToken]);
 
   const handleUpgrade = async (tier: PricingTier) => {
     setActionError(null);
