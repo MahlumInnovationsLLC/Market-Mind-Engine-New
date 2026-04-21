@@ -8,6 +8,7 @@ This is the minimum viable backend that:
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 from contextlib import asynccontextmanager
@@ -16,7 +17,7 @@ from fastapi import Depends, FastAPI, HTTPException, WebSocket, WebSocketDisconn
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
-from . import dashboard, db, storage
+from . import dashboard, db, models_loader, storage
 from .auth import (
     AuthedUser,
     auth_configured,
@@ -86,17 +87,31 @@ async def lifespan(_: FastAPI):
         await orchestrator_scheduler.start()
     except Exception as e:
         log.warning("orchestrator scheduler start failed: %s", e)
-    yield
+
+    # Kick off model artifact reassembly in the background so a cold cache
+    # (~240 MiB download) doesn't block the HTTP server from accepting
+    # traffic. Health endpoints surface progress while it warms up.
+    models_task = asyncio.create_task(models_loader.ensure_artifacts())
+
     try:
-        await orchestrator_scheduler.stop()
-    except Exception as e:
-        log.warning("orchestrator scheduler stop error: %s", e)
-    try:
-        await feed_scheduler.stop()
-    except Exception as e:
-        log.warning("feed scheduler stop error: %s", e)
-    await db.close_pool()
-    log.info("axiom-predict api stopped")
+        yield
+    finally:
+        try:
+            await orchestrator_scheduler.stop()
+        except Exception as e:
+            log.warning("orchestrator scheduler stop error: %s", e)
+        try:
+            await feed_scheduler.stop()
+        except Exception as e:
+            log.warning("feed scheduler stop error: %s", e)
+        if not models_task.done():
+            models_task.cancel()
+            try:
+                await models_task
+            except (asyncio.CancelledError, Exception):
+                pass
+        await db.close_pool()
+        log.info("axiom-predict api stopped")
 
 
 app = FastAPI(
@@ -218,6 +233,29 @@ async def health_full(_: object = Depends(require_approved_user)) -> dict[str, o
             out["status"] = "degraded"
     except Exception as e:
         out["feeds"] = {"ok": False, "error": str(e)}
+    # Models — startup smoke test: report ready/in-progress/error, the
+    # predictor catalog versions, the canonical-predictor load results
+    # (each model is actually deserialized at boot), and disk usage.
+    state = models_loader.get_state()
+    canonical_ok = sum(1 for v in state.loaded.values() if v.get("ok"))
+    out["models"] = {
+        "ok": state.ready and state.error is None and canonical_ok > 0,
+        "ready": state.ready,
+        "in_progress": state.in_progress,
+        "error": state.error,
+        "elapsed_seconds": (
+            round(state.completed_at - state.started_at, 2)
+            if state.started_at and state.completed_at else None
+        ),
+        "predictor_count": len(state.predictors),
+        "loaded_canonical": state.loaded,
+        "loaded_canonical_ok": canonical_ok,
+        "versions": models_loader.list_predictor_versions(),
+        "disk_usage": models_loader.disk_usage_summary(),
+    }
+    if not state.ready and state.error:
+        out["status"] = "degraded"
+    if state.ready and canonical_ok == 0:
         out["status"] = "degraded"
     return out
 
@@ -444,6 +482,25 @@ async def storage_list(
             for e in entries
         ],
     }
+
+
+@app.get("/api/models/status")
+async def models_status(_: object = Depends(require_auth)) -> dict[str, object]:
+    """Detailed loader state: archives, predictor catalog, disk usage."""
+    state = models_loader.get_state()
+    return {
+        **state.as_dict(),
+        "disk_usage": models_loader.disk_usage_summary(),
+    }
+
+
+@app.post("/api/models/reload")
+async def models_reload(_: object = Depends(require_auth)) -> dict[str, object]:
+    """Force a full reload: clears the in-memory state + cached predictor
+    objects and re-runs the reassemble/extract/scan/smoke-load pipeline.
+    Cached on-disk archives are reused if intact."""
+    asyncio.create_task(models_loader.ensure_artifacts(force=True))
+    return {"started": True, "state": models_loader.get_state().as_dict()}
 
 
 @app.get("/api/models/inventory")
