@@ -14,6 +14,8 @@ tags:
     description: Operator dashboard read-models
   - name: models
     description: Trained-model artifact discovery
+  - name: swarm
+    description: 6-persona LLM swarm + gatekeeper
 paths:
   /healthz:
     get:
@@ -110,6 +112,23 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/SwarmDebateList" }
+
+  /swarm/debate:
+    post:
+      operationId: runSwarmDebate
+      tags: [swarm]
+      summary: Run a 6-persona swarm debate against a candidate trade
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/SwarmDebateRequest" }
+      responses:
+        "200":
+          description: Debate result
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SwarmDebateResult" }
 
   /models/inventory:
     get:
@@ -320,6 +339,63 @@ components:
         models_archive_total_bytes: { type: integer }
         source_archive_total_bytes: { type: integer }
       required: [files, models_archive_total_bytes, source_archive_total_bytes]
+
+    SwarmDebateRequest:
+      type: object
+      properties:
+        game_id: { type: string }
+        matchup: { type: string, nullable: true }
+        league: { type: string, nullable: true }
+        market_type: { type: string, nullable: true }
+        side: { type: string, nullable: true }
+        current_price: { type: number, nullable: true }
+        context: { type: string, nullable: true }
+      required: [game_id]
+
+    SwarmPersonaVerdict:
+      type: object
+      properties:
+        persona: { type: string }
+        provider: { type: string }
+        model: { type: string }
+        probability: { type: number, nullable: true }
+        confidence: { type: number, nullable: true }
+        lean: { type: string }
+        reasoning: { type: string, nullable: true }
+        weight: { type: number, nullable: true }
+        latency_ms: { type: integer, nullable: true }
+        cost: { type: number, nullable: true }
+        input_tokens: { type: integer, nullable: true }
+        output_tokens: { type: integer, nullable: true }
+        error: { type: string, nullable: true }
+
+    SwarmDebateTranscript:
+      type: object
+      properties:
+        personas:
+          type: array
+          items: { $ref: "#/components/schemas/SwarmPersonaVerdict" }
+        moderator: { $ref: "#/components/schemas/SwarmPersonaVerdict" }
+        gatekeeper: { $ref: "#/components/schemas/SwarmPersonaVerdict" }
+
+    SwarmDebateResult:
+      type: object
+      properties:
+        debate_id: { type: integer, nullable: true }
+        game_id: { type: string }
+        matchup: { type: string, nullable: true }
+        league: { type: string, nullable: true }
+        market_type: { type: string, nullable: true }
+        consensus_probability: { type: number, nullable: true }
+        confidence_band_low: { type: number, nullable: true }
+        confidence_band_high: { type: number, nullable: true }
+        agreement_rate: { type: number, nullable: true }
+        approved: { type: boolean }
+        recommended_action: { type: string }
+        cost_estimate: { type: number, nullable: true }
+        latency_ms: { type: integer, nullable: true }
+        transcript: { $ref: "#/components/schemas/SwarmDebateTranscript" }
+      required: [game_id, approved, recommended_action]
 
     ModelsInventory:
       type: object

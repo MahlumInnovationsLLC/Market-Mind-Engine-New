@@ -153,6 +153,55 @@ export interface ExportsInventory {
   source_archive_total_bytes: number;
 }
 
+export interface SwarmDebateRequest {
+  game_id: string;
+  matchup?: string | null;
+  league?: string | null;
+  market_type?: string | null;
+  side?: string | null;
+  current_price?: number | null;
+  context?: string | null;
+}
+
+export interface SwarmPersonaVerdict {
+  persona?: string;
+  provider?: string;
+  model?: string;
+  probability?: number | null;
+  confidence?: number | null;
+  lean?: string;
+  reasoning?: string | null;
+  weight?: number | null;
+  latency_ms?: number | null;
+  cost?: number | null;
+  input_tokens?: number | null;
+  output_tokens?: number | null;
+  error?: string | null;
+}
+
+export interface SwarmDebateTranscript {
+  personas?: SwarmPersonaVerdict[];
+  moderator?: SwarmPersonaVerdict;
+  gatekeeper?: SwarmPersonaVerdict;
+}
+
+export interface SwarmDebateResult {
+  debate_id?: number | null;
+  game_id: string;
+  matchup?: string | null;
+  league?: string | null;
+  market_type?: string | null;
+  consensus_probability?: number | null;
+  confidence_band_low?: number | null;
+  confidence_band_high?: number | null;
+  agreement_rate?: number | null;
+  approved: boolean;
+  recommended_action: string;
+  cost_estimate?: number | null;
+  latency_ms?: number | null;
+  transcript?: SwarmDebateTranscript;
+}
+
 export interface ModelsInventory {
   buckets: StorageBucketEntry[];
   exports: ExportsInventory;

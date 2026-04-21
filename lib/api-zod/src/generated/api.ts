@@ -191,6 +191,92 @@ export const GetRecentDebatesResponse = zod.object({
 });
 
 /**
+ * @summary Run a 6-persona swarm debate against a candidate trade
+ */
+export const RunSwarmDebateBody = zod.object({
+  game_id: zod.string(),
+  matchup: zod.string().nullish(),
+  league: zod.string().nullish(),
+  market_type: zod.string().nullish(),
+  side: zod.string().nullish(),
+  current_price: zod.number().nullish(),
+  context: zod.string().nullish(),
+});
+
+export const RunSwarmDebateResponse = zod.object({
+  debate_id: zod.number().nullish(),
+  game_id: zod.string(),
+  matchup: zod.string().nullish(),
+  league: zod.string().nullish(),
+  market_type: zod.string().nullish(),
+  consensus_probability: zod.number().nullish(),
+  confidence_band_low: zod.number().nullish(),
+  confidence_band_high: zod.number().nullish(),
+  agreement_rate: zod.number().nullish(),
+  approved: zod.boolean(),
+  recommended_action: zod.string(),
+  cost_estimate: zod.number().nullish(),
+  latency_ms: zod.number().nullish(),
+  transcript: zod
+    .object({
+      personas: zod
+        .array(
+          zod.object({
+            persona: zod.string().optional(),
+            provider: zod.string().optional(),
+            model: zod.string().optional(),
+            probability: zod.number().nullish(),
+            confidence: zod.number().nullish(),
+            lean: zod.string().optional(),
+            reasoning: zod.string().nullish(),
+            weight: zod.number().nullish(),
+            latency_ms: zod.number().nullish(),
+            cost: zod.number().nullish(),
+            input_tokens: zod.number().nullish(),
+            output_tokens: zod.number().nullish(),
+            error: zod.string().nullish(),
+          }),
+        )
+        .optional(),
+      moderator: zod
+        .object({
+          persona: zod.string().optional(),
+          provider: zod.string().optional(),
+          model: zod.string().optional(),
+          probability: zod.number().nullish(),
+          confidence: zod.number().nullish(),
+          lean: zod.string().optional(),
+          reasoning: zod.string().nullish(),
+          weight: zod.number().nullish(),
+          latency_ms: zod.number().nullish(),
+          cost: zod.number().nullish(),
+          input_tokens: zod.number().nullish(),
+          output_tokens: zod.number().nullish(),
+          error: zod.string().nullish(),
+        })
+        .optional(),
+      gatekeeper: zod
+        .object({
+          persona: zod.string().optional(),
+          provider: zod.string().optional(),
+          model: zod.string().optional(),
+          probability: zod.number().nullish(),
+          confidence: zod.number().nullish(),
+          lean: zod.string().optional(),
+          reasoning: zod.string().nullish(),
+          weight: zod.number().nullish(),
+          latency_ms: zod.number().nullish(),
+          cost: zod.number().nullish(),
+          input_tokens: zod.number().nullish(),
+          output_tokens: zod.number().nullish(),
+          error: zod.string().nullish(),
+        })
+        .optional(),
+    })
+    .optional(),
+});
+
+/**
  * @summary Trained-model archive inventory in Supabase Storage
  */
 export const GetModelsInventoryResponse = zod.object({

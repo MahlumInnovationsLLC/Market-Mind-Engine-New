@@ -5,10 +5,13 @@
  * Axiom-Predict API — backend for the prediction-market trading platform.
  * OpenAPI spec version: 0.1.0
  */
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery } from "@tanstack/react-query";
 import type {
+  MutationFunction,
   QueryFunction,
   QueryKey,
+  UseMutationOptions,
+  UseMutationResult,
   UseQueryOptions,
   UseQueryResult,
 } from "@tanstack/react-query";
@@ -22,13 +25,15 @@ import type {
   HealthStatus,
   ModelsInventory,
   SwarmDebateList,
+  SwarmDebateRequest,
+  SwarmDebateResult,
   SwarmPersonaList,
   TradeList,
   TradingCycleList,
 } from "./api.schemas";
 
 import { customFetch } from "../custom-fetch";
-import type { ErrorType } from "../custom-fetch";
+import type { ErrorType, BodyType } from "../custom-fetch";
 
 type AwaitedInput<T> = PromiseLike<T> | T;
 
@@ -623,6 +628,92 @@ export function useGetRecentDebates<
 
   return { ...query, queryKey: queryOptions.queryKey };
 }
+
+/**
+ * @summary Run a 6-persona swarm debate against a candidate trade
+ */
+export const getRunSwarmDebateUrl = () => {
+  return `/api/swarm/debate`;
+};
+
+export const runSwarmDebate = async (
+  swarmDebateRequest: SwarmDebateRequest,
+  options?: RequestInit,
+): Promise<SwarmDebateResult> => {
+  return customFetch<SwarmDebateResult>(getRunSwarmDebateUrl(), {
+    ...options,
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...options?.headers },
+    body: JSON.stringify(swarmDebateRequest),
+  });
+};
+
+export const getRunSwarmDebateMutationOptions = <
+  TError = ErrorType<unknown>,
+  TContext = unknown,
+>(options?: {
+  mutation?: UseMutationOptions<
+    Awaited<ReturnType<typeof runSwarmDebate>>,
+    TError,
+    { data: BodyType<SwarmDebateRequest> },
+    TContext
+  >;
+  request?: SecondParameter<typeof customFetch>;
+}): UseMutationOptions<
+  Awaited<ReturnType<typeof runSwarmDebate>>,
+  TError,
+  { data: BodyType<SwarmDebateRequest> },
+  TContext
+> => {
+  const mutationKey = ["runSwarmDebate"];
+  const { mutation: mutationOptions, request: requestOptions } = options
+    ? options.mutation &&
+      "mutationKey" in options.mutation &&
+      options.mutation.mutationKey
+      ? options
+      : { ...options, mutation: { ...options.mutation, mutationKey } }
+    : { mutation: { mutationKey }, request: undefined };
+
+  const mutationFn: MutationFunction<
+    Awaited<ReturnType<typeof runSwarmDebate>>,
+    { data: BodyType<SwarmDebateRequest> }
+  > = (props) => {
+    const { data } = props ?? {};
+
+    return runSwarmDebate(data, requestOptions);
+  };
+
+  return { mutationFn, ...mutationOptions };
+};
+
+export type RunSwarmDebateMutationResult = NonNullable<
+  Awaited<ReturnType<typeof runSwarmDebate>>
+>;
+export type RunSwarmDebateMutationBody = BodyType<SwarmDebateRequest>;
+export type RunSwarmDebateMutationError = ErrorType<unknown>;
+
+/**
+ * @summary Run a 6-persona swarm debate against a candidate trade
+ */
+export const useRunSwarmDebate = <
+  TError = ErrorType<unknown>,
+  TContext = unknown,
+>(options?: {
+  mutation?: UseMutationOptions<
+    Awaited<ReturnType<typeof runSwarmDebate>>,
+    TError,
+    { data: BodyType<SwarmDebateRequest> },
+    TContext
+  >;
+  request?: SecondParameter<typeof customFetch>;
+}): UseMutationResult<
+  Awaited<ReturnType<typeof runSwarmDebate>>,
+  TError,
+  { data: BodyType<SwarmDebateRequest> },
+  TContext
+> => {
+  return useMutation(getRunSwarmDebateMutationOptions(options));
+};
 
 /**
  * @summary Trained-model archive inventory in Supabase Storage

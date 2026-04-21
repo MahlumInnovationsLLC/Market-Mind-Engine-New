@@ -68,3 +68,13 @@ async def fetch(query: str, *args):
 async def fetchrow(query: str, *args):
     async with acquire() as c:
         return await c.fetchrow(query, *args)
+
+
+async def execute(query: str, *args) -> str:
+    async with acquire() as c:
+        return await c.execute(query, *args)
+
+
+async def executemany(query: str, args_list) -> None:
+    async with acquire() as c:
+        await c.executemany(query, args_list)

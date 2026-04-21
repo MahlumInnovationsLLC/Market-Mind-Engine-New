@@ -12,8 +12,9 @@ import logging
 import os
 from contextlib import asynccontextmanager
 
-from fastapi import Depends, FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel, Field
 
 from . import dashboard, db, storage
 from .auth import auth_configured, require_auth
@@ -21,6 +22,7 @@ from .config import get_settings
 from .feeds import registry as feed_registry, scheduler as feed_scheduler
 from .feeds.odds_api import register_odds_feeds
 from .feeds.weather import register_weather_feeds
+from .swarm import llm_log_hub, refresh_persona_weights, run_debate
 
 
 logging.basicConfig(
@@ -63,6 +65,13 @@ async def lifespan(_: FastAPI):
         await feed_scheduler.start()
     except Exception as e:
         log.error("feed scheduler start failed: %s", e)
+    # Bootstrap persona weights from swarm_analyst_metrics so the swarm
+    # is ready to vote with calibrated weights on the very first request.
+    try:
+        n = await refresh_persona_weights()
+        log.info("swarm persona weights bootstrapped from %d rows", n)
+    except Exception as e:
+        log.warning("swarm persona weight bootstrap failed: %s", e)
     yield
     try:
         await feed_scheduler.stop()
@@ -224,6 +233,81 @@ async def dashboard_recent_debates(
 ) -> dict[str, object]:
     limit = max(1, min(100, int(limit)))
     return {"items": await dashboard.get_recent_swarm_debates(limit)}
+
+
+# ---------------------------------------------------------------------------
+# Swarm: 6-persona LLM debate + gatekeeper
+# ---------------------------------------------------------------------------
+
+
+class SwarmDebateRequest(BaseModel):
+    game_id: str = Field(..., min_length=1, max_length=128)
+    matchup: str | None = None
+    league: str | None = None
+    market_type: str | None = "moneyline"
+    side: str | None = "YES"
+    current_price: float | None = None
+    context: str | None = None
+
+
+@app.post("/api/swarm/debate")
+async def swarm_debate(
+    body: SwarmDebateRequest, _: object = Depends(require_auth)
+) -> dict[str, object]:
+    settings = get_settings()
+    if not (settings.openai_api_key and settings.anthropic_api_key):
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "swarm requires both OPENAI_API_KEY and ANTHROPIC_API_KEY; "
+                f"openai={bool(settings.openai_api_key)} "
+                f"anthropic={bool(settings.anthropic_api_key)}"
+            ),
+        )
+    try:
+        return await run_debate(body.model_dump())
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        log.exception("swarm debate failed")
+        raise HTTPException(status_code=502, detail=f"swarm error: {e}")
+
+
+@app.websocket("/ws/llm-logs")
+async def ws_llm_logs(ws: WebSocket) -> None:
+    """Live stream of swarm events: persona starts/deltas/verdicts,
+    moderator/gatekeeper outcomes, and final debate completion.
+
+    Auth: Clerk JWT passed via the `?token=` query param (browsers cannot
+    set Authorization headers on WebSocket upgrades).  When auth is not
+    configured (dev mode), the socket is allowed open.
+    """
+    token = ws.query_params.get("token")
+    if auth_configured():
+        from .auth import verify_clerk_jwt  # local import to avoid cycle on boot
+
+        if not token:
+            await ws.close(code=4401)
+            return
+        try:
+            verify_clerk_jwt(token)
+        except Exception as e:
+            log.info("ws auth failed: %s", e)
+            await ws.close(code=4401)
+            return
+
+    await ws.accept()
+    q = llm_log_hub.subscribe()
+    try:
+        while True:
+            event = await q.get()
+            await ws.send_json(event)
+    except WebSocketDisconnect:
+        pass
+    except Exception as e:
+        log.warning("ws send failed: %s", e)
+    finally:
+        llm_log_hub.unsubscribe(q)
 
 
 # ---------------------------------------------------------------------------

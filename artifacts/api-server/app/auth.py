@@ -94,21 +94,19 @@ class AuthedUser:
     claims: dict[str, Any]
 
 
-async def require_auth(
-    authorization: str | None = Header(default=None),
-) -> AuthedUser:
-    if not authorization or not authorization.lower().startswith("bearer "):
-        raise HTTPException(status_code=401, detail="missing bearer token")
-    token = authorization.split(" ", 1)[1].strip()
+def verify_clerk_jwt(token: str) -> AuthedUser:
+    """Verify a Clerk session JWT.  Raises HTTPException on failure.
+
+    Reusable from both HTTP (`require_auth`) and WebSocket handlers,
+    where the token arrives via `?token=` instead of an Authorization
+    header.
+    """
     if not token:
         raise HTTPException(status_code=401, detail="missing bearer token")
-
     jwks = _jwks_client()
     issuer = _issuer()
     if jwks is None or not issuer:
-        # Misconfigured server — refuse rather than letting traffic through.
         raise HTTPException(status_code=503, detail="auth not configured")
-
     try:
         signing_key = jwks.get_signing_key_from_jwt(token)
         claims = jwt.decode(
@@ -126,16 +124,24 @@ async def require_auth(
     except jwt.PyJWTError as e:
         log.warning("jwt verify failed: %s", e)
         raise HTTPException(status_code=401, detail="invalid token")
-    except Exception as e:  # JWKS fetch failure, etc.
+    except Exception as e:
         log.error("auth verification error: %s", e)
         raise HTTPException(status_code=401, detail="invalid token")
 
     user_id = claims.get("sub")
     if not user_id:
         raise HTTPException(status_code=401, detail="token missing subject")
-
     return AuthedUser(
         user_id=str(user_id),
         session_id=claims.get("sid"),
         claims=claims,
     )
+
+
+async def require_auth(
+    authorization: str | None = Header(default=None),
+) -> AuthedUser:
+    if not authorization or not authorization.lower().startswith("bearer "):
+        raise HTTPException(status_code=401, detail="missing bearer token")
+    token = authorization.split(" ", 1)[1].strip()
+    return verify_clerk_jwt(token)
