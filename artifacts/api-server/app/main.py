@@ -34,6 +34,9 @@ from .feeds.odds_api import register_odds_feeds
 from .feeds.weather import register_weather_feeds
 from .orchestrator import pipeline_event_hub, run_cycle, scheduler as orchestrator_scheduler
 from .settlement import (
+    backfill_is_running,
+    get_backfill_status,
+    run_backfill,
     run_cycle as run_settlement_cycle,
     scheduler as settlement_scheduler,
     settle_market,
@@ -1203,6 +1206,56 @@ async def settlement_settle_market(
         log.exception("manual settle_market failed")
         raise HTTPException(status_code=502, detail=str(e))
     return {k: v for k, v in result.items() if k != "details"}
+
+
+class SettlementBackfillRequest(BaseModel):
+    csv_path: str | None = Field(
+        None,
+        description=(
+            "Optional path to an operator-supplied CSV "
+            "(`market_id,outcome_yes[,settle_price]`) for markets Kalshi "
+            "no longer reports. When omitted, results are pulled from Kalshi."
+        ),
+    )
+    limit: int | None = Field(
+        None, ge=1, le=10000,
+        description="Cap how many un-settled markets to process this run.",
+    )
+
+
+@app.get("/api/settlement/backfill-status")
+async def settlement_backfill_status(
+    _: object = Depends(require_approved_user),
+) -> dict[str, object]:
+    """Snapshot of the in-process backfill job (idle, running, or completed).
+
+    Safe to poll from the operator console while the job is running.
+    """
+    return get_backfill_status()
+
+
+@app.post("/api/settlement/backfill")
+async def settlement_backfill_start(
+    body: SettlementBackfillRequest,
+    _: object = Depends(require_admin),
+) -> dict[str, object]:
+    """Kick off a one-shot backfill of historical Kalshi settlements.
+
+    Runs in the background; poll `/api/settlement/backfill-status` for
+    progress.  Returns 409 if another run is already in flight.
+    """
+    snap = get_backfill_status()
+    if snap.get("state") == "running" or backfill_is_running():
+        raise HTTPException(status_code=409, detail="backfill already running")
+
+    async def _runner() -> None:
+        try:
+            await run_backfill(csv_path=body.csv_path, limit=body.limit)
+        except Exception:
+            log.exception("background backfill failed")
+
+    asyncio.create_task(_runner(), name="settlement-backfill")
+    return {"started": True, "status": get_backfill_status()}
 
 
 @app.websocket("/api/ws/settlement")
