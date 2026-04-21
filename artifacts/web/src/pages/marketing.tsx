@@ -217,6 +217,12 @@ export default function MarketingPage() {
             >
               Pricing
             </a>
+            <a
+              href="#mobile"
+              className="hidden md:inline text-muted-foreground hover:text-primary uppercase tracking-widest"
+            >
+              Mobile
+            </a>
             {isSignedIn ? (
               <Link
                 href="/app"
@@ -569,6 +575,94 @@ export default function MarketingPage() {
             >
               Compare all tiers →
             </Link>
+          </div>
+        </div>
+      </section>
+
+      {/* ---------- Mobile ---------- */}
+      <section id="mobile" className="border-b border-border">
+        <div className="max-w-6xl mx-auto px-4 md:px-6 py-16 grid grid-cols-1 md:grid-cols-2 gap-10 items-center">
+          <div>
+            <SectionHeader
+              kicker="Mobile"
+              title="Take the swarm with you."
+              compact
+            />
+            <p className="text-sm text-muted-foreground mt-4 max-w-md">
+              The Axiom_Predict mobile app pushes live signals, settlement
+              alerts, and post-mortems straight to your phone. iOS and Android
+              builds are rolling out — tap a badge to be notified.
+            </p>
+            <div className="flex flex-wrap gap-3 mt-6">
+              <a
+                href="https://apps.apple.com/"
+                target="_blank"
+                rel="noopener noreferrer"
+                aria-label="Download Axiom_Predict on the App Store"
+                className="flex items-center gap-3 border border-border bg-card px-4 py-3 hover:border-primary"
+                data-testid="link-app-store"
+              >
+                <span aria-hidden="true" className="text-primary text-lg leading-none"></span>
+                <span className="flex flex-col leading-tight">
+                  <span className="text-[9px] uppercase tracking-widest text-muted-foreground">
+                    Download on the
+                  </span>
+                  <span className="text-sm font-bold uppercase tracking-tight">
+                    App Store
+                  </span>
+                </span>
+              </a>
+              <a
+                href="https://play.google.com/"
+                target="_blank"
+                rel="noopener noreferrer"
+                aria-label="Get Axiom_Predict on Google Play"
+                className="flex items-center gap-3 border border-border bg-card px-4 py-3 hover:border-primary"
+                data-testid="link-play-store"
+              >
+                <span aria-hidden="true" className="text-primary text-lg leading-none">▶</span>
+                <span className="flex flex-col leading-tight">
+                  <span className="text-[9px] uppercase tracking-widest text-muted-foreground">
+                    Get it on
+                  </span>
+                  <span className="text-sm font-bold uppercase tracking-tight">
+                    Google Play
+                  </span>
+                </span>
+              </a>
+            </div>
+            <p className="text-[10px] text-muted-foreground uppercase tracking-widest mt-4">
+              Store listings pending review — links are placeholders.
+            </p>
+          </div>
+          <div className="border border-border bg-card p-6 font-mono text-xs space-y-2">
+            <div className="text-[10px] text-primary uppercase tracking-widest">
+              ::push_preview
+            </div>
+            <div className="border-l-2 border-primary pl-3">
+              <div className="text-foreground font-bold">
+                AXIOM :: live signal
+              </div>
+              <div className="text-muted-foreground">
+                KXPRES-2028-DEM @ 0.42 → +6.1% edge, gates 12/12 cleared.
+              </div>
+            </div>
+            <div className="border-l-2 border-warning pl-3">
+              <div className="text-foreground font-bold">
+                AXIOM :: settlement
+              </div>
+              <div className="text-muted-foreground">
+                FED-CUT-MAR settled YES — +$184.20 realized.
+              </div>
+            </div>
+            <div className="border-l-2 border-destructive pl-3">
+              <div className="text-foreground font-bold">
+                AXIOM :: drift alert
+              </div>
+              <div className="text-muted-foreground">
+                Politics vertical Brier drift &gt; 0.08 — review queue.
+              </div>
+            </div>
           </div>
         </div>
       </section>
