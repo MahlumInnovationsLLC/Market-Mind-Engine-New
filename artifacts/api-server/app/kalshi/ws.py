@@ -71,7 +71,17 @@ class KalshiWebSocket:
             except Exception as e:
                 self._connected = False
                 self._last_error = str(e)
-                log.warning("Kalshi WS error: %s (reconnect in %.1fs)", e, backoff)
+                # 401 on the upgrade almost always means the credential
+                # belongs to the *other* cluster (prod key against demo, or
+                # vice-versa). Surface that hint to operators.
+                hint = ""
+                if "401" in str(e):
+                    hint = (
+                        f" — HTTP 401 on the WS upgrade usually means the API"
+                        f" key is for a different Kalshi cluster than"
+                        f" KALSHI_ENV={self._settings.kalshi_env!r}"
+                    )
+                log.warning("Kalshi WS error: %s%s (reconnect in %.1fs)", e, hint, backoff)
             if self._stop.is_set():
                 break
             try:

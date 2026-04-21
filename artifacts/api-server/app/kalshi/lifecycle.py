@@ -344,6 +344,10 @@ async def cancel_all_resting() -> int:
 async def handle_ws_fill(message: dict[str, Any]) -> None:
     """Best-effort: when the WS bus emits a fill event, mark the matching
     resting order as filled and write the `filled` row.
+
+    Kalshi fill messages do not include `client_order_id` — only the exchange
+    `order_id` (which we recorded as `exchange_order_id` on the resting record).
+    Match on that primarily; fall back to `client_order_id` for completeness.
     """
     payload = (message or {}).get("msg", {})
     if not isinstance(payload, dict):
@@ -351,21 +355,30 @@ async def handle_ws_fill(message: dict[str, Any]) -> None:
     if (payload.get("type") or payload.get("channel")) != "fill":
         return
     fill = payload.get("msg") or payload.get("data") or {}
-    coid = fill.get("client_order_id") or fill.get("clientOrderId")
-    if not coid:
+    if not isinstance(fill, dict):
         return
+    exch_id = fill.get("order_id") or fill.get("orderId")
+    coid = fill.get("client_order_id") or fill.get("clientOrderId")
+    rec: OrderRecord | None = None
     async with _resting_lock:
-        rec = _resting.get(coid)
+        if coid and coid in _resting:
+            rec = _resting.get(coid)
+        elif exch_id:
+            for r in _resting.values():
+                if r.exchange_order_id == exch_id:
+                    rec = r
+                    break
     if rec is None:
         return
     count = int(fill.get("count") or 0)
-    price = int(fill.get("yes_price") if rec.request.side == "yes" else fill.get("no_price") or 0)
+    side_price = fill.get("yes_price") if rec.request.side == "yes" else fill.get("no_price")
+    price = int(side_price or 0)
     rec.filled_count += count
     rec.avg_fill_price_cents = price
     rec.state = "filled" if rec.filled_count >= rec.request.count else "resting"
     if rec.state == "filled":
         async with _resting_lock:
-            _resting.pop(coid, None)
+            _resting.pop(rec.order_id, None)
     await _record(rec.request, paper=False, state="filled", price=price,
                   extra={"exchange_order_id": rec.exchange_order_id, "fill": fill})
     await _emit({"event": "filled", "order": rec.to_dict()})
