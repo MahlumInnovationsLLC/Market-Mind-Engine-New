@@ -152,21 +152,31 @@ async def get_public_equity_curve(days: int = 30) -> list[dict[str, Any]]:
     caller can't trigger a multi-year scan; the dashboard never asks for
     more than ~90 days of history.
 
-    Returns a list of `{date, daily_pnl, cumulative_pnl, trades}` rows
-    starting from the earliest day in the window.  Days with no trades
-    are omitted (callers can carry-forward the previous cumulative if
-    they want a continuous line).  Returns `[]` on any failure.
+    Returns a list of `{date, daily_pnl, cumulative_pnl, trades}` rows,
+    one per calendar day in the window (chronological).  Days with no
+    trades carry the previous `cumulative_pnl` forward with `daily_pnl=0`
+    and `trades=0`, so the curve is continuous.  Returns `[]` on any
+    failure.
     """
     days = max(1, min(int(days), 365))
     try:
         rows = await db.fetch(
             """
-            WITH window_trades AS (
+            WITH bounds AS (
+              SELECT
+                ((now() at time zone 'utc')::date - ($1::int - 1)) AS start_d,
+                (now() at time zone 'utc')::date                   AS end_d
+            ),
+            calendar AS (
+              SELECT generate_series(b.start_d, b.end_d, interval '1 day')::date AS d
+              FROM bounds b
+            ),
+            window_trades AS (
               SELECT
                 date_trunc('day', executed_at)::date AS d,
                 coalesce(pnl, 0)::float              AS pnl
-              FROM trades
-              WHERE executed_at >= (now() at time zone 'utc')::date - ($1::int - 1)
+              FROM trades, bounds b
+              WHERE executed_at >= b.start_d
             ),
             daily AS (
               SELECT
@@ -175,6 +185,14 @@ async def get_public_equity_curve(days: int = 30) -> list[dict[str, Any]]:
                 count(*)::int   AS trades
               FROM window_trades
               GROUP BY d
+            ),
+            filled AS (
+              SELECT
+                c.d,
+                coalesce(daily.daily_pnl, 0)::float AS daily_pnl,
+                coalesce(daily.trades, 0)::int      AS trades
+              FROM calendar c
+              LEFT JOIN daily ON daily.d = c.d
             )
             SELECT
               to_char(d, 'YYYY-MM-DD') AS date,
@@ -182,7 +200,7 @@ async def get_public_equity_curve(days: int = 30) -> list[dict[str, Any]]:
               sum(daily_pnl) OVER (ORDER BY d ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)::float
                                        AS cumulative_pnl,
               trades
-            FROM daily
+            FROM filled
             ORDER BY d ASC
             """,
             days,
