@@ -530,6 +530,7 @@ async def _calibration_and_drift(vertical: str | None) -> int:
             vertical,
         )
         if not recent:
+            msg = f"{vertical} 24h Brier {brier:.3f} >= {thr:.3f} ({sev})"
             await db.execute(
                 """
                 INSERT INTO model_health_alerts
@@ -537,10 +538,21 @@ async def _calibration_and_drift(vertical: str | None) -> int:
                      threshold, message, acknowledged)
                 VALUES ($1, 'brier_drift', $2, 'brier_score', $3, $4, $5, false)
                 """,
-                vertical, sev, brier, thr,
-                f"{vertical} 24h Brier {brier:.3f} >= {thr:.3f} ({sev})",
+                vertical, sev, brier, thr, msg,
             )
             raised = 1
+            # Email the operator about the drift event.  Best-effort.
+            try:
+                from ..notifications import alerts as _alerts
+                _alerts.drift(
+                    vertical=vertical,
+                    metric="brier_score_24h",
+                    value=brier,
+                    threshold=thr,
+                    note=f"severity={sev}; {msg}",
+                )
+            except Exception as e:  # pragma: no cover
+                log.warning("drift alert dispatch failed: %s", e)
     except Exception as e:
         log.warning("alert insert failed for %s: %s", vertical, e)
     return raised

@@ -31,6 +31,7 @@ import PipelinePage from "@/pages/pipeline";
 import PendingApproval from "@/pages/pending-approval";
 import PricingPage from "@/pages/pricing";
 import BillingPage from "@/pages/billing";
+import HealthPage from "@/pages/health";
 import SessionExpiredOverlay from "@/components/session-expired-overlay";
 
 const clerkPubKey = import.meta.env.VITE_CLERK_PUBLISHABLE_KEY;
@@ -392,6 +393,7 @@ function ClerkProviderWithRoutes() {
             <Route path="/pipeline" component={PipelineRoute} />
             <Route path="/pricing" component={PricingPage} />
             <Route path="/billing" component={BillingPage} />
+            <Route path="/health" component={HealthPage} />
             <Route path="/sign-in/*?" component={SignInPage} />
             <Route path="/sign-up/*?" component={SignUpPage} />
             <Route component={NotFound} />

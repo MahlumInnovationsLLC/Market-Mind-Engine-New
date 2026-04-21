@@ -727,6 +727,18 @@ async def _apply_subscription(sub_obj: dict[str, Any]) -> None:
         tier = TIER_FREE
 
     await ensure_schema()
+    # Resolve the prior tier so we can fire a tier_change alert on
+    # transitions only.  We read it before the upsert so the comparison
+    # is meaningful.
+    prev_tier: str | None = None
+    if user_id:
+        try:
+            row = await db.fetchrow(
+                "SELECT tier FROM subscriptions WHERE user_id=$1", user_id
+            )
+            prev_tier = (row["tier"] if row else None) or None
+        except Exception:
+            prev_tier = None
     async with db.acquire() as conn:
         # 1. Raw mirror — keep the unmodified Stripe payload.
         if sub_id:
@@ -817,6 +829,31 @@ async def _apply_subscription(sub_obj: dict[str, Any]) -> None:
                 period_end,
                 cancel_at_period_end,
             )
+
+    # Tier-change alert — only when the resolved tier actually changes.
+    # We compare against the prev_tier read above, before the upsert.
+    if user_id and prev_tier and prev_tier != tier:
+        try:
+            from .notifications import alerts as _alerts
+            # User email is best-effort; the operator can look up the
+            # Clerk user_id if needed.
+            user_email = None
+            try:
+                meta_email = (sub_obj.get("metadata") or {}).get("email")
+                if isinstance(meta_email, str):
+                    user_email = meta_email
+            except Exception:
+                user_email = None
+            _alerts.tier_change(
+                user_email=user_email,
+                user_id=user_id,
+                old_tier=prev_tier,
+                new_tier=tier,
+                status=status,
+                stripe_subscription_id=sub_id,
+            )
+        except Exception as e:  # pragma: no cover
+            log.warning("tier_change alert dispatch failed: %s", e)
 
 
 async def _apply_invoice(invoice: dict[str, Any], paid: bool) -> None:

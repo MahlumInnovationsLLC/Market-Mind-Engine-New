@@ -42,3 +42,9 @@ externalPort = 3000
 [nix]
 channel = "stable-25_05"
 packages = ["cargo", "libiconv", "libxcrypt", "openssl", "pkg-config", "postgresql", "rustc"]
+
+[userenv]
+
+[userenv.shared]
+OPERATOR_ALLOWED_EMAILS = "coltermahlum@gmail.com"
+OPERATOR_ALERT_EMAILS = "coltermahlum@gmail.com"

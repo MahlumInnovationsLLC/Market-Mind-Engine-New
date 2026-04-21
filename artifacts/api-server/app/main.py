@@ -17,7 +17,8 @@ from fastapi import Depends, FastAPI, HTTPException, Request, WebSocket, WebSock
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
-from . import billing, dashboard, db, models_loader, storage
+from . import billing, dashboard, db, health, models_loader, storage
+from .notifications import alerts as notif_alerts, daily_summary, postmark as notif_postmark
 from .auth import (
     AuthedUser,
     auth_configured,
@@ -129,6 +130,18 @@ async def lifespan(_: FastAPI):
     except Exception as e:
         log.warning("settlement scheduler start failed: %s", e)
 
+    # System-health collector + daily P&L summary scheduler.  Both are
+    # background tasks that touch in-memory state only on success and
+    # use try/except internally so a sick dep can't take down the process.
+    try:
+        await health.start()
+    except Exception as e:
+        log.warning("health collector start failed: %s", e)
+    try:
+        await daily_summary.start()
+    except Exception as e:
+        log.warning("daily summary scheduler start failed: %s", e)
+
     # Kick off model artifact reassembly in the background so a cold cache
     # (~240 MiB download) doesn't block the HTTP server from accepting
     # traffic. Health endpoints surface progress while it warms up.
@@ -137,6 +150,14 @@ async def lifespan(_: FastAPI):
     try:
         yield
     finally:
+        try:
+            await daily_summary.stop()
+        except Exception as e:
+            log.warning("daily summary stop error: %s", e)
+        try:
+            await health.stop()
+        except Exception as e:
+            log.warning("health collector stop error: %s", e)
         try:
             await settlement_scheduler.stop()
         except Exception as e:
@@ -365,6 +386,103 @@ async def health_full(_: object = Depends(require_approved_user)) -> dict[str, o
     if state.ready and canonical_ok == 0:
         out["status"] = "degraded"
     return out
+
+
+# ---------------------------------------------------------------------------
+# System health page + Postmark alert notifications
+# ---------------------------------------------------------------------------
+
+
+@app.get("/api/health/snapshot")
+async def health_snapshot(
+    _: object = Depends(require_approved_user),
+) -> dict[str, object]:
+    """Latest health snapshot — populated on a 30s loop by the health
+    collector.  Render this directly on the /health page."""
+    return health.get_snapshot()
+
+
+@app.get("/api/health/errors")
+async def health_errors(
+    limit: int = 100,
+    since_seconds: float | None = None,
+    _: object = Depends(require_approved_user),
+) -> dict[str, object]:
+    return {
+        "items": health.recent_errors(
+            limit=max(1, min(500, int(limit))),
+            since_seconds=since_seconds,
+        ),
+        "errors_24h": health.errors_in_last_24h(),
+    }
+
+
+@app.get("/api/notifications/status")
+async def notifications_status(
+    _: object = Depends(require_approved_user),
+) -> dict[str, object]:
+    return {
+        "postmark": notif_postmark.status(),
+        "recent_sends": notif_postmark.recent_sends(limit=25),
+    }
+
+
+_ALERT_TYPES = {"halt", "drift", "tier_change", "live_trade", "daily_pnl_summary"}
+
+
+class NotificationsTestRequest(BaseModel):
+    type: str = Field(..., description=f"One of: {sorted(_ALERT_TYPES)}")
+    dry_run: bool = True
+
+
+@app.post("/api/notifications/test")
+async def notifications_test(
+    body: NotificationsTestRequest,
+    _: object = Depends(require_approved_user),
+) -> dict[str, object]:
+    """Manually fire each alert type so the operator can verify wiring
+    end-to-end without waiting for a real halt / drift / etc.
+
+    `dry_run=True` (default) builds the email and returns the preview
+    *without* actually sending — flip to false to send it for real."""
+    if body.type not in _ALERT_TYPES:
+        raise HTTPException(
+            status_code=400, detail=f"unknown alert type {body.type!r}"
+        )
+    if body.type == "halt":
+        return notif_alerts.halt(reason="test halt", dry_run=body.dry_run)
+    if body.type == "drift":
+        return notif_alerts.drift(
+            vertical="sports",
+            metric="brier_score_24h",
+            value=0.31,
+            threshold=0.28,
+            note="test drift",
+            dry_run=body.dry_run,
+        )
+    if body.type == "tier_change":
+        return notif_alerts.tier_change(
+            user_email="test@axiom-predict.app",
+            user_id="user_test",
+            old_tier="free",
+            new_tier="pro",
+            status="active",
+            dry_run=body.dry_run,
+        )
+    if body.type == "live_trade":
+        return notif_alerts.live_trade(
+            market_ticker="TEST-MARKET",
+            side="yes",
+            action="buy",
+            contracts=1,
+            price_cents=50,
+            order_id="test-order",
+            fill_id="test-fill",
+            vertical="sports",
+            dry_run=body.dry_run,
+        )
+    # daily_pnl_summary
+    return await daily_summary.fire_now(dry_run=body.dry_run)
 
 
 @app.get("/api/feeds/status")

@@ -63,10 +63,18 @@ class _KillSwitch:
         }
 
     def trip(self, reason: str | None = None) -> dict[str, Any]:
+        was_halted = self._halted
         self._halted = True
         self._reason = reason or "operator halt"
         self._at = datetime.now(timezone.utc)
         log.warning("KILL SWITCH tripped: %s", self._reason)
+        # Fire halt alert only on the rising edge so re-tripping doesn't spam.
+        if not was_halted:
+            try:
+                from ..notifications import alerts as _alerts
+                _alerts.halt(reason=self._reason)
+            except Exception as e:  # pragma: no cover — notification must not break halt
+                log.warning("halt alert dispatch failed: %s", e)
         return self.state
 
     def reset(self) -> dict[str, Any]:
@@ -352,6 +360,22 @@ async def handle_ws_fill(message: dict[str, Any]) -> None:
     await _record(rec.request, paper=False, state="filled", price=price,
                   extra={"exchange_order_id": rec.exchange_order_id, "fill": fill})
     await _emit({"event": "filled", "order": rec.to_dict()})
+    # LIVE-trade alert (Elite-tier per spec). Paper fills never get
+    # here — they short-circuit in submit_order().
+    try:
+        from ..notifications import alerts as _alerts
+        _alerts.live_trade(
+            market_ticker=rec.request.market_ticker,
+            side=rec.request.side,
+            action=rec.request.action,
+            contracts=int(rec.request.count),
+            price_cents=price,
+            order_id=rec.order_id,
+            fill_id=str(fill.get("trade_id") or fill.get("fill_id") or ""),
+            vertical=rec.request.vertical,
+        )
+    except Exception as e:  # pragma: no cover
+        log.warning("live_trade alert dispatch failed: %s", e)
 
 
 # --- helpers --------------------------------------------------------------
