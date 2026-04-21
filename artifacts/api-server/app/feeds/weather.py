@@ -239,6 +239,11 @@ async def _poll_hrrr() -> int:
                       (city_code, forecast_date, hrrr_high_f, hrrr_hourly,
                        hrrr_run_time, fetched_at)
                     VALUES ($1, $2, $3, $4::jsonb, NOW(), NOW())
+                    ON CONFLICT (city_code, forecast_date) DO UPDATE SET
+                      hrrr_high_f = EXCLUDED.hrrr_high_f,
+                      hrrr_hourly = EXCLUDED.hrrr_hourly,
+                      hrrr_run_time = EXCLUDED.hrrr_run_time,
+                      fetched_at = EXCLUDED.fetched_at
                     RETURNING id
                     """,
                     city.code,

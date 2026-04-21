@@ -58,6 +58,18 @@ class FeedScheduler:
             return
 
         while not self._stop.is_set():
+            # Honour any provider-issued backoff window before spending a poll.
+            status = self._registry.status_of(feed.name)
+            if status and status.is_rate_limited():
+                # rate_limited_until is wall-clock epoch seconds.
+                import time as _time
+                wait_s = max(1.0, (status.rate_limited_until or 0.0) - _time.time())
+                try:
+                    await asyncio.wait_for(self._stop.wait(), timeout=wait_s)
+                    return  # stop() arrived during backoff
+                except asyncio.TimeoutError:
+                    pass  # backoff complete, fall through and poll
+
             started = await self._registry.record_start(feed.name)
             try:
                 written = await feed.poll()
@@ -65,6 +77,9 @@ class FeedScheduler:
                 log.debug("feed %s ok (%d rows)", feed.name, written or 0)
             except asyncio.CancelledError:
                 raise
+            except RateLimited as rl:
+                await self._registry.record_rate_limited(feed.name, rl.retry_after)
+                await self._registry.record_failure(feed.name, started, rl)
             except Exception as e:  # noqa: BLE001 — fault isolation is the whole point
                 await self._registry.record_failure(feed.name, started, e)
                 log.warning("feed %s failed: %s", feed.name, e)
@@ -73,6 +88,17 @@ class FeedScheduler:
                 await asyncio.wait_for(self._stop.wait(), timeout=feed.cadence_seconds)
             except asyncio.TimeoutError:
                 continue
+
+
+class RateLimited(Exception):
+    """Raised by a poll function when the upstream returned 429.
+
+    The scheduler catches this, records a backoff window in FeedStatus,
+    and skips polling until the deadline passes.
+    """
+    def __init__(self, provider: str, retry_after: float = 60.0) -> None:
+        super().__init__(f"{provider} rate-limited; retry in {retry_after:.0f}s")
+        self.retry_after = retry_after
 
 
 scheduler = FeedScheduler()

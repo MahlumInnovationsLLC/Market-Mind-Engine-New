@@ -33,6 +33,8 @@ class FeedStatus:
     success_count: int = 0
     failure_count: int = 0
     poll_count: int = 0
+    rate_limited_count: int = 0
+    rate_limited_until: float | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -50,7 +52,12 @@ class FeedStatus:
             "success_count": self.success_count,
             "failure_count": self.failure_count,
             "poll_count": self.poll_count,
+            "rate_limited_count": self.rate_limited_count,
+            "rate_limited_until": _ts(self.rate_limited_until),
         }
+
+    def is_rate_limited(self) -> bool:
+        return self.rate_limited_until is not None and time.time() < self.rate_limited_until
 
 
 def _ts(epoch: float | None) -> str | None:
@@ -148,6 +155,14 @@ class FeedRegistry:
             st.last_records_written = written
             st.last_error = None
             st.success_count += 1
+
+    async def record_rate_limited(self, name: str, retry_after_seconds: float) -> None:
+        """Mark a feed as rate-limited; the scheduler will skip its next poll until the deadline."""
+        async with self._lock:
+            st = self._status[name]
+            st.rate_limited_count += 1
+            st.rate_limited_until = time.time() + max(1.0, retry_after_seconds)
+            log.warning("feed %s rate-limited; backing off %.1fs", name, retry_after_seconds)
 
     async def record_failure(self, name: str, started_at: float, err: BaseException) -> None:
         async with self._lock:

@@ -20,6 +20,7 @@ import httpx
 
 from .. import db
 from .registry import Feed, registry
+from .scheduler import RateLimited
 
 
 log = logging.getLogger("axiom.feeds.odds")
@@ -61,8 +62,10 @@ async def _poll_the_odds_api() -> int:
             if r.status_code == 401:
                 raise RuntimeError("the-odds-api auth rejected — bad key")
             if r.status_code == 429:
-                log.warning("the-odds-api rate-limited on %s", sport)
-                continue
+                # Surface to the scheduler so it can apply a backoff window.
+                # The Odds API uses the standard `Retry-After` header.
+                retry = _retry_after_seconds(r) or 60.0
+                raise RateLimited("the-odds-api", retry_after=retry)
             if r.status_code >= 400:
                 log.warning("the-odds-api %s returned %s: %s", sport, r.status_code, r.text[:200])
                 continue
@@ -137,46 +140,112 @@ async def _persist_odds_payload(sport: str, games: list[dict[str, Any]]) -> int:
     return written
 
 
-async def _poll_sportradar(sport: str) -> int:
-    """Sportradar per-sport poller — minimal stub.
+_SPORTRADAR_SCHEDULE_PATHS = {
+    # Per-sport schedule endpoint templates (year/month/day are filled in at call time).
+    "nba":   "https://api.sportradar.us/nba/trial/v8/en/games/{y}/{m:02d}/{d:02d}/schedule.json",
+    "nhl":   "https://api.sportradar.us/nhl/trial/v7/en/games/{y}/{m:02d}/{d:02d}/schedule.json",
+    "mlb":   "https://api.sportradar.us/mlb/trial/v7/en/games/{y}/{m:02d}/{d:02d}/schedule.json",
+    "ncaab": "https://api.sportradar.us/ncaamb/trial/v8/en/games/{y}/{m:02d}/{d:02d}/schedule.json",
+}
+_SPORTRADAR_LEAGUE = {"nba": "NBA", "nhl": "NHL", "mlb": "MLB", "ncaab": "NCAAB"}
 
-    Sportradar surfaces deep team/player feeds that the legacy code
-    blends with The Odds API quotes.  Each sport endpoint differs and
-    requires its own per-sport API key.  We surface the key check + a
-    sentinel /sports/v8/en/league/seasons.json call so the operator can
-    confirm the key works and see the latency without us speculating
-    about which feed the orchestrator wants first.
-    """
+
+async def _poll_sportradar(sport: str) -> int:
+    """Fetch today's schedule from Sportradar and upsert into `games`."""
     key_var = f"SPORTRADAR_{sport.upper()}_KEY"
     api_key = os.environ.get(key_var) or os.environ.get("SPORTRADAR_API_KEY")
     if not api_key:
         raise RuntimeError(f"{key_var} not set")
-    base = {
-        "nba": "https://api.sportradar.us/nba/trial/v8/en/league/seasons.json",
-        "nhl": "https://api.sportradar.us/nhl/trial/v7/en/league/seasons.json",
-        "mlb": "https://api.sportradar.us/mlb/trial/v7/en/league/seasons.json",
-        "ncaab": "https://api.sportradar.us/ncaamb/trial/v8/en/league/seasons.json",
-    }.get(sport)
-    if not base:
+    template = _SPORTRADAR_SCHEDULE_PATHS.get(sport)
+    if not template:
         raise RuntimeError(f"unknown sportradar sport: {sport}")
+
+    from datetime import datetime, timezone
+    today = datetime.now(tz=timezone.utc)
+    url = template.format(y=today.year, m=today.month, d=today.day)
 
     timeout = httpx.Timeout(10.0, connect=5.0)
     async with httpx.AsyncClient(timeout=timeout) as client:
-        r = await client.get(base, params={"api_key": api_key})
-        if r.status_code == 401 or r.status_code == 403:
+        r = await client.get(url, params={"api_key": api_key})
+        if r.status_code in (401, 403):
             raise RuntimeError(f"sportradar {sport} auth rejected")
         if r.status_code == 429:
-            raise RuntimeError(f"sportradar {sport} rate-limited")
+            raise RateLimited(f"sportradar:{sport}", retry_after=_retry_after_seconds(r) or 60.0)
         if r.status_code >= 400:
             raise RuntimeError(f"sportradar {sport} HTTP {r.status_code}")
-        # We don't write to the schema yet — orchestrator follow-up owns the
-        # sport-specific persistence shape.  Counting the seasons in the
-        # response gives a non-zero "I am alive" signal.
         try:
-            payload = r.json()
-            return len(payload.get("seasons", []) or [])
+            payload = r.json() or {}
         except Exception:
             return 0
+
+    games = payload.get("games") or payload.get("league", {}).get("games") or []
+    if not games:
+        return 0
+
+    league = _SPORTRADAR_LEAGUE[sport]
+    rows: list[tuple] = []
+    from datetime import datetime as _dt, timezone as _tz
+    now_iso = _dt.now(tz=_tz.utc).isoformat(timespec="seconds")
+    for g in games:
+        gid = str(g.get("id") or "")
+        if not gid:
+            continue
+        home = (g.get("home") or {}).get("name") or g.get("home_team") or ""
+        away = (g.get("away") or {}).get("name") or g.get("away_team") or ""
+        scheduled = str(g.get("scheduled") or "")
+        status = str(g.get("status") or "scheduled")
+        home_score = (g.get("home_points") if g.get("home_points") is not None
+                      else (g.get("home") or {}).get("runs"))
+        away_score = (g.get("away_points") if g.get("away_points") is not None
+                      else (g.get("away") or {}).get("runs"))
+        rows.append((
+            gid, sport, league, home, away, scheduled, status,
+            int(home_score) if home_score is not None else None,
+            int(away_score) if away_score is not None else None,
+            now_iso, now_iso,
+        ))
+
+    if not rows:
+        return 0
+    try:
+        async with db.acquire() as conn, conn.transaction():
+            await conn.executemany(
+                """
+                INSERT INTO games
+                  (game_id, sport, league, home_team, away_team, scheduled_start,
+                   status, home_score, away_score, last_updated, inserted_at)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+                ON CONFLICT (game_id) DO UPDATE SET
+                  status = EXCLUDED.status,
+                  home_score = EXCLUDED.home_score,
+                  away_score = EXCLUDED.away_score,
+                  last_updated = EXCLUDED.last_updated
+                """,
+                rows,
+            )
+    except Exception as e:
+        # If the table doesn't have a unique index on game_id the upsert will
+        # raise — log and surface so the operator can fix the index.
+        log.warning("sportradar %s upsert failed: %s", sport, e)
+        return 0
+    return len(rows)
+
+
+def _retry_after_seconds(resp: httpx.Response) -> float | None:
+    """Best-effort parse of the standard `Retry-After` header (seconds or HTTP-date)."""
+    raw = resp.headers.get("retry-after")
+    if not raw:
+        return None
+    try:
+        return float(raw)
+    except ValueError:
+        from email.utils import parsedate_to_datetime
+        from datetime import datetime, timezone
+        try:
+            dt = parsedate_to_datetime(raw)
+            return max(1.0, (dt - datetime.now(tz=timezone.utc)).total_seconds())
+        except Exception:
+            return None
 
 
 def register_odds_feeds() -> None:
