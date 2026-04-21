@@ -37,6 +37,18 @@ class Settings:
 
     # Operating mode
     paper_mode: bool
+    # Trading orchestrator: "paper" (default — write trades with
+    # trading_mode='paper'), "live" (submit to Kalshi), "halt" (loop
+    # runs but never places trades — useful for diagnostics).
+    trading_mode: str
+    # Master switch for the orchestrator scheduler.  When false, no
+    # cycle tasks are started at boot.
+    orchestrator_enabled: bool
+    # Per-vertical cycle cadence in seconds.  Spec §6 calls for ~120s.
+    cycle_interval_seconds: int
+    # Max fresh swarm debates per cycle, to bound LLM cost.  Cycles
+    # may evaluate cached debates without limit.
+    max_fresh_debates_per_cycle: int
 
     # Server
     port: int
@@ -90,6 +102,16 @@ def get_settings() -> Settings:
         kalshi_private_key=os.environ.get("KALSHI_API_PRIVATE_KEY"),
         kalshi_env=os.environ.get("KALSHI_ENV", "demo"),
         paper_mode=_truthy(os.environ.get("AXIOM_PAPER_MODE"), default=True),
+        trading_mode=(os.environ.get("AXIOM_TRADING_MODE") or "paper").strip().lower(),
+        orchestrator_enabled=_truthy(
+            os.environ.get("AXIOM_ORCHESTRATOR_ENABLED"), default=True
+        ),
+        cycle_interval_seconds=max(
+            10, int(os.environ.get("AXIOM_CYCLE_INTERVAL_SECONDS") or "120")
+        ),
+        max_fresh_debates_per_cycle=max(
+            0, int(os.environ.get("AXIOM_MAX_FRESH_DEBATES_PER_CYCLE") or "1")
+        ),
         port=int(os.environ.get("PORT", "8080")),
         cors_origins=cors_origins,
     )

@@ -16,6 +16,8 @@ tags:
     description: Trained-model artifact discovery
   - name: swarm
     description: 6-persona LLM swarm + gatekeeper
+  - name: orchestrator
+    description: Trading cycle scheduler + 12-gate risk pipeline
 paths:
   /healthz:
     get:
@@ -129,6 +131,35 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/SwarmDebateResult" }
+
+  /orchestrator/status:
+    get:
+      operationId: getOrchestratorStatus
+      tags: [orchestrator]
+      summary: Cycle scheduler status + last cycle summary per vertical
+      responses:
+        "200":
+          description: Status snapshot
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/OrchestratorStatus" }
+
+  /orchestrator/run-cycle:
+    post:
+      operationId: runOrchestratorCycle
+      tags: [orchestrator]
+      summary: Manually fire a single trading cycle
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/OrchestratorRunCycleRequest" }
+      responses:
+        "200":
+          description: Cycle result
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/OrchestratorCycleResult" }
 
   /models/inventory:
     get:
@@ -339,6 +370,42 @@ components:
         models_archive_total_bytes: { type: integer }
         source_archive_total_bytes: { type: integer }
       required: [files, models_archive_total_bytes, source_archive_total_bytes]
+
+    OrchestratorStatus:
+      type: object
+      properties:
+        enabled: { type: boolean }
+        running: { type: boolean }
+        trading_mode: { type: string }
+        cycle_interval_seconds: { type: integer }
+        verticals:
+          type: array
+          items: { type: string }
+        last_cycle:
+          type: object
+          additionalProperties: true
+
+    OrchestratorRunCycleRequest:
+      type: object
+      properties:
+        vertical: { type: string, default: "sports" }
+      required: [vertical]
+
+    OrchestratorCycleResult:
+      type: object
+      properties:
+        cycle_id: { type: integer, nullable: true }
+        vertical: { type: string }
+        started_at: { type: string }
+        completed_at: { type: string, nullable: true }
+        duration_seconds: { type: number }
+        picks_evaluated: { type: integer }
+        trades_placed: { type: integer }
+        fresh_debates: { type: integer }
+        errors:
+          type: array
+          items: { type: string }
+      required: [vertical, started_at, picks_evaluated, trades_placed, fresh_debates, duration_seconds]
 
     SwarmDebateRequest:
       type: object

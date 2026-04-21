@@ -282,6 +282,39 @@ export const RunSwarmDebateResponse = zod.object({
 });
 
 /**
+ * @summary Cycle scheduler status + last cycle summary per vertical
+ */
+export const GetOrchestratorStatusResponse = zod.object({
+  enabled: zod.boolean().optional(),
+  running: zod.boolean().optional(),
+  trading_mode: zod.string().optional(),
+  cycle_interval_seconds: zod.number().optional(),
+  verticals: zod.array(zod.string()).optional(),
+  last_cycle: zod.record(zod.string(), zod.unknown()).optional(),
+});
+
+/**
+ * @summary Manually fire a single trading cycle
+ */
+export const runOrchestratorCycleBodyVerticalDefault = `sports`;
+
+export const RunOrchestratorCycleBody = zod.object({
+  vertical: zod.string().default(runOrchestratorCycleBodyVerticalDefault),
+});
+
+export const RunOrchestratorCycleResponse = zod.object({
+  cycle_id: zod.number().nullish(),
+  vertical: zod.string(),
+  started_at: zod.string(),
+  completed_at: zod.string().nullish(),
+  duration_seconds: zod.number(),
+  picks_evaluated: zod.number(),
+  trades_placed: zod.number(),
+  fresh_debates: zod.number(),
+  errors: zod.array(zod.string()).optional(),
+});
+
+/**
  * @summary Trained-model archive inventory in Supabase Storage
  */
 export const GetModelsInventoryResponse = zod.object({

@@ -153,6 +153,33 @@ export interface ExportsInventory {
   source_archive_total_bytes: number;
 }
 
+export type OrchestratorStatusLastCycle = { [key: string]: unknown };
+
+export interface OrchestratorStatus {
+  enabled?: boolean;
+  running?: boolean;
+  trading_mode?: string;
+  cycle_interval_seconds?: number;
+  verticals?: string[];
+  last_cycle?: OrchestratorStatusLastCycle;
+}
+
+export interface OrchestratorRunCycleRequest {
+  vertical: string;
+}
+
+export interface OrchestratorCycleResult {
+  cycle_id?: number | null;
+  vertical: string;
+  started_at: string;
+  completed_at?: string | null;
+  duration_seconds: number;
+  picks_evaluated: number;
+  trades_placed: number;
+  fresh_debates: number;
+  errors?: string[];
+}
+
 export interface SwarmDebateRequest {
   game_id: string;
   matchup?: string | null;

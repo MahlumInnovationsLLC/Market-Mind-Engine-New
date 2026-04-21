@@ -22,6 +22,7 @@ from .config import get_settings
 from .feeds import registry as feed_registry, scheduler as feed_scheduler
 from .feeds.odds_api import register_odds_feeds
 from .feeds.weather import register_weather_feeds
+from .orchestrator import pipeline_event_hub, run_cycle, scheduler as orchestrator_scheduler
 from .swarm import llm_log_hub, refresh_persona_weights, run_debate
 
 
@@ -72,7 +73,18 @@ async def lifespan(_: FastAPI):
         log.info("swarm persona weights bootstrapped from %d rows", n)
     except Exception as e:
         log.warning("swarm persona weight bootstrap failed: %s", e)
+    # Start the trading orchestrator scheduler.  Honors
+    # AXIOM_ORCHESTRATOR_ENABLED + AXIOM_TRADING_MODE.  Cycle failures
+    # are caught inside the loop so a sick DB doesn't stop the process.
+    try:
+        await orchestrator_scheduler.start()
+    except Exception as e:
+        log.warning("orchestrator scheduler start failed: %s", e)
     yield
+    try:
+        await orchestrator_scheduler.stop()
+    except Exception as e:
+        log.warning("orchestrator scheduler stop error: %s", e)
     try:
         await feed_scheduler.stop()
     except Exception as e:
@@ -312,6 +324,79 @@ async def ws_llm_logs(ws: WebSocket) -> None:
         log.warning("ws send failed: %s", e)
     finally:
         llm_log_hub.unsubscribe(q)
+
+
+# ---------------------------------------------------------------------------
+# Trading orchestrator: cycle scheduler + 12 risk gates + paper lifecycle
+# ---------------------------------------------------------------------------
+
+
+class OrchestratorRunCycleRequest(BaseModel):
+    vertical: str = Field("sports", min_length=1, max_length=64)
+
+
+@app.get("/api/orchestrator/status")
+async def orchestrator_status(_: object = Depends(require_auth)) -> dict[str, object]:
+    return orchestrator_scheduler.status()
+
+
+@app.post("/api/orchestrator/run-cycle")
+async def orchestrator_run_cycle(
+    body: OrchestratorRunCycleRequest, _: object = Depends(require_auth)
+) -> dict[str, object]:
+    """Manually fire a single cycle.  Useful for ops + smoke testing
+    without waiting for the next scheduler tick."""
+    try:
+        cr = await run_cycle(body.vertical)
+    except Exception as e:
+        log.exception("manual cycle failed")
+        raise HTTPException(status_code=502, detail=f"cycle error: {e}")
+    return {
+        "cycle_id": cr.cycle_id,
+        "vertical": cr.vertical,
+        "started_at": cr.started_at,
+        "completed_at": cr.completed_at,
+        "duration_seconds": cr.duration_seconds,
+        "picks_evaluated": cr.picks_evaluated,
+        "trades_placed": cr.trades_placed,
+        "fresh_debates": cr.fresh_debates,
+        "errors": cr.errors,
+    }
+
+
+@app.websocket("/ws/pipeline")
+async def ws_pipeline(ws: WebSocket) -> None:
+    """Live stream of orchestrator pipeline events: cycle_start, gate
+    pass/fail, candidate_complete (placed/rejected/place_error),
+    cycle_complete.  Auth via Clerk JWT in `?token=` (same contract as
+    `/ws/llm-logs` since browsers can't set Authorization on WS upgrades).
+    """
+    token = ws.query_params.get("token")
+    if auth_configured():
+        from .auth import verify_clerk_jwt
+
+        if not token:
+            await ws.close(code=4401)
+            return
+        try:
+            verify_clerk_jwt(token)
+        except Exception as e:
+            log.info("ws pipeline auth failed: %s", e)
+            await ws.close(code=4401)
+            return
+
+    await ws.accept()
+    q = pipeline_event_hub.subscribe()
+    try:
+        while True:
+            event = await q.get()
+            await ws.send_json(event)
+    except WebSocketDisconnect:
+        pass
+    except Exception as e:
+        log.warning("ws pipeline send failed: %s", e)
+    finally:
+        pipeline_event_hub.unsubscribe(q)
 
 
 # ---------------------------------------------------------------------------
