@@ -324,6 +324,33 @@ async def me_access(user: AuthedUser = Depends(require_auth)) -> dict[str, objec
         await admin_module.upsert_seen_user(user.user_id, email, name)
     except Exception as e:
         log.warning("/api/me/access upsert failed: %s", e)
+
+    # Best-effort: ping the operator the first time an unapproved user
+    # hits this endpoint so they know to come approve them. Dedupe per
+    # user for 24h so repeated polling from the "Awaiting approval"
+    # screen doesn't spam the inbox. Never fail the access check on
+    # email-provider trouble.
+    if not (approved or is_admin):
+        async def _notify_pending() -> None:
+            try:
+                ok = await notif_alerts.dedupe_or_skip(
+                    "pending-approval",
+                    user.user_id,
+                    ttl_seconds=24 * 3600,
+                )
+                if ok:
+                    notif_alerts.pending_approval(
+                        user_id=user.user_id,
+                        user_email=email,
+                    )
+            except Exception as e:
+                log.warning("pending_approval notify failed: %s", e)
+
+        try:
+            asyncio.create_task(_notify_pending())
+        except Exception as e:
+            log.warning("pending_approval schedule failed: %s", e)
+
     return {
         "approved": approved or is_admin,
         "is_admin": is_admin,

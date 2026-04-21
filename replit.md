@@ -34,6 +34,13 @@ showing real production telemetry.
   no shared API token, no referer/host bypass, and no same-origin shortcut.
 - `AXIOM_CORS_ORIGINS` (optional) — comma-separated allowed origins (defaults to `*`)
 - `OPERATOR_ALLOWED_EMAILS` (optional) — see "Operator allow-list" below
+- `OPERATOR_NOTIFY_EMAIL` (optional) — single address (or comma-separated list)
+  pinged the first time a brand-new signed-in user hits `/api/me/access`
+  while still unapproved. Dedup'd per user for 24h. Falls back to
+  `OPERATOR_ALERT_EMAILS` / `OPERATOR_ALLOWED_EMAILS` when unset. Requires
+  `POSTMARK_SERVER_TOKEN` (and a verified `POSTMARK_FROM_EMAIL`) to actually
+  deliver — without them the access check still succeeds and the send is a
+  logged no-op.
 - `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `VITE_STRIPE_PUBLISHABLE_KEY` —
   Stripe billing. The webhook handler lives at `POST /api/billing/webhook`
   (signature-verified, idempotent via the `stripe_events` table).

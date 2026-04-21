@@ -319,6 +319,79 @@ def drift(
 
 
 # ---------------------------------------------------------------------------
+# Pending teammate approval
+# ---------------------------------------------------------------------------
+
+
+def pending_approval(
+    *,
+    user_id: str,
+    user_email: str | None,
+    dry_run: bool = False,
+) -> dict[str, Any]:
+    """Notify the operator that a signed-in teammate is awaiting approval.
+
+    Caller is responsible for dedupe (use `dedupe_or_skip` with a 24h TTL)
+    so a single user pinging `/api/me/access` repeatedly doesn't spam the
+    operator inbox.
+
+    The recipient resolves from `OPERATOR_NOTIFY_EMAIL` first (this is the
+    address explicitly intended for new-signup notifications) and falls
+    back to the standard operator alert list when that env var is unset.
+    """
+    import os
+
+    subject = (
+        f"[axiom] Teammate awaiting approval: {user_email or user_id}"
+    )
+    body = (
+        "A signed-in user is on the \"Awaiting approval\" screen and has "
+        "no operator allow-list entry yet. Approve or revoke them from "
+        "the operator console (Admin → Users).\n\n"
+        + _format_lines(
+            [
+                ("user_email", user_email or "(unknown)"),
+                ("user_id", user_id),
+                ("at", _utc_now_iso()),
+            ]
+        )
+        + "\n"
+    )
+
+    notify_to_raw = (os.environ.get("OPERATOR_NOTIFY_EMAIL") or "").strip()
+    explicit_to: list[str] | None = None
+    if notify_to_raw:
+        explicit_to = [
+            t.strip() for t in notify_to_raw.split(",") if t.strip() and "@" in t
+        ] or None
+
+    if dry_run:
+        log.info("alert dry_run subject=%r tag=pending-approval", subject)
+        return {
+            "dry_run": True,
+            "tag": "pending-approval",
+            "subject": subject,
+            "body_preview": body[:4000],
+            "would_send_to": explicit_to or postmark.alert_recipients(),
+            "configured": postmark.is_configured(),
+        }
+    postmark.send_in_background(
+        subject=subject,
+        text_body=body,
+        tag="pending-approval",
+        to=explicit_to,
+    )
+    return {
+        "dry_run": False,
+        "tag": "pending-approval",
+        "subject": subject,
+        "queued": True,
+        "configured": postmark.is_configured(),
+        "recipients": explicit_to or postmark.alert_recipients(),
+    }
+
+
+# ---------------------------------------------------------------------------
 # Daily P&L summary
 # ---------------------------------------------------------------------------
 
