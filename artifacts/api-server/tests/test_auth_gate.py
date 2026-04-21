@@ -1,0 +1,235 @@
+"""Regression suite proving telemetry endpoints stay private without sign-in.
+
+The lockdown was previously only verified by hand with curl. These tests
+enumerate every protected route and assert each one rejects:
+  * a request with no Authorization header
+  * a request with a malformed Authorization header
+  * a request bearing an expired JWT signed by the legitimate key
+  * a request bearing a JWT signed by the wrong issuer (key swap)
+
+They also assert that `/api/healthz` stays public.
+
+The Clerk JWKS is replaced with an in-memory RSA keypair so the tests can
+exercise the real `app.auth.require_auth` code path — including signature
+validation, expiry, and issuer checks — without any network access.
+"""
+from __future__ import annotations
+
+import time
+from typing import Iterable
+
+import jwt
+import pytest
+from cryptography.hazmat.primitives.asymmetric import rsa
+from fastapi.testclient import TestClient
+
+from app import auth as auth_module
+from app.main import app
+from tests.conftest import TEST_CLERK_HOST
+
+
+# ---------------------------------------------------------------------------
+# Route inventory — kept in sync with app/main.py
+# ---------------------------------------------------------------------------
+
+PROTECTED_ROUTES: tuple[str, ...] = (
+    "/api/health",
+    "/api/dashboard/overview",
+    "/api/dashboard/recent-trades",
+    "/api/dashboard/swarm-personas",
+    "/api/dashboard/recent-cycles",
+    "/api/dashboard/recent-debates",
+    "/api/storage/list",
+    "/api/models/inventory",
+)
+
+PUBLIC_ROUTES: tuple[str, ...] = ("/api/healthz",)
+
+
+def test_route_inventory_matches_app() -> None:
+    """Fail loudly if a new /api/* route is added without test coverage.
+
+    Catches the exact regression this suite exists to prevent: a future PR
+    adding a dashboard endpoint and forgetting to gate it (or to list it
+    here).
+    """
+    declared = {r.path for r in app.routes if getattr(r, "path", "").startswith("/api/")}
+    covered = set(PROTECTED_ROUTES) | set(PUBLIC_ROUTES)
+    missing = declared - covered
+    assert not missing, (
+        f"New /api/* route(s) not covered by the auth-gate tests: {sorted(missing)}. "
+        "Add them to PROTECTED_ROUTES or PUBLIC_ROUTES in tests/test_auth_gate.py."
+    )
+
+
+# ---------------------------------------------------------------------------
+# In-memory JWKS plumbing
+# ---------------------------------------------------------------------------
+
+
+class _StubSigningKey:
+    def __init__(self, key) -> None:
+        self.key = key
+
+
+class _StubJWKSClient:
+    """Stand-in for `jwt.PyJWKClient` — returns a pre-baked public key."""
+
+    def __init__(self, public_key) -> None:
+        self._public_key = public_key
+
+    def get_signing_key_from_jwt(self, _token: str) -> _StubSigningKey:  # noqa: D401
+        return _StubSigningKey(self._public_key)
+
+
+@pytest.fixture(scope="module")
+def legit_keypair():
+    return rsa.generate_private_key(public_exponent=65537, key_size=2048)
+
+
+@pytest.fixture(scope="module")
+def attacker_keypair():
+    return rsa.generate_private_key(public_exponent=65537, key_size=2048)
+
+
+@pytest.fixture(autouse=True)
+def _patch_jwks(monkeypatch, legit_keypair):
+    """Force `app.auth` to verify against our in-memory keypair."""
+    auth_module._frontend_api_host.cache_clear()
+    auth_module._issuer.cache_clear()
+    auth_module._jwks_client.cache_clear()
+    monkeypatch.setattr(
+        auth_module,
+        "_jwks_client",
+        lambda: _StubJWKSClient(legit_keypair.public_key()),
+    )
+    yield
+    # monkeypatch restores `_jwks_client` automatically; just bust the
+    # other caches so a later non-patched test sees fresh state.
+    auth_module._frontend_api_host.cache_clear()
+    auth_module._issuer.cache_clear()
+
+
+@pytest.fixture
+def client():
+    return TestClient(app)
+
+
+# ---------------------------------------------------------------------------
+# Token helpers
+# ---------------------------------------------------------------------------
+
+
+ISSUER = f"https://{TEST_CLERK_HOST}"
+
+
+def _make_token(
+    private_key,
+    *,
+    issuer: str = ISSUER,
+    expired: bool = False,
+    sub: str = "user_test_123",
+) -> str:
+    now = int(time.time())
+    iat = now - (3600 if expired else 60)
+    exp = now - 60 if expired else now + 3600
+    return jwt.encode(
+        {"iss": issuer, "sub": sub, "iat": iat, "nbf": iat, "exp": exp, "sid": "sess_test"},
+        private_key,
+        algorithm="RS256",
+    )
+
+
+# ---------------------------------------------------------------------------
+# Public route stays public
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("route", PUBLIC_ROUTES)
+def test_public_routes_are_open(client, route):
+    """`/api/healthz` MUST stay reachable without any credentials so that
+    uptime checks and the load balancer can probe liveness."""
+    resp = client.get(route)
+    assert resp.status_code == 200, resp.text
+    assert resp.json().get("status") == "ok"
+
+
+# ---------------------------------------------------------------------------
+# Protected routes reject the four ways auth can be missing/forged
+# ---------------------------------------------------------------------------
+
+
+def _assert_unauthorized(resp) -> None:
+    assert resp.status_code == 401, (
+        f"expected 401 but got {resp.status_code}: {resp.text[:300]}"
+    )
+
+
+@pytest.mark.parametrize("route", PROTECTED_ROUTES)
+def test_protected_routes_reject_missing_header(client, route):
+    _assert_unauthorized(client.get(route))
+
+
+@pytest.mark.parametrize("route", PROTECTED_ROUTES)
+@pytest.mark.parametrize(
+    "header_value",
+    [
+        "",                       # empty header
+        "Bearer",                 # scheme only, no token
+        "Bearer ",                # scheme + whitespace
+        "Token abc.def.ghi",      # wrong scheme
+        "abc.def.ghi",            # missing scheme entirely
+        "Bearer not-a-jwt",       # well-formed scheme, garbage token
+    ],
+)
+def test_protected_routes_reject_malformed_header(client, route, header_value):
+    resp = client.get(route, headers={"Authorization": header_value})
+    _assert_unauthorized(resp)
+
+
+@pytest.mark.parametrize("route", PROTECTED_ROUTES)
+def test_protected_routes_reject_expired_token(client, route, legit_keypair):
+    token = _make_token(legit_keypair, expired=True)
+    resp = client.get(route, headers={"Authorization": f"Bearer {token}"})
+    _assert_unauthorized(resp)
+
+
+@pytest.mark.parametrize("route", PROTECTED_ROUTES)
+def test_protected_routes_reject_wrong_issuer(client, route, legit_keypair):
+    """A JWT minted for a different Clerk instance must not be accepted,
+    even if it is otherwise well-formed and within its validity window."""
+    token = _make_token(legit_keypair, issuer="https://clerk.attacker.example.com")
+    resp = client.get(route, headers={"Authorization": f"Bearer {token}"})
+    _assert_unauthorized(resp)
+
+
+@pytest.mark.parametrize("route", PROTECTED_ROUTES)
+def test_protected_routes_reject_token_signed_by_wrong_key(
+    client, route, attacker_keypair, monkeypatch, legit_keypair
+):
+    """Token has the right issuer string but is signed by a key the JWKS
+    does not vouch for — i.e. the attacker forged the payload but lacks the
+    private key."""
+    # JWKS still serves the legitimate public key (set up by autouse fixture);
+    # we just sign with a key the server has never seen.
+    token = _make_token(attacker_keypair)
+    resp = client.get(route, headers={"Authorization": f"Bearer {token}"})
+    _assert_unauthorized(resp)
+
+
+# ---------------------------------------------------------------------------
+# Sanity check: with a valid token the gate at least *passes auth* (the
+# handler may still 5xx because Postgres/Supabase aren't reachable in tests,
+# which is fine — what we care about is that we are no longer getting 401).
+# ---------------------------------------------------------------------------
+
+
+def test_valid_token_passes_auth_gate(client, legit_keypair):
+    token = _make_token(legit_keypair)
+    resp = client.get(
+        "/api/dashboard/overview",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert resp.status_code != 401, (
+        f"valid token was rejected ({resp.status_code}): {resp.text[:300]}"
+    )

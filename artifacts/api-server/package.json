@@ -5,6 +5,7 @@
   "scripts": {
     "dev": "../../.pythonlibs/bin/python3 -m uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8080} --reload",
     "start": "../../.pythonlibs/bin/python3 -m uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8080}",
-    "typecheck": "echo 'python service — no ts typecheck' && exit 0"
+    "typecheck": "echo 'python service — no ts typecheck' && exit 0",
+    "test": "../../.pythonlibs/bin/python -m pytest tests/"
   }
 }
