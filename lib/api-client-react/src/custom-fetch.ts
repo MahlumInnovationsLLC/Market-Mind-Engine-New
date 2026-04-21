@@ -8,6 +8,12 @@ export type BodyType<T> = T;
 
 export type AuthTokenGetter = () => Promise<string | null> | string | null;
 
+export type UnauthorizedHandler = (info: {
+  status: number;
+  url: string;
+  method: string;
+}) => void;
+
 const NO_BODY_STATUS = new Set([204, 205, 304]);
 const DEFAULT_JSON_ACCEPT = "application/json, application/problem+json";
 
@@ -17,6 +23,19 @@ const DEFAULT_JSON_ACCEPT = "application/json, application/problem+json";
 
 let _baseUrl: string | null = null;
 let _authTokenGetter: AuthTokenGetter | null = null;
+let _unauthorizedHandler: UnauthorizedHandler | null = null;
+
+/**
+ * Register a handler that is invoked whenever any API request returns a
+ * 401 Unauthorized response.  Useful for globally detecting expired
+ * sessions and routing the user back to a sign-in flow.
+ *
+ * The handler runs *before* the rejecting `ApiError` is thrown, so callers
+ * still see the error.  Pass `null` to clear the handler.
+ */
+export function setUnauthorizedHandler(handler: UnauthorizedHandler | null): void {
+  _unauthorizedHandler = handler;
+}
 
 /**
  * Set a base URL that is prepended to every relative request URL
@@ -364,6 +383,17 @@ export async function customFetch<T = unknown>(
 
   if (!response.ok) {
     const errorData = await parseErrorBody(response, method);
+    if (response.status === 401 && _unauthorizedHandler) {
+      try {
+        _unauthorizedHandler({
+          status: response.status,
+          url: requestInfo.url,
+          method: requestInfo.method,
+        });
+      } catch {
+        // Swallow handler errors so they don't mask the original API error.
+      }
+    }
     throw new ApiError(response, errorData, requestInfo);
   }
 

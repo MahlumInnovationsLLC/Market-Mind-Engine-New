@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   ClerkProvider,
   SignIn,
@@ -17,11 +17,15 @@ import {
   useLocation,
 } from "wouter";
 import { QueryClient, QueryClientProvider, useQueryClient } from "@tanstack/react-query";
-import { setAuthTokenGetter } from "@workspace/api-client-react";
+import {
+  setAuthTokenGetter,
+  setUnauthorizedHandler,
+} from "@workspace/api-client-react";
 import { Toaster } from "@/components/ui/toaster";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import NotFound from "@/pages/not-found";
 import Dashboard from "@/pages/dashboard";
+import SessionExpiredOverlay from "@/components/session-expired-overlay";
 
 const clerkPubKey = import.meta.env.VITE_CLERK_PUBLISHABLE_KEY;
 // Empty in dev, auto-set in prod by the platform.
@@ -229,8 +233,37 @@ function ClerkQueryClientCacheInvalidator() {
   return null;
 }
 
+function SessionExpiredBridge({
+  onExpired,
+}: {
+  onExpired: () => void;
+}) {
+  const queryClient = useQueryClient();
+  const onExpiredRef = useRef(onExpired);
+
+  useEffect(() => {
+    onExpiredRef.current = onExpired;
+  }, [onExpired]);
+
+  useEffect(() => {
+    setUnauthorizedHandler(() => {
+      // Drop every cached telemetry response so a re-authenticated user
+      // never sees data from the previous session.
+      queryClient.cancelQueries();
+      queryClient.clear();
+      onExpiredRef.current();
+    });
+    return () => {
+      setUnauthorizedHandler(null);
+    };
+  }, [queryClient]);
+
+  return null;
+}
+
 function ClerkProviderWithRoutes() {
   const [, setLocation] = useLocation();
+  const [sessionExpired, setSessionExpired] = useState(false);
 
   return (
     <ClerkProvider
@@ -257,6 +290,7 @@ function ClerkProviderWithRoutes() {
       <QueryClientProvider client={queryClient}>
         <ClerkApiTokenBridge />
         <ClerkQueryClientCacheInvalidator />
+        <SessionExpiredBridge onExpired={() => setSessionExpired(true)} />
         <TooltipProvider>
           <Switch>
             <Route path="/" component={HomeRedirect} />
@@ -264,6 +298,11 @@ function ClerkProviderWithRoutes() {
             <Route path="/sign-up/*?" component={SignUpPage} />
             <Route component={NotFound} />
           </Switch>
+          {sessionExpired && (
+            <SessionExpiredOverlay
+              onDismiss={() => setSessionExpired(false)}
+            />
+          )}
           <Toaster />
         </TooltipProvider>
       </QueryClientProvider>
