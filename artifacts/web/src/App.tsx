@@ -32,6 +32,7 @@ import PendingApproval from "@/pages/pending-approval";
 import PricingPage from "@/pages/pricing";
 import BillingPage from "@/pages/billing";
 import HealthPage from "@/pages/health";
+import MarketingPage from "@/pages/marketing";
 import SessionExpiredOverlay from "@/components/session-expired-overlay";
 
 const clerkPubKey = import.meta.env.VITE_CLERK_PUBLISHABLE_KEY;
@@ -119,7 +120,7 @@ function SignInPage() {
         routing="path"
         path={`${basePath}/sign-in`}
         signUpUrl={`${basePath}/sign-up`}
-        fallbackRedirectUrl={basePath || "/"}
+        fallbackRedirectUrl={`${basePath}/app`}
       />
     </div>
   );
@@ -134,52 +135,27 @@ function SignUpPage() {
         routing="path"
         path={`${basePath}/sign-up`}
         signInUrl={`${basePath}/sign-in`}
-        fallbackRedirectUrl={basePath || "/"}
+        fallbackRedirectUrl={`${basePath}/app`}
       />
     </div>
   );
 }
 
-function Landing() {
-  return (
-    <div className="min-h-[100dvh] bg-background text-foreground font-mono flex flex-col items-center justify-center p-6 selection:bg-primary/30">
-      <div className="max-w-md w-full border border-border bg-card p-8 space-y-6">
-        <div className="space-y-2">
-          <div className="text-xs text-muted-foreground uppercase tracking-widest">
-            AXIOM_PREDICT
-          </div>
-          <h1 className="text-2xl font-bold uppercase tracking-tight text-primary">
-            Operator Console
-          </h1>
-          <p className="text-sm text-muted-foreground">
-            Restricted access. Sign in to view live trading telemetry, swarm
-            debates, and model inventory.
-          </p>
-        </div>
-        <SignInButton mode="modal">
-          <button
-            type="button"
-            className="w-full bg-primary text-primary-foreground py-3 px-4 uppercase tracking-wider text-sm font-bold hover:opacity-90 transition-opacity"
-          >
-            Sign in
-          </button>
-        </SignInButton>
-        <div className="text-[10px] text-muted-foreground uppercase tracking-widest border-t border-border pt-4">
-          SYS_STATUS :: standby
-        </div>
-      </div>
-    </div>
-  );
+function HomeRoute() {
+  // Public marketing landing page is shown to everyone — even signed-in
+  // operators (who get an "Open Console" CTA in the nav). This avoids
+  // surprising paid subscribers who follow a public link.
+  return <MarketingPage />;
 }
 
-function HomeRedirect() {
+function AppRoute() {
   return (
     <>
       <Show when="signed-in">
-        <ProtectedDashboard />
+        <ApprovalGate />
       </Show>
       <Show when="signed-out">
-        <Landing />
+        <Redirect to="/" />
       </Show>
     </>
   );
@@ -274,18 +250,6 @@ function PipelineRoute() {
   );
 }
 
-function ProtectedDashboard() {
-  return (
-    <>
-      <Show when="signed-in">
-        <ApprovalGate />
-      </Show>
-      <Show when="signed-out">
-        <Redirect to="/" />
-      </Show>
-    </>
-  );
-}
 
 /**
  * Bridges Clerk's session token into the generated API client.  Every
@@ -389,7 +353,8 @@ function ClerkProviderWithRoutes() {
         <SessionExpiredBridge onExpired={() => setSessionExpired(true)} />
         <TooltipProvider>
           <Switch>
-            <Route path="/" component={HomeRedirect} />
+            <Route path="/" component={HomeRoute} />
+            <Route path="/app" component={AppRoute} />
             <Route path="/pipeline" component={PipelineRoute} />
             <Route path="/pricing" component={PricingPage} />
             <Route path="/billing" component={BillingPage} />

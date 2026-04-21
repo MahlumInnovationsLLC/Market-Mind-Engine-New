@@ -145,6 +145,82 @@ async def get_recent_cycles(limit: int = 10) -> list[dict[str, Any]]:
         return []
 
 
+async def get_public_equity_curve(days: int = 30) -> list[dict[str, Any]]:
+    """Daily cumulative realized PnL across all trades, in chronological order.
+
+    Public — used by the marketing landing page.  Bounded so a hostile
+    caller can't trigger a multi-year scan; the dashboard never asks for
+    more than ~90 days of history.
+
+    Returns a list of `{date, daily_pnl, cumulative_pnl, trades}` rows
+    starting from the earliest day in the window.  Days with no trades
+    are omitted (callers can carry-forward the previous cumulative if
+    they want a continuous line).  Returns `[]` on any failure.
+    """
+    days = max(1, min(int(days), 365))
+    try:
+        rows = await db.fetch(
+            """
+            WITH window_trades AS (
+              SELECT
+                date_trunc('day', executed_at)::date AS d,
+                coalesce(pnl, 0)::float              AS pnl
+              FROM trades
+              WHERE executed_at >= (now() at time zone 'utc')::date - ($1::int - 1)
+            ),
+            daily AS (
+              SELECT
+                d,
+                sum(pnl)::float AS daily_pnl,
+                count(*)::int   AS trades
+              FROM window_trades
+              GROUP BY d
+            )
+            SELECT
+              to_char(d, 'YYYY-MM-DD') AS date,
+              daily_pnl,
+              sum(daily_pnl) OVER (ORDER BY d ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)::float
+                                       AS cumulative_pnl,
+              trades
+            FROM daily
+            ORDER BY d ASC
+            """,
+            days,
+        )
+        return [dict(r) for r in rows]
+    except Exception as e:
+        log.warning("public_equity_curve failed: %s", e)
+        return []
+
+
+async def get_public_stats() -> dict[str, Any]:
+    """High-level numbers safe to expose to anonymous visitors.
+
+    Used by the marketing hero — total realized PnL, win rate, trade
+    count, and the most recent trade timestamp.  Every individual stat
+    is wrapped so a single failure doesn't blank the whole hero.
+    """
+    realized_pnl = await _safe_fetchval("SELECT coalesce(sum(pnl), 0)::float FROM trades")
+    total_trades = await _safe_count("trades")
+    win_rate = await _safe_fetchval(
+        "SELECT (sum((pnl > 0)::int)::float / nullif(count(*) filter (where pnl is not null), 0)) "
+        "FROM trades WHERE pnl IS NOT NULL"
+    )
+    last_trade_at = await _safe_fetchval(
+        "SELECT to_char(max(executed_at), 'YYYY-MM-DD\"T\"HH24:MI:SSZ') FROM trades"
+    )
+    cycles = await _safe_count("trading_cycles")
+    debates = await _safe_count("swarm_debates")
+    return {
+        "realized_pnl": realized_pnl,
+        "total_trades": total_trades,
+        "win_rate": win_rate,
+        "last_trade_at": last_trade_at,
+        "trading_cycles": cycles,
+        "swarm_debates": debates,
+    }
+
+
 async def get_recent_swarm_debates(limit: int = 10) -> list[dict[str, Any]]:
     try:
         rows = await db.fetch(

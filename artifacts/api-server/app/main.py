@@ -228,6 +228,19 @@ async def billing_pricing() -> dict[str, object]:
     return billing.public_pricing_catalog()
 
 
+@app.get("/api/public/equity-curve")
+async def public_equity_curve(days: int = 30) -> dict[str, object]:
+    """Public — daily cumulative realized PnL for the marketing landing page."""
+    points = await dashboard.get_public_equity_curve(days)
+    return {"days": days, "points": points}
+
+
+@app.get("/api/public/stats")
+async def public_stats() -> dict[str, object]:
+    """Public — high-level live trading stats for the marketing hero."""
+    return await dashboard.get_public_stats()
+
+
 @app.get("/api/me/subscription")
 async def me_subscription(
     user: AuthedUser = Depends(require_auth),
