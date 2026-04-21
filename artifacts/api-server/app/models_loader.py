@@ -9,11 +9,15 @@ The loader is idempotent: with the cache already populated the second
 call is a no-op. It is also safe to call concurrently — an internal
 lock prevents duplicate downloads.
 
-Layout under `CACHE_ROOT` (`/tmp/axiom-cache`):
+Layout under `CACHE_ROOT` (default: `<workspace>/.cache/axiom-models`,
+override with `AXIOM_MODEL_CACHE_DIR`):
     models.tar           reassembled trained-model archive
     source.tar           reassembled source archive
     models/              extracted models tree
     source/              extracted source tree
+
+The cache lives on the persistent workspace volume rather than `/tmp`,
+so warm restarts skip the ~30s reassembly + extract penalty.
 """
 from __future__ import annotations
 
@@ -30,11 +34,16 @@ from pathlib import Path
 from typing import Any
 
 from . import storage
+from .config import resolve_model_cache_dir
 
 
 log = logging.getLogger(__name__)
 
-CACHE_ROOT = Path("/tmp/axiom-cache")
+# Legacy ephemeral location; if we find a populated cache here at boot
+# we'll move it into the persistent location to avoid re-downloading.
+_LEGACY_CACHE_ROOT = Path("/tmp/axiom-cache")
+
+CACHE_ROOT = resolve_model_cache_dir()
 MODELS_DIR = CACHE_ROOT / "models"
 SOURCE_DIR = CACHE_ROOT / "source"
 MODELS_ARCHIVE = CACHE_ROOT / "models.tar"
@@ -273,6 +282,13 @@ async def ensure_artifacts(*, force: bool = False) -> ModelsState:
         _state.started_at = time.time()
         try:
             CACHE_ROOT.mkdir(parents=True, exist_ok=True)
+            log.info(
+                "[models_loader] cache_root=%s persistent=%s",
+                CACHE_ROOT,
+                not str(CACHE_ROOT.resolve()).startswith("/tmp"),
+            )
+            await asyncio.to_thread(_migrate_legacy_cache)
+            await asyncio.to_thread(_prune_cache)
             models_info = await _ensure_one(
                 "models", "models_part_", MODELS_ARCHIVE, MODELS_DIR
             )
@@ -404,6 +420,76 @@ def list_predictor_versions() -> dict[str, str]:
     return {name: meta["version"] for name, meta in _state.predictors.items()}
 
 
+def _migrate_legacy_cache() -> None:
+    """Move a populated `/tmp/axiom-cache` into the persistent root.
+
+    Best-effort: if the legacy location is empty, missing, or the new
+    root already has content, this is a no-op. Failures are logged and
+    swallowed — we'll just re-download.
+    """
+    if CACHE_ROOT.resolve() == _LEGACY_CACHE_ROOT.resolve():
+        return
+    if not _LEGACY_CACHE_ROOT.exists():
+        return
+    moved = 0
+    for name in ("models.tar", "source.tar", "models", "source"):
+        src = _LEGACY_CACHE_ROOT / name
+        dst = CACHE_ROOT / name
+        if not src.exists() or dst.exists():
+            continue
+        try:
+            shutil.move(str(src), str(dst))
+            moved += 1
+        except OSError as e:
+            log.warning("[models_loader] legacy migrate %s failed: %s", name, e)
+    if moved:
+        log.info(
+            "[models_loader] migrated %d entries from legacy cache %s -> %s",
+            moved, _LEGACY_CACHE_ROOT, CACHE_ROOT,
+        )
+
+
+# Files we expect at the cache root.  Anything else (stray reassembly
+# parts, half-written tempfiles, abandoned archive versions) is removed
+# during the prune pass to keep disk usage bounded.
+_EXPECTED_CACHE_ENTRIES = frozenset({
+    "models", "source", "models.tar", "source.tar",
+})
+
+
+def _prune_cache() -> None:
+    """Remove orphaned entries under CACHE_ROOT.
+
+    Keeps disk usage bounded across reload cycles by deleting
+    leftover `.partNNN` chunks, abandoned tempfiles, and any
+    extracted-version directories that are no longer current.
+    """
+    if not CACHE_ROOT.exists():
+        return
+    removed = 0
+    freed = 0
+    for entry in CACHE_ROOT.iterdir():
+        if entry.name in _EXPECTED_CACHE_ENTRIES:
+            continue
+        try:
+            if entry.is_file() or entry.is_symlink():
+                size = entry.stat().st_size if entry.is_file() else 0
+                entry.unlink()
+                freed += size
+            else:
+                size, _ = _dir_size(entry)
+                shutil.rmtree(entry, ignore_errors=True)
+                freed += size
+            removed += 1
+        except OSError as e:
+            log.warning("[models_loader] prune %s failed: %s", entry, e)
+    if removed:
+        log.info(
+            "[models_loader] pruned %d orphan cache entries (%.1f MiB freed)",
+            removed, freed / (1 << 20),
+        )
+
+
 def disk_usage_summary() -> dict[str, Any]:
     def file_size(p: Path) -> int:
         return p.stat().st_size if p.exists() and p.is_file() else 0
@@ -414,10 +500,23 @@ def disk_usage_summary() -> dict[str, Any]:
         total, _ = _dir_size(p)
         return total
 
+    models_archive_bytes = file_size(MODELS_ARCHIVE)
+    source_archive_bytes = file_size(SOURCE_ARCHIVE)
+    models_extracted_bytes = tree_size(MODELS_DIR)
+    source_extracted_bytes = tree_size(SOURCE_DIR)
+    total_bytes = (
+        models_archive_bytes
+        + source_archive_bytes
+        + models_extracted_bytes
+        + source_extracted_bytes
+    )
     return {
         "cache_root": str(CACHE_ROOT),
-        "models_archive_bytes": file_size(MODELS_ARCHIVE),
-        "source_archive_bytes": file_size(SOURCE_ARCHIVE),
-        "models_extracted_bytes": tree_size(MODELS_DIR),
-        "source_extracted_bytes": tree_size(SOURCE_DIR),
+        "persistent": CACHE_ROOT.resolve() != _LEGACY_CACHE_ROOT.resolve()
+        and not str(CACHE_ROOT.resolve()).startswith("/tmp"),
+        "models_archive_bytes": models_archive_bytes,
+        "source_archive_bytes": source_archive_bytes,
+        "models_extracted_bytes": models_extracted_bytes,
+        "source_extracted_bytes": source_extracted_bytes,
+        "total_bytes": total_bytes,
     }

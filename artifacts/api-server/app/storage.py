@@ -19,7 +19,6 @@ from .config import get_settings
 
 
 log = logging.getLogger(__name__)
-CACHE_ROOT = Path("/tmp/axiom-cache")
 
 
 def _client() -> httpx.AsyncClient:

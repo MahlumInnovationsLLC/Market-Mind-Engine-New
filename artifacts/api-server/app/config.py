@@ -9,11 +9,37 @@ from __future__ import annotations
 import os
 from functools import lru_cache
 from dataclasses import dataclass
+from pathlib import Path
 from urllib.parse import quote as _urlquote
 
 
 SUPABASE_PROJECT_REF = "frwhxftngijwcujqhltf"
 SUPABASE_BUCKET = "axiom-predict-artifacts"
+
+# Default model cache lives under the workspace root (`.cache/` is
+# gitignored and the workspace mount is persistent across container
+# restarts on Replit, unlike `/tmp` which gets wiped). Override with
+# AXIOM_MODEL_CACHE_DIR for tests or alternate deploy layouts.
+_WORKSPACE_ROOT = Path(__file__).resolve().parents[3]
+DEFAULT_MODEL_CACHE_DIR = _WORKSPACE_ROOT / ".cache" / "axiom-models"
+
+
+def resolve_model_cache_dir() -> Path:
+    """Resolve the model cache directory from env/default.
+
+    Kept module-level (and free of Settings dependencies) so
+    `models_loader` can resolve the path at import time without
+    requiring Supabase secrets to be present.
+
+    Note: the cache directory is owned exclusively by the loader —
+    `models_loader._prune_cache()` will delete any non-canonical
+    entries it finds at the root, so always point this at a
+    dedicated directory, not a shared one.
+    """
+    env = os.environ.get("AXIOM_MODEL_CACHE_DIR")
+    if env:
+        return Path(env).expanduser().resolve()
+    return DEFAULT_MODEL_CACHE_DIR
 
 
 @dataclass(frozen=True)
@@ -61,6 +87,10 @@ class Settings:
     # vertical, each tick runs run_cycle(vertical) which scopes
     # candidate selection to that vertical's leagues.
     orchestrator_verticals: tuple[str, ...]
+
+    # Model artifact cache (persistent across container restarts).
+    # Populated from AXIOM_MODEL_CACHE_DIR or DEFAULT_MODEL_CACHE_DIR.
+    model_cache_dir: Path
 
     # Server
     port: int
@@ -162,6 +192,7 @@ def get_settings() -> Settings:
         settlement_interval_seconds=max(
             10, int(os.environ.get("AXIOM_SETTLEMENT_INTERVAL_SECONDS") or "60")
         ),
+        model_cache_dir=resolve_model_cache_dir(),
         port=int(os.environ.get("PORT", "8080")),
         cors_origins=cors_origins,
     )
