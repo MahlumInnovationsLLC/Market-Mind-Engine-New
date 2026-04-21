@@ -41,9 +41,9 @@ class Settings:
     # Server
     port: int
 
-    # Auth — single shared bearer/api-key for read-only telemetry endpoints.
-    # When unset the API runs without auth (dev convenience); set in prod.
-    api_token: str | None
+    # CORS — comma-separated list, defaults to "*".  Auth is handled per
+    # request by Clerk JWT verification (see app/auth.py); there is no
+    # shared bearer token / referer shortcut.
     cors_origins: tuple[str, ...]
 
 
@@ -91,6 +91,5 @@ def get_settings() -> Settings:
         kalshi_env=os.environ.get("KALSHI_ENV", "demo"),
         paper_mode=_truthy(os.environ.get("AXIOM_PAPER_MODE"), default=True),
         port=int(os.environ.get("PORT", "8080")),
-        api_token=os.environ.get("AXIOM_API_TOKEN") or None,
         cors_origins=cors_origins,
     )

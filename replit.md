@@ -25,13 +25,14 @@ showing real production telemetry.
 - `SUPABASE_SERVICE_ROLE_KEY` (or `SUPABASE_SECRET_KEY`) — Storage service key
 - `OPENAI_APY_KEY` (typo intentional — user's existing secret name) or `OPENAI_API_KEY`
 - `ANTHROPIC_API_KEY`, `KALSHI_API_KEY_ID`, `KALSHI_API_PRIVATE_KEY` — for follow-up tasks
-- `AXIOM_API_TOKEN` (optional in dev, **required in prod**) — shared bearer token. When set,
-  every `/api/dashboard/*`, `/api/models/*`, `/api/storage/*`, and `/api/health` request must
-  present it via `X-API-Token: <token>` or `Authorization: Bearer <token>`. `/api/healthz`
-  stays public. There is no referer/host bypass — those are forgeable.
+- `CLERK_PUBLISHABLE_KEY`, `CLERK_SECRET_KEY`, `VITE_CLERK_PUBLISHABLE_KEY` —
+  auto-provisioned by the Replit Auth pane. The FastAPI server uses the publishable
+  key to discover the Clerk frontend-API host and verifies every incoming session
+  JWT against that instance's JWKS. Every `/api/dashboard/*`, `/api/models/*`,
+  `/api/storage/*`, and `/api/health` request must carry
+  `Authorization: Bearer <clerk-session-jwt>`; `/api/healthz` stays public. There is
+  no shared API token, no referer/host bypass, and no same-origin shortcut.
 - `AXIOM_CORS_ORIGINS` (optional) — comma-separated allowed origins (defaults to `*`)
-- `VITE_AXIOM_API_TOKEN` (frontend build-time) — when set, the operator console injects it
-  as `X-API-Token` on every request via `setAuthTokenGetter`. Must match `AXIOM_API_TOKEN`.
 
 ## Key endpoints (`/api`)
 

@@ -3,7 +3,7 @@
 This is the minimum viable backend that:
   * Connects to the existing Supabase Postgres (149-table production schema)
   * Connects to Supabase Storage (axiom-predict-artifacts bucket)
-  * Exposes `/api/healthz` and read-only dashboard endpoints
+  * Exposes `/api/healthz` (open) plus Clerk-gated dashboard endpoints
   * Reports which trained models are present in storage
 """
 from __future__ import annotations
@@ -12,45 +12,12 @@ import logging
 import os
 from contextlib import asynccontextmanager
 
-from fastapi import Depends, FastAPI, Header, HTTPException
+from fastapi import Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
 from . import dashboard, db, storage
+from .auth import auth_configured, require_auth
 from .config import get_settings
-
-
-def _constant_time_eq(a: str, b: str) -> bool:
-    import hmac
-    return hmac.compare_digest(a.encode("utf-8"), b.encode("utf-8"))
-
-
-async def require_api_token(
-    authorization: str | None = Header(default=None),
-    x_api_token: str | None = Header(default=None, alias="X-API-Token"),
-) -> None:
-    """Gate protected endpoints behind AXIOM_API_TOKEN.
-
-    Accepts the token via either `Authorization: Bearer <token>` or the
-    `X-API-Token` header.  When `AXIOM_API_TOKEN` is unset the gate is
-    open (dev convenience only — production deployments MUST set it).
-
-    No "same-origin" or referer-based bypass exists by design: those are
-    trivially forgeable by any non-browser client.  The bundled web
-    artifact is expected to inject the token via the X-API-Token header
-    using `setAuthTokenGetter` in lib/api-client-react.
-    """
-    settings = get_settings()
-    expected = settings.api_token
-    if not expected:
-        return
-    presented: str | None = None
-    if authorization and authorization.lower().startswith("bearer "):
-        presented = authorization.split(" ", 1)[1].strip()
-    elif x_api_token:
-        presented = x_api_token.strip()
-    if presented and _constant_time_eq(presented, expected):
-        return
-    raise HTTPException(status_code=401, detail="missing or invalid API token")
 
 
 logging.basicConfig(
@@ -63,25 +30,23 @@ log = logging.getLogger("axiom.api")
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     log.info("axiom-predict api starting")
-    settings = get_settings()
-    # Fail loudly in production-like environments when no shared token is set.
-    # `REPLIT_DEPLOYMENT=1` is exported in published Replit deployments.
-    is_prod = (
-        os.environ.get("REPLIT_DEPLOYMENT") == "1"
-        or (os.environ.get("ENV") or os.environ.get("APP_ENV") or "").lower()
-        in ("prod", "production")
-    )
-    if is_prod and not settings.api_token:
-        raise RuntimeError(
-            "refusing to start in production without AXIOM_API_TOKEN set — "
-            "telemetry endpoints would be publicly readable"
+    settings = get_settings()  # noqa: F841 — early validation
+    if not auth_configured():
+        # No Clerk publishable key means no way to verify tokens, which means
+        # every protected endpoint will return 503.  Fail fast in production
+        # rather than silently serving 503s; in dev, log loudly.
+        is_prod = (
+            os.environ.get("REPLIT_DEPLOYMENT") == "1"
+            or (os.environ.get("ENV") or os.environ.get("APP_ENV") or "").lower()
+            in ("prod", "production")
         )
-    if not settings.api_token:
-        log.warning(
-            "AXIOM_API_TOKEN is unset — running in OPEN dev mode, "
-            "every /api/dashboard/*, /api/health, /api/storage/*, and "
-            "/api/models/* request is unauthenticated"
+        msg = (
+            "CLERK_PUBLISHABLE_KEY is not set — operator console auth is "
+            "disabled and every protected endpoint will return 503"
         )
+        if is_prod:
+            raise RuntimeError(msg)
+        log.warning(msg)
     try:
         await db.get_pool()
     except Exception as e:
@@ -103,7 +68,7 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=list(_settings.cors_origins) or ["*"],
     allow_methods=["GET", "OPTIONS"],
-    allow_headers=["*"],
+    allow_headers=["authorization", "content-type", "accept"],
 )
 
 
@@ -114,12 +79,12 @@ app.add_middleware(
 
 @app.get("/api/healthz")
 async def healthz() -> dict[str, str]:
-    """Liveness probe (always returns ok if the process is up)."""
+    """Liveness probe (always returns ok if the process is up). Public."""
     return {"status": "ok"}
 
 
-@app.get("/api/health", dependencies=[Depends(require_api_token)])
-async def health_full() -> dict[str, object]:
+@app.get("/api/health")
+async def health_full(_: object = Depends(require_auth)) -> dict[str, object]:
     """Full readiness check across DB and Storage."""
     settings = get_settings()
     out: dict[str, object] = {
@@ -162,30 +127,38 @@ async def health_full() -> dict[str, object]:
 # ---------------------------------------------------------------------------
 
 
-@app.get("/api/dashboard/overview", dependencies=[Depends(require_api_token)])
-async def dashboard_overview() -> dict[str, object]:
+@app.get("/api/dashboard/overview")
+async def dashboard_overview(_: object = Depends(require_auth)) -> dict[str, object]:
     return await dashboard.get_overview()
 
 
-@app.get("/api/dashboard/recent-trades", dependencies=[Depends(require_api_token)])
-async def dashboard_recent_trades(limit: int = 25) -> dict[str, object]:
+@app.get("/api/dashboard/recent-trades")
+async def dashboard_recent_trades(
+    limit: int = 25, _: object = Depends(require_auth)
+) -> dict[str, object]:
     limit = max(1, min(200, int(limit)))
     return {"items": await dashboard.get_recent_trades(limit)}
 
 
-@app.get("/api/dashboard/swarm-personas", dependencies=[Depends(require_api_token)])
-async def dashboard_swarm_personas() -> dict[str, object]:
+@app.get("/api/dashboard/swarm-personas")
+async def dashboard_swarm_personas(
+    _: object = Depends(require_auth),
+) -> dict[str, object]:
     return {"items": await dashboard.get_swarm_personas()}
 
 
-@app.get("/api/dashboard/recent-cycles", dependencies=[Depends(require_api_token)])
-async def dashboard_recent_cycles(limit: int = 10) -> dict[str, object]:
+@app.get("/api/dashboard/recent-cycles")
+async def dashboard_recent_cycles(
+    limit: int = 10, _: object = Depends(require_auth)
+) -> dict[str, object]:
     limit = max(1, min(100, int(limit)))
     return {"items": await dashboard.get_recent_cycles(limit)}
 
 
-@app.get("/api/dashboard/recent-debates", dependencies=[Depends(require_api_token)])
-async def dashboard_recent_debates(limit: int = 10) -> dict[str, object]:
+@app.get("/api/dashboard/recent-debates")
+async def dashboard_recent_debates(
+    limit: int = 10, _: object = Depends(require_auth)
+) -> dict[str, object]:
     limit = max(1, min(100, int(limit)))
     return {"items": await dashboard.get_recent_swarm_debates(limit)}
 
@@ -195,8 +168,13 @@ async def dashboard_recent_debates(limit: int = 10) -> dict[str, object]:
 # ---------------------------------------------------------------------------
 
 
-@app.get("/api/storage/list", dependencies=[Depends(require_api_token)])
-async def storage_list(prefix: str = "", limit: int = 50, offset: int = 0) -> dict[str, object]:
+@app.get("/api/storage/list")
+async def storage_list(
+    prefix: str = "",
+    limit: int = 50,
+    offset: int = 0,
+    _: object = Depends(require_auth),
+) -> dict[str, object]:
     try:
         entries = await storage.list_path(prefix, limit=limit, offset=offset)
     except Exception as e:
@@ -210,8 +188,8 @@ async def storage_list(prefix: str = "", limit: int = 50, offset: int = 0) -> di
     }
 
 
-@app.get("/api/models/inventory", dependencies=[Depends(require_api_token)])
-async def models_inventory() -> dict[str, object]:
+@app.get("/api/models/inventory")
+async def models_inventory(_: object = Depends(require_auth)) -> dict[str, object]:
     """Report the artifact archives present in the storage bucket.
 
     The production bucket layout is:

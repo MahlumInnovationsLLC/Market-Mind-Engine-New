@@ -1,6 +1,13 @@
+@layer theme, base, clerk, components, utilities;
 @import "tailwindcss";
 @import "tw-animate-css";
 @plugin "@tailwindcss/typography";
+
+/* Clerk pseudo-states (placeholder colour, etc.) — must live outside any layer */
+.cl-formFieldInput::placeholder {
+  color: hsl(240 5% 45%);
+  opacity: 1;
+}
 
 @custom-variant dark (&:is(.dark *));
 
