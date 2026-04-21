@@ -74,3 +74,4 @@ packages = ["cargo", "libiconv", "libxcrypt", "openssl", "pkg-config", "postgres
 OPERATOR_ADMIN_EMAILS = "coltermahlum@gmail.com"
 OPERATOR_ALLOWED_EMAILS = "coltermahlum@gmail.com"
 OPERATOR_ALERT_EMAILS = "coltermahlum@gmail.com"
+REVENUECAT_PROJECT_ID = "projd60814d6"
