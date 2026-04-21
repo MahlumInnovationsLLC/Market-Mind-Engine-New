@@ -165,6 +165,8 @@ async def health_full(_: object = Depends(require_auth)) -> dict[str, object]:
                     "last_error_at": s.get("last_error_at"),
                     "last_error": s.get("last_error"),
                     "last_records_written": s.get("last_records_written"),
+                    "rate_limited_until": s.get("rate_limited_until"),
+                    "rate_limited_count": s.get("rate_limited_count"),
                 }
                 for s in snap
             ],

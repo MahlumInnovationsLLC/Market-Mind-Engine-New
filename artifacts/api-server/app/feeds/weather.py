@@ -16,6 +16,29 @@ import httpx
 
 from .. import db
 from .registry import Feed, registry
+from .scheduler import RateLimited
+
+
+def _retry_after_seconds(resp: httpx.Response) -> float | None:
+    raw = resp.headers.get("retry-after")
+    if not raw:
+        return None
+    try:
+        return float(raw)
+    except ValueError:
+        from email.utils import parsedate_to_datetime
+        from datetime import datetime, timezone
+        try:
+            dt = parsedate_to_datetime(raw)
+            return max(1.0, (dt - datetime.now(tz=timezone.utc)).total_seconds())
+        except Exception:
+            return None
+
+
+def _check_429(resp: httpx.Response, provider: str) -> None:
+    """Raise RateLimited so the scheduler applies a provider-specific backoff."""
+    if resp.status_code == 429:
+        raise RateLimited(provider, retry_after=_retry_after_seconds(resp) or 60.0)
 
 
 log = logging.getLogger("axiom.feeds.weather")
@@ -81,6 +104,7 @@ async def _poll_open_meteo() -> int:
             except httpx.HTTPError as e:
                 log.warning("open-meteo fetch failed for %s: %s", city.code, e)
                 continue
+            _check_429(r, "open-meteo")
             if r.status_code >= 400:
                 log.warning("open-meteo %s -> HTTP %s", city.code, r.status_code)
                 continue
@@ -154,6 +178,7 @@ async def _poll_nws() -> int:
             except httpx.HTTPError as e:
                 log.warning("nws fetch failed for %s: %s", city.code, e)
                 continue
+            _check_429(r, "nws")
             if r.status_code >= 400:
                 log.warning("nws %s -> HTTP %s", city.code, r.status_code)
                 continue
@@ -208,6 +233,7 @@ async def _poll_hrrr() -> int:
             except httpx.HTTPError as e:
                 log.warning("hrrr fetch failed for %s: %s", city.code, e)
                 continue
+            _check_429(r, "open-meteo:hrrr")
             if r.status_code >= 400:
                 log.warning("hrrr %s -> HTTP %s", city.code, r.status_code)
                 continue
@@ -268,30 +294,25 @@ async def _poll_accuweather_minutecast() -> int:
         raise RuntimeError("ACCUWEATHER_API_KEY not set")
     written = 0
     timeout = httpx.Timeout(10.0, connect=5.0)
+    # AccuWeather minutecast accepts geoposition (`q=lat,lon`) directly — no
+    # need for a separate location-key lookup, which doubles the quota burn.
     async with httpx.AsyncClient(timeout=timeout) as client:
         for city in _selected_cities():
-            # AccuWeather requires a location key per lat/lon — fetch once per call.
             try:
-                geo = await client.get(
-                    "https://dataservice.accuweather.com/locations/v1/cities/geoposition/search",
-                    params={"apikey": key, "q": f"{city.lat},{city.lon}"},
-                )
-                if geo.status_code >= 400:
-                    log.warning("accuweather geo %s -> %s", city.code, geo.status_code)
-                    continue
-                loc_key = (geo.json() or {}).get("Key")
-                if not loc_key:
-                    continue
                 m = await client.get(
-                    f"https://dataservice.accuweather.com/forecasts/v1/minute/1minute",
+                    "https://dataservice.accuweather.com/forecasts/v1/minute/1minute",
                     params={"apikey": key, "q": f"{city.lat},{city.lon}"},
                 )
-                if m.status_code >= 400:
-                    log.warning("accuweather minute %s -> %s", city.code, m.status_code)
-                    continue
-                payload = m.json() or {}
             except httpx.HTTPError as e:
                 log.warning("accuweather %s failed: %s", city.code, e)
+                continue
+            _check_429(m, "accuweather")
+            if m.status_code >= 400:
+                log.warning("accuweather minute %s -> %s", city.code, m.status_code)
+                continue
+            try:
+                payload = m.json() or {}
+            except Exception:
                 continue
             summary = payload.get("Summary") or {}
             try:
