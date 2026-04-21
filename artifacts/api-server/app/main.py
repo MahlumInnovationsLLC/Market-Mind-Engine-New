@@ -11,25 +11,32 @@ from __future__ import annotations
 import logging
 from contextlib import asynccontextmanager
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Request
+from fastapi import Depends, FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
 from . import dashboard, db, storage
 from .config import get_settings
 
 
+def _constant_time_eq(a: str, b: str) -> bool:
+    import hmac
+    return hmac.compare_digest(a.encode("utf-8"), b.encode("utf-8"))
+
+
 async def require_api_token(
-    request: Request,
     authorization: str | None = Header(default=None),
     x_api_token: str | None = Header(default=None, alias="X-API-Token"),
 ) -> None:
     """Gate protected endpoints behind AXIOM_API_TOKEN.
 
     Accepts the token via either `Authorization: Bearer <token>` or the
-    `X-API-Token` header. If `AXIOM_API_TOKEN` is unset the gate is open
-    (dev convenience). The same-origin browser request from the bundled
-    web artifact is also allowed so the operator console works without
-    any token plumbing in the browser.
+    `X-API-Token` header.  When `AXIOM_API_TOKEN` is unset the gate is
+    open (dev convenience only — production deployments MUST set it).
+
+    No "same-origin" or referer-based bypass exists by design: those are
+    trivially forgeable by any non-browser client.  The bundled web
+    artifact is expected to inject the token via the X-API-Token header
+    using `setAuthTokenGetter` in lib/api-client-react.
     """
     settings = get_settings()
     expected = settings.api_token
@@ -40,13 +47,7 @@ async def require_api_token(
         presented = authorization.split(" ", 1)[1].strip()
     elif x_api_token:
         presented = x_api_token.strip()
-    if presented and presented == expected:
-        return
-    # Allow same-origin requests from the workspace preview proxy so the
-    # browser-side dashboard works without the operator pasting a token.
-    referer = (request.headers.get("referer") or "").lower()
-    host = (request.headers.get("host") or "").lower()
-    if host and host in referer:
+    if presented and _constant_time_eq(presented, expected):
         return
     raise HTTPException(status_code=401, detail="missing or invalid API token")
 
