@@ -223,7 +223,9 @@ export default function SubscriptionScreen() {
             {sub.data.email}
           </Text>
         ) : null}
-        {isPaid && sub.data?.stripe_subscription_id ? (
+        {isPaid &&
+        sub.data?.stripe_subscription_id &&
+        !sub.data.stripe_subscription_id.startsWith("rc:") ? (
           <Pressable
             onPress={openPortal}
             disabled={busy === "portal"}
