@@ -92,7 +92,7 @@ _settings = get_settings()
 app.add_middleware(
     CORSMiddleware,
     allow_origins=list(_settings.cors_origins) or ["*"],
-    allow_methods=["GET", "OPTIONS"],
+    allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["authorization", "content-type", "accept"],
 )
 
