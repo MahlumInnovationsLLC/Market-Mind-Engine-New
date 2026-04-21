@@ -18,6 +18,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from . import dashboard, db, storage
 from .auth import auth_configured, require_auth
 from .config import get_settings
+from .feeds import registry as feed_registry, scheduler as feed_scheduler
+from .feeds.odds_api import register_odds_feeds
+from .feeds.weather import register_weather_feeds
 
 
 logging.basicConfig(
@@ -51,7 +54,20 @@ async def lifespan(_: FastAPI):
         await db.get_pool()
     except Exception as e:
         log.error("Postgres pool init failed: %s", e)
+    # Register + start the external data feed pollers.  Feeds with missing
+    # API keys register themselves as `enabled=false` so they show up in
+    # /api/feeds/status with a clear skipped_reason but never poll.
+    try:
+        register_odds_feeds()
+        register_weather_feeds()
+        await feed_scheduler.start()
+    except Exception as e:
+        log.error("feed scheduler start failed: %s", e)
     yield
+    try:
+        await feed_scheduler.stop()
+    except Exception as e:
+        log.warning("feed scheduler stop error: %s", e)
     await db.close_pool()
     log.info("axiom-predict api stopped")
 
@@ -119,7 +135,35 @@ async def health_full(_: object = Depends(require_auth)) -> dict[str, object]:
     except Exception as e:
         out["status"] = "degraded"
         out["storage"] = {"ok": False, "error": str(e)}
+    # External data feeds — render a compact summary so /api/health stays
+    # one screen.  Full per-feed detail lives at /api/feeds/status.
+    try:
+        snap = feed_registry.snapshot()
+        any_failing = any(
+            (s.get("failure_count") or 0) > 0
+            and (s.get("last_ok_at") is None
+                 or (s.get("last_error_at") or "") > (s.get("last_ok_at") or ""))
+            for s in snap
+        )
+        out["feeds"] = {
+            "ok": not any_failing,
+            "registered": len(snap),
+            "enabled": sum(1 for s in snap if s.get("enabled")),
+            "skipped": sum(1 for s in snap if not s.get("enabled")),
+            "names": [s["name"] for s in snap],
+        }
+        if any_failing:
+            out["status"] = "degraded"
+    except Exception as e:
+        out["feeds"] = {"ok": False, "error": str(e)}
+        out["status"] = "degraded"
     return out
+
+
+@app.get("/api/feeds/status")
+async def feeds_status(_: object = Depends(require_auth)) -> dict[str, object]:
+    """Per-feed liveness snapshot for the operator console."""
+    return {"items": feed_registry.snapshot()}
 
 
 # ---------------------------------------------------------------------------
