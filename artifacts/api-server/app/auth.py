@@ -320,8 +320,13 @@ async def ws_authenticate(websocket) -> "AuthedUser | None":
             return None
         return user
     except Exception as e:
+        # Log the full exception server-side; only return a generic
+        # message to the client so we don't leak verifier internals.
+        import logging
+
+        logging.getLogger("axiom.api").info("ws auth failed: %s", e)
         try:
-            await websocket.send_json({"type": "auth_error", "error": str(e)[:200]})
+            await websocket.send_json({"type": "auth_error", "error": "invalid token"})
         except Exception:
             pass
         await websocket.close(code=4401)
