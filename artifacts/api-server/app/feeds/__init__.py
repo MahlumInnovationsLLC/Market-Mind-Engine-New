@@ -15,9 +15,12 @@ Public interface:
     snap = registry.snapshot()     # live status of every feed
 
 The trading orchestrator (follow-up task) reads from the same DB tables
-the pollers write to (`odds_changes`, `line_snapshots`,
-`weather_minutecast`, `weather_extended`, `weather_observations`,
-`weather_hrrr_forecasts`), so this task only owns ingestion.
+the pollers write to.  The canonical odds-tick table on Supabase is
+`odds_changes` (verified via information_schema; the legacy spec name
+`odds_history` does not exist on the production schema).  Other targets:
+`line_snapshots`, `weather_minutecast`, `weather_extended`,
+`weather_observations`, `weather_hrrr_forecasts`.  This task only owns
+ingestion.
 """
 from __future__ import annotations
 

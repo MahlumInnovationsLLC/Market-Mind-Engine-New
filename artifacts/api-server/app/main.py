@@ -150,7 +150,24 @@ async def health_full(_: object = Depends(require_auth)) -> dict[str, object]:
             "registered": len(snap),
             "enabled": sum(1 for s in snap if s.get("enabled")),
             "skipped": sum(1 for s in snap if not s.get("enabled")),
-            "names": [s["name"] for s in snap],
+            # Per-feed detail (last poll time + last error) so an operator
+            # can read /api/health alone and see *which* feed is sick;
+            # /api/feeds/status carries the same info plus durations and
+            # success/failure counters.
+            "items": [
+                {
+                    "name": s["name"],
+                    "enabled": s["enabled"],
+                    "skipped_reason": s.get("skipped_reason"),
+                    "last_started_at": s.get("last_started_at"),
+                    "last_finished_at": s.get("last_finished_at"),
+                    "last_ok_at": s.get("last_ok_at"),
+                    "last_error_at": s.get("last_error_at"),
+                    "last_error": s.get("last_error"),
+                    "last_records_written": s.get("last_records_written"),
+                }
+                for s in snap
+            ],
         }
         if any_failing:
             out["status"] = "degraded"
