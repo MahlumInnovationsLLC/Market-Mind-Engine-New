@@ -84,6 +84,34 @@ function formatInt(n: number | null | undefined): string {
   return Math.round(n).toLocaleString();
 }
 
+function BrandMark({ size = 32 }: { size?: number }) {
+  // Simple chevron / mountain-peak mark inspired by the reference site
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 32 32"
+      fill="none"
+      xmlns="http://www.w3.org/2000/svg"
+      aria-hidden="true"
+    >
+      <defs>
+        <linearGradient id="brand-mark-grad" x1="0" y1="0" x2="1" y2="1">
+          <stop offset="0%" stopColor="hsl(189 94% 60%)" />
+          <stop offset="100%" stopColor="hsl(258 90% 70%)" />
+        </linearGradient>
+      </defs>
+      <path
+        d="M16 4 L28 26 H22 L16 14 L10 26 H4 Z"
+        stroke="url(#brand-mark-grad)"
+        strokeWidth="1.75"
+        strokeLinejoin="round"
+        fill="none"
+      />
+    </svg>
+  );
+}
+
 export default function MarketingPage() {
   const { isSignedIn } = useAuth();
   const [range, setRange] = useState<RangeKey>("30");
@@ -151,55 +179,59 @@ export default function MarketingPage() {
   );
 
   return (
-    <div className="min-h-[100dvh] bg-background text-foreground font-mono selection:bg-primary/30">
+    <div className="min-h-[100dvh] bg-background text-foreground font-sans selection:bg-primary/30">
       {/* ---------- Top Nav ---------- */}
-      <nav className="border-b border-border">
+      <nav className="sticky top-0 z-30 backdrop-blur-md bg-background/70 border-b border-border/60">
         <div className="max-w-6xl mx-auto px-4 md:px-6 py-3 flex items-center justify-between">
           <Link
             href="/"
-            className="flex items-center gap-3"
+            className="flex items-center gap-2.5"
             data-testid="link-home-logo"
           >
-            <div className="h-8 w-8 border border-primary text-primary flex items-center justify-center text-[10px] font-bold tracking-widest">
-              AX
-            </div>
-            <div className="text-xs uppercase tracking-widest text-foreground">
-              Axiom_Predict
+            <BrandMark size={28} />
+            <div className="flex flex-col leading-none">
+              <span className="text-sm font-bold tracking-wide text-foreground">
+                AXIOM
+              </span>
+              <span className="text-[9px] tracking-[0.25em] text-muted-foreground -mt-0.5">
+                PREDICT
+              </span>
             </div>
           </Link>
-          <div className="flex items-center gap-2 md:gap-4 text-xs">
+          <div className="flex items-center gap-1 md:gap-2 text-sm">
             <a
               href="#methodology"
-              className="hidden md:inline text-muted-foreground hover:text-primary uppercase tracking-widest"
+              className="hidden md:inline px-3 py-2 text-muted-foreground hover:text-foreground transition-colors"
             >
               Methodology
             </a>
             <a
               href="#equity"
-              className="hidden md:inline text-muted-foreground hover:text-primary uppercase tracking-widest"
+              className="hidden md:inline px-3 py-2 text-muted-foreground hover:text-foreground transition-colors"
             >
-              Live Curve
+              Live Performance
             </a>
             <a
               href="#pricing"
-              className="hidden md:inline text-muted-foreground hover:text-primary uppercase tracking-widest"
+              className="hidden md:inline px-3 py-2 text-muted-foreground hover:text-foreground transition-colors"
             >
               Pricing
             </a>
             {isSignedIn ? (
               <Link
                 href="/app"
-                className="border border-primary text-primary px-3 py-1 uppercase tracking-widest text-[10px] hover:bg-primary hover:text-primary-foreground"
+                className="ml-2 inline-flex items-center gap-1.5 rounded-full border border-primary/60 text-primary px-4 py-1.5 text-sm font-medium hover:bg-primary hover:text-primary-foreground transition-colors"
                 data-testid="link-open-console"
               >
-                Open Console →
+                Open Console
+                <span aria-hidden>→</span>
               </Link>
             ) : (
               <>
                 <SignInButton mode="modal">
                   <button
                     type="button"
-                    className="text-muted-foreground hover:text-primary uppercase tracking-widest"
+                    className="px-3 py-2 text-muted-foreground hover:text-foreground transition-colors"
                     data-testid="button-nav-signin"
                   >
                     Sign in
@@ -208,10 +240,11 @@ export default function MarketingPage() {
                 <SignUpButton mode="modal">
                   <button
                     type="button"
-                    className="border border-primary text-primary px-3 py-1 uppercase tracking-widest text-[10px] hover:bg-primary hover:text-primary-foreground"
+                    className="ml-2 inline-flex items-center gap-1.5 rounded-full border border-primary/60 text-primary px-4 py-1.5 text-sm font-medium hover:bg-primary hover:text-primary-foreground transition-colors"
                     data-testid="button-nav-signup"
                   >
                     Get Access
+                    <span aria-hidden>→</span>
                   </button>
                 </SignUpButton>
               </>
@@ -221,52 +254,57 @@ export default function MarketingPage() {
       </nav>
 
       {/* ---------- Hero ---------- */}
-      <section className="border-b border-border">
-        <div className="max-w-6xl mx-auto px-4 md:px-6 py-16 md:py-24">
-          <div className="text-[10px] text-primary uppercase tracking-widest mb-4">
-            ::SYS_ONLINE — live prediction-market trading
-          </div>
-          <h1 className="text-3xl md:text-5xl font-bold uppercase tracking-tight text-foreground max-w-3xl">
-            A six-persona LLM swarm trading{" "}
-            <span className="text-primary">prediction markets</span> with
-            twelve-gate risk control.
+      <section className="relative bg-starfield overflow-hidden">
+        <div className="max-w-5xl mx-auto px-4 md:px-6 pt-24 md:pt-32 pb-20 md:pb-28 text-center">
+          <Pill>
+            <span className="text-primary mr-1.5">✦</span>
+            Live prediction-market trading · Kalshi
+          </Pill>
+          <h1 className="mt-8 text-4xl md:text-6xl lg:text-7xl font-extrabold tracking-tight leading-[1.05]">
+            <span className="text-gradient-brand">Six analyst LLMs.</span>
+            <br />
+            One twelve-gate
+            <br />
+            risk loop.
           </h1>
-          <p className="text-sm md:text-base text-muted-foreground mt-6 max-w-2xl">
-            Axiom-Predict runs a continuous research-debate-execute loop on
-            Kalshi. Six analyst personas argue every pick, twelve risk gates
-            decide what gets sized, and the entire transcript — including this
-            equity curve — is yours to inspect.
+          <p className="mt-8 text-base md:text-lg text-muted-foreground max-w-2xl mx-auto leading-relaxed">
+            Axiom-Predict runs a continuous{" "}
+            <span className="text-primary">research-debate-execute</span> loop on
+            Kalshi. Six personas argue every pick, twelve risk gates decide what
+            gets sized, and the entire transcript — including this{" "}
+            <span className="text-primary">live equity curve</span> — is yours
+            to inspect.
           </p>
-          <div className="flex flex-wrap gap-3 mt-8">
+          <div className="mt-10 flex flex-wrap justify-center gap-3">
             {isSignedIn ? (
               <Link
                 href="/app"
-                className="bg-primary text-primary-foreground px-5 py-3 uppercase tracking-widest text-xs font-bold hover:opacity-90"
+                className="rounded-full bg-primary text-primary-foreground px-7 py-3.5 text-sm font-semibold hover:opacity-90 transition-opacity glow-primary"
                 data-testid="link-hero-console"
               >
-                Open Operator Console →
+                Open operator console →
               </Link>
             ) : (
               <SignUpButton mode="modal">
                 <button
                   type="button"
-                  className="bg-primary text-primary-foreground px-5 py-3 uppercase tracking-widest text-xs font-bold hover:opacity-90"
+                  className="rounded-full bg-primary text-primary-foreground px-7 py-3.5 text-sm font-semibold hover:opacity-90 transition-opacity glow-primary"
                   data-testid="button-hero-signup"
                 >
-                  Get Access →
+                  Get access →
                 </button>
               </SignUpButton>
             )}
             <a
               href="#equity"
-              className="border border-border px-5 py-3 uppercase tracking-widest text-xs text-muted-foreground hover:text-primary hover:border-primary"
+              className="rounded-full border border-border px-7 py-3.5 text-sm font-medium text-foreground hover:border-primary/60 hover:text-primary transition-colors"
             >
-              See Live Performance
+              See live performance
             </a>
           </div>
 
           {/* Hero stat strip */}
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-px mt-12 border border-border bg-border">
+          <div className="mt-16 grid grid-cols-2 md:grid-cols-4 gap-3 max-w-4xl mx-auto">
             <HeroStat
               label="Realized PnL"
               value={formatUsd(stats?.realized_pnl)}
@@ -295,29 +333,46 @@ export default function MarketingPage() {
               testId="stat-debates"
             />
           </div>
+
+          <div className="mt-10 flex flex-wrap justify-center gap-x-6 gap-y-2 text-xs text-muted-foreground">
+            <span>Six-persona swarm</span>
+            <span className="text-primary">·</span>
+            <span>Twelve risk gates</span>
+            <span className="text-primary">·</span>
+            <span>Live Kalshi fills</span>
+            <span className="text-primary">·</span>
+            <span>Full transcript audit</span>
+          </div>
         </div>
       </section>
 
       {/* ---------- Methodology ---------- */}
-      <section id="methodology" className="border-b border-border">
-        <div className="max-w-6xl mx-auto px-4 md:px-6 py-16">
+      <section id="methodology" className="border-t border-border/60">
+        <div className="max-w-6xl mx-auto px-4 md:px-6 py-20 md:py-28">
           <SectionHeader
-            kicker="01 :: methodology"
-            title="No black box. Every pick is debated, gated, and logged."
+            kicker="Methodology"
+            title={
+              <>
+                No black box. Every pick is{" "}
+                <span className="text-gradient-brand">debated, gated,</span> and
+                logged.
+              </>
+            }
+            subtitle="The full pipeline — from raw market scrape to settled fill — is observable, queryable, and explainable. Nothing happens that you can't replay."
           />
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-px bg-border border border-border mt-10">
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-5 mt-14">
             <MethodCard
-              tag="THE SWARM"
+              tag="The swarm"
               title="Six-persona debate"
               body="Six analyst personas — quantitative, contrarian, momentum, fundamentals, sentiment, and a designated devil's advocate — independently price every market and then argue. Calibration metrics for each persona are tracked and weighted over time."
             />
             <MethodCard
-              tag="THE GATES"
+              tag="The gates"
               title="Twelve-gate risk control"
               body="Before any size hits the book a candidate trade clears twelve sequential gates: liquidity, spread, slippage, edge vs. fee, exposure caps, drawdown, kill-switch, persona disagreement bands, and more. A single veto kills the order."
             />
             <MethodCard
-              tag="THE LOOP"
+              tag="The loop"
               title="Continuous research → execute"
               body="A scheduler runs trading cycles 24/7 on Kalshi. Every cycle's full transcript — pick, debate, gate verdicts, fill, settlement, post-mortem — is persisted and queryable in your console."
             />
@@ -326,16 +381,24 @@ export default function MarketingPage() {
       </section>
 
       {/* ---------- Live Equity Curve ---------- */}
-      <section id="equity" className="border-b border-border bg-card">
-        <div className="max-w-6xl mx-auto px-4 md:px-6 py-16">
-          <div className="flex flex-col md:flex-row md:items-end justify-between gap-4 mb-6">
+      <section
+        id="equity"
+        className="relative border-t border-border/60 bg-card/40"
+      >
+        <div className="max-w-6xl mx-auto px-4 md:px-6 py-20 md:py-28">
+          <div className="flex flex-col md:flex-row md:items-end justify-between gap-6 mb-10">
             <SectionHeader
-              kicker="02 :: live equity curve"
-              title="Real fills. Real PnL. Updated every cycle."
+              kicker="Live performance"
+              title={
+                <>
+                  Real fills. <span className="text-gradient-brand">Real PnL.</span>{" "}
+                  Updated every cycle.
+                </>
+              }
               compact
             />
             <div
-              className="inline-flex border border-border self-start md:self-auto"
+              className="inline-flex rounded-full border border-border bg-background/60 p-1 self-start md:self-auto"
               role="group"
             >
               {(["7", "30", "90"] as RangeKey[]).map((r) => (
@@ -343,11 +406,11 @@ export default function MarketingPage() {
                   key={r}
                   type="button"
                   onClick={() => setRange(r)}
-                  className={`px-4 py-2 text-[10px] uppercase tracking-widest ${
+                  className={`px-4 py-1.5 text-xs font-semibold rounded-full transition-colors ${
                     range === r
                       ? "bg-primary text-primary-foreground"
                       : "text-muted-foreground hover:text-foreground"
-                  } ${r !== "7" ? "border-l border-border" : ""}`}
+                  }`}
                   data-testid={`button-range-${r}`}
                 >
                   {RANGE_LABEL[r]}
@@ -356,7 +419,7 @@ export default function MarketingPage() {
             </div>
           </div>
 
-          <div className="grid grid-cols-3 gap-px border border-border bg-border mb-6">
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 mb-6">
             <HeroStat
               label={`${RANGE_LABEL[range]} PnL`}
               value={formatUsd(periodPnl, true)}
@@ -389,19 +452,19 @@ export default function MarketingPage() {
           </div>
 
           <div
-            className="border border-border bg-background h-[320px] p-2"
+            className="rounded-2xl border border-border bg-background/80 h-[360px] p-3"
             data-testid="chart-equity-curve"
           >
             {curveLoading ? (
-              <div className="h-full flex items-center justify-center text-xs uppercase tracking-widest text-muted-foreground">
-                LOADING…
+              <div className="h-full flex items-center justify-center text-sm text-muted-foreground">
+                Loading…
               </div>
             ) : curveError ? (
-              <div className="h-full flex items-center justify-center text-xs uppercase tracking-widest text-destructive p-4 text-center">
+              <div className="h-full flex items-center justify-center text-sm text-destructive p-4 text-center">
                 Equity curve unavailable: {curveError}
               </div>
             ) : curve.length === 0 ? (
-              <div className="h-full flex items-center justify-center text-xs uppercase tracking-widest text-muted-foreground">
+              <div className="h-full flex items-center justify-center text-sm text-muted-foreground">
                 No trades in the selected window yet.
               </div>
             ) : (
@@ -414,42 +477,42 @@ export default function MarketingPage() {
                     <linearGradient id="equityFill" x1="0" y1="0" x2="0" y2="1">
                       <stop
                         offset="0%"
-                        stopColor="hsl(188, 86%, 53%)"
-                        stopOpacity={0.4}
+                        stopColor="hsl(189 94% 55%)"
+                        stopOpacity={0.45}
                       />
                       <stop
                         offset="100%"
-                        stopColor="hsl(188, 86%, 53%)"
+                        stopColor="hsl(189 94% 55%)"
                         stopOpacity={0}
                       />
                     </linearGradient>
                   </defs>
                   <CartesianGrid
                     strokeDasharray="2 4"
-                    stroke="hsl(240, 6%, 20%)"
+                    stroke="hsl(220 25% 18%)"
                   />
                   <XAxis
                     dataKey="date"
-                    stroke="hsl(240, 5%, 65%)"
-                    tick={{ fontSize: 10, fontFamily: "monospace" }}
+                    stroke="hsl(215 20% 70%)"
+                    tick={{ fontSize: 11, fontFamily: "Inter, sans-serif" }}
                     tickFormatter={(v: string) => v.slice(5)}
                     minTickGap={24}
                   />
                   <YAxis
-                    stroke="hsl(240, 5%, 65%)"
-                    tick={{ fontSize: 10, fontFamily: "monospace" }}
+                    stroke="hsl(215 20% 70%)"
+                    tick={{ fontSize: 11, fontFamily: "Inter, sans-serif" }}
                     tickFormatter={(v: number) => formatUsd(v)}
                     width={70}
                   />
                   <Tooltip
                     contentStyle={{
-                      background: "hsl(240, 10%, 6%)",
-                      border: "1px solid hsl(240, 6%, 20%)",
-                      borderRadius: 0,
-                      fontSize: 11,
-                      fontFamily: "monospace",
+                      background: "hsl(222 35% 7%)",
+                      border: "1px solid hsl(220 25% 18%)",
+                      borderRadius: 12,
+                      fontSize: 12,
+                      fontFamily: "Inter, sans-serif",
                     }}
-                    labelStyle={{ color: "hsl(0, 0%, 95%)" }}
+                    labelStyle={{ color: "hsl(210 40% 98%)" }}
                     formatter={(value: number, name: string) => [
                       formatUsd(value, name === "daily_pnl"),
                       name === "cumulative_pnl" ? "Cumulative" : "Daily",
@@ -458,7 +521,7 @@ export default function MarketingPage() {
                   <Area
                     type="monotone"
                     dataKey="cumulative_pnl"
-                    stroke="hsl(188, 86%, 53%)"
+                    stroke="hsl(189 94% 55%)"
                     strokeWidth={2}
                     fill="url(#equityFill)"
                   />
@@ -466,35 +529,42 @@ export default function MarketingPage() {
               </ResponsiveContainer>
             )}
           </div>
-          <p className="text-[10px] text-muted-foreground uppercase tracking-widest mt-3">
-            Source: live `trades` table — refreshed every trading cycle.
+          <p className="text-xs text-muted-foreground mt-4">
+            Source: live <code className="text-primary font-mono">trades</code>{" "}
+            table — refreshed every trading cycle.
           </p>
         </div>
       </section>
 
       {/* ---------- Pricing ---------- */}
-      <section id="pricing" className="border-b border-border">
-        <div className="max-w-6xl mx-auto px-4 md:px-6 py-16">
+      <section id="pricing" className="border-t border-border/60">
+        <div className="max-w-6xl mx-auto px-4 md:px-6 py-20 md:py-28">
           <SectionHeader
-            kicker="03 :: pricing"
-            title="Pick a tier. Cancel anytime."
+            kicker="Pricing"
+            title={
+              <>
+                Pick a tier.{" "}
+                <span className="text-gradient-brand">Cancel anytime.</span>
+              </>
+            }
+            subtitle="Both tiers include the live equity curve, full methodology, and the Kalshi fill stream. Elite adds raw transcripts and per-persona scoring."
           />
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mt-10">
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-5 mt-14 max-w-4xl mx-auto">
             {paidTiers.length === 0
               ? [0, 1].map((i) => (
                   <div
                     key={i}
-                    className="border border-border bg-card p-6 h-48 animate-pulse"
+                    className="rounded-2xl border border-border bg-card p-6 h-72 animate-pulse"
                   />
                 ))
               : paidTiers.map((tier) => (
                   <TierCard key={tier.id} tier={tier} isSignedIn={!!isSignedIn} />
                 ))}
           </div>
-          <div className="mt-6 text-center">
+          <div className="mt-8 text-center">
             <Link
               href="/pricing"
-              className="text-xs uppercase tracking-widest text-muted-foreground hover:text-primary"
+              className="text-sm text-muted-foreground hover:text-primary transition-colors"
               data-testid="link-full-pricing"
             >
               Compare all tiers →
@@ -504,13 +574,17 @@ export default function MarketingPage() {
       </section>
 
       {/* ---------- FAQ ---------- */}
-      <section className="border-b border-border bg-card">
-        <div className="max-w-6xl mx-auto px-4 md:px-6 py-16">
-          <SectionHeader kicker="04 :: faq" title="Common questions" />
-          <div className="mt-8 grid grid-cols-1 md:grid-cols-2 gap-x-10 gap-y-6">
+      <section className="border-t border-border/60 bg-card/40">
+        <div className="max-w-5xl mx-auto px-4 md:px-6 py-20 md:py-28">
+          <SectionHeader
+            kicker="FAQ"
+            title={<>Common questions</>}
+            subtitle="Honest answers about what this is — and what it isn't."
+          />
+          <div className="mt-12 grid grid-cols-1 md:grid-cols-2 gap-6">
             <Faq
               q="Is this paper trading or live?"
-              a="Live — orders are placed against Kalshi in real money mode. The equity curve above is real fills. A `paper` mode exists for backtesting but is not what's plotted here."
+              a="Live — orders are placed against Kalshi in real money mode. The equity curve above is real fills. A paper mode exists for backtesting but is not what's plotted here."
             />
             <Faq
               q="Do I get to see the swarm's reasoning?"
@@ -529,34 +603,36 @@ export default function MarketingPage() {
       </section>
 
       {/* ---------- Final CTA ---------- */}
-      <section className="border-b border-border">
-        <div className="max-w-4xl mx-auto px-4 md:px-6 py-20 text-center">
-          <div className="text-[10px] text-primary uppercase tracking-widest mb-3">
-            ::ENTRY_POINT
-          </div>
-          <h2 className="text-2xl md:text-4xl font-bold uppercase tracking-tight">
-            Watch a real swarm trade real markets.
+      <section className="border-t border-border/60 bg-starfield">
+        <div className="max-w-3xl mx-auto px-4 md:px-6 py-24 text-center">
+          <Pill>
+            <span className="text-primary mr-1.5">✦</span>
+            Entry point
+          </Pill>
+          <h2 className="mt-8 text-3xl md:text-5xl font-extrabold tracking-tight leading-tight">
+            Watch a real swarm{" "}
+            <span className="text-gradient-brand">trade real markets.</span>
           </h2>
-          <p className="text-sm text-muted-foreground mt-4">
+          <p className="text-base text-muted-foreground mt-6 max-w-xl mx-auto">
             Create an account in under a minute. Pick a tier when you're ready.
           </p>
-          <div className="mt-8 flex justify-center gap-3">
+          <div className="mt-10 flex justify-center gap-3">
             {isSignedIn ? (
               <Link
                 href="/app"
-                className="bg-primary text-primary-foreground px-6 py-3 uppercase tracking-widest text-xs font-bold hover:opacity-90"
+                className="rounded-full bg-primary text-primary-foreground px-7 py-3.5 text-sm font-semibold hover:opacity-90 transition-opacity glow-primary"
                 data-testid="link-cta-console"
               >
-                Open Console →
+                Open console →
               </Link>
             ) : (
               <SignUpButton mode="modal">
                 <button
                   type="button"
-                  className="bg-primary text-primary-foreground px-6 py-3 uppercase tracking-widest text-xs font-bold hover:opacity-90"
+                  className="rounded-full bg-primary text-primary-foreground px-7 py-3.5 text-sm font-semibold hover:opacity-90 transition-opacity glow-primary"
                   data-testid="button-cta-signup"
                 >
-                  Create Account →
+                  Create account →
                 </button>
               </SignUpButton>
             )}
@@ -565,20 +641,25 @@ export default function MarketingPage() {
       </section>
 
       {/* ---------- Footer ---------- */}
-      <footer className="py-8">
-        <div className="max-w-6xl mx-auto px-4 md:px-6 flex flex-col md:flex-row items-center justify-between gap-4 text-[10px] uppercase tracking-widest text-muted-foreground">
-          <div>© Axiom_Predict — operator-grade prediction-market trading</div>
-          <div className="flex gap-4">
+      <footer className="border-t border-border/60 py-10">
+        <div className="max-w-6xl mx-auto px-4 md:px-6 flex flex-col md:flex-row items-center justify-between gap-4 text-sm text-muted-foreground">
+          <div className="flex items-center gap-2">
+            <BrandMark size={20} />
+            <span>
+              © Axiom Predict — operator-grade prediction-market trading
+            </span>
+          </div>
+          <div className="flex gap-5">
             <Link
               href="/pricing"
-              className="hover:text-primary"
+              className="hover:text-primary transition-colors"
               data-testid="link-footer-pricing"
             >
               Pricing
             </Link>
             <Link
               href="/health"
-              className="hover:text-primary"
+              className="hover:text-primary transition-colors"
               data-testid="link-footer-health"
             >
               Status
@@ -586,7 +667,7 @@ export default function MarketingPage() {
             {isSignedIn ? (
               <Link
                 href="/app"
-                className="hover:text-primary"
+                className="hover:text-primary transition-colors"
                 data-testid="link-footer-app"
               >
                 Console
@@ -595,7 +676,7 @@ export default function MarketingPage() {
               <SignInButton mode="modal">
                 <button
                   type="button"
-                  className="hover:text-primary"
+                  className="hover:text-primary transition-colors"
                   data-testid="button-footer-signin"
                 >
                   Sign in
@@ -606,6 +687,14 @@ export default function MarketingPage() {
         </div>
       </footer>
     </div>
+  );
+}
+
+function Pill({ children }: { children: React.ReactNode }) {
+  return (
+    <span className="inline-flex items-center rounded-full border border-primary/30 bg-primary/5 px-4 py-1.5 text-xs font-medium text-foreground/90">
+      {children}
+    </span>
   );
 }
 
@@ -625,40 +714,42 @@ function TierCard({
     ? `/pricing?checkout=${encodeURIComponent(priceId)}`
     : "/pricing";
 
-  const cls = `w-full py-3 text-xs uppercase tracking-widest font-bold border text-center ${
+  const cls = `w-full inline-flex items-center justify-center rounded-full px-5 py-3 text-sm font-semibold transition-all ${
     tier.highlight
-      ? "bg-primary text-primary-foreground border-primary hover:opacity-90"
-      : "border-border text-foreground hover:border-primary hover:text-primary"
+      ? "bg-primary text-primary-foreground hover:opacity-90 glow-primary"
+      : "border border-border text-foreground hover:border-primary/60 hover:text-primary"
   }`;
 
   return (
     <div
-      className={`border ${
-        tier.highlight ? "border-primary" : "border-border"
-      } bg-card p-6 flex flex-col`}
+      className={`relative rounded-2xl border bg-card p-7 flex flex-col ${
+        tier.highlight
+          ? "border-primary/50 shadow-[0_0_60px_-15px_hsl(189_94%_55%_/_0.4)]"
+          : "border-border"
+      }`}
       data-testid={`card-marketing-tier-${tier.id}`}
     >
       <div className="flex items-center justify-between mb-2">
-        <h3 className="text-sm uppercase tracking-widest font-bold">
-          {tier.name}
-        </h3>
+        <h3 className="text-lg font-semibold">{tier.name}</h3>
         {tier.highlight && (
-          <span className="text-[10px] uppercase tracking-widest text-primary border border-primary px-1">
+          <span className="text-[10px] uppercase tracking-widest font-semibold rounded-full bg-primary/10 text-primary border border-primary/30 px-2.5 py-1">
             Popular
           </span>
         )}
       </div>
-      <p className="text-xs text-muted-foreground min-h-[32px]">
-        {tier.tagline}
-      </p>
-      <div className="text-3xl text-primary font-bold mt-4">
-        ${tier.monthly_usd}
-        <span className="text-xs text-muted-foreground ml-1">/mo</span>
+      <p className="text-sm text-muted-foreground min-h-[40px]">{tier.tagline}</p>
+      <div className="mt-5 flex items-baseline gap-1.5">
+        <span className="text-4xl font-extrabold text-foreground">
+          ${tier.monthly_usd}
+        </span>
+        <span className="text-sm text-muted-foreground">/ month</span>
       </div>
-      <ul className="text-xs text-foreground/80 space-y-1 my-5 flex-1">
+      <ul className="text-sm text-foreground/80 space-y-2.5 my-6 flex-1">
         {tier.features.slice(0, 5).map((f) => (
-          <li key={f} className="flex gap-2">
-            <span className="text-primary">›</span>
+          <li key={f} className="flex gap-2.5">
+            <span className="text-primary mt-0.5" aria-hidden>
+              ✓
+            </span>
             <span>{f}</span>
           </li>
         ))}
@@ -698,24 +789,24 @@ function HeroStat({
 }: {
   label: string;
   value: string;
-  testId?: string;
+  testId: string;
   accent?: "positive" | "negative";
 }) {
-  const valueColor =
+  const accentClass =
     accent === "positive"
-      ? "text-primary"
+      ? "text-success"
       : accent === "negative"
         ? "text-destructive"
         : "text-foreground";
   return (
-    <div className="bg-background p-4 md:p-5">
-      <div className="text-[10px] uppercase tracking-widest text-muted-foreground">
+    <div
+      className="rounded-2xl border border-border bg-card/60 px-5 py-4 text-left"
+      data-testid={testId}
+    >
+      <div className="text-[11px] uppercase tracking-[0.18em] text-muted-foreground font-medium">
         {label}
       </div>
-      <div
-        className={`text-xl md:text-2xl font-bold mt-2 ${valueColor}`}
-        data-testid={testId}
-      >
+      <div className={`mt-1.5 text-2xl md:text-3xl font-bold ${accentClass}`}>
         {value}
       </div>
     </div>
@@ -725,22 +816,31 @@ function HeroStat({
 function SectionHeader({
   kicker,
   title,
+  subtitle,
   compact,
 }: {
   kicker: string;
-  title: string;
+  title: React.ReactNode;
+  subtitle?: string;
   compact?: boolean;
 }) {
   return (
-    <div>
-      <div className="text-[10px] text-primary uppercase tracking-widest">
+    <div className={compact ? "" : "max-w-3xl"}>
+      <div className="text-xs font-semibold uppercase tracking-[0.2em] text-primary mb-3">
         {kicker}
       </div>
       <h2
-        className={`${compact ? "text-xl md:text-2xl" : "text-2xl md:text-3xl"} font-bold uppercase tracking-tight mt-2 max-w-2xl`}
+        className={`font-extrabold tracking-tight leading-[1.1] ${
+          compact ? "text-2xl md:text-3xl" : "text-3xl md:text-5xl"
+        }`}
       >
         {title}
       </h2>
+      {subtitle && (
+        <p className="text-base text-muted-foreground mt-5 max-w-2xl">
+          {subtitle}
+        </p>
+      )}
     </div>
   );
 }
@@ -755,25 +855,21 @@ function MethodCard({
   body: string;
 }) {
   return (
-    <div className="bg-background p-6">
-      <div className="text-[10px] text-primary uppercase tracking-widest">
+    <div className="group rounded-2xl border border-border bg-card p-7 hover:border-primary/40 transition-colors">
+      <div className="text-[11px] font-semibold uppercase tracking-[0.2em] text-primary mb-4">
         {tag}
       </div>
-      <div className="text-base font-bold uppercase tracking-tight mt-2">
-        {title}
-      </div>
-      <p className="text-xs text-muted-foreground mt-3 leading-relaxed">
-        {body}
-      </p>
+      <h3 className="text-xl font-semibold mb-3">{title}</h3>
+      <p className="text-sm text-muted-foreground leading-relaxed">{body}</p>
     </div>
   );
 }
 
 function Faq({ q, a }: { q: string; a: string }) {
   return (
-    <div className="border-l-2 border-primary pl-4">
-      <div className="text-sm font-bold uppercase tracking-tight">{q}</div>
-      <p className="text-xs text-muted-foreground mt-2 leading-relaxed">{a}</p>
+    <div className="rounded-2xl border border-border bg-background/40 p-6">
+      <div className="text-base font-semibold text-foreground mb-2">{q}</div>
+      <p className="text-sm text-muted-foreground leading-relaxed">{a}</p>
     </div>
   );
 }

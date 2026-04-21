@@ -73,31 +73,31 @@
   --elevate-1: rgba(255,255,255, .04);
   --elevate-2: rgba(255,255,255, .09);
 
-  /* Dark theme by default for the dashboard */
-  --background: 240 10% 4%;
-  --foreground: 0 0% 95%;
-  --border: 240 6% 15%;
-  
-  --card: 240 10% 6%;
-  --card-foreground: 0 0% 95%;
-  --card-border: 240 6% 15%;
+  /* Mahlum-inspired deep navy / near-black with subtle blue undertone */
+  --background: 222 40% 5%;
+  --foreground: 210 40% 98%;
+  --border: 220 25% 14%;
 
-  --popover: 240 10% 6%;
-  --popover-foreground: 0 0% 95%;
-  --popover-border: 240 6% 15%;
+  --card: 222 35% 7%;
+  --card-foreground: 210 40% 98%;
+  --card-border: 220 25% 14%;
 
-  /* Electric cyan accent */
-  --primary: 188 86% 53%;
-  --primary-foreground: 240 10% 4%;
+  --popover: 222 35% 7%;
+  --popover-foreground: 210 40% 98%;
+  --popover-border: 220 25% 14%;
 
-  --secondary: 240 6% 12%;
-  --secondary-foreground: 0 0% 95%;
+  /* Bright cyan primary, matched to the reference site */
+  --primary: 189 94% 55%;
+  --primary-foreground: 222 47% 5%;
 
-  --muted: 240 6% 12%;
-  --muted-foreground: 240 5% 65%;
+  --secondary: 220 25% 12%;
+  --secondary-foreground: 210 40% 98%;
 
-  --accent: 188 86% 53%;
-  --accent-foreground: 240 10% 4%;
+  --muted: 220 25% 12%;
+  --muted-foreground: 215 20% 70%;
+
+  --accent: 189 94% 55%;
+  --accent-foreground: 222 47% 5%;
 
   --destructive: 0 84% 60%;
   --destructive-foreground: 0 0% 100%;
@@ -114,11 +114,12 @@
   --chart-4: 0 84% 60%;
   --chart-5: 43 100% 50%;
 
-  --app-font-sans: 'Inter', system-ui, sans-serif;
+  --app-font-sans: 'Inter', system-ui, -apple-system, sans-serif;
   --app-font-serif: Georgia, serif;
   --app-font-mono: 'JetBrains Mono', 'Menlo', 'Monaco', 'Courier New', monospace;
-  
-  --radius: 0px; /* Sharp corners for terminal feel */
+
+  --radius: 0.75rem; /* Soft rounding to match the reference brand */
+  --gradient-brand: linear-gradient(120deg, hsl(189 94% 60%) 0%, hsl(258 90% 70%) 100%);
   
   --shadow-2xs: 0px 2px 0px 0px rgba(0,0,0,0.1);
   --shadow-xs: 0px 2px 0px 0px rgba(0,0,0,0.2);
@@ -147,7 +148,37 @@
 
   body {
     @apply font-sans antialiased bg-background text-foreground;
+    font-feature-settings: "ss01", "cv11";
   }
+}
+
+/* Brand utilities used by the marketing surface */
+.text-gradient-brand {
+  background: var(--gradient-brand);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+.bg-starfield {
+  background-color: hsl(var(--background));
+  background-image:
+    radial-gradient(1px 1px at 20% 30%, rgba(56, 189, 248, 0.55) 50%, transparent 100%),
+    radial-gradient(1px 1px at 75% 18%, rgba(165, 180, 252, 0.45) 50%, transparent 100%),
+    radial-gradient(1.5px 1.5px at 40% 65%, rgba(56, 189, 248, 0.4) 50%, transparent 100%),
+    radial-gradient(1px 1px at 85% 82%, rgba(255, 255, 255, 0.35) 50%, transparent 100%),
+    radial-gradient(1px 1px at 12% 88%, rgba(56, 189, 248, 0.5) 50%, transparent 100%),
+    radial-gradient(1.5px 1.5px at 60% 12%, rgba(255, 255, 255, 0.3) 50%, transparent 100%),
+    radial-gradient(1px 1px at 30% 50%, rgba(165, 180, 252, 0.35) 50%, transparent 100%),
+    radial-gradient(1px 1px at 92% 45%, rgba(56, 189, 248, 0.4) 50%, transparent 100%),
+    radial-gradient(circle at 50% 0%, rgba(56, 189, 248, 0.08), transparent 60%),
+    radial-gradient(circle at 80% 100%, rgba(139, 92, 246, 0.06), transparent 55%);
+  background-size: 800px 800px, 800px 800px, 800px 800px, 800px 800px, 800px 800px, 800px 800px, 800px 800px, 800px 800px, 100% 100%, 100% 100%;
+  background-repeat: repeat, repeat, repeat, repeat, repeat, repeat, repeat, repeat, no-repeat, no-repeat;
+}
+
+.glow-primary {
+  box-shadow: 0 0 0 1px hsl(189 94% 55% / 0.35), 0 10px 40px -10px hsl(189 94% 55% / 0.45);
 }
 
 .text-loss {

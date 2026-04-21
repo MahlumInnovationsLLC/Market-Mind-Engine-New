@@ -154,31 +154,36 @@ export default function PricingPage() {
   };
 
   return (
-    <div className="min-h-[100dvh] bg-background text-foreground p-4 md:p-8 font-mono selection:bg-primary/30">
-      <header className="max-w-6xl mx-auto mb-8 flex flex-col md:flex-row md:items-end justify-between gap-4 border-b border-border pb-4">
+    <div className="min-h-[100dvh] bg-background text-foreground font-sans selection:bg-primary/30">
+      <header className="max-w-6xl mx-auto px-4 md:px-8 pt-10 pb-8 flex flex-col md:flex-row md:items-end justify-between gap-4">
         <div>
+          <div className="text-xs font-semibold uppercase tracking-[0.2em] text-primary mb-3">
+            Pricing
+          </div>
           <h1
-            className="text-xl md:text-2xl font-bold tracking-tight text-primary uppercase"
+            className="text-3xl md:text-4xl font-extrabold tracking-tight"
             data-testid="text-pricing-title"
           >
-            AXIOM_PREDICT :: PRICING
+            Pick a tier.{" "}
+            <span className="text-gradient-brand">Cancel anytime.</span>
           </h1>
-          <p className="text-muted-foreground text-xs uppercase tracking-widest mt-1">
-            Live trading telemetry for prediction markets
+          <p className="text-muted-foreground text-base mt-3 max-w-xl">
+            Live trading telemetry for prediction markets — full methodology and
+            real Kalshi fills, every cycle.
           </p>
         </div>
-        <div className="flex items-center gap-3 text-xs">
+        <div className="flex items-center gap-2 text-sm">
           <Link
             href="/"
-            className="border border-border px-3 py-1 uppercase tracking-widest text-[10px] text-muted-foreground hover:text-primary hover:border-primary"
+            className="rounded-full border border-border px-4 py-1.5 text-muted-foreground hover:border-primary/60 hover:text-primary transition-colors"
             data-testid="link-home"
           >
-            ← Console
+            ← Home
           </Link>
           {isSignedIn && (
             <Link
               href="/billing"
-              className="border border-border px-3 py-1 uppercase tracking-widest text-[10px] text-muted-foreground hover:text-primary hover:border-primary"
+              className="rounded-full border border-border px-4 py-1.5 text-muted-foreground hover:border-primary/60 hover:text-primary transition-colors"
               data-testid="link-billing"
             >
               My Billing
@@ -187,13 +192,16 @@ export default function PricingPage() {
         </div>
       </header>
 
-      <div className="max-w-6xl mx-auto">
-        <div className="flex items-center justify-center mb-8">
-          <div className="inline-flex border border-border" role="group">
+      <div className="max-w-6xl mx-auto px-4 md:px-8 pb-20">
+        <div className="flex items-center justify-center mb-10">
+          <div
+            className="inline-flex rounded-full border border-border bg-card/60 p-1"
+            role="group"
+          >
             <button
               type="button"
               onClick={() => setInterval("month")}
-              className={`px-4 py-2 text-xs uppercase tracking-widest ${
+              className={`px-5 py-1.5 text-sm font-semibold rounded-full transition-colors ${
                 interval === "month"
                   ? "bg-primary text-primary-foreground"
                   : "text-muted-foreground hover:text-foreground"
@@ -205,7 +213,7 @@ export default function PricingPage() {
             <button
               type="button"
               onClick={() => setInterval("year")}
-              className={`px-4 py-2 text-xs uppercase tracking-widest border-l border-border ${
+              className={`px-5 py-1.5 text-sm font-semibold rounded-full transition-colors ${
                 interval === "year"
                   ? "bg-primary text-primary-foreground"
                   : "text-muted-foreground hover:text-foreground"
@@ -219,7 +227,7 @@ export default function PricingPage() {
 
         {loadError && (
           <div
-            className="border border-destructive text-destructive p-3 mb-6 text-xs uppercase tracking-widest"
+            className="rounded-xl border border-destructive/60 bg-destructive/10 text-destructive p-4 mb-6 text-sm"
             data-testid="text-load-error"
           >
             Pricing failed to load: {loadError}
@@ -227,14 +235,14 @@ export default function PricingPage() {
         )}
         {actionError && (
           <div
-            className="border border-destructive text-destructive p-3 mb-6 text-xs uppercase tracking-widest"
+            className="rounded-xl border border-destructive/60 bg-destructive/10 text-destructive p-4 mb-6 text-sm"
             data-testid="text-action-error"
           >
             {actionError}
           </div>
         )}
 
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-5">
           {tiers.map((tier) => {
             const slot = interval === "month" ? tier.monthly : tier.annual;
             const isPaid = tier.id === "pro" || tier.id === "elite";
@@ -242,41 +250,47 @@ export default function PricingPage() {
             return (
               <div
                 key={tier.id}
-                className={`border ${tier.highlight ? "border-primary" : "border-border"} bg-card p-5 flex flex-col`}
+                className={`rounded-2xl border bg-card p-6 flex flex-col ${
+                  tier.highlight
+                    ? "border-primary/50 shadow-[0_0_60px_-15px_hsl(189_94%_55%_/_0.4)]"
+                    : "border-border"
+                }`}
                 data-testid={`card-tier-${tier.id}`}
               >
                 <div className="mb-3">
                   <div className="flex items-center justify-between">
-                    <h2 className="text-sm uppercase tracking-widest text-foreground font-bold">
+                    <h2 className="text-lg font-semibold text-foreground">
                       {tier.name}
                     </h2>
                     {tier.highlight && (
-                      <span className="text-[10px] uppercase tracking-widest text-primary border border-primary px-1">
+                      <span className="text-[10px] uppercase tracking-widest font-semibold rounded-full bg-primary/10 text-primary border border-primary/30 px-2.5 py-1">
                         Popular
                       </span>
                     )}
                   </div>
-                  <p className="text-xs text-muted-foreground mt-1 min-h-[32px]">
+                  <p className="text-sm text-muted-foreground mt-1.5 min-h-[40px]">
                     {tier.tagline}
                   </p>
                 </div>
-                <div className="mb-4">
+                <div className="mb-5">
                   <div
-                    className="text-2xl text-primary font-bold"
+                    className="text-3xl font-extrabold text-foreground"
                     data-testid={`text-price-${tier.id}`}
                   >
                     {priceLabel(tier)}
                     {tier.monthly_usd > 0 && (
-                      <span className="text-xs text-muted-foreground ml-1">
+                      <span className="text-sm text-muted-foreground ml-1.5 font-normal">
                         /{interval === "month" ? "mo" : "yr"}
                       </span>
                     )}
                   </div>
                 </div>
-                <ul className="text-xs text-foreground/80 space-y-1 mb-5 flex-1">
+                <ul className="text-sm text-foreground/80 space-y-2.5 mb-6 flex-1">
                   {tier.features.map((f) => (
-                    <li key={f} className="flex gap-2">
-                      <span className="text-primary">›</span>
+                    <li key={f} className="flex gap-2.5">
+                      <span className="text-primary mt-0.5" aria-hidden>
+                        ✓
+                      </span>
                       <span>{f}</span>
                     </li>
                   ))}
@@ -287,10 +301,10 @@ export default function PricingPage() {
                       type="button"
                       disabled={!configured || actionTier === tier.id}
                       onClick={() => handleUpgrade(tier)}
-                      className={`w-full py-2 text-xs uppercase tracking-widest font-bold border ${
+                      className={`w-full inline-flex items-center justify-center rounded-full px-5 py-3 text-sm font-semibold transition-all ${
                         configured
-                          ? "bg-primary text-primary-foreground border-primary hover:opacity-90"
-                          : "border-border text-muted-foreground cursor-not-allowed"
+                          ? "bg-primary text-primary-foreground hover:opacity-90 glow-primary"
+                          : "border border-border text-muted-foreground cursor-not-allowed"
                       }`}
                       data-testid={`button-upgrade-${tier.id}`}
                     >
@@ -304,7 +318,7 @@ export default function PricingPage() {
                     <SignInButton mode="modal">
                       <button
                         type="button"
-                        className="w-full py-2 text-xs uppercase tracking-widest font-bold bg-primary text-primary-foreground border border-primary hover:opacity-90"
+                        className="w-full inline-flex items-center justify-center rounded-full bg-primary text-primary-foreground px-5 py-3 text-sm font-semibold hover:opacity-90 transition-opacity glow-primary"
                         data-testid={`button-signin-${tier.id}`}
                       >
                         Sign in to upgrade
@@ -314,7 +328,7 @@ export default function PricingPage() {
                 ) : (
                   <Link
                     href={tier.id === "free" ? "/" : "/"}
-                    className="w-full py-2 text-xs uppercase tracking-widest font-bold border border-border text-muted-foreground hover:text-foreground text-center"
+                    className="w-full inline-flex items-center justify-center rounded-full border border-border px-5 py-3 text-sm font-semibold text-foreground hover:border-primary/60 hover:text-primary transition-colors"
                     data-testid={`button-cta-${tier.id}`}
                   >
                     {tier.cta}
@@ -327,10 +341,11 @@ export default function PricingPage() {
 
         {catalog && !catalog.stripe_configured && (
           <p
-            className="text-[10px] text-muted-foreground uppercase tracking-widest text-center mt-8"
+            className="text-xs text-muted-foreground text-center mt-10"
             data-testid="text-stripe-warning"
           >
-            Stripe is not yet fully configured — checkout will be unavailable until the operator adds the secret key.
+            Stripe is not yet fully configured — checkout will be unavailable
+            until the operator adds the secret key.
           </p>
         )}
       </div>
