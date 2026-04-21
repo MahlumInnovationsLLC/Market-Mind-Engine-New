@@ -17,9 +17,6 @@ from .cycle import run_cycle
 log = logging.getLogger(__name__)
 
 
-VERTICALS_DEFAULT: tuple[str, ...] = ("sports",)
-
-
 class _CycleScheduler:
     def __init__(self) -> None:
         self._tasks: dict[str, asyncio.Task[Any]] = {}
@@ -43,7 +40,7 @@ class _CycleScheduler:
             log.info("orchestrator scheduler disabled by config")
             return
         self._stop.clear()
-        for vertical in VERTICALS_DEFAULT:
+        for vertical in s.orchestrator_verticals:
             if vertical in self._tasks and not self._tasks[vertical].done():
                 continue
             self._tasks[vertical] = asyncio.create_task(

@@ -49,6 +49,10 @@ class Settings:
     # Max fresh swarm debates per cycle, to bound LLM cost.  Cycles
     # may evaluate cached debates without limit.
     max_fresh_debates_per_cycle: int
+    # Verticals the orchestrator schedules.  One asyncio task per
+    # vertical, each tick runs run_cycle(vertical) which scopes
+    # candidate selection to that vertical's leagues.
+    orchestrator_verticals: tuple[str, ...]
 
     # Server
     port: int
@@ -89,6 +93,11 @@ def get_settings() -> Settings:
     cors_raw = os.environ.get("AXIOM_CORS_ORIGINS", "*")
     cors_origins = tuple(o.strip() for o in cors_raw.split(",") if o.strip())
 
+    verticals_raw = os.environ.get("AXIOM_ORCHESTRATOR_VERTICALS", "sports")
+    verticals = tuple(
+        v.strip().lower() for v in verticals_raw.split(",") if v.strip()
+    ) or ("sports",)
+
     return Settings(
         supabase_db_password=pwd,
         supabase_service_key=svc,
@@ -112,6 +121,7 @@ def get_settings() -> Settings:
         max_fresh_debates_per_cycle=max(
             0, int(os.environ.get("AXIOM_MAX_FRESH_DEBATES_PER_CYCLE") or "1")
         ),
+        orchestrator_verticals=verticals,
         port=int(os.environ.get("PORT", "8080")),
         cors_origins=cors_origins,
     )

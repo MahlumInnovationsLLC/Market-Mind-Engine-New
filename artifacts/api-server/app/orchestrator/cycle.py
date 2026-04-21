@@ -25,6 +25,24 @@ DEFAULT_MIN_PRICE = 0.05
 DEFAULT_MAX_PRICE = 0.95
 
 
+# Map verticals → list of league codes used for SQL filtering.
+# `predictions.league` and `swarm_debates.league` carry the league code
+# (e.g. "NBA", "NFL").  An empty list means "no filter" — used for
+# verticals like 'sports' that span every supported league.  Future
+# verticals (weather, crypto, politics) get explicit league prefixes
+# once their feeds land.
+VERTICAL_LEAGUES: dict[str, list[str]] = {
+    "sports": [],  # all leagues
+    "weather": ["WEATHER"],
+    "crypto": ["CRYPTO"],
+    "politics": ["POLITICS"],
+}
+
+
+def _league_filter(vertical: str) -> list[str]:
+    return VERTICAL_LEAGUES.get(vertical.lower(), [])
+
+
 @dataclass
 class CycleResult:
     cycle_id: int | None
@@ -130,24 +148,46 @@ async def _candidate_predictions(vertical: str, limit: int) -> list[dict[str, An
     already debated in the last 15 minutes — those go through the
     `_cached_debates` path instead, which doesn't pay LLM cost.
     """
+    leagues = _league_filter(vertical)
     try:
-        rows = await db.fetch(
-            """
-            SELECT p.id, p.game_id, p.league, p.kalshi_market_id, p.kalshi_price,
-                   p.home_win_prob, p.confidence, p.edge, p.game_time
-              FROM predictions p
-             WHERE p.kalshi_market_id IS NOT NULL
-               AND (p.game_time IS NULL OR p.game_time > now())
-               AND NOT EXISTS (
-                   SELECT 1 FROM swarm_debates d
-                    WHERE d.game_id = p.game_id
-                      AND d.created_at > now() - interval '15 minutes'
-               )
-             ORDER BY abs(coalesce(p.edge, 0)) DESC NULLS LAST
-             LIMIT $1
-            """,
-            limit,
-        )
+        if leagues:
+            rows = await db.fetch(
+                """
+                SELECT p.id, p.game_id, p.league, p.kalshi_market_id, p.kalshi_price,
+                       p.home_win_prob, p.confidence, p.edge, p.game_time
+                  FROM predictions p
+                 WHERE p.kalshi_market_id IS NOT NULL
+                   AND p.league = ANY($2)
+                   AND (p.game_time IS NULL OR p.game_time > now())
+                   AND NOT EXISTS (
+                       SELECT 1 FROM swarm_debates d
+                        WHERE d.game_id = p.game_id
+                          AND d.created_at > now() - interval '15 minutes'
+                   )
+                 ORDER BY abs(coalesce(p.edge, 0)) DESC NULLS LAST
+                 LIMIT $1
+                """,
+                limit,
+                leagues,
+            )
+        else:
+            rows = await db.fetch(
+                """
+                SELECT p.id, p.game_id, p.league, p.kalshi_market_id, p.kalshi_price,
+                       p.home_win_prob, p.confidence, p.edge, p.game_time
+                  FROM predictions p
+                 WHERE p.kalshi_market_id IS NOT NULL
+                   AND (p.game_time IS NULL OR p.game_time > now())
+                   AND NOT EXISTS (
+                       SELECT 1 FROM swarm_debates d
+                        WHERE d.game_id = p.game_id
+                          AND d.created_at > now() - interval '15 minutes'
+                   )
+                 ORDER BY abs(coalesce(p.edge, 0)) DESC NULLS LAST
+                 LIMIT $1
+                """,
+                limit,
+            )
         return [dict(r) for r in rows]
     except Exception as e:
         log.debug("candidate prediction read failed: %s", e)
@@ -156,21 +196,40 @@ async def _candidate_predictions(vertical: str, limit: int) -> list[dict[str, An
 
 async def _cached_debates(vertical: str, limit: int) -> list[dict[str, Any]]:
     """Recent approved debates that haven't been traded today."""
+    leagues = _league_filter(vertical)
     try:
-        rows = await db.fetch(
-            """
-            SELECT id            AS debate_id,
-                   game_id, matchup, league, market_type,
-                   consensus_probability, confidence_band_low, confidence_band_high,
-                   agreement_rate, approved, recommended_action,
-                   game_context
-              FROM swarm_debates
-             WHERE created_at > now() - interval '60 minutes'
-             ORDER BY created_at DESC
-             LIMIT $1
-            """,
-            limit,
-        )
+        if leagues:
+            rows = await db.fetch(
+                """
+                SELECT id            AS debate_id,
+                       game_id, matchup, league, market_type,
+                       consensus_probability, confidence_band_low, confidence_band_high,
+                       agreement_rate, approved, recommended_action,
+                       game_context
+                  FROM swarm_debates
+                 WHERE created_at > now() - interval '60 minutes'
+                   AND league = ANY($2)
+                 ORDER BY created_at DESC
+                 LIMIT $1
+                """,
+                limit,
+                leagues,
+            )
+        else:
+            rows = await db.fetch(
+                """
+                SELECT id            AS debate_id,
+                       game_id, matchup, league, market_type,
+                       consensus_probability, confidence_band_low, confidence_band_high,
+                       agreement_rate, approved, recommended_action,
+                       game_context
+                  FROM swarm_debates
+                 WHERE created_at > now() - interval '60 minutes'
+                 ORDER BY created_at DESC
+                 LIMIT $1
+                """,
+                limit,
+            )
         return [dict(r) for r in rows]
     except Exception as e:
         log.debug("cached debate read failed: %s", e)
