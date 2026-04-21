@@ -34,6 +34,18 @@ showing real production telemetry.
   no shared API token, no referer/host bypass, and no same-origin shortcut.
 - `AXIOM_CORS_ORIGINS` (optional) — comma-separated allowed origins (defaults to `*`)
 - `OPERATOR_ALLOWED_EMAILS` (optional) — see "Operator allow-list" below
+- `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `VITE_STRIPE_PUBLISHABLE_KEY` —
+  Stripe billing. The webhook handler lives at `POST /api/billing/webhook`
+  (signature-verified, idempotent via the `stripe_events` table).
+- `STRIPE_PRICE_PRO_MONTHLY`, `STRIPE_PRICE_PRO_ANNUAL`,
+  `STRIPE_PRICE_ELITE_MONTHLY`, `STRIPE_PRICE_ELITE_ANNUAL` (optional) — price
+  IDs created in the Stripe dashboard. Missing prices render as "coming soon"
+  on the `/pricing` page rather than crashing.
+- `STRIPE_FOUNDER_USERS` (optional) — comma-separated emails treated as the
+  founder tier (billing fully bypassed). The `OPERATOR_ALLOWED_EMAILS` list
+  is also unioned in.
+- `AXIOM_PUBLIC_BASE_URL` (optional) — overrides `https://$REPLIT_DEV_DOMAIN`
+  for Stripe Checkout `success_url` / `cancel_url` and Customer Portal returns.
 
 ## Operator allow-list
 
@@ -66,9 +78,37 @@ what drives the front-end gate.
 
 - `GET /healthz` — liveness, public
 - `GET /me/access` — approval status (auth required, but unapproved users get 200)
+- `GET /me/subscription` — caller's effective tier/status (auth required)
+- `GET /billing/pricing` — public tier catalogue (used by the `/pricing` page)
+- `POST /billing/checkout-session` — start a Stripe Checkout (auth required)
+- `POST /billing/portal-session` — open the Stripe Customer Portal (auth required)
+- `POST /billing/webhook` — Stripe webhook receiver (signature-verified)
 - `GET /health` — full readiness (DB + Storage + secrets) — approved-only
-- `GET /dashboard/{overview,recent-trades,recent-cycles,recent-debates,swarm-personas}` — approved-only
+- `GET /dashboard/{overview,recent-trades,recent-cycles,swarm-personas}` — approved-only
+- `GET /dashboard/recent-debates` — full LLM transcripts — Pro+ only
+- `POST /swarm/debate`, `POST /orchestrator/run-cycle` — Pro+ only
 - `GET /models/inventory` — multi-part archive listing under storage `exports/` — approved-only
+
+## Subscription tiers
+
+Four tiers are resolved per request via `app/billing.py`:
+
+- `free` — default for any signed-in user with no active Stripe subscription.
+- `pro` — paid (`active`/`trialing`/`past_due`); unlocks live signals, full
+  swarm transcripts, and manual cycle execution.
+- `elite` — superset of pro; reserved for future entitlements.
+- `founder` — operator allow-list emails (`OPERATOR_ALLOWED_EMAILS` ∪
+  `STRIPE_FOUNDER_USERS`); billing bypassed entirely.
+
+Tier resolution upserts/reads from the `subscriptions` table (created
+on first use). Stripe webhook events are idempotent through `stripe_events`.
+
+After deploy you must, in the Stripe dashboard: (1) create your products +
+recurring prices, (2) copy the `price_…` IDs into the four
+`STRIPE_PRICE_*` env vars, and (3) add a webhook endpoint targeting
+`https://<host>/api/billing/webhook` with the events
+`checkout.session.completed`, `customer.subscription.{created,updated,deleted}`,
+`invoice.payment_{succeeded,failed}`.
 
 ## Key Commands
 

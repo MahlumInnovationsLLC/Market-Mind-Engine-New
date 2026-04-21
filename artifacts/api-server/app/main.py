@@ -13,11 +13,11 @@ import logging
 import os
 from contextlib import asynccontextmanager
 
-from fastapi import Depends, FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import Depends, FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
-from . import dashboard, db, models_loader, storage
+from . import billing, dashboard, db, models_loader, storage
 from .auth import (
     AuthedUser,
     auth_configured,
@@ -192,6 +192,50 @@ async def healthz() -> dict[str, str]:
     return {"status": "ok"}
 
 
+# ---------------------------------------------------------------------------
+# Billing: Stripe Checkout + Customer Portal + webhook + tier resolution
+# ---------------------------------------------------------------------------
+
+
+class CheckoutSessionRequest(BaseModel):
+    price_id: str = Field(..., min_length=1, max_length=200)
+
+
+@app.get("/api/billing/pricing")
+async def billing_pricing() -> dict[str, object]:
+    """Public — the pricing-page renders against this without needing auth."""
+    return billing.public_pricing_catalog()
+
+
+@app.get("/api/me/subscription")
+async def me_subscription(
+    user: AuthedUser = Depends(require_auth),
+) -> dict[str, object]:
+    sub = await billing.get_user_subscription(user)
+    return sub.as_dict()
+
+
+@app.post("/api/billing/checkout-session")
+async def billing_checkout_session(
+    body: CheckoutSessionRequest,
+    user: AuthedUser = Depends(require_auth),
+) -> dict[str, object]:
+    return await billing.create_checkout_session(user, body.price_id)
+
+
+@app.post("/api/billing/portal-session")
+async def billing_portal_session(
+    user: AuthedUser = Depends(require_auth),
+) -> dict[str, object]:
+    return await billing.create_portal_session(user)
+
+
+@app.post("/api/billing/webhook")
+async def billing_webhook(request: Request) -> dict[str, object]:
+    """Stripe webhook receiver.  Signature-verified, idempotent."""
+    return await billing.handle_webhook(request)
+
+
 @app.get("/api/me/access")
 async def me_access(user: AuthedUser = Depends(require_auth)) -> dict[str, object]:
     """Report whether the signed-in user is on the operator allow-list.
@@ -364,8 +408,10 @@ async def dashboard_recent_cycles(
 
 @app.get("/api/dashboard/recent-debates")
 async def dashboard_recent_debates(
-    limit: int = 10, _: object = Depends(require_approved_user)
+    limit: int = 10,
+    _: object = Depends(billing.require_tier(billing.TIER_PRO)),
 ) -> dict[str, object]:
+    """Full LLM swarm transcripts — gated to Pro+ subscribers (founders bypass)."""
     limit = max(1, min(100, int(limit)))
     return {"items": await dashboard.get_recent_swarm_debates(limit)}
 
@@ -391,7 +437,8 @@ class SwarmDebateRequest(BaseModel):
 
 @app.post("/api/swarm/debate")
 async def swarm_debate(
-    body: SwarmDebateRequest, _: object = Depends(require_auth)
+    body: SwarmDebateRequest,
+    _: object = Depends(billing.require_tier(billing.TIER_PRO)),
 ) -> dict[str, object]:
     settings = get_settings()
     if not (settings.openai_api_key and settings.anthropic_api_key):
@@ -455,7 +502,8 @@ async def orchestrator_status(_: object = Depends(require_auth)) -> dict[str, ob
 
 @app.post("/api/orchestrator/run-cycle")
 async def orchestrator_run_cycle(
-    body: OrchestratorRunCycleRequest, _: object = Depends(require_auth)
+    body: OrchestratorRunCycleRequest,
+    _: object = Depends(billing.require_tier(billing.TIER_PRO)),
 ) -> dict[str, object]:
     """Manually fire a single cycle.  Useful for ops + smoke testing
     without waiting for the next scheduler tick."""

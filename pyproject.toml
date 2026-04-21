@@ -23,4 +23,5 @@ dependencies = [
     "pytest>=9.0.3",
     "openai>=1.50,<2",
     "anthropic>=0.40,<1",
+    "stripe>=15.0.1",
 ]
