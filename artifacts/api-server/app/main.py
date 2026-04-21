@@ -17,7 +17,7 @@ from fastapi import Depends, FastAPI, HTTPException, Request, WebSocket, WebSock
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
-from . import billing, dashboard, db, health, models_loader, storage
+from . import billing, dashboard, db, health, models_loader, rc_billing, storage
 from .notifications import alerts as notif_alerts, daily_summary, postmark as notif_postmark
 from .auth import (
     AuthedUser,
@@ -249,6 +249,12 @@ async def billing_portal_session(
     user: AuthedUser = Depends(require_auth),
 ) -> dict[str, object]:
     return await billing.create_portal_session(user)
+
+
+@app.post("/api/billing/revenuecat-webhook")
+async def billing_revenuecat_webhook(request: Request) -> dict[str, object]:
+    """Receive subscription lifecycle events from RevenueCat (mobile IAP)."""
+    return await rc_billing.handle_webhook(request)
 
 
 @app.post("/api/billing/webhook")
