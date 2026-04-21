@@ -1,36 +1,334 @@
 openapi: 3.1.0
 info:
-  # Do not change the title, if the title changes, the import paths will be broken
+  # Do not change the title — generated import paths depend on it.
   title: Api
   version: 0.1.0
-  description: API specification
+  description: Axiom-Predict API — backend for the prediction-market trading platform.
 servers:
   - url: /api
     description: Base API path
 tags:
   - name: health
-    description: Health operations
+    description: Health and readiness
+  - name: dashboard
+    description: Operator dashboard read-models
+  - name: models
+    description: Trained-model artifact discovery
 paths:
   /healthz:
     get:
       operationId: healthCheck
       tags: [health]
-      summary: Health check
-      description: Returns server health status
+      summary: Liveness probe
       responses:
         "200":
           description: Healthy
           content:
             application/json:
-              schema:
-                $ref: "#/components/schemas/HealthStatus"
+              schema: { $ref: "#/components/schemas/HealthStatus" }
+
+  /health:
+    get:
+      operationId: healthFull
+      tags: [health]
+      summary: Full readiness check (DB + Storage + secrets present)
+      responses:
+        "200":
+          description: Health snapshot
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/FullHealth" }
+
+  /dashboard/overview:
+    get:
+      operationId: getDashboardOverview
+      tags: [dashboard]
+      summary: Top-level counts and lifetime KPIs from the production database
+      responses:
+        "200":
+          description: Overview
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DashboardOverview" }
+
+  /dashboard/recent-trades:
+    get:
+      operationId: getRecentTrades
+      tags: [dashboard]
+      summary: Most recent trades executed against Kalshi
+      parameters:
+        - in: query
+          name: limit
+          schema: { type: integer, minimum: 1, maximum: 200, default: 25 }
+      responses:
+        "200":
+          description: Recent trades
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TradeList" }
+
+  /dashboard/swarm-personas:
+    get:
+      operationId: getSwarmPersonas
+      tags: [dashboard]
+      summary: Per-analyst Brier / accuracy / calibration metrics
+      responses:
+        "200":
+          description: Swarm metrics
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SwarmPersonaList" }
+
+  /dashboard/recent-cycles:
+    get:
+      operationId: getRecentCycles
+      tags: [dashboard]
+      summary: Most recent trading-loop cycles
+      parameters:
+        - in: query
+          name: limit
+          schema: { type: integer, minimum: 1, maximum: 100, default: 10 }
+      responses:
+        "200":
+          description: Recent cycles
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TradingCycleList" }
+
+  /dashboard/recent-debates:
+    get:
+      operationId: getRecentDebates
+      tags: [dashboard]
+      summary: Most recent 6-persona swarm debates
+      parameters:
+        - in: query
+          name: limit
+          schema: { type: integer, minimum: 1, maximum: 100, default: 10 }
+      responses:
+        "200":
+          description: Recent debates
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SwarmDebateList" }
+
+  /models/inventory:
+    get:
+      operationId: getModelsInventory
+      tags: [models]
+      summary: Trained-model archive inventory in Supabase Storage
+      responses:
+        "200":
+          description: Storage inventory
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ModelsInventory" }
+
 components:
   schemas:
     HealthStatus:
       type: object
       properties:
-        status:
-          type: string
-      required:
-        - status
+        status: { type: string }
+      required: [status]
 
+    SecretsPresent:
+      type: object
+      properties:
+        openai: { type: boolean }
+        anthropic: { type: boolean }
+        kalshi: { type: boolean }
+      required: [openai, anthropic, kalshi]
+
+    PostgresHealth:
+      type: object
+      properties:
+        ok: { type: boolean }
+        version: { type: string, nullable: true }
+        public_tables: { type: integer, nullable: true }
+        error: { type: string, nullable: true }
+      required: [ok]
+
+    StorageSampleEntry:
+      type: object
+      properties:
+        name: { type: string }
+        folder: { type: boolean }
+      required: [name, folder]
+
+    StorageHealth:
+      type: object
+      properties:
+        ok: { type: boolean }
+        bucket: { type: string, nullable: true }
+        sample:
+          type: array
+          items: { $ref: "#/components/schemas/StorageSampleEntry" }
+        error: { type: string, nullable: true }
+      required: [ok]
+
+    FullHealth:
+      type: object
+      properties:
+        status: { type: string }
+        supabase_project: { type: string }
+        paper_mode: { type: boolean }
+        kalshi_env: { type: string }
+        secrets_present: { $ref: "#/components/schemas/SecretsPresent" }
+        postgres: { $ref: "#/components/schemas/PostgresHealth" }
+        storage: { $ref: "#/components/schemas/StorageHealth" }
+      required: [status, supabase_project, paper_mode, kalshi_env, secrets_present]
+
+    DashboardCounts:
+      type: object
+      properties:
+        trading_cycles: { type: integer, nullable: true }
+        trades: { type: integer, nullable: true }
+        swarm_debates: { type: integer, nullable: true }
+        ml_training_logs: { type: integer, nullable: true }
+        predictions: { type: integer, nullable: true }
+        positions: { type: integer, nullable: true }
+
+    DashboardOverview:
+      type: object
+      properties:
+        counts: { $ref: "#/components/schemas/DashboardCounts" }
+        latest_cycle_at: { type: string, nullable: true }
+        latest_trade_at: { type: string, nullable: true }
+        realized_pnl: { type: number, nullable: true }
+        win_rate: { type: number, nullable: true }
+        open_positions: { type: integer, nullable: true }
+      required: [counts]
+
+    Trade:
+      type: object
+      properties:
+        id: { type: integer }
+        trade_id: { type: string, nullable: true }
+        market_id: { type: string, nullable: true }
+        vertical: { type: string, nullable: true }
+        league: { type: string, nullable: true }
+        side: { type: string, nullable: true }
+        action: { type: string, nullable: true }
+        quantity: { type: number, nullable: true }
+        price: { type: number, nullable: true }
+        fees: { type: number, nullable: true }
+        pnl: { type: number, nullable: true }
+        trading_mode: { type: string, nullable: true }
+        exchange: { type: string, nullable: true }
+        executed_at: { type: string, nullable: true }
+      required: [id]
+
+    TradeList:
+      type: object
+      properties:
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/Trade" }
+      required: [items]
+
+    SwarmPersona:
+      type: object
+      properties:
+        persona: { type: string, nullable: true }
+        league: { type: string, nullable: true }
+        market_type: { type: string, nullable: true }
+        n: { type: integer, nullable: true }
+        correct: { type: integer, nullable: true }
+        brier: { type: number, nullable: true }
+        calibration_error: { type: number, nullable: true }
+        accuracy: { type: number, nullable: true }
+        avg_confidence: { type: number, nullable: true }
+        updated_at: { type: string, nullable: true }
+
+    SwarmPersonaList:
+      type: object
+      properties:
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/SwarmPersona" }
+      required: [items]
+
+    TradingCycle:
+      type: object
+      properties:
+        id: { type: integer }
+        vertical: { type: string, nullable: true }
+        picks_evaluated: { type: integer, nullable: true }
+        trades_placed: { type: integer, nullable: true }
+        errors: { type: string, nullable: true }
+        started_at: { type: string, nullable: true }
+        completed_at: { type: string, nullable: true }
+        duration_seconds: { type: number, nullable: true }
+      required: [id]
+
+    TradingCycleList:
+      type: object
+      properties:
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/TradingCycle" }
+      required: [items]
+
+    SwarmDebate:
+      type: object
+      properties:
+        id: { type: integer }
+        league: { type: string, nullable: true }
+        matchup: { type: string, nullable: true }
+        market_type: { type: string, nullable: true }
+        consensus_probability: { type: number, nullable: true }
+        confidence_band_low: { type: number, nullable: true }
+        confidence_band_high: { type: number, nullable: true }
+        agreement_rate: { type: number, nullable: true }
+        approved: { type: boolean, nullable: true }
+        recommended_action: { type: string, nullable: true }
+        outcome: { type: string, nullable: true }
+        cost_estimate: { type: number, nullable: true }
+        latency_ms: { type: number, nullable: true }
+        created_at: { type: string, nullable: true }
+      required: [id]
+
+    SwarmDebateList:
+      type: object
+      properties:
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/SwarmDebate" }
+      required: [items]
+
+    StorageFile:
+      type: object
+      properties:
+        name: { type: string }
+        size: { type: integer, nullable: true }
+        updated_at: { type: string, nullable: true }
+      required: [name]
+
+    StorageBucketEntry:
+      type: object
+      properties:
+        name: { type: string }
+        is_folder: { type: boolean }
+      required: [name, is_folder]
+
+    ExportsInventory:
+      type: object
+      properties:
+        files:
+          type: array
+          items: { $ref: "#/components/schemas/StorageFile" }
+        models_archive_total_bytes: { type: integer }
+        source_archive_total_bytes: { type: integer }
+      required: [files, models_archive_total_bytes, source_archive_total_bytes]
+
+    ModelsInventory:
+      type: object
+      properties:
+        buckets:
+          type: array
+          items: { $ref: "#/components/schemas/StorageBucketEntry" }
+        exports: { $ref: "#/components/schemas/ExportsInventory" }
+        cutover:
+          type: array
+          items: { $ref: "#/components/schemas/StorageFile" }
+      required: [buckets, exports, cutover]
