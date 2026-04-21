@@ -516,53 +516,9 @@ async def _persist_debate(
         }
     )
 
-    # Persistence is contractual: every debate writes 1 swarm_debates +
-    # 8 llm_predictions rows.  An insert failure surfaces as a 502 from
-    # the endpoint instead of a silent success.  Two-step (insert
-    # debate, capture id, then bulk-insert predictions referencing it)
-    # so a children-insert failure cannot leave a parent without rows.
-    try:
-        debate_id_raw = await db.fetchval(
-            """
-            INSERT INTO swarm_debates (
-                game_id, matchup, league, market_type,
-                analyst_verdicts, moderator_synthesis,
-                consensus_probability, confidence_band_low, confidence_band_high,
-                agreement_rate, approved, recommended_action,
-                cost_estimate, latency_ms, game_context
-            ) VALUES (
-                $1, $2, $3, $4,
-                $5::jsonb, $6::jsonb,
-                $7, $8, $9,
-                $10, $11, $12,
-                $13, $14, $15::jsonb
-            )
-            RETURNING id
-            """,
-            game_id,
-            matchup,
-            league,
-            market_type,
-            analyst_verdicts_json,
-            moderator_synthesis_json,
-            consensus,
-            band_low,
-            band_high,
-            agreement,
-            approved,
-            recommended_action,
-            float(total_cost),
-            float(total_latency_ms),
-            game_context_json,
-        )
-    except Exception as e:
-        log.error("swarm_debates insert failed: %s", e)
-        raise RuntimeError(f"swarm_debates insert failed: {e}") from e
-    if debate_id_raw is None:
-        raise RuntimeError("swarm_debates insert returned no id")
-    debate_id: int = int(debate_id_raw)
-
-    # llm_predictions: one row per call (6 personas + moderator + gatekeeper).
+    # llm_predictions rows are built first (with debate_id placeholders
+    # patched after the parent insert) so that the entire two-statement
+    # write executes inside a single asyncpg transaction below.
     rows: list[dict[str, Any]] = []
     for v in verdicts:
         rows.append(
@@ -587,7 +543,6 @@ async def _persist_debate(
                     "input_tokens": v["input_tokens"],
                     "output_tokens": v["output_tokens"],
                     "error": v["error"],
-                    "debate_id": debate_id,
                 },
             }
         )
@@ -610,7 +565,6 @@ async def _persist_debate(
                 "recommended_action": moderator_parsed.get("recommended_action"),
                 "confidence_band_low": band_low,
                 "confidence_band_high": band_high,
-                "debate_id": debate_id,
             },
         }
     )
@@ -632,46 +586,93 @@ async def _persist_debate(
             "metadata": {
                 "approved": approved,
                 "recommended_action": recommended_action,
-                "debate_id": debate_id,
             },
         }
     )
 
+    # Persistence is contractual AND atomic: every successful debate
+    # writes 1 swarm_debates + exactly 8 llm_predictions rows in a
+    # single asyncpg transaction.  A children-insert failure rolls back
+    # the parent row so we never leave an orphaned swarm_debates row.
+    # Any failure raises and the endpoint returns 502 instead of silent
+    # success.
     try:
-        await db.executemany(
-            """
-            INSERT INTO llm_predictions (
-                provider, model_id, category, league, game_id, matchup,
-                prediction_type, predicted_value, confidence,
-                latency_ms, tokens_used, cost_estimate, reasoning, metadata
-            ) VALUES (
-                $1, $2, $3, $4, $5, $6,
-                $7, $8, $9,
-                $10, $11, $12, $13, $14::jsonb
-            )
-            """,
-            [
-                (
-                    r["provider"],
-                    r["model_id"],
-                    r["category"],
-                    r["league"],
-                    r["game_id"],
-                    r["matchup"],
-                    r["prediction_type"],
-                    r["predicted_value"],
-                    r["confidence"],
-                    r["latency_ms"],
-                    r["tokens_used"],
-                    r["cost_estimate"],
-                    r["reasoning"],
-                    json.dumps(r["metadata"]),
+        async with db.acquire() as conn:
+            async with conn.transaction():
+                debate_id_raw = await conn.fetchval(
+                    """
+                    INSERT INTO swarm_debates (
+                        game_id, matchup, league, market_type,
+                        analyst_verdicts, moderator_synthesis,
+                        consensus_probability, confidence_band_low, confidence_band_high,
+                        agreement_rate, approved, recommended_action,
+                        cost_estimate, latency_ms, game_context
+                    ) VALUES (
+                        $1, $2, $3, $4,
+                        $5::jsonb, $6::jsonb,
+                        $7, $8, $9,
+                        $10, $11, $12,
+                        $13, $14, $15::jsonb
+                    )
+                    RETURNING id
+                    """,
+                    game_id,
+                    matchup,
+                    league,
+                    market_type,
+                    analyst_verdicts_json,
+                    moderator_synthesis_json,
+                    consensus,
+                    band_low,
+                    band_high,
+                    agreement,
+                    approved,
+                    recommended_action,
+                    float(total_cost),
+                    float(total_latency_ms),
+                    game_context_json,
                 )
-                for r in rows
-            ],
-        )
+                if debate_id_raw is None:
+                    raise RuntimeError("swarm_debates insert returned no id")
+                debate_id = int(debate_id_raw)
+                # Stamp the freshly-allocated debate id into each child row's
+                # metadata so the children are queryable by parent id.
+                for r in rows:
+                    r["metadata"]["debate_id"] = debate_id
+                await conn.executemany(
+                    """
+                    INSERT INTO llm_predictions (
+                        provider, model_id, category, league, game_id, matchup,
+                        prediction_type, predicted_value, confidence,
+                        latency_ms, tokens_used, cost_estimate, reasoning, metadata
+                    ) VALUES (
+                        $1, $2, $3, $4, $5, $6,
+                        $7, $8, $9,
+                        $10, $11, $12, $13, $14::jsonb
+                    )
+                    """,
+                    [
+                        (
+                            r["provider"],
+                            r["model_id"],
+                            r["category"],
+                            r["league"],
+                            r["game_id"],
+                            r["matchup"],
+                            r["prediction_type"],
+                            r["predicted_value"],
+                            r["confidence"],
+                            r["latency_ms"],
+                            r["tokens_used"],
+                            r["cost_estimate"],
+                            r["reasoning"],
+                            json.dumps(r["metadata"]),
+                        )
+                        for r in rows
+                    ],
+                )
     except Exception as e:
-        log.error("llm_predictions insert failed: %s", e)
-        raise RuntimeError(f"llm_predictions insert failed: {e}") from e
+        log.error("swarm persistence failed (transaction rolled back): %s", e)
+        raise RuntimeError(f"swarm persistence failed: {e}") from e
 
     return debate_id
