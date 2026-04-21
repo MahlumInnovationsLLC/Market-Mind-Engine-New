@@ -43,7 +43,14 @@ async def place_order(
     so the cycle counts the trade as an error rather than a silent no-op.
     """
     settings = get_settings()
-    mode = (settings.trading_mode or "paper").lower()
+    # Effective mode honors the operator override carried on the
+    # RiskContext (`risk.trading_mode` in system_settings) so flipping
+    # live via the dashboard takes effect immediately and matches the
+    # source of truth used by run_cycle's halt check.
+    override_mode = None
+    if isinstance(ctx.operator_overrides, dict):
+        override_mode = ctx.operator_overrides.get("trading_mode")
+    mode = (override_mode or settings.trading_mode or "paper").strip().lower()
     if mode == "live":
         # Important: do NOT silently fall back to paper here — operators
         # who set live=ON expect submission attempts (or a clear failure).
