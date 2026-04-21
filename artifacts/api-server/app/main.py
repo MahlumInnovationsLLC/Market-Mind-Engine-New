@@ -231,8 +231,9 @@ async def billing_pricing() -> dict[str, object]:
 @app.get("/api/public/equity-curve")
 async def public_equity_curve(days: int = 30) -> dict[str, object]:
     """Public — daily cumulative realized PnL for the marketing landing page."""
-    points = await dashboard.get_public_equity_curve(days)
-    return {"days": days, "points": points}
+    clamped_days = max(1, min(int(days), 365))
+    points = await dashboard.get_public_equity_curve(clamped_days)
+    return {"days": clamped_days, "points": points}
 
 
 @app.get("/api/public/stats")
