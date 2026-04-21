@@ -551,8 +551,18 @@ async def health_full(_: object = Depends(require_approved_user)) -> dict[str, o
     state = models_loader.get_state()
     canonical_ok = sum(1 for v in state.loaded.values() if v.get("ok"))
     active = predictor.active_model_info()
+    mcheck = state.manifest_check or {}
+    manifest_ok = bool(mcheck.get("ok")) if mcheck else False
+    bad_files = [m["name"] for m in mcheck.get("missing", [])] + [
+        m["name"] for m in mcheck.get("mismatch", [])
+    ]
     out["models"] = {
-        "ok": state.ready and state.error is None and canonical_ok > 0,
+        "ok": (
+            state.ready
+            and state.error is None
+            and canonical_ok > 0
+            and manifest_ok
+        ),
         "ready": state.ready,
         "in_progress": state.in_progress,
         "error": state.error,
@@ -567,10 +577,16 @@ async def health_full(_: object = Depends(require_approved_user)) -> dict[str, o
         "active_model_version": active.get("version") if active else None,
         "versions": models_loader.list_predictor_versions(),
         "disk_usage": models_loader.disk_usage_summary(),
+        "manifest": state.manifest,
+        "manifest_ok": manifest_ok,
+        "manifest_check": mcheck,
+        "bad_files": bad_files,
     }
     if not state.ready and state.error:
         out["status"] = "degraded"
     if state.ready and canonical_ok == 0:
+        out["status"] = "degraded"
+    if mcheck and not manifest_ok:
         out["status"] = "degraded"
     return out
 

@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import logging
 import shutil
 import sys
@@ -48,6 +49,13 @@ MODELS_DIR = CACHE_ROOT / "models"
 SOURCE_DIR = CACHE_ROOT / "source"
 MODELS_ARCHIVE = CACHE_ROOT / "models.tar"
 SOURCE_ARCHIVE = CACHE_ROOT / "source.tar"
+
+# Authoritative manifest pinning sha256 + version for each predictor. The
+# loader downloads this on every boot and refuses to mark itself ready if
+# required predictors are missing, extra files appear that aren't listed,
+# or any sha256 fails to match. Path is relative to the storage bucket.
+MANIFEST_REMOTE_PATH = "exports/models_manifest.json"
+MANIFEST_LOCAL = CACHE_ROOT / "models_manifest.json"
 
 _PREDICTOR_EXTS = {
     ".pkl", ".joblib", ".pt", ".pth", ".onnx",
@@ -88,6 +96,8 @@ class ModelsState:
     archives: dict[str, ArchiveInfo] = field(default_factory=dict)
     predictors: dict[str, dict[str, Any]] = field(default_factory=dict)
     loaded: dict[str, dict[str, Any]] = field(default_factory=dict)
+    manifest: dict[str, Any] | None = None
+    manifest_check: dict[str, Any] = field(default_factory=dict)
 
     def as_dict(self) -> dict[str, Any]:
         elapsed: float | None = None
@@ -105,6 +115,8 @@ class ModelsState:
             "archives": {k: asdict(v) for k, v in self.archives.items()},
             "predictors": self.predictors,
             "loaded": self.loaded,
+            "manifest": self.manifest,
+            "manifest_check": self.manifest_check,
         }
 
 
@@ -226,6 +238,97 @@ async def _ensure_one(
     return info
 
 
+async def _download_manifest() -> dict[str, Any]:
+    """Fetch the authoritative manifest from the bucket, parse, and validate.
+
+    The manifest must be a JSON object with a `predictors` mapping where
+    each entry has at least an expected `sha256`. Optional per-entry
+    fields: `version` (semantic tag) and `required` (bool, default True).
+    """
+    CACHE_ROOT.mkdir(parents=True, exist_ok=True)
+    if MANIFEST_LOCAL.exists():
+        try:
+            MANIFEST_LOCAL.unlink()
+        except OSError:
+            pass
+    log.info("[models_loader] fetching manifest %s", MANIFEST_REMOTE_PATH)
+    await storage.download_to_path(MANIFEST_REMOTE_PATH, MANIFEST_LOCAL, force=True)
+    raw = MANIFEST_LOCAL.read_text(encoding="utf-8")
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as e:
+        raise RuntimeError(f"models manifest is not valid JSON: {e}") from e
+    if not isinstance(data, dict) or not isinstance(data.get("predictors"), dict):
+        raise RuntimeError(
+            "models manifest missing required top-level 'predictors' object"
+        )
+    for name, meta in data["predictors"].items():
+        if not isinstance(meta, dict) or not isinstance(meta.get("sha256"), str):
+            raise RuntimeError(
+                f"manifest entry {name!r} missing required 'sha256' string"
+            )
+        sha = meta["sha256"].lower().strip()
+        if len(sha) != 64 or any(c not in "0123456789abcdef" for c in sha):
+            raise RuntimeError(
+                f"manifest entry {name!r} has malformed sha256 ({sha!r})"
+            )
+        meta["sha256"] = sha
+    return data
+
+
+def _verify_against_manifest(
+    predictors: dict[str, dict[str, Any]],
+    manifest: dict[str, Any],
+) -> dict[str, Any]:
+    """Compare scanned predictors against the manifest.
+
+    Returns a structured report with three lists:
+      * `missing`   — manifest entries marked required that aren't on disk
+      * `mismatch`  — files present whose sha256 does not match the manifest
+      * `unexpected` — files on disk not declared in the manifest
+    Plus an `ok` flag (True when missing+mismatch are empty; unexpected
+    files are surfaced but do not block readiness on their own — they
+    indicate stale cache, not corruption of a required predictor).
+    """
+    expected = manifest.get("predictors", {}) or {}
+    missing: list[dict[str, Any]] = []
+    mismatch: list[dict[str, Any]] = []
+    matched: list[str] = []
+
+    for name, meta in expected.items():
+        required = bool(meta.get("required", True))
+        actual = predictors.get(name)
+        if actual is None:
+            if required:
+                missing.append({
+                    "name": name,
+                    "expected_sha256": meta["sha256"],
+                    "expected_version": meta.get("version"),
+                })
+            continue
+        if actual["sha256"] != meta["sha256"]:
+            mismatch.append({
+                "name": name,
+                "expected_sha256": meta["sha256"],
+                "actual_sha256": actual["sha256"],
+                "expected_version": meta.get("version"),
+            })
+        else:
+            matched.append(name)
+
+    unexpected = [n for n in predictors.keys() if n not in expected]
+
+    return {
+        "ok": not missing and not mismatch,
+        "checked_at": time.time(),
+        "manifest_predictor_count": len(expected),
+        "matched_count": len(matched),
+        "missing": missing,
+        "mismatch": mismatch,
+        "unexpected": unexpected,
+    }
+
+
 def _scan_predictors(models_dir: Path) -> dict[str, dict[str, Any]]:
     """Catalogue serialized model files under `models_dir`.
 
@@ -300,6 +403,36 @@ async def ensure_artifacts(*, force: bool = False) -> ModelsState:
 
             predictors = await asyncio.to_thread(_scan_predictors, MODELS_DIR)
             _state.predictors = predictors
+
+            # Verify scanned predictors against the published manifest
+            # BEFORE marking ready. Any required-predictor mismatch or
+            # missing file aborts readiness so we never trade against a
+            # corrupt or partial set.
+            manifest = await _download_manifest()
+            _state.manifest = {
+                "version": manifest.get("version"),
+                "generated_at": manifest.get("generated_at"),
+                "predictor_count": len(manifest.get("predictors", {}) or {}),
+            }
+            check = _verify_against_manifest(predictors, manifest)
+            _state.manifest_check = check
+            if not check["ok"]:
+                bad = [m["name"] for m in check["missing"]] + [
+                    m["name"] for m in check["mismatch"]
+                ]
+                raise RuntimeError(
+                    "manifest verification failed: "
+                    f"missing={len(check['missing'])} "
+                    f"mismatch={len(check['mismatch'])} "
+                    f"files={bad}"
+                )
+            log.info(
+                "[models_loader] manifest OK matched=%d/%d unexpected=%d",
+                check["matched_count"],
+                check["manifest_predictor_count"],
+                len(check["unexpected"]),
+            )
+
             # Mark catalog ready before smoke-loading so load_predictor
             # works inside the smoke step.
             _state.ready = True

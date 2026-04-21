@@ -386,12 +386,20 @@ def _probe_settlement() -> dict:
 
 def _probe_models() -> dict:
     state = models_loader.get_state()
+    mcheck = state.manifest_check or {}
+    manifest_ok = bool(mcheck.get("ok")) if mcheck else False
     if state.error:
         status = "down"
         detail = f"error: {state.error}"[:240]
     elif not state.ready:
         status = "degraded" if state.in_progress else "down"
         detail = "loading…" if state.in_progress else "not loaded"
+    elif mcheck and not manifest_ok:
+        status = "down"
+        bad = [m["name"] for m in mcheck.get("missing", [])] + [
+            m["name"] for m in mcheck.get("mismatch", [])
+        ]
+        detail = f"manifest mismatch: {len(bad)} bad file(s)"
     else:
         ok_loaded = sum(1 for v in state.loaded.values() if v.get("ok"))
         status = "ok" if ok_loaded > 0 else "degraded"
@@ -406,6 +414,9 @@ def _probe_models() -> dict:
             "ready": state.ready,
             "in_progress": state.in_progress,
             "predictor_count": len(state.predictors),
+            "manifest_ok": manifest_ok,
+            "manifest_missing": len(mcheck.get("missing", [])),
+            "manifest_mismatch": len(mcheck.get("mismatch", [])),
         },
     )
 
