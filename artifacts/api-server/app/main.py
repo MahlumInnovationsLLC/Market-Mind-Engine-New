@@ -248,6 +248,10 @@ class SwarmDebateRequest(BaseModel):
     side: str | None = "YES"
     current_price: float | None = None
     context: str | None = None
+    # Aggression-mode bias: conservative | balanced | aggressive.  Drives
+    # both the moderator's edge/agreement thresholds and the gatekeeper's
+    # veto criteria; see app/swarm/personas.py.
+    aggression_mode: str | None = "balanced"
 
 
 @app.post("/api/swarm/debate")

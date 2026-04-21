@@ -14,4 +14,6 @@ export interface SwarmDebateRequest {
   side?: string | null;
   current_price?: number | null;
   context?: string | null;
+  /** conservative | balanced | aggressive */
+  aggression_mode?: string | null;
 }

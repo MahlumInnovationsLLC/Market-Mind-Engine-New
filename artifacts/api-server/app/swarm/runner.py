@@ -24,6 +24,7 @@ from .personas import (
     PERSONAS,
     Persona,
     estimate_cost,
+    normalize_aggression_mode,
 )
 from .streams import llm_log_hub
 from .weights import get_persona_weight
@@ -257,16 +258,18 @@ async def run_debate(candidate: dict[str, Any]) -> dict[str, Any]:
     side = str(candidate.get("side") or "YES").strip()
     current_price = _coerce_prob(candidate.get("current_price"))
     ctx = str(candidate.get("context") or "").strip()
+    aggression_mode = normalize_aggression_mode(candidate.get("aggression_mode"))
 
     user_prompt = (
         f"CANDIDATE TRADE\n"
-        f"  game_id     : {game_id}\n"
-        f"  matchup     : {matchup or '(unknown)'}\n"
-        f"  league      : {league or '(unknown)'}\n"
-        f"  market_type : {market_type}\n"
-        f"  side        : {side}\n"
+        f"  game_id         : {game_id}\n"
+        f"  matchup         : {matchup or '(unknown)'}\n"
+        f"  league          : {league or '(unknown)'}\n"
+        f"  market_type     : {market_type}\n"
+        f"  side            : {side}\n"
         f"  current YES price: "
         f"{'%.4f' % current_price if current_price is not None else '(unknown)'}\n"
+        f"  aggression_mode : {aggression_mode}\n"
         f"\nCONTEXT\n{ctx or '(no additional context provided)'}"
     )
 
@@ -277,6 +280,7 @@ async def run_debate(candidate: dict[str, Any]) -> dict[str, Any]:
             "matchup": matchup,
             "league": league,
             "market_type": market_type,
+            "aggression_mode": aggression_mode,
         }
     )
 
@@ -291,7 +295,8 @@ async def run_debate(candidate: dict[str, Any]) -> dict[str, Any]:
     # 3) Moderator synthesizes weighted consensus.
     mod_input = (
         user_prompt
-        + "\n\nPERSONA VERDICTS (with Brier-derived weights):\n"
+        + f"\n\nAGGRESSION_MODE: {aggression_mode}\n"
+        + "PERSONA VERDICTS (with Brier-derived weights):\n"
         + json.dumps(
             [
                 {
@@ -338,7 +343,8 @@ async def run_debate(candidate: dict[str, Any]) -> dict[str, Any]:
     # 4) Gatekeeper veto.
     gk_input = (
         user_prompt
-        + "\n\nMODERATOR SYNTHESIS:\n"
+        + f"\n\nAGGRESSION_MODE: {aggression_mode}\n"
+        + "MODERATOR SYNTHESIS:\n"
         + json.dumps(
             {
                 "consensus_probability": consensus,
@@ -394,6 +400,7 @@ async def run_debate(candidate: dict[str, Any]) -> dict[str, Any]:
         total_cost=total_cost,
         total_latency_ms=total_latency_ms,
         candidate=candidate,
+        aggression_mode=aggression_mode,
     )
 
     await llm_log_hub.publish(
@@ -414,6 +421,7 @@ async def run_debate(candidate: dict[str, Any]) -> dict[str, Any]:
         "matchup": matchup,
         "league": league,
         "market_type": market_type,
+        "aggression_mode": aggression_mode,
         "consensus_probability": consensus,
         "confidence_band_low": band_low,
         "confidence_band_high": band_high,
@@ -457,7 +465,8 @@ async def _persist_debate(
     total_cost: float,
     total_latency_ms: int,
     candidate: dict[str, Any],
-) -> int | None:
+    aggression_mode: str,
+) -> int:
     analyst_verdicts_json = json.dumps(
         [
             {
@@ -503,12 +512,17 @@ async def _persist_debate(
             "side": candidate.get("side"),
             "current_price": candidate.get("current_price"),
             "context": candidate.get("context"),
+            "aggression_mode": aggression_mode,
         }
     )
 
-    debate_id: int | None = None
+    # Persistence is contractual: every debate writes 1 swarm_debates +
+    # 8 llm_predictions rows.  An insert failure surfaces as a 502 from
+    # the endpoint instead of a silent success.  Two-step (insert
+    # debate, capture id, then bulk-insert predictions referencing it)
+    # so a children-insert failure cannot leave a parent without rows.
     try:
-        debate_id = await db.fetchval(
+        debate_id_raw = await db.fetchval(
             """
             INSERT INTO swarm_debates (
                 game_id, matchup, league, market_type,
@@ -543,6 +557,10 @@ async def _persist_debate(
         )
     except Exception as e:
         log.error("swarm_debates insert failed: %s", e)
+        raise RuntimeError(f"swarm_debates insert failed: {e}") from e
+    if debate_id_raw is None:
+        raise RuntimeError("swarm_debates insert returned no id")
+    debate_id: int = int(debate_id_raw)
 
     # llm_predictions: one row per call (6 personas + moderator + gatekeeper).
     rows: list[dict[str, Any]] = []
@@ -654,5 +672,6 @@ async def _persist_debate(
         )
     except Exception as e:
         log.error("llm_predictions insert failed: %s", e)
+        raise RuntimeError(f"llm_predictions insert failed: {e}") from e
 
     return debate_id

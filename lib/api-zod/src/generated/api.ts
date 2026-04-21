@@ -201,6 +201,10 @@ export const RunSwarmDebateBody = zod.object({
   side: zod.string().nullish(),
   current_price: zod.number().nullish(),
   context: zod.string().nullish(),
+  aggression_mode: zod
+    .string()
+    .nullish()
+    .describe("conservative | balanced | aggressive"),
 });
 
 export const RunSwarmDebateResponse = zod.object({
@@ -209,6 +213,7 @@ export const RunSwarmDebateResponse = zod.object({
   matchup: zod.string().nullish(),
   league: zod.string().nullish(),
   market_type: zod.string().nullish(),
+  aggression_mode: zod.string().nullish(),
   consensus_probability: zod.number().nullish(),
   confidence_band_low: zod.number().nullish(),
   confidence_band_high: zod.number().nullish(),

@@ -13,6 +13,7 @@ export interface SwarmDebateResult {
   matchup?: string | null;
   league?: string | null;
   market_type?: string | null;
+  aggression_mode?: string | null;
   consensus_probability?: number | null;
   confidence_band_low?: number | null;
   confidence_band_high?: number | null;

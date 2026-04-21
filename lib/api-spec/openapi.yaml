@@ -350,6 +350,10 @@ components:
         side: { type: string, nullable: true }
         current_price: { type: number, nullable: true }
         context: { type: string, nullable: true }
+        aggression_mode:
+          type: string
+          nullable: true
+          description: "conservative | balanced | aggressive"
       required: [game_id]
 
     SwarmPersonaVerdict:
@@ -386,6 +390,7 @@ components:
         matchup: { type: string, nullable: true }
         league: { type: string, nullable: true }
         market_type: { type: string, nullable: true }
+        aggression_mode: { type: string, nullable: true }
         consensus_probability: { type: number, nullable: true }
         confidence_band_low: { type: number, nullable: true }
         confidence_band_high: { type: number, nullable: true }

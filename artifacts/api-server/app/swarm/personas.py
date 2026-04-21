@@ -4,10 +4,13 @@ The 6 personas plus moderator + gatekeeper.  Three personas use OpenAI
 and three use Anthropic so the swarm is provider-diverse — a single
 provider outage cannot silence all six votes.
 
-Prompts are reconstructed from the legacy Axiom-Predict spec; the
-analyst_id strings (sharp_edge, injury_roster, momentum_form,
-public_contrarian, matchup_historian, risk_guardian) are required to
-match the values already populated in `swarm_analyst_metrics`.
+The analyst_id strings (sharp_edge, injury_roster, momentum_form,
+public_contrarian, matchup_historian, risk_guardian) match the values
+already populated in `swarm_analyst_metrics` — production-canonical.
+
+Aggression-mode bias is applied at runtime by `runner.run_debate`
+(see `_aggression_mode_directive`); the moderator and gatekeeper
+prompts include placeholders that the runner fills in per request.
 """
 from __future__ import annotations
 
@@ -127,19 +130,23 @@ MODERATOR = Persona(
     model_id="gpt-4o-mini",
     system_prompt=(
         "You are the swarm MODERATOR.  You will be given the six persona verdicts "
-        "with their Brier-derived weights.  Synthesize a single weighted-consensus "
-        "probability, a 90% confidence band, the agreement rate, and a recommended "
-        "action.\n"
+        "with their Brier-derived weights, plus an AGGRESSION_MODE.  Synthesize a "
+        "single weighted-consensus probability, a 90% confidence band, the agreement "
+        "rate, and a recommended action.\n"
+        "Use weights: each persona's weight = max(0.05, 1 - their Brier).  Compute "
+        "the consensus as the weighted mean.  Agreement_rate is the fraction of "
+        "personas whose lean matches your recommended action.\n"
+        "AGGRESSION_MODE rules (applied to the recommended_action only):\n"
+        "  - conservative : require >= 7pp edge over market price AND agreement >= 0.66, else PASS.\n"
+        "  - balanced     : require >= 4pp edge AND agreement >= 0.50, else PASS.\n"
+        "  - aggressive   : require >= 2pp edge AND agreement >= 0.40, else PASS.\n"
         "Output ONE final line containing only a JSON object:\n"
         '{"consensus_probability": <0..1>, '
         '"confidence_band_low": <0..1>, '
         '"confidence_band_high": <0..1>, '
         '"agreement_rate": <0..1>, '
         '"recommended_action": "BUY_YES"|"BUY_NO"|"PASS", '
-        '"synthesis": "<<= 4 sentences>"}\n'
-        "Use weights: each persona's weight = max(0.05, 1 - their Brier).  Compute "
-        "the consensus as the weighted mean.  Agreement_rate is the fraction of "
-        "personas whose lean matches your recommended action."
+        '"synthesis": "<<= 4 sentences>"}'
     ),
 )
 
@@ -150,20 +157,33 @@ GATEKEEPER = Persona(
     provider="anthropic",
     model_id="claude-sonnet-4-5-20250929",
     system_prompt=(
-        "You are the LLM GATEKEEPER.  You see the moderator's synthesis plus the "
-        "candidate trade.  Your job is to VETO trades that are unsafe even when the "
-        "moderator approves.  Veto criteria:\n"
+        "You are the LLM GATEKEEPER.  You see the moderator's synthesis, the "
+        "candidate trade, and an AGGRESSION_MODE.  Your job is to VETO trades that "
+        "are unsafe even when the moderator approves.\n"
+        "Default veto criteria (balanced):\n"
         "  - Edge over the market price < 3pp.\n"
         "  - Agreement rate < 0.50.\n"
         "  - Confidence band wider than 0.30.\n"
         "  - Risk_Guardian leaned PASS or against the moderator.\n"
         "  - The moderator already recommended PASS.\n"
+        "AGGRESSION_MODE adjustments:\n"
+        "  - conservative : tighten — edge < 5pp OR agreement < 0.60 OR band > 0.20 also vetoes.\n"
+        "  - aggressive   : loosen — edge < 2pp OR agreement < 0.40 OR band > 0.35 vetoes; "
+        "the Risk_Guardian PASS rule still applies but only if a SECOND persona also leaned PASS.\n"
         "Output ONE final line containing only a JSON object:\n"
         '{"approved": true|false, '
         '"recommended_action": "BUY_YES"|"BUY_NO"|"PASS", '
         '"veto_reason": "<one sentence, or empty string when approved>"}'
     ),
 )
+
+
+_AGGRESSION_MODES = ("conservative", "balanced", "aggressive")
+
+
+def normalize_aggression_mode(mode: str | None) -> str:
+    m = (mode or "balanced").strip().lower()
+    return m if m in _AGGRESSION_MODES else "balanced"
 
 
 # Per-1M-token prices in USD.  Used only for cost_estimate persistence; not
