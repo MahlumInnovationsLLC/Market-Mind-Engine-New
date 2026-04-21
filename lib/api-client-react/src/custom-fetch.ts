@@ -6,7 +6,18 @@ export type ErrorType<T = unknown> = ApiError<T>;
 
 export type BodyType<T> = T;
 
-export type AuthTokenGetter = () => Promise<string | null> | string | null;
+export type AuthTokenGetterOptions = {
+  /**
+   * When true, the getter should bypass any local token cache and fetch
+   * a fresh token from the auth provider. Used after a 401 to attempt a
+   * silent retry before surfacing the failure to the user.
+   */
+  forceRefresh?: boolean;
+};
+
+export type AuthTokenGetter = (
+  options?: AuthTokenGetterOptions,
+) => Promise<string | null> | string | null;
 
 export type UnauthorizedHandler = (info: {
   status: number;
@@ -354,32 +365,57 @@ export async function customFetch<T = unknown>(
     throw new TypeError(`customFetch: ${method} requests cannot have a body.`);
   }
 
-  const headers = mergeHeaders(isRequest(input) ? input.headers : undefined, headersInit);
+  const baseHeaders = mergeHeaders(
+    isRequest(input) ? input.headers : undefined,
+    headersInit,
+  );
 
   if (
     typeof init.body === "string" &&
-    !headers.has("content-type") &&
+    !baseHeaders.has("content-type") &&
     looksLikeJson(init.body)
   ) {
-    headers.set("content-type", "application/json");
+    baseHeaders.set("content-type", "application/json");
   }
 
-  if (responseType === "json" && !headers.has("accept")) {
-    headers.set("accept", DEFAULT_JSON_ACCEPT);
-  }
-
-  // Attach bearer token when an auth getter is configured and no
-  // Authorization header has been explicitly provided.
-  if (_authTokenGetter && !headers.has("authorization")) {
-    const token = await _authTokenGetter();
-    if (token) {
-      headers.set("authorization", `Bearer ${token}`);
-    }
+  if (responseType === "json" && !baseHeaders.has("accept")) {
+    baseHeaders.set("accept", DEFAULT_JSON_ACCEPT);
   }
 
   const requestInfo = { method, url: resolveUrl(input) };
+  const callerSuppliedAuth = baseHeaders.has("authorization");
 
-  const response = await fetch(input, { ...init, method, headers });
+  // Attempt the request, optionally with a freshly-refreshed bearer token.
+  // On a 401 we transparently retry exactly once with `forceRefresh: true`
+  // so brief Clerk JWT rollovers / clock skew don't kick the operator out.
+  async function attempt(forceRefresh: boolean): Promise<Response> {
+    const headers = new Headers(baseHeaders);
+    if (_authTokenGetter && !callerSuppliedAuth) {
+      const token = await _authTokenGetter({ forceRefresh });
+      if (token) {
+        headers.set("authorization", `Bearer ${token}`);
+      } else {
+        headers.delete("authorization");
+      }
+    }
+    return fetch(input, { ...init, method, headers });
+  }
+
+  let response = await attempt(false);
+
+  if (
+    response.status === 401 &&
+    _authTokenGetter &&
+    !callerSuppliedAuth
+  ) {
+    // Drain the first response body so the connection can be released.
+    try {
+      await response.clone().text();
+    } catch {
+      // ignore
+    }
+    response = await attempt(true);
+  }
 
   if (!response.ok) {
     const errorData = await parseErrorBody(response, method);

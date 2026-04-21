@@ -340,7 +340,14 @@ function ClerkApiTokenBridge() {
   const { isSignedIn, getToken } = useAuth();
   useEffect(() => {
     if (isSignedIn) {
-      setAuthTokenGetter(async () => (await getToken()) ?? null);
+      setAuthTokenGetter(async (opts) => {
+        // When the API client retries after a 401, ask Clerk for a fresh
+        // JWT instead of returning the cached (likely expired) one.
+        const token = await getToken(
+          opts?.forceRefresh ? { skipCache: true } : undefined,
+        );
+        return token ?? null;
+      });
     } else {
       setAuthTokenGetter(null);
     }
