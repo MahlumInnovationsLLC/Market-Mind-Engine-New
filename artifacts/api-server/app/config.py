@@ -34,12 +34,16 @@ class Settings:
     kalshi_api_key_id: str | None
     kalshi_private_key: str | None
     kalshi_env: str
+    kalshi_api_base_url: str
+    kalshi_ws_url: str
 
     # Operating mode
     paper_mode: bool
-    # Trading orchestrator: "paper" (default — write trades with
-    # trading_mode='paper'), "live" (submit to Kalshi), "halt" (loop
-    # runs but never places trades — useful for diagnostics).
+    # AXIOM_TRADING_MODE = "paper" (default) | "live" | "halt"
+    # When "live", real orders are sent to Kalshi. "halt" lets the
+    # orchestrator loop run but never place trades — useful for diagnostics.
+    # The trading orchestrator is forbidden from setting this to "live"
+    # until the risk-gate task ships.
     trading_mode: str
     # Master switch for the orchestrator scheduler.  When false, no
     # cycle tasks are started at boot.
@@ -98,6 +102,30 @@ def get_settings() -> Settings:
         v.strip().lower() for v in verticals_raw.split(",") if v.strip()
     ) or ("sports",)
 
+    kalshi_env = os.environ.get("KALSHI_ENV", "demo").strip().lower()
+    if kalshi_env not in ("demo", "prod", "production"):
+        raise RuntimeError(f"KALSHI_ENV must be 'demo' or 'prod' (got {kalshi_env!r})")
+    if kalshi_env == "production":
+        kalshi_env = "prod"
+    kalshi_api_base_url = (
+        os.environ.get("KALSHI_API_BASE_URL")
+        or ("https://api.elections.kalshi.com/trade-api/v2"
+            if kalshi_env == "prod"
+            else "https://demo-api.kalshi.co/trade-api/v2")
+    )
+    kalshi_ws_url = (
+        os.environ.get("KALSHI_WS_URL")
+        or ("wss://api.elections.kalshi.com/trade-api/ws/v2"
+            if kalshi_env == "prod"
+            else "wss://demo-api.kalshi.co/trade-api/ws/v2")
+    )
+
+    trading_mode = (os.environ.get("AXIOM_TRADING_MODE") or "paper").strip().lower()
+    if trading_mode not in ("paper", "live", "halt"):
+        raise RuntimeError(
+            f"AXIOM_TRADING_MODE must be 'paper', 'live', or 'halt' (got {trading_mode!r})"
+        )
+
     return Settings(
         supabase_db_password=pwd,
         supabase_service_key=svc,
@@ -109,9 +137,11 @@ def get_settings() -> Settings:
         anthropic_api_key=os.environ.get("ANTHROPIC_API_KEY"),
         kalshi_api_key_id=os.environ.get("KALSHI_API_KEY_ID"),
         kalshi_private_key=os.environ.get("KALSHI_API_PRIVATE_KEY"),
-        kalshi_env=os.environ.get("KALSHI_ENV", "demo"),
+        kalshi_env=kalshi_env,
+        kalshi_api_base_url=kalshi_api_base_url,
+        kalshi_ws_url=kalshi_ws_url,
         paper_mode=_truthy(os.environ.get("AXIOM_PAPER_MODE"), default=True),
-        trading_mode=(os.environ.get("AXIOM_TRADING_MODE") or "paper").strip().lower(),
+        trading_mode=trading_mode,
         orchestrator_enabled=_truthy(
             os.environ.get("AXIOM_ORCHESTRATOR_ENABLED"), default=True
         ),

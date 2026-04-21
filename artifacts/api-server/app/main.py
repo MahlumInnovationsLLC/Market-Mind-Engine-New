@@ -31,6 +31,14 @@ from .feeds.odds_api import register_odds_feeds
 from .feeds.weather import register_weather_feeds
 from .orchestrator import pipeline_event_hub, run_cycle, scheduler as orchestrator_scheduler
 from .swarm import llm_log_hub, refresh_persona_weights, run_debate
+from .kalshi import (
+    OrderRequest,
+    auth as kalshi_auth,
+    bus as kalshi_bus,
+    client as kalshi_client_mod,
+    lifecycle as kalshi_lifecycle,
+    ws as kalshi_ws,
+)
 
 
 logging.basicConfig(
@@ -80,6 +88,25 @@ async def lifespan(_: FastAPI):
         log.info("swarm persona weights bootstrapped from %d rows", n)
     except Exception as e:
         log.warning("swarm persona weight bootstrap failed: %s", e)
+
+    # Validate Kalshi credentials at startup (non-fatal — degraded mode allowed).
+    cred = kalshi_auth.validate_credentials(
+        settings.kalshi_api_key_id, settings.kalshi_private_key
+    )
+    if cred.get("ok"):
+        log.info("Kalshi credentials OK (key fingerprint=%s, env=%s, mode=%s)",
+                 cred.get("key_fingerprint"), settings.kalshi_env, settings.trading_mode)
+    else:
+        log.warning("Kalshi credentials NOT validated: %s", cred.get("error"))
+
+    # Start WS subscriber + bus->lifecycle bridge if creds are present.
+    fill_task = None
+    try:
+        await kalshi_ws.maybe_start_ws()
+        fill_task = await kalshi_lifecycle.attach_ws_fill_handler()
+    except Exception as e:
+        log.warning("Kalshi WS startup skipped: %s", e)
+
     # Start the trading orchestrator scheduler.  Honors
     # AXIOM_ORCHESTRATOR_ENABLED + AXIOM_TRADING_MODE.  Cycle failures
     # are caught inside the loop so a sick DB doesn't stop the process.
@@ -110,6 +137,12 @@ async def lifespan(_: FastAPI):
                 await models_task
             except (asyncio.CancelledError, Exception):
                 pass
+        try:
+            await kalshi_ws.stop_ws()
+        except Exception:
+            pass
+        if fill_task is not None:
+            fill_task.cancel()
         await db.close_pool()
         log.info("axiom-predict api stopped")
 
@@ -182,6 +215,18 @@ async def health_full(_: object = Depends(require_approved_user)) -> dict[str, o
     except Exception as e:
         out["status"] = "degraded"
         out["postgres"] = {"ok": False, "error": str(e)}
+    # Kalshi reachability
+    out["kalshi"] = await kalshi_client_mod.health_probe()
+    if not out["kalshi"].get("ok"):
+        out["status"] = "degraded"
+    out["trading_mode"] = settings.trading_mode
+    ws = kalshi_ws.get_ws_subscriber()
+    out["kalshi_ws"] = {
+        "connected": bool(ws and ws.connected),
+        "last_error": ws.last_error if ws else None,
+        "subscribers": kalshi_bus.subscriber_count,
+    }
+    out["kill_switch"] = kalshi_lifecycle.kill_switch_state()
     # Storage
     try:
         entries = await storage.list_path("", limit=5)
@@ -457,6 +502,159 @@ async def ws_pipeline(ws: WebSocket) -> None:
         log.warning("ws pipeline send failed: %s", e)
     finally:
         pipeline_event_hub.unsubscribe(q)
+
+
+# ---------------------------------------------------------------------------
+# Kalshi exchange endpoints
+# ---------------------------------------------------------------------------
+
+
+def _kalshi_error_to_http(e: Exception) -> HTTPException:
+    if isinstance(e, kalshi_client_mod.KalshiAPIError):
+        status = 502 if e.status == 0 else min(max(e.status, 400), 599)
+        return HTTPException(status_code=status, detail={"kalshi_status": e.status, "body": e.body})
+    if isinstance(e, kalshi_auth.KalshiAuthError):
+        return HTTPException(status_code=503, detail=str(e))
+    return HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/kalshi/balance")
+async def kalshi_balance(_: object = Depends(require_auth)) -> dict[str, object]:
+    try:
+        async with kalshi_client_mod.KalshiClient() as c:
+            bal = await c.get_balance()
+    except Exception as e:
+        raise _kalshi_error_to_http(e)
+    return {
+        "balance_cents": bal.balance_cents,
+        "balance_dollars": bal.balance_dollars,
+        "payout_cents": bal.payout_cents,
+        "raw": bal.raw,
+    }
+
+
+@app.get("/api/kalshi/positions")
+async def kalshi_positions(limit: int = 100, _: object = Depends(require_auth)) -> dict[str, object]:
+    limit = max(1, min(500, int(limit)))
+    try:
+        async with kalshi_client_mod.KalshiClient() as c:
+            pos = await c.get_positions(limit=limit)
+    except Exception as e:
+        raise _kalshi_error_to_http(e)
+    return {
+        "items": [
+            {
+                "market_ticker": p.market_ticker,
+                "position": p.position,
+                "market_exposure_cents": p.market_exposure_cents,
+                "realized_pnl_cents": p.realized_pnl_cents,
+                "fees_paid_cents": p.fees_paid_cents,
+            }
+            for p in pos
+        ],
+        "count": len(pos),
+    }
+
+
+@app.get("/api/kalshi/markets")
+async def kalshi_markets(
+    limit: int = 50, status: str = "open", _: object = Depends(require_auth)
+) -> dict[str, object]:
+    try:
+        async with kalshi_client_mod.KalshiClient() as c:
+            data = await c.list_markets(limit=max(1, min(200, limit)), status=status or None)
+    except Exception as e:
+        raise _kalshi_error_to_http(e)
+    return data
+
+
+@app.get("/api/kalshi/orders/resting")
+async def kalshi_resting_orders(_: object = Depends(require_auth)) -> dict[str, object]:
+    rows = await kalshi_lifecycle.list_resting_orders()
+    return {"items": [r.to_dict() for r in rows], "count": len(rows)}
+
+
+@app.post("/api/kalshi/paper-order")
+async def kalshi_paper_order(
+    payload: dict, _: object = Depends(require_auth)
+) -> dict[str, object]:
+    """Submit a paper order via the lifecycle. Always paper, even when
+    AXIOM_TRADING_MODE=live, so this endpoint is safe to expose to operators.
+    """
+    try:
+        req = OrderRequest(
+            market_ticker=str(payload.get("market_ticker") or payload.get("ticker") or "").strip(),
+            side=str(payload.get("side") or "yes").lower(),  # type: ignore[arg-type]
+            action=str(payload.get("action") or "buy").lower(),  # type: ignore[arg-type]
+            count=int(payload.get("count") or payload.get("contracts") or 1),
+            limit_price_cents=(int(payload["limit_price_cents"])
+                               if payload.get("limit_price_cents") is not None else None),
+            type=str(payload.get("type") or "limit"),  # type: ignore[arg-type]
+            time_in_force=str(payload.get("time_in_force") or "GTC"),  # type: ignore[arg-type]
+            vertical=str(payload.get("vertical") or "sports"),
+            context=dict(payload.get("context") or {}),
+        )
+    except Exception as e:
+        raise HTTPException(status_code=422, detail=f"bad order payload: {e}")
+    if not req.market_ticker:
+        raise HTTPException(status_code=422, detail="market_ticker is required")
+    try:
+        rec = await kalshi_lifecycle.submit_order(req, force_paper=True)
+    except kalshi_lifecycle.OrderRejected as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    return rec.to_dict()
+
+
+@app.post("/api/kalshi/halt")
+async def kalshi_halt(reason: str | None = None) -> dict[str, object]:
+    """Trip the kill switch. Intentionally NO middleware deps — operators must
+    be able to halt trading even when downstream auth is broken.
+    """
+    return kalshi_lifecycle.halt(reason)
+
+
+@app.post("/api/kalshi/resume")
+async def kalshi_resume(_: object = Depends(require_auth)) -> dict[str, object]:
+    return kalshi_lifecycle.resume()
+
+
+@app.get("/api/kalshi/kill-switch")
+async def kalshi_kill_state(_: object = Depends(require_auth)) -> dict[str, object]:
+    return kalshi_lifecycle.kill_switch_state()
+
+
+@app.websocket("/ws/kalshi")
+async def kalshi_event_stream(websocket: WebSocket):  # pragma: no cover - covered by manual integration
+    """Stream the in-process Kalshi event bus to a connected client.
+
+    Auth: pass a Clerk session JWT as the `?token=` query parameter (browsers
+    can't set headers on the WS upgrade, so the query parameter is the
+    practical path). Verified with the same JWKS used by `require_auth`.
+    """
+    token = websocket.query_params.get("token") or ""
+    if token:
+        # Reuse the Clerk verification path. Construct an Authorization header
+        # and call into require_auth directly so we share its JWKS cache.
+        try:
+            await require_auth(authorization=f"Bearer {token}")
+        except Exception:
+            await websocket.close(code=1008)
+            return
+    elif auth_configured():
+        await websocket.close(code=1008)
+        return
+    await websocket.accept()
+    q = await kalshi_bus.subscribe()
+    try:
+        while True:
+            msg = await q.get()
+            await websocket.send_json(msg)
+    except WebSocketDisconnect:
+        pass
+    except Exception as e:
+        log.warning("ws/kalshi error: %s", e)
+    finally:
+        await kalshi_bus.unsubscribe(q)
 
 
 # ---------------------------------------------------------------------------

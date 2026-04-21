@@ -1,0 +1,179 @@
+"""Kalshi REST client (async, httpx-based).
+
+Each call signs the request with the operator's RSA private key and parses
+Kalshi's modern "dollar-era" responses (cents are integers, dollars are floats).
+
+The client is intentionally thin: it returns the parsed JSON dict for endpoints
+where Kalshi may add fields, and small typed dataclasses for the bits we need
+(balance, position summary).
+"""
+from __future__ import annotations
+
+import logging
+from dataclasses import dataclass
+from typing import Any
+from urllib.parse import urlsplit
+
+import httpx
+
+from ..config import get_settings
+from . import auth
+
+log = logging.getLogger(__name__)
+
+
+class KalshiAPIError(RuntimeError):
+    def __init__(self, status: int, body: Any, message: str = "") -> None:
+        super().__init__(message or f"Kalshi API error {status}: {body!r}")
+        self.status = status
+        self.body = body
+
+
+@dataclass
+class Balance:
+    balance_cents: int
+    payout_cents: int
+    raw: dict[str, Any]
+
+    @property
+    def balance_dollars(self) -> float:
+        return self.balance_cents / 100.0
+
+
+@dataclass
+class PositionSummary:
+    market_ticker: str
+    position: int          # signed contracts (positive=YES, negative=NO)
+    market_exposure_cents: int
+    realized_pnl_cents: int
+    fees_paid_cents: int
+    raw: dict[str, Any]
+
+
+class KalshiClient:
+    """Async REST client. Construct once and reuse; closes its httpx client on `aclose()`."""
+
+    def __init__(self, *, settings=None, timeout: float = 15.0) -> None:
+        self._settings = settings or get_settings()
+        if not self._settings.kalshi_api_key_id or not self._settings.kalshi_private_key:
+            raise auth.KalshiAuthError(
+                "Kalshi credentials missing — set KALSHI_API_KEY_ID and KALSHI_API_PRIVATE_KEY"
+            )
+        self._http = httpx.AsyncClient(timeout=timeout)
+        self._base = self._settings.kalshi_api_base_url.rstrip("/")
+        # Path prefix for signing (e.g. "/trade-api/v2")
+        self._base_path = urlsplit(self._base).path or ""
+
+    async def aclose(self) -> None:
+        await self._http.aclose()
+
+    async def __aenter__(self) -> "KalshiClient":
+        return self
+
+    async def __aexit__(self, *exc) -> None:
+        await self.aclose()
+
+    # ---- internal -------------------------------------------------------
+
+    def _sign_path(self, sub_path: str) -> str:
+        # Kalshi signs the full path ("/trade-api/v2/..."), not just the suffix.
+        return f"{self._base_path}{sub_path}"
+
+    async def _request(
+        self,
+        method: str,
+        sub_path: str,
+        *,
+        params: dict[str, Any] | None = None,
+        json: dict[str, Any] | None = None,
+    ) -> Any:
+        sign_path = self._sign_path(sub_path)
+        headers = auth.sign_request(
+            key_id=self._settings.kalshi_api_key_id or "",
+            private_key_pem=self._settings.kalshi_private_key or "",
+            method=method,
+            path=sign_path,
+        )
+        url = f"{self._base}{sub_path}"
+        try:
+            r = await self._http.request(method, url, params=params, json=json, headers=headers)
+        except httpx.HTTPError as e:
+            raise KalshiAPIError(0, None, f"Kalshi network error: {e}") from e
+        try:
+            body: Any = r.json() if r.content else None
+        except ValueError:
+            body = r.text
+        if r.status_code >= 400:
+            raise KalshiAPIError(r.status_code, body)
+        return body
+
+    # ---- public endpoints ----------------------------------------------
+
+    async def exchange_status(self) -> dict[str, Any]:
+        return await self._request("GET", "/exchange/status")
+
+    async def get_balance(self) -> Balance:
+        data = await self._request("GET", "/portfolio/balance")
+        # Kalshi returns "balance" in cents; "payout" sometimes present.
+        bal_cents = int(data.get("balance") or 0)
+        payout_cents = int(data.get("payout") or 0)
+        return Balance(balance_cents=bal_cents, payout_cents=payout_cents, raw=data)
+
+    async def get_positions(self, *, limit: int = 100) -> list[PositionSummary]:
+        data = await self._request("GET", "/portfolio/positions", params={"limit": limit})
+        out: list[PositionSummary] = []
+        for row in (data or {}).get("market_positions", []) or []:
+            out.append(
+                PositionSummary(
+                    market_ticker=row.get("ticker") or row.get("market_ticker") or "",
+                    position=int(row.get("position") or 0),
+                    market_exposure_cents=int(row.get("market_exposure") or 0),
+                    realized_pnl_cents=int(row.get("realized_pnl") or 0),
+                    fees_paid_cents=int(row.get("fees_paid") or 0),
+                    raw=row,
+                )
+            )
+        return out
+
+    async def get_market(self, ticker: str) -> dict[str, Any]:
+        return await self._request("GET", f"/markets/{ticker}")
+
+    async def list_markets(self, *, limit: int = 50, status: str | None = "open") -> dict[str, Any]:
+        params: dict[str, Any] = {"limit": limit}
+        if status:
+            params["status"] = status
+        return await self._request("GET", "/markets", params=params)
+
+    async def submit_order(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Submit a new order. Caller is responsible for validating payload shape.
+
+        Kalshi's `POST /portfolio/orders` expects:
+          { ticker, action: "buy"|"sell", side: "yes"|"no",
+            type: "limit"|"market", count, yes_price?|no_price?,
+            client_order_id, time_in_force? }
+        """
+        return await self._request("POST", "/portfolio/orders", json=payload)
+
+    async def cancel_order(self, order_id: str) -> dict[str, Any]:
+        return await self._request("DELETE", f"/portfolio/orders/{order_id}")
+
+    async def get_order(self, order_id: str) -> dict[str, Any]:
+        return await self._request("GET", f"/portfolio/orders/{order_id}")
+
+
+async def health_probe() -> dict[str, Any]:
+    """Cheap unauthenticated check: hit `/exchange/status` with our key.
+
+    Returns `{ok, status?, error?}`. Never raises.
+    """
+    s = get_settings()
+    if not s.kalshi_api_key_id or not s.kalshi_private_key:
+        return {"ok": False, "error": "missing credentials"}
+    try:
+        async with KalshiClient(settings=s, timeout=8.0) as c:
+            data = await c.exchange_status()
+        return {"ok": True, "exchange_active": bool(data.get("exchange_active", True)), "raw": data}
+    except KalshiAPIError as e:
+        return {"ok": False, "error": f"http {e.status}: {e.body!r}"[:300]}
+    except Exception as e:
+        return {"ok": False, "error": str(e)[:300]}
