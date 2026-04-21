@@ -55,6 +55,7 @@ PROTECTED_ROUTES: tuple[str, ...] = (
     "/api/feeds/status",
     "/api/notifications/status",
     "/api/orchestrator/status",
+    "/api/orchestrator/recent-events",
     "/api/settlement/status",
     "/api/settlement/backfill-status",
     "/api/kalshi/balance",

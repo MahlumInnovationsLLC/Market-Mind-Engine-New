@@ -1043,6 +1043,23 @@ async def orchestrator_run_cycle(
     }
 
 
+@app.get("/api/orchestrator/recent-events")
+async def orchestrator_recent_events(
+    cycles: int = 5,
+    _: object = Depends(require_auth),
+) -> dict[str, object]:
+    """Return buffered pipeline events from the most recent ``cycles``
+    distinct cycle ids so /pipeline can hydrate immediately on mount
+    instead of staring at an empty buffer until the next WS event lands.
+
+    Each event carries a server-assigned ``_seq`` so the dashboard can
+    dedupe against any frames the WebSocket replays.
+    """
+    n = max(1, min(20, int(cycles)))
+    events = pipeline_event_hub.recent_events(max_cycles=n)
+    return {"cycles": n, "events": events}
+
+
 @app.websocket("/api/ws/pipeline")
 async def ws_pipeline(ws: WebSocket) -> None:
     """Live stream of orchestrator pipeline events: cycle_start, gate

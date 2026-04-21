@@ -1,8 +1,9 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Link } from "wouter";
-import { useClerk, useUser } from "@clerk/react";
+import { useAuth, useClerk, useUser } from "@clerk/react";
 import { useWebSocket } from "@/hooks/use-websocket";
 import WsStatusIndicator from "@/components/ws-status-indicator";
+import { apiFetch } from "@/lib/api";
 
 interface CycleGroup {
   cycle_id: string | null;
@@ -320,10 +321,56 @@ function formatSettlementLine(ev: Record<string, unknown>): string {
 export default function PipelinePage() {
   const { user } = useUser();
   const { signOut } = useClerk();
+  const { getToken, isSignedIn } = useAuth();
   const ws = useWebSocket({ path: "/api/ws/pipeline", bufferSize: 500 });
   const llm = useWebSocket({ path: "/api/ws/llm-logs", bufferSize: 200 });
   const settlement = useWebSocket({ path: "/api/ws/settlement", bufferSize: 200 });
-  const groups = useMemo(() => groupByCycle(ws.events), [ws.events]);
+
+  // Hydrate from REST so reloading the page mid-cycle still shows the
+  // last few cycles instead of an empty buffer until the next event.
+  const [snapshot, setSnapshot] = useState<Record<string, unknown>[]>([]);
+  const [snapshotError, setSnapshotError] = useState<string | null>(null);
+  useEffect(() => {
+    if (!isSignedIn) return;
+    let cancelled = false;
+    apiFetch<{ events: Record<string, unknown>[] }>(
+      "/api/orchestrator/recent-events?cycles=5",
+      { getToken },
+    )
+      .then((res) => {
+        if (cancelled) return;
+        setSnapshot(Array.isArray(res?.events) ? res.events : []);
+      })
+      .catch((e) => {
+        if (cancelled) return;
+        setSnapshotError(String(e?.message ?? e));
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [isSignedIn, getToken]);
+
+  // Merge snapshot + live WS events, dedup'd on the server-assigned _seq.
+  // Snapshot events that the WS later replays are filtered out so the
+  // same cycle card never doubles up.
+  const mergedEvents = useMemo(() => {
+    const seenSeq = new Set<number>();
+    const out: Record<string, unknown>[] = [];
+    const push = (ev: Record<string, unknown>) => {
+      const seqVal = ev["_seq"];
+      const seq = typeof seqVal === "number" ? seqVal : null;
+      if (seq !== null) {
+        if (seenSeq.has(seq)) return;
+        seenSeq.add(seq);
+      }
+      out.push(ev);
+    };
+    for (const ev of snapshot) push(ev);
+    for (const ev of ws.events) push(ev);
+    return out;
+  }, [snapshot, ws.events]);
+
+  const groups = useMemo(() => groupByCycle(mergedEvents), [mergedEvents]);
   const operatorLabel =
     user?.primaryEmailAddress?.emailAddress ?? user?.username ?? user?.id ?? "—";
 
@@ -370,7 +417,18 @@ export default function PipelinePage() {
       </header>
 
       <div className="flex items-center justify-between mb-3 text-[10px] uppercase tracking-widest text-muted-foreground">
-        <span>BUFFERED_EVENTS :: {ws.events.length}</span>
+        <span>
+          BUFFERED_EVENTS :: {mergedEvents.length}
+          {snapshot.length > 0 && (
+            <span className="text-foreground/60"> · {snapshot.length} HYDRATED</span>
+          )}
+          {snapshotError && (
+            <span className="text-destructive" title={snapshotError}>
+              {" "}
+              · HYDRATE_FAILED
+            </span>
+          )}
+        </span>
         <div className="flex gap-2">
           <button
             type="button"
@@ -382,7 +440,10 @@ export default function PipelinePage() {
           </button>
           <button
             type="button"
-            onClick={ws.clear}
+            onClick={() => {
+              setSnapshot([]);
+              ws.clear();
+            }}
             className="border border-border px-2 py-1 hover:text-primary hover:border-primary"
             data-testid="button-clear"
           >
