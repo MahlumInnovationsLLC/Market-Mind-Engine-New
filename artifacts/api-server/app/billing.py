@@ -849,14 +849,25 @@ async def _apply_subscription(sub_obj: dict[str, Any]) -> None:
                     user_email = meta_email
             except Exception:
                 user_email = None
-            _alerts.tier_change(
-                user_email=user_email,
-                user_id=user_id,
-                old_tier=_prev_normalized,
-                new_tier=tier,
-                status=status,
-                stripe_subscription_id=sub_id,
+            # Persistent dedupe: Stripe will re-deliver the same
+            # `customer.subscription.updated` webhook on retry; without
+            # this guard we'd email the operator twice for one real
+            # transition.  Key off (user_id, new_tier) so a real
+            # subsequent transition (e.g. pro -> elite) isn't suppressed.
+            should_send = await _alerts.dedupe_or_skip(
+                "tier_change",
+                f"{user_id}:{tier}",
+                ttl_seconds=24 * 3600,
             )
+            if should_send:
+                _alerts.tier_change(
+                    user_email=user_email,
+                    user_id=user_id,
+                    old_tier=_prev_normalized,
+                    new_tier=tier,
+                    status=status,
+                    stripe_subscription_id=sub_id,
+                )
         except Exception as e:  # pragma: no cover
             log.warning("tier_change alert dispatch failed: %s", e)
 

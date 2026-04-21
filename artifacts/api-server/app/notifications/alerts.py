@@ -21,6 +21,8 @@ mailboxes.
 """
 from __future__ import annotations
 
+import asyncio
+import hashlib
 import logging
 from datetime import datetime, timezone
 from typing import Any, Iterable
@@ -29,6 +31,132 @@ from . import postmark
 
 
 log = logging.getLogger("axiom.notifications.alerts")
+
+
+# ---------------------------------------------------------------------------
+# Persistent dedupe — generalized `(alert_type, dedupe_key)` with TTL.
+#
+# The same `notification_dedupe` table created by `daily_summary` is used.
+# Composite key is encoded as `f"{alert_type}:{dedupe_key}"` so the
+# original PRIMARY KEY (`key TEXT`) keeps working.  We add an optional
+# `expires_at TIMESTAMPTZ` column for TTL semantics; the daily-summary
+# rows leave it NULL and rely on their `date_utc` comparison.
+#
+# Each call site that wants idempotency calls `await dedupe_or_skip(...)`
+# *before* dispatching the alert.  Returns True if the caller is the
+# winner (should send), False if a previous send is still within the TTL
+# window and the alert must be suppressed.
+# ---------------------------------------------------------------------------
+
+
+_dedupe_table_ready = False
+_dedupe_lock = asyncio.Lock()
+
+
+async def _ensure_dedupe_table() -> None:
+    global _dedupe_table_ready
+    if _dedupe_table_ready:
+        return
+    async with _dedupe_lock:
+        if _dedupe_table_ready:
+            return
+        from .. import db  # local import to avoid cycles at module load
+        try:
+            await db.execute(
+                """
+                CREATE TABLE IF NOT EXISTS notification_dedupe (
+                  key  TEXT PRIMARY KEY,
+                  date_utc DATE,
+                  sent_at TIMESTAMPTZ NOT NULL DEFAULT now()
+                )
+                """
+            )
+            # Make date_utc nullable so generic (non-daily) rows can omit it.
+            await db.execute(
+                "ALTER TABLE notification_dedupe ALTER COLUMN date_utc DROP NOT NULL"
+            )
+            await db.execute(
+                "ALTER TABLE notification_dedupe "
+                "ADD COLUMN IF NOT EXISTS expires_at TIMESTAMPTZ"
+            )
+            _dedupe_table_ready = True
+        except Exception as e:
+            log.warning("notification_dedupe ensure failed: %s", e)
+
+
+def _compose_key(alert_type: str, dedupe_key: str) -> str:
+    return f"{alert_type}:{dedupe_key}"
+
+
+async def dedupe_or_skip(
+    alert_type: str,
+    dedupe_key: str,
+    *,
+    ttl_seconds: int = 3600,
+) -> bool:
+    """Atomically claim `(alert_type, dedupe_key)` for the next
+    `ttl_seconds`.
+
+    Returns True if the caller is the first to claim the key in this
+    TTL window (i.e. should send the alert).  Returns False when an
+    earlier send is still within the window.  Fails open (returns True)
+    on any DB error so we'd rather risk a duplicate than swallow a
+    halt/drift alert.
+    """
+    full_key = _compose_key(alert_type, dedupe_key)
+    await _ensure_dedupe_table()
+    from .. import db
+    try:
+        row = await db.fetchrow(
+            """
+            INSERT INTO notification_dedupe (key, expires_at)
+            VALUES ($1, now() + make_interval(secs => $2))
+            ON CONFLICT (key) DO UPDATE
+              SET expires_at = EXCLUDED.expires_at,
+                  sent_at    = now()
+              WHERE notification_dedupe.expires_at IS NULL
+                 OR notification_dedupe.expires_at <= now()
+            RETURNING 1 AS ok
+            """,
+            full_key, int(ttl_seconds),
+        )
+        return bool(row)
+    except Exception as e:
+        log.warning("dedupe_or_skip claim failed for %s: %s", full_key, e)
+        return True
+
+
+def _hash_reason(reason: str | None) -> str:
+    h = hashlib.sha256((reason or "").encode("utf-8")).hexdigest()
+    return h[:16]
+
+
+def _schedule_dedupe_dispatch(
+    alert_type: str,
+    dedupe_key: str,
+    ttl_seconds: int,
+    dispatch: "callable[[], dict[str, Any]]",
+) -> None:
+    """Sync helper — schedule an async dedupe + dispatch on the running
+    event loop.  Used by sync call sites (kill switch trip)."""
+    async def _runner() -> None:
+        try:
+            ok = await dedupe_or_skip(alert_type, dedupe_key, ttl_seconds=ttl_seconds)
+            if ok:
+                dispatch()
+            else:
+                log.info("alert suppressed by dedupe: %s/%s", alert_type, dedupe_key)
+        except Exception as e:  # pragma: no cover
+            log.warning("scheduled dedupe dispatch failed: %s", e)
+    try:
+        loop = asyncio.get_running_loop()
+        loop.create_task(_runner())
+    except RuntimeError:
+        # No running loop (e.g. unit test calling sync code) — run inline.
+        try:
+            asyncio.run(_runner())
+        except Exception as e:  # pragma: no cover
+            log.warning("inline dedupe dispatch failed: %s", e)
 
 
 def _utc_now_iso() -> str:

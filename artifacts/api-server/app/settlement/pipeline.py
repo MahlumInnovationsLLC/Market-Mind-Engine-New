@@ -544,13 +544,21 @@ async def _calibration_and_drift(vertical: str | None) -> int:
             # Email the operator about the drift event.  Best-effort.
             try:
                 from ..notifications import alerts as _alerts
-                _alerts.drift(
-                    vertical=vertical,
-                    metric="brier_score_24h",
-                    value=brier,
-                    threshold=thr,
-                    note=f"severity={sev}; {msg}",
-                )
+                # Persistent dedupe survives settlement re-runs of the
+                # same vertical at the same severity within the hour.
+                # The model_health_alerts row insert above is the
+                # primary suppressor, but a settle-re-run that crosses
+                # the hour boundary would otherwise fire a duplicate.
+                if await _alerts.dedupe_or_skip(
+                    "drift", f"{vertical}:{sev}", ttl_seconds=3600
+                ):
+                    _alerts.drift(
+                        vertical=vertical,
+                        metric="brier_score_24h",
+                        value=brier,
+                        threshold=thr,
+                        note=f"severity={sev}; {msg}",
+                    )
             except Exception as e:  # pragma: no cover
                 log.warning("drift alert dispatch failed: %s", e)
     except Exception as e:

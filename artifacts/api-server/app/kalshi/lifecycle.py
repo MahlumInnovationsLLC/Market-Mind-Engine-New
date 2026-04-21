@@ -69,10 +69,19 @@ class _KillSwitch:
         self._at = datetime.now(timezone.utc)
         log.warning("KILL SWITCH tripped: %s", self._reason)
         # Fire halt alert only on the rising edge so re-tripping doesn't spam.
+        # Also gate on persistent dedupe so a process restart while halted
+        # doesn't re-email the operator (in-memory `_halted` is lost on
+        # boot but the dedupe row in Postgres survives).
         if not was_halted:
             try:
                 from ..notifications import alerts as _alerts
-                _alerts.halt(reason=self._reason)
+                reason = self._reason
+                _alerts._schedule_dedupe_dispatch(
+                    "halt",
+                    f"reason:{_alerts._hash_reason(reason)}",
+                    3600,
+                    lambda: _alerts.halt(reason=reason),
+                )
             except Exception as e:  # pragma: no cover — notification must not break halt
                 log.warning("halt alert dispatch failed: %s", e)
         return self.state
@@ -364,16 +373,40 @@ async def handle_ws_fill(message: dict[str, Any]) -> None:
     # here — they short-circuit in submit_order().
     try:
         from ..notifications import alerts as _alerts
-        _alerts.live_trade(
-            market_ticker=rec.request.market_ticker,
-            side=rec.request.side,
-            action=rec.request.action,
-            contracts=int(rec.request.count),
-            price_cents=price,
-            order_id=rec.order_id,
-            fill_id=str(fill.get("trade_id") or fill.get("fill_id") or ""),
-            vertical=rec.request.vertical,
-        )
+        fill_id = str(fill.get("trade_id") or fill.get("fill_id") or "")
+        # Persistent dedupe: Kalshi's fill websocket can re-deliver the
+        # same fill on reconnect.  Preferred key is (order_id, fill_id)
+        # — both together are the natural idempotency token.  When the
+        # fill payload omits fill_id, fall back to a hash of the *raw*
+        # immutable fields of the payload (count + price + exchange ts
+        # + side) so a replay produces the same key.  We deliberately
+        # do NOT use `rec.filled_count` here — it mutates as fills land.
+        if not fill_id:
+            raw_count = fill.get("count") or 0
+            raw_yes = fill.get("yes_price") or ""
+            raw_no = fill.get("no_price") or ""
+            raw_ts = (
+                fill.get("created_time")
+                or fill.get("ts")
+                or fill.get("timestamp")
+                or ""
+            )
+            fallback = f"{raw_count}|{raw_yes}|{raw_no}|{raw_ts}"
+            fill_id = f"raw:{_alerts._hash_reason(fallback)}"
+        dk = f"{rec.order_id or coid}:{fill_id}"
+        if await _alerts.dedupe_or_skip(
+            "live_trade", dk, ttl_seconds=7 * 24 * 3600
+        ):
+            _alerts.live_trade(
+                market_ticker=rec.request.market_ticker,
+                side=rec.request.side,
+                action=rec.request.action,
+                contracts=int(rec.request.count),
+                price_cents=price,
+                order_id=rec.order_id,
+                fill_id=fill_id,
+                vertical=rec.request.vertical,
+            )
     except Exception as e:  # pragma: no cover
         log.warning("live_trade alert dispatch failed: %s", e)
 
