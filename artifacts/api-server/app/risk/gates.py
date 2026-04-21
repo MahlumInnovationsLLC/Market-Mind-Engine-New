@@ -349,18 +349,23 @@ async def gate_duplicate_trade(ctx: RiskContext) -> GateResult:
     where the index does not apply."""
     if (ctx.vertical or "").lower() == "crypto":
         return GateResult("duplicate_trade", True, "crypto vertical exempt", {})
-    today = date.today()
+    # Use UTC date everywhere — host-local date would create
+    # day-boundary races at the seam between UTC and local TZ.  The
+    # production unique index `idx_trades_unique_daily` is built on
+    # `(market_id, lower(side), (executed_at at time zone 'UTC')::date)`
+    # so we mirror it exactly.
+    today_utc = datetime.now(timezone.utc).date()
     try:
         n = await db.fetchval(
             """
             SELECT count(*) FROM trades
              WHERE market_id = $1
                AND lower(side) = lower($2)
-               AND date(executed_at) = $3
+               AND ((executed_at at time zone 'UTC')::date) = $3
             """,
             ctx.market_id,
             ctx.side,
-            today,
+            today_utc,
         )
     except Exception as e:
         log.warning("duplicate_trade gate query failed: %s", e)
