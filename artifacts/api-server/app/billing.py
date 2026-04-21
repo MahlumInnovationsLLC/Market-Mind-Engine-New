@@ -182,6 +182,40 @@ async def ensure_schema() -> None:
                 )
                 """
             )
+            # Raw-state mirror of every Stripe Subscription we've seen.
+            # ``subscriptions`` above is the *derived* row our request
+            # path reads (one per Clerk user, with the tier already
+            # resolved); ``stripe_subscriptions`` keeps the unmodified
+            # Stripe payload so we can reconcile / replay without
+            # round-tripping the Stripe API.
+            await conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS stripe_subscriptions (
+                    stripe_subscription_id TEXT PRIMARY KEY,
+                    stripe_customer_id TEXT,
+                    user_id TEXT,
+                    status TEXT,
+                    stripe_price_id TEXT,
+                    interval TEXT,
+                    current_period_end TIMESTAMPTZ,
+                    cancel_at_period_end BOOLEAN NOT NULL DEFAULT FALSE,
+                    raw JSONB,
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                )
+                """
+            )
+            await conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS stripe_subscriptions_customer_idx
+                ON stripe_subscriptions (stripe_customer_id)
+                """
+            )
+            await conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS stripe_subscriptions_user_idx
+                ON stripe_subscriptions (user_id)
+                """
+            )
         _schema_ready = True
 
 
@@ -429,7 +463,6 @@ async def create_checkout_session(
             line_items=[{"price": price_id, "quantity": 1}],
             success_url=success,
             cancel_url=cancel,
-            allow_promotion_codes=True,
             client_reference_id=user.user_id,
             metadata={
                 "clerk_user_id": user.user_id,
@@ -695,6 +728,40 @@ async def _apply_subscription(sub_obj: dict[str, Any]) -> None:
 
     await ensure_schema()
     async with db.acquire() as conn:
+        # 1. Raw mirror — keep the unmodified Stripe payload.
+        if sub_id:
+            await conn.execute(
+                """
+                INSERT INTO stripe_subscriptions (
+                    stripe_subscription_id, stripe_customer_id, user_id,
+                    status, stripe_price_id, interval,
+                    current_period_end, cancel_at_period_end, raw, updated_at
+                )
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, NOW())
+                ON CONFLICT (stripe_subscription_id) DO UPDATE SET
+                    stripe_customer_id = EXCLUDED.stripe_customer_id,
+                    user_id = COALESCE(EXCLUDED.user_id, stripe_subscriptions.user_id),
+                    status = EXCLUDED.status,
+                    stripe_price_id = EXCLUDED.stripe_price_id,
+                    interval = EXCLUDED.interval,
+                    current_period_end = EXCLUDED.current_period_end,
+                    cancel_at_period_end = EXCLUDED.cancel_at_period_end,
+                    raw = EXCLUDED.raw,
+                    updated_at = NOW()
+                """,
+                sub_id,
+                customer_id,
+                user_id,
+                status,
+                price_id,
+                interval,
+                period_end,
+                cancel_at_period_end,
+                json.dumps(sub_obj),
+            )
+
+        # 2. Derived per-user row — the runtime source of truth that
+        # ``get_user_subscription`` reads.
         if user_id:
             await conn.execute(
                 """
