@@ -211,11 +211,20 @@ async def _cached_debates(vertical: str, limit: int) -> list[dict[str, Any]]:
                        consensus_probability, confidence_band_low, confidence_band_high,
                        agreement_rate, approved, recommended_action,
                        game_context
-                  FROM swarm_debates
-                 WHERE created_at > now() - interval '60 minutes'
-                   AND approved = true
-                   AND league = ANY($2)
-                 ORDER BY created_at DESC
+                  FROM swarm_debates sd
+                 WHERE sd.created_at > now() - interval '60 minutes'
+                   AND sd.approved = true
+                   AND sd.league = ANY($2)
+                   AND NOT EXISTS (
+                       SELECT 1 FROM trades t
+                        WHERE t.executed_at::date = (now() at time zone 'utc')::date
+                          AND t.market_id IS NOT NULL
+                          AND (
+                            t.market_id = (sd.game_context->>'kalshi_market_id')
+                            OR t.market_id = sd.game_id
+                          )
+                   )
+                 ORDER BY sd.created_at DESC
                  LIMIT $1
                 """,
                 limit,
@@ -229,10 +238,19 @@ async def _cached_debates(vertical: str, limit: int) -> list[dict[str, Any]]:
                        consensus_probability, confidence_band_low, confidence_band_high,
                        agreement_rate, approved, recommended_action,
                        game_context
-                  FROM swarm_debates
-                 WHERE created_at > now() - interval '60 minutes'
-                   AND approved = true
-                 ORDER BY created_at DESC
+                  FROM swarm_debates sd
+                 WHERE sd.created_at > now() - interval '60 minutes'
+                   AND sd.approved = true
+                   AND NOT EXISTS (
+                       SELECT 1 FROM trades t
+                        WHERE t.executed_at::date = (now() at time zone 'utc')::date
+                          AND t.market_id IS NOT NULL
+                          AND (
+                            t.market_id = (sd.game_context->>'kalshi_market_id')
+                            OR t.market_id = sd.game_id
+                          )
+                   )
+                 ORDER BY sd.created_at DESC
                  LIMIT $1
                 """,
                 limit,
@@ -244,7 +262,13 @@ async def _cached_debates(vertical: str, limit: int) -> list[dict[str, Any]]:
 
 
 def _resolve_market_id(d: dict[str, Any]) -> str | None:
-    # cached debate path: stash kalshi market id in game_context.market_id when known
+    """Return the canonical Kalshi market id for the candidate, or None.
+
+    We deliberately do NOT fall back to `game_id` — placing trades keyed
+    to a non-exchange identifier would break settlement, position
+    aggregation, and the future live submission path (#4).  Candidates
+    without a real market id are skipped by the cycle.
+    """
     ctx = d.get("game_context") or {}
     if isinstance(ctx, str):
         try:
@@ -254,7 +278,6 @@ def _resolve_market_id(d: dict[str, Any]) -> str | None:
     return (
         d.get("kalshi_market_id")
         or (ctx.get("kalshi_market_id") if isinstance(ctx, dict) else None)
-        or d.get("game_id")
     )
 
 
