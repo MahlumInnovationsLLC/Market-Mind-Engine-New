@@ -1,4 +1,7 @@
+import { useCallback } from "react";
+import { useQueryClient } from "@tanstack/react-query";
 import { useGetRecentTrades, getGetRecentTradesQueryKey } from "@workspace/api-client-react";
+import { useWebSocket } from "@/hooks/use-websocket";
 
 function formatMoney(num: number | null | undefined): string {
   if (num === null || num === undefined) return "—";
@@ -8,20 +11,52 @@ function formatMoney(num: number | null | undefined): string {
 
 export default function RecentTrades() {
   const params = { limit: 25 };
+  const queryClient = useQueryClient();
   const { data, isLoading } = useGetRecentTrades(params, {
-    query: { refetchInterval: 20000, queryKey: getGetRecentTradesQueryKey(params) },
+    query: { refetchInterval: 60_000, queryKey: getGetRecentTradesQueryKey(params) },
   });
+
+  const onPipelineEvent = useCallback(
+    (ev: Record<string, unknown>) => {
+      const t = typeof ev.type === "string" ? ev.type : null;
+      if (
+        t === "candidate_complete" ||
+        t === "cycle_complete" ||
+        t === "trade_settled"
+      ) {
+        queryClient.invalidateQueries({ queryKey: getGetRecentTradesQueryKey(params) });
+      }
+    },
+    [queryClient],
+  );
+  const onSettlementEvent = useCallback(
+    (ev: Record<string, unknown>) => {
+      const t = typeof ev.type === "string" ? ev.type : null;
+      if (t === "trade_settled" || t === "market_settle_complete") {
+        queryClient.invalidateQueries({ queryKey: getGetRecentTradesQueryKey(params) });
+      }
+    },
+    [queryClient],
+  );
+  const pipeline = useWebSocket({ path: "/api/ws/pipeline", onMessage: onPipelineEvent, bufferSize: 50 });
+  useWebSocket({ path: "/api/ws/settlement", onMessage: onSettlementEvent, bufferSize: 50 });
 
   if (isLoading) {
     return <div className="border border-border p-4 animate-pulse h-96 bg-card" />;
   }
 
   const trades = data?.items || [];
+  const live = pipeline.status === "open";
 
   return (
     <div className="border border-border bg-card overflow-hidden flex flex-col h-[500px]">
       <div className="border-b border-border p-2 px-3 bg-muted/20 flex justify-between items-center shrink-0">
-        <h2 className="text-xs uppercase tracking-wider font-bold text-muted-foreground">RECENT_FILLS</h2>
+        <div className="flex items-center gap-2">
+          <span
+            className={`w-1.5 h-1.5 rounded-full ${live ? "bg-success animate-pulse" : "bg-muted-foreground"}`}
+          />
+          <h2 className="text-xs uppercase tracking-wider font-bold text-muted-foreground">RECENT_FILLS</h2>
+        </div>
         <span className="text-xs text-muted-foreground">LAST 25</span>
       </div>
       

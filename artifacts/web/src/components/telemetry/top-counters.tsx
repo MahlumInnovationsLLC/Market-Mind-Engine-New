@@ -1,4 +1,7 @@
+import { useCallback } from "react";
+import { useQueryClient } from "@tanstack/react-query";
 import { useGetDashboardOverview, getGetDashboardOverviewQueryKey } from "@workspace/api-client-react";
+import { useWebSocket } from "@/hooks/use-websocket";
 
 function formatNumber(num: number | null | undefined, isCurrency: boolean = false): string {
   if (num === null || num === undefined) return "—";
@@ -9,9 +12,33 @@ function formatNumber(num: number | null | undefined, isCurrency: boolean = fals
 }
 
 export default function TopCounters() {
+  const queryClient = useQueryClient();
   const { data: overview, isLoading } = useGetDashboardOverview({
-    query: { refetchInterval: 20000, queryKey: getGetDashboardOverviewQueryKey() },
+    query: { refetchInterval: 60_000, queryKey: getGetDashboardOverviewQueryKey() },
   });
+
+  const invalidate = useCallback(() => {
+    queryClient.invalidateQueries({ queryKey: getGetDashboardOverviewQueryKey() });
+  }, [queryClient]);
+
+  const onPipelineEvent = useCallback(
+    (ev: Record<string, unknown>) => {
+      const t = typeof ev.type === "string" ? ev.type : null;
+      if (t === "cycle_complete" || t === "candidate_complete") invalidate();
+    },
+    [invalidate],
+  );
+  const onSettlementEvent = useCallback(
+    (ev: Record<string, unknown>) => {
+      const t = typeof ev.type === "string" ? ev.type : null;
+      if (t === "trade_settled" || t === "market_settle_complete" || t === "cycle_complete") {
+        invalidate();
+      }
+    },
+    [invalidate],
+  );
+  useWebSocket({ path: "/api/ws/pipeline", onMessage: onPipelineEvent, bufferSize: 50 });
+  useWebSocket({ path: "/api/ws/settlement", onMessage: onSettlementEvent, bufferSize: 50 });
 
   if (isLoading) {
     return <div className="border border-border p-4 animate-pulse h-64 bg-card" />;

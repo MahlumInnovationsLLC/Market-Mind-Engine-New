@@ -27,6 +27,7 @@ import { Toaster } from "@/components/ui/toaster";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import NotFound from "@/pages/not-found";
 import Dashboard from "@/pages/dashboard";
+import PipelinePage from "@/pages/pipeline";
 import PendingApproval from "@/pages/pending-approval";
 import SessionExpiredOverlay from "@/components/session-expired-overlay";
 
@@ -225,6 +226,51 @@ function ApprovalGate() {
   return <Dashboard />;
 }
 
+function ProtectedPipeline() {
+  const { data, isLoading, isError, error } = useGetMyAccess({
+    query: {
+      queryKey: getGetMyAccessQueryKey(),
+      retry: (failureCount, err: unknown) => {
+        const status = (err as { status?: number } | null)?.status;
+        if (status === 403) return false;
+        return failureCount < 3;
+      },
+      staleTime: 30_000,
+    },
+  });
+  if (isLoading) {
+    return (
+      <div className="min-h-[100dvh] bg-background text-muted-foreground font-mono flex items-center justify-center text-xs uppercase tracking-widest">
+        AUTH :: verifying access…
+      </div>
+    );
+  }
+  if (isError) {
+    const status = (error as { status?: number } | null)?.status;
+    if (status === 403) return <PendingApproval />;
+    return (
+      <div className="min-h-[100dvh] bg-background text-destructive font-mono flex items-center justify-center text-xs uppercase tracking-widest p-6 text-center">
+        AUTH :: unable to verify access (HTTP {status ?? "?"})
+      </div>
+    );
+  }
+  if (!data?.approved) return <PendingApproval email={data?.email ?? null} />;
+  return <PipelinePage />;
+}
+
+function PipelineRoute() {
+  return (
+    <>
+      <Show when="signed-in">
+        <ProtectedPipeline />
+      </Show>
+      <Show when="signed-out">
+        <Redirect to="/" />
+      </Show>
+    </>
+  );
+}
+
 function ProtectedDashboard() {
   return (
     <>
@@ -341,6 +387,7 @@ function ClerkProviderWithRoutes() {
         <TooltipProvider>
           <Switch>
             <Route path="/" component={HomeRedirect} />
+            <Route path="/pipeline" component={PipelineRoute} />
             <Route path="/sign-in/*?" component={SignInPage} />
             <Route path="/sign-up/*?" component={SignUpPage} />
             <Route component={NotFound} />

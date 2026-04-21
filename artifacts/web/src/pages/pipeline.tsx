@@ -1,0 +1,307 @@
+import { useMemo, useState } from "react";
+import { Link } from "wouter";
+import { useClerk, useUser } from "@clerk/react";
+import { useWebSocket } from "@/hooks/use-websocket";
+import WsStatusIndicator from "@/components/ws-status-indicator";
+
+interface CycleGroup {
+  cycle_id: string | null;
+  vertical: string | null;
+  started_at: string | null;
+  completed_at: string | null;
+  status: "running" | "complete" | "halted";
+  events: Record<string, unknown>[];
+  candidates: Map<string, Record<string, unknown>[]>;
+  trades_placed: number;
+  picks_evaluated: number;
+  errors: string | null;
+}
+
+function pickStr(o: Record<string, unknown>, k: string): string | null {
+  const v = o[k];
+  return typeof v === "string" ? v : null;
+}
+function pickNum(o: Record<string, unknown>, k: string): number | null {
+  const v = o[k];
+  return typeof v === "number" ? v : null;
+}
+
+function groupByCycle(events: Record<string, unknown>[]): CycleGroup[] {
+  const map = new Map<string, CycleGroup>();
+  const order: string[] = [];
+  for (const ev of events) {
+    const cid = pickStr(ev, "cycle_id") ?? "unknown";
+    let g = map.get(cid);
+    if (!g) {
+      g = {
+        cycle_id: cid === "unknown" ? null : cid,
+        vertical: pickStr(ev, "vertical"),
+        started_at: null,
+        completed_at: null,
+        status: "running",
+        events: [],
+        candidates: new Map(),
+        trades_placed: 0,
+        picks_evaluated: 0,
+        errors: null,
+      };
+      map.set(cid, g);
+      order.push(cid);
+    }
+    g.events.push(ev);
+    const t = pickStr(ev, "type");
+    if (t === "cycle_start") {
+      g.started_at = pickStr(ev, "started_at") ?? g.started_at;
+      g.vertical = pickStr(ev, "vertical") ?? g.vertical;
+    } else if (t === "cycle_complete") {
+      g.completed_at = pickStr(ev, "completed_at") ?? g.completed_at;
+      g.status = "complete";
+      g.trades_placed = pickNum(ev, "trades_placed") ?? g.trades_placed;
+      g.picks_evaluated = pickNum(ev, "picks_evaluated") ?? g.picks_evaluated;
+      g.errors = pickStr(ev, "errors");
+    } else if (t === "cycle_halted") {
+      g.status = "halted";
+      g.errors = pickStr(ev, "reason") ?? pickStr(ev, "error");
+    } else {
+      const candId =
+        pickStr(ev, "candidate_id") ?? pickStr(ev, "market_id") ?? null;
+      if (candId) {
+        const arr = g.candidates.get(candId) ?? [];
+        arr.push(ev);
+        g.candidates.set(candId, arr);
+      }
+    }
+  }
+  return order.map((cid) => map.get(cid)!).reverse();
+}
+
+function fmtTime(s: string | null | undefined): string {
+  if (!s) return "—";
+  return new Date(s).toLocaleTimeString([], {
+    hour12: false,
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+  });
+}
+
+function eventTone(t: string | null): string {
+  if (!t) return "text-muted-foreground";
+  if (t.includes("error") || t === "cycle_halted") return "text-destructive";
+  if (t === "cycle_complete") return "text-success";
+  if (t === "cycle_start") return "text-primary";
+  if (t === "candidate_complete") return "text-warning";
+  if (t === "gate") return "text-muted-foreground";
+  return "text-foreground";
+}
+
+function GateRow({ ev }: { ev: Record<string, unknown> }) {
+  const passed = ev["passed"] === true;
+  const gate = pickStr(ev, "gate") ?? pickStr(ev, "name") ?? "gate";
+  const reason = pickStr(ev, "reason") ?? "";
+  return (
+    <div className="flex items-center gap-2 text-[10px] uppercase">
+      <span
+        className={`w-1.5 h-1.5 rounded-full ${passed ? "bg-success" : "bg-destructive"}`}
+      />
+      <span className="text-muted-foreground tracking-wider">{gate}</span>
+      {!passed && reason && (
+        <span className="text-destructive truncate" title={reason}>
+          · {reason}
+        </span>
+      )}
+    </div>
+  );
+}
+
+function CandidateBlock({
+  candidateId,
+  events,
+}: {
+  candidateId: string;
+  events: Record<string, unknown>[];
+}) {
+  const last = events[events.length - 1];
+  const final =
+    pickStr(last, "type") === "candidate_complete"
+      ? pickStr(last, "outcome") ?? pickStr(last, "status") ?? "complete"
+      : "in-progress";
+  const market = pickStr(events[0] ?? {}, "market_id") ?? candidateId;
+  return (
+    <div className="border border-border/60 bg-background/40 p-2 text-[10px]">
+      <div className="flex items-center justify-between mb-1">
+        <span
+          className="font-bold text-foreground truncate max-w-[260px]"
+          title={market}
+        >
+          {market}
+        </span>
+        <span
+          className={`uppercase tracking-wider ${final === "placed" ? "text-success" : final === "in-progress" ? "text-primary" : "text-muted-foreground"}`}
+        >
+          {final}
+        </span>
+      </div>
+      <div className="space-y-0.5">
+        {events.map((ev, i) => {
+          const t = pickStr(ev, "type");
+          if (t === "gate") return <GateRow key={i} ev={ev} />;
+          return (
+            <div key={i} className={`text-[10px] ${eventTone(t)}`}>
+              <span className="uppercase tracking-wider">{t ?? "event"}</span>
+              {pickStr(ev, "reason") && (
+                <span className="text-muted-foreground"> · {pickStr(ev, "reason")}</span>
+              )}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function CycleCard({ group }: { group: CycleGroup }) {
+  const [open, setOpen] = useState(group.status === "running");
+  const candidates = Array.from(group.candidates.entries());
+  const statusColor =
+    group.status === "complete"
+      ? "text-success"
+      : group.status === "halted"
+        ? "text-destructive"
+        : "text-primary animate-pulse";
+  return (
+    <div className="border border-border bg-card">
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        className="w-full text-left p-3 flex items-center justify-between hover:bg-muted/20"
+        data-testid="cycle-toggle"
+      >
+        <div className="flex items-center gap-3 text-xs">
+          <span className={`uppercase tracking-widest ${statusColor}`}>
+            {group.status}
+          </span>
+          <span className="text-foreground font-bold uppercase">
+            {group.vertical ?? "—"}
+          </span>
+          <span className="text-muted-foreground">
+            {fmtTime(group.started_at)}
+            {group.completed_at ? ` → ${fmtTime(group.completed_at)}` : ""}
+          </span>
+        </div>
+        <div className="text-[10px] uppercase tracking-widest text-muted-foreground flex gap-3">
+          <span>EV {candidates.length}</span>
+          <span>PLACED {group.trades_placed}</span>
+          <span>{open ? "▴" : "▾"}</span>
+        </div>
+      </button>
+      {open && (
+        <div className="border-t border-border p-3 space-y-2">
+          {group.errors && (
+            <div className="text-[10px] uppercase text-destructive">
+              ERR · {group.errors}
+            </div>
+          )}
+          {candidates.length === 0 ? (
+            <div className="text-[10px] text-muted-foreground uppercase tracking-widest">
+              waiting for events…
+            </div>
+          ) : (
+            candidates.map(([cid, evs]) => (
+              <CandidateBlock key={cid} candidateId={cid} events={evs} />
+            ))
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+export default function PipelinePage() {
+  const { user } = useUser();
+  const { signOut } = useClerk();
+  const ws = useWebSocket({ path: "/api/ws/pipeline", bufferSize: 500 });
+  const groups = useMemo(() => groupByCycle(ws.events), [ws.events]);
+  const operatorLabel =
+    user?.primaryEmailAddress?.emailAddress ?? user?.username ?? user?.id ?? "—";
+
+  return (
+    <div className="min-h-[100dvh] bg-background text-foreground p-4 md:p-6 font-mono">
+      <header className="mb-6 flex flex-col md:flex-row md:items-end justify-between gap-4 border-b border-border pb-4">
+        <div>
+          <h1 className="text-xl md:text-2xl font-bold tracking-tight text-primary uppercase">
+            AXIOM_PREDICT :: PIPELINE_MONITOR
+          </h1>
+          <p className="text-muted-foreground text-xs uppercase tracking-widest mt-1">
+            Live cycle stream · gates · candidate decisions
+          </p>
+        </div>
+        <div className="text-xs text-muted-foreground flex flex-wrap items-center gap-4">
+          <WsStatusIndicator
+            status={ws.status}
+            reconnectIn={ws.reconnectIn}
+            closeCode={ws.closeCode}
+            label="WS_OPEN"
+          />
+          <Link
+            href="/"
+            className="border border-border px-3 py-1 uppercase tracking-widest text-[10px] text-muted-foreground hover:text-primary hover:border-primary"
+            data-testid="link-dashboard"
+          >
+            ← Dashboard
+          </Link>
+          <div className="flex items-center gap-2">
+            <span className="uppercase tracking-widest">OP</span>
+            <span className="text-foreground truncate max-w-[200px]">
+              {operatorLabel}
+            </span>
+          </div>
+          <button
+            type="button"
+            onClick={() => signOut({ redirectUrl: import.meta.env.BASE_URL })}
+            className="border border-border px-3 py-1 uppercase tracking-widest text-[10px] text-muted-foreground hover:text-destructive hover:border-destructive"
+            data-testid="button-sign-out"
+          >
+            Sign out
+          </button>
+        </div>
+      </header>
+
+      <div className="flex items-center justify-between mb-3 text-[10px] uppercase tracking-widest text-muted-foreground">
+        <span>BUFFERED_EVENTS :: {ws.events.length}</span>
+        <div className="flex gap-2">
+          <button
+            type="button"
+            onClick={ws.reconnectNow}
+            className="border border-border px-2 py-1 hover:text-primary hover:border-primary"
+            data-testid="button-reconnect"
+          >
+            Reconnect
+          </button>
+          <button
+            type="button"
+            onClick={ws.clear}
+            className="border border-border px-2 py-1 hover:text-primary hover:border-primary"
+            data-testid="button-clear"
+          >
+            Clear
+          </button>
+        </div>
+      </div>
+
+      <main className="space-y-3">
+        {groups.length === 0 ? (
+          <div className="border border-border bg-card p-8 text-center text-muted-foreground text-xs uppercase tracking-widest">
+            {ws.status === "open"
+              ? "Waiting for the next cycle event…"
+              : "Stream not connected."}
+          </div>
+        ) : (
+          groups.map((g, i) => (
+            <CycleCard key={`${g.cycle_id ?? "x"}-${i}`} group={g} />
+          ))
+        )}
+      </main>
+    </div>
+  );
+}

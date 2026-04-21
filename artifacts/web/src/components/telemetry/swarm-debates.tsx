@@ -1,4 +1,7 @@
-import { useGetRecentDebates } from "@workspace/api-client-react";
+import { useCallback } from "react";
+import { useQueryClient } from "@tanstack/react-query";
+import { useGetRecentDebates, getGetRecentDebatesQueryKey } from "@workspace/api-client-react";
+import { useWebSocket } from "@/hooks/use-websocket";
 
 function fmtPct(n: number | null | undefined, digits = 0): string {
   if (n === null || n === undefined) return "—";
@@ -26,20 +29,45 @@ function fmtTime(s: string | null | undefined): string {
 }
 
 export default function SwarmDebates() {
-  const { data, isLoading } = useGetRecentDebates({ limit: 10 });
+  const params = { limit: 10 };
+  const queryClient = useQueryClient();
+  const { data, isLoading } = useGetRecentDebates(params, {
+    query: {
+      refetchInterval: 60_000,
+      queryKey: getGetRecentDebatesQueryKey(params),
+    },
+  });
+
+  const onLlmEvent = useCallback(
+    (ev: Record<string, unknown>) => {
+      const t = typeof ev.type === "string" ? ev.type : null;
+      // Refresh on debate completion / gatekeeper verdict events.
+      if (t === "debate_complete" || t === "gatekeeper_verdict" || t === "moderator_consensus") {
+        queryClient.invalidateQueries({ queryKey: getGetRecentDebatesQueryKey(params) });
+      }
+    },
+    [queryClient],
+  );
+  const llm = useWebSocket({ path: "/api/ws/llm-logs", onMessage: onLlmEvent, bufferSize: 50 });
 
   if (isLoading) {
     return <div className="border border-border p-4 animate-pulse h-72 bg-card" />;
   }
 
   const items = data?.items ?? [];
+  const live = llm.status === "open";
 
   return (
     <div className="border border-border bg-card flex flex-col">
       <div className="border-b border-border p-2 px-3 bg-muted/20 flex justify-between items-center shrink-0">
-        <h2 className="text-xs uppercase tracking-wider font-bold text-muted-foreground">
-          SWARM_DEBATES
-        </h2>
+        <div className="flex items-center gap-2">
+          <span
+            className={`w-1.5 h-1.5 rounded-full ${live ? "bg-success animate-pulse" : "bg-muted-foreground"}`}
+          />
+          <h2 className="text-xs uppercase tracking-wider font-bold text-muted-foreground">
+            SWARM_DEBATES
+          </h2>
+        </div>
         <span className="text-xs text-muted-foreground">CONSENSUS_VERDICTS</span>
       </div>
       <div className="overflow-auto divide-y divide-border/50">

@@ -279,3 +279,50 @@ async def require_approved_user(
             detail="account pending operator approval",
         )
     return user
+
+
+async def ws_authenticate(websocket) -> "AuthedUser | None":
+    """Shared WS auth helper: accept the upgrade first, then verify the
+    Clerk JWT (passed as `?token=`) and confirm operator approval.
+
+    Accepting before close ensures the browser surfaces the custom 4401
+    close code instead of an opaque 1006 from a denied handshake.
+
+    Returns the authenticated user on success.  On failure, sends a
+    structured error frame, closes with 4401, and returns ``None``.
+    Callers must `return` immediately when ``None`` is returned.
+
+    In dev mode (no auth configured), the socket is accepted without a
+    user so existing local workflows continue to work.
+    """
+    await websocket.accept()
+    if not auth_configured():
+        return None  # type: ignore[return-value]
+    token = websocket.query_params.get("token") or ""
+    if not token:
+        try:
+            await websocket.send_json({"type": "auth_error", "error": "missing token"})
+        except Exception:
+            pass
+        await websocket.close(code=4401)
+        return None
+    try:
+        user = verify_clerk_jwt(token)
+        approved, _ = await check_approval(user)
+        if not approved:
+            try:
+                await websocket.send_json(
+                    {"type": "auth_error", "error": "account pending operator approval"}
+                )
+            except Exception:
+                pass
+            await websocket.close(code=4401)
+            return None
+        return user
+    except Exception as e:
+        try:
+            await websocket.send_json({"type": "auth_error", "error": str(e)[:200]})
+        except Exception:
+            pass
+        await websocket.close(code=4401)
+        return None

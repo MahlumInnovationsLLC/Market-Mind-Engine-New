@@ -412,7 +412,7 @@ async def swarm_debate(
         raise HTTPException(status_code=502, detail=f"swarm error: {e}")
 
 
-@app.websocket("/ws/llm-logs")
+@app.websocket("/api/ws/llm-logs")
 async def ws_llm_logs(ws: WebSocket) -> None:
     """Live stream of swarm events: persona starts/deltas/verdicts,
     moderator/gatekeeper outcomes, and final debate completion.
@@ -421,21 +421,11 @@ async def ws_llm_logs(ws: WebSocket) -> None:
     set Authorization headers on WebSocket upgrades).  When auth is not
     configured (dev mode), the socket is allowed open.
     """
-    token = ws.query_params.get("token")
-    if auth_configured():
-        from .auth import verify_clerk_jwt  # local import to avoid cycle on boot
+    from .auth import ws_authenticate  # local import to avoid cycle on boot
 
-        if not token:
-            await ws.close(code=4401)
-            return
-        try:
-            verify_clerk_jwt(token)
-        except Exception as e:
-            log.info("ws auth failed: %s", e)
-            await ws.close(code=4401)
-            return
-
-    await ws.accept()
+    user = await ws_authenticate(ws)
+    if user is None and auth_configured():
+        return
     q = llm_log_hub.subscribe()
     try:
         while True:
@@ -487,28 +477,18 @@ async def orchestrator_run_cycle(
     }
 
 
-@app.websocket("/ws/pipeline")
+@app.websocket("/api/ws/pipeline")
 async def ws_pipeline(ws: WebSocket) -> None:
     """Live stream of orchestrator pipeline events: cycle_start, gate
     pass/fail, candidate_complete (placed/rejected/place_error),
     cycle_complete.  Auth via Clerk JWT in `?token=` (same contract as
-    `/ws/llm-logs` since browsers can't set Authorization on WS upgrades).
+    `/api/ws/llm-logs` since browsers can't set Authorization on WS upgrades).
     """
-    token = ws.query_params.get("token")
-    if auth_configured():
-        from .auth import verify_clerk_jwt
+    from .auth import ws_authenticate
 
-        if not token:
-            await ws.close(code=4401)
-            return
-        try:
-            verify_clerk_jwt(token)
-        except Exception as e:
-            log.info("ws pipeline auth failed: %s", e)
-            await ws.close(code=4401)
-            return
-
-    await ws.accept()
+    user = await ws_authenticate(ws)
+    if user is None and auth_configured():
+        return
     q = pipeline_event_hub.subscribe()
     try:
         while True:
@@ -580,27 +560,17 @@ async def settlement_settle_market(
     return {k: v for k, v in result.items() if k != "details"}
 
 
-@app.websocket("/ws/settlement")
+@app.websocket("/api/ws/settlement")
 async def ws_settlement(ws: WebSocket) -> None:
     """Live stream of settlement events: cycle_start, market_settle_start,
     trade_settled, market_settle_complete, cycle_complete.  Auth via
-    Clerk JWT in `?token=` (same contract as `/ws/pipeline`).
+    Clerk JWT in `?token=` (same contract as `/api/ws/pipeline`).
     """
-    token = ws.query_params.get("token")
-    if auth_configured():
-        from .auth import verify_clerk_jwt
+    from .auth import ws_authenticate
 
-        if not token:
-            await ws.close(code=4401)
-            return
-        try:
-            verify_clerk_jwt(token)
-        except Exception as e:
-            log.info("ws settlement auth failed: %s", e)
-            await ws.close(code=4401)
-            return
-
-    await ws.accept()
+    user = await ws_authenticate(ws)
+    if user is None and auth_configured():
+        return
     q = settlement_event_hub.subscribe()
     try:
         while True:
@@ -733,7 +703,7 @@ async def kalshi_kill_state(_: object = Depends(require_auth)) -> dict[str, obje
     return kalshi_lifecycle.kill_switch_state()
 
 
-@app.websocket("/ws/kalshi")
+@app.websocket("/api/ws/kalshi")
 async def kalshi_event_stream(websocket: WebSocket):  # pragma: no cover - covered by manual integration
     """Stream the in-process Kalshi event bus to a connected client.
 
@@ -741,19 +711,11 @@ async def kalshi_event_stream(websocket: WebSocket):  # pragma: no cover - cover
     can't set headers on the WS upgrade, so the query parameter is the
     practical path). Verified with the same JWKS used by `require_auth`.
     """
-    token = websocket.query_params.get("token") or ""
-    if token:
-        # Reuse the Clerk verification path. Construct an Authorization header
-        # and call into require_auth directly so we share its JWKS cache.
-        try:
-            await require_auth(authorization=f"Bearer {token}")
-        except Exception:
-            await websocket.close(code=1008)
-            return
-    elif auth_configured():
-        await websocket.close(code=1008)
+    from .auth import ws_authenticate
+
+    user = await ws_authenticate(websocket)
+    if user is None and auth_configured():
         return
-    await websocket.accept()
     q = await kalshi_bus.subscribe()
     try:
         while True:

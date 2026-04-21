@@ -1,3 +1,4 @@
+import { Link } from "wouter";
 import { useClerk, useUser } from "@clerk/react";
 import HealthSnapshot from "@/components/telemetry/health-snapshot";
 import TopCounters from "@/components/telemetry/top-counters";
@@ -6,6 +7,8 @@ import SwarmAnalysts from "@/components/telemetry/swarm-analysts";
 import TradingCycles from "@/components/telemetry/trading-cycles";
 import SwarmDebates from "@/components/telemetry/swarm-debates";
 import ModelInventory from "@/components/telemetry/model-inventory";
+import WsStatusIndicator from "@/components/ws-status-indicator";
+import { useWebSocket } from "@/hooks/use-websocket";
 
 export default function Dashboard() {
   const { user } = useUser();
@@ -16,6 +19,11 @@ export default function Dashboard() {
     user?.id ??
     "—";
 
+  // Lightweight header subscription so the operator sees connection
+  // health at a glance.  The widgets each maintain their own subscription
+  // for cache-invalidation; this one just drives the indicator.
+  const ws = useWebSocket({ path: "/api/ws/pipeline", bufferSize: 5 });
+
   return (
     <div className="min-h-[100dvh] bg-background text-foreground p-4 md:p-6 font-mono selection:bg-primary/30">
       <header className="mb-6 flex flex-col md:flex-row md:items-end justify-between gap-4 border-b border-border pb-4">
@@ -24,10 +32,19 @@ export default function Dashboard() {
           <p className="text-muted-foreground text-xs uppercase tracking-widest mt-1">Live Telemetry & Swarm Monitoring</p>
         </div>
         <div className="text-xs text-muted-foreground flex flex-wrap items-center gap-4">
-          <div className="flex items-center gap-2">
-            <span className="w-2 h-2 rounded-full bg-success animate-pulse" />
-            SYSTEM_ONLINE
-          </div>
+          <WsStatusIndicator
+            status={ws.status}
+            reconnectIn={ws.reconnectIn}
+            closeCode={ws.closeCode}
+            label="LIVE"
+          />
+          <Link
+            href="/pipeline"
+            className="border border-border px-3 py-1 uppercase tracking-widest text-[10px] text-muted-foreground hover:text-primary hover:border-primary"
+            data-testid="link-pipeline"
+          >
+            Pipeline →
+          </Link>
           <div className="flex items-center gap-2">
             <span className="uppercase tracking-widest">OP</span>
             <span className="text-foreground truncate max-w-[200px]" data-testid="text-operator-id">{operatorLabel}</span>
