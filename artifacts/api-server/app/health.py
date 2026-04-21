@@ -287,21 +287,43 @@ def _probe_kill_switch() -> dict:
     )
 
 
+def _coerce_ts(v: Any) -> float | None:
+    if isinstance(v, (int, float)):
+        return float(v)
+    if isinstance(v, str):
+        try:
+            return datetime.fromisoformat(v.replace("Z", "+00:00")).timestamp()
+        except Exception:
+            return None
+    if isinstance(v, datetime):
+        return v.timestamp()
+    return None
+
+
 def _probe_orchestrator() -> dict:
     s = orchestrator_scheduler.status()
     running = bool(s.get("running"))
+    # `last_cycle` is a per-vertical map: {vertical: {completed_at, ...}}.
+    # Pick the most-recent completed_at across all verticals.
     last_cycle_ts: float | None = None
+    last_cycle_iso: str | None = None
+    last_vertical: str | None = None
     last = s.get("last_cycle") or {}
     if isinstance(last, dict):
-        # last_cycle has either iso string or epoch — derive epoch.
-        ca = last.get("completed_at")
-        if isinstance(ca, (int, float)):
-            last_cycle_ts = float(ca)
-        elif isinstance(ca, str):
-            try:
-                last_cycle_ts = datetime.fromisoformat(ca.replace("Z", "+00:00")).timestamp()
-            except Exception:
-                last_cycle_ts = None
+        for vertical, entry in last.items():
+            if not isinstance(entry, dict):
+                continue
+            ts = _coerce_ts(entry.get("completed_at"))
+            if ts is None:
+                continue
+            if last_cycle_ts is None or ts > last_cycle_ts:
+                last_cycle_ts = ts
+                last_vertical = vertical
+                ca = entry.get("completed_at")
+                last_cycle_iso = (
+                    ca if isinstance(ca, str)
+                    else datetime.fromtimestamp(ts, tz=timezone.utc).isoformat()
+                )
     age = (time.time() - last_cycle_ts) if last_cycle_ts else None
     settings = get_settings()
     enabled = bool(s.get("enabled"))
@@ -311,14 +333,23 @@ def _probe_orchestrator() -> dict:
     elif not running:
         status = "down"
         detail = "scheduler not running"
-    elif age is not None and age > 5 * settings.cycle_interval_seconds:
+    elif age is None:
         status = "degraded"
-        detail = f"last cycle {round(age,1)}s ago (cadence={settings.cycle_interval_seconds}s)"
+        detail = (
+            f"running but no cycles completed yet "
+            f"(cadence={settings.cycle_interval_seconds}s)"
+        )
+    elif age > 5 * settings.cycle_interval_seconds:
+        status = "degraded"
+        detail = (
+            f"last cycle {last_cycle_iso} ({round(age,1)}s ago) "
+            f"on {last_vertical} — cadence={settings.cycle_interval_seconds}s"
+        )
     else:
         status = "ok"
         detail = (
-            f"last cycle {round(age,1) if age else '?'}s ago "
-            f"(cadence={settings.cycle_interval_seconds}s)"
+            f"last cycle {last_cycle_iso} ({round(age,1)}s ago) "
+            f"on {last_vertical} — cadence={settings.cycle_interval_seconds}s"
         )
     return _card(
         key="orchestrator",
