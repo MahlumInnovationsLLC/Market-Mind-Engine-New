@@ -378,6 +378,10 @@ async def run_cycle(vertical: str = "sports") -> CycleResult:
                     f"home_win_prob={pred['home_win_prob']} "
                     f"edge={pred['edge']} confidence={pred['confidence']}"
                 ),
+                # Persisted into swarm_debates.game_context so settlement
+                # can join debates -> markets -> persona Brier updates.
+                "kalshi_market_id": pred.get("kalshi_market_id"),
+                "kalshi_price": pred.get("kalshi_price"),
             })
             result.fresh_debates += 1
             candidates.append({

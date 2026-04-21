@@ -507,12 +507,18 @@ async def _persist_debate(
             },
         }
     )
+    # Include any optional linkage keys passed by the orchestrator so
+    # downstream systems (settlement, dashboards) can join debates back
+    # to the originating market without a fragile game_id heuristic.
     game_context_json = json.dumps(
         {
             "side": candidate.get("side"),
             "current_price": candidate.get("current_price"),
             "context": candidate.get("context"),
             "aggression_mode": aggression_mode,
+            "kalshi_market_id": candidate.get("kalshi_market_id"),
+            "kalshi_price": candidate.get("kalshi_price"),
+            "vertical": candidate.get("vertical"),
         }
     )
 

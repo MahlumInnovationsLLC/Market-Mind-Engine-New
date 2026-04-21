@@ -277,7 +277,10 @@ async def _update_personas_for_market(market_id: str, outcome_yes: int) -> int:
         for v in verdicts:
             if not isinstance(v, dict):
                 continue
-            persona_id = v.get("analyst_id")
+            # Live debates (swarm/runner.py) write the key as "persona";
+            # legacy/cold-storage debates use "analyst_id".  Accept both
+            # so settlement updates work across the entire history.
+            persona_id = v.get("persona") or v.get("analyst_id")
             prob = v.get("probability")
             conf = v.get("confidence")
             if not persona_id or prob is None:
