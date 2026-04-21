@@ -12,6 +12,7 @@ from typing import Any
 
 from ..config import get_settings
 from .pipeline import run_cycle
+from .retrain import run_retrain_cycle
 
 
 log = logging.getLogger(__name__)
@@ -63,6 +64,25 @@ class _SettlementScheduler:
         while not self._stop.is_set():
             try:
                 cr = await run_cycle()
+                # After settling fresh outcomes, drain the online-learning
+                # buffer and refit any vertical that crossed the warning
+                # threshold (or accumulated enough fresh signal).  Run
+                # in the same loop so we share the backoff/cadence logic
+                # and don't need a second long-lived task.
+                try:
+                    rr = await run_retrain_cycle()
+                    retrain_summary = {
+                        "started_at": rr.started_at,
+                        "completed_at": rr.completed_at,
+                        "duration_seconds": rr.duration_seconds,
+                        "verticals_examined": rr.verticals_examined,
+                        "verticals_retrained": rr.verticals_retrained,
+                        "rows_processed": rr.rows_processed,
+                        "errors": rr.errors,
+                    }
+                except Exception as e:
+                    log.exception("retrain cycle failed: %s", e)
+                    retrain_summary = {"error": f"{type(e).__name__}: {e}"}
                 self._last = {
                     "started_at": cr.started_at,
                     "completed_at": cr.completed_at,
@@ -73,6 +93,7 @@ class _SettlementScheduler:
                     "persona_metrics_updated": cr.persona_metrics_updated,
                     "alerts_raised": cr.alerts_raised,
                     "errors": cr.errors,
+                    "retrain": retrain_summary,
                 }
                 backoff = 0.0
             except asyncio.CancelledError:
