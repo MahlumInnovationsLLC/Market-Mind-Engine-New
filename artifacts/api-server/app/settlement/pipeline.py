@@ -66,22 +66,25 @@ def _to_unit_price(price: float | None) -> float | None:
 def _trade_pnl(side: str | None, quantity: float | None, price: float | None,
                outcome_yes: int) -> float:
     """Realized PnL on a single fill given binary outcome (1=YES wins, 0=NO wins).
-    YES position pays $1 if YES wins, $0 otherwise.
-    NO  position pays $1 if NO  wins, $0 otherwise.
-    Cost basis is `quantity * price` (in unit dollars)."""
+
+    `price` is always the YES-side unit price as stored by `orchestrator/paper.py`
+    (`price = ctx.current_price`).  Each contract pays $1 if its side wins.
+
+    NO contract cost basis is therefore `q * (1 - yes_price)`, NOT `q * yes_price`.
+    """
     if quantity is None or price is None:
         return 0.0
     q = float(quantity)
-    p = _to_unit_price(price) or 0.0
+    yes_p = _to_unit_price(price) or 0.0
     side_lc = (side or "").lower()
     if side_lc in ("yes", "y", "buy"):
+        cost = q * yes_p
         payout = q * (1.0 if outcome_yes == 1 else 0.0)
     elif side_lc in ("no", "n", "sell"):
+        cost = q * (1.0 - yes_p)
         payout = q * (1.0 if outcome_yes == 0 else 0.0)
     else:
-        # Unknown side encoding — be conservative, no PnL.
         return 0.0
-    cost = q * p
     return round(payout - cost, 6)
 
 
@@ -217,18 +220,23 @@ async def _close_position(market_id: str, outcome_yes: int) -> None:
 
 
 async def _update_personas_for_market(market_id: str, outcome_yes: int) -> int:
-    """For every recent swarm_debate associated with this market, update
-    `swarm_analyst_metrics` (running Brier + accuracy) per persona using
-    Bayesian online update: new_brier = (n*old_brier + (p - y)^2) / (n+1).
-    Returns the number of (persona, league, market_type) rows touched.
+    """For every recent swarm_debate associated with this market that has
+    NOT already been settled, update `swarm_analyst_metrics` (running
+    Brier + accuracy) per persona using a Bayesian online update:
+    new_brier = (n*old_brier + (p - y)^2) / (n+1).
+
+    Per-debate idempotency: the `swarm_debates.outcome IS NULL` filter
+    guarantees re-running settle_market on the same market never
+    double-counts persona predictions.  Returns the number of
+    (persona, league, market_type) rows touched.
     """
     try:
         debates = await db.fetch(
             """
             SELECT id, league, market_type, analyst_verdicts, outcome
               FROM swarm_debates
-             WHERE (game_context->>'kalshi_market_id') = $1
-                OR game_id = $1
+             WHERE ((game_context->>'kalshi_market_id') = $1 OR game_id = $1)
+               AND outcome IS NULL
              ORDER BY created_at DESC
              LIMIT 5
             """,
@@ -249,14 +257,20 @@ async def _update_personas_for_market(market_id: str, outcome_yes: int) -> int:
                 continue
         if not isinstance(verdicts, list):
             continue
-        # Stamp the debate outcome itself.
+        # Atomic claim: stamp outcome only if still NULL.  If 0 rows
+        # were updated, another worker already processed this debate
+        # and we must NOT update persona metrics for it again.
         try:
-            await db.execute(
+            stamped = await db.execute(
                 "UPDATE swarm_debates SET outcome=$2 WHERE id=$1 AND outcome IS NULL",
                 d["id"], outcome_label,
             )
+            # asyncpg returns "UPDATE n" — if n==0, skip persona updates.
+            if isinstance(stamped, str) and stamped.endswith(" 0"):
+                continue
         except Exception as e:
             log.debug("debate outcome stamp failed: %s", e)
+            continue
 
         league = d["league"] or "ALL"
         mtype = d["market_type"] or "moneyline"
@@ -432,26 +446,44 @@ BRIER_DRIFT_CRIT = 0.32
 
 
 async def _calibration_and_drift(vertical: str | None) -> int:
-    """Compute rolling Brier on settled trades for this vertical, append
-    a `calibration_snapshots` row, and raise a `model_health_alerts`
+    """Compute rolling Brier on settled trades for this vertical against
+    each trade's *true market outcome* (sourced from `trade_postmortems.actual_outcome`,
+    which is the YES/NO resolution we just wrote — NOT trade profitability),
+    append a `calibration_snapshots` row, and raise a `model_health_alerts`
     row if the Brier exceeds drift thresholds.  Returns # alerts raised.
+
+    For YES-side trades the prediction probability is `model_prob` directly.
+    For NO-side  trades it is `1 - model_prob`, since `model_prob` always
+    represents P(YES) per the gatekeeper convention.
     """
     if not vertical:
         return 0
     try:
         agg = await db.fetchrow(
             """
-            SELECT
-              count(*)::int AS n,
-              avg((coalesce(model_prob, 0.5) - (CASE WHEN pnl > 0 THEN 1 ELSE 0 END))::float
-                  * (coalesce(model_prob, 0.5) - (CASE WHEN pnl > 0 THEN 1 ELSE 0 END))::float)::float
-                  AS brier,
-              avg(abs(coalesce(model_prob, 0.5) - (CASE WHEN pnl > 0 THEN 1 ELSE 0 END)))::float AS mae
-              FROM trades
-             WHERE vertical = $1
-               AND settled_at IS NOT NULL
-               AND settled_at > now() - interval '24 hours'
-               AND model_prob IS NOT NULL
+            WITH settled AS (
+              SELECT
+                t.model_prob::float                 AS p_yes,
+                lower(coalesce(t.side, ''))         AS side_lc,
+                pm.actual_outcome::int              AS y
+                FROM trades t
+                JOIN trade_postmortems pm
+                  ON pm.trade_id = coalesce(t.trade_id, t.id::text)
+               WHERE t.vertical = $1
+                 AND t.settled_at IS NOT NULL
+                 AND t.settled_at > now() - interval '24 hours'
+                 AND t.model_prob IS NOT NULL
+                 AND pm.actual_outcome IS NOT NULL
+            ), aligned AS (
+              SELECT
+                CASE WHEN side_lc IN ('no','n','sell') THEN 1.0 - p_yes ELSE p_yes END AS p_side,
+                CASE WHEN side_lc IN ('no','n','sell') THEN 1 - y       ELSE y       END AS y_side
+                FROM settled
+            )
+            SELECT count(*)::int                                 AS n,
+                   avg((p_side - y_side) * (p_side - y_side))::float AS brier,
+                   avg(abs(p_side - y_side))::float                  AS mae
+              FROM aligned
             """,
             vertical,
         )
@@ -570,6 +602,16 @@ async def settle_market(
 
     await _close_position(market_id, outcome_yes)
     persona_touched = await _update_personas_for_market(market_id, outcome_yes)
+    # If we updated any persona metrics, refresh the in-memory weight
+    # cache so the very next swarm debate reflects the new Brier scores.
+    # Without this the gatekeeper would keep using startup-time weights
+    # until the process restarts — i.e. no live online learning.
+    if persona_touched > 0:
+        try:
+            from ..swarm import refresh_persona_weights
+            await refresh_persona_weights()
+        except Exception as e:
+            log.warning("persona weight cache refresh failed: %s", e)
     alerts_raised = 0
     for v in verticals:
         await _accumulate_daily_pnl(v)
