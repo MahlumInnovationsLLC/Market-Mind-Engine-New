@@ -24,6 +24,7 @@ import type {
   GetRecentTradesParams,
   HealthStatus,
   ModelsInventory,
+  MyAccess,
   OrchestratorCycleResult,
   OrchestratorRunCycleRequest,
   OrchestratorStatus,
@@ -43,6 +44,79 @@ type AwaitedInput<T> = PromiseLike<T> | T;
 type Awaited<O> = O extends AwaitedInput<infer T> ? T : never;
 
 type SecondParameter<T extends (...args: never) => unknown> = Parameters<T>[1];
+
+/**
+ * @summary Whether the signed-in user is approved for the operator console
+ */
+export const getGetMyAccessUrl = () => {
+  return `/api/me/access`;
+};
+
+export const getMyAccess = async (options?: RequestInit): Promise<MyAccess> => {
+  return customFetch<MyAccess>(getGetMyAccessUrl(), {
+    ...options,
+    method: "GET",
+  });
+};
+
+export const getGetMyAccessQueryKey = () => {
+  return [`/api/me/access`] as const;
+};
+
+export const getGetMyAccessQueryOptions = <
+  TData = Awaited<ReturnType<typeof getMyAccess>>,
+  TError = ErrorType<unknown>,
+>(options?: {
+  query?: UseQueryOptions<
+    Awaited<ReturnType<typeof getMyAccess>>,
+    TError,
+    TData
+  >;
+  request?: SecondParameter<typeof customFetch>;
+}) => {
+  const { query: queryOptions, request: requestOptions } = options ?? {};
+
+  const queryKey = queryOptions?.queryKey ?? getGetMyAccessQueryKey();
+
+  const queryFn: QueryFunction<Awaited<ReturnType<typeof getMyAccess>>> = ({
+    signal,
+  }) => getMyAccess({ signal, ...requestOptions });
+
+  return { queryKey, queryFn, ...queryOptions } as UseQueryOptions<
+    Awaited<ReturnType<typeof getMyAccess>>,
+    TError,
+    TData
+  > & { queryKey: QueryKey };
+};
+
+export type GetMyAccessQueryResult = NonNullable<
+  Awaited<ReturnType<typeof getMyAccess>>
+>;
+export type GetMyAccessQueryError = ErrorType<unknown>;
+
+/**
+ * @summary Whether the signed-in user is approved for the operator console
+ */
+
+export function useGetMyAccess<
+  TData = Awaited<ReturnType<typeof getMyAccess>>,
+  TError = ErrorType<unknown>,
+>(options?: {
+  query?: UseQueryOptions<
+    Awaited<ReturnType<typeof getMyAccess>>,
+    TError,
+    TData
+  >;
+  request?: SecondParameter<typeof customFetch>;
+}): UseQueryResult<TData, TError> & { queryKey: QueryKey } {
+  const queryOptions = getGetMyAccessQueryOptions(options);
+
+  const query = useQuery(queryOptions) as UseQueryResult<TData, TError> & {
+    queryKey: QueryKey;
+  };
+
+  return { ...query, queryKey: queryOptions.queryKey };
+}
 
 /**
  * @summary Liveness probe

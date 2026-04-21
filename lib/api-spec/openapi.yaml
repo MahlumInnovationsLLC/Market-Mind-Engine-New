@@ -10,6 +10,8 @@ servers:
 tags:
   - name: health
     description: Health and readiness
+  - name: auth
+    description: Authenticated-user metadata
   - name: dashboard
     description: Operator dashboard read-models
   - name: models
@@ -19,6 +21,18 @@ tags:
   - name: orchestrator
     description: Trading cycle scheduler + 12-gate risk pipeline
 paths:
+  /me/access:
+    get:
+      operationId: getMyAccess
+      tags: [auth]
+      summary: Whether the signed-in user is approved for the operator console
+      responses:
+        "200":
+          description: Approval status
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/MyAccess" }
+
   /healthz:
     get:
       operationId: healthCheck
@@ -180,6 +194,14 @@ components:
       properties:
         status: { type: string }
       required: [status]
+
+    MyAccess:
+      type: object
+      properties:
+        approved: { type: boolean }
+        email: { type: string, nullable: true }
+        user_id: { type: string }
+      required: [approved, user_id]
 
     SecretsPresent:
       type: object

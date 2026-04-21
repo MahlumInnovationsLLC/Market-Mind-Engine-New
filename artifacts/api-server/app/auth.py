@@ -1,4 +1,4 @@
-"""Clerk session JWT verification for the operator console API.
+"""Clerk session JWT verification + operator approval gate.
 
 Every protected endpoint depends on `require_auth`, which:
   * Requires an `Authorization: Bearer <token>` header
@@ -7,21 +7,31 @@ Every protected endpoint depends on `require_auth`, which:
     `CLERK_PUBLISHABLE_KEY`
   * Returns an `AuthedUser` with the Clerk user id (`sub` claim)
 
+Telemetry endpoints additionally depend on `require_approved_user`,
+which gates access on an operator-controlled allow-list:
+  * `OPERATOR_ALLOWED_EMAILS` — comma-separated env var of approved
+    primary email addresses (case-insensitive), and/or
+  * Clerk user metadata: `public_metadata.approved == true` (or the
+    same flag in `private_metadata`), settable from the Clerk dashboard.
+
 There is no fallback path — no shared bearer token, no same-origin
 shortcut, no referer check.  Either the request carries a valid Clerk
-session JWT or it gets a 401.
+session JWT *and* the user is on the allow-list, or it gets 401/403.
 """
 from __future__ import annotations
 
+import asyncio
 import base64
 import logging
 import os
+import time
 from dataclasses import dataclass
 from functools import lru_cache
 from typing import Any
 
+import httpx
 import jwt
-from fastapi import Header, HTTPException
+from fastapi import Depends, Header, HTTPException
 from jwt import PyJWKClient
 
 log = logging.getLogger("axiom.auth")
@@ -145,3 +155,127 @@ async def require_auth(
         raise HTTPException(status_code=401, detail="missing bearer token")
     token = authorization.split(" ", 1)[1].strip()
     return verify_clerk_jwt(token)
+
+
+# ---------------------------------------------------------------------------
+# Operator approval gate
+# ---------------------------------------------------------------------------
+
+
+def _allowed_emails() -> set[str]:
+    raw = os.environ.get("OPERATOR_ALLOWED_EMAILS", "")
+    return {e.strip().lower() for e in raw.split(",") if e.strip()}
+
+
+def _email_from_claims(claims: dict[str, Any]) -> str | None:
+    # Clerk session tokens may include email when the JWT template is
+    # configured for it; fall back through a few common shapes.
+    for key in ("email", "primary_email", "email_address", "primary_email_address"):
+        v = claims.get(key)
+        if isinstance(v, str) and v.strip():
+            return v.strip().lower()
+    return None
+
+
+def _metadata_approved(meta: Any) -> bool:
+    if not isinstance(meta, dict):
+        return False
+    v = meta.get("approved")
+    if isinstance(v, bool):
+        return v
+    if isinstance(v, str):
+        return v.strip().lower() in ("1", "true", "yes", "y", "on")
+    return False
+
+
+# Per-user cache of the Clerk Backend API user object.
+_USER_CACHE_TTL = 60.0
+_user_cache: dict[str, tuple[float, dict[str, Any]]] = {}
+_user_cache_lock = asyncio.Lock()
+
+
+async def _fetch_clerk_user(user_id: str) -> dict[str, Any]:
+    """Look up a Clerk user via the Backend API. Returns {} on any failure."""
+    secret = os.environ.get("CLERK_SECRET_KEY")
+    if not secret:
+        return {}
+    now = time.time()
+    cached = _user_cache.get(user_id)
+    if cached and now - cached[0] < _USER_CACHE_TTL:
+        return cached[1]
+    async with _user_cache_lock:
+        cached = _user_cache.get(user_id)
+        if cached and now - cached[0] < _USER_CACHE_TTL:
+            return cached[1]
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                r = await client.get(
+                    f"https://api.clerk.com/v1/users/{user_id}",
+                    headers={"Authorization": f"Bearer {secret}"},
+                )
+            if r.status_code != 200:
+                log.warning("clerk user fetch %s: %s", r.status_code, r.text[:200])
+                return {}
+            data = r.json()
+        except Exception as e:
+            log.warning("clerk user fetch failed: %s", e)
+            return {}
+        if isinstance(data, dict):
+            _user_cache[user_id] = (now, data)
+            return data
+        return {}
+
+
+def _email_from_clerk_user(data: dict[str, Any]) -> str | None:
+    primary_id = data.get("primary_email_address_id")
+    addresses = data.get("email_addresses") or []
+    if isinstance(addresses, list):
+        for entry in addresses:
+            if isinstance(entry, dict) and entry.get("id") == primary_id:
+                v = entry.get("email_address")
+                if isinstance(v, str) and v.strip():
+                    return v.strip().lower()
+        for entry in addresses:
+            if isinstance(entry, dict):
+                v = entry.get("email_address")
+                if isinstance(v, str) and v.strip():
+                    return v.strip().lower()
+    return None
+
+
+async def check_approval(user: AuthedUser) -> tuple[bool, str | None]:
+    """Return (approved, primary_email_lower) for the authenticated user."""
+    email = _email_from_claims(user.claims)
+    allowed = _allowed_emails()
+
+    # Fast paths from the JWT claims first to avoid a Clerk API call.
+    if email and email in allowed:
+        return True, email
+    if _metadata_approved(user.claims.get("public_metadata")) or _metadata_approved(
+        user.claims.get("private_metadata")
+    ):
+        return True, email
+
+    # Fall back to the Clerk Backend API (cached) to fetch email + metadata.
+    data = await _fetch_clerk_user(user.user_id)
+    if not email:
+        email = _email_from_clerk_user(data)
+    if email and email in allowed:
+        return True, email
+    if _metadata_approved(data.get("public_metadata")) or _metadata_approved(
+        data.get("private_metadata")
+    ):
+        return True, email
+    return False, email
+
+
+async def require_approved_user(
+    user: AuthedUser = Depends(require_auth),
+) -> AuthedUser:
+    approved, _ = await check_approval(user)
+    if not approved:
+        raise HTTPException(
+            status_code=403,
+            detail="account pending operator approval",
+        )
+    return user

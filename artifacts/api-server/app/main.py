@@ -17,7 +17,13 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 from . import dashboard, db, storage
-from .auth import auth_configured, require_auth
+from .auth import (
+    AuthedUser,
+    auth_configured,
+    check_approval,
+    require_approved_user,
+    require_auth,
+)
 from .config import get_settings
 from .feeds import registry as feed_registry, scheduler as feed_scheduler
 from .feeds.odds_api import register_odds_feeds
@@ -120,8 +126,24 @@ async def healthz() -> dict[str, str]:
     return {"status": "ok"}
 
 
+@app.get("/api/me/access")
+async def me_access(user: AuthedUser = Depends(require_auth)) -> dict[str, object]:
+    """Report whether the signed-in user is on the operator allow-list.
+
+    Authenticated but unapproved users hit this endpoint to detect that
+    they should see the "awaiting approval" screen instead of the
+    dashboard (which would otherwise just throw 403s).
+    """
+    approved, email = await check_approval(user)
+    return {
+        "approved": approved,
+        "email": email,
+        "user_id": user.user_id,
+    }
+
+
 @app.get("/api/health")
-async def health_full(_: object = Depends(require_auth)) -> dict[str, object]:
+async def health_full(_: object = Depends(require_approved_user)) -> dict[str, object]:
     """Full readiness check across DB and Storage."""
     settings = get_settings()
     out: dict[str, object] = {
@@ -212,13 +234,13 @@ async def feeds_status(_: object = Depends(require_auth)) -> dict[str, object]:
 
 
 @app.get("/api/dashboard/overview")
-async def dashboard_overview(_: object = Depends(require_auth)) -> dict[str, object]:
+async def dashboard_overview(_: object = Depends(require_approved_user)) -> dict[str, object]:
     return await dashboard.get_overview()
 
 
 @app.get("/api/dashboard/recent-trades")
 async def dashboard_recent_trades(
-    limit: int = 25, _: object = Depends(require_auth)
+    limit: int = 25, _: object = Depends(require_approved_user)
 ) -> dict[str, object]:
     limit = max(1, min(200, int(limit)))
     return {"items": await dashboard.get_recent_trades(limit)}
@@ -226,14 +248,14 @@ async def dashboard_recent_trades(
 
 @app.get("/api/dashboard/swarm-personas")
 async def dashboard_swarm_personas(
-    _: object = Depends(require_auth),
+    _: object = Depends(require_approved_user),
 ) -> dict[str, object]:
     return {"items": await dashboard.get_swarm_personas()}
 
 
 @app.get("/api/dashboard/recent-cycles")
 async def dashboard_recent_cycles(
-    limit: int = 10, _: object = Depends(require_auth)
+    limit: int = 10, _: object = Depends(require_approved_user)
 ) -> dict[str, object]:
     limit = max(1, min(100, int(limit)))
     return {"items": await dashboard.get_recent_cycles(limit)}
@@ -241,7 +263,7 @@ async def dashboard_recent_cycles(
 
 @app.get("/api/dashboard/recent-debates")
 async def dashboard_recent_debates(
-    limit: int = 10, _: object = Depends(require_auth)
+    limit: int = 10, _: object = Depends(require_approved_user)
 ) -> dict[str, object]:
     limit = max(1, min(100, int(limit)))
     return {"items": await dashboard.get_recent_swarm_debates(limit)}
@@ -409,7 +431,7 @@ async def storage_list(
     prefix: str = "",
     limit: int = 50,
     offset: int = 0,
-    _: object = Depends(require_auth),
+    _: object = Depends(require_approved_user),
 ) -> dict[str, object]:
     try:
         entries = await storage.list_path(prefix, limit=limit, offset=offset)
@@ -425,7 +447,7 @@ async def storage_list(
 
 
 @app.get("/api/models/inventory")
-async def models_inventory(_: object = Depends(require_auth)) -> dict[str, object]:
+async def models_inventory(_: object = Depends(require_approved_user)) -> dict[str, object]:
     """Report the artifact archives present in the storage bucket.
 
     The production bucket layout is:

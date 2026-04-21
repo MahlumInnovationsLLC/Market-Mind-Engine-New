@@ -15,6 +15,7 @@ export * from "./getRecentDebatesParams";
 export * from "./getRecentTradesParams";
 export * from "./healthStatus";
 export * from "./modelsInventory";
+export * from "./myAccess";
 export * from "./orchestratorCycleResult";
 export * from "./orchestratorRunCycleRequest";
 export * from "./orchestratorStatus";

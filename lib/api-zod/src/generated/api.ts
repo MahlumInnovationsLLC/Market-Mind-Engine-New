@@ -8,6 +8,15 @@
 import * as zod from "zod";
 
 /**
+ * @summary Whether the signed-in user is approved for the operator console
+ */
+export const GetMyAccessResponse = zod.object({
+  approved: zod.boolean(),
+  email: zod.string().nullish(),
+  user_id: zod.string(),
+});
+
+/**
  * @summary Liveness probe
  */
 export const HealthCheckResponse = zod.object({

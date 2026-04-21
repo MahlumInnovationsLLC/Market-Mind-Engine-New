@@ -9,6 +9,12 @@ export interface HealthStatus {
   status: string;
 }
 
+export interface MyAccess {
+  approved: boolean;
+  email?: string | null;
+  user_id: string;
+}
+
 export interface SecretsPresent {
   openai: boolean;
   anthropic: boolean;
