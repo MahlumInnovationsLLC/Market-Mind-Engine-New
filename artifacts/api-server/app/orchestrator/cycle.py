@@ -195,7 +195,12 @@ async def _candidate_predictions(vertical: str, limit: int) -> list[dict[str, An
 
 
 async def _cached_debates(vertical: str, limit: int) -> list[dict[str, Any]]:
-    """Recent approved debates that haven't been traded today."""
+    """Recent approved debates that haven't been traded today.
+
+    Filters `approved = true` here (not just at gate_swarm_approval) so
+    we don't churn through obviously-rejected debates inside the gate
+    pipeline.  gate_swarm_approval still re-checks for safety.
+    """
     leagues = _league_filter(vertical)
     try:
         if leagues:
@@ -208,6 +213,7 @@ async def _cached_debates(vertical: str, limit: int) -> list[dict[str, Any]]:
                        game_context
                   FROM swarm_debates
                  WHERE created_at > now() - interval '60 minutes'
+                   AND approved = true
                    AND league = ANY($2)
                  ORDER BY created_at DESC
                  LIMIT $1
@@ -225,6 +231,7 @@ async def _cached_debates(vertical: str, limit: int) -> list[dict[str, Any]]:
                        game_context
                   FROM swarm_debates
                  WHERE created_at > now() - interval '60 minutes'
+                   AND approved = true
                  ORDER BY created_at DESC
                  LIMIT $1
                 """,
