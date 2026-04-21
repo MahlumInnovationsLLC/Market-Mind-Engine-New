@@ -32,8 +32,13 @@ from tests.conftest import TEST_CLERK_HOST
 # Route inventory — kept in sync with app/main.py
 # ---------------------------------------------------------------------------
 
+# GET routes that require auth — exercised by the parameterized
+# auth-rejection tests below (which all use HTTP GET).
 PROTECTED_ROUTES: tuple[str, ...] = (
     "/api/health",
+    "/api/health/snapshot",
+    "/api/health/errors",
+    "/api/health/model-alerts",
     "/api/dashboard/overview",
     "/api/dashboard/recent-trades",
     "/api/dashboard/swarm-personas",
@@ -41,12 +46,69 @@ PROTECTED_ROUTES: tuple[str, ...] = (
     "/api/dashboard/recent-debates",
     "/api/storage/list",
     "/api/models/inventory",
+    "/api/models/status",
     "/api/admin/users",
     "/api/admin/users/{clerk_user_id}",
     "/api/admin/audit-log",
+    "/api/me/access",
+    "/api/me/subscription",
+    "/api/feeds/status",
+    "/api/notifications/status",
+    "/api/orchestrator/status",
+    "/api/settlement/status",
+    "/api/kalshi/balance",
+    "/api/kalshi/positions",
+    "/api/kalshi/markets",
+    "/api/kalshi/orders/resting",
+    "/api/kalshi/kill-switch",
 )
 
-PUBLIC_ROUTES: tuple[str, ...] = ("/api/healthz",)
+# Mutating endpoints — auth-protected but only accept POST.  We don't
+# parametrize them through the GET-based rejection tests (FastAPI would
+# answer 405 before the auth dependency runs); they're listed here so
+# the inventory check still catches missing coverage.
+PROTECTED_POST_ROUTES: tuple[str, ...] = (
+    "/api/health/model-alerts/{alert_id}/ack",
+    "/api/admin/users/{clerk_user_id}/approved",
+    "/api/admin/users/{clerk_user_id}/admin",
+    "/api/billing/checkout-session",
+    "/api/billing/portal-session",
+    "/api/notifications/test",
+    "/api/orchestrator/run-cycle",
+    "/api/settlement/run-cycle",
+    "/api/settlement/settle-market",
+    "/api/swarm/debate",
+    "/api/kalshi/paper-order",
+    "/api/kalshi/resume",
+    "/api/models/reload",
+    "/api/models/predict",
+)
+
+# Liveness probes — must answer 200 with no auth (parameterized below).
+PUBLIC_ROUTES: tuple[str, ...] = (
+    "/api/healthz",
+)
+
+# Other unauthenticated surface — covered by the inventory check only.
+#   * /api/billing/pricing + /api/public/*: marketing-page surface.
+#   * /api/billing/{webhook,revenuecat-webhook}: webhooks authenticated
+#     via HMAC signature, not Bearer tokens.
+#   * /api/kalshi/halt: kill switch — operators must be able to halt
+#     trading even when downstream auth is broken.
+#   * /api/ws/*: WebSockets authenticate via the `?token=` query param
+#     inside the handler, not the require_auth dependency.
+OTHER_PUBLIC_ROUTES: tuple[str, ...] = (
+    "/api/billing/pricing",
+    "/api/billing/webhook",
+    "/api/billing/revenuecat-webhook",
+    "/api/public/equity-curve",
+    "/api/public/stats",
+    "/api/kalshi/halt",
+    "/api/ws/kalshi",
+    "/api/ws/llm-logs",
+    "/api/ws/pipeline",
+    "/api/ws/settlement",
+)
 
 
 def test_route_inventory_matches_app() -> None:
@@ -57,7 +119,12 @@ def test_route_inventory_matches_app() -> None:
     here).
     """
     declared = {r.path for r in app.routes if getattr(r, "path", "").startswith("/api/")}
-    covered = set(PROTECTED_ROUTES) | set(PUBLIC_ROUTES)
+    covered = (
+        set(PROTECTED_ROUTES)
+        | set(PROTECTED_POST_ROUTES)
+        | set(PUBLIC_ROUTES)
+        | set(OTHER_PUBLIC_ROUTES)
+    )
     missing = declared - covered
     assert not missing, (
         f"New /api/* route(s) not covered by the auth-gate tests: {sorted(missing)}. "

@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
-from .. import db
+from .. import db, predictor
 from ..config import get_settings
 from ..risk import RiskContext, run_all_gates
 from ..swarm import run_debate
@@ -285,6 +285,61 @@ async def _publish(event: dict[str, Any]) -> None:
     await pipeline_event_hub.publish(event)
 
 
+# Feature keys we hand to the predictor service. The order matters when
+# the loaded model has a fixed `n_features_in_` and was trained against
+# a different schema — the service auto-pads/truncates so the call still
+# succeeds, but we keep this list stable so the live probability is at
+# least reproducible across cycles.
+_LIVE_PRED_FEATURES: tuple[str, ...] = (
+    "consensus_probability",
+    "kalshi_price",
+    "edge",
+    "agreement_rate",
+    "confidence_band_low",
+    "confidence_band_high",
+)
+
+
+async def _predict_for_candidate(
+    cand: dict[str, Any], consensus: float | None
+) -> dict[str, Any] | None:
+    """Run the active canonical predictor on a candidate's signals.
+
+    Returns the prediction's `as_dict()` payload, or None when the
+    predictor isn't loaded yet (cold cache) or the call fails. Errors
+    are swallowed and logged at debug — a sick model must NOT take down
+    the trading loop, the loop just falls back to swarm-only signals.
+    """
+    ctx_blob = cand.get("game_context") or {}
+    if isinstance(ctx_blob, str):
+        try:
+            ctx_blob = json.loads(ctx_blob)
+        except Exception:
+            ctx_blob = {}
+    merged: dict[str, float] = {}
+    if consensus is not None:
+        merged["consensus_probability"] = float(consensus)
+    for k in _LIVE_PRED_FEATURES:
+        if k in merged:
+            continue
+        v = cand.get(k)
+        if v is None and isinstance(ctx_blob, dict):
+            v = ctx_blob.get(k)
+        if v is not None:
+            try:
+                merged[k] = float(v)
+            except (TypeError, ValueError):
+                pass
+    try:
+        pred = await predictor.predict(merged)
+    except predictor.PredictorUnavailable:
+        return None
+    except Exception as e:  # pragma: no cover — model-specific failures
+        log.debug("live predict failed for %s: %s", cand.get("game_id"), e)
+        return None
+    return pred.as_dict()
+
+
 async def run_cycle(vertical: str = "sports") -> CycleResult:
     """Execute one full trading cycle for `vertical`.
 
@@ -296,11 +351,13 @@ async def run_cycle(vertical: str = "sports") -> CycleResult:
     started = time.perf_counter()
     started_at = datetime.now(timezone.utc).isoformat()
 
+    active_model = predictor.active_model_info()
     cycle_settings_snapshot = {
         "trading_mode": settings.trading_mode,
         "cycle_interval_seconds": settings.cycle_interval_seconds,
         "max_fresh_debates_per_cycle": settings.max_fresh_debates_per_cycle,
         "vertical": vertical,
+        "active_model": active_model,
     }
 
     # Open the cycle row up front so dashboards see in-flight cycles
@@ -414,6 +471,10 @@ async def run_cycle(vertical: str = "sports") -> CycleResult:
             continue
         side = "YES" if (cand.get("recommended_action") or "").upper() != "BUY_NO" else "NO"
         consensus = cand.get("consensus_probability")
+        # Live model probability from the loaded canonical predictor.
+        # Built from whatever signals the candidate carries; the
+        # predictor service auto-pads to the model's expected width.
+        live_pred = await _predict_for_candidate(cand, consensus)
         # current_price falls back to consensus when the underlying market price
         # isn't carried on the cached debate row — gates with no price degrade
         # to PASS so we don't kill the loop on missing pricing data.
@@ -428,12 +489,17 @@ async def run_cycle(vertical: str = "sports") -> CycleResult:
             if isinstance(ctx_blob, dict) and ctx_blob.get("kalshi_price") is not None
             else None
         )
+        # If swarm consensus is missing, fall back to the live model
+        # probability so the gates still get a real number to chew on.
+        effective_consensus = consensus
+        if effective_consensus is None and live_pred is not None:
+            effective_consensus = live_pred["probability"]
         edge = None
-        if consensus is not None and current_price is not None:
+        if effective_consensus is not None and current_price is not None:
             edge = (
-                float(consensus) - float(current_price)
+                float(effective_consensus) - float(current_price)
                 if side == "YES"
-                else float(current_price) - float(consensus)
+                else float(current_price) - float(effective_consensus)
             )
         intended_qty = int(overrides.get("intended_quantity", DEFAULT_INTENDED_QUANTITY))
         intended_notional = intended_qty * float(current_price or 0.0)
@@ -447,7 +513,7 @@ async def run_cycle(vertical: str = "sports") -> CycleResult:
             market_type=cand.get("market_type"),
             matchup=cand.get("matchup"),
             current_price=current_price,
-            model_probability=float(consensus) if consensus is not None else None,
+            model_probability=float(effective_consensus) if effective_consensus is not None else None,
             edge=edge,
             confidence_band_low=cand.get("confidence_band_low"),
             confidence_band_high=cand.get("confidence_band_high"),
@@ -475,6 +541,16 @@ async def run_cycle(vertical: str = "sports") -> CycleResult:
             "model_probability": ctx.model_probability,
             "current_price": ctx.current_price,
             "edge": ctx.edge,
+            "swarm_consensus": float(consensus) if consensus is not None else None,
+            "live_model_probability": (
+                live_pred["probability"] if live_pred else None
+            ),
+            "live_model_version": (
+                live_pred["model_version"] if live_pred else None
+            ),
+            "live_model_name": (
+                live_pred["model_name"] if live_pred else None
+            ),
         })
 
         async def _on_gate_event(ev: dict[str, Any]) -> None:

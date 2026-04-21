@@ -17,7 +17,7 @@ from fastapi import Depends, FastAPI, HTTPException, Request, WebSocket, WebSock
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
-from . import admin as admin_module, billing, dashboard, db, health, models_loader, rc_billing, storage
+from . import admin as admin_module, billing, dashboard, db, health, models_loader, predictor, rc_billing, storage
 from .notifications import alerts as notif_alerts, daily_summary, postmark as notif_postmark
 from .auth import (
     AuthedUser,
@@ -477,6 +477,7 @@ async def health_full(_: object = Depends(require_approved_user)) -> dict[str, o
     # (each model is actually deserialized at boot), and disk usage.
     state = models_loader.get_state()
     canonical_ok = sum(1 for v in state.loaded.values() if v.get("ok"))
+    active = predictor.active_model_info()
     out["models"] = {
         "ok": state.ready and state.error is None and canonical_ok > 0,
         "ready": state.ready,
@@ -489,6 +490,8 @@ async def health_full(_: object = Depends(require_approved_user)) -> dict[str, o
         "predictor_count": len(state.predictors),
         "loaded_canonical": state.loaded,
         "loaded_canonical_ok": canonical_ok,
+        "active_predictor": active,
+        "active_model_version": active.get("version") if active else None,
         "versions": models_loader.list_predictor_versions(),
         "disk_usage": models_loader.disk_usage_summary(),
     }
@@ -1199,11 +1202,16 @@ async def storage_list(
 
 @app.get("/api/models/status")
 async def models_status(_: object = Depends(require_auth)) -> dict[str, object]:
-    """Detailed loader state: archives, predictor catalog, disk usage."""
+    """Detailed loader state: archives, predictor catalog, disk usage,
+    plus the currently-bound active predictor + version (mirrors what
+    /api/health reports, so the diagnostics endpoints agree)."""
     state = models_loader.get_state()
+    active = predictor.active_model_info()
     return {
         **state.as_dict(),
         "disk_usage": models_loader.disk_usage_summary(),
+        "active_predictor": active,
+        "active_model_version": active.get("version") if active else None,
     }
 
 
@@ -1212,8 +1220,44 @@ async def models_reload(_: object = Depends(require_auth)) -> dict[str, object]:
     """Force a full reload: clears the in-memory state + cached predictor
     objects and re-runs the reassemble/extract/scan/smoke-load pipeline.
     Cached on-disk archives are reused if intact."""
+    predictor.invalidate()
     asyncio.create_task(models_loader.ensure_artifacts(force=True))
     return {"started": True, "state": models_loader.get_state().as_dict()}
+
+
+class PredictRequest(BaseModel):
+    """Optional payload for `/api/models/predict`.
+
+    `features` may be a list of floats or a {name: value} mapping. When
+    omitted the endpoint runs a smoke prediction with a zero-vector of
+    the model's expected width.
+    """
+    features: list[float] | dict[str, float] | None = None
+
+
+@app.post("/api/models/predict")
+async def models_predict(
+    body: PredictRequest | None = None,
+    _: object = Depends(require_auth),
+) -> dict[str, object]:
+    """Run the active canonical predictor and return the prediction
+    plus the model version that produced it. Acts as a smoke test for
+    the predictor service when called with no payload."""
+    features = body.features if body is not None else None
+    try:
+        result = await predictor.predict(features)
+    except predictor.PredictorUnavailable as e:
+        raise HTTPException(status_code=503, detail=str(e))
+    except predictor.PredictorInputError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+    except Exception as e:
+        log.exception("/api/models/predict failed")
+        raise HTTPException(status_code=500, detail=f"{type(e).__name__}: {e}")
+    return {
+        "ok": True,
+        "prediction": result.as_dict(),
+        "active_predictor": predictor.active_model_info(),
+    }
 
 
 @app.get("/api/models/inventory")

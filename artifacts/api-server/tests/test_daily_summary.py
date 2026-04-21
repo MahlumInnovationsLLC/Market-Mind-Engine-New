@@ -212,7 +212,10 @@ class _FakeDB:
 
 
 def _run(coro):
-    return asyncio.get_event_loop().run_until_complete(coro)
+    # asyncio.get_event_loop() raises in Python 3.12+ when no loop is set
+    # in the main thread (DeprecationWarning -> RuntimeError on newer
+    # interpreters). Use asyncio.run() so each test gets a fresh loop.
+    return asyncio.run(coro)
 
 
 def test_collect_summary_aggregates_personas(monkeypatch: pytest.MonkeyPatch) -> None:
