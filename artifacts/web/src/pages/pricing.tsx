@@ -1,61 +1,61 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Link, useSearch } from "wouter";
-import { useAuth, useClerk, SignInButton } from "@clerk/react";
-import { apiFetch, ApiError } from "@/lib/api";
-
-interface PriceSlot {
-  price_id: string | null;
-  configured: boolean;
-}
-
-interface PricingTier {
-  id: "free" | "pro" | "elite" | "founder";
-  name: string;
-  tagline: string;
-  monthly_usd: number;
-  annual_usd: number;
-  features: string[];
-  monthly: PriceSlot | null;
-  annual: PriceSlot | null;
-  cta: string;
-  highlight?: boolean;
-}
-
-interface PricingCatalog {
-  tiers: PricingTier[];
-  publishable_key_present: boolean;
-  stripe_configured: boolean;
-}
+import { useAuth, SignInButton } from "@clerk/react";
+import {
+  ApiError,
+  PricingTier,
+  useGetBillingPricing,
+  useCreateBillingCheckoutSession,
+} from "@workspace/api-client-react";
 
 export default function PricingPage() {
-  const { isSignedIn, getToken } = useAuth();
+  const { isSignedIn } = useAuth();
   const search = useSearch();
   const autoCheckoutPriceId = useMemo(() => {
     const params = new URLSearchParams(search);
     return params.get("checkout");
   }, [search]);
   const autoCheckoutFired = useRef(false);
-  const [catalog, setCatalog] = useState<PricingCatalog | null>(null);
   const [interval, setInterval] = useState<"month" | "year">("month");
-  const [loadError, setLoadError] = useState<string | null>(null);
   const [actionTier, setActionTier] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
 
-  useEffect(() => {
-    let cancel = false;
-    apiFetch<PricingCatalog>("/api/billing/pricing")
-      .then((data) => {
-        if (!cancel) setCatalog(data);
-      })
-      .catch((e) => {
-        if (!cancel) setLoadError(e instanceof Error ? e.message : String(e));
-      });
-    return () => {
-      cancel = true;
-    };
-  }, []);
+  const pricingQuery = useGetBillingPricing();
+  const catalog = pricingQuery.data ?? null;
+  const loadError = pricingQuery.error
+    ? pricingQuery.error instanceof Error
+      ? pricingQuery.error.message
+      : String(pricingQuery.error)
+    : null;
+
+  const checkoutMutation = useCreateBillingCheckoutSession();
 
   const tiers = catalog?.tiers ?? [];
+
+  const startCheckout = async (tierId: string, priceId: string) => {
+    setActionTier(tierId);
+    setActionError(null);
+    try {
+      const res = await checkoutMutation.mutateAsync({
+        data: { price_id: priceId },
+      });
+      if (res.url) {
+        window.location.href = res.url;
+        return;
+      }
+      setActionError("Stripe did not return a checkout URL.");
+    } catch (e) {
+      const msg =
+        e instanceof ApiError
+          ? `Checkout failed (HTTP ${e.status})`
+          : e instanceof Error
+            ? e.message
+            : String(e);
+      setActionError(msg);
+    } finally {
+      setActionTier(null);
+    }
+  };
 
   // Tier-aware CTA handoff from the marketing page (`/pricing?checkout=<price_id>`).
   // After Clerk sign-up the user lands here; if they're authenticated and the
@@ -75,36 +75,9 @@ export default function PricingPage() {
     } else {
       setInterval("month");
     }
-    void (async () => {
-      setActionTier(target.id);
-      setActionError(null);
-      try {
-        const res = await apiFetch<{ url: string }>(
-          "/api/billing/checkout-session",
-          {
-            method: "POST",
-            body: { price_id: autoCheckoutPriceId },
-            getToken: async () => (await getToken()) ?? null,
-          },
-        );
-        if (res.url) {
-          window.location.href = res.url;
-          return;
-        }
-        setActionError("Stripe did not return a checkout URL.");
-      } catch (e) {
-        const msg =
-          e instanceof ApiError
-            ? `Checkout failed (HTTP ${e.status})`
-            : e instanceof Error
-              ? e.message
-              : String(e);
-        setActionError(msg);
-      } finally {
-        setActionTier(null);
-      }
-    })();
-  }, [autoCheckoutPriceId, catalog, isSignedIn, getToken]);
+    void startCheckout(target.id, autoCheckoutPriceId);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [autoCheckoutPriceId, catalog, isSignedIn]);
 
   const handleUpgrade = async (tier: PricingTier) => {
     setActionError(null);
@@ -119,32 +92,7 @@ export default function PricingPage() {
       setActionError("Please sign in to upgrade.");
       return;
     }
-    setActionTier(tier.id);
-    try {
-      const res = await apiFetch<{ url: string }>(
-        "/api/billing/checkout-session",
-        {
-          method: "POST",
-          body: { price_id: slot.price_id },
-          getToken: async () => (await getToken()) ?? null,
-        },
-      );
-      if (res.url) {
-        window.location.href = res.url;
-      } else {
-        setActionError("Stripe did not return a checkout URL.");
-      }
-    } catch (e) {
-      const msg =
-        e instanceof ApiError
-          ? `Checkout failed (HTTP ${e.status})`
-          : e instanceof Error
-            ? e.message
-            : String(e);
-      setActionError(msg);
-    } finally {
-      setActionTier(null);
-    }
+    await startCheckout(tier.id, slot.price_id);
   };
 
   const priceLabel = (tier: PricingTier) => {

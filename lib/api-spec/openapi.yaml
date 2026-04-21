@@ -22,6 +22,8 @@ tags:
     description: Trading cycle scheduler + 12-gate risk pipeline
   - name: admin
     description: Admin console — user role + approval management
+  - name: billing
+    description: Stripe billing — pricing, subscription, checkout, customer portal
 paths:
   /me/access:
     get:
@@ -343,6 +345,59 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/AdminAuditLogList" }
+
+  /me/subscription:
+    get:
+      operationId: getMySubscription
+      tags: [billing]
+      summary: The signed-in user's effective subscription / tier
+      responses:
+        "200":
+          description: Subscription
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/UserSubscription" }
+
+  /billing/pricing:
+    get:
+      operationId: getBillingPricing
+      tags: [billing]
+      summary: Public pricing catalog with configured Stripe price IDs
+      responses:
+        "200":
+          description: Pricing catalog
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PricingCatalog" }
+
+  /billing/checkout-session:
+    post:
+      operationId: createBillingCheckoutSession
+      tags: [billing]
+      summary: Create a Stripe Checkout session for the requested price
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CheckoutSessionRequest" }
+      responses:
+        "200":
+          description: Stripe Checkout session
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CheckoutSessionResult" }
+
+  /billing/portal-session:
+    post:
+      operationId: createBillingPortalSession
+      tags: [billing]
+      summary: Create a Stripe Customer Portal session for the signed-in user
+      responses:
+        "200":
+          description: Stripe Customer Portal session
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PortalSessionResult" }
 
   /models/inventory:
     get:
@@ -908,3 +963,82 @@ components:
           type: array
           items: { $ref: "#/components/schemas/AdminAuditLogEntry" }
       required: [items]
+
+    UserSubscription:
+      type: object
+      properties:
+        user_id: { type: string }
+        email: { type: string, nullable: true }
+        tier:
+          type: string
+          enum: [free, pro, elite, founder]
+        status: { type: string }
+        is_founder: { type: boolean }
+        stripe_customer_id: { type: string, nullable: true }
+        stripe_subscription_id: { type: string, nullable: true }
+        stripe_price_id: { type: string, nullable: true }
+        interval: { type: string, nullable: true }
+        current_period_end: { type: string, nullable: true }
+        cancel_at_period_end: { type: boolean }
+      required: [user_id, tier, status, is_founder, cancel_at_period_end]
+
+    PriceSlot:
+      type: object
+      properties:
+        price_id: { type: string, nullable: true }
+        configured: { type: boolean }
+      required: [configured]
+
+    PricingTier:
+      type: object
+      properties:
+        id:
+          type: string
+          enum: [free, pro, elite, founder]
+        name: { type: string }
+        tagline: { type: string }
+        monthly_usd: { type: number }
+        annual_usd: { type: number }
+        features:
+          type: array
+          items: { type: string }
+        monthly:
+          allOf:
+            - $ref: "#/components/schemas/PriceSlot"
+          nullable: true
+        annual:
+          allOf:
+            - $ref: "#/components/schemas/PriceSlot"
+          nullable: true
+        cta: { type: string }
+        highlight: { type: boolean }
+      required: [id, name, tagline, monthly_usd, annual_usd, features, cta]
+
+    PricingCatalog:
+      type: object
+      properties:
+        tiers:
+          type: array
+          items: { $ref: "#/components/schemas/PricingTier" }
+        publishable_key_present: { type: boolean }
+        stripe_configured: { type: boolean }
+      required: [tiers, publishable_key_present, stripe_configured]
+
+    CheckoutSessionRequest:
+      type: object
+      properties:
+        price_id: { type: string, minLength: 1 }
+      required: [price_id]
+
+    CheckoutSessionResult:
+      type: object
+      properties:
+        id: { type: string }
+        url: { type: string }
+      required: [id, url]
+
+    PortalSessionResult:
+      type: object
+      properties:
+        url: { type: string }
+      required: [url]

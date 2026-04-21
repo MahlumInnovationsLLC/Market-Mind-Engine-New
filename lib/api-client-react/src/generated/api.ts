@@ -26,6 +26,8 @@ import type {
   AdminSetFlagResult,
   AdminUserDetail,
   AdminUserList,
+  CheckoutSessionRequest,
+  CheckoutSessionResult,
   DashboardOverview,
   FullHealth,
   GetRecentCyclesParams,
@@ -39,6 +41,8 @@ import type {
   OrchestratorCycleResult,
   OrchestratorRunCycleRequest,
   OrchestratorStatus,
+  PortalSessionResult,
+  PricingCatalog,
   SettleMarketRequest,
   SettleMarketResult,
   SettlementCycleResult,
@@ -49,6 +53,7 @@ import type {
   SwarmPersonaList,
   TradeList,
   TradingCycleList,
+  UserSubscription,
 } from "./api.schemas";
 
 import { customFetch } from "../custom-fetch";
@@ -1841,6 +1846,327 @@ export function useAdminGetAuditLog<
 
   return { ...query, queryKey: queryOptions.queryKey };
 }
+
+/**
+ * @summary The signed-in user's effective subscription / tier
+ */
+export const getGetMySubscriptionUrl = () => {
+  return `/api/me/subscription`;
+};
+
+export const getMySubscription = async (
+  options?: RequestInit,
+): Promise<UserSubscription> => {
+  return customFetch<UserSubscription>(getGetMySubscriptionUrl(), {
+    ...options,
+    method: "GET",
+  });
+};
+
+export const getGetMySubscriptionQueryKey = () => {
+  return [`/api/me/subscription`] as const;
+};
+
+export const getGetMySubscriptionQueryOptions = <
+  TData = Awaited<ReturnType<typeof getMySubscription>>,
+  TError = ErrorType<unknown>,
+>(options?: {
+  query?: UseQueryOptions<
+    Awaited<ReturnType<typeof getMySubscription>>,
+    TError,
+    TData
+  >;
+  request?: SecondParameter<typeof customFetch>;
+}) => {
+  const { query: queryOptions, request: requestOptions } = options ?? {};
+
+  const queryKey = queryOptions?.queryKey ?? getGetMySubscriptionQueryKey();
+
+  const queryFn: QueryFunction<
+    Awaited<ReturnType<typeof getMySubscription>>
+  > = ({ signal }) => getMySubscription({ signal, ...requestOptions });
+
+  return { queryKey, queryFn, ...queryOptions } as UseQueryOptions<
+    Awaited<ReturnType<typeof getMySubscription>>,
+    TError,
+    TData
+  > & { queryKey: QueryKey };
+};
+
+export type GetMySubscriptionQueryResult = NonNullable<
+  Awaited<ReturnType<typeof getMySubscription>>
+>;
+export type GetMySubscriptionQueryError = ErrorType<unknown>;
+
+/**
+ * @summary The signed-in user's effective subscription / tier
+ */
+
+export function useGetMySubscription<
+  TData = Awaited<ReturnType<typeof getMySubscription>>,
+  TError = ErrorType<unknown>,
+>(options?: {
+  query?: UseQueryOptions<
+    Awaited<ReturnType<typeof getMySubscription>>,
+    TError,
+    TData
+  >;
+  request?: SecondParameter<typeof customFetch>;
+}): UseQueryResult<TData, TError> & { queryKey: QueryKey } {
+  const queryOptions = getGetMySubscriptionQueryOptions(options);
+
+  const query = useQuery(queryOptions) as UseQueryResult<TData, TError> & {
+    queryKey: QueryKey;
+  };
+
+  return { ...query, queryKey: queryOptions.queryKey };
+}
+
+/**
+ * @summary Public pricing catalog with configured Stripe price IDs
+ */
+export const getGetBillingPricingUrl = () => {
+  return `/api/billing/pricing`;
+};
+
+export const getBillingPricing = async (
+  options?: RequestInit,
+): Promise<PricingCatalog> => {
+  return customFetch<PricingCatalog>(getGetBillingPricingUrl(), {
+    ...options,
+    method: "GET",
+  });
+};
+
+export const getGetBillingPricingQueryKey = () => {
+  return [`/api/billing/pricing`] as const;
+};
+
+export const getGetBillingPricingQueryOptions = <
+  TData = Awaited<ReturnType<typeof getBillingPricing>>,
+  TError = ErrorType<unknown>,
+>(options?: {
+  query?: UseQueryOptions<
+    Awaited<ReturnType<typeof getBillingPricing>>,
+    TError,
+    TData
+  >;
+  request?: SecondParameter<typeof customFetch>;
+}) => {
+  const { query: queryOptions, request: requestOptions } = options ?? {};
+
+  const queryKey = queryOptions?.queryKey ?? getGetBillingPricingQueryKey();
+
+  const queryFn: QueryFunction<
+    Awaited<ReturnType<typeof getBillingPricing>>
+  > = ({ signal }) => getBillingPricing({ signal, ...requestOptions });
+
+  return { queryKey, queryFn, ...queryOptions } as UseQueryOptions<
+    Awaited<ReturnType<typeof getBillingPricing>>,
+    TError,
+    TData
+  > & { queryKey: QueryKey };
+};
+
+export type GetBillingPricingQueryResult = NonNullable<
+  Awaited<ReturnType<typeof getBillingPricing>>
+>;
+export type GetBillingPricingQueryError = ErrorType<unknown>;
+
+/**
+ * @summary Public pricing catalog with configured Stripe price IDs
+ */
+
+export function useGetBillingPricing<
+  TData = Awaited<ReturnType<typeof getBillingPricing>>,
+  TError = ErrorType<unknown>,
+>(options?: {
+  query?: UseQueryOptions<
+    Awaited<ReturnType<typeof getBillingPricing>>,
+    TError,
+    TData
+  >;
+  request?: SecondParameter<typeof customFetch>;
+}): UseQueryResult<TData, TError> & { queryKey: QueryKey } {
+  const queryOptions = getGetBillingPricingQueryOptions(options);
+
+  const query = useQuery(queryOptions) as UseQueryResult<TData, TError> & {
+    queryKey: QueryKey;
+  };
+
+  return { ...query, queryKey: queryOptions.queryKey };
+}
+
+/**
+ * @summary Create a Stripe Checkout session for the requested price
+ */
+export const getCreateBillingCheckoutSessionUrl = () => {
+  return `/api/billing/checkout-session`;
+};
+
+export const createBillingCheckoutSession = async (
+  checkoutSessionRequest: CheckoutSessionRequest,
+  options?: RequestInit,
+): Promise<CheckoutSessionResult> => {
+  return customFetch<CheckoutSessionResult>(
+    getCreateBillingCheckoutSessionUrl(),
+    {
+      ...options,
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...options?.headers },
+      body: JSON.stringify(checkoutSessionRequest),
+    },
+  );
+};
+
+export const getCreateBillingCheckoutSessionMutationOptions = <
+  TError = ErrorType<unknown>,
+  TContext = unknown,
+>(options?: {
+  mutation?: UseMutationOptions<
+    Awaited<ReturnType<typeof createBillingCheckoutSession>>,
+    TError,
+    { data: BodyType<CheckoutSessionRequest> },
+    TContext
+  >;
+  request?: SecondParameter<typeof customFetch>;
+}): UseMutationOptions<
+  Awaited<ReturnType<typeof createBillingCheckoutSession>>,
+  TError,
+  { data: BodyType<CheckoutSessionRequest> },
+  TContext
+> => {
+  const mutationKey = ["createBillingCheckoutSession"];
+  const { mutation: mutationOptions, request: requestOptions } = options
+    ? options.mutation &&
+      "mutationKey" in options.mutation &&
+      options.mutation.mutationKey
+      ? options
+      : { ...options, mutation: { ...options.mutation, mutationKey } }
+    : { mutation: { mutationKey }, request: undefined };
+
+  const mutationFn: MutationFunction<
+    Awaited<ReturnType<typeof createBillingCheckoutSession>>,
+    { data: BodyType<CheckoutSessionRequest> }
+  > = (props) => {
+    const { data } = props ?? {};
+
+    return createBillingCheckoutSession(data, requestOptions);
+  };
+
+  return { mutationFn, ...mutationOptions };
+};
+
+export type CreateBillingCheckoutSessionMutationResult = NonNullable<
+  Awaited<ReturnType<typeof createBillingCheckoutSession>>
+>;
+export type CreateBillingCheckoutSessionMutationBody =
+  BodyType<CheckoutSessionRequest>;
+export type CreateBillingCheckoutSessionMutationError = ErrorType<unknown>;
+
+/**
+ * @summary Create a Stripe Checkout session for the requested price
+ */
+export const useCreateBillingCheckoutSession = <
+  TError = ErrorType<unknown>,
+  TContext = unknown,
+>(options?: {
+  mutation?: UseMutationOptions<
+    Awaited<ReturnType<typeof createBillingCheckoutSession>>,
+    TError,
+    { data: BodyType<CheckoutSessionRequest> },
+    TContext
+  >;
+  request?: SecondParameter<typeof customFetch>;
+}): UseMutationResult<
+  Awaited<ReturnType<typeof createBillingCheckoutSession>>,
+  TError,
+  { data: BodyType<CheckoutSessionRequest> },
+  TContext
+> => {
+  return useMutation(getCreateBillingCheckoutSessionMutationOptions(options));
+};
+
+/**
+ * @summary Create a Stripe Customer Portal session for the signed-in user
+ */
+export const getCreateBillingPortalSessionUrl = () => {
+  return `/api/billing/portal-session`;
+};
+
+export const createBillingPortalSession = async (
+  options?: RequestInit,
+): Promise<PortalSessionResult> => {
+  return customFetch<PortalSessionResult>(getCreateBillingPortalSessionUrl(), {
+    ...options,
+    method: "POST",
+  });
+};
+
+export const getCreateBillingPortalSessionMutationOptions = <
+  TError = ErrorType<unknown>,
+  TContext = unknown,
+>(options?: {
+  mutation?: UseMutationOptions<
+    Awaited<ReturnType<typeof createBillingPortalSession>>,
+    TError,
+    void,
+    TContext
+  >;
+  request?: SecondParameter<typeof customFetch>;
+}): UseMutationOptions<
+  Awaited<ReturnType<typeof createBillingPortalSession>>,
+  TError,
+  void,
+  TContext
+> => {
+  const mutationKey = ["createBillingPortalSession"];
+  const { mutation: mutationOptions, request: requestOptions } = options
+    ? options.mutation &&
+      "mutationKey" in options.mutation &&
+      options.mutation.mutationKey
+      ? options
+      : { ...options, mutation: { ...options.mutation, mutationKey } }
+    : { mutation: { mutationKey }, request: undefined };
+
+  const mutationFn: MutationFunction<
+    Awaited<ReturnType<typeof createBillingPortalSession>>,
+    void
+  > = () => {
+    return createBillingPortalSession(requestOptions);
+  };
+
+  return { mutationFn, ...mutationOptions };
+};
+
+export type CreateBillingPortalSessionMutationResult = NonNullable<
+  Awaited<ReturnType<typeof createBillingPortalSession>>
+>;
+
+export type CreateBillingPortalSessionMutationError = ErrorType<unknown>;
+
+/**
+ * @summary Create a Stripe Customer Portal session for the signed-in user
+ */
+export const useCreateBillingPortalSession = <
+  TError = ErrorType<unknown>,
+  TContext = unknown,
+>(options?: {
+  mutation?: UseMutationOptions<
+    Awaited<ReturnType<typeof createBillingPortalSession>>,
+    TError,
+    void,
+    TContext
+  >;
+  request?: SecondParameter<typeof customFetch>;
+}): UseMutationResult<
+  Awaited<ReturnType<typeof createBillingPortalSession>>,
+  TError,
+  void,
+  TContext
+> => {
+  return useMutation(getCreateBillingPortalSessionMutationOptions(options));
+};
 
 /**
  * @summary Trained-model archive inventory in Supabase Storage

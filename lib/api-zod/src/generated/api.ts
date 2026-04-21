@@ -574,6 +574,75 @@ export const AdminGetAuditLogResponse = zod.object({
 });
 
 /**
+ * @summary The signed-in user's effective subscription / tier
+ */
+export const GetMySubscriptionResponse = zod.object({
+  user_id: zod.string(),
+  email: zod.string().nullish(),
+  tier: zod.enum(["free", "pro", "elite", "founder"]),
+  status: zod.string(),
+  is_founder: zod.boolean(),
+  stripe_customer_id: zod.string().nullish(),
+  stripe_subscription_id: zod.string().nullish(),
+  stripe_price_id: zod.string().nullish(),
+  interval: zod.string().nullish(),
+  current_period_end: zod.string().nullish(),
+  cancel_at_period_end: zod.boolean(),
+});
+
+/**
+ * @summary Public pricing catalog with configured Stripe price IDs
+ */
+export const GetBillingPricingResponse = zod.object({
+  tiers: zod.array(
+    zod.object({
+      id: zod.enum(["free", "pro", "elite", "founder"]),
+      name: zod.string(),
+      tagline: zod.string(),
+      monthly_usd: zod.number(),
+      annual_usd: zod.number(),
+      features: zod.array(zod.string()),
+      monthly: zod
+        .object({
+          price_id: zod.string().nullish(),
+          configured: zod.boolean(),
+        })
+        .nullish(),
+      annual: zod
+        .object({
+          price_id: zod.string().nullish(),
+          configured: zod.boolean(),
+        })
+        .nullish(),
+      cta: zod.string(),
+      highlight: zod.boolean().optional(),
+    }),
+  ),
+  publishable_key_present: zod.boolean(),
+  stripe_configured: zod.boolean(),
+});
+
+/**
+ * @summary Create a Stripe Checkout session for the requested price
+ */
+
+export const CreateBillingCheckoutSessionBody = zod.object({
+  price_id: zod.string().min(1),
+});
+
+export const CreateBillingCheckoutSessionResponse = zod.object({
+  id: zod.string(),
+  url: zod.string(),
+});
+
+/**
+ * @summary Create a Stripe Customer Portal session for the signed-in user
+ */
+export const CreateBillingPortalSessionResponse = zod.object({
+  url: zod.string(),
+});
+
+/**
  * @summary Trained-model archive inventory in Supabase Storage
  */
 export const GetModelsInventoryResponse = zod.object({

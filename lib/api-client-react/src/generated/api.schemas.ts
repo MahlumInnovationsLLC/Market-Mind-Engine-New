@@ -444,6 +444,77 @@ export interface AdminAuditLogList {
   items: AdminAuditLogEntry[];
 }
 
+export type UserSubscriptionTier =
+  (typeof UserSubscriptionTier)[keyof typeof UserSubscriptionTier];
+
+export const UserSubscriptionTier = {
+  free: "free",
+  pro: "pro",
+  elite: "elite",
+  founder: "founder",
+} as const;
+
+export interface UserSubscription {
+  user_id: string;
+  email?: string | null;
+  tier: UserSubscriptionTier;
+  status: string;
+  is_founder: boolean;
+  stripe_customer_id?: string | null;
+  stripe_subscription_id?: string | null;
+  stripe_price_id?: string | null;
+  interval?: string | null;
+  current_period_end?: string | null;
+  cancel_at_period_end: boolean;
+}
+
+export interface PriceSlot {
+  price_id?: string | null;
+  configured: boolean;
+}
+
+export type PricingTierId = (typeof PricingTierId)[keyof typeof PricingTierId];
+
+export const PricingTierId = {
+  free: "free",
+  pro: "pro",
+  elite: "elite",
+  founder: "founder",
+} as const;
+
+export interface PricingTier {
+  id: PricingTierId;
+  name: string;
+  tagline: string;
+  monthly_usd: number;
+  annual_usd: number;
+  features: string[];
+  monthly?: PriceSlot | null;
+  annual?: PriceSlot | null;
+  cta: string;
+  highlight?: boolean;
+}
+
+export interface PricingCatalog {
+  tiers: PricingTier[];
+  publishable_key_present: boolean;
+  stripe_configured: boolean;
+}
+
+export interface CheckoutSessionRequest {
+  /** @minLength 1 */
+  price_id: string;
+}
+
+export interface CheckoutSessionResult {
+  id: string;
+  url: string;
+}
+
+export interface PortalSessionResult {
+  url: string;
+}
+
 export type GetRecentTradesParams = {
   /**
    * @minimum 1

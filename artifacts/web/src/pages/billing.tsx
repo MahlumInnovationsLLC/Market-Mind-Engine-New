@@ -1,30 +1,25 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { Link, useLocation } from "wouter";
 import { useAuth, useClerk } from "@clerk/react";
-import { apiFetch, ApiError } from "@/lib/api";
-
-interface UserSubscription {
-  user_id: string;
-  email: string | null;
-  tier: "free" | "pro" | "elite" | "founder";
-  status: string;
-  is_founder: boolean;
-  stripe_customer_id: string | null;
-  stripe_subscription_id: string | null;
-  stripe_price_id: string | null;
-  interval: string | null;
-  current_period_end: string | null;
-  cancel_at_period_end: boolean;
-}
+import {
+  ApiError,
+  UserSubscription,
+  UserSubscriptionTier,
+  getGetMySubscriptionQueryKey,
+  useCreateBillingPortalSession,
+  useGetMySubscription,
+} from "@workspace/api-client-react";
+import { useQueryClient } from "@tanstack/react-query";
 
 const TIER_COPY: Record<UserSubscription["tier"], string> = {
-  free: "Free — read-only dashboard at delay.",
-  pro: "Pro — live signals + full swarm transcripts.",
-  elite: "Elite — Pro + institutional features.",
-  founder: "Founder — operator allow-list, billing bypassed.",
+  [UserSubscriptionTier.free]: "Free — read-only dashboard at delay.",
+  [UserSubscriptionTier.pro]: "Pro — live signals + full swarm transcripts.",
+  [UserSubscriptionTier.elite]: "Elite — Pro + institutional features.",
+  [UserSubscriptionTier.founder]:
+    "Founder — operator allow-list, billing bypassed.",
 };
 
-function fmtDate(iso: string | null): string {
+function fmtDate(iso: string | null | undefined): string {
   if (!iso) return "—";
   try {
     return new Date(iso).toLocaleDateString(undefined, {
@@ -38,50 +33,33 @@ function fmtDate(iso: string | null): string {
 }
 
 export default function BillingPage() {
-  const { getToken, isSignedIn } = useAuth();
+  const { isSignedIn } = useAuth();
   const { signOut } = useClerk();
   const [location] = useLocation();
-  const [sub, setSub] = useState<UserSubscription | null>(null);
+  const queryClient = useQueryClient();
   const [error, setError] = useState<string | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [portalLoading, setPortalLoading] = useState(false);
-  const [refreshKey, setRefreshKey] = useState(0);
   const showSuccess = location.includes("checkout=success");
 
-  useEffect(() => {
-    if (!isSignedIn) return;
-    let cancel = false;
-    setLoading(true);
-    apiFetch<UserSubscription>("/api/me/subscription", {
-      getToken: async () => (await getToken()) ?? null,
-    })
-      .then((data) => {
-        if (!cancel) setSub(data);
-      })
-      .catch((e) => {
-        if (!cancel) {
-          setError(e instanceof Error ? e.message : String(e));
-        }
-      })
-      .finally(() => {
-        if (!cancel) setLoading(false);
-      });
-    return () => {
-      cancel = true;
-    };
-  }, [isSignedIn, getToken, refreshKey]);
+  const subQuery = useGetMySubscription({
+    query: {
+      enabled: !!isSignedIn,
+    },
+  });
+  const sub = subQuery.data ?? null;
+  const loading = subQuery.isLoading;
+  const fetchError = subQuery.error
+    ? subQuery.error instanceof Error
+      ? subQuery.error.message
+      : String(subQuery.error)
+    : null;
+
+  const portalMutation = useCreateBillingPortalSession();
+  const portalLoading = portalMutation.isPending;
 
   const openPortal = async () => {
-    setPortalLoading(true);
     setError(null);
     try {
-      const res = await apiFetch<{ url: string }>(
-        "/api/billing/portal-session",
-        {
-          method: "POST",
-          getToken: async () => (await getToken()) ?? null,
-        },
-      );
+      const res = await portalMutation.mutateAsync();
       if (res.url) {
         window.location.href = res.url;
       } else {
@@ -95,10 +73,16 @@ export default function BillingPage() {
             ? e.message
             : String(e),
       );
-    } finally {
-      setPortalLoading(false);
     }
   };
+
+  const refreshSubscription = () => {
+    void queryClient.invalidateQueries({
+      queryKey: getGetMySubscriptionQueryKey(),
+    });
+  };
+
+  const displayedError = error ?? fetchError;
 
   return (
     <div className="min-h-[100dvh] bg-background text-foreground p-4 md:p-8 font-mono selection:bg-primary/30">
@@ -157,7 +141,7 @@ export default function BillingPage() {
             ✓ Checkout complete. Your subscription will be active in moments.
             <button
               type="button"
-              onClick={() => setRefreshKey((k) => k + 1)}
+              onClick={refreshSubscription}
               className="ml-3 underline"
               data-testid="button-refresh-after-checkout"
             >
@@ -166,12 +150,12 @@ export default function BillingPage() {
           </div>
         )}
 
-        {error && (
+        {displayedError && (
           <div
             className="border border-destructive text-destructive p-3 text-xs uppercase tracking-widest"
             data-testid="text-error"
           >
-            {error}
+            {displayedError}
           </div>
         )}
 
