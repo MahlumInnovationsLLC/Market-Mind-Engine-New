@@ -158,6 +158,14 @@ async def lifespan(_: FastAPI):
     except Exception as e:
         log.warning("settlement scheduler start failed: %s", e)
 
+    # Background tap on the settlement event hub: caches the most recent
+    # market_settle_complete events in-process so the dashboard panel can
+    # render history immediately on first paint (the WS only delivers
+    # events that occur while a client is connected).
+    settlement_tap_task = asyncio.create_task(
+        _settlement_recent_tap(), name="settlement-recent-tap"
+    )
+
     # System-health collector + daily P&L summary scheduler.  Both are
     # background tasks that touch in-memory state only on success and
     # use try/except internally so a sick dep can't take down the process.
@@ -186,6 +194,14 @@ async def lifespan(_: FastAPI):
             await health.stop()
         except Exception as e:
             log.warning("health collector stop error: %s", e)
+        try:
+            settlement_tap_task.cancel()
+            try:
+                await settlement_tap_task
+            except (asyncio.CancelledError, Exception):
+                pass
+        except Exception as e:
+            log.warning("settlement tap stop error: %s", e)
         try:
             await settlement_scheduler.stop()
         except Exception as e:
@@ -694,6 +710,34 @@ class ModelAlertAckRequest(BaseModel):
     )
 
 
+class AcknowledgeAlertRequest(BaseModel):
+    alert_id: int = Field(..., ge=1, description="model_health_alerts.id to acknowledge")
+    snooze_minutes: int | None = Field(
+        default=None,
+        ge=1,
+        le=60 * 24 * 7,
+        description=(
+            "If set, snooze the alert for this many minutes instead of "
+            "permanently acknowledging it.  Range: 1..10080 (7d)."
+        ),
+    )
+
+
+@app.post("/api/health/acknowledge-alert")
+async def acknowledge_model_health_alert(
+    body: AcknowledgeAlertRequest,
+    user: AuthedUser = Depends(require_approved_user),
+) -> dict[str, object]:
+    """Dashboard-friendly variant of `/api/health/model-alerts/{id}/ack`
+    that takes the alert_id in the request body so the operator console
+    can call a single stable URL for the "Acknowledge" button."""
+    return await ack_model_health_alert(
+        alert_id=body.alert_id,
+        body=ModelAlertAckRequest(snooze_minutes=body.snooze_minutes),
+        user=user,
+    )
+
+
 @app.post("/api/health/model-alerts/{alert_id}/ack")
 async def ack_model_health_alert(
     alert_id: int,
@@ -1016,9 +1060,91 @@ class SettlementSettleMarketRequest(BaseModel):
     settle_price: float | None = Field(None, ge=0.0, le=100.0)
 
 
+_RECENT_SETTLEMENTS_BUF: list[dict[str, object]] = []
+_RECENT_SETTLEMENTS_MAX = 25
+
+
+async def _settlement_recent_tap() -> None:
+    """Long-lived subscriber on the settlement event hub that records
+    `market_settle_complete` events for the dashboard polling fallback.
+    Restarted on lifespan; cancellation is the normal exit."""
+    q = settlement_event_hub.subscribe()
+    try:
+        while True:
+            ev = await q.get()
+            if isinstance(ev, dict) and ev.get("type") == "market_settle_complete":
+                _record_recent_settlement(ev)
+    except asyncio.CancelledError:
+        raise
+    except Exception as e:  # pragma: no cover
+        log.warning("settlement recent tap exited: %s", e)
+    finally:
+        settlement_event_hub.unsubscribe(q)
+
+
+def _record_recent_settlement(event: dict[str, object]) -> None:
+    """Cache the last N market_settle_complete events so the dashboard can
+    show recent settlements after a page reload (the WS only delivers
+    events that happen while connected)."""
+    _RECENT_SETTLEMENTS_BUF.append(event)
+    if len(_RECENT_SETTLEMENTS_BUF) > _RECENT_SETTLEMENTS_MAX:
+        del _RECENT_SETTLEMENTS_BUF[: len(_RECENT_SETTLEMENTS_BUF) - _RECENT_SETTLEMENTS_MAX]
+
+
+async def _settlement_today_summary() -> dict[str, object]:
+    """Aggregate today's settled-trade activity for the operator panel.
+    Returns trade count, vertical breakdown, and total realized PnL."""
+    out: dict[str, object] = {
+        "trades_settled": 0,
+        "realized_pnl": 0.0,
+        "by_vertical": [],
+    }
+    try:
+        pool = await db.get_pool()
+        row = await pool.fetchrow(
+            """
+            SELECT COUNT(*)::int AS n,
+                   COALESCE(SUM(pnl), 0)::float AS pnl
+              FROM trades
+             WHERE settled_at >= date_trunc('day', now())
+            """
+        )
+        if row is not None:
+            out["trades_settled"] = int(row["n"] or 0)
+            out["realized_pnl"] = float(row["pnl"] or 0.0)
+        rows = await pool.fetch(
+            """
+            SELECT vertical,
+                   COUNT(*)::int AS trades_settled,
+                   COALESCE(SUM(pnl), 0)::float AS realized_pnl
+              FROM trades
+             WHERE settled_at >= date_trunc('day', now())
+             GROUP BY vertical
+             ORDER BY vertical NULLS LAST
+            """
+        )
+        out["by_vertical"] = [
+            {
+                "vertical": r["vertical"],
+                "trades_settled": int(r["trades_settled"] or 0),
+                "realized_pnl": float(r["realized_pnl"] or 0.0),
+            }
+            for r in rows
+        ]
+    except Exception as e:  # pragma: no cover
+        log.warning("settlement today summary failed: %s", e)
+    return out
+
+
 @app.get("/api/settlement/status")
 async def settlement_status(_: object = Depends(require_auth)) -> dict[str, object]:
-    return settlement_scheduler.status()
+    """Scheduler status + today's settled-trade summary + recent
+    market_settle_complete events.  The recent-events buffer is the WS
+    fallback when the live socket drops or the page is fresh."""
+    base = settlement_scheduler.status()
+    base["today"] = await _settlement_today_summary()
+    base["recent_settlements"] = list(reversed(_RECENT_SETTLEMENTS_BUF[-10:]))
+    return base
 
 
 @app.post("/api/settlement/run-cycle")

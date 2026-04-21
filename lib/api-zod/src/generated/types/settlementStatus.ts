@@ -5,11 +5,15 @@
  * Axiom-Predict API — backend for the prediction-market trading platform.
  * OpenAPI spec version: 0.1.0
  */
+import type { SettlementRecentEvent } from "./settlementRecentEvent";
 import type { SettlementStatusLastCycle } from "./settlementStatusLastCycle";
+import type { SettlementTodaySummary } from "./settlementTodaySummary";
 
 export interface SettlementStatus {
   enabled?: boolean;
   running?: boolean;
   interval_seconds?: number;
   last_cycle?: SettlementStatusLastCycle;
+  today?: SettlementTodaySummary;
+  recent_settlements?: SettlementRecentEvent[];
 }

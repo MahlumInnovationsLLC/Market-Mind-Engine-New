@@ -189,11 +189,78 @@ export interface OrchestratorCycleResult {
 
 export type SettlementStatusLastCycle = { [key: string]: unknown };
 
+export interface SettlementVerticalToday {
+  vertical?: string | null;
+  trades_settled: number;
+  realized_pnl: number;
+}
+
+export interface SettlementTodaySummary {
+  trades_settled: number;
+  realized_pnl: number;
+  by_vertical: SettlementVerticalToday[];
+}
+
+export interface SettlementRecentEvent {
+  type?: string;
+  market_id?: string | null;
+  outcome_yes?: number | null;
+  trades_settled?: number | null;
+  persona_metrics_updated?: number | null;
+  alerts_raised?: number | null;
+  verticals?: string[];
+  [key: string]: unknown;
+}
+
 export interface SettlementStatus {
   enabled?: boolean;
   running?: boolean;
   interval_seconds?: number;
   last_cycle?: SettlementStatusLastCycle;
+  today?: SettlementTodaySummary;
+  recent_settlements?: SettlementRecentEvent[];
+}
+
+export interface ModelHealthAlert {
+  id: number;
+  vertical?: string | null;
+  alert_type?: string | null;
+  severity?: string | null;
+  metric_name?: string | null;
+  metric_value?: number | null;
+  threshold?: number | null;
+  message?: string | null;
+  acknowledged: boolean;
+  acknowledged_by?: string | null;
+  acknowledged_at?: string | null;
+  snooze_until?: string | null;
+  created_at?: string | null;
+  age_seconds: number;
+}
+
+export interface ModelHealthAlertList {
+  items: ModelHealthAlert[];
+  count: number;
+}
+
+export interface AcknowledgeAlertRequest {
+  /** @minimum 1 */
+  alert_id: number;
+  /**
+   * @minimum 1
+   * @maximum 10080
+   */
+  snooze_minutes?: number | null;
+}
+
+export interface AcknowledgeAlertResult {
+  ok: boolean;
+  id: number;
+  vertical?: string | null;
+  severity?: string | null;
+  acknowledged: boolean;
+  snooze_until?: string | null;
+  acknowledged_by?: string | null;
 }
 
 export interface SettlementCycleResult {
@@ -397,6 +464,18 @@ export type GetRecentDebatesParams = {
   /**
    * @minimum 1
    * @maximum 100
+   */
+  limit?: number;
+};
+
+export type ListModelHealthAlertsParams = {
+  /**
+   * Include acknowledged + snoozed alerts in addition to open ones
+   */
+  ack?: boolean;
+  /**
+   * @minimum 1
+   * @maximum 500
    */
   limit?: number;
 };

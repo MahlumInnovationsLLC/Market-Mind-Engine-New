@@ -11,6 +11,8 @@ import SwarmAnalysts from "@/components/telemetry/swarm-analysts";
 import TradingCycles from "@/components/telemetry/trading-cycles";
 import SwarmDebates from "@/components/telemetry/swarm-debates";
 import ModelInventory from "@/components/telemetry/model-inventory";
+import SettlementPanel from "@/components/telemetry/settlement-panel";
+import ModelHealthAlerts from "@/components/telemetry/model-health-alerts";
 import WsStatusIndicator from "@/components/ws-status-indicator";
 import { useWebSocket } from "@/hooks/use-websocket";
 
@@ -90,10 +92,12 @@ export default function Dashboard() {
         <div className="xl:col-span-5 space-y-6">
           <RecentTrades />
           <TradingCycles />
+          <SettlementPanel />
         </div>
 
         {/* Right Column - Swarm Intelligence */}
         <div className="xl:col-span-4 space-y-6">
+          <ModelHealthAlerts />
           <SwarmAnalysts />
           <SwarmDebates />
         </div>

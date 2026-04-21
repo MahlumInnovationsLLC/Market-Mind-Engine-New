@@ -332,6 +332,98 @@ export const GetSettlementStatusResponse = zod.object({
   running: zod.boolean().optional(),
   interval_seconds: zod.number().optional(),
   last_cycle: zod.record(zod.string(), zod.unknown()).optional(),
+  today: zod
+    .object({
+      trades_settled: zod.number(),
+      realized_pnl: zod.number(),
+      by_vertical: zod.array(
+        zod.object({
+          vertical: zod.string().nullish(),
+          trades_settled: zod.number(),
+          realized_pnl: zod.number(),
+        }),
+      ),
+    })
+    .optional(),
+  recent_settlements: zod
+    .array(
+      zod.object({
+        type: zod.string().optional(),
+        market_id: zod.string().nullish(),
+        outcome_yes: zod.number().nullish(),
+        trades_settled: zod.number().nullish(),
+        persona_metrics_updated: zod.number().nullish(),
+        alerts_raised: zod.number().nullish(),
+        verticals: zod.array(zod.string()).optional(),
+      }),
+    )
+    .optional(),
+});
+
+/**
+ * @summary Open (or all) model health / drift alerts
+ */
+export const listModelHealthAlertsQueryAckDefault = false;
+export const listModelHealthAlertsQueryLimitDefault = 100;
+export const listModelHealthAlertsQueryLimitMax = 500;
+
+export const ListModelHealthAlertsQueryParams = zod.object({
+  ack: zod.coerce
+    .boolean()
+    .default(listModelHealthAlertsQueryAckDefault)
+    .describe("Include acknowledged + snoozed alerts in addition to open ones"),
+  limit: zod.coerce
+    .number()
+    .min(1)
+    .max(listModelHealthAlertsQueryLimitMax)
+    .default(listModelHealthAlertsQueryLimitDefault),
+});
+
+export const ListModelHealthAlertsResponse = zod.object({
+  items: zod.array(
+    zod.object({
+      id: zod.number(),
+      vertical: zod.string().nullish(),
+      alert_type: zod.string().nullish(),
+      severity: zod.string().nullish(),
+      metric_name: zod.string().nullish(),
+      metric_value: zod.number().nullish(),
+      threshold: zod.number().nullish(),
+      message: zod.string().nullish(),
+      acknowledged: zod.boolean(),
+      acknowledged_by: zod.string().nullish(),
+      acknowledged_at: zod.string().nullish(),
+      snooze_until: zod.string().nullish(),
+      created_at: zod.string().nullish(),
+      age_seconds: zod.number(),
+    }),
+  ),
+  count: zod.number(),
+});
+
+/**
+ * @summary Acknowledge or snooze a model health alert by id
+ */
+
+export const acknowledgeModelHealthAlertBodySnoozeMinutesMax = 10080;
+
+export const AcknowledgeModelHealthAlertBody = zod.object({
+  alert_id: zod.number().min(1),
+  snooze_minutes: zod
+    .number()
+    .min(1)
+    .max(acknowledgeModelHealthAlertBodySnoozeMinutesMax)
+    .nullish(),
+});
+
+export const AcknowledgeModelHealthAlertResponse = zod.object({
+  ok: zod.boolean(),
+  id: zod.number(),
+  vertical: zod.string().nullish(),
+  severity: zod.string().nullish(),
+  acknowledged: zod.boolean(),
+  snooze_until: zod.string().nullish(),
+  acknowledged_by: zod.string().nullish(),
 });
 
 /**

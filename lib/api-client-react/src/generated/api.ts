@@ -17,6 +17,8 @@ import type {
 } from "@tanstack/react-query";
 
 import type {
+  AcknowledgeAlertRequest,
+  AcknowledgeAlertResult,
   AdminAuditLogList,
   AdminGetAuditLogParams,
   AdminSetAdminRequest,
@@ -30,6 +32,8 @@ import type {
   GetRecentDebatesParams,
   GetRecentTradesParams,
   HealthStatus,
+  ListModelHealthAlertsParams,
+  ModelHealthAlertList,
   ModelsInventory,
   MyAccess,
   OrchestratorCycleResult,
@@ -1039,6 +1043,199 @@ export function useGetSettlementStatus<
 
   return { ...query, queryKey: queryOptions.queryKey };
 }
+
+/**
+ * @summary Open (or all) model health / drift alerts
+ */
+export const getListModelHealthAlertsUrl = (
+  params?: ListModelHealthAlertsParams,
+) => {
+  const normalizedParams = new URLSearchParams();
+
+  Object.entries(params || {}).forEach(([key, value]) => {
+    if (value !== undefined) {
+      normalizedParams.append(key, value === null ? "null" : value.toString());
+    }
+  });
+
+  const stringifiedParams = normalizedParams.toString();
+
+  return stringifiedParams.length > 0
+    ? `/api/health/model-alerts?${stringifiedParams}`
+    : `/api/health/model-alerts`;
+};
+
+export const listModelHealthAlerts = async (
+  params?: ListModelHealthAlertsParams,
+  options?: RequestInit,
+): Promise<ModelHealthAlertList> => {
+  return customFetch<ModelHealthAlertList>(
+    getListModelHealthAlertsUrl(params),
+    {
+      ...options,
+      method: "GET",
+    },
+  );
+};
+
+export const getListModelHealthAlertsQueryKey = (
+  params?: ListModelHealthAlertsParams,
+) => {
+  return [`/api/health/model-alerts`, ...(params ? [params] : [])] as const;
+};
+
+export const getListModelHealthAlertsQueryOptions = <
+  TData = Awaited<ReturnType<typeof listModelHealthAlerts>>,
+  TError = ErrorType<unknown>,
+>(
+  params?: ListModelHealthAlertsParams,
+  options?: {
+    query?: UseQueryOptions<
+      Awaited<ReturnType<typeof listModelHealthAlerts>>,
+      TError,
+      TData
+    >;
+    request?: SecondParameter<typeof customFetch>;
+  },
+) => {
+  const { query: queryOptions, request: requestOptions } = options ?? {};
+
+  const queryKey =
+    queryOptions?.queryKey ?? getListModelHealthAlertsQueryKey(params);
+
+  const queryFn: QueryFunction<
+    Awaited<ReturnType<typeof listModelHealthAlerts>>
+  > = ({ signal }) =>
+    listModelHealthAlerts(params, { signal, ...requestOptions });
+
+  return { queryKey, queryFn, ...queryOptions } as UseQueryOptions<
+    Awaited<ReturnType<typeof listModelHealthAlerts>>,
+    TError,
+    TData
+  > & { queryKey: QueryKey };
+};
+
+export type ListModelHealthAlertsQueryResult = NonNullable<
+  Awaited<ReturnType<typeof listModelHealthAlerts>>
+>;
+export type ListModelHealthAlertsQueryError = ErrorType<unknown>;
+
+/**
+ * @summary Open (or all) model health / drift alerts
+ */
+
+export function useListModelHealthAlerts<
+  TData = Awaited<ReturnType<typeof listModelHealthAlerts>>,
+  TError = ErrorType<unknown>,
+>(
+  params?: ListModelHealthAlertsParams,
+  options?: {
+    query?: UseQueryOptions<
+      Awaited<ReturnType<typeof listModelHealthAlerts>>,
+      TError,
+      TData
+    >;
+    request?: SecondParameter<typeof customFetch>;
+  },
+): UseQueryResult<TData, TError> & { queryKey: QueryKey } {
+  const queryOptions = getListModelHealthAlertsQueryOptions(params, options);
+
+  const query = useQuery(queryOptions) as UseQueryResult<TData, TError> & {
+    queryKey: QueryKey;
+  };
+
+  return { ...query, queryKey: queryOptions.queryKey };
+}
+
+/**
+ * @summary Acknowledge or snooze a model health alert by id
+ */
+export const getAcknowledgeModelHealthAlertUrl = () => {
+  return `/api/health/acknowledge-alert`;
+};
+
+export const acknowledgeModelHealthAlert = async (
+  acknowledgeAlertRequest: AcknowledgeAlertRequest,
+  options?: RequestInit,
+): Promise<AcknowledgeAlertResult> => {
+  return customFetch<AcknowledgeAlertResult>(
+    getAcknowledgeModelHealthAlertUrl(),
+    {
+      ...options,
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...options?.headers },
+      body: JSON.stringify(acknowledgeAlertRequest),
+    },
+  );
+};
+
+export const getAcknowledgeModelHealthAlertMutationOptions = <
+  TError = ErrorType<unknown>,
+  TContext = unknown,
+>(options?: {
+  mutation?: UseMutationOptions<
+    Awaited<ReturnType<typeof acknowledgeModelHealthAlert>>,
+    TError,
+    { data: BodyType<AcknowledgeAlertRequest> },
+    TContext
+  >;
+  request?: SecondParameter<typeof customFetch>;
+}): UseMutationOptions<
+  Awaited<ReturnType<typeof acknowledgeModelHealthAlert>>,
+  TError,
+  { data: BodyType<AcknowledgeAlertRequest> },
+  TContext
+> => {
+  const mutationKey = ["acknowledgeModelHealthAlert"];
+  const { mutation: mutationOptions, request: requestOptions } = options
+    ? options.mutation &&
+      "mutationKey" in options.mutation &&
+      options.mutation.mutationKey
+      ? options
+      : { ...options, mutation: { ...options.mutation, mutationKey } }
+    : { mutation: { mutationKey }, request: undefined };
+
+  const mutationFn: MutationFunction<
+    Awaited<ReturnType<typeof acknowledgeModelHealthAlert>>,
+    { data: BodyType<AcknowledgeAlertRequest> }
+  > = (props) => {
+    const { data } = props ?? {};
+
+    return acknowledgeModelHealthAlert(data, requestOptions);
+  };
+
+  return { mutationFn, ...mutationOptions };
+};
+
+export type AcknowledgeModelHealthAlertMutationResult = NonNullable<
+  Awaited<ReturnType<typeof acknowledgeModelHealthAlert>>
+>;
+export type AcknowledgeModelHealthAlertMutationBody =
+  BodyType<AcknowledgeAlertRequest>;
+export type AcknowledgeModelHealthAlertMutationError = ErrorType<unknown>;
+
+/**
+ * @summary Acknowledge or snooze a model health alert by id
+ */
+export const useAcknowledgeModelHealthAlert = <
+  TError = ErrorType<unknown>,
+  TContext = unknown,
+>(options?: {
+  mutation?: UseMutationOptions<
+    Awaited<ReturnType<typeof acknowledgeModelHealthAlert>>,
+    TError,
+    { data: BodyType<AcknowledgeAlertRequest> },
+    TContext
+  >;
+  request?: SecondParameter<typeof customFetch>;
+}): UseMutationResult<
+  Awaited<ReturnType<typeof acknowledgeModelHealthAlert>>,
+  TError,
+  { data: BodyType<AcknowledgeAlertRequest> },
+  TContext
+> => {
+  return useMutation(getAcknowledgeModelHealthAlertMutationOptions(options));
+};
 
 /**
  * @summary Manually trigger one settlement sweep

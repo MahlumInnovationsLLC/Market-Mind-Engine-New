@@ -189,6 +189,43 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/SettlementStatus" }
 
+  /health/model-alerts:
+    get:
+      operationId: listModelHealthAlerts
+      tags: [health]
+      summary: Open (or all) model health / drift alerts
+      parameters:
+        - in: query
+          name: ack
+          schema: { type: boolean, default: false }
+          description: Include acknowledged + snoozed alerts in addition to open ones
+        - in: query
+          name: limit
+          schema: { type: integer, minimum: 1, maximum: 500, default: 100 }
+      responses:
+        "200":
+          description: Alert list
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ModelHealthAlertList" }
+
+  /health/acknowledge-alert:
+    post:
+      operationId: acknowledgeModelHealthAlert
+      tags: [health]
+      summary: Acknowledge or snooze a model health alert by id
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AcknowledgeAlertRequest" }
+      responses:
+        "200":
+          description: Updated alert state
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AcknowledgeAlertResult" }
+
   /settlement/run-cycle:
     post:
       operationId: runSettlementCycle
@@ -571,6 +608,93 @@ components:
         last_cycle:
           type: object
           additionalProperties: true
+        today: { $ref: "#/components/schemas/SettlementTodaySummary" }
+        recent_settlements:
+          type: array
+          items: { $ref: "#/components/schemas/SettlementRecentEvent" }
+
+    SettlementVerticalToday:
+      type: object
+      properties:
+        vertical: { type: string, nullable: true }
+        trades_settled: { type: integer }
+        realized_pnl: { type: number }
+      required: [trades_settled, realized_pnl]
+
+    SettlementTodaySummary:
+      type: object
+      properties:
+        trades_settled: { type: integer }
+        realized_pnl: { type: number }
+        by_vertical:
+          type: array
+          items: { $ref: "#/components/schemas/SettlementVerticalToday" }
+      required: [trades_settled, realized_pnl, by_vertical]
+
+    SettlementRecentEvent:
+      type: object
+      additionalProperties: true
+      properties:
+        type: { type: string }
+        market_id: { type: string, nullable: true }
+        outcome_yes: { type: integer, nullable: true }
+        trades_settled: { type: integer, nullable: true }
+        persona_metrics_updated: { type: integer, nullable: true }
+        alerts_raised: { type: integer, nullable: true }
+        verticals:
+          type: array
+          items: { type: string }
+
+    ModelHealthAlert:
+      type: object
+      properties:
+        id: { type: integer }
+        vertical: { type: string, nullable: true }
+        alert_type: { type: string, nullable: true }
+        severity: { type: string, nullable: true }
+        metric_name: { type: string, nullable: true }
+        metric_value: { type: number, nullable: true }
+        threshold: { type: number, nullable: true }
+        message: { type: string, nullable: true }
+        acknowledged: { type: boolean }
+        acknowledged_by: { type: string, nullable: true }
+        acknowledged_at: { type: string, nullable: true }
+        snooze_until: { type: string, nullable: true }
+        created_at: { type: string, nullable: true }
+        age_seconds: { type: integer }
+      required: [id, acknowledged, age_seconds]
+
+    ModelHealthAlertList:
+      type: object
+      properties:
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/ModelHealthAlert" }
+        count: { type: integer }
+      required: [items, count]
+
+    AcknowledgeAlertRequest:
+      type: object
+      properties:
+        alert_id: { type: integer, minimum: 1 }
+        snooze_minutes:
+          type: integer
+          nullable: true
+          minimum: 1
+          maximum: 10080
+      required: [alert_id]
+
+    AcknowledgeAlertResult:
+      type: object
+      properties:
+        ok: { type: boolean }
+        id: { type: integer }
+        vertical: { type: string, nullable: true }
+        severity: { type: string, nullable: true }
+        acknowledged: { type: boolean }
+        snooze_until: { type: string, nullable: true }
+        acknowledged_by: { type: string, nullable: true }
+      required: [ok, id, acknowledged]
 
     SettlementCycleResult:
       type: object
