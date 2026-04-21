@@ -79,11 +79,6 @@ export default function SignInScreen() {
             {errors.fields.password.message}
           </Text>
         )}
-        {(errors as any).global?.message && (
-          <Text style={[styles.error, { color: colors.destructive }]}>
-            {(errors as any).global.message}
-          </Text>
-        )}
 
         <Pressable
           onPress={submit}

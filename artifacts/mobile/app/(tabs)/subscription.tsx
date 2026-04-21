@@ -54,6 +54,21 @@ type FlatPlan = {
   annual_usd: number;
 };
 
+function errMsg(e: unknown): string {
+  if (e instanceof Error) return e.message;
+  if (typeof e === "string") return e;
+  return "Unknown error";
+}
+
+function isUserCancelledPurchase(e: unknown): boolean {
+  return (
+    typeof e === "object" &&
+    e !== null &&
+    "userCancelled" in e &&
+    Boolean((e as { userCancelled?: unknown }).userCancelled)
+  );
+}
+
 function flattenPricing(p: Pricing | undefined): FlatPlan[] {
   if (!p) return [];
   const out: FlatPlan[] = [];
@@ -120,8 +135,8 @@ export default function SubscriptionScreen() {
         body: { price_id: priceId },
       });
       await WebBrowser.openBrowserAsync(res.url);
-    } catch (e: any) {
-      Alert.alert("Checkout failed", e?.message ?? "Unknown error");
+    } catch (e) {
+      Alert.alert("Checkout failed", errMsg(e));
     } finally {
       setBusy(null);
     }
@@ -134,8 +149,8 @@ export default function SubscriptionScreen() {
         method: "POST",
       });
       await WebBrowser.openBrowserAsync(res.url);
-    } catch (e: any) {
-      Alert.alert("Could not open billing portal", e?.message ?? "Unknown error");
+    } catch (e) {
+      Alert.alert("Could not open billing portal", errMsg(e));
     } finally {
       setBusy(null);
     }
@@ -156,9 +171,9 @@ export default function SubscriptionScreen() {
       if (Object.keys(customerInfo.entitlements.active).length > 0) {
         sub.refetch();
       }
-    } catch (e: any) {
-      if (!e?.userCancelled) {
-        Alert.alert("Purchase failed", e?.message ?? "Unknown error");
+    } catch (e) {
+      if (!isUserCancelledPurchase(e)) {
+        Alert.alert("Purchase failed", errMsg(e));
       }
     } finally {
       setBusy(null);
