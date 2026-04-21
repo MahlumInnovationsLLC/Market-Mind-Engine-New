@@ -48,6 +48,14 @@ from .kalshi import (
     lifecycle as kalshi_lifecycle,
     ws as kalshi_ws,
 )
+from .polymarket import (
+    auth as polymarket_auth,
+    bus as polymarket_bus,
+    client as polymarket_client_mod,
+    lifecycle as polymarket_lifecycle,
+    ws as polymarket_ws,
+)
+from .polymarket.lifecycle import OrderRequest as PolymarketOrderRequest
 
 
 logging.basicConfig(
@@ -120,6 +128,19 @@ async def lifespan(_: FastAPI):
         fill_task = await kalshi_lifecycle.attach_ws_fill_handler()
     except Exception as e:
         log.warning("Kalshi WS startup skipped: %s", e)
+
+    # Validate Polymarket credentials at startup (non-fatal — degraded mode allowed).
+    pcred = polymarket_auth.validate_credentials(
+        settings.polymarket_api_key,
+        settings.polymarket_api_secret,
+        settings.polymarket_api_passphrase,
+        settings.polymarket_wallet_address,
+    )
+    if pcred.get("ok"):
+        log.info("Polymarket credentials OK (key fingerprint=%s, mode=%s)",
+                 pcred.get("key_fingerprint"), settings.trading_mode)
+    else:
+        log.warning("Polymarket credentials NOT validated: %s", pcred.get("error"))
 
     # Start the trading orchestrator scheduler.  Honors
     # AXIOM_ORCHESTRATOR_ENABLED + AXIOM_TRADING_MODE.  Cycle failures
@@ -413,6 +434,15 @@ async def health_full(_: object = Depends(require_approved_user)) -> dict[str, o
     out["kalshi"] = await kalshi_client_mod.health_probe()
     if not out["kalshi"].get("ok"):
         out["status"] = "degraded"
+    out["polymarket"] = await polymarket_client_mod.health_probe()
+    if not out["polymarket"].get("ok"):
+        out["status"] = "degraded"
+    pws = polymarket_ws.get_ws_subscriber()
+    out["polymarket_ws"] = {
+        "connected": bool(pws and pws.connected),
+        "last_error": pws.last_error if pws else None,
+        "subscribers": polymarket_bus.bus.subscriber_count,
+    }
     out["trading_mode"] = settings.trading_mode
     ws = kalshi_ws.get_ws_subscriber()
     out["kalshi_ws"] = {
@@ -1173,6 +1203,139 @@ async def kalshi_event_stream(websocket: WebSocket):  # pragma: no cover - cover
         log.warning("ws/kalshi error: %s", e)
     finally:
         await kalshi_bus.unsubscribe(q)
+
+
+# ---------------------------------------------------------------------------
+# Polymarket exchange endpoints (mirror of /api/kalshi/*)
+# ---------------------------------------------------------------------------
+
+
+def _polymarket_error_to_http(e: Exception) -> HTTPException:
+    if isinstance(e, polymarket_client_mod.PolymarketAPIError):
+        status = 502 if e.status == 0 else min(max(e.status, 400), 599)
+        return HTTPException(status_code=status, detail={"polymarket_status": e.status, "body": e.body})
+    if isinstance(e, polymarket_auth.PolymarketAuthError):
+        return HTTPException(status_code=503, detail=str(e))
+    return HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/polymarket/balance")
+async def polymarket_balance(_: object = Depends(require_auth)) -> dict[str, object]:
+    try:
+        async with polymarket_client_mod.PolymarketClient() as c:
+            bal = await c.get_balance()
+    except Exception as e:
+        raise _polymarket_error_to_http(e)
+    return {
+        "balance_cents": bal.balance_cents,
+        "balance_dollars": bal.balance_dollars,
+        "allowance_cents": bal.allowance_cents,
+        "raw": bal.raw,
+    }
+
+
+@app.get("/api/polymarket/positions")
+async def polymarket_positions(
+    limit: int = 100, _: object = Depends(require_auth)
+) -> dict[str, object]:
+    limit = max(1, min(500, int(limit)))
+    try:
+        async with polymarket_client_mod.PolymarketClient() as c:
+            pos = await c.get_positions(limit=limit)
+    except Exception as e:
+        raise _polymarket_error_to_http(e)
+    return {
+        "items": [
+            {
+                "market_id": p.market_id,
+                "token_id": p.token_id,
+                "outcome": p.outcome,
+                "size": p.size,
+                "avg_price": p.avg_price,
+                "realized_pnl_cents": p.realized_pnl_cents,
+            }
+            for p in pos
+        ],
+        "count": len(pos),
+    }
+
+
+@app.get("/api/polymarket/markets")
+async def polymarket_markets(
+    limit: int = 50,
+    next_cursor: str | None = None,
+    _: object = Depends(require_auth),
+) -> dict[str, object]:
+    try:
+        async with polymarket_client_mod.PolymarketClient() as c:
+            data = await c.list_markets(limit=max(1, min(200, limit)), next_cursor=next_cursor)
+    except Exception as e:
+        raise _polymarket_error_to_http(e)
+    return data
+
+
+@app.get("/api/polymarket/orders/resting")
+async def polymarket_resting_orders(_: object = Depends(require_auth)) -> dict[str, object]:
+    rows = await polymarket_lifecycle.list_resting_orders()
+    return {"items": [r.to_dict() for r in rows], "count": len(rows)}
+
+
+@app.post("/api/polymarket/paper-order")
+async def polymarket_paper_order(
+    payload: dict, _: object = Depends(require_auth)
+) -> dict[str, object]:
+    """Submit a paper order via the Polymarket lifecycle. Always paper,
+    even when AXIOM_TRADING_MODE=live, so this endpoint is safe to expose
+    to operators."""
+    try:
+        req = PolymarketOrderRequest(
+            market_id=str(payload.get("market_id") or payload.get("conditionId") or "").strip(),
+            token_id=str(payload.get("token_id") or payload.get("tokenID") or "").strip(),
+            side=str(payload.get("side") or "yes").lower(),  # type: ignore[arg-type]
+            action=str(payload.get("action") or "buy").lower(),  # type: ignore[arg-type]
+            count=int(payload.get("count") or payload.get("contracts") or payload.get("size") or 1),
+            limit_price_cents=(int(payload["limit_price_cents"])
+                               if payload.get("limit_price_cents") is not None else None),
+            type=str(payload.get("type") or "limit"),  # type: ignore[arg-type]
+            time_in_force=str(payload.get("time_in_force") or "GTC"),  # type: ignore[arg-type]
+            vertical=str(payload.get("vertical") or "sports"),
+            context=dict(payload.get("context") or {}),
+        )
+    except Exception as e:
+        raise HTTPException(status_code=422, detail=f"bad order payload: {e}")
+    if not req.market_id:
+        raise HTTPException(status_code=422, detail="market_id is required")
+    if not req.token_id:
+        raise HTTPException(status_code=422, detail="token_id is required")
+    try:
+        rec = await polymarket_lifecycle.submit_order(req, force_paper=True)
+    except polymarket_lifecycle.OrderRejected as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    return rec.to_dict()
+
+
+@app.websocket("/api/ws/polymarket")
+async def polymarket_event_stream(websocket: WebSocket):  # pragma: no cover
+    """Stream the in-process Polymarket event bus to a connected client.
+
+    Auth: pass a Clerk session JWT as the `?token=` query parameter.
+    """
+    from .auth import ws_authenticate
+
+    user = await ws_authenticate(websocket)
+    if user is None and auth_configured():
+        return
+    q = await polymarket_bus.bus.subscribe()
+    try:
+        while True:
+            msg = await q.get()
+            await websocket.send_json(msg)
+    except WebSocketDisconnect:
+        pass
+    except Exception as e:
+        log.warning("ws/polymarket error: %s", e)
+    finally:
+        await polymarket_bus.bus.unsubscribe(q)
 
 
 # ---------------------------------------------------------------------------

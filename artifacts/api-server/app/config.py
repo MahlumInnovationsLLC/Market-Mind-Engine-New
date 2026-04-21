@@ -63,6 +63,16 @@ class Settings:
     kalshi_api_base_url: str
     kalshi_ws_url: str
 
+    # Polymarket (CLOB) — credentials are L2 API keys (key/secret/passphrase)
+    # plus the wallet address that owns them. All optional: missing creds
+    # put the client in degraded mode, identical to Kalshi.
+    polymarket_api_key: str | None
+    polymarket_api_secret: str | None
+    polymarket_api_passphrase: str | None
+    polymarket_wallet_address: str | None
+    polymarket_api_base_url: str
+    polymarket_ws_url: str
+
     # Operating mode
     paper_mode: bool
     # AXIOM_TRADING_MODE = "paper" (default) | "live" | "halt"
@@ -174,6 +184,16 @@ def get_settings() -> Settings:
         kalshi_env=kalshi_env,
         kalshi_api_base_url=kalshi_api_base_url,
         kalshi_ws_url=kalshi_ws_url,
+        polymarket_api_key=os.environ.get("POLYMARKET_API_KEY"),
+        polymarket_api_secret=os.environ.get("POLYMARKET_API_SECRET"),
+        polymarket_api_passphrase=os.environ.get("POLYMARKET_API_PASSPHRASE"),
+        polymarket_wallet_address=os.environ.get("POLYMARKET_WALLET_ADDRESS"),
+        polymarket_api_base_url=(
+            os.environ.get("POLYMARKET_API_BASE_URL") or "https://clob.polymarket.com"
+        ).rstrip("/"),
+        polymarket_ws_url=(
+            os.environ.get("POLYMARKET_WS_URL") or "wss://ws-subscriptions-clob.polymarket.com/ws/"
+        ),
         paper_mode=_truthy(os.environ.get("AXIOM_PAPER_MODE"), default=True),
         trading_mode=trading_mode,
         orchestrator_enabled=_truthy(
