@@ -148,14 +148,6 @@ function HealthPage() {
     }
   }
 
-  if (!isSignedIn) {
-    return (
-      <div className="min-h-[100dvh] bg-background text-muted-foreground font-mono flex items-center justify-center text-xs uppercase tracking-widest">
-        AUTH :: sign in required
-      </div>
-    );
-  }
-
   const grouped = useMemo(() => {
     const out: Record<Card["category"], Card[]> = {
       live: [],
@@ -165,6 +157,14 @@ function HealthPage() {
     (snap?.cards ?? []).forEach((c) => out[c.category].push(c));
     return out;
   }, [snap]);
+
+  if (!isSignedIn) {
+    return (
+      <div className="min-h-[100dvh] bg-background text-muted-foreground font-mono flex items-center justify-center text-xs uppercase tracking-widest">
+        AUTH :: sign in required
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-[100dvh] bg-background text-foreground font-mono p-6">

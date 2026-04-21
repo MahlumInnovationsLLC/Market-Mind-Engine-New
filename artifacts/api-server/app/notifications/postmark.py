@@ -127,11 +127,24 @@ async def _send_one(
     text_body: str,
     html_body: str | None,
     tag: str | None,
+    dry_run: bool = False,
 ) -> _SendRecord:
     token = os.environ.get("POSTMARK_SERVER_TOKEN")
     from_email = os.environ.get("POSTMARK_FROM_EMAIL") or DEFAULT_FROM
     stream = os.environ.get("POSTMARK_MESSAGE_STREAM") or "outbound"
     now = time.time()
+
+    if dry_run:
+        rec = _SendRecord(
+            sent_at=now,
+            to=to,
+            subject=subject,
+            ok=False,
+            skipped_reason="dry_run",
+        )
+        log.info("postmark dry-run: to=%s subject=%r", to, subject)
+        _record(rec)
+        return rec
 
     if not token:
         rec = _SendRecord(
@@ -195,6 +208,7 @@ async def send(
     html_body: str | None = None,
     to: Iterable[str] | None = None,
     tag: str | None = None,
+    dry_run: bool = False,
 ) -> list[dict]:
     """Send `subject`/`text_body` to every operator (or the explicit
     `to` list when provided).  Returns a list of per-recipient result
@@ -225,6 +239,7 @@ async def send(
                 text_body=text_body,
                 html_body=html_body,
                 tag=tag,
+                dry_run=dry_run,
             )
             for r in recipients
         ],

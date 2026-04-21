@@ -830,9 +830,14 @@ async def _apply_subscription(sub_obj: dict[str, Any]) -> None:
                 cancel_at_period_end,
             )
 
-    # Tier-change alert — only when the resolved tier actually changes.
-    # We compare against the prev_tier read above, before the upsert.
-    if user_id and prev_tier and prev_tier != tier:
+    # Tier-change alert — fire on any real transition, including the
+    # first-ever paid subscription where prev_tier is None.  We treat
+    # `None` as the "free" baseline so a None→free webhook (e.g. a
+    # cancelled-then-stale event) doesn't spam, but None→pro/elite
+    # *does* alert.  Comparison is against the prev_tier we read above,
+    # before the upsert.
+    _prev_normalized = prev_tier or TIER_FREE
+    if user_id and _prev_normalized != tier:
         try:
             from .notifications import alerts as _alerts
             # User email is best-effort; the operator can look up the
@@ -847,7 +852,7 @@ async def _apply_subscription(sub_obj: dict[str, Any]) -> None:
             _alerts.tier_change(
                 user_email=user_email,
                 user_id=user_id,
-                old_tier=prev_tier,
+                old_tier=_prev_normalized,
                 new_tier=tier,
                 status=status,
                 stripe_subscription_id=sub_id,

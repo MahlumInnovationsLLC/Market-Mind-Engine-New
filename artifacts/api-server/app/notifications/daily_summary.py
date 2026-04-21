@@ -50,6 +50,66 @@ _stop = asyncio.Event()
 _last_sent_date: str | None = None
 
 
+# ---------------------------------------------------------------------------
+# Restart-safe dedupe — persists "last sent UTC date" to a tiny table so a
+# process restart on the same day after the target time doesn't duplicate.
+# ---------------------------------------------------------------------------
+
+
+_DEDUPE_KEY = "daily_pnl_summary"
+
+
+async def _ensure_dedupe_table() -> None:
+    try:
+        await db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS notification_dedupe (
+              key  TEXT PRIMARY KEY,
+              date_utc DATE NOT NULL,
+              sent_at TIMESTAMPTZ NOT NULL DEFAULT now()
+            )
+            """
+        )
+    except Exception as e:
+        log.warning("notification_dedupe table create failed: %s", e)
+
+
+async def _get_last_sent_date() -> str | None:
+    try:
+        row = await db.fetchrow(
+            "SELECT date_utc::text AS d FROM notification_dedupe WHERE key=$1",
+            _DEDUPE_KEY,
+        )
+        return row["d"] if row else None
+    except Exception as e:
+        log.warning("dedupe read failed: %s", e)
+        return None
+
+
+async def _mark_sent(date_utc: str) -> bool:
+    """Atomically claim today's date.  Returns True if this caller is the
+    one that successfully claimed it (i.e. should send), False if another
+    actor / earlier run already did."""
+    try:
+        row = await db.fetchrow(
+            """
+            INSERT INTO notification_dedupe (key, date_utc)
+            VALUES ($1, $2::date)
+            ON CONFLICT (key) DO UPDATE
+              SET date_utc = EXCLUDED.date_utc,
+                  sent_at  = now()
+              WHERE notification_dedupe.date_utc < EXCLUDED.date_utc
+            RETURNING 1 AS ok
+            """,
+            _DEDUPE_KEY, date_utc,
+        )
+        return bool(row)
+    except Exception as e:
+        log.warning("dedupe claim failed: %s", e)
+        # Fail open — better to risk a dup than silently skip.
+        return True
+
+
 async def collect_summary(date_utc: str) -> dict[str, Any]:
     """Pull yesterday's PnL, fills, settle counts, etc.  All queries are
     bounded by `date_utc` (UTC YYYY-MM-DD).  Failures fall back to zero
@@ -168,6 +228,9 @@ async def _loop() -> None:
         "daily summary scheduler started: hour=%02d:%02d UTC",
         _send_hour(), _send_minute(),
     )
+    # Hydrate in-memory marker from the persistent table so we don't even
+    # attempt the claim query when we already know we sent today.
+    _last_sent_date = await _get_last_sent_date()
     while not _stop.is_set():
         try:
             now = datetime.now(tz=timezone.utc)
@@ -179,13 +242,20 @@ async def _loop() -> None:
                 or (now.hour == target_hour and now.minute >= target_minute)
             )
             if past_target and _last_sent_date != today:
-                log.info("firing daily summary for %s", today)
-                try:
-                    await fire_now()
+                # Atomic claim — survives process restarts.  If another
+                # worker already sent for `today`, the INSERT...ON CONFLICT
+                # WHERE date_utc < EXCLUDED.date_utc returns no row.
+                claimed = await _mark_sent(today)
+                if not claimed:
                     _last_sent_date = today
-                except Exception as e:
-                    log.exception("daily summary send failed: %s", e)
-                    error_log("daily_summary", f"{type(e).__name__}: {e}")
+                else:
+                    log.info("firing daily summary for %s", today)
+                    try:
+                        await fire_now()
+                        _last_sent_date = today
+                    except Exception as e:
+                        log.exception("daily summary send failed: %s", e)
+                        error_log("daily_summary", f"{type(e).__name__}: {e}")
         except asyncio.CancelledError:
             raise
         except Exception as e:
@@ -205,6 +275,7 @@ async def start() -> None:
         return
     if _task and not _task.done():
         return
+    await _ensure_dedupe_table()
     _stop.clear()
     _task = asyncio.create_task(_loop(), name="daily-summary")
 
