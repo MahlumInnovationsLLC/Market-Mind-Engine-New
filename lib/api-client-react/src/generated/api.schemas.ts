@@ -11,6 +11,7 @@ export interface HealthStatus {
 
 export interface MyAccess {
   approved: boolean;
+  is_admin: boolean;
   email?: string | null;
   user_id: string;
 }
@@ -302,6 +303,80 @@ export interface ModelsInventory {
   cutover: StorageFile[];
 }
 
+export interface AdminUser {
+  clerk_user_id: string;
+  email?: string | null;
+  display_name?: string | null;
+  approved: boolean;
+  is_admin: boolean;
+  first_seen_at?: string | null;
+  last_seen_at?: string | null;
+  activity_count: number;
+  clerk_created_at?: string | null;
+  clerk_last_sign_in_at?: string | null;
+}
+
+export interface AdminUserList {
+  items: AdminUser[];
+}
+
+export interface AdminClerkProfile {
+  [key: string]: unknown;
+}
+
+export interface AdminUserDetail {
+  clerk_user_id: string;
+  email?: string | null;
+  display_name?: string | null;
+  approved: boolean;
+  is_admin: boolean;
+  activity_count: number;
+  first_seen_at?: string | null;
+  last_seen_at?: string | null;
+  approval_source: string;
+  clerk_profile?: AdminClerkProfile;
+}
+
+export interface AdminSetApprovedRequest {
+  approved: boolean;
+}
+
+export interface AdminSetAdminRequest {
+  is_admin: boolean;
+}
+
+export type AdminSetFlagResultBefore = { [key: string]: unknown };
+
+export type AdminSetFlagResultAfter = { [key: string]: unknown };
+
+export interface AdminSetFlagResult {
+  clerk_user_id: string;
+  approved: boolean;
+  is_admin: boolean;
+  before?: AdminSetFlagResultBefore;
+  after?: AdminSetFlagResultAfter;
+}
+
+export type AdminAuditLogEntryBeforeValue = { [key: string]: unknown } | null;
+
+export type AdminAuditLogEntryAfterValue = { [key: string]: unknown } | null;
+
+export interface AdminAuditLogEntry {
+  id: number;
+  actor_user_id: string;
+  actor_email?: string | null;
+  target_user_id: string;
+  target_email?: string | null;
+  action: string;
+  before_value?: AdminAuditLogEntryBeforeValue;
+  after_value?: AdminAuditLogEntryAfterValue;
+  created_at?: string | null;
+}
+
+export interface AdminAuditLogList {
+  items: AdminAuditLogEntry[];
+}
+
 export type GetRecentTradesParams = {
   /**
    * @minimum 1
@@ -322,6 +397,14 @@ export type GetRecentDebatesParams = {
   /**
    * @minimum 1
    * @maximum 100
+   */
+  limit?: number;
+};
+
+export type AdminGetAuditLogParams = {
+  /**
+   * @minimum 1
+   * @maximum 500
    */
   limit?: number;
 };

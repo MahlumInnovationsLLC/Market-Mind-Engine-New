@@ -12,6 +12,7 @@ import * as zod from "zod";
  */
 export const GetMyAccessResponse = zod.object({
   approved: zod.boolean(),
+  is_admin: zod.boolean(),
   email: zod.string().nullish(),
   user_id: zod.string(),
 });
@@ -370,6 +371,114 @@ export const SettleMarketResponse = zod.object({
   persona_metrics_updated: zod.number(),
   alerts_raised: zod.number(),
   verticals: zod.array(zod.string()),
+});
+
+/**
+ * @summary List every user the system has seen sign in
+ */
+export const AdminListUsersResponse = zod.object({
+  items: zod.array(
+    zod.object({
+      clerk_user_id: zod.string(),
+      email: zod.string().nullish(),
+      display_name: zod.string().nullish(),
+      approved: zod.boolean(),
+      is_admin: zod.boolean(),
+      first_seen_at: zod.string().nullish(),
+      last_seen_at: zod.string().nullish(),
+      activity_count: zod.number(),
+      clerk_created_at: zod.string().nullish(),
+      clerk_last_sign_in_at: zod.string().nullish(),
+    }),
+  ),
+});
+
+/**
+ * @summary Detail view for a single user
+ */
+export const AdminGetUserParams = zod.object({
+  clerk_user_id: zod.coerce.string(),
+});
+
+export const AdminGetUserResponse = zod.object({
+  clerk_user_id: zod.string(),
+  email: zod.string().nullish(),
+  display_name: zod.string().nullish(),
+  approved: zod.boolean(),
+  is_admin: zod.boolean(),
+  activity_count: zod.number(),
+  first_seen_at: zod.string().nullish(),
+  last_seen_at: zod.string().nullish(),
+  approval_source: zod.string(),
+  clerk_profile: zod.record(zod.string(), zod.unknown()).optional(),
+});
+
+/**
+ * @summary Approve or revoke operator access for a user
+ */
+export const AdminSetUserApprovedParams = zod.object({
+  clerk_user_id: zod.coerce.string(),
+});
+
+export const AdminSetUserApprovedBody = zod.object({
+  approved: zod.boolean(),
+});
+
+export const AdminSetUserApprovedResponse = zod.object({
+  clerk_user_id: zod.string(),
+  approved: zod.boolean(),
+  is_admin: zod.boolean(),
+  before: zod.record(zod.string(), zod.unknown()).optional(),
+  after: zod.record(zod.string(), zod.unknown()).optional(),
+});
+
+/**
+ * @summary Promote or demote a user to admin
+ */
+export const AdminSetUserAdminParams = zod.object({
+  clerk_user_id: zod.coerce.string(),
+});
+
+export const AdminSetUserAdminBody = zod.object({
+  is_admin: zod.boolean(),
+});
+
+export const AdminSetUserAdminResponse = zod.object({
+  clerk_user_id: zod.string(),
+  approved: zod.boolean(),
+  is_admin: zod.boolean(),
+  before: zod.record(zod.string(), zod.unknown()).optional(),
+  after: zod.record(zod.string(), zod.unknown()).optional(),
+});
+
+/**
+ * @summary Recent admin role / approval audit entries
+ */
+export const adminGetAuditLogQueryLimitDefault = 100;
+export const adminGetAuditLogQueryLimitMax = 500;
+
+export const AdminGetAuditLogQueryParams = zod.object({
+  limit: zod.coerce
+    .number()
+    .min(1)
+    .max(adminGetAuditLogQueryLimitMax)
+    .default(adminGetAuditLogQueryLimitDefault),
+});
+
+export const AdminGetAuditLogResponse = zod.object({
+  items: zod.array(
+    zod.object({
+      id: zod.number(),
+      actor_user_id: zod.string(),
+      actor_email: zod.string().nullish(),
+      target_user_id: zod.string(),
+      target_email: zod.string().nullish(),
+      action: zod.string(),
+      before_value: zod.record(zod.string(), zod.unknown()).nullish(),
+      after_value: zod.record(zod.string(), zod.unknown()).nullish(),
+      created_at: zod.string().nullish(),
+    }),
+  ),
 });
 
 /**

@@ -243,27 +243,130 @@ def _email_from_clerk_user(data: dict[str, Any]) -> str | None:
     return None
 
 
-async def check_approval(user: AuthedUser) -> tuple[bool, str | None]:
-    """Return (approved, primary_email_lower) for the authenticated user."""
-    email = _email_from_claims(user.claims)
-    allowed = _allowed_emails()
+def _bootstrap_admin_emails() -> set[str]:
+    raw = os.environ.get("OPERATOR_ADMIN_EMAILS", "")
+    return {e.strip().lower() for e in raw.split(",") if e.strip()}
 
-    # Fast paths from the JWT claims first to avoid a Clerk API call.
-    if email and email in allowed:
-        return True, email
-    if _metadata_approved(user.claims.get("public_metadata")) or _metadata_approved(
+
+def _metadata_admin(meta: Any) -> bool:
+    if not isinstance(meta, dict):
+        return False
+    v = meta.get("admin")
+    if isinstance(v, bool):
+        return v
+    if isinstance(v, str):
+        return v.strip().lower() in ("1", "true", "yes", "y", "on")
+    return False
+
+
+def _display_name_from_clerk_user(data: dict[str, Any]) -> str | None:
+    first = (data.get("first_name") or "").strip()
+    last = (data.get("last_name") or "").strip()
+    full = (first + " " + last).strip()
+    if full:
+        return full
+    username = data.get("username")
+    if isinstance(username, str) and username.strip():
+        return username.strip()
+    return None
+
+
+async def _resolve_email_and_name(user: AuthedUser) -> tuple[str | None, str | None]:
+    """Resolve the user's primary email + display name, hitting Clerk if needed."""
+    email = _email_from_claims(user.claims)
+    name = None
+    # Avoid a Clerk hit if we already have the email and metadata flags
+    # are not the only signal we need.
+    data = await _fetch_clerk_user(user.user_id)
+    if data:
+        if not email:
+            email = _email_from_clerk_user(data)
+        name = _display_name_from_clerk_user(data)
+    return email, name
+
+
+async def check_admin(user: AuthedUser) -> bool:
+    """Return True if this user is a platform admin.
+
+    `app_users` is the authoritative source. If a row exists, its
+    `is_admin` value wins — even if a stale JWT claim or env-var
+    allowlist would otherwise say "admin". Only when *no* row exists
+    do we fall back to Clerk metadata + the bootstrap env var so the
+    very first admin can sign in on a blank database.
+    """
+    try:
+        from . import admin as admin_module
+
+        row = await admin_module.get_user_row(user.user_id)
+    except Exception as e:
+        log.warning("check_admin DB lookup failed: %s", e)
+        row = None
+
+    if row is not None:
+        return bool(row.get("is_admin"))
+
+    # Bootstrap path only — no app_users row yet.
+    if _metadata_admin(user.claims.get("public_metadata")) or _metadata_admin(
         user.claims.get("private_metadata")
     ):
-        return True, email
+        return True
+    email = _email_from_claims(user.claims)
+    if not email:
+        data = await _fetch_clerk_user(user.user_id)
+        if _metadata_admin(data.get("public_metadata")) or _metadata_admin(
+            data.get("private_metadata")
+        ):
+            return True
+        email = _email_from_clerk_user(data)
+    return bool(email and email in _bootstrap_admin_emails())
 
-    # Fall back to the Clerk Backend API (cached) to fetch email + metadata.
+
+async def check_approval(user: AuthedUser) -> tuple[bool, str | None]:
+    """Return (approved, primary_email_lower) for the authenticated user.
+
+    `app_users` is the authoritative source for revocations: if a row
+    exists, its `approved`/`is_admin` flags win, so an admin-issued
+    revoke takes effect on the next request even if the user's JWT
+    still carries `approved=true` claims and even if their email is
+    still listed in `OPERATOR_ALLOWED_EMAILS`. We only consult the env
+    allowlist / Clerk metadata when no row exists yet (bootstrap).
+    """
+    email = _email_from_claims(user.claims)
+
+    try:
+        from . import admin as admin_module
+
+        row = await admin_module.get_user_row(user.user_id)
+    except Exception as e:
+        log.warning("check_approval DB lookup failed: %s", e)
+        row = None
+
+    if row is not None:
+        approved = bool(row.get("approved") or row.get("is_admin"))
+        return approved, (row.get("email") or email)
+
+    # Bootstrap path only — no app_users row yet.
+    allowed = _allowed_emails()
+    bootstrap_admins = _bootstrap_admin_emails()
+    if email and (email in allowed or email in bootstrap_admins):
+        return True, email
+    if (
+        _metadata_approved(user.claims.get("public_metadata"))
+        or _metadata_approved(user.claims.get("private_metadata"))
+        or _metadata_admin(user.claims.get("public_metadata"))
+        or _metadata_admin(user.claims.get("private_metadata"))
+    ):
+        return True, email
     data = await _fetch_clerk_user(user.user_id)
     if not email:
         email = _email_from_clerk_user(data)
-    if email and email in allowed:
+    if email and (email in allowed or email in bootstrap_admins):
         return True, email
-    if _metadata_approved(data.get("public_metadata")) or _metadata_approved(
-        data.get("private_metadata")
+    if (
+        _metadata_approved(data.get("public_metadata"))
+        or _metadata_approved(data.get("private_metadata"))
+        or _metadata_admin(data.get("public_metadata"))
+        or _metadata_admin(data.get("private_metadata"))
     ):
         return True, email
     return False, email
@@ -272,12 +375,36 @@ async def check_approval(user: AuthedUser) -> tuple[bool, str | None]:
 async def require_approved_user(
     user: AuthedUser = Depends(require_auth),
 ) -> AuthedUser:
-    approved, _ = await check_approval(user)
+    approved, email = await check_approval(user)
+    # Refresh app_users so the admin console always sees the caller.
+    try:
+        from . import admin as admin_module
+
+        _, name = await _resolve_email_and_name(user)
+        await admin_module.upsert_seen_user(user.user_id, email, name)
+    except Exception as e:
+        log.warning("upsert_seen_user (approved) failed: %s", e)
     if not approved:
         raise HTTPException(
             status_code=403,
             detail="account pending operator approval",
         )
+    return user
+
+
+async def require_admin(
+    user: AuthedUser = Depends(require_auth),
+) -> AuthedUser:
+    is_admin = await check_admin(user)
+    if not is_admin:
+        raise HTTPException(status_code=403, detail="admin only")
+    try:
+        from . import admin as admin_module
+
+        email, name = await _resolve_email_and_name(user)
+        await admin_module.upsert_seen_user(user.user_id, email, name)
+    except Exception as e:
+        log.warning("upsert_seen_user (admin) failed: %s", e)
     return user
 
 

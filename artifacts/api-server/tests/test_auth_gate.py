@@ -41,6 +41,9 @@ PROTECTED_ROUTES: tuple[str, ...] = (
     "/api/dashboard/recent-debates",
     "/api/storage/list",
     "/api/models/inventory",
+    "/api/admin/users",
+    "/api/admin/users/{clerk_user_id}",
+    "/api/admin/audit-log",
 )
 
 PUBLIC_ROUTES: tuple[str, ...] = ("/api/healthz",)

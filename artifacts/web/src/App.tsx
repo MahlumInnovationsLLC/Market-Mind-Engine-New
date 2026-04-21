@@ -33,6 +33,7 @@ import PricingPage from "@/pages/pricing";
 import BillingPage from "@/pages/billing";
 import HealthPage from "@/pages/health";
 import MarketingPage from "@/pages/marketing";
+import AdminPage from "@/pages/admin";
 import SessionExpiredOverlay from "@/components/session-expired-overlay";
 
 const clerkPubKey = import.meta.env.VITE_CLERK_PUBLISHABLE_KEY;
@@ -260,6 +261,75 @@ function PipelineRoute() {
   );
 }
 
+function ProtectedAdmin() {
+  const { data, isLoading, isError, error } = useGetMyAccess({
+    query: {
+      queryKey: getGetMyAccessQueryKey(),
+      retry: (failureCount, err: unknown) => {
+        const status = (err as { status?: number } | null)?.status;
+        if (status === 403) return false;
+        return failureCount < 3;
+      },
+      staleTime: 30_000,
+    },
+  });
+  if (isLoading) {
+    return (
+      <div className="min-h-[100dvh] bg-background text-muted-foreground font-mono flex items-center justify-center text-xs uppercase tracking-widest">
+        AUTH :: verifying access…
+      </div>
+    );
+  }
+  if (isError) {
+    const status = (error as { status?: number } | null)?.status;
+    if (status === 403) return <PendingApproval />;
+    return (
+      <div className="min-h-[100dvh] bg-background text-destructive font-mono flex items-center justify-center text-xs uppercase tracking-widest p-6 text-center">
+        AUTH :: unable to verify access (HTTP {status ?? "?"})
+      </div>
+    );
+  }
+  if (!data?.approved) return <PendingApproval email={data?.email ?? null} />;
+  if (!data.is_admin) return <AdminForbidden email={data?.email ?? null} />;
+  return <AdminPage />;
+}
+
+function AdminForbidden({ email }: { email: string | null }) {
+  return (
+    <div className="min-h-[100dvh] bg-background text-foreground font-mono flex items-center justify-center p-6">
+      <div className="max-w-md text-center space-y-4 border border-destructive/40 bg-destructive/5 rounded-md p-8">
+        <div className="text-destructive text-xs uppercase tracking-widest">
+          HTTP 403 :: Forbidden
+        </div>
+        <div className="text-lg font-semibold">Admin access required</div>
+        <p className="text-sm text-muted-foreground">
+          Your account{email ? ` (${email})` : ""} is approved as an operator
+          but is not an admin. Ask an existing admin to promote you from the
+          admin console.
+        </p>
+        <a
+          href="/"
+          className="inline-block text-xs uppercase tracking-widest text-primary underline-offset-4 hover:underline"
+        >
+          ← back to dashboard
+        </a>
+      </div>
+    </div>
+  );
+}
+
+function AdminRoute() {
+  return (
+    <>
+      <Show when="signed-in">
+        <ProtectedAdmin />
+      </Show>
+      <Show when="signed-out">
+        <Redirect to="/" />
+      </Show>
+    </>
+  );
+}
 
 /**
  * Bridges Clerk's session token into the generated API client.  Every
@@ -369,6 +439,7 @@ function ClerkProviderWithRoutes() {
             <Route path="/pricing" component={PricingPage} />
             <Route path="/billing" component={BillingPage} />
             <Route path="/health" component={HealthPage} />
+            <Route path="/admin" component={AdminRoute} />
             <Route path="/sign-in/*?" component={SignInPage} />
             <Route path="/sign-up/*?" component={SignUpPage} />
             <Route component={NotFound} />

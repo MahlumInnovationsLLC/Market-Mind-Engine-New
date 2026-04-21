@@ -20,6 +20,8 @@ tags:
     description: 6-persona LLM swarm + gatekeeper
   - name: orchestrator
     description: Trading cycle scheduler + 12-gate risk pipeline
+  - name: admin
+    description: Admin console — user role + approval management
 paths:
   /me/access:
     get:
@@ -216,6 +218,95 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/SettleMarketResult" }
 
+  /admin/users:
+    get:
+      operationId: adminListUsers
+      tags: [admin]
+      summary: List every user the system has seen sign in
+      responses:
+        "200":
+          description: User list
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AdminUserList" }
+
+  /admin/users/{clerk_user_id}:
+    get:
+      operationId: adminGetUser
+      tags: [admin]
+      summary: Detail view for a single user
+      parameters:
+        - in: path
+          name: clerk_user_id
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: User detail
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AdminUserDetail" }
+
+  /admin/users/{clerk_user_id}/approved:
+    post:
+      operationId: adminSetUserApproved
+      tags: [admin]
+      summary: Approve or revoke operator access for a user
+      parameters:
+        - in: path
+          name: clerk_user_id
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AdminSetApprovedRequest" }
+      responses:
+        "200":
+          description: Updated state
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AdminSetFlagResult" }
+
+  /admin/users/{clerk_user_id}/admin:
+    post:
+      operationId: adminSetUserAdmin
+      tags: [admin]
+      summary: Promote or demote a user to admin
+      parameters:
+        - in: path
+          name: clerk_user_id
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AdminSetAdminRequest" }
+      responses:
+        "200":
+          description: Updated state
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AdminSetFlagResult" }
+
+  /admin/audit-log:
+    get:
+      operationId: adminGetAuditLog
+      tags: [admin]
+      summary: Recent admin role / approval audit entries
+      parameters:
+        - in: query
+          name: limit
+          schema: { type: integer, minimum: 1, maximum: 500, default: 100 }
+      responses:
+        "200":
+          description: Audit log
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AdminAuditLogList" }
+
   /models/inventory:
     get:
       operationId: getModelsInventory
@@ -240,9 +331,10 @@ components:
       type: object
       properties:
         approved: { type: boolean }
+        is_admin: { type: boolean }
         email: { type: string, nullable: true }
         user_id: { type: string }
-      required: [approved, user_id]
+      required: [approved, is_admin, user_id]
 
     SecretsPresent:
       type: object
@@ -596,3 +688,99 @@ components:
           type: array
           items: { $ref: "#/components/schemas/StorageFile" }
       required: [buckets, exports, cutover]
+
+    AdminUser:
+      type: object
+      properties:
+        clerk_user_id: { type: string }
+        email: { type: string, nullable: true }
+        display_name: { type: string, nullable: true }
+        approved: { type: boolean }
+        is_admin: { type: boolean }
+        first_seen_at: { type: string, nullable: true }
+        last_seen_at: { type: string, nullable: true }
+        activity_count: { type: integer }
+        clerk_created_at: { type: string, nullable: true }
+        clerk_last_sign_in_at: { type: string, nullable: true }
+      required: [clerk_user_id, approved, is_admin, activity_count]
+
+    AdminUserList:
+      type: object
+      properties:
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/AdminUser" }
+      required: [items]
+
+    AdminClerkProfile:
+      type: object
+      additionalProperties: true
+
+    AdminUserDetail:
+      type: object
+      properties:
+        clerk_user_id: { type: string }
+        email: { type: string, nullable: true }
+        display_name: { type: string, nullable: true }
+        approved: { type: boolean }
+        is_admin: { type: boolean }
+        activity_count: { type: integer }
+        first_seen_at: { type: string, nullable: true }
+        last_seen_at: { type: string, nullable: true }
+        approval_source: { type: string }
+        clerk_profile: { $ref: "#/components/schemas/AdminClerkProfile" }
+      required: [clerk_user_id, approved, is_admin, activity_count, approval_source]
+
+    AdminSetApprovedRequest:
+      type: object
+      properties:
+        approved: { type: boolean }
+      required: [approved]
+
+    AdminSetAdminRequest:
+      type: object
+      properties:
+        is_admin: { type: boolean }
+      required: [is_admin]
+
+    AdminSetFlagResult:
+      type: object
+      properties:
+        clerk_user_id: { type: string }
+        approved: { type: boolean }
+        is_admin: { type: boolean }
+        before:
+          type: object
+          additionalProperties: true
+        after:
+          type: object
+          additionalProperties: true
+      required: [clerk_user_id, approved, is_admin]
+
+    AdminAuditLogEntry:
+      type: object
+      properties:
+        id: { type: integer }
+        actor_user_id: { type: string }
+        actor_email: { type: string, nullable: true }
+        target_user_id: { type: string }
+        target_email: { type: string, nullable: true }
+        action: { type: string }
+        before_value:
+          type: object
+          additionalProperties: true
+          nullable: true
+        after_value:
+          type: object
+          additionalProperties: true
+          nullable: true
+        created_at: { type: string, nullable: true }
+      required: [id, actor_user_id, target_user_id, action]
+
+    AdminAuditLogList:
+      type: object
+      properties:
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/AdminAuditLogEntry" }
+      required: [items]

@@ -8,6 +8,7 @@
 
 export interface MyAccess {
   approved: boolean;
+  is_admin: boolean;
   email?: string | null;
   user_id: string;
 }

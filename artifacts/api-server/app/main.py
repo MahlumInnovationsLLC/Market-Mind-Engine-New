@@ -17,12 +17,14 @@ from fastapi import Depends, FastAPI, HTTPException, Request, WebSocket, WebSock
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
-from . import billing, dashboard, db, health, models_loader, rc_billing, storage
+from . import admin as admin_module, billing, dashboard, db, health, models_loader, rc_billing, storage
 from .notifications import alerts as notif_alerts, daily_summary, postmark as notif_postmark
 from .auth import (
     AuthedUser,
     auth_configured,
+    check_admin,
     check_approval,
+    require_admin,
     require_approved_user,
     require_auth,
 )
@@ -79,6 +81,11 @@ async def lifespan(_: FastAPI):
         await db.get_pool()
     except Exception as e:
         log.error("Postgres pool init failed: %s", e)
+    # Make sure the admin tables exist before any request lands.
+    try:
+        await admin_module.ensure_schema()
+    except Exception as e:
+        log.warning("admin schema bootstrap failed: %s", e)
     # Register + start the external data feed pollers.  Feeds with missing
     # API keys register themselves as `enabled=false` so they show up in
     # /api/feeds/status with a clear skipped_reason but never poll.
@@ -286,11 +293,95 @@ async def me_access(user: AuthedUser = Depends(require_auth)) -> dict[str, objec
     dashboard (which would otherwise just throw 403s).
     """
     approved, email = await check_approval(user)
+    is_admin = await check_admin(user)
+    # Always reflect the caller in the admin user table so the admin
+    # console shows everyone who has ever signed in.
+    try:
+        from .auth import _resolve_email_and_name
+
+        _, name = await _resolve_email_and_name(user)
+        await admin_module.upsert_seen_user(user.user_id, email, name)
+    except Exception as e:
+        log.warning("/api/me/access upsert failed: %s", e)
     return {
-        "approved": approved,
+        "approved": approved or is_admin,
+        "is_admin": is_admin,
         "email": email,
         "user_id": user.user_id,
     }
+
+
+# ---------------------------------------------------------------------------
+# Admin console
+# ---------------------------------------------------------------------------
+
+
+class AdminSetApprovedRequest(BaseModel):
+    approved: bool
+
+
+class AdminSetAdminRequest(BaseModel):
+    is_admin: bool
+
+
+@app.get("/api/admin/users")
+async def admin_list_users(
+    actor: AuthedUser = Depends(require_admin),
+) -> dict[str, object]:
+    return {"items": await admin_module.list_users()}
+
+
+@app.get("/api/admin/users/{clerk_user_id}")
+async def admin_get_user(
+    clerk_user_id: str,
+    actor: AuthedUser = Depends(require_admin),
+) -> dict[str, object]:
+    detail = await admin_module.get_user_detail(clerk_user_id)
+    if detail is None:
+        raise HTTPException(status_code=404, detail="user not found")
+    return detail
+
+
+@app.post("/api/admin/users/{clerk_user_id}/approved")
+async def admin_set_user_approved(
+    clerk_user_id: str,
+    body: AdminSetApprovedRequest,
+    actor: AuthedUser = Depends(require_admin),
+) -> dict[str, object]:
+    actor_email = (await check_approval(actor))[1]
+    try:
+        return await admin_module.set_approved(
+            actor_user_id=actor.user_id,
+            actor_email=actor_email,
+            target_user_id=clerk_user_id,
+            approved=bool(body.approved),
+        )
+    except admin_module.AdminInvariantError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+
+
+@app.post("/api/admin/users/{clerk_user_id}/admin")
+async def admin_set_user_admin(
+    clerk_user_id: str,
+    body: AdminSetAdminRequest,
+    actor: AuthedUser = Depends(require_admin),
+) -> dict[str, object]:
+    actor_email = (await check_approval(actor))[1]
+    return await admin_module.set_admin(
+        actor_user_id=actor.user_id,
+        actor_email=actor_email,
+        target_user_id=clerk_user_id,
+        is_admin=bool(body.is_admin),
+    )
+
+
+@app.get("/api/admin/audit-log")
+async def admin_get_audit_log(
+    limit: int = 100,
+    actor: AuthedUser = Depends(require_admin),
+) -> dict[str, object]:
+    limit = max(1, min(500, int(limit)))
+    return {"items": await admin_module.list_audit_log(limit)}
 
 
 @app.get("/api/health")

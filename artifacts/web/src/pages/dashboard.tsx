@@ -1,5 +1,9 @@
 import { Link } from "wouter";
 import { useClerk, useUser } from "@clerk/react";
+import {
+  getGetMyAccessQueryKey,
+  useGetMyAccess,
+} from "@workspace/api-client-react";
 import HealthSnapshot from "@/components/telemetry/health-snapshot";
 import TopCounters from "@/components/telemetry/top-counters";
 import RecentTrades from "@/components/telemetry/recent-trades";
@@ -24,6 +28,11 @@ export default function Dashboard() {
   // for cache-invalidation; this one just drives the indicator.
   const ws = useWebSocket({ path: "/api/ws/pipeline", bufferSize: 5 });
 
+  const { data: access } = useGetMyAccess({
+    query: { queryKey: getGetMyAccessQueryKey(), staleTime: 30_000 },
+  });
+  const isAdmin = !!access?.is_admin;
+
   return (
     <div className="min-h-[100dvh] bg-background text-foreground p-4 md:p-6 font-mono selection:bg-primary/30">
       <header className="mb-6 flex flex-col md:flex-row md:items-end justify-between gap-4 border-b border-border pb-4">
@@ -45,6 +54,15 @@ export default function Dashboard() {
           >
             Pipeline →
           </Link>
+          {isAdmin && (
+            <Link
+              href="/admin"
+              className="border border-primary px-3 py-1 uppercase tracking-widest text-[10px] text-primary hover:bg-primary/10"
+              data-testid="link-admin"
+            >
+              Admin →
+            </Link>
+          )}
           <div className="flex items-center gap-2">
             <span className="uppercase tracking-widest">OP</span>
             <span className="text-foreground truncate max-w-[200px]" data-testid="text-operator-id">{operatorLabel}</span>
