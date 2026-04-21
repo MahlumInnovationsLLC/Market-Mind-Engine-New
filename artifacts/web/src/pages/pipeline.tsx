@@ -160,6 +160,62 @@ function CandidateBlock({
   );
 }
 
+interface OutOfBandFeedProps {
+  title: string;
+  events: Record<string, unknown>[];
+  status: import("@/hooks/use-websocket").WSStatus;
+  reconnectIn: number | null;
+  closeCode: number | null;
+  emptyText: string;
+  formatLine: (ev: Record<string, unknown>) => string;
+}
+
+function OutOfBandFeed({
+  title,
+  events,
+  status,
+  reconnectIn,
+  closeCode,
+  emptyText,
+  formatLine,
+}: OutOfBandFeedProps) {
+  const recent = events.slice(-30).reverse();
+  return (
+    <div className="border border-border bg-card flex flex-col h-[300px]">
+      <div className="border-b border-border p-2 px-3 bg-muted/20 flex items-center justify-between shrink-0">
+        <h2 className="text-xs uppercase tracking-wider font-bold text-muted-foreground">
+          {title}
+        </h2>
+        <WsStatusIndicator
+          status={status}
+          reconnectIn={reconnectIn}
+          closeCode={closeCode}
+          label="OPEN"
+        />
+      </div>
+      <div className="overflow-auto grow text-[10px] font-mono">
+        {recent.length === 0 ? (
+          <div className="p-3 text-muted-foreground uppercase tracking-widest">
+            {emptyText}
+          </div>
+        ) : (
+          recent.map((ev, i) => {
+            const t = pickStr(ev, "type");
+            return (
+              <div
+                key={i}
+                className={`px-3 py-1 border-b border-border/40 ${eventTone(t)}`}
+              >
+                {formatLine(ev)}
+              </div>
+            );
+          })
+        )}
+      </div>
+    </div>
+  );
+}
+
 function CycleCard({ group }: { group: CycleGroup }) {
   const [open, setOpen] = useState(group.status === "running");
   const candidates = Array.from(group.candidates.entries());
@@ -217,10 +273,56 @@ function CycleCard({ group }: { group: CycleGroup }) {
   );
 }
 
+function fmtTimePart(s: string | null): string {
+  if (!s) return "—";
+  return new Date(s).toLocaleTimeString([], {
+    hour12: false,
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+  });
+}
+
+function formatSwarmLine(ev: Record<string, unknown>): string {
+  const t = pickStr(ev, "type") ?? "event";
+  const persona = pickStr(ev, "persona") ?? pickStr(ev, "analyst_id");
+  const debate = pickStr(ev, "debate_id");
+  const verdict =
+    pickStr(ev, "recommended_action") ??
+    pickStr(ev, "verdict") ??
+    pickStr(ev, "decision");
+  const matchup = pickStr(ev, "matchup");
+  const created = pickStr(ev, "ts") ?? pickStr(ev, "created_at");
+  const head = `${fmtTimePart(created)} · ${t.toUpperCase()}`;
+  const tail = [persona && `@${persona}`, matchup, verdict && `→ ${verdict}`, debate && `[${debate.slice(0, 8)}]`]
+    .filter(Boolean)
+    .join(" · ");
+  return tail ? `${head} · ${tail}` : head;
+}
+
+function formatSettlementLine(ev: Record<string, unknown>): string {
+  const t = pickStr(ev, "type") ?? "event";
+  const market = pickStr(ev, "market_id");
+  const tradeId = pickStr(ev, "trade_id");
+  const outcomeYes = ev["outcome_yes"];
+  const pnl = pickNum(ev, "pnl");
+  const ts = pickStr(ev, "ts") ?? pickStr(ev, "settled_at") ?? pickStr(ev, "completed_at");
+  const head = `${fmtTimePart(ts)} · ${t.toUpperCase()}`;
+  const parts = [
+    market,
+    tradeId && `trade=${tradeId.slice(0, 8)}`,
+    typeof outcomeYes === "number" ? `outcome=${outcomeYes ? "YES" : "NO"}` : null,
+    typeof pnl === "number" ? `pnl=$${pnl.toFixed(2)}` : null,
+  ].filter(Boolean) as string[];
+  return parts.length ? `${head} · ${parts.join(" · ")}` : head;
+}
+
 export default function PipelinePage() {
   const { user } = useUser();
   const { signOut } = useClerk();
   const ws = useWebSocket({ path: "/api/ws/pipeline", bufferSize: 500 });
+  const llm = useWebSocket({ path: "/api/ws/llm-logs", bufferSize: 200 });
+  const settlement = useWebSocket({ path: "/api/ws/settlement", bufferSize: 200 });
   const groups = useMemo(() => groupByCycle(ws.events), [ws.events]);
   const operatorLabel =
     user?.primaryEmailAddress?.emailAddress ?? user?.username ?? user?.id ?? "—";
@@ -289,18 +391,40 @@ export default function PipelinePage() {
         </div>
       </div>
 
-      <main className="space-y-3">
-        {groups.length === 0 ? (
-          <div className="border border-border bg-card p-8 text-center text-muted-foreground text-xs uppercase tracking-widest">
-            {ws.status === "open"
-              ? "Waiting for the next cycle event…"
-              : "Stream not connected."}
-          </div>
-        ) : (
-          groups.map((g, i) => (
-            <CycleCard key={`${g.cycle_id ?? "x"}-${i}`} group={g} />
-          ))
-        )}
+      <main className="grid grid-cols-1 xl:grid-cols-3 gap-4">
+        <section className="xl:col-span-2 space-y-3">
+          {groups.length === 0 ? (
+            <div className="border border-border bg-card p-8 text-center text-muted-foreground text-xs uppercase tracking-widest">
+              {ws.status === "open"
+                ? "Waiting for the next cycle event…"
+                : "Stream not connected."}
+            </div>
+          ) : (
+            groups.map((g, i) => (
+              <CycleCard key={`${g.cycle_id ?? "x"}-${i}`} group={g} />
+            ))
+          )}
+        </section>
+        <aside className="space-y-3">
+          <OutOfBandFeed
+            title="SWARM_VERDICTS"
+            events={llm.events}
+            status={llm.status}
+            reconnectIn={llm.reconnectIn}
+            closeCode={llm.closeCode}
+            emptyText="Awaiting persona / gatekeeper output…"
+            formatLine={formatSwarmLine}
+          />
+          <OutOfBandFeed
+            title="SETTLEMENT_FILLS"
+            events={settlement.events}
+            status={settlement.status}
+            reconnectIn={settlement.reconnectIn}
+            closeCode={settlement.closeCode}
+            emptyText="No settlement events yet…"
+            formatLine={formatSettlementLine}
+          />
+        </aside>
       </main>
     </div>
   );
