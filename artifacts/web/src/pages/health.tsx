@@ -65,6 +65,28 @@ const STATUS_DOT: Record<Card["status"], string> = {
   unconfigured: "bg-muted-foreground/40",
 };
 
+type ModelAlert = {
+  id: number;
+  vertical: string;
+  alert_type: string;
+  severity: string;
+  metric_name: string;
+  metric_value: number | null;
+  threshold: number | null;
+  message: string;
+  acknowledged: boolean;
+  acknowledged_by: string | null;
+  acknowledged_at: string | null;
+  snooze_until: string | null;
+  created_at: string | null;
+  age_seconds: number;
+};
+
+type ModelAlertsResponse = {
+  items: ModelAlert[];
+  count: number;
+};
+
 const ALERT_TYPES = [
   "halt",
   "drift",
@@ -73,6 +95,18 @@ const ALERT_TYPES = [
   "daily_pnl_summary",
 ] as const;
 type AlertType = (typeof ALERT_TYPES)[number];
+
+function formatAge(seconds: number): string {
+  if (seconds < 60) return `${seconds}s`;
+  const m = Math.floor(seconds / 60);
+  if (m < 60) return `${m}m`;
+  const h = Math.floor(m / 60);
+  const rm = m % 60;
+  if (h < 24) return rm > 0 ? `${h}h ${rm}m` : `${h}h`;
+  const d = Math.floor(h / 24);
+  const rh = h % 24;
+  return rh > 0 ? `${d}d ${rh}h` : `${d}d`;
+}
 
 function formatUptime(seconds: number): string {
   const d = Math.floor(seconds / 86400);
@@ -88,6 +122,9 @@ function HealthPage() {
   const [snap, setSnap] = useState<Snapshot | null>(null);
   const [errors, setErrors] = useState<ErrorsResponse | null>(null);
   const [notif, setNotif] = useState<NotificationsStatus | null>(null);
+  const [modelAlerts, setModelAlerts] = useState<ModelAlertsResponse | null>(null);
+  const [alertBusy, setAlertBusy] = useState<number | null>(null);
+  const [alertError, setAlertError] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [testing, setTesting] = useState<AlertType | null>(null);
   const [testResult, setTestResult] = useState<unknown>(null);
@@ -97,7 +134,7 @@ function HealthPage() {
 
   async function refresh() {
     try {
-      const [s, e, n] = await Promise.all([
+      const [s, e, n, m] = await Promise.all([
         apiFetch<Snapshot>("/api/health/snapshot", { getToken: token }),
         apiFetch<ErrorsResponse>("/api/health/errors?limit=50", {
           getToken: token,
@@ -105,10 +142,14 @@ function HealthPage() {
         apiFetch<NotificationsStatus>("/api/notifications/status", {
           getToken: token,
         }),
+        apiFetch<ModelAlertsResponse>("/api/health/model-alerts?ack=false", {
+          getToken: token,
+        }),
       ]);
       setSnap(s);
       setErrors(e);
       setNotif(n);
+      setModelAlerts(m);
       setError(null);
     } catch (e: unknown) {
       const msg =
@@ -128,6 +169,33 @@ function HealthPage() {
     return () => clearInterval(id);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isSignedIn]);
+
+  async function ackAlert(id: number, snoozeMinutes: number | null) {
+    setAlertBusy(id);
+    setAlertError(null);
+    try {
+      await apiFetch(`/api/health/model-alerts/${id}/ack`, {
+        method: "POST",
+        body: snoozeMinutes ? { snooze_minutes: snoozeMinutes } : {},
+        getToken: token,
+      });
+      const m = await apiFetch<ModelAlertsResponse>(
+        "/api/health/model-alerts?ack=false",
+        { getToken: token },
+      );
+      setModelAlerts(m);
+    } catch (e: unknown) {
+      setAlertError(
+        e instanceof ApiError
+          ? `HTTP ${e.status} :: ${e.message}`
+          : e instanceof Error
+            ? e.message
+            : String(e),
+      );
+    } finally {
+      setAlertBusy(null);
+    }
+  }
 
   async function fireTest(type: AlertType) {
     setTesting(type);
@@ -251,6 +319,100 @@ function HealthPage() {
             </div>
           </section>
         ))}
+
+        <section className="space-y-3">
+          <div className="flex items-baseline justify-between">
+            <h2 className="text-sm uppercase tracking-widest text-muted-foreground">
+              Open model drift alerts
+              <span className="ml-2 text-[10px]">
+                ({modelAlerts?.count ?? 0})
+              </span>
+            </h2>
+            <span className="text-[10px] text-muted-foreground/70 uppercase tracking-widest">
+              ack to clear · snooze hides for 1h
+            </span>
+          </div>
+          {alertError && (
+            <div className="border border-destructive bg-destructive/10 text-destructive p-2 text-xs">
+              {alertError}
+            </div>
+          )}
+          <div className="border border-border bg-card max-h-72 overflow-y-auto text-xs">
+            {(modelAlerts?.items ?? []).length === 0 ? (
+              <div className="p-3 text-muted-foreground">
+                no open drift alerts
+              </div>
+            ) : (
+              <table className="w-full">
+                <thead className="text-[10px] uppercase tracking-widest text-muted-foreground">
+                  <tr className="border-b border-border">
+                    <th className="text-left p-2">sev</th>
+                    <th className="text-left p-2">vertical</th>
+                    <th className="text-left p-2">metric</th>
+                    <th className="text-left p-2">value</th>
+                    <th className="text-left p-2">threshold</th>
+                    <th className="text-left p-2">age</th>
+                    <th className="text-left p-2">message</th>
+                    <th className="text-right p-2">actions</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {(modelAlerts?.items ?? []).map((a) => (
+                    <tr key={a.id} className="border-b border-border/40">
+                      <td className="p-2 align-top whitespace-nowrap">
+                        <span
+                          className={
+                            a.severity === "critical"
+                              ? "text-destructive uppercase tracking-widest"
+                              : "text-warning uppercase tracking-widest"
+                          }
+                        >
+                          {a.severity}
+                        </span>
+                      </td>
+                      <td className="p-2 align-top whitespace-nowrap">
+                        {a.vertical}
+                      </td>
+                      <td className="p-2 align-top whitespace-nowrap text-muted-foreground">
+                        {a.metric_name}
+                      </td>
+                      <td className="p-2 align-top whitespace-nowrap">
+                        {a.metric_value !== null
+                          ? a.metric_value.toFixed(3)
+                          : "—"}
+                      </td>
+                      <td className="p-2 align-top whitespace-nowrap text-muted-foreground">
+                        {a.threshold !== null ? a.threshold.toFixed(3) : "—"}
+                      </td>
+                      <td className="p-2 align-top whitespace-nowrap text-muted-foreground">
+                        {formatAge(a.age_seconds)}
+                      </td>
+                      <td className="p-2 align-top break-all">{a.message}</td>
+                      <td className="p-2 align-top text-right whitespace-nowrap">
+                        <div className="inline-flex gap-1">
+                          <button
+                            onClick={() => ackAlert(a.id, null)}
+                            disabled={alertBusy !== null}
+                            className="border border-border bg-card hover:bg-muted px-2 py-1 uppercase tracking-widest text-[10px] disabled:opacity-50"
+                          >
+                            {alertBusy === a.id ? "…" : "Ack"}
+                          </button>
+                          <button
+                            onClick={() => ackAlert(a.id, 60)}
+                            disabled={alertBusy !== null}
+                            className="border border-border bg-card hover:bg-muted px-2 py-1 uppercase tracking-widest text-[10px] disabled:opacity-50"
+                          >
+                            {alertBusy === a.id ? "…" : "Snooze 1h"}
+                          </button>
+                        </div>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+          </div>
+        </section>
 
         <section className="space-y-3">
           <h2 className="text-sm uppercase tracking-widest text-muted-foreground">

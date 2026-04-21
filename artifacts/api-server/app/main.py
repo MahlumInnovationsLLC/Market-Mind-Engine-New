@@ -528,6 +528,172 @@ async def health_errors(
     }
 
 
+_ALERT_SCHEMA_READY = False
+
+
+async def _ensure_alert_schema() -> None:
+    """Ensure the model_health_alerts table has the columns we need to
+    record acknowledgements + snoozes.  Idempotent — safe to call often."""
+    global _ALERT_SCHEMA_READY
+    if _ALERT_SCHEMA_READY:
+        return
+    try:
+        pool = await db.get_pool()
+        async with pool.acquire() as con:
+            await con.execute(
+                """
+                ALTER TABLE model_health_alerts
+                    ADD COLUMN IF NOT EXISTS acknowledged_by  text,
+                    ADD COLUMN IF NOT EXISTS acknowledged_at  timestamptz,
+                    ADD COLUMN IF NOT EXISTS snooze_until     timestamptz
+                """
+            )
+        _ALERT_SCHEMA_READY = True
+    except Exception as e:  # pragma: no cover
+        log.warning("model_health_alerts schema ensure failed: %s", e)
+
+
+@app.get("/api/health/model-alerts")
+async def list_model_health_alerts(
+    ack: bool = False,
+    limit: int = 100,
+    user: AuthedUser = Depends(require_approved_user),
+) -> dict[str, object]:
+    """List drift / model-health alerts.
+
+    `ack=false` (default) returns only currently-open alerts —
+    `acknowledged=false` AND (snooze_until IS NULL OR snooze_until <= now()).
+    `ack=true` returns the full recent log including acknowledged + snoozed
+    rows for audit purposes.
+    """
+    await _ensure_alert_schema()
+    lim = max(1, min(500, int(limit)))
+    pool = await db.get_pool()
+    if ack:
+        rows = await pool.fetch(
+            """
+            SELECT id, vertical, alert_type, severity, metric_name,
+                   metric_value, threshold, message, acknowledged,
+                   acknowledged_by, acknowledged_at, snooze_until,
+                   created_at,
+                   EXTRACT(EPOCH FROM (now() - created_at))::bigint AS age_seconds
+              FROM model_health_alerts
+             ORDER BY created_at DESC
+             LIMIT $1
+            """,
+            lim,
+        )
+    else:
+        rows = await pool.fetch(
+            """
+            SELECT id, vertical, alert_type, severity, metric_name,
+                   metric_value, threshold, message, acknowledged,
+                   acknowledged_by, acknowledged_at, snooze_until,
+                   created_at,
+                   EXTRACT(EPOCH FROM (now() - created_at))::bigint AS age_seconds
+              FROM model_health_alerts
+             WHERE acknowledged = false
+               AND (snooze_until IS NULL OR snooze_until <= now())
+             ORDER BY created_at DESC
+             LIMIT $1
+            """,
+            lim,
+        )
+    items: list[dict[str, object]] = []
+    for r in rows:
+        items.append(
+            {
+                "id": r["id"],
+                "vertical": r["vertical"],
+                "alert_type": r["alert_type"],
+                "severity": r["severity"],
+                "metric_name": r["metric_name"],
+                "metric_value": float(r["metric_value"]) if r["metric_value"] is not None else None,
+                "threshold": float(r["threshold"]) if r["threshold"] is not None else None,
+                "message": r["message"],
+                "acknowledged": bool(r["acknowledged"]),
+                "acknowledged_by": r["acknowledged_by"],
+                "acknowledged_at": r["acknowledged_at"].isoformat() if r["acknowledged_at"] else None,
+                "snooze_until": r["snooze_until"].isoformat() if r["snooze_until"] else None,
+                "created_at": r["created_at"].isoformat() if r["created_at"] else None,
+                "age_seconds": int(r["age_seconds"]) if r["age_seconds"] is not None else 0,
+            }
+        )
+    return {"items": items, "count": len(items)}
+
+
+class ModelAlertAckRequest(BaseModel):
+    snooze_minutes: int | None = Field(
+        default=None,
+        ge=1,
+        le=60 * 24 * 7,
+        description=(
+            "If set, snooze the alert for this many minutes instead of "
+            "permanently acknowledging it.  Range: 1..10080 (7d)."
+        ),
+    )
+
+
+@app.post("/api/health/model-alerts/{alert_id}/ack")
+async def ack_model_health_alert(
+    alert_id: int,
+    body: ModelAlertAckRequest | None = None,
+    user: AuthedUser = Depends(require_approved_user),
+) -> dict[str, object]:
+    """Acknowledge or snooze a single model health alert.
+
+    Without a body (or `snooze_minutes` unset), the alert is permanently
+    acknowledged.  With `snooze_minutes`, the alert is hidden from the
+    open list until that many minutes have elapsed.
+    """
+    await _ensure_alert_schema()
+    _, email = await check_approval(user)
+    operator = email or user.user_id
+    snooze_minutes = body.snooze_minutes if body is not None else None
+    pool = await db.get_pool()
+    if snooze_minutes:
+        row = await pool.fetchrow(
+            """
+            UPDATE model_health_alerts
+               SET snooze_until = now() + ($2 || ' minutes')::interval,
+                   acknowledged_by = COALESCE(acknowledged_by, $1)
+             WHERE id = $3
+            RETURNING id, vertical, severity, snooze_until, acknowledged
+            """,
+            operator, str(int(snooze_minutes)), alert_id,
+        )
+    else:
+        row = await pool.fetchrow(
+            """
+            UPDATE model_health_alerts
+               SET acknowledged = true,
+                   acknowledged_by = $1,
+                   acknowledged_at = now()
+             WHERE id = $2
+            RETURNING id, vertical, severity, snooze_until, acknowledged
+            """,
+            operator, alert_id,
+        )
+    if row is None:
+        raise HTTPException(status_code=404, detail="alert not found")
+    log.info(
+        "model_health_alerts %s %s by %s (snooze_minutes=%s)",
+        alert_id,
+        "snoozed" if snooze_minutes else "acknowledged",
+        operator,
+        snooze_minutes,
+    )
+    return {
+        "ok": True,
+        "id": row["id"],
+        "vertical": row["vertical"],
+        "severity": row["severity"],
+        "acknowledged": bool(row["acknowledged"]),
+        "snooze_until": row["snooze_until"].isoformat() if row["snooze_until"] else None,
+        "acknowledged_by": operator,
+    }
+
+
 @app.get("/api/notifications/status")
 async def notifications_status(
     _: object = Depends(require_approved_user),
