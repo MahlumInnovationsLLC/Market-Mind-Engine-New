@@ -1,0 +1,93 @@
+"""Periodic settlement loop — same shape as the orchestrator scheduler.
+
+One asyncio task wakes every `settlement_interval_seconds`, runs
+`run_cycle()`, and applies exponential backoff on failure.  Loop never
+exits except via `stop()`.
+"""
+from __future__ import annotations
+
+import asyncio
+import logging
+from typing import Any
+
+from ..config import get_settings
+from .pipeline import run_cycle
+
+
+log = logging.getLogger(__name__)
+
+
+class _SettlementScheduler:
+    def __init__(self) -> None:
+        self._task: asyncio.Task[Any] | None = None
+        self._stop = asyncio.Event()
+        self._last: dict[str, Any] = {}
+
+    def status(self) -> dict[str, Any]:
+        s = get_settings()
+        return {
+            "enabled": s.settlement_enabled,
+            "running": bool(self._task and not self._task.done()),
+            "interval_seconds": s.settlement_interval_seconds,
+            "last_cycle": self._last,
+        }
+
+    async def start(self) -> None:
+        s = get_settings()
+        if not s.settlement_enabled:
+            log.info("settlement scheduler disabled by config")
+            return
+        if self._task and not self._task.done():
+            return
+        self._stop.clear()
+        self._task = asyncio.create_task(self._loop(), name="settlement-loop")
+        log.info(
+            "settlement scheduler started: interval=%ss", s.settlement_interval_seconds
+        )
+
+    async def stop(self) -> None:
+        self._stop.set()
+        if self._task:
+            self._task.cancel()
+            try:
+                await self._task
+            except asyncio.CancelledError:
+                pass
+            except Exception as e:
+                log.warning("settlement task exit error: %s", e)
+        self._task = None
+        log.info("settlement scheduler stopped")
+
+    async def _loop(self) -> None:
+        backoff = 0.0
+        while not self._stop.is_set():
+            try:
+                cr = await run_cycle()
+                self._last = {
+                    "started_at": cr.started_at,
+                    "completed_at": cr.completed_at,
+                    "duration_seconds": cr.duration_seconds,
+                    "markets_examined": cr.markets_examined,
+                    "markets_settled": cr.markets_settled,
+                    "trades_settled": cr.trades_settled,
+                    "persona_metrics_updated": cr.persona_metrics_updated,
+                    "alerts_raised": cr.alerts_raised,
+                    "errors": cr.errors,
+                }
+                backoff = 0.0
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                log.exception("settlement cycle failed: %s", e)
+                backoff = min(120.0, max(5.0, backoff * 2 if backoff else 5.0))
+            settings = get_settings()
+            sleep_s = settings.settlement_interval_seconds + backoff
+            try:
+                await asyncio.wait_for(self._stop.wait(), timeout=sleep_s)
+            except asyncio.TimeoutError:
+                pass
+            else:
+                return
+
+
+scheduler = _SettlementScheduler()

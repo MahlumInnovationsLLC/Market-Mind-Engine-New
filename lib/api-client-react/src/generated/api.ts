@@ -28,6 +28,10 @@ import type {
   OrchestratorCycleResult,
   OrchestratorRunCycleRequest,
   OrchestratorStatus,
+  SettleMarketRequest,
+  SettleMarketResult,
+  SettlementCycleResult,
+  SettlementStatus,
   SwarmDebateList,
   SwarmDebateRequest,
   SwarmDebateResult,
@@ -952,6 +956,248 @@ export const useRunOrchestratorCycle = <
   TContext
 > => {
   return useMutation(getRunOrchestratorCycleMutationOptions(options));
+};
+
+/**
+ * @summary Settlement scheduler status + last cycle summary
+ */
+export const getGetSettlementStatusUrl = () => {
+  return `/api/settlement/status`;
+};
+
+export const getSettlementStatus = async (
+  options?: RequestInit,
+): Promise<SettlementStatus> => {
+  return customFetch<SettlementStatus>(getGetSettlementStatusUrl(), {
+    ...options,
+    method: "GET",
+  });
+};
+
+export const getGetSettlementStatusQueryKey = () => {
+  return [`/api/settlement/status`] as const;
+};
+
+export const getGetSettlementStatusQueryOptions = <
+  TData = Awaited<ReturnType<typeof getSettlementStatus>>,
+  TError = ErrorType<unknown>,
+>(options?: {
+  query?: UseQueryOptions<
+    Awaited<ReturnType<typeof getSettlementStatus>>,
+    TError,
+    TData
+  >;
+  request?: SecondParameter<typeof customFetch>;
+}) => {
+  const { query: queryOptions, request: requestOptions } = options ?? {};
+
+  const queryKey = queryOptions?.queryKey ?? getGetSettlementStatusQueryKey();
+
+  const queryFn: QueryFunction<
+    Awaited<ReturnType<typeof getSettlementStatus>>
+  > = ({ signal }) => getSettlementStatus({ signal, ...requestOptions });
+
+  return { queryKey, queryFn, ...queryOptions } as UseQueryOptions<
+    Awaited<ReturnType<typeof getSettlementStatus>>,
+    TError,
+    TData
+  > & { queryKey: QueryKey };
+};
+
+export type GetSettlementStatusQueryResult = NonNullable<
+  Awaited<ReturnType<typeof getSettlementStatus>>
+>;
+export type GetSettlementStatusQueryError = ErrorType<unknown>;
+
+/**
+ * @summary Settlement scheduler status + last cycle summary
+ */
+
+export function useGetSettlementStatus<
+  TData = Awaited<ReturnType<typeof getSettlementStatus>>,
+  TError = ErrorType<unknown>,
+>(options?: {
+  query?: UseQueryOptions<
+    Awaited<ReturnType<typeof getSettlementStatus>>,
+    TError,
+    TData
+  >;
+  request?: SecondParameter<typeof customFetch>;
+}): UseQueryResult<TData, TError> & { queryKey: QueryKey } {
+  const queryOptions = getGetSettlementStatusQueryOptions(options);
+
+  const query = useQuery(queryOptions) as UseQueryResult<TData, TError> & {
+    queryKey: QueryKey;
+  };
+
+  return { ...query, queryKey: queryOptions.queryKey };
+}
+
+/**
+ * @summary Manually trigger one settlement sweep
+ */
+export const getRunSettlementCycleUrl = () => {
+  return `/api/settlement/run-cycle`;
+};
+
+export const runSettlementCycle = async (
+  options?: RequestInit,
+): Promise<SettlementCycleResult> => {
+  return customFetch<SettlementCycleResult>(getRunSettlementCycleUrl(), {
+    ...options,
+    method: "POST",
+  });
+};
+
+export const getRunSettlementCycleMutationOptions = <
+  TError = ErrorType<unknown>,
+  TContext = unknown,
+>(options?: {
+  mutation?: UseMutationOptions<
+    Awaited<ReturnType<typeof runSettlementCycle>>,
+    TError,
+    void,
+    TContext
+  >;
+  request?: SecondParameter<typeof customFetch>;
+}): UseMutationOptions<
+  Awaited<ReturnType<typeof runSettlementCycle>>,
+  TError,
+  void,
+  TContext
+> => {
+  const mutationKey = ["runSettlementCycle"];
+  const { mutation: mutationOptions, request: requestOptions } = options
+    ? options.mutation &&
+      "mutationKey" in options.mutation &&
+      options.mutation.mutationKey
+      ? options
+      : { ...options, mutation: { ...options.mutation, mutationKey } }
+    : { mutation: { mutationKey }, request: undefined };
+
+  const mutationFn: MutationFunction<
+    Awaited<ReturnType<typeof runSettlementCycle>>,
+    void
+  > = () => {
+    return runSettlementCycle(requestOptions);
+  };
+
+  return { mutationFn, ...mutationOptions };
+};
+
+export type RunSettlementCycleMutationResult = NonNullable<
+  Awaited<ReturnType<typeof runSettlementCycle>>
+>;
+
+export type RunSettlementCycleMutationError = ErrorType<unknown>;
+
+/**
+ * @summary Manually trigger one settlement sweep
+ */
+export const useRunSettlementCycle = <
+  TError = ErrorType<unknown>,
+  TContext = unknown,
+>(options?: {
+  mutation?: UseMutationOptions<
+    Awaited<ReturnType<typeof runSettlementCycle>>,
+    TError,
+    void,
+    TContext
+  >;
+  request?: SecondParameter<typeof customFetch>;
+}): UseMutationResult<
+  Awaited<ReturnType<typeof runSettlementCycle>>,
+  TError,
+  void,
+  TContext
+> => {
+  return useMutation(getRunSettlementCycleMutationOptions(options));
+};
+
+/**
+ * @summary Manual / backfill settlement of a single market
+ */
+export const getSettleMarketUrl = () => {
+  return `/api/settlement/settle-market`;
+};
+
+export const settleMarket = async (
+  settleMarketRequest: SettleMarketRequest,
+  options?: RequestInit,
+): Promise<SettleMarketResult> => {
+  return customFetch<SettleMarketResult>(getSettleMarketUrl(), {
+    ...options,
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...options?.headers },
+    body: JSON.stringify(settleMarketRequest),
+  });
+};
+
+export const getSettleMarketMutationOptions = <
+  TError = ErrorType<unknown>,
+  TContext = unknown,
+>(options?: {
+  mutation?: UseMutationOptions<
+    Awaited<ReturnType<typeof settleMarket>>,
+    TError,
+    { data: BodyType<SettleMarketRequest> },
+    TContext
+  >;
+  request?: SecondParameter<typeof customFetch>;
+}): UseMutationOptions<
+  Awaited<ReturnType<typeof settleMarket>>,
+  TError,
+  { data: BodyType<SettleMarketRequest> },
+  TContext
+> => {
+  const mutationKey = ["settleMarket"];
+  const { mutation: mutationOptions, request: requestOptions } = options
+    ? options.mutation &&
+      "mutationKey" in options.mutation &&
+      options.mutation.mutationKey
+      ? options
+      : { ...options, mutation: { ...options.mutation, mutationKey } }
+    : { mutation: { mutationKey }, request: undefined };
+
+  const mutationFn: MutationFunction<
+    Awaited<ReturnType<typeof settleMarket>>,
+    { data: BodyType<SettleMarketRequest> }
+  > = (props) => {
+    const { data } = props ?? {};
+
+    return settleMarket(data, requestOptions);
+  };
+
+  return { mutationFn, ...mutationOptions };
+};
+
+export type SettleMarketMutationResult = NonNullable<
+  Awaited<ReturnType<typeof settleMarket>>
+>;
+export type SettleMarketMutationBody = BodyType<SettleMarketRequest>;
+export type SettleMarketMutationError = ErrorType<unknown>;
+
+/**
+ * @summary Manual / backfill settlement of a single market
+ */
+export const useSettleMarket = <
+  TError = ErrorType<unknown>,
+  TContext = unknown,
+>(options?: {
+  mutation?: UseMutationOptions<
+    Awaited<ReturnType<typeof settleMarket>>,
+    TError,
+    { data: BodyType<SettleMarketRequest> },
+    TContext
+  >;
+  request?: SecondParameter<typeof customFetch>;
+}): UseMutationResult<
+  Awaited<ReturnType<typeof settleMarket>>,
+  TError,
+  { data: BodyType<SettleMarketRequest> },
+  TContext
+> => {
+  return useMutation(getSettleMarketMutationOptions(options));
 };
 
 /**

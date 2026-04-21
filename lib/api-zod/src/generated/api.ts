@@ -324,6 +324,55 @@ export const RunOrchestratorCycleResponse = zod.object({
 });
 
 /**
+ * @summary Settlement scheduler status + last cycle summary
+ */
+export const GetSettlementStatusResponse = zod.object({
+  enabled: zod.boolean().optional(),
+  running: zod.boolean().optional(),
+  interval_seconds: zod.number().optional(),
+  last_cycle: zod.record(zod.string(), zod.unknown()).optional(),
+});
+
+/**
+ * @summary Manually trigger one settlement sweep
+ */
+export const RunSettlementCycleResponse = zod.object({
+  started_at: zod.string(),
+  completed_at: zod.string().nullish(),
+  duration_seconds: zod.number(),
+  markets_examined: zod.number(),
+  markets_settled: zod.number(),
+  trades_settled: zod.number(),
+  persona_metrics_updated: zod.number(),
+  alerts_raised: zod.number(),
+  errors: zod.array(zod.string()),
+});
+
+/**
+ * @summary Manual / backfill settlement of a single market
+ */
+
+export const SettleMarketBody = zod.object({
+  market_id: zod.string().min(1),
+  outcome_yes: zod
+    .union([zod.literal(0), zod.literal(1)])
+    .describe("1 if YES side wins, 0 if NO side wins"),
+  settle_price: zod
+    .number()
+    .nullish()
+    .describe("Optional final settlement price (cents 0-100 or unit 0-1)"),
+});
+
+export const SettleMarketResponse = zod.object({
+  market_id: zod.string(),
+  outcome_yes: zod.union([zod.literal(0), zod.literal(1)]),
+  trades_settled: zod.number(),
+  persona_metrics_updated: zod.number(),
+  alerts_raised: zod.number(),
+  verticals: zod.array(zod.string()),
+});
+
+/**
  * @summary Trained-model archive inventory in Supabase Storage
  */
 export const GetModelsInventoryResponse = zod.object({

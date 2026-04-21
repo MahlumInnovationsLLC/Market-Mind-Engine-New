@@ -175,6 +175,47 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/OrchestratorCycleResult" }
 
+  /settlement/status:
+    get:
+      operationId: getSettlementStatus
+      tags: [settlement]
+      summary: Settlement scheduler status + last cycle summary
+      responses:
+        "200":
+          description: Status snapshot
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SettlementStatus" }
+
+  /settlement/run-cycle:
+    post:
+      operationId: runSettlementCycle
+      tags: [settlement]
+      summary: Manually trigger one settlement sweep
+      responses:
+        "200":
+          description: Cycle result
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SettlementCycleResult" }
+
+  /settlement/settle-market:
+    post:
+      operationId: settleMarket
+      tags: [settlement]
+      summary: Manual / backfill settlement of a single market
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/SettleMarketRequest" }
+      responses:
+        "200":
+          description: Settlement result
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SettleMarketResult" }
+
   /models/inventory:
     get:
       operationId: getModelsInventory
@@ -428,6 +469,59 @@ components:
           type: array
           items: { type: string }
       required: [vertical, started_at, picks_evaluated, trades_placed, fresh_debates, duration_seconds]
+
+    SettlementStatus:
+      type: object
+      properties:
+        enabled: { type: boolean }
+        running: { type: boolean }
+        interval_seconds: { type: integer }
+        last_cycle:
+          type: object
+          additionalProperties: true
+
+    SettlementCycleResult:
+      type: object
+      properties:
+        started_at: { type: string }
+        completed_at: { type: string, nullable: true }
+        duration_seconds: { type: number }
+        markets_examined: { type: integer }
+        markets_settled: { type: integer }
+        trades_settled: { type: integer }
+        persona_metrics_updated: { type: integer }
+        alerts_raised: { type: integer }
+        errors:
+          type: array
+          items: { type: string }
+      required: [started_at, duration_seconds, markets_examined, markets_settled, trades_settled, persona_metrics_updated, alerts_raised, errors]
+
+    SettleMarketRequest:
+      type: object
+      properties:
+        market_id: { type: string, minLength: 1 }
+        outcome_yes:
+          type: integer
+          enum: [0, 1]
+          description: "1 if YES side wins, 0 if NO side wins"
+        settle_price:
+          type: number
+          nullable: true
+          description: "Optional final settlement price (cents 0-100 or unit 0-1)"
+      required: [market_id, outcome_yes]
+
+    SettleMarketResult:
+      type: object
+      properties:
+        market_id: { type: string }
+        outcome_yes: { type: integer, enum: [0, 1] }
+        trades_settled: { type: integer }
+        persona_metrics_updated: { type: integer }
+        alerts_raised: { type: integer }
+        verticals:
+          type: array
+          items: { type: string }
+      required: [market_id, outcome_yes, trades_settled, persona_metrics_updated, alerts_raised, verticals]
 
     SwarmDebateRequest:
       type: object

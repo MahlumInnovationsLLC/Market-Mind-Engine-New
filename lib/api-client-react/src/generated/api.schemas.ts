@@ -186,6 +186,64 @@ export interface OrchestratorCycleResult {
   errors?: string[];
 }
 
+export type SettlementStatusLastCycle = { [key: string]: unknown };
+
+export interface SettlementStatus {
+  enabled?: boolean;
+  running?: boolean;
+  interval_seconds?: number;
+  last_cycle?: SettlementStatusLastCycle;
+}
+
+export interface SettlementCycleResult {
+  started_at: string;
+  completed_at?: string | null;
+  duration_seconds: number;
+  markets_examined: number;
+  markets_settled: number;
+  trades_settled: number;
+  persona_metrics_updated: number;
+  alerts_raised: number;
+  errors: string[];
+}
+
+/**
+ * 1 if YES side wins, 0 if NO side wins
+ */
+export type SettleMarketRequestOutcomeYes =
+  (typeof SettleMarketRequestOutcomeYes)[keyof typeof SettleMarketRequestOutcomeYes];
+
+export const SettleMarketRequestOutcomeYes = {
+  NUMBER_0: 0,
+  NUMBER_1: 1,
+} as const;
+
+export interface SettleMarketRequest {
+  /** @minLength 1 */
+  market_id: string;
+  /** 1 if YES side wins, 0 if NO side wins */
+  outcome_yes: SettleMarketRequestOutcomeYes;
+  /** Optional final settlement price (cents 0-100 or unit 0-1) */
+  settle_price?: number | null;
+}
+
+export type SettleMarketResultOutcomeYes =
+  (typeof SettleMarketResultOutcomeYes)[keyof typeof SettleMarketResultOutcomeYes];
+
+export const SettleMarketResultOutcomeYes = {
+  NUMBER_0: 0,
+  NUMBER_1: 1,
+} as const;
+
+export interface SettleMarketResult {
+  market_id: string;
+  outcome_yes: SettleMarketResultOutcomeYes;
+  trades_settled: number;
+  persona_metrics_updated: number;
+  alerts_raised: number;
+  verticals: string[];
+}
+
 export interface SwarmDebateRequest {
   game_id: string;
   matchup?: string | null;

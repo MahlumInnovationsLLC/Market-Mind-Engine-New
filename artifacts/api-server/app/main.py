@@ -30,6 +30,12 @@ from .feeds import registry as feed_registry, scheduler as feed_scheduler
 from .feeds.odds_api import register_odds_feeds
 from .feeds.weather import register_weather_feeds
 from .orchestrator import pipeline_event_hub, run_cycle, scheduler as orchestrator_scheduler
+from .settlement import (
+    run_cycle as run_settlement_cycle,
+    scheduler as settlement_scheduler,
+    settle_market,
+    settlement_event_hub,
+)
 from .swarm import llm_log_hub, refresh_persona_weights, run_debate
 from .kalshi import (
     OrderRequest,
@@ -115,6 +121,14 @@ async def lifespan(_: FastAPI):
     except Exception as e:
         log.warning("orchestrator scheduler start failed: %s", e)
 
+    # Settlement loop: closes finalized markets, writes post-mortems,
+    # updates persona Brier, accumulates daily PnL, raises drift alerts.
+    # Runs independent of trading-mode halts so feedback never stalls.
+    try:
+        await settlement_scheduler.start()
+    except Exception as e:
+        log.warning("settlement scheduler start failed: %s", e)
+
     # Kick off model artifact reassembly in the background so a cold cache
     # (~240 MiB download) doesn't block the HTTP server from accepting
     # traffic. Health endpoints surface progress while it warms up.
@@ -123,6 +137,10 @@ async def lifespan(_: FastAPI):
     try:
         yield
     finally:
+        try:
+            await settlement_scheduler.stop()
+        except Exception as e:
+            log.warning("settlement scheduler stop error: %s", e)
         try:
             await orchestrator_scheduler.stop()
         except Exception as e:
@@ -502,6 +520,98 @@ async def ws_pipeline(ws: WebSocket) -> None:
         log.warning("ws pipeline send failed: %s", e)
     finally:
         pipeline_event_hub.unsubscribe(q)
+
+
+# ---------------------------------------------------------------------------
+# Settlement endpoints
+# ---------------------------------------------------------------------------
+
+
+class SettlementSettleMarketRequest(BaseModel):
+    market_id: str = Field(..., min_length=1, max_length=128)
+    outcome_yes: int = Field(..., ge=0, le=1)
+    settle_price: float | None = Field(None, ge=0.0, le=100.0)
+
+
+@app.get("/api/settlement/status")
+async def settlement_status(_: object = Depends(require_auth)) -> dict[str, object]:
+    return settlement_scheduler.status()
+
+
+@app.post("/api/settlement/run-cycle")
+async def settlement_run_cycle(_: object = Depends(require_auth)) -> dict[str, object]:
+    """Manually trigger one settlement sweep."""
+    try:
+        cr = await run_settlement_cycle()
+    except Exception as e:
+        log.exception("manual settlement cycle failed")
+        raise HTTPException(status_code=502, detail=f"settlement cycle error: {e}")
+    return {
+        "started_at": cr.started_at,
+        "completed_at": cr.completed_at,
+        "duration_seconds": cr.duration_seconds,
+        "markets_examined": cr.markets_examined,
+        "markets_settled": cr.markets_settled,
+        "trades_settled": cr.trades_settled,
+        "persona_metrics_updated": cr.persona_metrics_updated,
+        "alerts_raised": cr.alerts_raised,
+        "errors": cr.errors,
+    }
+
+
+@app.post("/api/settlement/settle-market")
+async def settlement_settle_market(
+    body: SettlementSettleMarketRequest, _: object = Depends(require_auth)
+) -> dict[str, object]:
+    """Manual / backfill settlement of a specific market.  Used by ops
+    when Kalshi's `/markets/{ticker}` lags or for paper-mode markets the
+    exchange never resolves."""
+    try:
+        result = await settle_market(
+            body.market_id,
+            outcome_yes=body.outcome_yes,
+            settle_price=body.settle_price,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        log.exception("manual settle_market failed")
+        raise HTTPException(status_code=502, detail=str(e))
+    return {k: v for k, v in result.items() if k != "details"}
+
+
+@app.websocket("/ws/settlement")
+async def ws_settlement(ws: WebSocket) -> None:
+    """Live stream of settlement events: cycle_start, market_settle_start,
+    trade_settled, market_settle_complete, cycle_complete.  Auth via
+    Clerk JWT in `?token=` (same contract as `/ws/pipeline`).
+    """
+    token = ws.query_params.get("token")
+    if auth_configured():
+        from .auth import verify_clerk_jwt
+
+        if not token:
+            await ws.close(code=4401)
+            return
+        try:
+            verify_clerk_jwt(token)
+        except Exception as e:
+            log.info("ws settlement auth failed: %s", e)
+            await ws.close(code=4401)
+            return
+
+    await ws.accept()
+    q = settlement_event_hub.subscribe()
+    try:
+        while True:
+            event = await q.get()
+            await ws.send_json(event)
+    except WebSocketDisconnect:
+        pass
+    except Exception as e:
+        log.warning("ws settlement send failed: %s", e)
+    finally:
+        settlement_event_hub.unsubscribe(q)
 
 
 # ---------------------------------------------------------------------------

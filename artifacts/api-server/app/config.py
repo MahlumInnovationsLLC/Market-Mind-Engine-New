@@ -53,6 +53,10 @@ class Settings:
     # Max fresh swarm debates per cycle, to bound LLM cost.  Cycles
     # may evaluate cached debates without limit.
     max_fresh_debates_per_cycle: int
+    # Settlement pipeline: master switch + cadence (default 60s).
+    settlement_enabled: bool
+    settlement_interval_seconds: int
+
     # Verticals the orchestrator schedules.  One asyncio task per
     # vertical, each tick runs run_cycle(vertical) which scopes
     # candidate selection to that vertical's leagues.
@@ -152,6 +156,12 @@ def get_settings() -> Settings:
             0, int(os.environ.get("AXIOM_MAX_FRESH_DEBATES_PER_CYCLE") or "1")
         ),
         orchestrator_verticals=verticals,
+        settlement_enabled=_truthy(
+            os.environ.get("AXIOM_SETTLEMENT_ENABLED"), default=True
+        ),
+        settlement_interval_seconds=max(
+            10, int(os.environ.get("AXIOM_SETTLEMENT_INTERVAL_SECONDS") or "60")
+        ),
         port=int(os.environ.get("PORT", "8080")),
         cors_origins=cors_origins,
     )
