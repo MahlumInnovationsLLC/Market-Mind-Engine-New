@@ -8,6 +8,11 @@
 
 export * from "./acknowledgeAlertRequest";
 export * from "./acknowledgeAlertResult";
+export * from "./adminAccessRequest";
+export * from "./adminAccessRequestDecision";
+export * from "./adminAccessRequestDecisionDecision";
+export * from "./adminAccessRequestList";
+export * from "./adminAccessRequestResult";
 export * from "./adminAuditLogEntry";
 export * from "./adminAuditLogEntryAfterValue";
 export * from "./adminAuditLogEntryBeforeValue";

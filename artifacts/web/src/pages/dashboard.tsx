@@ -4,6 +4,7 @@ import {
   getGetMyAccessQueryKey,
   useGetMyAccess,
 } from "@workspace/api-client-react";
+import AccessRequests from "@/components/telemetry/access-requests";
 import HealthSnapshot from "@/components/telemetry/health-snapshot";
 import TopCounters from "@/components/telemetry/top-counters";
 import RecentTrades from "@/components/telemetry/recent-trades";
@@ -84,6 +85,7 @@ export default function Dashboard() {
         {/* Left Column - Health & Stats */}
         <div className="xl:col-span-3 space-y-6">
           <HealthSnapshot />
+          {isAdmin && <AccessRequests />}
           <TopCounters />
           <ModelInventory />
         </div>

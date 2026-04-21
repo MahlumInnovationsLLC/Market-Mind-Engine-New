@@ -442,6 +442,44 @@ async def admin_set_user_admin(
     )
 
 
+class AdminAccessRequestDecision(BaseModel):
+    decision: str = Field(..., pattern="^(approve|deny)$")
+
+
+@app.get("/api/admin/access-requests")
+async def admin_list_access_requests(
+    actor: AuthedUser = Depends(require_admin),
+) -> dict[str, object]:
+    """Users who hit `/api/me/access` while unapproved and have not been
+    explicitly denied. Drives the operator-console "Access requests" panel.
+    """
+    return {"items": await admin_module.list_pending_access_requests()}
+
+
+@app.post("/api/admin/access-requests/{clerk_user_id}")
+async def admin_decide_access_request(
+    clerk_user_id: str,
+    body: AdminAccessRequestDecision,
+    actor: AuthedUser = Depends(require_admin),
+) -> dict[str, object]:
+    actor_email = (await check_approval(actor))[1]
+    try:
+        if body.decision == "approve":
+            return await admin_module.set_approved(
+                actor_user_id=actor.user_id,
+                actor_email=actor_email,
+                target_user_id=clerk_user_id,
+                approved=True,
+            )
+        return await admin_module.set_denied(
+            actor_user_id=actor.user_id,
+            actor_email=actor_email,
+            target_user_id=clerk_user_id,
+        )
+    except admin_module.AdminInvariantError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+
+
 @app.get("/api/admin/audit-log")
 async def admin_get_audit_log(
     limit: int = 100,

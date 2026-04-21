@@ -544,6 +544,44 @@ export const AdminSetUserAdminResponse = zod.object({
 });
 
 /**
+ * @summary Users awaiting operator approval
+ */
+export const AdminListAccessRequestsResponse = zod.object({
+  items: zod.array(
+    zod.object({
+      clerk_user_id: zod.string(),
+      email: zod.string().nullish(),
+      display_name: zod.string().nullish(),
+      approved: zod.boolean(),
+      is_admin: zod.boolean(),
+      first_seen_at: zod.string().nullish(),
+      last_seen_at: zod.string().nullish(),
+      activity_count: zod.number(),
+      clerk_created_at: zod.string().nullish(),
+      clerk_last_sign_in_at: zod.string().nullish(),
+    }),
+  ),
+});
+
+/**
+ * @summary Approve or deny a pending access request
+ */
+export const AdminDecideAccessRequestParams = zod.object({
+  clerk_user_id: zod.coerce.string(),
+});
+
+export const AdminDecideAccessRequestBody = zod.object({
+  decision: zod.enum(["approve", "deny"]),
+});
+
+export const AdminDecideAccessRequestResponse = zod.object({
+  clerk_user_id: zod.string(),
+  approved: zod.boolean(),
+  is_admin: zod.boolean(),
+  denied: zod.boolean().optional(),
+});
+
+/**
  * @summary Recent admin role / approval audit entries
  */
 export const adminGetAuditLogQueryLimitDefault = 100;

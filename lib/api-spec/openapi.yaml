@@ -330,6 +330,40 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/AdminSetFlagResult" }
 
+  /admin/access-requests:
+    get:
+      operationId: adminListAccessRequests
+      tags: [admin]
+      summary: Users awaiting operator approval
+      responses:
+        "200":
+          description: Pending access requests
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AdminAccessRequestList" }
+
+  /admin/access-requests/{clerk_user_id}:
+    post:
+      operationId: adminDecideAccessRequest
+      tags: [admin]
+      summary: Approve or deny a pending access request
+      parameters:
+        - in: path
+          name: clerk_user_id
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AdminAccessRequestDecision" }
+      responses:
+        "200":
+          description: Updated state
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AdminAccessRequestResult" }
+
   /admin/audit-log:
     get:
       operationId: adminGetAuditLog
@@ -1042,3 +1076,43 @@ components:
       properties:
         url: { type: string }
       required: [url]
+
+    AdminAccessRequest:
+      type: object
+      properties:
+        clerk_user_id: { type: string }
+        email: { type: string, nullable: true }
+        display_name: { type: string, nullable: true }
+        approved: { type: boolean }
+        is_admin: { type: boolean }
+        first_seen_at: { type: string, nullable: true }
+        last_seen_at: { type: string, nullable: true }
+        activity_count: { type: integer }
+        clerk_created_at: { type: string, nullable: true }
+        clerk_last_sign_in_at: { type: string, nullable: true }
+      required: [clerk_user_id, approved, is_admin, activity_count]
+
+    AdminAccessRequestList:
+      type: object
+      properties:
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/AdminAccessRequest" }
+      required: [items]
+
+    AdminAccessRequestDecision:
+      type: object
+      properties:
+        decision:
+          type: string
+          enum: [approve, deny]
+      required: [decision]
+
+    AdminAccessRequestResult:
+      type: object
+      properties:
+        clerk_user_id: { type: string }
+        approved: { type: boolean }
+        is_admin: { type: boolean }
+        denied: { type: boolean }
+      required: [clerk_user_id, approved, is_admin]

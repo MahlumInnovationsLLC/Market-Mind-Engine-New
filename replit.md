@@ -79,7 +79,27 @@ back to the Clerk Backend API (`api.clerk.com/v1/users/{id}`) using
 
 The `GET /api/me/access` endpoint is the only authenticated endpoint
 unapproved users can reach; it returns `{approved, email, user_id}` and is
-what drives the front-end gate.
+what drives the front-end gate. Every call also upserts the caller into
+`app_users` so admins can see them in the access-requests panel.
+
+### Approving from inside the console
+
+Admins (anyone with `is_admin = true` on their `app_users` row, or a
+bootstrap `OPERATOR_ADMIN_EMAILS` email on a blank database) see an
+**ACCESS_REQUESTS** panel on the operator dashboard listing every
+signed-in user who is still unapproved and has not been denied. One
+click approves (writes `approved = true` and mirrors
+`public_metadata.approved = true` to Clerk) or denies (stamps
+`denied_at` so they drop out of the panel — re-approving clears it).
+Both actions are written to `admin_audit_log` with action
+`set_approved` / `set_denied`. Backed by:
+
+- `GET  /api/admin/access-requests`
+- `POST /api/admin/access-requests/{clerk_user_id}` body `{decision: "approve"|"deny"}`
+
+This is the recommended path; editing `OPERATOR_ALLOWED_EMAILS` or
+toggling `public_metadata.approved` in the Clerk dashboard still works
+as a fallback.
 
 ## Key endpoints (`/api`)
 
@@ -95,6 +115,8 @@ what drives the front-end gate.
 - `GET /dashboard/recent-debates` — full LLM transcripts — Pro+ only
 - `POST /swarm/debate`, `POST /orchestrator/run-cycle` — Pro+ only
 - `GET /models/inventory` — multi-part archive listing under storage `exports/` — approved-only
+- `GET /admin/access-requests` — pending sign-ups awaiting operator approval — admin-only
+- `POST /admin/access-requests/{clerk_user_id}` — approve or deny in one click — admin-only
 
 ## Subscription tiers
 

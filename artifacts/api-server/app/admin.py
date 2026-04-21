@@ -57,6 +57,7 @@ CREATE TABLE IF NOT EXISTS app_users (
 ALTER TABLE app_users ADD COLUMN IF NOT EXISTS clerk_created_at      timestamptz;
 ALTER TABLE app_users ADD COLUMN IF NOT EXISTS clerk_last_sign_in_at timestamptz;
 ALTER TABLE app_users ADD COLUMN IF NOT EXISTS clerk_synced_at       timestamptz;
+ALTER TABLE app_users ADD COLUMN IF NOT EXISTS denied_at             timestamptz;
 
 CREATE INDEX IF NOT EXISTS app_users_email_idx ON app_users (lower(email));
 
@@ -432,7 +433,7 @@ async def set_approved(
             raise AdminInvariantError(
                 "cannot revoke approval while user is still an admin; demote first"
             )
-    return await _set_flag(
+    result = await _set_flag(
         actor_user_id=actor_user_id,
         actor_email=actor_email,
         target_user_id=target_user_id,
@@ -441,6 +442,114 @@ async def set_approved(
         action="set_approved",
         clerk_metadata_key="approved",
     )
+    # Approving a user should also clear any prior denial so they leave
+    # the pending-requests panel and stay out of it.
+    if approved:
+        try:
+            async with db.acquire() as c:
+                await c.execute(
+                    "UPDATE app_users SET denied_at = NULL WHERE clerk_user_id = $1",
+                    target_user_id,
+                )
+        except Exception as e:
+            log.warning("clear denied_at failed for %s: %s", target_user_id, e)
+    return result
+
+
+async def set_denied(
+    *,
+    actor_user_id: str,
+    actor_email: str | None,
+    target_user_id: str,
+) -> dict[str, Any]:
+    """Mark a pending access request as denied.
+
+    Leaves ``approved`` / ``is_admin`` alone (an admin shouldn't be
+    "denied" via this path) but stamps ``denied_at`` so the user drops
+    out of the operator's pending-requests panel. Records an audit row
+    so the action shows up in the admin audit log.
+    """
+    await ensure_schema()
+    before_row = await _ensure_target_row(target_user_id)
+    if before_row and before_row.get("is_admin"):
+        raise AdminInvariantError(
+            "cannot deny an admin; demote first"
+        )
+    before_denied = bool(before_row.get("denied_at")) if before_row else False
+    try:
+        async with db.acquire() as c:
+            row = await c.fetchrow(
+                """
+                UPDATE app_users SET denied_at = now()
+                WHERE clerk_user_id = $1
+                RETURNING *
+                """,
+                target_user_id,
+            )
+    except Exception as e:
+        log.warning("set_denied update failed for %s: %s", target_user_id, e)
+        row = None
+    after_row = dict(row) if row is not None else (before_row or {})
+    target_email = after_row.get("email") if after_row else None
+    try:
+        async with db.acquire() as c:
+            await c.execute(
+                """
+                INSERT INTO admin_audit_log (
+                    actor_user_id, actor_email,
+                    target_user_id, target_email,
+                    action, before_value, after_value
+                ) VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7::jsonb)
+                """,
+                actor_user_id,
+                actor_email,
+                target_user_id,
+                target_email,
+                "set_denied",
+                f'{{"denied": {str(before_denied).lower()}}}',
+                '{"denied": true}',
+            )
+    except Exception as e:
+        log.warning("audit log insert (deny) failed: %s", e)
+    return {
+        "clerk_user_id": target_user_id,
+        "approved": bool(after_row.get("approved")),
+        "is_admin": bool(after_row.get("is_admin")),
+        "denied": True,
+    }
+
+
+async def list_pending_access_requests() -> list[dict[str, Any]]:
+    """Users who have signed in but are still waiting for an operator
+    to approve them. Denied users drop out — re-signing in or a manual
+    DB clear of ``denied_at`` brings them back."""
+    await ensure_schema()
+    try:
+        async with db.acquire() as c:
+            rows = await c.fetch(
+                """
+                SELECT
+                  clerk_user_id,
+                  email,
+                  display_name,
+                  approved,
+                  is_admin,
+                  to_char(first_seen_at, 'YYYY-MM-DD"T"HH24:MI:SSZ') AS first_seen_at,
+                  to_char(last_seen_at,  'YYYY-MM-DD"T"HH24:MI:SSZ') AS last_seen_at,
+                  activity_count,
+                  to_char(clerk_created_at, 'YYYY-MM-DD"T"HH24:MI:SSZ')      AS clerk_created_at,
+                  to_char(clerk_last_sign_in_at, 'YYYY-MM-DD"T"HH24:MI:SSZ') AS clerk_last_sign_in_at
+                FROM app_users
+                WHERE approved = false
+                  AND is_admin = false
+                  AND denied_at IS NULL
+                ORDER BY last_seen_at DESC NULLS LAST
+                """
+            )
+            return [dict(r) for r in rows]
+    except Exception as e:
+        log.warning("list_pending_access_requests failed: %s", e)
+        return []
 
 
 async def set_admin(

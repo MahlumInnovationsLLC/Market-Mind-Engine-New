@@ -19,6 +19,9 @@ import type {
 import type {
   AcknowledgeAlertRequest,
   AcknowledgeAlertResult,
+  AdminAccessRequestDecision,
+  AdminAccessRequestList,
+  AdminAccessRequestResult,
   AdminAuditLogList,
   AdminGetAuditLogParams,
   AdminSetAdminRequest,
@@ -1748,6 +1751,173 @@ export const useAdminSetUserAdmin = <
   TContext
 > => {
   return useMutation(getAdminSetUserAdminMutationOptions(options));
+};
+
+/**
+ * @summary Users awaiting operator approval
+ */
+export const getAdminListAccessRequestsUrl = () => {
+  return `/api/admin/access-requests`;
+};
+
+export const adminListAccessRequests = async (
+  options?: RequestInit,
+): Promise<AdminAccessRequestList> => {
+  return customFetch<AdminAccessRequestList>(getAdminListAccessRequestsUrl(), {
+    ...options,
+    method: "GET",
+  });
+};
+
+export const getAdminListAccessRequestsQueryKey = () => {
+  return [`/api/admin/access-requests`] as const;
+};
+
+export const getAdminListAccessRequestsQueryOptions = <
+  TData = Awaited<ReturnType<typeof adminListAccessRequests>>,
+  TError = ErrorType<unknown>,
+>(options?: {
+  query?: UseQueryOptions<
+    Awaited<ReturnType<typeof adminListAccessRequests>>,
+    TError,
+    TData
+  >;
+  request?: SecondParameter<typeof customFetch>;
+}) => {
+  const { query: queryOptions, request: requestOptions } = options ?? {};
+
+  const queryKey =
+    queryOptions?.queryKey ?? getAdminListAccessRequestsQueryKey();
+
+  const queryFn: QueryFunction<
+    Awaited<ReturnType<typeof adminListAccessRequests>>
+  > = ({ signal }) => adminListAccessRequests({ signal, ...requestOptions });
+
+  return { queryKey, queryFn, ...queryOptions } as UseQueryOptions<
+    Awaited<ReturnType<typeof adminListAccessRequests>>,
+    TError,
+    TData
+  > & { queryKey: QueryKey };
+};
+
+export type AdminListAccessRequestsQueryResult = NonNullable<
+  Awaited<ReturnType<typeof adminListAccessRequests>>
+>;
+export type AdminListAccessRequestsQueryError = ErrorType<unknown>;
+
+/**
+ * @summary Users awaiting operator approval
+ */
+
+export function useAdminListAccessRequests<
+  TData = Awaited<ReturnType<typeof adminListAccessRequests>>,
+  TError = ErrorType<unknown>,
+>(options?: {
+  query?: UseQueryOptions<
+    Awaited<ReturnType<typeof adminListAccessRequests>>,
+    TError,
+    TData
+  >;
+  request?: SecondParameter<typeof customFetch>;
+}): UseQueryResult<TData, TError> & { queryKey: QueryKey } {
+  const queryOptions = getAdminListAccessRequestsQueryOptions(options);
+
+  const query = useQuery(queryOptions) as UseQueryResult<TData, TError> & {
+    queryKey: QueryKey;
+  };
+
+  return { ...query, queryKey: queryOptions.queryKey };
+}
+
+/**
+ * @summary Approve or deny a pending access request
+ */
+export const getAdminDecideAccessRequestUrl = (clerkUserId: string) => {
+  return `/api/admin/access-requests/${clerkUserId}`;
+};
+
+export const adminDecideAccessRequest = async (
+  clerkUserId: string,
+  adminAccessRequestDecision: AdminAccessRequestDecision,
+  options?: RequestInit,
+): Promise<AdminAccessRequestResult> => {
+  return customFetch<AdminAccessRequestResult>(
+    getAdminDecideAccessRequestUrl(clerkUserId),
+    {
+      ...options,
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...options?.headers },
+      body: JSON.stringify(adminAccessRequestDecision),
+    },
+  );
+};
+
+export const getAdminDecideAccessRequestMutationOptions = <
+  TError = ErrorType<unknown>,
+  TContext = unknown,
+>(options?: {
+  mutation?: UseMutationOptions<
+    Awaited<ReturnType<typeof adminDecideAccessRequest>>,
+    TError,
+    { clerkUserId: string; data: BodyType<AdminAccessRequestDecision> },
+    TContext
+  >;
+  request?: SecondParameter<typeof customFetch>;
+}): UseMutationOptions<
+  Awaited<ReturnType<typeof adminDecideAccessRequest>>,
+  TError,
+  { clerkUserId: string; data: BodyType<AdminAccessRequestDecision> },
+  TContext
+> => {
+  const mutationKey = ["adminDecideAccessRequest"];
+  const { mutation: mutationOptions, request: requestOptions } = options
+    ? options.mutation &&
+      "mutationKey" in options.mutation &&
+      options.mutation.mutationKey
+      ? options
+      : { ...options, mutation: { ...options.mutation, mutationKey } }
+    : { mutation: { mutationKey }, request: undefined };
+
+  const mutationFn: MutationFunction<
+    Awaited<ReturnType<typeof adminDecideAccessRequest>>,
+    { clerkUserId: string; data: BodyType<AdminAccessRequestDecision> }
+  > = (props) => {
+    const { clerkUserId, data } = props ?? {};
+
+    return adminDecideAccessRequest(clerkUserId, data, requestOptions);
+  };
+
+  return { mutationFn, ...mutationOptions };
+};
+
+export type AdminDecideAccessRequestMutationResult = NonNullable<
+  Awaited<ReturnType<typeof adminDecideAccessRequest>>
+>;
+export type AdminDecideAccessRequestMutationBody =
+  BodyType<AdminAccessRequestDecision>;
+export type AdminDecideAccessRequestMutationError = ErrorType<unknown>;
+
+/**
+ * @summary Approve or deny a pending access request
+ */
+export const useAdminDecideAccessRequest = <
+  TError = ErrorType<unknown>,
+  TContext = unknown,
+>(options?: {
+  mutation?: UseMutationOptions<
+    Awaited<ReturnType<typeof adminDecideAccessRequest>>,
+    TError,
+    { clerkUserId: string; data: BodyType<AdminAccessRequestDecision> },
+    TContext
+  >;
+  request?: SecondParameter<typeof customFetch>;
+}): UseMutationResult<
+  Awaited<ReturnType<typeof adminDecideAccessRequest>>,
+  TError,
+  { clerkUserId: string; data: BodyType<AdminAccessRequestDecision> },
+  TContext
+> => {
+  return useMutation(getAdminDecideAccessRequestMutationOptions(options));
 };
 
 /**

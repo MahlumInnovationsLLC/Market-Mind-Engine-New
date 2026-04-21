@@ -515,6 +515,42 @@ export interface PortalSessionResult {
   url: string;
 }
 
+export interface AdminAccessRequest {
+  clerk_user_id: string;
+  email?: string | null;
+  display_name?: string | null;
+  approved: boolean;
+  is_admin: boolean;
+  first_seen_at?: string | null;
+  last_seen_at?: string | null;
+  activity_count: number;
+  clerk_created_at?: string | null;
+  clerk_last_sign_in_at?: string | null;
+}
+
+export interface AdminAccessRequestList {
+  items: AdminAccessRequest[];
+}
+
+export type AdminAccessRequestDecisionDecision =
+  (typeof AdminAccessRequestDecisionDecision)[keyof typeof AdminAccessRequestDecisionDecision];
+
+export const AdminAccessRequestDecisionDecision = {
+  approve: "approve",
+  deny: "deny",
+} as const;
+
+export interface AdminAccessRequestDecision {
+  decision: AdminAccessRequestDecisionDecision;
+}
+
+export interface AdminAccessRequestResult {
+  clerk_user_id: string;
+  approved: boolean;
+  is_admin: boolean;
+  denied?: boolean;
+}
+
 export type GetRecentTradesParams = {
   /**
    * @minimum 1
