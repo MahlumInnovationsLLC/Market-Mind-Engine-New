@@ -9,6 +9,7 @@ This is the minimum viable backend that:
 from __future__ import annotations
 
 import logging
+import os
 from contextlib import asynccontextmanager
 
 from fastapi import Depends, FastAPI, Header, HTTPException
@@ -62,6 +63,25 @@ log = logging.getLogger("axiom.api")
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     log.info("axiom-predict api starting")
+    settings = get_settings()
+    # Fail loudly in production-like environments when no shared token is set.
+    # `REPLIT_DEPLOYMENT=1` is exported in published Replit deployments.
+    is_prod = (
+        os.environ.get("REPLIT_DEPLOYMENT") == "1"
+        or (os.environ.get("ENV") or os.environ.get("APP_ENV") or "").lower()
+        in ("prod", "production")
+    )
+    if is_prod and not settings.api_token:
+        raise RuntimeError(
+            "refusing to start in production without AXIOM_API_TOKEN set — "
+            "telemetry endpoints would be publicly readable"
+        )
+    if not settings.api_token:
+        log.warning(
+            "AXIOM_API_TOKEN is unset — running in OPEN dev mode, "
+            "every /api/dashboard/*, /api/health, /api/storage/*, and "
+            "/api/models/* request is unauthenticated"
+        )
     try:
         await db.get_pool()
     except Exception as e:
