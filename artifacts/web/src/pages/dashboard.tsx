@@ -54,6 +54,17 @@ export default function Dashboard() {
             label="LIVE"
           />
           <ActiveModelBadge />
+          <button
+            type="button"
+            onClick={() => {
+              window.dispatchEvent(new CustomEvent("axiom:open-search"));
+            }}
+            className="border border-border px-3 py-1 uppercase tracking-widest text-[10px] text-muted-foreground hover:text-primary hover:border-primary"
+            data-testid="button-open-search"
+            title="Search trades, debates, and cycles"
+          >
+            Search ⌘K
+          </button>
           <Link
             href="/pipeline"
             className="border border-border px-3 py-1 uppercase tracking-widest text-[10px] text-muted-foreground hover:text-primary hover:border-primary"

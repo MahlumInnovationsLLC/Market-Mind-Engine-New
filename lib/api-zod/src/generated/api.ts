@@ -169,6 +169,113 @@ export const GetSwarmPersonasResponse = zod.object({
 });
 
 /**
+ * @summary Single trade + market-price-vs-model-probability time series
+ */
+export const getTradeDetailPathTradeRefMax = 200;
+
+export const GetTradeDetailParams = zod.object({
+  trade_ref: zod.coerce
+    .string()
+    .min(1)
+    .max(getTradeDetailPathTradeRefMax)
+    .describe("Either the integer trades.id or the trade_id UUID"),
+});
+
+export const GetTradeDetailResponse = zod.object({
+  trade: zod
+    .object({
+      id: zod.number(),
+      trade_id: zod.string().nullish(),
+      market_id: zod.string().nullish(),
+      market_title: zod.string().nullish(),
+      vertical: zod.string().nullish(),
+      league: zod.string().nullish(),
+      side: zod.string().nullish(),
+      action: zod.string().nullish(),
+      quantity: zod.number().nullish(),
+      price: zod.number().nullish(),
+      fees: zod.number().nullish(),
+      pnl: zod.number().nullish(),
+      model_prob: zod.number().nullish(),
+      model_edge: zod.number().nullish(),
+      kelly_fraction: zod.number().nullish(),
+      trading_mode: zod.string().nullish(),
+      exchange: zod.string().nullish(),
+      executed_at: zod.string().nullish(),
+    })
+    .describe("Trade row enriched with model snapshot taken at execution"),
+  series: zod.array(
+    zod
+      .object({
+        t: zod.string().nullish(),
+        market_price: zod.number().nullish(),
+        model_prob: zod.number().nullish(),
+      })
+      .describe("One sample of (market price, model probability) at time t"),
+  ),
+});
+
+/**
+ * @summary Global search across trades, debates, and cycles
+ */
+export const searchAllQueryQMax = 200;
+
+export const searchAllQueryLimitDefault = 10;
+export const searchAllQueryLimitMax = 50;
+
+export const SearchAllQueryParams = zod.object({
+  q: zod.coerce
+    .string()
+    .min(1)
+    .max(searchAllQueryQMax)
+    .describe("Ticker, market id, or ISO date (YYYY-MM-DD)"),
+  limit: zod.coerce
+    .number()
+    .min(1)
+    .max(searchAllQueryLimitMax)
+    .default(searchAllQueryLimitDefault),
+});
+
+export const SearchAllResponse = zod.object({
+  trades: zod.array(
+    zod.object({
+      id: zod.number(),
+      trade_id: zod.string().nullish(),
+      market_id: zod.string().nullish(),
+      market_title: zod.string().nullish(),
+      side: zod.string().nullish(),
+      action: zod.string().nullish(),
+      price: zod.number().nullish(),
+      pnl: zod.number().nullish(),
+      executed_at: zod.string().nullish(),
+    }),
+  ),
+  debates: zod.array(
+    zod.object({
+      id: zod.number(),
+      league: zod.string().nullish(),
+      matchup: zod.string().nullish(),
+      market_type: zod.string().nullish(),
+      consensus_probability: zod.number().nullish(),
+      agreement_rate: zod.number().nullish(),
+      approved: zod.boolean().nullish(),
+      recommended_action: zod.string().nullish(),
+      created_at: zod.string().nullish(),
+    }),
+  ),
+  cycles: zod.array(
+    zod.object({
+      id: zod.number(),
+      vertical: zod.string().nullish(),
+      picks_evaluated: zod.number().nullish(),
+      trades_placed: zod.number().nullish(),
+      started_at: zod.string().nullish(),
+      completed_at: zod.string().nullish(),
+    }),
+  ),
+});
+
+/**
  * @summary Most recent trading-loop cycles
  */
 export const getRecentCyclesQueryLimitDefault = 10;

@@ -362,6 +362,282 @@ async def mark_lead_confirmation_sent(lead_id: int) -> None:
         log.warning("mark_lead_confirmation_sent failed for %s: %s", lead_id, e)
 
 
+_ISO_DATE_RE = None  # lazily built
+
+
+def _looks_like_iso_date(q: str) -> bool:
+    """Return True if `q` looks like an ISO calendar date (YYYY-MM-DD).
+
+    We don't try to parse arbitrary timestamp shapes here — the search
+    box advertises "ticker, market id, ISO date" so accepting just the
+    date prefix keeps the SQL deterministic.
+    """
+    import re
+    global _ISO_DATE_RE
+    if _ISO_DATE_RE is None:
+        _ISO_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+    return bool(_ISO_DATE_RE.match(q))
+
+
+async def search_global(q: str, limit: int = 10) -> dict[str, list[dict[str, Any]]]:
+    """Find trades / debates / cycles that match `q`.
+
+    Spec: ticker (e.g. ``KXNFL-25SEP04SEAARI-SEA``), market id, or an
+    ISO date (``YYYY-MM-DD``).  No fuzzy / NL search — that's
+    explicitly out of scope.
+
+    Tickers and market ids are matched as case-insensitive substring on
+    ``trades.market_id`` (Kalshi tickers are stored here) and
+    ``trades.market_title``.  Debates are matched on ``matchup`` /
+    ``league`` and on ``game_context->>'kalshi_market_id'``.  Cycles are
+    matched by id when the query is numeric, or by ``vertical``.
+
+    An ISO-date query restricts each table to that calendar day in UTC
+    (``executed_at`` / ``created_at`` / ``started_at`` respectively).
+    """
+    q = (q or "").strip()
+    if not q:
+        return {"trades": [], "debates": [], "cycles": []}
+    limit = max(1, min(50, int(limit)))
+
+    is_date = _looks_like_iso_date(q)
+    like = f"%{q}%"
+
+    trades: list[dict[str, Any]] = []
+    debates: list[dict[str, Any]] = []
+    cycles: list[dict[str, Any]] = []
+
+    try:
+        if is_date:
+            rows = await db.fetch(
+                """
+                SELECT id, trade_id, market_id, market_title, side, action,
+                       price::float AS price, pnl::float AS pnl,
+                       to_char(executed_at, 'YYYY-MM-DD"T"HH24:MI:SSZ') AS executed_at
+                  FROM trades
+                 WHERE executed_at::date = $1::date
+                 ORDER BY executed_at DESC NULLS LAST
+                 LIMIT $2
+                """,
+                q, limit,
+            )
+        else:
+            rows = await db.fetch(
+                """
+                SELECT id, trade_id, market_id, market_title, side, action,
+                       price::float AS price, pnl::float AS pnl,
+                       to_char(executed_at, 'YYYY-MM-DD"T"HH24:MI:SSZ') AS executed_at
+                  FROM trades
+                 WHERE market_id ILIKE $1
+                    OR coalesce(market_title, '') ILIKE $1
+                    OR coalesce(trade_id, '') ILIKE $1
+                 ORDER BY executed_at DESC NULLS LAST
+                 LIMIT $2
+                """,
+                like, limit,
+            )
+        trades = [dict(r) for r in rows]
+    except Exception as e:
+        log.warning("search trades failed: %s", e)
+
+    try:
+        if is_date:
+            rows = await db.fetch(
+                """
+                SELECT id, league, matchup, market_type,
+                       consensus_probability, agreement_rate, approved,
+                       recommended_action,
+                       to_char(created_at, 'YYYY-MM-DD"T"HH24:MI:SSZ') AS created_at
+                  FROM swarm_debates
+                 WHERE created_at::date = $1::date
+                 ORDER BY created_at DESC NULLS LAST
+                 LIMIT $2
+                """,
+                q, limit,
+            )
+        else:
+            rows = await db.fetch(
+                """
+                SELECT id, league, matchup, market_type,
+                       consensus_probability, agreement_rate, approved,
+                       recommended_action,
+                       to_char(created_at, 'YYYY-MM-DD"T"HH24:MI:SSZ') AS created_at
+                  FROM swarm_debates
+                 WHERE matchup ILIKE $1
+                    OR coalesce(league, '') ILIKE $1
+                    OR coalesce(game_id, '') ILIKE $1
+                    OR coalesce(game_context->>'kalshi_market_id', '') ILIKE $1
+                 ORDER BY created_at DESC NULLS LAST
+                 LIMIT $2
+                """,
+                like, limit,
+            )
+        debates = [dict(r) for r in rows]
+    except Exception as e:
+        log.warning("search debates failed: %s", e)
+
+    try:
+        if is_date:
+            rows = await db.fetch(
+                """
+                SELECT id, vertical, picks_evaluated, trades_placed,
+                       to_char(started_at, 'YYYY-MM-DD"T"HH24:MI:SSZ')   AS started_at,
+                       to_char(completed_at, 'YYYY-MM-DD"T"HH24:MI:SSZ') AS completed_at
+                  FROM trading_cycles
+                 WHERE started_at::date = $1::date
+                 ORDER BY started_at DESC NULLS LAST
+                 LIMIT $2
+                """,
+                q, limit,
+            )
+        elif q.isdigit():
+            rows = await db.fetch(
+                """
+                SELECT id, vertical, picks_evaluated, trades_placed,
+                       to_char(started_at, 'YYYY-MM-DD"T"HH24:MI:SSZ')   AS started_at,
+                       to_char(completed_at, 'YYYY-MM-DD"T"HH24:MI:SSZ') AS completed_at
+                  FROM trading_cycles
+                 WHERE id = $1
+                 LIMIT $2
+                """,
+                int(q), limit,
+            )
+        else:
+            rows = await db.fetch(
+                """
+                SELECT id, vertical, picks_evaluated, trades_placed,
+                       to_char(started_at, 'YYYY-MM-DD"T"HH24:MI:SSZ')   AS started_at,
+                       to_char(completed_at, 'YYYY-MM-DD"T"HH24:MI:SSZ') AS completed_at
+                  FROM trading_cycles
+                 WHERE coalesce(vertical, '') ILIKE $1
+                 ORDER BY started_at DESC NULLS LAST
+                 LIMIT $2
+                """,
+                like, limit,
+            )
+        cycles = [dict(r) for r in rows]
+    except Exception as e:
+        log.warning("search cycles failed: %s", e)
+
+    return {"trades": trades, "debates": debates, "cycles": cycles}
+
+
+async def get_trade_detail(trade_ref: str) -> dict[str, Any] | None:
+    """Return a single trade row + market-vs-model time series.
+
+    `trade_ref` accepts either the integer ``trades.id`` (preferred —
+    that's what the recent-trades table renders) or the UUID-ish
+    ``trades.trade_id``.  Returns ``None`` if no row matches.
+
+    The time series is built from ``swarm_debates`` rows that share the
+    same Kalshi market_id (via ``game_context->>'kalshi_market_id'``):
+    each debate carries both the consensus model probability *and* the
+    Kalshi price snapshot at debate time, which is exactly the
+    market-vs-model overlay the spec asks for.  The trade's own
+    snapshot (``trades.price`` and ``trades.model_prob``) is appended
+    as the anchor point at ``executed_at`` so the chart always shows at
+    least one data point.
+    """
+    ref = (trade_ref or "").strip()
+    if not ref:
+        return None
+
+    try:
+        if ref.isdigit():
+            row = await db.fetchrow(
+                """
+                SELECT id, trade_id, market_id, market_title, vertical, league,
+                       side, action,
+                       quantity::float    AS quantity,
+                       price::float       AS price,
+                       fees::float        AS fees,
+                       pnl::float         AS pnl,
+                       model_prob::float  AS model_prob,
+                       model_edge::float  AS model_edge,
+                       kelly_fraction::float AS kelly_fraction,
+                       trading_mode, exchange,
+                       to_char(executed_at, 'YYYY-MM-DD"T"HH24:MI:SSZ') AS executed_at
+                  FROM trades
+                 WHERE id = $1
+                 LIMIT 1
+                """,
+                int(ref),
+            )
+        else:
+            row = await db.fetchrow(
+                """
+                SELECT id, trade_id, market_id, market_title, vertical, league,
+                       side, action,
+                       quantity::float    AS quantity,
+                       price::float       AS price,
+                       fees::float        AS fees,
+                       pnl::float         AS pnl,
+                       model_prob::float  AS model_prob,
+                       model_edge::float  AS model_edge,
+                       kelly_fraction::float AS kelly_fraction,
+                       trading_mode, exchange,
+                       to_char(executed_at, 'YYYY-MM-DD"T"HH24:MI:SSZ') AS executed_at
+                  FROM trades
+                 WHERE trade_id = $1
+                 LIMIT 1
+                """,
+                ref,
+            )
+    except Exception as e:
+        log.warning("get_trade_detail lookup failed: %s", e)
+        return None
+
+    if row is None:
+        return None
+    trade = dict(row)
+
+    # Backfill market_title if missing.
+    if trade.get("market_id") and not trade.get("market_title"):
+        try:
+            titles = await resolve_market_titles({trade["market_id"]})
+            trade["market_title"] = titles.get(trade["market_id"])
+        except Exception:
+            pass
+
+    series: list[dict[str, Any]] = []
+    market_id = trade.get("market_id")
+    if market_id:
+        try:
+            srows = await db.fetch(
+                """
+                SELECT
+                    to_char(created_at, 'YYYY-MM-DD"T"HH24:MI:SSZ') AS t,
+                    consensus_probability::float                    AS model_prob,
+                    nullif(game_context->>'kalshi_price', '')::float AS market_price
+                  FROM swarm_debates
+                 WHERE game_context->>'kalshi_market_id' = $1
+                   AND created_at IS NOT NULL
+                 ORDER BY created_at ASC
+                 LIMIT 500
+                """,
+                market_id,
+            )
+            series = [dict(r) for r in srows]
+        except Exception as e:
+            log.warning("trade detail series failed: %s", e)
+
+    # Anchor: always append the trade's own snapshot so the chart isn't
+    # empty even if no debate rows exist for this market.
+    if trade.get("executed_at"):
+        anchor_t = trade["executed_at"]
+        if not any(p.get("t") == anchor_t for p in series):
+            series.append(
+                {
+                    "t": anchor_t,
+                    "model_prob": trade.get("model_prob"),
+                    "market_price": trade.get("price"),
+                }
+            )
+            series.sort(key=lambda p: p.get("t") or "")
+
+    return {"trade": trade, "series": series}
+
+
 async def get_recent_swarm_debates(limit: int = 10) -> list[dict[str, Any]]:
     """Recent swarm-debate rows including the per-persona ``analyst_verdicts``
     and ``moderator_synthesis`` jsonb columns.

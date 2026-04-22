@@ -193,6 +193,83 @@ export interface LiveExecuteToggleRequest {
   enabled: boolean;
 }
 
+/**
+ * One sample of (market price, model probability) at time t
+ */
+export interface TradeDetailPoint {
+  t?: string | null;
+  market_price?: number | null;
+  model_prob?: number | null;
+}
+
+/**
+ * Trade row enriched with model snapshot taken at execution
+ */
+export interface TradeDetailRow {
+  id: number;
+  trade_id?: string | null;
+  market_id?: string | null;
+  market_title?: string | null;
+  vertical?: string | null;
+  league?: string | null;
+  side?: string | null;
+  action?: string | null;
+  quantity?: number | null;
+  price?: number | null;
+  fees?: number | null;
+  pnl?: number | null;
+  model_prob?: number | null;
+  model_edge?: number | null;
+  kelly_fraction?: number | null;
+  trading_mode?: string | null;
+  exchange?: string | null;
+  executed_at?: string | null;
+}
+
+export interface TradeDetail {
+  trade: TradeDetailRow;
+  series: TradeDetailPoint[];
+}
+
+export interface SearchTradeHit {
+  id: number;
+  trade_id?: string | null;
+  market_id?: string | null;
+  market_title?: string | null;
+  side?: string | null;
+  action?: string | null;
+  price?: number | null;
+  pnl?: number | null;
+  executed_at?: string | null;
+}
+
+export interface SearchDebateHit {
+  id: number;
+  league?: string | null;
+  matchup?: string | null;
+  market_type?: string | null;
+  consensus_probability?: number | null;
+  agreement_rate?: number | null;
+  approved?: boolean | null;
+  recommended_action?: string | null;
+  created_at?: string | null;
+}
+
+export interface SearchCycleHit {
+  id: number;
+  vertical?: string | null;
+  picks_evaluated?: number | null;
+  trades_placed?: number | null;
+  started_at?: string | null;
+  completed_at?: string | null;
+}
+
+export interface SearchResults {
+  trades: SearchTradeHit[];
+  debates: SearchDebateHit[];
+  cycles: SearchCycleHit[];
+}
+
 export interface StorageFile {
   name: string;
   size?: number | null;
@@ -605,6 +682,20 @@ export type GetRecentTradesParams = {
   /**
    * @minimum 1
    * @maximum 200
+   */
+  limit?: number;
+};
+
+export type SearchAllParams = {
+  /**
+   * Ticker, market id, or ISO date (YYYY-MM-DD)
+   * @minLength 1
+   * @maxLength 200
+   */
+  q: string;
+  /**
+   * @minimum 1
+   * @maximum 50
    */
   limit?: number;
 };

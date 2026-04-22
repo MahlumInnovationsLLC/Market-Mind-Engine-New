@@ -101,6 +101,47 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/SwarmPersonaList" }
 
+  /dashboard/trades/{trade_ref}:
+    get:
+      operationId: getTradeDetail
+      tags: [dashboard]
+      summary: Single trade + market-price-vs-model-probability time series
+      parameters:
+        - in: path
+          name: trade_ref
+          required: true
+          schema: { type: string, minLength: 1, maxLength: 200 }
+          description: Either the integer trades.id or the trade_id UUID
+      responses:
+        "200":
+          description: Trade detail with comparison series
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TradeDetail" }
+        "404":
+          description: No trade matched
+
+  /search:
+    get:
+      operationId: searchAll
+      tags: [dashboard]
+      summary: Global search across trades, debates, and cycles
+      parameters:
+        - in: query
+          name: q
+          required: true
+          schema: { type: string, minLength: 1, maxLength: 200 }
+          description: Ticker, market id, or ISO date (YYYY-MM-DD)
+        - in: query
+          name: limit
+          schema: { type: integer, minimum: 1, maximum: 50, default: 10 }
+      responses:
+        "200":
+          description: Search hits
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SearchResults" }
+
   /dashboard/recent-cycles:
     get:
       operationId: getRecentCycles
@@ -733,6 +774,100 @@ components:
       properties:
         enabled: { type: boolean }
       required: [enabled]
+
+    TradeDetailPoint:
+      type: object
+      description: One sample of (market price, model probability) at time t
+      properties:
+        t: { type: string, nullable: true }
+        market_price: { type: number, nullable: true }
+        model_prob: { type: number, nullable: true }
+
+    TradeDetailRow:
+      type: object
+      description: Trade row enriched with model snapshot taken at execution
+      properties:
+        id: { type: integer }
+        trade_id: { type: string, nullable: true }
+        market_id: { type: string, nullable: true }
+        market_title: { type: string, nullable: true }
+        vertical: { type: string, nullable: true }
+        league: { type: string, nullable: true }
+        side: { type: string, nullable: true }
+        action: { type: string, nullable: true }
+        quantity: { type: number, nullable: true }
+        price: { type: number, nullable: true }
+        fees: { type: number, nullable: true }
+        pnl: { type: number, nullable: true }
+        model_prob: { type: number, nullable: true }
+        model_edge: { type: number, nullable: true }
+        kelly_fraction: { type: number, nullable: true }
+        trading_mode: { type: string, nullable: true }
+        exchange: { type: string, nullable: true }
+        executed_at: { type: string, nullable: true }
+      required: [id]
+
+    TradeDetail:
+      type: object
+      properties:
+        trade: { $ref: "#/components/schemas/TradeDetailRow" }
+        series:
+          type: array
+          items: { $ref: "#/components/schemas/TradeDetailPoint" }
+      required: [trade, series]
+
+    SearchTradeHit:
+      type: object
+      properties:
+        id: { type: integer }
+        trade_id: { type: string, nullable: true }
+        market_id: { type: string, nullable: true }
+        market_title: { type: string, nullable: true }
+        side: { type: string, nullable: true }
+        action: { type: string, nullable: true }
+        price: { type: number, nullable: true }
+        pnl: { type: number, nullable: true }
+        executed_at: { type: string, nullable: true }
+      required: [id]
+
+    SearchDebateHit:
+      type: object
+      properties:
+        id: { type: integer }
+        league: { type: string, nullable: true }
+        matchup: { type: string, nullable: true }
+        market_type: { type: string, nullable: true }
+        consensus_probability: { type: number, nullable: true }
+        agreement_rate: { type: number, nullable: true }
+        approved: { type: boolean, nullable: true }
+        recommended_action: { type: string, nullable: true }
+        created_at: { type: string, nullable: true }
+      required: [id]
+
+    SearchCycleHit:
+      type: object
+      properties:
+        id: { type: integer }
+        vertical: { type: string, nullable: true }
+        picks_evaluated: { type: integer, nullable: true }
+        trades_placed: { type: integer, nullable: true }
+        started_at: { type: string, nullable: true }
+        completed_at: { type: string, nullable: true }
+      required: [id]
+
+    SearchResults:
+      type: object
+      properties:
+        trades:
+          type: array
+          items: { $ref: "#/components/schemas/SearchTradeHit" }
+        debates:
+          type: array
+          items: { $ref: "#/components/schemas/SearchDebateHit" }
+        cycles:
+          type: array
+          items: { $ref: "#/components/schemas/SearchCycleHit" }
+      required: [trades, debates, cycles]
 
     StorageFile:
       type: object

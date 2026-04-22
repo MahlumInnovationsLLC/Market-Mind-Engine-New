@@ -44,6 +44,8 @@ PROTECTED_ROUTES: tuple[str, ...] = (
     "/api/dashboard/swarm-personas",
     "/api/dashboard/recent-cycles",
     "/api/dashboard/recent-debates",
+    "/api/dashboard/trades/{trade_ref}",
+    "/api/search",
     "/api/storage/list",
     "/api/models/inventory",
     "/api/models/status",

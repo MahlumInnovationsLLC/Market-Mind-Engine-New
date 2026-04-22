@@ -49,6 +49,8 @@ import type {
   OrchestratorStatus,
   PortalSessionResult,
   PricingCatalog,
+  SearchAllParams,
+  SearchResults,
   SettleMarketRequest,
   SettleMarketResult,
   SettlementCycleResult,
@@ -57,6 +59,7 @@ import type {
   SwarmDebateRequest,
   SwarmDebateResult,
   SwarmPersonaList,
+  TradeDetail,
   TradeList,
   TradingCycleList,
   UserSubscription,
@@ -530,6 +533,188 @@ export function useGetSwarmPersonas<
   request?: SecondParameter<typeof customFetch>;
 }): UseQueryResult<TData, TError> & { queryKey: QueryKey } {
   const queryOptions = getGetSwarmPersonasQueryOptions(options);
+
+  const query = useQuery(queryOptions) as UseQueryResult<TData, TError> & {
+    queryKey: QueryKey;
+  };
+
+  return { ...query, queryKey: queryOptions.queryKey };
+}
+
+/**
+ * @summary Single trade + market-price-vs-model-probability time series
+ */
+export const getGetTradeDetailUrl = (tradeRef: string) => {
+  return `/api/dashboard/trades/${tradeRef}`;
+};
+
+export const getTradeDetail = async (
+  tradeRef: string,
+  options?: RequestInit,
+): Promise<TradeDetail> => {
+  return customFetch<TradeDetail>(getGetTradeDetailUrl(tradeRef), {
+    ...options,
+    method: "GET",
+  });
+};
+
+export const getGetTradeDetailQueryKey = (tradeRef: string) => {
+  return [`/api/dashboard/trades/${tradeRef}`] as const;
+};
+
+export const getGetTradeDetailQueryOptions = <
+  TData = Awaited<ReturnType<typeof getTradeDetail>>,
+  TError = ErrorType<void>,
+>(
+  tradeRef: string,
+  options?: {
+    query?: UseQueryOptions<
+      Awaited<ReturnType<typeof getTradeDetail>>,
+      TError,
+      TData
+    >;
+    request?: SecondParameter<typeof customFetch>;
+  },
+) => {
+  const { query: queryOptions, request: requestOptions } = options ?? {};
+
+  const queryKey =
+    queryOptions?.queryKey ?? getGetTradeDetailQueryKey(tradeRef);
+
+  const queryFn: QueryFunction<Awaited<ReturnType<typeof getTradeDetail>>> = ({
+    signal,
+  }) => getTradeDetail(tradeRef, { signal, ...requestOptions });
+
+  return {
+    queryKey,
+    queryFn,
+    enabled: !!tradeRef,
+    ...queryOptions,
+  } as UseQueryOptions<
+    Awaited<ReturnType<typeof getTradeDetail>>,
+    TError,
+    TData
+  > & { queryKey: QueryKey };
+};
+
+export type GetTradeDetailQueryResult = NonNullable<
+  Awaited<ReturnType<typeof getTradeDetail>>
+>;
+export type GetTradeDetailQueryError = ErrorType<void>;
+
+/**
+ * @summary Single trade + market-price-vs-model-probability time series
+ */
+
+export function useGetTradeDetail<
+  TData = Awaited<ReturnType<typeof getTradeDetail>>,
+  TError = ErrorType<void>,
+>(
+  tradeRef: string,
+  options?: {
+    query?: UseQueryOptions<
+      Awaited<ReturnType<typeof getTradeDetail>>,
+      TError,
+      TData
+    >;
+    request?: SecondParameter<typeof customFetch>;
+  },
+): UseQueryResult<TData, TError> & { queryKey: QueryKey } {
+  const queryOptions = getGetTradeDetailQueryOptions(tradeRef, options);
+
+  const query = useQuery(queryOptions) as UseQueryResult<TData, TError> & {
+    queryKey: QueryKey;
+  };
+
+  return { ...query, queryKey: queryOptions.queryKey };
+}
+
+/**
+ * @summary Global search across trades, debates, and cycles
+ */
+export const getSearchAllUrl = (params: SearchAllParams) => {
+  const normalizedParams = new URLSearchParams();
+
+  Object.entries(params || {}).forEach(([key, value]) => {
+    if (value !== undefined) {
+      normalizedParams.append(key, value === null ? "null" : value.toString());
+    }
+  });
+
+  const stringifiedParams = normalizedParams.toString();
+
+  return stringifiedParams.length > 0
+    ? `/api/search?${stringifiedParams}`
+    : `/api/search`;
+};
+
+export const searchAll = async (
+  params: SearchAllParams,
+  options?: RequestInit,
+): Promise<SearchResults> => {
+  return customFetch<SearchResults>(getSearchAllUrl(params), {
+    ...options,
+    method: "GET",
+  });
+};
+
+export const getSearchAllQueryKey = (params?: SearchAllParams) => {
+  return [`/api/search`, ...(params ? [params] : [])] as const;
+};
+
+export const getSearchAllQueryOptions = <
+  TData = Awaited<ReturnType<typeof searchAll>>,
+  TError = ErrorType<unknown>,
+>(
+  params: SearchAllParams,
+  options?: {
+    query?: UseQueryOptions<
+      Awaited<ReturnType<typeof searchAll>>,
+      TError,
+      TData
+    >;
+    request?: SecondParameter<typeof customFetch>;
+  },
+) => {
+  const { query: queryOptions, request: requestOptions } = options ?? {};
+
+  const queryKey = queryOptions?.queryKey ?? getSearchAllQueryKey(params);
+
+  const queryFn: QueryFunction<Awaited<ReturnType<typeof searchAll>>> = ({
+    signal,
+  }) => searchAll(params, { signal, ...requestOptions });
+
+  return { queryKey, queryFn, ...queryOptions } as UseQueryOptions<
+    Awaited<ReturnType<typeof searchAll>>,
+    TError,
+    TData
+  > & { queryKey: QueryKey };
+};
+
+export type SearchAllQueryResult = NonNullable<
+  Awaited<ReturnType<typeof searchAll>>
+>;
+export type SearchAllQueryError = ErrorType<unknown>;
+
+/**
+ * @summary Global search across trades, debates, and cycles
+ */
+
+export function useSearchAll<
+  TData = Awaited<ReturnType<typeof searchAll>>,
+  TError = ErrorType<unknown>,
+>(
+  params: SearchAllParams,
+  options?: {
+    query?: UseQueryOptions<
+      Awaited<ReturnType<typeof searchAll>>,
+      TError,
+      TData
+    >;
+    request?: SecondParameter<typeof customFetch>;
+  },
+): UseQueryResult<TData, TError> & { queryKey: QueryKey } {
+  const queryOptions = getSearchAllQueryOptions(params, options);
 
   const query = useQuery(queryOptions) as UseQueryResult<TData, TError> & {
     queryKey: QueryKey;

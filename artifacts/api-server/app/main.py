@@ -1407,6 +1407,37 @@ async def dashboard_runtime_settings(
     return state
 
 
+@app.get("/api/dashboard/trades/{trade_ref}")
+async def dashboard_trade_detail(
+    trade_ref: str,
+    _: object = Depends(require_approved_user),
+) -> dict[str, object]:
+    """Single-trade detail + market-vs-model time series.
+
+    `trade_ref` accepts either the integer `trades.id` or the UUID-ish
+    `trades.trade_id` so the operator can deep-link from either column.
+    """
+    detail = await dashboard.get_trade_detail(trade_ref)
+    if detail is None:
+        raise HTTPException(status_code=404, detail="trade not found")
+    return detail
+
+
+@app.get("/api/search")
+async def dashboard_search(
+    q: str = "",
+    limit: int = 10,
+    _: object = Depends(require_approved_user),
+) -> dict[str, object]:
+    """Global search across trades, debates, and cycles.
+
+    Query syntax: ticker / market id substring, or an ISO date
+    (YYYY-MM-DD).  Fuzzy / NL search is intentionally out of scope.
+    """
+    limit = max(1, min(50, int(limit)))
+    return await dashboard.search_global(q, limit)
+
+
 @app.get("/api/dashboard/recent-cycles")
 async def dashboard_recent_cycles(
     limit: int = 10, _: object = Depends(require_approved_user)
