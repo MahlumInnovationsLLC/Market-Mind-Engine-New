@@ -5,7 +5,7 @@ regulatory signals to ground its Bayesian probability model.  This
 module owns the public-API pollers that fill the `tech_evidence`
 cache table.
 
-Five sources are wired:
+Six sources are wired:
 
 1. **GitHub releases** — a curated list of orgs/repos (huggingface,
    openai, anthropics, meta-llama).  Public REST API, no key required;
@@ -15,10 +15,13 @@ Five sources are wired:
    public endpoint, no auth required.
 3. **ArXiv recent submissions** — Atom feed for `cs.LG` and `cs.CL`
    categories, no auth required.
-4. **MLPerf snapshot** — placeholder poller (results land via manual
+4. **Industry-analyst RSS** — SemiAnalysis + The Information public RSS
+   feeds, parsed for headline/title and routed onto a symbol class via
+   keyword heuristics.
+5. **MLPerf snapshot** — placeholder poller (results land via manual
    pull by the ops team; the table & poller wiring exist so the
    resolver can pick rows up immediately when they do).
-5. **Earnings calendar** — placeholder poller for NVDA / TSMC report
+6. **Earnings calendar** — placeholder poller for NVDA / TSMC report
    dates.
 
 Every poller is *idempotent*: it upserts into `tech_evidence` keyed by
@@ -72,13 +75,24 @@ GITHUB_REPOS: tuple[tuple[str, str], ...] = (
 ARXIV_CATEGORIES: tuple[str, ...] = ("cs.LG", "cs.CL")
 
 
-# Cadence: 30 minutes for release/trending, 1 hour for ArXiv, 6 hours
-# for the placeholder pollers (the resolver only needs them to refresh
-# after upstream updates).
+# Cadence: 30 minutes for release/trending, 1 hour for ArXiv + RSS, 6
+# hours for the placeholder pollers (the resolver only needs them to
+# refresh after upstream updates).
 _CADENCE_RELEASE = 1800.0
 _CADENCE_TRENDING = 1800.0
 _CADENCE_ARXIV = 3600.0
+_CADENCE_RSS = 3600.0
 _CADENCE_PLACEHOLDER = 6 * 3600.0
+
+
+# Industry-analyst RSS feeds (per task spec).  Both are public RSS;
+# SemiAnalysis publishes free + subscriber posts (we only need
+# headlines), and The Information's RSS exposes article titles even
+# behind their paywall.
+RSS_SOURCES: tuple[tuple[str, str, str], ...] = (
+    ("semianalysis_rss",  "https://www.semianalysis.com/feed",     "NVDA"),
+    ("theinformation_rss","https://www.theinformation.com/feed",   "LLM"),
+)
 
 
 # --- Persistence -------------------------------------------------------------
@@ -328,6 +342,97 @@ async def poll_arxiv() -> int:
     return await upsert_evidence(rows)
 
 
+# --- Industry-analyst RSS pollers --------------------------------------------
+
+
+_RSS_ITEM_RE = re.compile(r"<item>(.*?)</item>", re.DOTALL | re.IGNORECASE)
+_RSS_FIELD_RE = re.compile(
+    r"<(title|link|guid|pubDate|description)[^>]*>(.*?)</\1>",
+    re.DOTALL | re.IGNORECASE,
+)
+_CDATA_RE = re.compile(r"<!\[CDATA\[(.*?)\]\]>", re.DOTALL)
+
+
+def _strip_cdata(s: str) -> str:
+    m = _CDATA_RE.search(s)
+    return (m.group(1) if m else s).strip()
+
+
+def _rss_symbol_for(text: str, default_symbol: str) -> str:
+    """Re-route an RSS item to a more specific symbol class when the
+    title gives a strong tell — otherwise keep the source's default."""
+    t = text.lower()
+    if "tsmc" in t or "wafer" in t or "fab " in t:
+        return "TSMC"
+    if "nvda" in t or "nvidia" in t or "blackwell" in t or "h200" in t or "h100" in t:
+        return "NVDA"
+    if "claude" in t or "anthropic" in t:
+        return "CLAUDE"
+    if "llama" in t or "meta-llama" in t:
+        return "LLAMA"
+    if "openai" in t or "gpt-" in t or "chatgpt" in t:
+        return "GPT"
+    if "ipo" in t:
+        return "IPO"
+    if "mlperf" in t or "benchmark" in t:
+        return "MLPERF"
+    return default_symbol
+
+
+async def _fetch_rss(source: str, url: str, default_symbol: str) -> list[dict[str, Any]]:
+    body = await _http_get_text(url)
+    if not body:
+        return []
+    out: list[dict[str, Any]] = []
+    now = datetime.now(timezone.utc)
+    for item_match in _RSS_ITEM_RE.finditer(body):
+        item = item_match.group(1)
+        fields: dict[str, str] = {}
+        for fm in _RSS_FIELD_RE.finditer(item):
+            fields[fm.group(1).lower()] = _strip_cdata(fm.group(2))
+        title = fields.get("title", "")
+        link = fields.get("link", "")
+        guid = fields.get("guid") or link or title
+        if not guid:
+            continue
+        # pubDate is RFC-822-ish; fall back to "now" when we can't parse.
+        pub_raw = fields.get("pubdate", "")
+        observed = now
+        try:
+            from email.utils import parsedate_to_datetime
+            if pub_raw:
+                observed = parsedate_to_datetime(pub_raw)
+                if observed.tzinfo is None:
+                    observed = observed.replace(tzinfo=timezone.utc)
+        except Exception:
+            observed = now
+        out.append({
+            "source": source,
+            "signal_id": guid[:300],
+            "symbol": _rss_symbol_for(title, default_symbol),
+            "kind": KIND_TRENDING,
+            "observed_at": observed,
+            "weight": 0.4,
+            "payload": {"title": title[:500], "url": link},
+        })
+    return out
+
+
+async def poll_industry_rss() -> int:
+    """Poll the SemiAnalysis + The Information RSS feeds.
+
+    Failure on either source is logged-and-skipped so a flaky upstream
+    doesn't take the other source down with it.
+    """
+    rows: list[dict[str, Any]] = []
+    for source, url, default_symbol in RSS_SOURCES:
+        try:
+            rows.extend(await _fetch_rss(source, url, default_symbol))
+        except Exception as e:
+            log.debug("rss source %s fetch failed: %s", source, e)
+    return await upsert_evidence(rows)
+
+
 # --- Placeholder pollers -----------------------------------------------------
 
 
@@ -365,6 +470,7 @@ def register_tech_evidence_feeds() -> None:
         ("tech_evidence.github_releases", _CADENCE_RELEASE, poll_github_releases),
         ("tech_evidence.hf_trending",     _CADENCE_TRENDING, poll_hf_trending),
         ("tech_evidence.arxiv",           _CADENCE_ARXIV,    poll_arxiv),
+        ("tech_evidence.industry_rss",    _CADENCE_RSS,      poll_industry_rss),
         ("tech_evidence.mlperf",          _CADENCE_PLACEHOLDER, poll_mlperf),
         ("tech_evidence.earnings",        _CADENCE_PLACEHOLDER, poll_earnings_calendar),
     ]

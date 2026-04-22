@@ -355,6 +355,22 @@ LEAGUE_CONFIGS: dict[str, LeagueConfig] = {
         live_action_blackout=False,
         max_daily_trades=20,
     ),
+    # Tech / AI binary-close (task #199).  Same shape as commodities:
+    # each contract settles independently on its own resolution date,
+    # so per_event concentration doesn't apply.  Allocation_pct mirrors
+    # the conservative 0.10 vertical default (paper-grade until the
+    # auto-promote pipeline bumps the Kelly multiplier).  Live blackout
+    # disabled — there's no in-progress event to fade against.
+    "TECH_AI": LeagueConfig(
+        league="TECH_AI",
+        priority=8,
+        allocation_pct=0.10,
+        per_game_cap_pct=0.01,
+        per_event_cap_pct=None,
+        n_way_market=False,
+        live_action_blackout=False,
+        max_daily_trades=20,
+    ),
 }
 
 

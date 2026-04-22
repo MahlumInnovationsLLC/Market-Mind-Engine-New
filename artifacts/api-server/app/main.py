@@ -1069,6 +1069,63 @@ async def admin_get_audit_log(
 # ---------------------------------------------------------------------------
 
 
+@app.get("/api/dashboard/tech-ai/markets/{ticker}/evidence")
+async def dashboard_tech_ai_market_evidence(
+    ticker: str,
+    lookback_days: int = 30,
+    limit: int = 25,
+    _: object = Depends(require_approved_user),
+) -> dict[str, object]:
+    """Surface the evidence rows pinned to a tech-AI market.
+
+    Powers the dashboard's "evidence pinned" panel: parses the ticker,
+    pulls recent rows from `tech_evidence` scoped to the symbol class,
+    and returns them alongside the current Bayesian probability so the
+    UI can render the model output next to the underlying signals.
+    """
+    from .tech_ai import predictor as _ta_predictor
+    from .tech_ai.tickers import InvalidTechAITicker, parse_tech_ai_ticker
+    from .tech_ai.evidence import resolve_evidence
+    try:
+        parsed = parse_tech_ai_ticker(ticker)
+    except InvalidTechAITicker as e:
+        raise HTTPException(status_code=400, detail=f"invalid tech-ai ticker: {e}")
+    lookback_days = max(1, min(180, int(lookback_days)))
+    limit = max(1, min(100, int(limit)))
+    rows = await resolve_evidence(parsed, lookback_days=lookback_days, limit=limit)
+    try:
+        pred = await _ta_predictor.predict_tech_ai_binary(
+            parsed, league="TECH_AI", lookback_days=lookback_days
+        )
+        prediction = pred.as_dict()
+    except Exception as e:
+        log.debug("tech-ai dashboard predict failed for %s: %s", ticker, e)
+        prediction = None
+    return {
+        "ticker": {
+            "raw": parsed.raw,
+            "symbol": parsed.symbol,
+            "direction": parsed.direction,
+            "threshold": parsed.threshold,
+            "when": parsed.when,
+        },
+        "lookback_days": lookback_days,
+        "evidence": [
+            {
+                "source": r.source,
+                "signal_id": r.signal_id,
+                "symbol": r.symbol,
+                "kind": r.kind,
+                "observed_at": r.observed_at.isoformat() if r.observed_at else None,
+                "weight": r.weight,
+                "payload": r.payload,
+            }
+            for r in rows
+        ],
+        "prediction": prediction,
+    }
+
+
 @app.get("/api/admin/tech-ai/promotion-status")
 async def admin_tech_ai_promotion_status(
     actor: AuthedUser = Depends(require_admin),
