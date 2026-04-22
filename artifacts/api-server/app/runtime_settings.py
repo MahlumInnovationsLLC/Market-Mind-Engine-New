@@ -97,6 +97,25 @@ async def get_aggression_mode() -> str:
     return normalize_mode(v)
 
 
+async def get_trading_halted() -> bool:
+    """Return the global kill-switch state.
+
+    Stored in the same key/value `runtime_settings` table under the key
+    ``trading_halted`` with value ``'true'`` / ``'false'`` (anything else
+    is treated as ``False``). Surfaces in the operator dashboard pill
+    (DRY-RUN state) and the trading-alerts banner.
+    """
+    await ensure_schema()
+    try:
+        v = await db.fetchval(
+            "SELECT value FROM runtime_settings WHERE key = 'trading_halted'"
+        )
+    except Exception as e:
+        log.debug("get_trading_halted read failed (best-effort): %s", e)
+        return False
+    return (v or "").strip().lower() == "true"
+
+
 async def set_aggression_mode(mode: str, *, actor_user_id: str | None) -> str:
     raw = (mode or "").strip().lower()
     if raw not in VALID_MODES:
@@ -545,8 +564,10 @@ async def get_state() -> dict[str, Any]:
             updated_by = row["updated_by"]
     except Exception as e:
         log.debug("runtime_settings meta read failed: %s", e)
+    trading_halted = await get_trading_halted()
     return {
         "aggression_mode": mode,
+        "trading_halted": trading_halted,
         "thresholds": profile_for(mode),
         "available_modes": list(VALID_MODES),
         "updated_at": updated_at,

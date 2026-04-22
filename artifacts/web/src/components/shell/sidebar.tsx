@@ -1,18 +1,19 @@
 import { Link, useLocation } from "wouter";
+import { useClerk } from "@clerk/react";
 import {
   Activity,
   BarChart3,
+  Bell,
   Briefcase,
   Brain,
   Cpu,
   LayoutDashboard,
   LineChart,
-  Settings,
+  LogOut,
   Shield,
   ShieldAlert,
   TrendingUp,
   User,
-  Bell,
 } from "lucide-react";
 import {
   Sidebar,
@@ -29,8 +30,10 @@ import {
   SidebarSeparator,
 } from "@/components/ui/sidebar";
 import {
+  getAdminListAccessRequestsQueryKey,
   getGetVerticalsOverviewQueryKey,
   getListModelHealthAlertsQueryKey,
+  useAdminListAccessRequests,
   useGetVerticalsOverview,
   useListModelHealthAlerts,
 } from "@workspace/api-client-react";
@@ -62,6 +65,7 @@ function isActive(current: string, href: string, exact?: boolean): boolean {
 
 export function ShellSidebar({ isAdmin, wsStatus }: ShellSidebarProps) {
   const [location] = useLocation();
+  const { signOut } = useClerk();
 
   // Sum open positions across visible verticals — drives the Positions badge.
   const verticals = useGetVerticalsOverview(
@@ -89,6 +93,17 @@ export function ShellSidebar({ isAdmin, wsStatus }: ShellSidebarProps) {
     },
   });
   const unreadAlerts = (alerts.data?.items ?? []).length;
+
+  // Pending access-requests count — admin only — drives the Admin badge.
+  const accessRequests = useAdminListAccessRequests({
+    query: {
+      queryKey: getAdminListAccessRequestsQueryKey(),
+      staleTime: 60_000,
+      refetchInterval: 60_000,
+      enabled: isAdmin,
+    },
+  });
+  const pendingAccessRequests = (accessRequests.data?.items ?? []).length;
 
   const sections: SidebarSectionDef[] = [
     {
@@ -119,29 +134,34 @@ export function ShellSidebar({ isAdmin, wsStatus }: ShellSidebarProps) {
           badge: openPositions > 0 ? openPositions : null,
           testId: "nav-positions",
         },
-        {
-          href: "/trading",
-          label: "Trading",
-          icon: TrendingUp,
-          testId: "nav-trading",
-        },
       ],
     },
     {
       label: "Intelligence",
       items: [
         {
-          href: "/pipeline",
-          label: "Pipeline",
-          icon: Activity,
-          testId: "nav-pipeline",
-        },
-        {
           href: "/intelligence",
           label: "Intelligence",
           icon: Brain,
           badge: unreadAlerts > 0 ? unreadAlerts : null,
           testId: "nav-intelligence",
+        },
+      ],
+    },
+    {
+      label: "Trading",
+      items: [
+        {
+          href: "/trading",
+          label: "Trading",
+          icon: TrendingUp,
+          testId: "nav-trading",
+        },
+        {
+          href: "/pipeline",
+          label: "Pipeline",
+          icon: Activity,
+          testId: "nav-pipeline",
         },
       ],
     },
@@ -154,16 +174,6 @@ export function ShellSidebar({ isAdmin, wsStatus }: ShellSidebarProps) {
           icon: Cpu,
           testId: "nav-system",
         },
-        ...(isAdmin
-          ? [
-              {
-                href: "/admin",
-                label: "Admin",
-                icon: Shield,
-                testId: "nav-admin",
-              },
-            ]
-          : []),
       ],
     },
     {
@@ -205,6 +215,7 @@ export function ShellSidebar({ isAdmin, wsStatus }: ShellSidebarProps) {
             <span
               className={`absolute -top-0.5 -right-0.5 w-2 h-2 rounded-full ${wsDot}`}
               aria-hidden
+              data-testid="shell-ws-dot"
             />
           </div>
           <div className="flex flex-col leading-tight group-data-[collapsible=icon]:hidden">
@@ -256,6 +267,54 @@ export function ShellSidebar({ isAdmin, wsStatus }: ShellSidebarProps) {
         ))}
       </SidebarContent>
       <SidebarFooter>
+        <SidebarMenu>
+          {isAdmin ? (
+            <SidebarMenuItem>
+              <SidebarMenuButton
+                asChild
+                isActive={isActive(location, "/admin")}
+                tooltip="Admin"
+                data-testid="nav-admin"
+              >
+                <Link href="/admin">
+                  <Shield className="w-4 h-4" />
+                  <span>Admin</span>
+                </Link>
+              </SidebarMenuButton>
+              {pendingAccessRequests > 0 ? (
+                <SidebarMenuBadge data-testid="nav-admin-badge">
+                  {pendingAccessRequests}
+                </SidebarMenuBadge>
+              ) : null}
+            </SidebarMenuItem>
+          ) : null}
+          <SidebarMenuItem>
+            <SidebarMenuButton
+              asChild
+              isActive={isActive(location, "/profile")}
+              tooltip="Profile"
+              data-testid="nav-footer-profile"
+            >
+              <Link href="/profile">
+                <User className="w-4 h-4" />
+                <span>Profile</span>
+              </Link>
+            </SidebarMenuButton>
+          </SidebarMenuItem>
+          <SidebarMenuItem>
+            <SidebarMenuButton
+              tooltip="Sign out"
+              onClick={() =>
+                signOut({ redirectUrl: import.meta.env.BASE_URL })
+              }
+              data-testid="button-shell-sidebar-sign-out"
+              className="text-loss hover:text-loss"
+            >
+              <LogOut className="w-4 h-4" />
+              <span>Sign out</span>
+            </SidebarMenuButton>
+          </SidebarMenuItem>
+        </SidebarMenu>
         <div className="px-2 py-1.5 text-[9px] uppercase tracking-widest text-muted-foreground/60 group-data-[collapsible=icon]:hidden">
           <ShieldAlert className="inline w-3 h-3 mr-1" />
           v1.0 · operator

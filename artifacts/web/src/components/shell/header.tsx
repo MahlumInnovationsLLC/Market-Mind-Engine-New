@@ -1,6 +1,7 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Link, useLocation } from "wouter";
-import { useClerk, useUser } from "@clerk/react";
+import { useAuth, useClerk, useUser } from "@clerk/react";
+import { useQuery } from "@tanstack/react-query";
 import { Bell, LogOut, Moon, Search, Sun } from "lucide-react";
 import {
   useHealthFull,
@@ -8,6 +9,7 @@ import {
   useListModelHealthAlerts,
   getListModelHealthAlertsQueryKey,
 } from "@workspace/api-client-react";
+import { apiFetch } from "@/lib/api";
 import { SidebarTrigger } from "@/components/ui/sidebar";
 import { Separator } from "@/components/ui/separator";
 import {
@@ -18,6 +20,15 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+
+interface ShellHeaderProps {
+  operatorEmail: string | null;
+}
+
+type RuntimeSettingsLite = {
+  trading_halted?: boolean;
+  aggression_mode?: string;
+};
 
 const THEME_KEY = "axiom.theme";
 
@@ -34,9 +45,10 @@ function loadTheme(): "dark" | "light" {
   return stored === "light" ? "light" : "dark";
 }
 
-export function ShellHeader() {
+export function ShellHeader({ operatorEmail: emailOverride }: ShellHeaderProps) {
   const { user } = useUser();
   const { signOut } = useClerk();
+  const { getToken, isSignedIn } = useAuth();
   const [, setLocation] = useLocation();
 
   const [theme, setTheme] = useState<"dark" | "light">(() => loadTheme());
@@ -60,20 +72,50 @@ export function ShellHeader() {
   });
   const unreadAlerts = (alerts.data?.items ?? []).length;
 
+  // Runtime settings drives the kill-switch / dry-run portion of the
+  // trading-mode pill. The spec asks for PAPER / LIVE / DRY-RUN derived
+  // from runtime settings; the current API exposes `trading_halted` (kill
+  // switch) but no separate `live_execute_enabled` field, so we combine
+  // it with `paper_mode` from /api/health/full:
+  //   • paper_mode === true                       → PAPER
+  //   • paper_mode === false && trading_halted    → DRY-RUN
+  //   • paper_mode === false                      → LIVE
+  const tokenGetter = useMemo(
+    () => () => getToken().then((t) => t ?? null),
+    [getToken],
+  );
+  const runtime = useQuery<RuntimeSettingsLite>({
+    queryKey: ["shell", "runtime-settings"],
+    queryFn: () =>
+      apiFetch<RuntimeSettingsLite>("/api/dashboard/runtime-settings", {
+        getToken: tokenGetter,
+      }),
+    enabled: !!isSignedIn,
+    refetchInterval: 30_000,
+    staleTime: 15_000,
+  });
+
   const paperMode = health.data?.paper_mode;
+  const tradingHalted = !!runtime.data?.trading_halted;
   const env = health.data?.kalshi_env?.toUpperCase();
   let modeLabel = "—";
   let modeClass = "border-border text-muted-foreground";
   if (paperMode === true) {
     modeLabel = "PAPER";
     modeClass = "border-info/60 text-info bg-info/5";
+  } else if (paperMode === false && tradingHalted) {
+    modeLabel = "DRY-RUN";
+    modeClass = "border-warning/60 text-warning bg-warning/5";
   } else if (paperMode === false) {
     modeLabel = "LIVE";
     modeClass = "border-loss/60 text-loss bg-loss/5";
   }
 
   const operatorEmail =
-    user?.primaryEmailAddress?.emailAddress ?? user?.username ?? "operator";
+    emailOverride ??
+    user?.primaryEmailAddress?.emailAddress ??
+    user?.username ??
+    "operator";
   const initials = (operatorEmail || "OP").slice(0, 2).toUpperCase();
 
   const openSearch = () => {

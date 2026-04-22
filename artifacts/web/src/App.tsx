@@ -22,7 +22,6 @@ import {
   setUnauthorizedHandler,
   useGetMyAccess,
 } from "@workspace/api-client-react";
-import { Toaster } from "@/components/ui/toaster";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import NotFound from "@/pages/not-found";
 import Dashboard from "@/pages/dashboard";
@@ -230,7 +229,7 @@ function AuthedShell() {
   const operatorEmail = data.email ?? null;
 
   return (
-    <AppShell isAdmin={isAdmin}>
+    <AppShell isAdmin={isAdmin} operatorEmail={operatorEmail}>
       <Switch>
         <Route path="/app" component={Dashboard} />
         <Route path="/pipeline" component={PipelinePage} />
@@ -387,7 +386,6 @@ function ClerkProviderWithRoutes() {
               onDismiss={() => setSessionExpired(false)}
             />
           )}
-          <Toaster />
         </TooltipProvider>
       </QueryClientProvider>
     </ClerkProvider>

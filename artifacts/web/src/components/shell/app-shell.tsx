@@ -1,5 +1,6 @@
 import type { ReactNode } from "react";
 import { SidebarInset, SidebarProvider } from "@/components/ui/sidebar";
+import { Toaster } from "@/components/ui/toaster";
 import { useWebSocket } from "@/hooks/use-websocket";
 import { ShellSidebar } from "./sidebar";
 import { ShellHeader } from "./header";
@@ -8,10 +9,11 @@ import { TradingAlertsBanner } from "./trading-alerts-banner";
 
 interface AppShellProps {
   isAdmin: boolean;
+  operatorEmail: string | null;
   children: ReactNode;
 }
 
-export function AppShell({ isAdmin, children }: AppShellProps) {
+export function AppShell({ isAdmin, operatorEmail, children }: AppShellProps) {
   // Single shell-wide pipeline subscription drives the brand-block
   // connection dot and lets pages share its status via context if
   // needed later. Buffer is tiny — pages keep their own WS hooks
@@ -24,13 +26,16 @@ export function AppShell({ isAdmin, children }: AppShellProps) {
       <SidebarInset className="flex flex-col min-h-[100dvh] bg-background">
         <DegradedModeBanner />
         <TradingAlertsBanner />
-        <ShellHeader />
+        <ShellHeader operatorEmail={operatorEmail} />
         <main
           className="flex-1 p-4 md:p-6 selection:bg-primary/30"
           data-testid="shell-main"
         >
           {children}
         </main>
+        {/* Toaster lives inside the shell so toasts render above all
+            authed surfaces and unmount cleanly when the user signs out. */}
+        <Toaster />
       </SidebarInset>
     </SidebarProvider>
   );
