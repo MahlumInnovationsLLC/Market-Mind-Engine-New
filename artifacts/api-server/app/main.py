@@ -63,6 +63,7 @@ from .feeds.sportradar import (
 )
 from .feeds.weather import register_weather_feeds
 from .feeds.crypto import register_crypto_feeds
+from .features import drift as feature_drift, registry as feature_registry
 from .orchestrator import pipeline_event_hub, run_cycle, scheduler as orchestrator_scheduler
 from .settlement import (
     backfill_is_running,
@@ -240,6 +241,13 @@ async def lifespan(_: FastAPI):
     except Exception as e:
         log.warning("churn digest scheduler start failed: %s", e)
 
+    # Periodic feature-drift snapshot logger.  Pure in-process — no DB
+    # dependency, so it's safe to start before the ready gate clears.
+    try:
+        await feature_drift.scheduler.start()
+    except Exception as e:
+        log.warning("feature drift scheduler start failed: %s", e)
+
     # Kick off model artifact reassembly in the background so a cold cache
     # (~240 MiB download) doesn't block the HTTP server from accepting
     # traffic. Health endpoints surface progress while it warms up.
@@ -287,6 +295,10 @@ async def lifespan(_: FastAPI):
             await notif_churn.stop()
         except Exception as e:
             log.warning("churn digest stop error: %s", e)
+        try:
+            await feature_drift.scheduler.stop()
+        except Exception as e:
+            log.warning("feature drift scheduler stop error: %s", e)
         try:
             await health.stop()
         except Exception as e:
@@ -1625,6 +1637,36 @@ async def notifications_test(
 async def feeds_status(_: object = Depends(require_auth)) -> dict[str, object]:
     """Per-feed liveness snapshot for the operator console."""
     return {"items": feed_registry.snapshot()}
+
+
+@app.get("/api/features/registry")
+async def features_registry(
+    _: object = Depends(require_auth),
+) -> dict[str, object]:
+    """Centralised feature catalogue.
+
+    Returns the ordered list of every feature the live predictor
+    consumes, with name, source, transform description, dtype, and
+    training-time default.  Powers the operator console + lets
+    AutoResearch / backtest tools enumerate the same schema as prod.
+    """
+    return {
+        "count": len(feature_registry),
+        "items": feature_registry.metadata(),
+    }
+
+
+@app.get("/api/features/drift")
+async def features_drift(
+    _: object = Depends(require_auth),
+) -> dict[str, object]:
+    """Live vs training-time distribution drift, per feature.
+
+    Pull-based snapshot of the in-process rolling stats; cheap enough
+    to poll from the dashboard.  See ``app.features.drift`` for the
+    z-score definition and threshold semantics.
+    """
+    return feature_drift.report()
 
 
 # ---------------------------------------------------------------------------
