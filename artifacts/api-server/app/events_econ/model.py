@@ -183,16 +183,17 @@ def at_consensus_probability(
     if consensus is None and previous is None:
         return ConsensusPriorResult(
             probability=0.5, consensus=None, threshold=None,
-            direction="above", sigma=0.0, count=0,
-            entropy={"history": 0.0, "has_consensus": 0.0,
-                     "has_threshold": 0.0, "z": 0.0, "sigma": 0.0},
+            direction="above", sigma=0.0, contributing_history=0,
+            feature_summary={"history": 0.0, "has_consensus": 0.0,
+                             "has_threshold": 0.0, "z": 0.0, "sigma": 0.0},
         )
     threshold = float(consensus if consensus is not None else previous)
     sigma, n = _rolling_forecast_error_sigma(
         [r for r in history if getattr(r, "actual", None) is not None]
     )
     if sigma <= 0.0:
-        sigma = _DEFAULT_SIGMAS.get(release_type, 0.5)
+        sigma = _DEFAULT_SIGMA_BY_TYPE.get(str(release_type).upper(), 0.5)
+    sigma = max(_MIN_SIGMA, sigma)
     z = 0.0  # at-consensus -> z=0 -> raw probability 0.5
     raw = 1.0 - _norm_cdf(z)
     prob = max(0.05, min(0.95, raw))
@@ -202,9 +203,9 @@ def at_consensus_probability(
         threshold=threshold,
         direction="above",
         sigma=sigma,
-        count=n,
-        entropy={"history": float(n), "has_consensus": 1.0,
-                 "has_threshold": 1.0, "z": z, "sigma": sigma},
+        contributing_history=n,
+        feature_summary={"history": float(n), "has_consensus": 1.0,
+                         "has_threshold": 1.0, "z": z, "sigma": sigma},
     )
 
 

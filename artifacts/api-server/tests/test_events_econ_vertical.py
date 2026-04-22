@@ -479,6 +479,64 @@ def test_kalshi_mid_blend_pulls_probability_toward_market():
     assert baseline.raw["kalshi_blend"]["applied"] is False
 
 
+# ---------------------------------------------------------------------------
+# /api/events-econ/calendar route
+# ---------------------------------------------------------------------------
+
+
+def test_calendar_route_populates_model_prob():
+    """Smoke-test the public route: model_prob must be a real float
+    (not null) for normal upcoming-release rows.  Catches dataclass
+    field/constant typos in at_consensus_probability."""
+    from fastapi.testclient import TestClient
+    from app.main import app
+    from app.events_econ import calendar as ee_cal
+    from unittest.mock import patch
+    from datetime import datetime, timezone, timedelta
+
+    upcoming = ReleaseRow(
+        source="trading_economics_rss",
+        signal_id="te/CPI/2025-03-12",
+        release_type="CPI",
+        release_at=datetime.now(timezone.utc) + timedelta(hours=2),
+        consensus=2.7, previous=2.5, actual=None,
+        revised_previous=None, payload={},
+    )
+    history = [
+        ReleaseRow(
+            source="te", signal_id=f"te/CPI/{i}", release_type="CPI",
+            release_at=datetime.now(timezone.utc) - timedelta(days=30 * (i + 1)),
+            consensus=2.5 + 0.05 * i,
+            previous=2.4, actual=2.5 + 0.05 * i + (i - 5) * 0.02,
+            revised_previous=None, payload={},
+        ) for i in range(15)
+    ]
+
+    async def _fake_upcoming(within_hours=168.0, limit=50):
+        return [upcoming]
+
+    async def _fake_settled(release_type, **_kw):
+        return history
+
+    async def _fake_fetchval(_q, _arg):
+        return None
+
+    with patch.object(ee_cal, "upcoming_releases", side_effect=_fake_upcoming), \
+         patch.object(ee_cal, "settled_history_for_type", side_effect=_fake_settled), \
+         patch("app.main.db.fetchval", side_effect=_fake_fetchval):
+        client = TestClient(app)
+        resp = client.get("/api/events-econ/calendar")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert "items" in body and len(body["items"]) == 1
+    item = body["items"][0]
+    assert item["model_prob"] is not None
+    assert 0.05 <= item["model_prob"] <= 0.95
+    assert item["release_type"] == "CPI"
+    assert item["kalshi_ticker_prefix"] is not None
+    assert item["kalshi_ticker_prefix"].startswith("KXCPI-")
+
+
 def test_promotion_eligible_when_thresholds_met():
     async def _fake_read_mult():
         return promotion_mod.DEFAULT_MULTIPLIER
