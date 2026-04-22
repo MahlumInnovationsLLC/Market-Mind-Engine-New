@@ -11,6 +11,7 @@ import logging
 from typing import Any
 
 from ..config import get_settings
+from .. import verticals as vertical_registry
 from .cycle import run_cycle
 
 
@@ -30,6 +31,9 @@ class _CycleScheduler:
             "trading_mode": s.trading_mode,
             "cycle_interval_seconds": s.cycle_interval_seconds,
             "verticals": list(self._tasks.keys()),
+            "registered_verticals": [
+                spec.to_dict() for spec in vertical_registry.all_specs()
+            ],
             "last_cycle": self._last_cycle_summary,
             "running": any(not t.done() for t in self._tasks.values()),
         }
@@ -40,7 +44,18 @@ class _CycleScheduler:
             log.info("orchestrator scheduler disabled by config")
             return
         self._stop.clear()
+        skipped: list[tuple[str, str]] = []
         for vertical in s.orchestrator_verticals:
+            spec = vertical_registry.get_spec(vertical)
+            # Unknown names should already have been rejected by
+            # config.py validation, but stay defensive in case the
+            # registry is mutated at runtime.
+            if spec is None:
+                skipped.append((vertical, "not registered"))
+                continue
+            if not spec.enabled:
+                skipped.append((vertical, "disabled in registry"))
+                continue
             if vertical in self._tasks and not self._tasks[vertical].done():
                 continue
             self._tasks[vertical] = asyncio.create_task(
@@ -51,6 +66,8 @@ class _CycleScheduler:
             list(self._tasks.keys()),
             s.cycle_interval_seconds,
         )
+        for name, reason in skipped:
+            log.warning("orchestrator vertical %s skipped: %s", name, reason)
 
     async def stop(self) -> None:
         self._stop.set()

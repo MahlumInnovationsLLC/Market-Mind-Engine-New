@@ -1420,6 +1420,7 @@ async def health_full(_: object = Depends(require_approved_user)) -> dict[str, o
             "kalshi": bool(settings.kalshi_api_key_id and settings.kalshi_private_key),
         },
         "active_predictor": predictor.active_model_info(),
+        "verticals": dashboard._registered_verticals_snapshot(),
     }
     # Postgres
     try:

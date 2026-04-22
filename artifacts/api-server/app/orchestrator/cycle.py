@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
-from .. import db, margin_regressor, predictor
+from .. import db, margin_regressor, predictor, verticals as vertical_registry
 from ..crypto import predictor as crypto_predictor
 from ..crypto.tickers import InvalidCryptoTicker, parse_crypto_ticker
 from ..config import get_settings
@@ -30,27 +30,11 @@ DEFAULT_MIN_PRICE = 0.05
 DEFAULT_MAX_PRICE = 0.95
 
 
-# Map verticals → list of league codes used for SQL filtering.
-# `predictions.league` and `swarm_debates.league` carry the league code
-# (e.g. "NBA", "NFL").  An empty list means "no filter" — used for
-# verticals like 'sports' that span every supported league.  Future
-# verticals (weather, crypto, politics) get explicit league prefixes
-# once their feeds land.
-VERTICAL_LEAGUES: dict[str, list[str]] = {
-    "sports": [],  # all leagues
-    "weather": ["WEATHER"],
-    "crypto": ["CRYPTO"],
-    # The crypto-binary vertical is the BTC/ETH "closes above K" stack
-    # served by `app.crypto.predictor` (5m/15m/1h LGB+XGB ensembles +
-    # GRU directional blend).  Both verticals filter on the CRYPTO
-    # league code so a single OHLCV feed primes either pipeline.
-    "crypto-binary": ["CRYPTO"],
-    "politics": ["POLITICS"],
-}
-
-
+# Vertical → league filter is now driven by the pluggable
+# `app.verticals` registry.  `_league_filter` stays as a thin wrapper
+# so existing call sites (and tests that monkeypatch it) keep working.
 def _league_filter(vertical: str) -> list[str]:
-    return VERTICAL_LEAGUES.get(vertical.lower(), [])
+    return vertical_registry.league_filter(vertical)
 
 
 @dataclass
@@ -379,10 +363,12 @@ async def _predict_for_candidate(
     logged at debug — a sick model must NOT take down the trading loop,
     the loop just falls back to swarm-only signals.
     """
-    # The crypto-binary vertical has its own OHLCV-driven feature builder
-    # and dedicated ensemble + GRU stack — bypass the meta-model entirely
-    # and surface the crypto Prediction payload to the rest of the cycle.
-    if vertical.lower() == "crypto-binary":
+    # Verticals can opt into a specialist predictor via
+    # `VerticalSpec.predictor_hook`.  The crypto-binary vertical wires
+    # its OHLCV ensemble + GRU stack via the "crypto_binary" hook,
+    # bypassing the generic meta-model entirely.
+    spec = vertical_registry.get_spec(vertical)
+    if spec is not None and spec.predictor_hook == "crypto_binary":
         return await _predict_for_crypto_binary(cand)
 
     fv = build_features(

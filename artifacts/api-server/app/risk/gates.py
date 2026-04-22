@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
 from typing import Any, Awaitable, Callable
 
-from .. import db
+from .. import db, verticals as vertical_registry
 from ..config import get_settings
 from ..runtime_settings import profile_for as _aggression_profile
 
@@ -324,8 +324,15 @@ async def gate_global_exposure_cap(ctx: RiskContext) -> GateResult:
 
 
 async def gate_per_vertical_cap(ctx: RiskContext) -> GateResult:
-    """Per-vertical exposure cap (sports/crypto/etc)."""
-    cap_pct = float(ctx.operator_overrides.get("per_vertical_cap_pct", 0.30))
+    """Per-vertical exposure cap (sports/crypto/etc).
+
+    Default is taken from the registry's `VerticalSpec.default_allocation_pct`
+    (so a new vertical can ship its own cap by registering a spec) and
+    operator overrides via `risk.per_vertical_cap_pct` still win.
+    """
+    spec = vertical_registry.get_spec(ctx.vertical or "")
+    spec_default = spec.default_allocation_pct if spec is not None else 0.30
+    cap_pct = float(ctx.operator_overrides.get("per_vertical_cap_pct", spec_default))
     bankroll = ctx.bankroll_usd or 0.0
     if bankroll <= 0:
         return GateResult("per_vertical_cap", True, "no bankroll", {"cap_pct": cap_pct})
@@ -376,10 +383,17 @@ async def gate_max_concurrent_positions(ctx: RiskContext) -> GateResult:
 
 async def gate_duplicate_trade(ctx: RiskContext) -> GateResult:
     """Production has `idx_trades_unique_daily` — match it exactly so we
-    don't even attempt an insert that would conflict.  Skips crypto
-    where the index does not apply."""
-    if (ctx.vertical or "").lower() == "crypto":
-        return GateResult("duplicate_trade", True, "crypto vertical exempt", {})
+    don't even attempt an insert that would conflict.  Verticals can
+    opt out via `VerticalSpec.duplicate_trade_exempt` (currently the
+    spot-crypto vertical, where the production index does not apply)."""
+    spec = vertical_registry.get_spec(ctx.vertical or "")
+    if spec is not None and spec.duplicate_trade_exempt:
+        return GateResult(
+            "duplicate_trade",
+            True,
+            f"{spec.name} vertical exempt",
+            {"vertical": spec.name},
+        )
     # Use UTC date everywhere — host-local date would create
     # day-boundary races at the seam between UTC and local TZ.  The
     # production unique index `idx_trades_unique_daily` is built on

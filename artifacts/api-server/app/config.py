@@ -157,6 +157,19 @@ def get_settings() -> Settings:
     verticals = tuple(
         v.strip().lower() for v in verticals_raw.split(",") if v.strip()
     ) or ("sports",)
+    # Validate against the pluggable vertical registry — unknown names
+    # fail loudly at boot so a typo in AXIOM_ORCHESTRATOR_VERTICALS
+    # can't silently spawn a no-op scheduler task.  Imported lazily so
+    # `app.config` stays importable from registry-side modules without
+    # a circular dependency.
+    from . import verticals as _vertical_registry
+
+    unknown = [v for v in verticals if not _vertical_registry.has(v)]
+    if unknown:
+        raise RuntimeError(
+            "AXIOM_ORCHESTRATOR_VERTICALS contains unknown vertical(s) "
+            f"{unknown!r}; registered: {sorted(_vertical_registry.names())}"
+        )
 
     kalshi_env = os.environ.get("KALSHI_ENV", "demo").strip().lower()
     if kalshi_env not in ("demo", "prod", "production"):

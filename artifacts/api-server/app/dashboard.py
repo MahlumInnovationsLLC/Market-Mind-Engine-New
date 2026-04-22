@@ -31,6 +31,14 @@ async def _safe_fetchval(query: str) -> Any:
         return None
 
 
+def _registered_verticals_snapshot() -> list[dict[str, Any]]:
+    """Snapshot of the pluggable vertical registry for `/api/health`
+    and `/api/dashboard/overview` consumers."""
+    from . import verticals as _vertical_registry
+
+    return [s.to_dict() for s in _vertical_registry.all_specs()]
+
+
 async def get_overview() -> dict[str, Any]:
     counts = {
         "trading_cycles": await _safe_count("trading_cycles"),
@@ -61,6 +69,7 @@ async def get_overview() -> dict[str, Any]:
         "realized_pnl": realized_pnl,
         "win_rate": win_rate,
         "open_positions": int(open_positions) if open_positions is not None else None,
+        "verticals": _registered_verticals_snapshot(),
     }
 
 
@@ -656,7 +665,15 @@ async def get_vertical_performance(days: int = 30) -> dict[str, Any]:
     single failure doesn't blank the whole strip.
     """
     days = max(1, min(int(days), 365))
-    verticals = ["sports", "weather", "crypto"]
+    # Driven by `app.verticals` — verticals with
+    # `include_in_dashboard_strip=True` show up here.  Existing order
+    # (sports → weather → crypto) is preserved by the registry's
+    # insertion order in `app/verticals/builtins.py`.
+    from . import verticals as _vertical_registry
+
+    verticals = _vertical_registry.dashboard_strip_verticals() or [
+        "sports", "weather", "crypto"
+    ]
 
     out: list[dict[str, Any]] = []
     for vertical in verticals:
