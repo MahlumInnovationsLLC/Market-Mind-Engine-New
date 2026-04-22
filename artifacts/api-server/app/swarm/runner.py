@@ -399,6 +399,18 @@ async def _run_debate_inner(
     ctx = str(candidate.get("context") or "").strip()
     aggression_mode = normalize_aggression_mode(candidate.get("aggression_mode"))
 
+    # Resolve vertical persona profile from registry so debates carry the
+    # profile tag forward.  Per-profile prompt overrides land in #194;
+    # for now we attach it to the debate metadata + start event so the
+    # operator UI / weight aggregator can branch on it without breaking
+    # legacy "default"-profile callers.
+    from .. import verticals as _verticals
+    candidate_vertical = (
+        str(candidate.get("vertical") or "").strip().lower() or None
+    )
+    _vspec = _verticals.get_spec(candidate_vertical) if candidate_vertical else None
+    persona_profile = _vspec.persona_profile if _vspec is not None else "default"
+
     # `stream_debate_id` is set into `_current_debate_id` by the public
     # `run_debate` wrapper above, which also handles reset() in finally.
     kalshi_market_id = candidate.get("kalshi_market_id")
@@ -430,6 +442,8 @@ async def _run_debate_inner(
             # link each debate back to its candidate row.
             "market_id": kalshi_market_id,
             "kalshi_market_id": kalshi_market_id,
+            "vertical": candidate_vertical,
+            "persona_profile": persona_profile,
             "personas": [p.id for p in PERSONAS] + [MODERATOR.id, GATEKEEPER.id],
             "ts": _now_iso(),
         }

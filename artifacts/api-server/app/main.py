@@ -1421,6 +1421,7 @@ async def health_full(_: object = Depends(require_approved_user)) -> dict[str, o
         },
         "active_predictor": predictor.active_model_info(),
         "verticals": dashboard._registered_verticals_snapshot(),
+        "active_verticals": list(settings.orchestrator_verticals),
     }
     # Postgres
     try:

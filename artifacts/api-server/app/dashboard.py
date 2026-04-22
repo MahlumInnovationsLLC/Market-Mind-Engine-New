@@ -62,6 +62,7 @@ async def get_overview() -> dict[str, Any]:
     open_positions = await _safe_fetchval(
         "SELECT count(*) FROM positions WHERE coalesce(status,'open') = 'open'"
     )
+    from .config import get_settings as _get_settings
     return {
         "counts": counts,
         "latest_cycle_at": latest_cycle_at,
@@ -70,6 +71,7 @@ async def get_overview() -> dict[str, Any]:
         "win_rate": win_rate,
         "open_positions": int(open_positions) if open_positions is not None else None,
         "verticals": _registered_verticals_snapshot(),
+        "active_verticals": list(_get_settings().orchestrator_verticals),
     }
 
 

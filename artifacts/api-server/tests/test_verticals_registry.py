@@ -20,7 +20,12 @@ import importlib
 
 scheduler_mod = importlib.import_module("app.orchestrator.scheduler")
 OrchestratorScheduler = scheduler_mod._CycleScheduler
-from app.risk.gates import RiskContext, gate_duplicate_trade, gate_per_vertical_cap
+from app.risk.gates import (
+    RiskContext,
+    gate_duplicate_trade,
+    gate_kelly_fraction,
+    gate_per_vertical_cap,
+)
 
 
 def _ctx(vertical: str, **overrides: Any) -> RiskContext:
@@ -218,6 +223,103 @@ def test_scheduler_skips_disabled_vertical(
         asyncio.run(go())
     finally:
         verticals.REGISTRY.unregister("sched-disabled-test")
+
+
+def test_kelly_multiplier_default_preserves_legacy_behaviour() -> None:
+    """All built-in verticals use kelly_multiplier=1.0, so the legacy
+    notional cap (`bankroll * kelly * fraction_cap`) must be unchanged."""
+    for v in ("sports", "weather", "crypto", "crypto-binary", "politics"):
+        assert verticals.require_spec(v).kelly_multiplier == 1.0
+    ctx = _ctx("sports", model_probability=0.7, current_price=0.5,
+               intended_notional_usd=1.0, bankroll_usd=1000.0)
+    res = asyncio.run(gate_kelly_fraction(ctx))
+    assert res.passed is True
+    # multiplier reported as 1.0 (legacy parity).
+    assert res.details["kelly_multiplier"] == pytest.approx(1.0)
+
+
+def test_kelly_multiplier_from_spec_tightens_cap() -> None:
+    """A vertical with `kelly_multiplier=0.5` must produce a notional
+    cap that is exactly half of the equivalent kelly_multiplier=1.0
+    vertical. Operator override is left unset."""
+    spec = verticals.VerticalSpec(
+        name="kelly-half-test",
+        kelly_multiplier=0.5,
+    )
+    verticals.REGISTRY.register(spec)
+    try:
+        ctx_full = _ctx("sports", model_probability=0.7, current_price=0.5,
+                        intended_notional_usd=1.0, bankroll_usd=1000.0)
+        ctx_half = _ctx("kelly-half-test", model_probability=0.7,
+                        current_price=0.5, intended_notional_usd=1.0,
+                        bankroll_usd=1000.0)
+        res_full = asyncio.run(gate_kelly_fraction(ctx_full))
+        res_half = asyncio.run(gate_kelly_fraction(ctx_half))
+        assert res_half.details["max_notional"] == pytest.approx(
+            res_full.details["max_notional"] * 0.5
+        )
+        assert res_half.details["kelly_multiplier"] == pytest.approx(0.5)
+    finally:
+        verticals.REGISTRY.unregister("kelly-half-test")
+
+
+def test_kelly_multiplier_operator_override_wins() -> None:
+    """Per the existing override convention, an operator-set
+    `kelly_multiplier` must beat the spec value."""
+    spec = verticals.VerticalSpec(name="kelly-ov-test", kelly_multiplier=0.5)
+    verticals.REGISTRY.register(spec)
+    try:
+        ctx = _ctx(
+            "kelly-ov-test",
+            model_probability=0.7,
+            current_price=0.5,
+            intended_notional_usd=1.0,
+            bankroll_usd=1000.0,
+            operator_overrides={"kelly_multiplier": 2.0},
+        )
+        res = asyncio.run(gate_kelly_fraction(ctx))
+        assert res.details["kelly_multiplier"] == pytest.approx(2.0)
+    finally:
+        verticals.REGISTRY.unregister("kelly-ov-test")
+
+
+def test_feature_builder_hook_field_present() -> None:
+    """`feature_builder_hook` is part of the spec contract so future
+    cycle feature-construction code can dispatch on it."""
+    for v in verticals.all_specs():
+        # Default for built-ins is None (generic builder).
+        assert hasattr(v, "feature_builder_hook")
+    spec = verticals.VerticalSpec(
+        name="fb-hook-test",
+        feature_builder_hook="weather_grid_v1",
+    )
+    verticals.REGISTRY.register(spec)
+    try:
+        assert verticals.require_spec("fb-hook-test").feature_builder_hook == (
+            "weather_grid_v1"
+        )
+        # to_dict must round-trip the new field for /api/health consumers.
+        assert verticals.require_spec("fb-hook-test").to_dict()[
+            "feature_builder_hook"
+        ] == "weather_grid_v1"
+    finally:
+        verticals.REGISTRY.unregister("fb-hook-test")
+
+
+def test_swarm_runner_resolves_persona_profile_from_registry() -> None:
+    """`_run_debate_inner` reads `candidate['vertical']` and looks up
+    the persona profile via the registry; we verify the registry-side
+    half here without spinning up the full LLM stack."""
+    spec = verticals.VerticalSpec(
+        name="profile-test", persona_profile="commodities_v1"
+    )
+    verticals.REGISTRY.register(spec)
+    try:
+        assert verticals.persona_profile_for("profile-test") == "commodities_v1"
+        # Unknown vertical falls back to the legacy "default" profile.
+        assert verticals.persona_profile_for("totally-unknown") == "default"
+    finally:
+        verticals.REGISTRY.unregister("profile-test")
 
 
 def test_scheduler_status_exposes_registered_verticals(

@@ -253,8 +253,18 @@ async def gate_kelly_fraction(ctx: RiskContext) -> GateResult:
             _mode_default(ctx, "kelly_fraction_cap", 0.25),
         )
     )
+    # Per-vertical Kelly multiplier from the registry (operator override
+    # via "kelly_multiplier" still wins).  Defaults to 1.0 so existing
+    # verticals behave identically until a spec opts into a different
+    # multiplier.
+    from .. import verticals as _verticals
+    spec = _verticals.get_spec(ctx.vertical) if ctx.vertical else None
+    spec_multiplier = spec.kelly_multiplier if spec is not None else 1.0
+    kelly_multiplier = float(
+        ctx.operator_overrides.get("kelly_multiplier", spec_multiplier)
+    )
     bankroll = ctx.bankroll_usd or 0.0
-    max_notional = bankroll * kelly * fraction_cap
+    max_notional = bankroll * kelly * fraction_cap * kelly_multiplier
     if ctx.intended_notional_usd > max_notional and bankroll > 0:
         return GateResult(
             "kelly_fraction",
@@ -266,6 +276,7 @@ async def gate_kelly_fraction(ctx: RiskContext) -> GateResult:
             {
                 "kelly": kelly,
                 "fraction_cap": fraction_cap,
+                "kelly_multiplier": kelly_multiplier,
                 "max_notional": max_notional,
                 "intended_notional": ctx.intended_notional_usd,
             },
@@ -277,6 +288,7 @@ async def gate_kelly_fraction(ctx: RiskContext) -> GateResult:
         {
             "kelly": kelly,
             "fraction_cap": fraction_cap,
+            "kelly_multiplier": kelly_multiplier,
             "max_notional": max_notional,
             "intended_notional": ctx.intended_notional_usd,
         },

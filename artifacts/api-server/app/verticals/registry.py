@@ -43,6 +43,11 @@ class VerticalSpec:
     # routes the candidate to the matching specialist predictor instead
     # of the generic meta-model. Currently only "crypto_binary" is wired.
     predictor_hook: str | None = None
+    # Optional feature-builder hook name.  When set, the orchestrator's
+    # feature construction path can dispatch to a vertical-specific
+    # builder (e.g. weather grids, options-implied vol).  Defaults to
+    # None which keeps the generic builder.
+    feature_builder_hook: str | None = None
     # Production duplicate-trade index doesn't apply to high-frequency
     # crypto markets; setting this to True exempts the vertical from
     # gate_duplicate_trade.
@@ -66,6 +71,7 @@ class VerticalSpec:
             "default_allocation_pct": self.default_allocation_pct,
             "blackout_windows": list(self.blackout_windows),
             "predictor_hook": self.predictor_hook,
+            "feature_builder_hook": self.feature_builder_hook,
             "duplicate_trade_exempt": self.duplicate_trade_exempt,
             "include_in_dashboard_strip": self.include_in_dashboard_strip,
             "enabled": self.enabled,
