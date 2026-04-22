@@ -189,10 +189,19 @@ def test_unknown_vertical_returns_empty_filter() -> None:
 
 def test_dashboard_strip_preserves_legacy_order() -> None:
     """`get_vertical_performance` used to iterate
-    ``["sports", "weather", "crypto"]``.  The registry must still
-    produce that exact ordering so the operator strip doesn't shuffle.
+    ``["sports", "weather", "crypto"]``.  The legacy three must keep
+    that exact ordering so the operator strip doesn't shuffle.  Task
+    #196 appended ``soccer`` after the original three (registered in
+    insertion order in `app/verticals/builtins.py`).
     """
-    assert verticals.dashboard_strip_verticals() == ["sports", "weather", "crypto"]
+    strip = verticals.dashboard_strip_verticals()
+    assert strip[:3] == ["sports", "weather", "crypto"], (
+        "legacy three must remain in original order"
+    )
+    assert "soccer" in strip, "soccer vertical should appear on the strip"
+    assert strip.index("soccer") > strip.index("crypto"), (
+        "soccer must come after the legacy three (insertion order)"
+    )
 
 
 def test_crypto_binary_routes_through_specialist_predictor_hook() -> None:
@@ -243,9 +252,14 @@ def test_register_new_vertical_then_unregister() -> None:
         assert verticals.league_filter("Commodities-Test") == ["OIL"]
         # Built-ins still intact.
         assert verticals.has("sports")
-        assert verticals.dashboard_strip_verticals() == [
-            "sports", "weather", "crypto"
-        ]
+        # Legacy strip is now ["sports","weather","crypto","soccer"]
+        # after task #196 promoted the soccer vertical.  The
+        # commodities-test fixture above explicitly opts out of the
+        # strip, so it must NOT appear here.
+        strip = verticals.dashboard_strip_verticals()
+        assert strip[:3] == ["sports", "weather", "crypto"]
+        assert "soccer" in strip
+        assert "commodities-test" not in strip
     finally:
         verticals.REGISTRY.unregister("commodities-test")
     assert not verticals.has("commodities-test")

@@ -72,10 +72,11 @@ REGISTRY.register(VerticalSpec(
         "KXLIGUE1", "KXMLS", "KXUCL",
     ),
     persona_profile="soccer",
-    # Kept off the legacy 3-column dashboard strip
-    # ("sports","weather","crypto") to preserve `test_dashboard_strip
-    # _preserves_legacy_order`.  A future follow-up can promote it.
-    include_in_dashboard_strip=False,
+    # Soccer joins the operator strip alongside sports/weather/crypto so
+    # operators can see per-vertical P&L, open positions and today's
+    # cycle activity at a glance.  The legacy-order regression test
+    # was updated to append "soccer" after the original three.
+    include_in_dashboard_strip=True,
     description=(
         "International soccer 3-way moneyline (home/draw/away) markets "
         "across EPL, La Liga, Serie A, Bundesliga, Ligue 1, MLS and "

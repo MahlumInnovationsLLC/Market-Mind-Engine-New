@@ -500,6 +500,16 @@ _DAILY_SCHEDULE_PATHS = {
     # NFL has no daily endpoint — current_week covers any in-progress game.
     "nfl":   "https://api.sportradar.us/nfl/official/trial/v7/en/games/current_week/schedule.json",
     "ncaaf": "https://api.sportradar.us/ncaafb/trial/v1/en/games/{y}/{m:02d}/{d:02d}/schedule.json",
+    # Soccer-extended trial v4 — daily schedules across every
+    # competition.  Each league polls the same global daily endpoint
+    # and we filter downstream by competition (task #196).
+    "epl":     "https://api.sportradar.us/soccer-extended/trial/v4/en/schedules/{y}-{m:02d}-{d:02d}/schedule.json",
+    "laliga":  "https://api.sportradar.us/soccer-extended/trial/v4/en/schedules/{y}-{m:02d}-{d:02d}/schedule.json",
+    "seriea":  "https://api.sportradar.us/soccer-extended/trial/v4/en/schedules/{y}-{m:02d}-{d:02d}/schedule.json",
+    "bundes":  "https://api.sportradar.us/soccer-extended/trial/v4/en/schedules/{y}-{m:02d}-{d:02d}/schedule.json",
+    "ligue1":  "https://api.sportradar.us/soccer-extended/trial/v4/en/schedules/{y}-{m:02d}-{d:02d}/schedule.json",
+    "mls":     "https://api.sportradar.us/soccer-extended/trial/v4/en/schedules/{y}-{m:02d}-{d:02d}/schedule.json",
+    "ucl":     "https://api.sportradar.us/soccer-extended/trial/v4/en/schedules/{y}-{m:02d}-{d:02d}/schedule.json",
 }
 
 _LIVE_STATUSES = {"inprogress", "halftime", "delayed", "scheduled.live"}

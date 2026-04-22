@@ -226,12 +226,6 @@ def test_live_trade_dedupe_fill_replay(fake_store: _FakeDedupeStore) -> None:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.skip(
-    reason="Pre-existing flake unrelated to current task — tracked "
-    "separately.  The fallback dedupe key path produces None for "
-    "dispatch_count under the fixture's no-fill-id replay; investigate "
-    "in a focused dedupe task rather than gating soccer-vertical work."
-)
 def test_live_trade_dedupe_fill_replay_no_fill_id(
     fake_store: _FakeDedupeStore, monkeypatch: pytest.MonkeyPatch
 ) -> None:

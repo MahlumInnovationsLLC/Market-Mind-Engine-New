@@ -48,7 +48,12 @@ def test_returns_three_verticals_with_empty_buckets(monkeypatch: pytest.MonkeyPa
     out = _run(dashboard.get_vertical_performance(7))
 
     assert out["days"] == 7
-    assert [v["vertical"] for v in out["verticals"]] == ["sports", "weather", "crypto"]
+    # Strip ordering follows the registry's insertion order; legacy
+    # three first, then any verticals later promoted to the strip
+    # (task #196 promoted "soccer").
+    names = [v["vertical"] for v in out["verticals"]]
+    assert names[:3] == ["sports", "weather", "crypto"]
+    assert "soccer" in names
 
     for v in out["verticals"]:
         # Empty agg → defaults preserved.
@@ -116,7 +121,11 @@ def test_aggregates_and_buckets_populate(monkeypatch: pytest.MonkeyPatch) -> Non
 
     # Other verticals still emitted with empty defaults so the strip stays
     # 3-wide on the front-end.
-    assert {v["vertical"] for v in out["verticals"]} == {"sports", "weather", "crypto"}
+    # Soccer was added to the dashboard strip in task #196; the
+    # legacy three must still be present.
+    names = {v["vertical"] for v in out["verticals"]}
+    assert {"sports", "weather", "crypto"}.issubset(names)
+    assert "soccer" in names
 
 
 def test_clamps_days_to_valid_range(monkeypatch: pytest.MonkeyPatch) -> None:
