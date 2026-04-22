@@ -73,6 +73,11 @@ SUPPORTED_LEAGUES: tuple[str, ...] = (
     # key already covers oil/gold/grains/etc separately when the
     # settlement pipeline records `market_type='commodity:WTI'` etc.
     "COMMODITIES",
+    # Tech / AI (task #199).  Bayesian evidence model rather than ML
+    # stack — calibrator still applies post-model so settled tech-AI
+    # trades feed an isotonic / Platt curve scoped to TECH_AI just
+    # like every other vertical.
+    "TECH_AI",
 )
 
 # Below this sample count we fall back to Platt; below MIN_REFIT we

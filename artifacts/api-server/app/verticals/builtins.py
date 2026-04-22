@@ -83,6 +83,34 @@ REGISTRY.register(VerticalSpec(
     ),
 ))
 
+# Tech / AI (task #199).  Bayesian evidence-driven binary stack with a
+# conservative paper-grade Kelly multiplier (0.06).  Auto-promotes to
+# 0.10 only after 30 settled trades show Brier<0.20 and an admin
+# confirms via the `/api/admin/tech-ai/promote-kelly` endpoint, which
+# writes `risk.kelly_multiplier_tech_ai=0.10` into `system_settings`.
+# Registered AFTER `commodities` so the dashboard frozen-order snapshot
+# is preserved.
+REGISTRY.register(VerticalSpec(
+    name="tech-ai",
+    leagues=("TECH_AI",),
+    ticker_prefixes=(
+        "KXLLM", "KXGPT", "KXCLAUDE", "KXLLAMA", "KXAI",
+        "KXNVDA", "KXTSMC", "KXMLPERF", "KXGPU", "KXIPO",
+    ),
+    persona_profile="tech-ai",
+    predictor_hook="tech_ai_evidence",
+    kelly_multiplier=0.06,
+    default_allocation_pct=0.10,
+    duplicate_trade_exempt=True,
+    description=(
+        "Tech / AI binary markets across model-release dates, GPU "
+        "shipment milestones, IPO timing, AI benchmark thresholds and "
+        "antitrust outcomes.  Routed through a Bayesian evidence "
+        "model that combines GitHub releases, Hugging Face trending, "
+        "ArXiv submissions and MLPerf signals."
+    ),
+))
+
 # Soccer (task #196).  Distinct from `sports` so the orchestrator can
 # route candidates through the soccer-specific persona stack (xG /
 # rotation / market microstructure) and hit per-league caps tuned for
