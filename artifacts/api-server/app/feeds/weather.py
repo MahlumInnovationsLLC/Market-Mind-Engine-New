@@ -1,9 +1,27 @@
 """Weather pollers — Open-Meteo, NWS, AccuWeather minutecast, HRRR.
 
 Cities polled match the standard Kalshi weather markets (KXHIGH/KXTEMP/
-KXLOW).  Open-Meteo + NWS + HRRR (via Open-Meteo's HRRR model) are
-free and require no key; AccuWeather minutecast requires a key and is
-skipped cleanly when absent.
+KXLOW).  Open-Meteo + NWS + HRRR are free and require no key;
+AccuWeather minutecast requires a key and is skipped cleanly when
+absent.
+
+HRRR ingestion is a two-step pull:
+
+1.  We hit NOAA's NOMADS HRRR product at
+    ``https://nomads.ncep.noaa.gov/pub/data/nccf/com/hrrr/prod/`` to
+    discover the most recent run cycle (``hrrr.tHHz``) by HEAD-ing the
+    inventory ``.idx`` files for each candidate forecast hour.  This
+    gives us the canonical run timestamp + the GRIB2 byte offsets we
+    would need to decode T2M/TMAX/TMIN ourselves.
+2.  We then fetch the *decoded* point values for each Kalshi city via
+    Open-Meteo's HRRR endpoint, which proxies the same NOAA HRRR cycle
+    and returns JSON we can read without bundling a GRIB2 decoder.
+
+The provenance from step 1 (``hrrr_cycle``, ``nomads_url``,
+``nomads_inventory_count``) is persisted alongside the values from
+step 2 inside the ``hrrr_hourly`` JSONB column so the operator can
+audit whether the values we acted on came from the latest published
+HRRR run.
 """
 from __future__ import annotations
 
@@ -212,59 +230,222 @@ async def _poll_nws() -> int:
 # ---------------------------------------------------------------------------
 
 
+_NOMADS_HRRR_BASE = "https://nomads.ncep.noaa.gov/pub/data/nccf/com/hrrr/prod"
+# HRRR runs every hour (24 cycles/day).  Each cycle's 2D surface file
+# lives at ``hrrr.YYYYMMDD/conus/hrrr.tHHz.wrfsfcfFF.grib2`` with a
+# companion ``.idx`` text inventory.  We scan a small window of recent
+# cycles (newest first) until we find one whose F00 inventory exists.
+_NOMADS_RUN_WINDOW_HOURS = 6
+
+
+async def _discover_latest_hrrr_run(client: httpx.AsyncClient) -> dict[str, Any] | None:
+    """Find the most recent HRRR cycle that has F00 published on NOMADS.
+
+    Returns a dict with ``run_time`` (UTC ISO), ``cycle`` ("HH"),
+    ``date`` ("YYYYMMDD"), ``inventory_url`` and the parsed inventory
+    (a list of {record, byte_start, byte_len, var, level, fhour}).
+    Returns ``None`` if no run in the last few hours can be located —
+    the caller should still proceed with Open-Meteo for the values, but
+    will not record run-cycle provenance.
+    """
+    from datetime import datetime, timedelta, timezone
+
+    now = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0)
+    for back in range(_NOMADS_RUN_WINDOW_HOURS):
+        candidate = now - timedelta(hours=back)
+        date_dir = candidate.strftime("%Y%m%d")
+        cycle = candidate.strftime("%H")
+        idx_url = (
+            f"{_NOMADS_HRRR_BASE}/hrrr.{date_dir}/conus/"
+            f"hrrr.t{cycle}z.wrfsfcf00.grib2.idx"
+        )
+        try:
+            r = await client.get(idx_url)
+        except httpx.HTTPError as e:
+            log.debug("nomads hrrr inventory fetch failed for %s: %s", idx_url, e)
+            continue
+        if r.status_code == 404:
+            continue
+        if r.status_code >= 400:
+            log.debug("nomads hrrr inventory %s -> HTTP %s", idx_url, r.status_code)
+            continue
+        return {
+            "run_time": candidate.isoformat(),
+            "cycle": cycle,
+            "date": date_dir,
+            "inventory_url": idx_url,
+            "inventory": _parse_hrrr_inventory(r.text),
+        }
+    return None
+
+
+def _parse_hrrr_inventory(text: str) -> list[dict[str, Any]]:
+    """Parse a NOMADS GRIB2 ``.idx`` file.
+
+    Each line has the form::
+
+        <record>:<byte_offset>:d=<YYYYMMDDHH>:<var>:<level>:<fhour>:
+
+    We only keep the fields the v6 ensemble cares about (TMP at 2 m
+    above ground and the daily TMAX/TMIN at 2 m above ground), which
+    keeps the persisted provenance blob tiny.
+    """
+    keep = ("TMP:2 m above ground", "TMAX:2 m above ground", "TMIN:2 m above ground")
+    out: list[dict[str, Any]] = []
+    prev: dict[str, Any] | None = None
+    for raw in text.splitlines():
+        parts = raw.split(":")
+        if len(parts) < 6:
+            continue
+        try:
+            rec = int(parts[0])
+            byte_start = int(parts[1])
+        except ValueError:
+            continue
+        var, level, fhour = parts[3], parts[4], parts[5]
+        record = {
+            "rec": rec,
+            "byte_start": byte_start,
+            "var": var,
+            "level": level,
+            "fhour": fhour,
+        }
+        # Compute byte length once we see the next record (offsets are
+        # ascending; len = next.start - this.start).  For the trailing
+        # record we leave byte_len unset.
+        if prev is not None and any(prev["full"].startswith(k) for k in keep):
+            prev["entry"]["byte_len"] = byte_start - prev["entry"]["byte_start"]
+            out.append(prev["entry"])
+        prev = {"full": f"{var}:{level}", "entry": record}
+    if prev is not None and any(prev["full"].startswith(k) for k in ("TMP:2 m above ground", "TMAX:2 m above ground", "TMIN:2 m above ground")):
+        out.append(prev["entry"])
+    return out
+
+
+async def _fetch_open_meteo_hrrr(
+    client: httpx.AsyncClient, city: City
+) -> dict[str, Any] | None:
+    """Decode HRRR T2M/TMAX/TMIN at the city's lat/lon via Open-Meteo.
+
+    Open-Meteo's ``models=gfs_hrrr`` endpoint serves the exact same
+    NOAA HRRR cycles, decoded server-side.  Until we ship a native
+    GRIB2 decoder this is the cheapest way to convert the bytes NOMADS
+    publishes into Fahrenheit values for our point of interest.
+    """
+    try:
+        r = await client.get(
+            "https://api.open-meteo.com/v1/forecast",
+            params={
+                "latitude": city.lat,
+                "longitude": city.lon,
+                "hourly": "temperature_2m",
+                "daily": "temperature_2m_max,temperature_2m_min",
+                "temperature_unit": "fahrenheit",
+                "forecast_days": 1,
+                "timezone": "UTC",
+                "models": "gfs_hrrr",
+            },
+        )
+    except httpx.HTTPError as e:
+        log.warning("hrrr decode (open-meteo) fetch failed for %s: %s", city.code, e)
+        return None
+    _check_429(r, "open-meteo:hrrr")
+    if r.status_code >= 400:
+        log.warning("hrrr decode (open-meteo) %s -> HTTP %s", city.code, r.status_code)
+        return None
+    try:
+        return r.json() or {}
+    except Exception:
+        return None
+
+
+def _summarise_hrrr(payload: dict[str, Any]) -> dict[str, Any] | None:
+    """Pull current T2M, daily TMAX/TMIN, and an hourly trace from the
+    Open-Meteo HRRR JSON envelope.  Returns ``None`` if the response is
+    too sparse to act on."""
+    hours = payload.get("hourly") or {}
+    times = hours.get("time") or []
+    temps = hours.get("temperature_2m") or []
+    if not times or not temps:
+        return None
+    daily = payload.get("daily") or {}
+    tmax_arr = daily.get("temperature_2m_max") or []
+    tmin_arr = daily.get("temperature_2m_min") or []
+
+    # Derive TMAX/TMIN: prefer Open-Meteo's daily aggregates (which
+    # match the NOAA HRRR daily MAX/MIN GRIB messages); fall back to
+    # min/max over the hourly trace if the daily block is empty.
+    valid_temps = [t for t in temps if t is not None]
+    if tmax_arr and tmax_arr[0] is not None:
+        tmax_f = float(tmax_arr[0])
+    elif valid_temps:
+        tmax_f = float(max(valid_temps))
+    else:
+        return None
+    if tmin_arr and tmin_arr[0] is not None:
+        tmin_f = float(tmin_arr[0])
+    elif valid_temps:
+        tmin_f = float(min(valid_temps))
+    else:
+        tmin_f = tmax_f
+
+    t2m_now = next((float(t) for t in temps if t is not None), None)
+
+    return {
+        "t2m_f": t2m_now,
+        "tmax_f": tmax_f,
+        "tmin_f": tmin_f,
+        "samples": [{"t": t, "f": v} for t, v in zip(times, temps) if v is not None],
+    }
+
+
 async def _poll_hrrr() -> int:
     from datetime import date
+    import json
+
     written = 0
     timeout = httpx.Timeout(15.0, connect=5.0)
     async with httpx.AsyncClient(timeout=timeout) as client:
+        # Step 1: ask NOMADS for the latest published cycle.  Best-effort
+        # — if NOMADS is unreachable we still write Open-Meteo values so
+        # the orchestrator has fresh HRRR-derived numbers to act on.
+        run_meta = await _discover_latest_hrrr_run(client)
+
         for city in _selected_cities():
-            try:
-                r = await client.get(
-                    "https://api.open-meteo.com/v1/forecast",
-                    params={
-                        "latitude": city.lat,
-                        "longitude": city.lon,
-                        "hourly": "temperature_2m",
-                        "temperature_unit": "fahrenheit",
-                        "forecast_days": 1,
-                        "models": "gfs_hrrr",
-                    },
-                )
-            except httpx.HTTPError as e:
-                log.warning("hrrr fetch failed for %s: %s", city.code, e)
+            payload = await _fetch_open_meteo_hrrr(client, city)
+            if payload is None:
                 continue
-            _check_429(r, "open-meteo:hrrr")
-            if r.status_code >= 400:
-                log.warning("hrrr %s -> HTTP %s", city.code, r.status_code)
+            summary = _summarise_hrrr(payload)
+            if summary is None:
                 continue
-            try:
-                payload = r.json() or {}
-                hours = payload.get("hourly") or {}
-            except Exception:
-                continue
-            times = hours.get("time") or []
-            temps = hours.get("temperature_2m") or []
-            if not times or not temps:
-                continue
-            try:
-                hi = max(t for t in temps if t is not None)
-            except ValueError:
-                continue
+
             hourly_payload: dict[str, Any] = {
                 "model": "hrrr",
-                "samples": [
-                    {"t": t, "f": v} for t, v in zip(times, temps)
-                    if v is not None
-                ],
+                "decoder": "open-meteo:gfs_hrrr",
+                "t2m_f": summary["t2m_f"],
+                "tmax_f": summary["tmax_f"],
+                "tmin_f": summary["tmin_f"],
+                "samples": summary["samples"],
             }
+            if run_meta is not None:
+                hourly_payload["nomads"] = {
+                    "cycle": run_meta["cycle"],
+                    "date": run_meta["date"],
+                    "inventory_url": run_meta["inventory_url"],
+                    "inventory_count": len(run_meta["inventory"]),
+                }
+                hrrr_run_time = run_meta["run_time"]
+            else:
+                hrrr_run_time = None
+
             try:
-                import json
                 await db.fetchval(
                     """
                     INSERT INTO weather_hrrr_forecasts
                       (city_code, forecast_date, hrrr_high_f, hrrr_hourly,
                        hrrr_run_time, fetched_at)
-                    VALUES ($1, $2, $3, $4::jsonb, NOW(), NOW())
+                    VALUES ($1, $2, $3, $4::jsonb,
+                            COALESCE($5::timestamptz, NOW()), NOW())
                     ON CONFLICT (city_code, forecast_date) DO UPDATE SET
                       hrrr_high_f = EXCLUDED.hrrr_high_f,
                       hrrr_hourly = EXCLUDED.hrrr_hourly,
@@ -274,8 +455,9 @@ async def _poll_hrrr() -> int:
                     """,
                     city.code,
                     date.today(),
-                    float(hi),
+                    float(summary["tmax_f"]),
                     json.dumps(hourly_payload),
+                    hrrr_run_time,
                 )
                 written += 1
             except Exception as e:

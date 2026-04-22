@@ -141,6 +141,14 @@ async def lifespan(_: FastAPI):
         register_odds_feeds()
         register_weather_feeds()
         try:
+            from .feeds import weather_climatology as _wclim
+
+            await _wclim.ensure_schema()
+            await _wclim.backfill_climatology()
+            await _wclim.refresh_climatology_cache()
+        except Exception as e:
+            log.warning("weather_climatology bootstrap failed: %s", e)
+        try:
             await _ensure_sportradar_schema()
             register_sportradar_extra_feeds()
         except Exception as e:
