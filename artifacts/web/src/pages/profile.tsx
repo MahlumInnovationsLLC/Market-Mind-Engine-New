@@ -312,13 +312,6 @@ export default function ProfilePage() {
               Choose a plan
             </Link>
           )}
-          <Link
-            href="/billing"
-            className="border border-border px-4 py-2 text-xs uppercase tracking-widest text-muted-foreground hover:text-primary hover:border-primary"
-            data-testid="link-billing-detail"
-          >
-            Billing detail
-          </Link>
           {sub && sub.tier !== UserSubscriptionTier.founder && (
             <Link
               href="/pricing"

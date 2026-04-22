@@ -372,11 +372,17 @@ function ClerkProviderWithRoutes() {
             <Route path="/" component={HomeRoute} />
             <Route path="/pricing" component={PricingPage} />
             <Route path="/billing">
-              {/* /billing now lives inside the authed /profile page; if a
-                  signed-out visitor lands on /billing (or follows an old
-                  link) we redirect them to /profile, which gates them through
-                  Clerk and surfaces the subscription card on success. */}
-              <Redirect to="/profile" />
+              {/* /billing now lives inside the authed /profile page.
+                  Signed-in visitors are redirected straight to /profile;
+                  signed-out visitors are sent through the Clerk sign-in
+                  page (with /profile as the post-login destination) so
+                  they don't fall through to the public NotFound. */}
+              <Show when="signed-in">
+                <Redirect to="/profile" />
+              </Show>
+              <Show when="signed-out">
+                <Redirect to="/sign-in?redirect_url=/profile" />
+              </Show>
             </Route>
             <Route path="/health" component={HealthPage} />
             <Route path="/settings/notifications" component={SettingsNotificationsPage} />
