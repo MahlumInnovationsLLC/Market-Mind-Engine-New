@@ -115,6 +115,11 @@ function GateRow({ ev }: { ev: Record<string, unknown> }) {
   );
 }
 
+function fmtPct(v: number | null | undefined): string {
+  if (typeof v !== "number" || Number.isNaN(v)) return "—";
+  return `${(v * 100).toFixed(1)}%`;
+}
+
 function CandidateBlock({
   candidateId,
   events,
@@ -128,6 +133,16 @@ function CandidateBlock({
       ? pickStr(last, "outcome") ?? pickStr(last, "status") ?? "complete"
       : "in-progress";
   const market = pickStr(events[0] ?? {}, "market_id") ?? candidateId;
+  // The candidate_start event carries both probabilities so the dashboard
+  // can show the live model number alongside the cached swarm consensus.
+  const startEv =
+    events.find((e) => pickStr(e, "type") === "candidate_start") ?? events[0] ?? {};
+  const cachedProb = pickNum(startEv, "swarm_consensus");
+  const liveProb = pickNum(startEv, "live_model_probability");
+  const liveModel =
+    pickStr(startEv, "live_model_name") ??
+    pickStr(startEv, "live_model_version");
+  const liveMissing = liveProb === null;
   return (
     <div className="border border-border/60 bg-background/40 p-2 text-[10px]">
       <div className="flex items-center justify-between mb-1">
@@ -141,6 +156,25 @@ function CandidateBlock({
           className={`uppercase tracking-wider ${final === "placed" ? "text-success" : final === "in-progress" ? "text-primary" : "text-muted-foreground"}`}
         >
           {final}
+        </span>
+      </div>
+      <div
+        className="flex items-center gap-3 mb-1 text-[10px] uppercase tracking-wider"
+        data-testid="candidate-probabilities"
+      >
+        <span className="text-muted-foreground">
+          CACHED <span className="text-foreground font-bold">{fmtPct(cachedProb)}</span>
+        </span>
+        <span className={liveMissing ? "text-muted-foreground/60" : "text-muted-foreground"}>
+          LIVE{" "}
+          <span className={liveMissing ? "text-muted-foreground" : "text-primary font-bold"}>
+            {fmtPct(liveProb)}
+          </span>
+          {liveModel && !liveMissing && (
+            <span className="text-muted-foreground/60 normal-case">
+              {" "}· {liveModel.split("/").pop()}
+            </span>
+          )}
         </span>
       </div>
       <div className="space-y-0.5">
