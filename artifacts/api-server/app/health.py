@@ -581,6 +581,45 @@ def _probe_config() -> list[dict]:
             configured=bool(os.environ.get("SPORTRADAR_API_KEY")),
             detail_missing="not configured (Odds API used as primary)",
         ),
+        _config_card(
+            "unusual_whales",
+            "Unusual Whales",
+            configured=bool(
+                os.environ.get("UNUSUAL_WHALES_API_KEY")
+                or os.environ.get("UW_API_TOKEN")
+            ),
+            detail_missing="not configured (no flow / dark-pool ingest)",
+        ),
+        _config_card(
+            "bettingpros",
+            "BettingPros (public-betting)",
+            # BettingPros polls anonymously when no key is set; presence
+            # of a key just unlocks higher rate limits.
+            configured=True,
+            extras={
+                "api_key_present": bool(
+                    os.environ.get("BETTINGPROS_API_KEY")
+                    or os.environ.get("AXIOM_BETTINGPROS_API_KEY")
+                ),
+            },
+            detail_ok=(
+                "anonymous polling enabled"
+                if not (
+                    os.environ.get("BETTINGPROS_API_KEY")
+                    or os.environ.get("AXIOM_BETTINGPROS_API_KEY")
+                )
+                else "api key present"
+            ),
+        ),
+        _config_card(
+            "sportsline",
+            "SportsLine (public-betting fallback)",
+            configured=bool(
+                os.environ.get("SPORTSLINE_API_KEY")
+                or os.environ.get("AXIOM_SPORTSLINE_API_KEY")
+            ),
+            detail_missing="not configured (BettingPros primary)",
+        ),
     ]
     return cards
 
