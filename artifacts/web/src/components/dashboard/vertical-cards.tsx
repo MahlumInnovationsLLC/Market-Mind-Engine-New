@@ -42,7 +42,7 @@ function VerticalCard({ entry }: { entry: VerticalsOverviewEntry }) {
 
   return (
     <Link
-      href={`/intelligence?selected=${encodeURIComponent(slug)}`}
+      href={`/verticals?selected=${encodeURIComponent(slug)}`}
       data-testid={`card-vertical-${slug}`}
       className="block focus:outline-none"
     >

@@ -2,12 +2,15 @@ import {
   getGetMyAccessQueryKey,
   useGetMyAccess,
 } from "@workspace/api-client-react";
-import KpiSummaryBar from "@/components/dashboard/kpi-summary-bar";
+import ActivePositions from "@/components/dashboard/active-positions";
 import EquityCharts from "@/components/dashboard/equity-charts";
-import VerticalCards from "@/components/dashboard/vertical-cards";
 import HighlightsPanel from "@/components/dashboard/highlights-panel";
+import KpiSummaryBar from "@/components/dashboard/kpi-summary-bar";
 import OperatorControls from "@/components/dashboard/operator-controls";
 import { PeriodProvider, PeriodStrip } from "@/components/dashboard/period-context";
+import PipelineTracker from "@/components/dashboard/pipeline-tracker";
+import TradeStatsPanel from "@/components/dashboard/trade-stats-panel";
+import VerticalCards from "@/components/dashboard/vertical-cards";
 
 import { GlassCard } from "@/components/ui/glass-card";
 import { SectionHeader } from "@/components/ui/section-header";
@@ -53,6 +56,29 @@ export default function Dashboard() {
 
         <EquityCharts />
 
+        <div className="grid grid-cols-1 gap-4 xl:grid-cols-3">
+          <div className="xl:col-span-2">
+            <TradeStatsPanel />
+          </div>
+          <PipelineTracker />
+        </div>
+
+        <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
+          <ActivePositions />
+          <GlassCard
+            tone="solid"
+            padding="md"
+            data-testid="card-recent-trades"
+          >
+            <SectionHeader
+              eyebrow="EXECUTION"
+              title="Recent fills"
+              subtitle="Latest 25 settled and pending fills."
+            />
+            <RecentTrades />
+          </GlassCard>
+        </div>
+
         <VerticalCards />
 
         <HighlightsPanel />
@@ -62,14 +88,14 @@ export default function Dashboard() {
             tone="solid"
             padding="md"
             className="xl:col-span-2"
-            data-testid="card-recent-trades"
+            data-testid="card-trading-cycles"
           >
             <SectionHeader
-              eyebrow="EXECUTION"
-              title="Recent fills"
-              subtitle="Latest 25 settled and pending fills."
+              eyebrow="ORCHESTRATOR"
+              title="Trading cycles"
+              subtitle="Last 10 swarm loops with placement counts."
             />
-            <RecentTrades />
+            <TradingCycles />
           </GlassCard>
           <GlassCard
             tone="solid"

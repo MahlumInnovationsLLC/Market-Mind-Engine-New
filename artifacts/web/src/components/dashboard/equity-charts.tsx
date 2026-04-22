@@ -75,13 +75,15 @@ export default function EquityCharts() {
           subtitle="Daily realized PnL, summed forward across the selected window."
         />
         <div className="h-64" data-testid="chart-cumulative-pnl">
-          {isLoading || isError || points.length === 0 ? (
+          {isLoading ? (
+            <div
+              className="h-full animate-pulse bg-muted/10"
+              data-testid="skeleton-cumulative-pnl"
+              aria-busy="true"
+            />
+          ) : isError || points.length === 0 ? (
             <div className="flex h-full items-center justify-center text-[11px] uppercase tracking-widest text-muted-foreground">
-              {isLoading
-                ? "LOADING…"
-                : isError
-                  ? "CURVE_UNAVAILABLE"
-                  : "NO_SETTLED_DATA"}
+              {isError ? "CURVE_UNAVAILABLE" : "NO_SETTLED_DATA"}
             </div>
           ) : (
             <ResponsiveContainer width="100%" height="100%">
@@ -145,13 +147,15 @@ export default function EquityCharts() {
           subtitle="Per-day realized PnL across the window."
         />
         <div className="h-64" data-testid="chart-daily-pnl">
-          {isLoading || isError || points.length === 0 ? (
+          {isLoading ? (
+            <div
+              className="h-full animate-pulse bg-muted/10"
+              data-testid="skeleton-daily-pnl"
+              aria-busy="true"
+            />
+          ) : isError || points.length === 0 ? (
             <div className="flex h-full items-center justify-center text-[11px] uppercase tracking-widest text-muted-foreground">
-              {isLoading
-                ? "LOADING…"
-                : isError
-                  ? "CURVE_UNAVAILABLE"
-                  : "NO_SETTLED_DATA"}
+              {isError ? "CURVE_UNAVAILABLE" : "NO_SETTLED_DATA"}
             </div>
           ) : (
             <ResponsiveContainer width="100%" height="100%">

@@ -1,8 +1,10 @@
 import { useQuery } from "@tanstack/react-query";
 import {
   getGetDashboardOverviewQueryKey,
+  getGetRecentTradesQueryKey,
   getGetVerticalsOverviewQueryKey,
   useGetDashboardOverview,
+  useGetRecentTrades,
   useGetVerticalsOverview,
 } from "@workspace/api-client-react";
 import { GlassCard } from "@/components/ui/glass-card";
@@ -52,24 +54,34 @@ function KpiTile({
   hint,
   testId,
   valueClassName,
+  loading,
 }: {
   label: string;
   value: string;
   hint?: string;
   testId: string;
   valueClassName?: string;
+  loading?: boolean;
 }) {
   return (
     <GlassCard tone="solid" padding="sm" className="flex flex-col gap-1">
       <span className="text-[10px] uppercase tracking-widest text-muted-foreground">
         {label}
       </span>
-      <span
-        className={`text-lg font-bold tabular-nums ${valueClassName ?? "text-foreground"}`}
-        data-testid={testId}
-      >
-        {value}
-      </span>
+      {loading ? (
+        <span
+          className="block h-6 w-20 animate-pulse bg-muted/20"
+          data-testid={`${testId}-skeleton`}
+          aria-busy="true"
+        />
+      ) : (
+        <span
+          className={`text-lg font-bold tabular-nums ${valueClassName ?? "text-foreground"}`}
+          data-testid={testId}
+        >
+          {value}
+        </span>
+      )}
       {hint ? (
         <span className="text-[10px] text-muted-foreground/70">{hint}</span>
       ) : null}
@@ -92,6 +104,13 @@ export default function KpiSummaryBar() {
       refetchInterval: 60_000,
     },
   });
+  const tradesParams = { limit: 200 };
+  const tradesQ = useGetRecentTrades(tradesParams, {
+    query: {
+      queryKey: getGetRecentTradesQueryKey(tradesParams),
+      refetchInterval: 60_000,
+    },
+  });
   const equityQ = useQuery<EquityCurve>({
     queryKey: ["public-equity-curve", days],
     queryFn: async () => {
@@ -108,15 +127,20 @@ export default function KpiSummaryBar() {
   const overview = overviewQ.data;
   const verticals = verticalsQ.data?.verticals ?? [];
   const equityPoints = equityQ.data?.points ?? [];
+  const trades = tradesQ.data?.items ?? [];
+
+  const loading =
+    overviewQ.isLoading ||
+    verticalsQ.isLoading ||
+    equityQ.isLoading ||
+    tradesQ.isLoading;
 
   const todayPnl =
     equityPoints.length > 0
       ? equityPoints[equityPoints.length - 1].daily_pnl
       : null;
-  const periodPnl = equityPoints.reduce((s, p) => s + (p.daily_pnl ?? 0), 0);
-  const periodTrades = equityPoints.reduce((s, p) => s + (p.trades ?? 0), 0);
 
-  // Trade-weighted Sharpe across verticals — most representative single
+  // Trade-weighted Sharpe across verticals — most representative
   // operator-level number that the verticals endpoint actually returns.
   const sharpeNumer = verticals.reduce(
     (s, v) =>
@@ -130,8 +154,34 @@ export default function KpiSummaryBar() {
   );
   const sharpe = sharpeDenom > 0 ? sharpeNumer / sharpeDenom : null;
 
+  // Volume = sum(|qty| * price) across recent fills clipped to the
+  // selected window. The dashboard endpoint doesn't expose a volume
+  // figure directly so this is the closest faithful aggregate.
+  const cutoffMs = Date.now() - days * 86_400_000;
+  let volume = 0;
+  for (const t of trades) {
+    if (t.executed_at) {
+      const ms = new Date(t.executed_at).getTime();
+      if (!Number.isNaN(ms) && ms < cutoffMs) continue;
+    }
+    volume += Math.abs(Number(t.quantity ?? 0)) * Number(t.price ?? 0);
+  }
+
+  // ROI = period realized PnL / opening cumulative bankroll baseline.
+  // We use the first non-zero |cumulative_pnl| point in the window as
+  // a denominator proxy when no bankroll endpoint is available; this
+  // mirrors how the marketing landing computes its "growth %".
+  let baseline = 0;
+  for (const p of equityPoints) {
+    if (Math.abs(p.cumulative_pnl) > 0) {
+      baseline = Math.abs(p.cumulative_pnl);
+      break;
+    }
+  }
+  const periodPnl = equityPoints.reduce((s, p) => s + (p.daily_pnl ?? 0), 0);
+  const roi = baseline > 0 ? periodPnl / baseline : null;
+
   const winRate = overview?.win_rate ?? null;
-  const totalPnl = overview?.realized_pnl ?? null;
   const openPositions = overview?.open_positions ?? null;
 
   const periodLabel = period.toUpperCase();
@@ -142,40 +192,48 @@ export default function KpiSummaryBar() {
       data-testid="kpi-summary-bar"
     >
       <KpiTile
+        loading={loading && todayPnl === null}
         label="P&L TODAY"
         value={fmtCurrency(todayPnl)}
-        hint={equityQ.isLoading ? "loading…" : "since 00:00 UTC"}
+        hint="since 00:00 UTC"
         valueClassName={pnlClass(todayPnl)}
         testId="kpi-pnl-today"
       />
       <KpiTile
+        loading={overviewQ.isLoading}
         label="WIN RATE"
         value={fmtPct(winRate, 1)}
         hint="all-time settled"
         testId="kpi-win-rate"
       />
       <KpiTile
-        label={`P&L · ${periodLabel}`}
-        value={fmtCurrency(periodPnl)}
-        hint={`${fmtNumber(periodTrades)} trades`}
-        valueClassName={pnlClass(periodPnl)}
-        testId="kpi-period-pnl"
+        loading={loading && roi === null}
+        label={`ROI · ${periodLabel}`}
+        value={roi !== null ? fmtPct(roi, 1) : "—"}
+        hint="period P&L vs baseline"
+        valueClassName={pnlClass(roi)}
+        testId="kpi-roi"
       />
       <KpiTile
-        label="TOTAL P&L"
-        value={fmtCurrency(totalPnl)}
-        hint="cumulative realized"
-        valueClassName={pnlClass(totalPnl)}
-        testId="kpi-total-pnl"
+        loading={tradesQ.isLoading}
+        label={`VOLUME · ${periodLabel}`}
+        value={fmtCurrency(volume)}
+        hint={`${fmtNumber(trades.length)} fills`}
+        valueClassName="text-primary"
+        testId="kpi-volume"
       />
       <KpiTile
+        loading={overviewQ.isLoading}
         label="OPEN POS"
         value={openPositions !== null ? String(openPositions) : "—"}
         hint={`${verticals.length} verticals`}
-        valueClassName={openPositions && openPositions > 0 ? "text-primary" : undefined}
+        valueClassName={
+          openPositions && openPositions > 0 ? "text-primary" : undefined
+        }
         testId="kpi-open-positions"
       />
       <KpiTile
+        loading={verticalsQ.isLoading}
         label="SHARPE (W)"
         value={sharpe !== null ? sharpe.toFixed(2) : "—"}
         hint="trade-weighted"
