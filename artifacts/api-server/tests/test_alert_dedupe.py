@@ -243,6 +243,20 @@ def test_live_trade_dedupe_fill_replay_no_fill_id(
 
     monkeypatch.setattr(_lc, "_record", _noop)
     monkeypatch.setattr(_lc, "_emit", _noop)
+    # `_record_fill_idempotent` calls real asyncpg via `db.fetchval`,
+    # which the in-memory dedupe shim above does NOT intercept.  In
+    # environments where a Postgres pool happens to be reachable AND
+    # a previous run inserted the (order_id='ord_zzz', fill_id) row
+    # into `order_fills`, the ON CONFLICT branch trips and the whole
+    # fill path short-circuits before we reach the alert dispatch we
+    # are trying to exercise.  Stub it out: this test is about the
+    # alert-dedupe key derivation under no-fill-id replay, NOT the
+    # fill-row uniqueness which has its own dedicated tests.
+    async def _always_fresh(**_kw: Any) -> bool:
+        return True
+    monkeypatch.setattr(_lc, "_record_fill_idempotent", _always_fresh)
+    # Same goes for the position rollup write.
+    monkeypatch.setattr(_lc, "_upsert_position_rollup", _noop)
 
     req = _lc.OrderRequest(
         market_ticker="MKT", side="yes", action="buy",

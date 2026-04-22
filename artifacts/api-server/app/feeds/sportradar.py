@@ -500,16 +500,16 @@ _DAILY_SCHEDULE_PATHS = {
     # NFL has no daily endpoint — current_week covers any in-progress game.
     "nfl":   "https://api.sportradar.us/nfl/official/trial/v7/en/games/current_week/schedule.json",
     "ncaaf": "https://api.sportradar.us/ncaafb/trial/v1/en/games/{y}/{m:02d}/{d:02d}/schedule.json",
-    # Soccer-extended trial v4 — daily schedules across every
-    # competition.  Each league polls the same global daily endpoint
-    # and we filter downstream by competition (task #196).
-    "epl":     "https://api.sportradar.us/soccer-extended/trial/v4/en/schedules/{y}-{m:02d}-{d:02d}/schedule.json",
-    "laliga":  "https://api.sportradar.us/soccer-extended/trial/v4/en/schedules/{y}-{m:02d}-{d:02d}/schedule.json",
-    "seriea":  "https://api.sportradar.us/soccer-extended/trial/v4/en/schedules/{y}-{m:02d}-{d:02d}/schedule.json",
-    "bundes":  "https://api.sportradar.us/soccer-extended/trial/v4/en/schedules/{y}-{m:02d}-{d:02d}/schedule.json",
-    "ligue1":  "https://api.sportradar.us/soccer-extended/trial/v4/en/schedules/{y}-{m:02d}-{d:02d}/schedule.json",
-    "mls":     "https://api.sportradar.us/soccer-extended/trial/v4/en/schedules/{y}-{m:02d}-{d:02d}/schedule.json",
-    "ucl":     "https://api.sportradar.us/soccer-extended/trial/v4/en/schedules/{y}-{m:02d}-{d:02d}/schedule.json",
+    # Soccer leagues use the soccer-extended /v4 API which has a
+    # different (competition-keyed) payload shape than the NA-league
+    # endpoints above.  Rather than registering live-state pollers
+    # that would mis-attribute events across competitions, soccer
+    # live/roster/injury feeds are intentionally registered DISABLED
+    # with a clear `skipped_reason` until the soccer-extended payload
+    # parser ships (follow-up task #211).  Schedules themselves are
+    # pulled via the dedicated `_SPORTRADAR_SCHEDULE_PATHS` map in
+    # `app/feeds/odds_api.py`, which has the soccer-extended URLs
+    # and a soccer-aware normalizer.
 }
 
 _LIVE_STATUSES = {"inprogress", "halftime", "delayed", "scheduled.live"}
