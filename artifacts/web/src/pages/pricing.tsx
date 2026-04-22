@@ -7,6 +7,7 @@ import {
   useGetBillingPricing,
   useCreateBillingCheckoutSession,
 } from "@workspace/api-client-react";
+import { PublicFooter, PublicNav } from "@/components/public/public-nav";
 
 export default function PricingPage() {
   const { isSignedIn } = useAuth();
@@ -103,44 +104,40 @@ export default function PricingPage() {
 
   return (
     <div className="min-h-[100dvh] bg-background text-foreground font-sans selection:bg-primary/30">
-      <header className="max-w-6xl mx-auto px-4 md:px-8 pt-10 pb-8 flex flex-col md:flex-row md:items-end justify-between gap-4">
-        <div>
+      <PublicNav active="pricing" />
+
+      <header className="relative bg-starfield overflow-hidden border-b border-border/60">
+        <div className="absolute inset-0 grid-bg opacity-40 pointer-events-none" />
+        <div className="relative max-w-6xl mx-auto px-4 md:px-8 pt-16 md:pt-20 pb-12 text-center">
           <div className="text-xs font-semibold uppercase tracking-[0.2em] text-primary mb-3">
             Pricing
           </div>
           <h1
-            className="text-3xl md:text-4xl font-extrabold tracking-tight"
+            className="text-3xl md:text-5xl font-extrabold tracking-tight"
             data-testid="text-pricing-title"
           >
             Pick a tier.{" "}
             <span className="text-gradient-brand">Cancel anytime.</span>
           </h1>
-          <p className="text-muted-foreground text-base mt-3 max-w-xl">
+          <p className="text-muted-foreground text-base mt-4 max-w-xl mx-auto">
             Live trading telemetry for prediction markets — full methodology and
             real Kalshi fills, every cycle.
           </p>
-        </div>
-        <div className="flex items-center gap-2 text-sm">
-          <Link
-            href="/"
-            className="rounded-full border border-border px-4 py-1.5 text-muted-foreground hover:border-primary/60 hover:text-primary transition-colors"
-            data-testid="link-home"
-          >
-            ← Home
-          </Link>
           {isSignedIn && (
-            <Link
-              href="/billing"
-              className="rounded-full border border-border px-4 py-1.5 text-muted-foreground hover:border-primary/60 hover:text-primary transition-colors"
-              data-testid="link-billing"
-            >
-              My Billing
-            </Link>
+            <div className="mt-6">
+              <Link
+                href="/profile"
+                className="inline-flex items-center gap-1.5 rounded-full border border-border px-4 py-1.5 text-sm text-muted-foreground hover:border-primary/60 hover:text-primary transition-colors"
+                data-testid="link-billing"
+              >
+                Manage your billing →
+              </Link>
+            </div>
           )}
         </div>
       </header>
 
-      <div className="max-w-6xl mx-auto px-4 md:px-8 pb-20">
+      <div className="max-w-6xl mx-auto px-4 md:px-8 pt-12 pb-20">
         <div className="flex items-center justify-center mb-10">
           <div
             className="inline-flex rounded-full border border-border bg-card/60 p-1"
@@ -297,6 +294,8 @@ export default function PricingPage() {
           </p>
         )}
       </div>
+
+      <PublicFooter />
     </div>
   );
 }

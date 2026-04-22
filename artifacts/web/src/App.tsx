@@ -31,6 +31,8 @@ import PricingPage from "@/pages/pricing";
 import BillingPage from "@/pages/billing";
 import HealthPage from "@/pages/health";
 import MarketingPage from "@/pages/marketing";
+import AboutPage from "@/pages/about";
+import LeaderboardPage from "@/pages/leaderboard";
 import AdminPage from "@/pages/admin";
 import VerticalsPage from "@/pages/verticals";
 import SettingsNotificationsPage from "@/pages/settings-notifications";
@@ -371,6 +373,8 @@ function ClerkProviderWithRoutes() {
           <Switch>
             <Route path="/" component={HomeRoute} />
             <Route path="/pricing" component={PricingPage} />
+            <Route path="/about" component={AboutPage} />
+            <Route path="/leaderboard" component={LeaderboardPage} />
             <Route path="/billing">
               {/* /billing now lives inside the authed /profile page.
                   Signed-in visitors are redirected straight to /profile;

@@ -11,6 +11,7 @@ import {
   YAxis,
 } from "recharts";
 import { apiFetch } from "@/lib/api";
+import { PublicFooter, PublicNav } from "@/components/public/public-nav";
 
 type RangeKey = "7" | "30" | "90";
 
@@ -106,34 +107,6 @@ function formatPct(n: number | null | undefined): string {
 function formatInt(n: number | null | undefined): string {
   if (n === null || n === undefined) return "—";
   return Math.round(n).toLocaleString();
-}
-
-function BrandMark({ size = 32 }: { size?: number }) {
-  // Simple chevron / mountain-peak mark inspired by the reference site
-  return (
-    <svg
-      width={size}
-      height={size}
-      viewBox="0 0 32 32"
-      fill="none"
-      xmlns="http://www.w3.org/2000/svg"
-      aria-hidden="true"
-    >
-      <defs>
-        <linearGradient id="brand-mark-grad" x1="0" y1="0" x2="1" y2="1">
-          <stop offset="0%" stopColor="hsl(189 94% 60%)" />
-          <stop offset="100%" stopColor="hsl(258 90% 70%)" />
-        </linearGradient>
-      </defs>
-      <path
-        d="M16 4 L28 26 H22 L16 14 L10 26 H4 Z"
-        stroke="url(#brand-mark-grad)"
-        strokeWidth="1.75"
-        strokeLinejoin="round"
-        fill="none"
-      />
-    </svg>
-  );
 }
 
 export default function MarketingPage() {
@@ -256,90 +229,7 @@ export default function MarketingPage() {
 
   return (
     <div className="min-h-[100dvh] bg-background text-foreground font-sans selection:bg-primary/30">
-      {/* ---------- Top Nav ---------- */}
-      <nav className="sticky top-0 z-30 backdrop-blur-md bg-background/70 border-b border-border/60">
-        <div className="max-w-6xl mx-auto px-4 md:px-6 py-3 flex items-center justify-between">
-          <Link
-            href="/"
-            className="flex items-center gap-2.5"
-            data-testid="link-home-logo"
-          >
-            <BrandMark size={28} />
-            <div className="flex flex-col leading-none">
-              <span className="text-sm font-bold tracking-wide text-foreground">
-                AXIOM
-              </span>
-              <span className="text-[9px] tracking-[0.25em] text-muted-foreground -mt-0.5">
-                PREDICT
-              </span>
-            </div>
-          </Link>
-          <div className="flex items-center gap-1 md:gap-2 text-sm">
-            <a
-              href="#methodology"
-              className="hidden md:inline px-3 py-2 text-muted-foreground hover:text-foreground transition-colors"
-            >
-              Methodology
-            </a>
-            <a
-              href="#equity"
-              className="hidden md:inline px-3 py-2 text-muted-foreground hover:text-foreground transition-colors"
-            >
-              Live Performance
-            </a>
-            <a
-              href="#signals"
-              className="hidden md:inline px-3 py-2 text-muted-foreground hover:text-foreground transition-colors"
-            >
-              Signals
-            </a>
-            <a
-              href="#pricing"
-              className="hidden md:inline px-3 py-2 text-muted-foreground hover:text-foreground transition-colors"
-            >
-              Pricing
-            </a>
-            <a
-              href="#mobile"
-              className="hidden md:inline text-muted-foreground hover:text-primary uppercase tracking-widest"
-            >
-              Mobile
-            </a>
-            {isSignedIn ? (
-              <Link
-                href="/app"
-                className="ml-2 inline-flex items-center gap-1.5 rounded-full border border-primary/60 text-primary px-4 py-1.5 text-sm font-medium hover:bg-primary hover:text-primary-foreground transition-colors"
-                data-testid="link-open-console"
-              >
-                Open Console
-                <span aria-hidden>→</span>
-              </Link>
-            ) : (
-              <>
-                <SignInButton mode="modal">
-                  <button
-                    type="button"
-                    className="px-3 py-2 text-muted-foreground hover:text-foreground transition-colors"
-                    data-testid="button-nav-signin"
-                  >
-                    Sign in
-                  </button>
-                </SignInButton>
-                <SignUpButton mode="modal">
-                  <button
-                    type="button"
-                    className="ml-2 inline-flex items-center gap-1.5 rounded-full border border-primary/60 text-primary px-4 py-1.5 text-sm font-medium hover:bg-primary hover:text-primary-foreground transition-colors"
-                    data-testid="button-nav-signup"
-                  >
-                    Get Access
-                    <span aria-hidden>→</span>
-                  </button>
-                </SignUpButton>
-              </>
-            )}
-          </div>
-        </div>
-      </nav>
+      <PublicNav active="home" />
 
       {/* ---------- Hero ---------- */}
       <section className="relative bg-starfield overflow-hidden">
@@ -941,52 +831,7 @@ export default function MarketingPage() {
         </div>
       </section>
 
-      {/* ---------- Footer ---------- */}
-      <footer className="border-t border-border/60 py-10">
-        <div className="max-w-6xl mx-auto px-4 md:px-6 flex flex-col md:flex-row items-center justify-between gap-4 text-sm text-muted-foreground">
-          <div className="flex items-center gap-2">
-            <BrandMark size={20} />
-            <span>
-              © Axiom Predict — operator-grade prediction-market trading
-            </span>
-          </div>
-          <div className="flex gap-5">
-            <Link
-              href="/pricing"
-              className="hover:text-primary transition-colors"
-              data-testid="link-footer-pricing"
-            >
-              Pricing
-            </Link>
-            <Link
-              href="/health"
-              className="hover:text-primary transition-colors"
-              data-testid="link-footer-health"
-            >
-              Status
-            </Link>
-            {isSignedIn ? (
-              <Link
-                href="/app"
-                className="hover:text-primary transition-colors"
-                data-testid="link-footer-app"
-              >
-                Console
-              </Link>
-            ) : (
-              <SignInButton mode="modal">
-                <button
-                  type="button"
-                  className="hover:text-primary transition-colors"
-                  data-testid="button-footer-signin"
-                >
-                  Sign in
-                </button>
-              </SignInButton>
-            )}
-          </div>
-        </div>
-      </footer>
+      <PublicFooter />
     </div>
   );
 }
