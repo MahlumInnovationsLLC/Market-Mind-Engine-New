@@ -204,6 +204,34 @@ REGISTRY.register(VerticalSpec(
 ))
 
 
+# Entertainment (task #203).  Hybrid log-normal (box-office) +
+# Bayesian-precursor (awards) + empirical chart-rank (Spotify/streams)
+# binary stack with a paper-grade Kelly multiplier (0.05).  Auto-promotes
+# to 0.08 after 30 settled trades show Brier<0.22 and an admin confirms
+# via `/api/admin/entertainment/promote-kelly`, which writes
+# `risk.kelly_multiplier_entertainment=0.08` into `system_settings`.
+REGISTRY.register(VerticalSpec(
+    name="entertainment",
+    leagues=("ENTERTAINMENT",),
+    ticker_prefixes=(
+        "KXBOX", "KXOSCAR", "KXEMMY", "KXGRAMMY",
+        "KXSPOTIFY", "KXSTREAM", "KXRT",
+    ),
+    persona_profile="entertainment",
+    predictor_hook="entertainment_hybrid",
+    kelly_multiplier=0.05,
+    default_allocation_pct=0.10,
+    duplicate_trade_exempt=True,
+    description=(
+        "Entertainment binary markets across box-office opening "
+        "weekends, awards-show winners (Oscars, Emmys, Grammys), "
+        "Spotify / streaming chart positions and Rotten Tomatoes "
+        "critic-score thresholds.  Routed through a hybrid log-normal "
+        "/ Bayesian / empirical model with a release-day blackout."
+    ),
+))
+
+
 REGISTRY.register(VerticalSpec(
     name="soccer",
     leagues=("EPL", "LALIGA", "SERIEA", "BUNDES", "LIGUE1", "MLS", "UCL"),

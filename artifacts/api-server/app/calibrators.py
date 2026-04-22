@@ -88,6 +88,11 @@ SUPPORTED_LEAGUES: tuple[str, ...] = (
     # post-model so settled events-econ trades feed an isotonic / Platt
     # curve scoped to EVENTS_ECON.
     "EVENTS_ECON",
+    # Entertainment (task #203).  Hybrid log-normal / Bayesian /
+    # empirical model.  Calibrator still applies post-model so settled
+    # entertainment trades feed an isotonic / Platt curve scoped to
+    # ENTERTAINMENT just like every other vertical.
+    "ENTERTAINMENT",
 )
 
 # Below this sample count we fall back to Platt; below MIN_REFIT we

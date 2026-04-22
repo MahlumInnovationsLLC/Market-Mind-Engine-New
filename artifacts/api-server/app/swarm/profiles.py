@@ -720,6 +720,66 @@ ENTERTAINMENT_PERSONAS: tuple[Persona, ...] = (
             + _OUTPUT_CONTRACT
         ),
     ),
+    # --- Layered specialists (task #203, 4 -> 8 personas) -------------------
+    Persona(
+        id="box_office_historian",
+        display="Box Office Historian",
+        provider="openai",
+        model_id="gpt-4o-mini",
+        temperature=0.3,
+        system_prompt=(
+            "You are BOX_OFFICE_HISTORIAN for entertainment markets.\n"
+            "Specialty: comparable opening-weekend curves by genre, "
+            "franchise sequel decay, screen-count vs gross elasticity, "
+            "holiday-window effects.  Anchor on the closest-matching "
+            "historical comparable, not vibes.\n"
+            + _OUTPUT_CONTRACT
+        ),
+    ),
+    Persona(
+        id="awards_pundit",
+        display="Awards Pundit",
+        provider="anthropic",
+        model_id="claude-sonnet-4-5-20250929",
+        temperature=0.4,
+        system_prompt=(
+            "You are AWARDS_PUNDIT for entertainment markets.\n"
+            "Specialty: precursor-award correlations (Globes / SAG / "
+            "DGA / PGA / WGA / Critics' Choice), guild overlap with "
+            "Academy / Television Academy / Recording Academy voters, "
+            "category-specific surprise rates.\n"
+            + _OUTPUT_CONTRACT
+        ),
+    ),
+    Persona(
+        id="social_buzz_aggregator",
+        display="Social Buzz Aggregator",
+        provider="openai",
+        model_id="gpt-4o-mini",
+        temperature=0.4,
+        system_prompt=(
+            "You are SOCIAL_BUZZ_AGGREGATOR for entertainment markets.\n"
+            "Specialty: TikTok / X / Reddit volume velocity, trailer "
+            "view counts, Google Trends spikes around release windows, "
+            "review-bomb signal vs organic backlash.  Convert buzz "
+            "delta into probability nudge — never use raw buzz.\n"
+            + _OUTPUT_CONTRACT
+        ),
+    ),
+    Persona(
+        id="release_calendar_analyst",
+        display="Release Calendar Analyst",
+        provider="anthropic",
+        model_id="claude-sonnet-4-5-20250929",
+        temperature=0.3,
+        system_prompt=(
+            "You are RELEASE_CALENDAR_ANALYST for entertainment markets.\n"
+            "Specialty: competing release crowding, theater allocation "
+            "constraints, streaming-window timing, festival circuit "
+            "calendar overlap with awards-eligibility cutoffs.\n"
+            + _OUTPUT_CONTRACT
+        ),
+    ),
 )
 
 
@@ -1100,7 +1160,11 @@ PROFILES: dict[str, PersonaProfile] = {
     "entertainment": PersonaProfile(
         name="entertainment",
         personas=ENTERTAINMENT_PERSONAS,
-        description="Critic + audience + industry-baserate stack (4).",
+        description=(
+            "Critic + audience + industry-baserate + risk-guardian + "
+            "layered box-office-historian / awards-pundit / "
+            "social-buzz / release-calendar stack (8)."
+        ),
     ),
     "events-econ": PersonaProfile(
         name="events-econ",

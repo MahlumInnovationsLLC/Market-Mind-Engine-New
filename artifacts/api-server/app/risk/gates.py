@@ -242,6 +242,59 @@ async def gate_market_cooldown(ctx: RiskContext) -> GateResult:
                         )
         except Exception as e:  # pragma: no cover — never kill the gate
             log.debug("events-econ pre-release blackout sub-check failed: %s", e)
+    # Release-day blackout (task #203): box-office tickers are blacked
+    # out from the event-day open until the weekend actuals print.
+    # Best-effort lookup — any failure short-circuits to a no-op so a
+    # sick entertainment_signals cache can never silently widen the
+    # blackout window.
+    if ctx.vertical == "entertainment":
+        try:
+            from ..entertainment.tickers import (
+                InvalidEntertainmentTicker as _InvalidEntertainmentTicker,
+                parse_entertainment_ticker as _parse_entertainment_ticker,
+            )
+            from ..entertainment.signals import (
+                resolved_signal_for_ticker as _resolved_signal_for_ticker,
+            )
+            try:
+                ticker = _parse_entertainment_ticker(ctx.market_id)
+            except _InvalidEntertainmentTicker:
+                ticker = None
+            # Only box-office (and, by extension, RT score) tickers
+            # carry a release-day blackout.  Awards / charts resolve
+            # at scheduled show / chart-week endpoints handled by the
+            # cycle's cooldown directly.
+            if ticker is not None and ticker.signal_type in {"BOX", "RT"}:
+                blackout_minutes = int(
+                    ctx.operator_overrides.get(
+                        "entertainment_release_day_blackout_minutes", 60
+                    )
+                )
+                resolved = await _resolved_signal_for_ticker(ticker)
+                next_at = resolved.event_at if resolved is not None else None
+                if next_at is not None:
+                    if next_at.tzinfo is None:
+                        next_at = next_at.replace(tzinfo=timezone.utc)
+                    now = datetime.now(timezone.utc)
+                    from datetime import timedelta as _td
+                    window_start = next_at - _td(minutes=max(0, blackout_minutes))
+                    if window_start <= now < next_at:
+                        return GateResult(
+                            "market_cooldown",
+                            False,
+                            (
+                                f"entertainment release-day blackout "
+                                f"({blackout_minutes}m before {ticker.signal_type})"
+                            ),
+                            {
+                                "reason": "release_day_blackout",
+                                "signal_type": ticker.signal_type,
+                                "event_at": next_at.isoformat(),
+                                "blackout_minutes": blackout_minutes,
+                            },
+                        )
+        except Exception as e:  # pragma: no cover — never kill the gate
+            log.debug("entertainment release-day blackout sub-check failed: %s", e)
     # Live-action blackout (task #197): combat & individual sports
     # opt-in via `LeagueConfig.live_action_blackout`.  Once the
     # underlying event is in-progress, pre-event outright markets are

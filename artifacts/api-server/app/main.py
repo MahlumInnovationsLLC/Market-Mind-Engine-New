@@ -165,6 +165,13 @@ async def lifespan(_: FastAPI):
         except Exception as e:
             log.warning("econ_calendar feed registration failed: %s", e)
         try:
+            from .feeds.entertainment_signals import (
+                register_entertainment_signal_feeds,
+            )
+            register_entertainment_signal_feeds()
+        except Exception as e:
+            log.warning("entertainment_signals feed registration failed: %s", e)
+        try:
             from .feeds import weather_climatology as _wclim
 
             await _wclim.ensure_schema()
@@ -1454,6 +1461,122 @@ async def events_econ_calendar(within_hours: float = 168.0, limit: int = 50) -> 
             "imminent": imminent,
         })
     return {"items": items}
+
+
+# ---------------------------------------------------------------------------
+# Entertainment vertical (task #203) — admin promotion + public weekend
+# release calendar / awards leaderboard.
+# ---------------------------------------------------------------------------
+
+
+@app.get("/api/admin/entertainment/promotion-status")
+async def admin_entertainment_promotion_status(
+    actor: AuthedUser = Depends(require_admin),
+) -> dict[str, object]:
+    """Current entertainment Kelly promotion eligibility snapshot."""
+    from .entertainment import promotion as _ent_promotion
+    status = await _ent_promotion.evaluate_promotion()
+    return status.as_dict()
+
+
+@app.post("/api/admin/entertainment/promote-kelly")
+async def admin_entertainment_promote_kelly(
+    actor: AuthedUser = Depends(require_admin),
+) -> dict[str, object]:
+    """Promote the entertainment Kelly multiplier from 0.05 to 0.08.
+
+    Refuses unless the latest evaluation reports ``eligible=True``
+    (>= 30 settled trades and rolling Brier < 0.22).  When eligible,
+    writes ``risk.kelly_multiplier_entertainment = 0.08`` into
+    ``system_settings`` and records an audit row.
+    """
+    from .entertainment import promotion as _ent_promotion
+    status = await _ent_promotion.promote(
+        actor_user_id=actor.user_id,
+        actor_email=getattr(actor, "email", None),
+    )
+    if not status.eligible and status.current_multiplier < _ent_promotion.PROMOTED_MULTIPLIER:
+        raise HTTPException(status_code=409, detail={
+            "error": "not_eligible",
+            "status": status.as_dict(),
+        })
+    return status.as_dict()
+
+
+@app.get("/api/entertainment/calendar")
+async def entertainment_calendar(
+    within_hours: float = 168.0,
+    limit: int = 50,
+) -> dict[str, object]:
+    """Upcoming entertainment events for the dashboard calendar panel.
+
+    Public: no auth — only surfaces release schedules + nominee
+    placeholders, all of which is already public information from
+    the upstream feeds.
+    """
+    from datetime import datetime, timezone
+    from .entertainment.signals import settled_history_for_type, upcoming_signals
+    from .entertainment.model import at_baseline_probability
+
+    rows = await upcoming_signals(within_hours=within_hours, limit=limit)
+    history_cache: dict[str, list] = {}
+    items: list[dict[str, object]] = []
+    now = datetime.now(timezone.utc)
+    for r in rows:
+        if r.signal_type not in history_cache:
+            history_cache[r.signal_type] = await settled_history_for_type(r.signal_type)
+        history = history_cache[r.signal_type]
+
+        model_prob: float | None = None
+        try:
+            res = at_baseline_probability(r, history)
+            model_prob = float(res.probability)
+        except Exception:  # pragma: no cover — never fail the route
+            model_prob = None
+
+        seconds_until = None
+        imminent = False
+        if r.event_at is not None:
+            event_at = r.event_at
+            if event_at.tzinfo is None:
+                event_at = event_at.replace(tzinfo=timezone.utc)
+            seconds_until = max(0.0, (event_at - now).total_seconds())
+            imminent = 0 < seconds_until <= 60 * 60.0
+
+        items.append({
+            "source": r.source,
+            "signal_id": r.signal_id,
+            "signal_type": r.signal_type,
+            "title": r.title,
+            "event_at": r.event_at.isoformat() if r.event_at else None,
+            "value": r.value,
+            "model_prob": model_prob,
+            "seconds_until_event": seconds_until,
+            "imminent": imminent,
+        })
+    return {"items": items}
+
+
+@app.get("/api/entertainment/awards-leaderboard")
+async def entertainment_awards_leaderboard(
+    award_type: str = "OSCAR",
+    limit: int = 20,
+) -> dict[str, object]:
+    """Leading nominees / candidates for an upcoming awards cycle."""
+    from .entertainment.signals import awards_leaderboard
+    rows = await awards_leaderboard(award_type, limit=limit)
+    items = [
+        {
+            "source": r.source,
+            "signal_id": r.signal_id,
+            "signal_type": r.signal_type,
+            "title": r.title,
+            "event_at": r.event_at.isoformat() if r.event_at else None,
+            "value": r.value,
+        }
+        for r in rows
+    ]
+    return {"award_type": award_type.upper(), "items": items}
 
 
 # ---------------------------------------------------------------------------

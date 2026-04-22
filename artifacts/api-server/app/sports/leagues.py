@@ -402,6 +402,20 @@ LEAGUE_CONFIGS: dict[str, LeagueConfig] = {
         live_action_blackout=False,
         max_daily_trades=15,
     ),
+    # Entertainment (task #203).  Each release / awards ceremony
+    # resolves independently.  No "event in progress" frame — the
+    # release-day blackout for box-office tickers is enforced via the
+    # entertainment sub-check on `gate_market_cooldown`.
+    "ENTERTAINMENT": LeagueConfig(
+        league="ENTERTAINMENT",
+        priority=10,
+        allocation_pct=0.10,
+        per_game_cap_pct=0.01,
+        per_event_cap_pct=0.05,
+        n_way_market=False,
+        live_action_blackout=False,
+        max_daily_trades=15,
+    ),
 }
 
 

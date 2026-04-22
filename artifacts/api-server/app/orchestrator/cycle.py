@@ -620,6 +620,70 @@ async def _predict_for_events_econ_binary(cand: dict[str, Any]) -> dict[str, Any
     return payload
 
 
+async def _predict_for_entertainment_binary(cand: dict[str, Any]) -> dict[str, Any] | None:
+    """Route an entertainment candidate through `app.entertainment.predictor`.
+
+    Mirrors the events-econ helper — parse the Kalshi ticker into an
+    `EntertainmentTicker`, run the hybrid model, fold the calibrated
+    YES probability into the cycle telemetry shape.  Failure modes
+    (parse error, sick entertainment_signals cache) degrade to swarm-
+    only signals.
+    """
+    market_id = _resolve_market_id(cand) or cand.get("kalshi_market_id")
+    if not market_id:
+        return None
+    try:
+        from ..entertainment.tickers import (
+            InvalidEntertainmentTicker as _InvalidEntertainmentTicker,
+            parse_entertainment_ticker as _parse_entertainment_ticker,
+        )
+        from ..entertainment import predictor as _entertainment_predictor
+    except Exception as e:  # pragma: no cover — defensive
+        log.warning("entertainment module import failed: %s", e)
+        return None
+    try:
+        ticker = _parse_entertainment_ticker(str(market_id))
+    except _InvalidEntertainmentTicker as e:
+        log.debug("entertainment ticker parse failed for %s: %s", market_id, e)
+        return None
+    # Source the Kalshi mid from any of: top-level current_price (set
+    # on fresh debate inputs), top-level kalshi_price (set on cached
+    # candidate rows from `_candidate_predictions`), or game_context
+    # blob (set when the candidate was assembled from a fresh debate).
+    # Without this fall-through the log-odds blend in
+    # `predict_entertainment_binary` never fires in live cycle flow.
+    kalshi_mid_raw = cand.get("current_price") or cand.get("kalshi_price")
+    if kalshi_mid_raw is None:
+        ctx_blob = cand.get("game_context") or {}
+        if isinstance(ctx_blob, str):
+            try:
+                ctx_blob = json.loads(ctx_blob)
+            except Exception:
+                ctx_blob = {}
+        if isinstance(ctx_blob, dict):
+            kalshi_mid_raw = ctx_blob.get("kalshi_price")
+    try:
+        kalshi_mid = float(kalshi_mid_raw) if kalshi_mid_raw is not None else None
+    except (TypeError, ValueError):
+        kalshi_mid = None
+    try:
+        pred = await _entertainment_predictor.predict_entertainment_binary(
+            ticker,
+            league=cand.get("league") or "ENTERTAINMENT",
+            kalshi_mid=kalshi_mid,
+        )
+    except _entertainment_predictor.EntertainmentPredictionError as e:
+        log.debug("entertainment predict failed for %s: %s", market_id, e)
+        return None
+    except Exception as e:  # pragma: no cover — defensive
+        log.warning("entertainment predict crashed for %s: %s", market_id, e)
+        return None
+    payload = pred.as_dict()
+    payload["feature_inputs"] = payload.get("raw", {}).get("features", {})
+    payload["feature_count"] = payload.get("raw", {}).get("feature_count")
+    return payload
+
+
 async def _predict_for_candidate(
     cand: dict[str, Any],
     *,
@@ -658,6 +722,8 @@ async def _predict_for_candidate(
         return await _predict_for_elections_binary(cand)
     if spec is not None and spec.predictor_hook == "events_econ_consensus_prior":
         return await _predict_for_events_econ_binary(cand)
+    if spec is not None and spec.predictor_hook == "entertainment_hybrid":
+        return await _predict_for_entertainment_binary(cand)
 
     # N-way tournament markets (task #197) — leagues that flag
     # `LeagueConfig.n_way_market=True` (ATP / WTA / F1 / PGA) and ship
