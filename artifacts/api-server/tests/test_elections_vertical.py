@@ -400,6 +400,27 @@ def test_state_bias_inverts_for_named_rep_candidate():
     assert _bias_for_region("WI", "HARRIS") == -2.5  # named Dem
 
 
+def test_polymarket_xref_candidate_alignment_in_model():
+    """Multi-outcome xref rows must be candidate-aligned before nudging
+    the YES probability — a REP xref leg must not pull a DEM ticker."""
+    ticker = parse_election_ticker("KXPRES-28-DEM")
+    now = datetime.now(timezone.utc)
+    polls = [
+        # Misaligned REP xref leg @ 0.80 — would push DEM probability
+        # down toward ~0.20 if incorrectly applied.
+        PollRow(source="polymarket_xref", signal_id="x/rep",
+                scope="US_PRES_2028", candidate="REP",
+                kind="polymarket_xref", observed_at=now,
+                sample_size=None, support_pct=80.0, weight=1.0,
+                payload={}),
+    ]
+    res = poll_of_polls_probability(ticker, polls, now=now)
+    # No aligned data at all -> prior 0.5, no contributing polls.
+    assert res.probability == pytest.approx(0.5)
+    assert res.contributing_polls == 0
+    assert res.polymarket_implied_prob is None
+
+
 def test_polymarket_xref_payload_envelope_handled(monkeypatch):
     """Architect-flagged regression: poll_polymarket_xref must accept
     the actual CLOB payload shape (`{data: [...]}`) and not crash on

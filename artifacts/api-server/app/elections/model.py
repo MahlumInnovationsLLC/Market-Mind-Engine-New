@@ -198,6 +198,14 @@ def poll_of_polls_probability(
     for row in polls:
         kind = (row.kind or "").lower()
         if kind == "polymarket_xref":
+            # Multi-outcome Polymarket markets emit one xref row per
+            # outcome (DEM + REP + IND), so we must align on candidate
+            # before folding the row into the log-odds nudge — otherwise
+            # a Republican xref row would push a Democrat-side ticker's
+            # probability the wrong way.  Mirrors the dashboard arb
+            # endpoint's filtering.
+            if cand and not _candidate_matches(cand, row.candidate or ""):
+                continue
             try:
                 implied = float(row.support_pct) / 100.0 if row.support_pct is not None else None
             except Exception:
