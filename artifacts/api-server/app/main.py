@@ -320,6 +320,77 @@ async def public_stats() -> dict[str, object]:
     return await dashboard.get_public_stats()
 
 
+@app.get("/api/public/recent-signals")
+async def public_recent_signals(limit: int = 4) -> dict[str, object]:
+    """Public — most-recent settled signals (anonymized) for the landing page."""
+    clamped = max(1, min(int(limit), 12))
+    rows = await dashboard.get_recent_settled_signals(clamped)
+    return {"signals": rows}
+
+
+class LandingLeadRequest(BaseModel):
+    email: str = Field(..., min_length=3, max_length=320)
+    interest: str | None = Field(default=None, max_length=120)
+    source: str | None = Field(default=None, max_length=80)
+
+
+@app.post("/api/public/leads")
+async def public_leads(body: LandingLeadRequest, request: Request) -> dict[str, object]:
+    """Public — capture an early-access lead from the landing form.
+
+    Stores the row in `landing_leads` and best-effort sends a confirmation
+    email via Postmark (no-op if Postmark isn't configured).  Returns
+    `{ok: true}` whether or not the email was delivered, so callers can
+    keep their UX simple.
+    """
+    import hashlib
+
+    email = body.email.strip()
+    if "@" not in email or "." not in email.split("@", 1)[-1]:
+        raise HTTPException(status_code=400, detail="invalid email")
+    interest = (body.interest or "").strip() or None
+    source = (body.source or "landing").strip() or "landing"
+    user_agent = request.headers.get("user-agent", "")[:500] or None
+    client_host = request.client.host if request.client else ""
+    ip_hash = hashlib.sha256(client_host.encode("utf-8")).hexdigest()[:32] if client_host else None
+
+    try:
+        lead_id = await dashboard.insert_landing_lead(
+            email=email,
+            interest=interest,
+            source=source,
+            user_agent=user_agent,
+            ip_hash=ip_hash,
+        )
+    except Exception as e:
+        log.warning("insert_landing_lead failed: %s", e)
+        raise HTTPException(status_code=503, detail="lead store unavailable")
+
+    interest_line = f"Interest area: {interest}\n" if interest else ""
+    text_body = (
+        "Thanks for signing up for early access to Axiom Predict.\n\n"
+        f"{interest_line}"
+        "We'll email you the moment the next vertical opens up. In the\n"
+        "meantime you can watch the live equity curve and methodology at\n"
+        "https://axiom-predict.app.\n\n"
+        "— The Axiom Predict team\n"
+    )
+    try:
+        results = await notif_postmark.send(
+            subject="You're on the Axiom Predict early-access list",
+            text_body=text_body,
+            to=[email],
+            tag="landing-lead-confirmation",
+        )
+        delivered = any(r.get("ok") for r in results)
+    except Exception as e:
+        log.warning("postmark confirmation failed for lead %s: %s", lead_id, e)
+        delivered = False
+    if delivered:
+        await dashboard.mark_lead_confirmation_sent(lead_id)
+    return {"ok": True, "lead_id": lead_id, "confirmation_sent": delivered}
+
+
 @app.get("/api/me/subscription")
 async def me_subscription(
     user: AuthedUser = Depends(require_auth),

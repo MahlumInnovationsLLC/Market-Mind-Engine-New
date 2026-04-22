@@ -259,6 +259,109 @@ async def get_public_stats() -> dict[str, Any]:
     }
 
 
+async def get_recent_settled_signals(limit: int = 4) -> list[dict[str, Any]]:
+    """Most-recent settled trades with model_prob, market settle price, and
+    actual outcome — anonymized for the public landing page.
+
+    Anonymized = no operator-identifying fields (account, position size,
+    PnL).  We expose the *vertical* and *league* (e.g. "sports / NFL") so
+    the visitor knows the swarm is real, plus the model's predicted
+    probability, the market's settle price, and the binary YES/NO
+    outcome.  Returns `[]` on any failure or when no settled trades exist.
+    """
+    limit = max(1, min(int(limit), 20))
+    try:
+        rows = await db.fetch(
+            """
+            SELECT
+              t.vertical                                       AS vertical,
+              t.league                                         AS league,
+              lower(coalesce(t.side, ''))                      AS side,
+              t.model_prob::float                              AS model_prob,
+              t.price::float                                   AS entry_price,
+              pm.actual_outcome::int                           AS actual_outcome,
+              (pm.details->>'settle_price')::float             AS settle_price,
+              to_char(t.settled_at, 'YYYY-MM-DD"T"HH24:MI:SSZ') AS settled_at
+              FROM trades t
+              JOIN trade_postmortems pm
+                ON pm.trade_id = coalesce(t.trade_id, t.id::text)
+             WHERE t.settled_at IS NOT NULL
+               AND t.model_prob IS NOT NULL
+               AND pm.actual_outcome IS NOT NULL
+             ORDER BY t.settled_at DESC NULLS LAST
+             LIMIT $1
+            """,
+            limit,
+        )
+        return [dict(r) for r in rows]
+    except Exception as e:
+        log.warning("recent_settled_signals failed: %s", e)
+        return []
+
+
+_LEADS_TABLE_READY = False
+
+
+async def _ensure_leads_table() -> None:
+    global _LEADS_TABLE_READY
+    if _LEADS_TABLE_READY:
+        return
+    await db.execute(
+        """
+        CREATE TABLE IF NOT EXISTS landing_leads (
+            id           bigserial PRIMARY KEY,
+            email        text NOT NULL,
+            interest     text,
+            source       text,
+            user_agent   text,
+            ip_hash      text,
+            created_at   timestamptz NOT NULL DEFAULT now(),
+            confirmation_sent_at timestamptz
+        )
+        """
+    )
+    await db.execute(
+        "CREATE INDEX IF NOT EXISTS landing_leads_email_idx ON landing_leads (lower(email))"
+    )
+    _LEADS_TABLE_READY = True
+
+
+async def insert_landing_lead(
+    *,
+    email: str,
+    interest: str | None,
+    source: str | None = None,
+    user_agent: str | None = None,
+    ip_hash: str | None = None,
+) -> int:
+    """Insert a row into `landing_leads` and return its id.  Creates the
+    table on first call so a fresh database doesn't need a migration."""
+    await _ensure_leads_table()
+    row = await db.fetchrow(
+        """
+        INSERT INTO landing_leads (email, interest, source, user_agent, ip_hash)
+        VALUES ($1, $2, $3, $4, $5)
+        RETURNING id
+        """,
+        email,
+        interest,
+        source,
+        user_agent,
+        ip_hash,
+    )
+    return int(row["id"])
+
+
+async def mark_lead_confirmation_sent(lead_id: int) -> None:
+    try:
+        await db.execute(
+            "UPDATE landing_leads SET confirmation_sent_at = now() WHERE id = $1",
+            lead_id,
+        )
+    except Exception as e:
+        log.warning("mark_lead_confirmation_sent failed for %s: %s", lead_id, e)
+
+
 async def get_recent_swarm_debates(limit: int = 10) -> list[dict[str, Any]]:
     """Recent swarm-debate rows including the per-persona ``analyst_verdicts``
     and ``moderator_synthesis`` jsonb columns.

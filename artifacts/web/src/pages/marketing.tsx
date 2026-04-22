@@ -57,6 +57,30 @@ interface PricingCatalog {
   tiers: PricingTier[];
 }
 
+interface LiveSignal {
+  vertical: string | null;
+  league: string | null;
+  side: string | null;
+  model_prob: number | null;
+  entry_price: number | null;
+  actual_outcome: number | null;
+  settle_price: number | null;
+  settled_at: string | null;
+}
+
+interface RecentSignalsResponse {
+  signals: LiveSignal[];
+}
+
+const INTEREST_OPTIONS: { value: string; label: string }[] = [
+  { value: "politics", label: "Politics" },
+  { value: "sports", label: "Sports" },
+  { value: "macro", label: "Macro / Fed" },
+  { value: "crypto", label: "Crypto" },
+  { value: "weather", label: "Weather" },
+  { value: "other", label: "Other" },
+];
+
 const RANGE_LABEL: Record<RangeKey, string> = {
   "7": "7D",
   "30": "30D",
@@ -120,6 +144,16 @@ export default function MarketingPage() {
   const [curveError, setCurveError] = useState<string | null>(null);
   const [stats, setStats] = useState<PublicStats | null>(null);
   const [catalog, setCatalog] = useState<PricingCatalog | null>(null);
+  const [signals, setSignals] = useState<LiveSignal[] | null>(null);
+  const [signalsError, setSignalsError] = useState<string | null>(null);
+  const [leadEmail, setLeadEmail] = useState("");
+  const [leadInterest, setLeadInterest] = useState<string>(INTEREST_OPTIONS[0].value);
+  const [leadSubmitting, setLeadSubmitting] = useState(false);
+  const [leadStatus, setLeadStatus] = useState<
+    | { kind: "ok"; message: string }
+    | { kind: "error"; message: string }
+    | null
+  >(null);
 
   useEffect(() => {
     let cancel = false;
@@ -158,10 +192,52 @@ export default function MarketingPage() {
       .catch(() => {
         // Pricing block falls back to a static placeholder.
       });
+    apiFetch<RecentSignalsResponse>("/api/public/recent-signals?limit=4")
+      .then((data) => {
+        if (!cancel) setSignals(data.signals ?? []);
+      })
+      .catch((e) => {
+        if (!cancel) {
+          setSignals([]);
+          setSignalsError(e instanceof Error ? e.message : String(e));
+        }
+      });
     return () => {
       cancel = true;
     };
   }, []);
+
+  async function submitLead(ev: React.FormEvent<HTMLFormElement>) {
+    ev.preventDefault();
+    if (leadSubmitting) return;
+    const email = leadEmail.trim();
+    if (!email || !email.includes("@")) {
+      setLeadStatus({ kind: "error", message: "Please enter a valid email." });
+      return;
+    }
+    setLeadSubmitting(true);
+    setLeadStatus(null);
+    try {
+      await apiFetch("/api/public/leads", {
+        method: "POST",
+        body: { email, interest: leadInterest, source: "landing" },
+      });
+      setLeadStatus({
+        kind: "ok",
+        message:
+          "You're on the list. Check your inbox for a confirmation from Axiom Predict.",
+      });
+      setLeadEmail("");
+    } catch (e) {
+      const msg =
+        e instanceof Error
+          ? e.message
+          : "Couldn't submit right now. Please try again.";
+      setLeadStatus({ kind: "error", message: msg });
+    } finally {
+      setLeadSubmitting(false);
+    }
+  }
 
   const lastPoint = curve.length > 0 ? curve[curve.length - 1] : null;
   const firstPoint = curve.length > 0 ? curve[0] : null;
@@ -210,6 +286,12 @@ export default function MarketingPage() {
               className="hidden md:inline px-3 py-2 text-muted-foreground hover:text-foreground transition-colors"
             >
               Live Performance
+            </a>
+            <a
+              href="#signals"
+              className="hidden md:inline px-3 py-2 text-muted-foreground hover:text-foreground transition-colors"
+            >
+              Signals
             </a>
             <a
               href="#pricing"
@@ -539,6 +621,131 @@ export default function MarketingPage() {
             Source: live <code className="text-primary font-mono">trades</code>{" "}
             table — refreshed every trading cycle.
           </p>
+        </div>
+      </section>
+
+      {/* ---------- Live Signals Strip ---------- */}
+      <section id="signals" className="border-t border-border/60">
+        <div className="max-w-6xl mx-auto px-4 md:px-6 py-20 md:py-24">
+          <SectionHeader
+            kicker="Live signals"
+            title={
+              <>
+                The four most-recent{" "}
+                <span className="text-gradient-brand">settled signals.</span>
+              </>
+            }
+            subtitle="Pulled live from the trades table — anonymized to vertical, model probability, market settle, and outcome. No cherry-picking, no curation."
+          />
+          <div
+            className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 mt-12"
+            data-testid="grid-live-signals"
+          >
+            {signals === null ? (
+              [0, 1, 2, 3].map((i) => (
+                <div
+                  key={i}
+                  className="rounded-2xl border border-border bg-card/60 h-44 animate-pulse"
+                />
+              ))
+            ) : signals.length === 0 ? (
+              <div
+                className="col-span-full rounded-2xl border border-border bg-card/60 px-6 py-10 text-center text-sm text-muted-foreground"
+                data-testid="empty-live-signals"
+              >
+                {signalsError
+                  ? "Live signals are temporarily unavailable. Check back shortly."
+                  : "No settled signals yet — the next trading cycle will fill this strip."}
+              </div>
+            ) : (
+              signals.map((s, i) => (
+                <SignalCard key={i} signal={s} index={i} />
+              ))
+            )}
+          </div>
+        </div>
+      </section>
+
+      {/* ---------- Lead Capture ---------- */}
+      <section id="early-access" className="border-t border-border/60 bg-card/40">
+        <div className="max-w-3xl mx-auto px-4 md:px-6 py-20 md:py-24">
+          <SectionHeader
+            kicker="Early access"
+            title={
+              <>
+                Want the next vertical?{" "}
+                <span className="text-gradient-brand">Tell us where to look.</span>
+              </>
+            }
+            subtitle="We're rolling new verticals out one at a time. Drop your email and the area you care about — we'll ping you the day it goes live."
+          />
+          <form
+            onSubmit={submitLead}
+            className="mt-10 rounded-2xl border border-border bg-background/80 p-6 md:p-8 space-y-5"
+            data-testid="form-lead-capture"
+            noValidate
+          >
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              <label className="flex flex-col gap-2">
+                <span className="text-[11px] uppercase tracking-[0.18em] text-muted-foreground font-medium">
+                  Email
+                </span>
+                <input
+                  type="email"
+                  required
+                  autoComplete="email"
+                  placeholder="you@firm.com"
+                  value={leadEmail}
+                  onChange={(e) => setLeadEmail(e.target.value)}
+                  className="rounded-xl border border-border bg-background px-4 py-3 text-sm text-foreground placeholder:text-muted-foreground/60 focus:outline-none focus:border-primary/60"
+                  data-testid="input-lead-email"
+                />
+              </label>
+              <label className="flex flex-col gap-2">
+                <span className="text-[11px] uppercase tracking-[0.18em] text-muted-foreground font-medium">
+                  Interest area
+                </span>
+                <select
+                  value={leadInterest}
+                  onChange={(e) => setLeadInterest(e.target.value)}
+                  className="rounded-xl border border-border bg-background px-4 py-3 text-sm text-foreground focus:outline-none focus:border-primary/60"
+                  data-testid="select-lead-interest"
+                >
+                  {INTEREST_OPTIONS.map((o) => (
+                    <option key={o.value} value={o.value}>
+                      {o.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            </div>
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+              <p className="text-xs text-muted-foreground">
+                We'll only email you about Axiom Predict launches. No spam, unsubscribe anytime.
+              </p>
+              <button
+                type="submit"
+                disabled={leadSubmitting}
+                className="rounded-full bg-primary text-primary-foreground px-6 py-3 text-sm font-semibold hover:opacity-90 transition-opacity glow-primary disabled:opacity-60 disabled:cursor-not-allowed"
+                data-testid="button-lead-submit"
+              >
+                {leadSubmitting ? "Submitting…" : "Notify me →"}
+              </button>
+            </div>
+            {leadStatus && (
+              <div
+                className={`rounded-xl border px-4 py-3 text-sm ${
+                  leadStatus.kind === "ok"
+                    ? "border-success/40 bg-success/10 text-success"
+                    : "border-destructive/40 bg-destructive/10 text-destructive"
+                }`}
+                data-testid={`lead-status-${leadStatus.kind}`}
+                role="status"
+              >
+                {leadStatus.message}
+              </div>
+            )}
+          </form>
         </div>
       </section>
 
@@ -957,6 +1164,102 @@ function MethodCard({
       <p className="text-sm text-muted-foreground leading-relaxed">{body}</p>
     </div>
   );
+}
+
+function SignalCard({ signal, index }: { signal: LiveSignal; index: number }) {
+  const sideUpper = (signal.side || "").toUpperCase();
+  const isYesSide = sideUpper === "YES" || sideUpper === "Y" || sideUpper === "BUY";
+  const predictedYes = isYesSide
+    ? signal.model_prob
+    : signal.model_prob !== null
+      ? 1 - signal.model_prob
+      : null;
+  const calledYes = isYesSide;
+  const outcomeYes = signal.actual_outcome === 1;
+  const correct =
+    signal.actual_outcome === null ? null : calledYes === outcomeYes;
+  const verticalLabel = (signal.vertical || "Market").replace(/_/g, " ");
+  const leagueLabel = signal.league ? signal.league.toUpperCase() : null;
+  const settledTs = signal.settled_at ? new Date(signal.settled_at) : null;
+  const settledRel = settledTs ? relTime(settledTs) : "—";
+  const settlePct =
+    signal.settle_price !== null && signal.settle_price !== undefined
+      ? `${(signal.settle_price * 100).toFixed(0)}¢`
+      : "—";
+  const modelPct =
+    predictedYes !== null && predictedYes !== undefined
+      ? `${(predictedYes * 100).toFixed(0)}%`
+      : "—";
+
+  return (
+    <div
+      className="rounded-2xl border border-border bg-card/70 p-5 flex flex-col gap-3 hover:border-primary/40 transition-colors"
+      data-testid={`card-live-signal-${index}`}
+    >
+      <div className="flex items-center justify-between">
+        <span className="text-[10px] font-semibold uppercase tracking-[0.2em] text-primary">
+          {verticalLabel}
+          {leagueLabel ? ` · ${leagueLabel}` : ""}
+        </span>
+        {correct === null ? (
+          <span className="text-[10px] uppercase tracking-widest text-muted-foreground">
+            Pending
+          </span>
+        ) : correct ? (
+          <span className="text-[10px] uppercase tracking-widest font-semibold text-success">
+            Hit
+          </span>
+        ) : (
+          <span className="text-[10px] uppercase tracking-widest font-semibold text-destructive">
+            Miss
+          </span>
+        )}
+      </div>
+      <div className="text-sm text-foreground">
+        Swarm called <span className="font-semibold">{calledYes ? "YES" : "NO"}</span>{" "}
+        with confidence <span className="font-semibold text-primary">{modelPct}</span>
+      </div>
+      <div className="grid grid-cols-2 gap-3 text-xs">
+        <div className="rounded-lg border border-border bg-background/60 px-3 py-2">
+          <div className="text-[10px] uppercase tracking-widest text-muted-foreground">
+            Market settle
+          </div>
+          <div className="mt-1 font-mono text-sm text-foreground">{settlePct}</div>
+        </div>
+        <div className="rounded-lg border border-border bg-background/60 px-3 py-2">
+          <div className="text-[10px] uppercase tracking-widest text-muted-foreground">
+            Outcome
+          </div>
+          <div
+            className={`mt-1 font-mono text-sm ${
+              outcomeYes ? "text-success" : "text-destructive"
+            }`}
+          >
+            {signal.actual_outcome === null
+              ? "—"
+              : outcomeYes
+                ? "YES"
+                : "NO"}
+          </div>
+        </div>
+      </div>
+      <div className="text-[11px] text-muted-foreground mt-auto">
+        Settled {settledRel}
+      </div>
+    </div>
+  );
+}
+
+function relTime(d: Date): string {
+  const diffMs = Date.now() - d.getTime();
+  const sec = Math.floor(diffMs / 1000);
+  if (sec < 60) return `${sec}s ago`;
+  const min = Math.floor(sec / 60);
+  if (min < 60) return `${min}m ago`;
+  const hr = Math.floor(min / 60);
+  if (hr < 48) return `${hr}h ago`;
+  const day = Math.floor(hr / 24);
+  return `${day}d ago`;
 }
 
 function Faq({ q, a }: { q: string; a: string }) {
