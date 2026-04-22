@@ -325,7 +325,7 @@ COMMODITIES_PERSONAS: tuple[Persona, ...] = (
 
 
 # ---------------------------------------------------------------------------
-# Tech / AI profile (5 personas).
+# Tech / AI profile (8 personas: 5 base + 3 layered industry/hype/bench).
 # ---------------------------------------------------------------------------
 TECH_AI_PERSONAS: tuple[Persona, ...] = (
     Persona(
@@ -987,7 +987,7 @@ PROFILES: dict[str, PersonaProfile] = {
     "tech-ai": PersonaProfile(
         name="tech-ai",
         personas=TECH_AI_PERSONAS,
-        description="Roadmap + benchmarks + capex + regulatory stack (5).",
+        description="Roadmap + benchmarks + capex + regulatory + layered industry/hype/bench stack (8).",
     ),
     "geopolitics": PersonaProfile(
         name="geopolitics",
