@@ -375,7 +375,6 @@ html.light-theme {
   @apply text-muted-foreground;
 }
 
-/* Rest of the file unchanged */
 @layer utilities {
   input[type="search"]::-webkit-search-cancel-button {
     @apply hidden;
