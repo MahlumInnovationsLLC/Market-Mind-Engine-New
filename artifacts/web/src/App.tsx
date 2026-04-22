@@ -3,7 +3,6 @@ import {
   ClerkProvider,
   SignIn,
   SignUp,
-  SignInButton,
   Show,
   useAuth,
   useClerk,
@@ -37,8 +36,14 @@ import AdminPage from "@/pages/admin";
 import VerticalsPage from "@/pages/verticals";
 import SettingsNotificationsPage from "@/pages/settings-notifications";
 import TradeDetailPage from "@/pages/trade-detail";
+import TradingPage from "@/pages/trading";
+import PositionsPage from "@/pages/positions";
+import IntelligencePage from "@/pages/intelligence";
+import SystemPage from "@/pages/system";
+import ProfilePage from "@/pages/profile";
 import SessionExpiredOverlay from "@/components/session-expired-overlay";
 import GlobalSearch from "@/components/global-search";
+import { AppShell } from "@/components/shell/app-shell";
 
 const clerkPubKey = import.meta.env.VITE_CLERK_PUBLISHABLE_KEY;
 // Empty in dev, auto-set in prod by the platform.
@@ -117,8 +122,6 @@ const clerkAppearance = {
 };
 
 function SignInPage() {
-  // To update login providers, app branding, or OAuth settings use the Auth
-  // pane in the workspace toolbar. More information can be found in the Replit docs.
   return (
     <div className="flex min-h-[100dvh] items-center justify-center bg-background px-4 font-mono">
       <SignIn
@@ -132,8 +135,6 @@ function SignInPage() {
 }
 
 function SignUpPage() {
-  // To update login providers, app branding, or OAuth settings use the Auth
-  // pane in the workspace toolbar. More information can be found in the Replit docs.
   return (
     <div className="flex min-h-[100dvh] items-center justify-center bg-background px-4 font-mono">
       <SignUp
@@ -147,10 +148,6 @@ function SignUpPage() {
 }
 
 function HomeRoute() {
-  // Spec: signed-out visitors get the marketing page; authenticated
-  // users land on the operator console (`/app`). Anyone who explicitly
-  // wants the marketing copy can still reach it via a logged-out
-  // browser or by signing out.
   return (
     <>
       <Show when="signed-in">
@@ -163,30 +160,42 @@ function HomeRoute() {
   );
 }
 
-function AppRoute() {
+function AdminForbidden({ email }: { email: string | null }) {
   return (
-    <>
-      <Show when="signed-in">
-        <ApprovalGate />
-      </Show>
-      <Show when="signed-out">
-        <Redirect to="/" />
-      </Show>
-    </>
+    <div className="min-h-[100dvh] bg-background text-foreground font-mono flex items-center justify-center p-6">
+      <div className="max-w-md text-center space-y-4 border border-destructive/40 bg-destructive/5 rounded-md p-8">
+        <div className="text-destructive text-xs uppercase tracking-widest">
+          HTTP 403 :: Forbidden
+        </div>
+        <div className="text-lg font-semibold">Admin access required</div>
+        <p className="text-sm text-muted-foreground">
+          Your account{email ? ` (${email})` : ""} is approved as an operator
+          but is not an admin. Ask an existing admin to promote you from the
+          admin console.
+        </p>
+        <a
+          href="/"
+          className="inline-block text-xs uppercase tracking-widest text-primary underline-offset-4 hover:underline"
+        >
+          ← back to dashboard
+        </a>
+      </div>
+    </div>
   );
 }
 
-function ApprovalGate() {
-  // Operator allow-list check. Resolved server-side from
-  // `OPERATOR_ALLOWED_EMAILS` env var or Clerk public_metadata.approved.
-  // Unapproved users see PendingApproval; the API also enforces 403.
+/**
+ * Authenticated shell + approval gate consolidated into one component
+ * so the access query is fired once per session and the chrome (sidebar,
+ * header, banners) is mounted exactly once for the whole signed-in
+ * surface area. Wouter unmounts route children on navigation, but the
+ * shell itself persists so sidebar collapse state is preserved.
+ */
+function AuthedShell() {
   const { data, isLoading, isError, error } = useGetMyAccess({
     query: {
       queryKey: getGetMyAccessQueryKey(),
       retry: (failureCount, err: unknown) => {
-        // 403 is a definite "not approved" — don't retry. 401 can happen
-        // transiently if the Clerk token bridge hasn't attached yet, so
-        // give it a couple of retries before showing an error.
         const status = (err as { status?: number } | null)?.status;
         if (status === 403) return false;
         return failureCount < 3;
@@ -217,207 +226,53 @@ function ApprovalGate() {
     return <PendingApproval email={data?.email ?? null} />;
   }
 
-  return <Dashboard />;
+  const isAdmin = !!data.is_admin;
+  const operatorEmail = data.email ?? null;
+
+  return (
+    <AppShell isAdmin={isAdmin}>
+      <Switch>
+        <Route path="/app" component={Dashboard} />
+        <Route path="/pipeline" component={PipelinePage} />
+        <Route path="/verticals" component={VerticalsPage} />
+        <Route path="/trading" component={TradingPage} />
+        <Route path="/positions" component={PositionsPage} />
+        <Route path="/intelligence" component={IntelligencePage} />
+        <Route path="/system" component={SystemPage} />
+        <Route path="/profile" component={ProfilePage} />
+        <Route path="/settings/notifications" component={SettingsNotificationsPage} />
+        <Route path="/trade/:ref" component={TradeDetailPage} />
+        <Route path="/admin">
+          {isAdmin ? <AdminPage /> : <AdminForbidden email={operatorEmail} />}
+        </Route>
+        <Route component={NotFound} />
+      </Switch>
+    </AppShell>
+  );
 }
 
-function ProtectedPipeline() {
-  const { data, isLoading, isError, error } = useGetMyAccess({
-    query: {
-      queryKey: getGetMyAccessQueryKey(),
-      retry: (failureCount, err: unknown) => {
-        const status = (err as { status?: number } | null)?.status;
-        if (status === 403) return false;
-        return failureCount < 3;
-      },
-      staleTime: 30_000,
-    },
-  });
-  if (isLoading) {
-    return (
-      <div className="min-h-[100dvh] bg-background text-muted-foreground font-mono flex items-center justify-center text-xs uppercase tracking-widest">
-        AUTH :: verifying access…
-      </div>
-    );
-  }
-  if (isError) {
-    const status = (error as { status?: number } | null)?.status;
-    if (status === 403) return <PendingApproval />;
-    return (
-      <div className="min-h-[100dvh] bg-background text-destructive font-mono flex items-center justify-center text-xs uppercase tracking-widest p-6 text-center">
-        AUTH :: unable to verify access (HTTP {status ?? "?"})
-      </div>
-    );
-  }
-  if (!data?.approved) return <PendingApproval email={data?.email ?? null} />;
-  return <PipelinePage />;
-}
-
-function ProtectedTradeDetail() {
-  const { data, isLoading, isError, error } = useGetMyAccess({
-    query: {
-      queryKey: getGetMyAccessQueryKey(),
-      retry: (failureCount, err: unknown) => {
-        const status = (err as { status?: number } | null)?.status;
-        if (status === 403) return false;
-        return failureCount < 3;
-      },
-      staleTime: 30_000,
-    },
-  });
-  if (isLoading) {
-    return (
-      <div className="min-h-[100dvh] bg-background text-muted-foreground font-mono flex items-center justify-center text-xs uppercase tracking-widest">
-        AUTH :: verifying access…
-      </div>
-    );
-  }
-  if (isError) {
-    const status = (error as { status?: number } | null)?.status;
-    if (status === 403) return <PendingApproval />;
-    return (
-      <div className="min-h-[100dvh] bg-background text-destructive font-mono flex items-center justify-center text-xs uppercase tracking-widest p-6 text-center">
-        AUTH :: unable to verify access (HTTP {status ?? "?"})
-      </div>
-    );
-  }
-  if (!data?.approved) return <PendingApproval email={data?.email ?? null} />;
-  return <TradeDetailPage />;
-}
-
-function TradeDetailRoute() {
+function AuthedShellRoute() {
+  // Catch-all for any path not matched by the public-route Switch above.
+  // Signed-in users get the shell (which has its own inner NotFound for
+  // unknown sub-paths); signed-out users get the public NotFound page so
+  // unknown URLs don't silently bounce to `/`.
   return (
     <>
       <Show when="signed-in">
-        <ProtectedTradeDetail />
+        <AuthedShell />
       </Show>
       <Show when="signed-out">
-        <Redirect to="/" />
+        <NotFound />
       </Show>
     </>
   );
 }
 
-function PipelineRoute() {
-  return (
-    <>
-      <Show when="signed-in">
-        <ProtectedPipeline />
-      </Show>
-      <Show when="signed-out">
-        <Redirect to="/" />
-      </Show>
-    </>
-  );
-}
-
-function ProtectedAdmin() {
-  const { data, isLoading, isError, error } = useGetMyAccess({
-    query: {
-      queryKey: getGetMyAccessQueryKey(),
-      retry: (failureCount, err: unknown) => {
-        const status = (err as { status?: number } | null)?.status;
-        if (status === 403) return false;
-        return failureCount < 3;
-      },
-      staleTime: 30_000,
-    },
-  });
-  if (isLoading) {
-    return (
-      <div className="min-h-[100dvh] bg-background text-muted-foreground font-mono flex items-center justify-center text-xs uppercase tracking-widest">
-        AUTH :: verifying access…
-      </div>
-    );
-  }
-  if (isError) {
-    const status = (error as { status?: number } | null)?.status;
-    if (status === 403) return <PendingApproval />;
-    return (
-      <div className="min-h-[100dvh] bg-background text-destructive font-mono flex items-center justify-center text-xs uppercase tracking-widest p-6 text-center">
-        AUTH :: unable to verify access (HTTP {status ?? "?"})
-      </div>
-    );
-  }
-  if (!data?.approved) return <PendingApproval email={data?.email ?? null} />;
-  if (!data.is_admin) return <AdminForbidden email={data?.email ?? null} />;
-  return <AdminPage />;
-}
-
-function AdminForbidden({ email }: { email: string | null }) {
-  return (
-    <div className="min-h-[100dvh] bg-background text-foreground font-mono flex items-center justify-center p-6">
-      <div className="max-w-md text-center space-y-4 border border-destructive/40 bg-destructive/5 rounded-md p-8">
-        <div className="text-destructive text-xs uppercase tracking-widest">
-          HTTP 403 :: Forbidden
-        </div>
-        <div className="text-lg font-semibold">Admin access required</div>
-        <p className="text-sm text-muted-foreground">
-          Your account{email ? ` (${email})` : ""} is approved as an operator
-          but is not an admin. Ask an existing admin to promote you from the
-          admin console.
-        </p>
-        <a
-          href="/"
-          className="inline-block text-xs uppercase tracking-widest text-primary underline-offset-4 hover:underline"
-        >
-          ← back to dashboard
-        </a>
-      </div>
-    </div>
-  );
-}
-
-function SettingsNotificationsRoute() {
-  return (
-    <>
-      <Show when="signed-in">
-        <SettingsNotificationsPage />
-      </Show>
-      <Show when="signed-out">
-        <Redirect to="/" />
-      </Show>
-    </>
-  );
-}
-
-function AdminRoute() {
-  return (
-    <>
-      <Show when="signed-in">
-        <ProtectedAdmin />
-      </Show>
-      <Show when="signed-out">
-        <Redirect to="/" />
-      </Show>
-    </>
-  );
-}
-
-function VerticalsRoute() {
-  return (
-    <>
-      <Show when="signed-in">
-        <VerticalsPage />
-      </Show>
-      <Show when="signed-out">
-        <Redirect to="/" />
-      </Show>
-    </>
-  );
-}
-
-/**
- * Bridges Clerk's session token into the generated API client.  Every
- * outgoing request from `@workspace/api-client-react` will include the
- * current Clerk JWT as `Authorization: Bearer <token>`.
- */
 function ClerkApiTokenBridge() {
   const { isSignedIn, getToken } = useAuth();
   useEffect(() => {
     if (isSignedIn) {
       setAuthTokenGetter(async (opts) => {
-        // When the API client retries after a 401, ask Clerk for a fresh
-        // JWT instead of returning the cached (likely expired) one.
         const token = await getToken(
           opts?.forceRefresh ? { skipCache: true } : undefined,
         );
@@ -469,8 +324,6 @@ function SessionExpiredBridge({
 
   useEffect(() => {
     setUnauthorizedHandler(() => {
-      // Drop every cached telemetry response so a re-authenticated user
-      // never sees data from the previous session.
       queryClient.cancelQueries();
       queryClient.clear();
       onExpiredRef.current();
@@ -516,18 +369,15 @@ function ClerkProviderWithRoutes() {
         <TooltipProvider>
           <Switch>
             <Route path="/" component={HomeRoute} />
-            <Route path="/app" component={AppRoute} />
-            <Route path="/pipeline" component={PipelineRoute} />
             <Route path="/pricing" component={PricingPage} />
             <Route path="/billing" component={BillingPage} />
             <Route path="/health" component={HealthPage} />
-            <Route path="/admin" component={AdminRoute} />
-            <Route path="/verticals" component={VerticalsRoute} />
-            <Route path="/settings/notifications" component={SettingsNotificationsRoute} />
-            <Route path="/trade/:ref" component={TradeDetailRoute} />
-            <Route path="/sign-in/*?" component={SignInPage} />
-            <Route path="/sign-up/*?" component={SignUpPage} />
-            <Route component={NotFound} />
+            <Route path="/sign-in/:rest*" component={SignInPage} />
+            <Route path="/sign-up/:rest*" component={SignUpPage} />
+            {/* Catch-all: every other path goes through the
+                authenticated shell, which itself handles
+                approval-gating and 404s. */}
+            <Route component={AuthedShellRoute} />
           </Switch>
           <Show when="signed-in">
             <GlobalSearch />
