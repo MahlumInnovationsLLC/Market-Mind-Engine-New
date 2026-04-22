@@ -39,6 +39,7 @@ from ..exchange_kill_switch import (
 )
 from .bus import bus
 from . import client as kalshi_client
+from . import orderbook as kalshi_orderbook
 
 log = logging.getLogger(__name__)
 
@@ -287,6 +288,20 @@ async def submit_order(req: OrderRequest, *, force_paper: bool | None = None) ->
                       extra={"reason": "bad_price"})
         raise OrderRejected("limit_price_cents must be 1..99")
 
+    # ---- pre-submit orderbook liquidity / slippage guard -----------------
+    # When the request carries `model_edge_cents` in its context, project the
+    # worst-case fill against the cached WS orderbook. If projected slippage
+    # would erase more than `slippage_guard_max_edge_pct` of the model edge,
+    # reject before submission with reason=`slippage_guard`.
+    guard = await _check_slippage_guard(req, settings=s)
+    if guard is not None:
+        await _record(req, paper=paper, state="rejected",
+                      price=req.limit_price_cents or 0,
+                      extra={"reason": "slippage_guard", **guard})
+        raise OrderRejected(
+            f"slippage guard: {guard.get('detail') or 'rejected'}"
+        )
+
     record = OrderRecord(
         order_id=req.client_order_id,
         request=req,
@@ -512,6 +527,113 @@ async def handle_ws_fill(message: dict[str, Any]) -> None:
 
 
 # --- helpers --------------------------------------------------------------
+
+async def _check_slippage_guard(req: OrderRequest, *, settings) -> dict[str, Any] | None:
+    """Project worst-case fill against the cached orderbook.
+
+    Returns a metadata dict to attach to the rejection (and log on the
+    cycle) when the guard fires; returns None when the order is allowed
+    to proceed.
+
+    The guard is a no-op when:
+      * the order isn't a limit order (we don't quote a reference price);
+      * the request context doesn't include `model_edge_cents`;
+      * the cache has no book for the ticker (degraded mode — we don't
+        block trading just because WS hasn't delivered a snapshot yet);
+      * the configured threshold is 0 (operator-disabled).
+    """
+    threshold_pct = float(getattr(settings, "slippage_guard_max_edge_pct", 0.0) or 0.0)
+    if threshold_pct <= 0.0:
+        return None
+    if req.type != "limit" or req.limit_price_cents is None:
+        return None
+    ctx = req.context if isinstance(req.context, dict) else {}
+    edge_raw = ctx.get("model_edge_cents")
+    if edge_raw is None:
+        # Fall back to fractional `model_edge` (probability units, 0..1).
+        # 0.04 = 4¢ on a 1¢-100¢ book.
+        prob_edge = ctx.get("model_edge")
+        if prob_edge is None:
+            return None
+        try:
+            edge_cents = abs(float(prob_edge)) * 100.0
+        except (TypeError, ValueError):
+            return None
+    else:
+        try:
+            edge_cents = abs(float(edge_raw))
+        except (TypeError, ValueError):
+            return None
+    if edge_cents <= 0:
+        return None
+
+    worst, filled = await kalshi_orderbook.orderbook_cache.worst_fill_price(
+        req.market_ticker,
+        action=req.action,
+        side=req.side,
+        count=int(req.count),
+    )
+    # Cache miss → degraded; allow.
+    if worst is None and filled == 0:
+        snap = await kalshi_orderbook.orderbook_cache.snapshot(req.market_ticker)
+        if snap is None:
+            return None
+        # Book exists but is empty on this side: zero liquidity.
+        return {
+            "detail": "no liquidity on requested side",
+            "market_ticker": req.market_ticker,
+            "side": req.side,
+            "requested_count": int(req.count),
+            "filled_available": 0,
+            "model_edge_cents": edge_cents,
+            "threshold_pct": threshold_pct,
+        }
+    if filled < int(req.count):
+        # Partial book depth — treat as a liquidity reject too.
+        return {
+            "detail": (
+                f"insufficient depth: book covers {filled} of {req.count}"
+            ),
+            "market_ticker": req.market_ticker,
+            "side": req.side,
+            "requested_count": int(req.count),
+            "filled_available": int(filled),
+            "worst_fill_price_cents": int(worst) if worst is not None else None,
+            "model_edge_cents": edge_cents,
+            "threshold_pct": threshold_pct,
+        }
+
+    limit = int(req.limit_price_cents)
+    # Slippage in cents per contract. For a BUY we paid more than we
+    # wanted (worst > limit); for a SELL we received less (worst < limit).
+    # In both cases the magnitude of "worse-than-limit" is what erodes
+    # the model edge. Negative => the book is *better* than our limit
+    # (zero slippage).
+    if (req.action or "").lower() == "sell":
+        slip_cents = max(0, limit - int(worst))
+    else:
+        slip_cents = max(0, int(worst) - limit)
+    erased_pct = (slip_cents / edge_cents) * 100.0 if edge_cents > 0 else 0.0
+    if erased_pct > threshold_pct:
+        return {
+            "detail": (
+                f"projected slippage {slip_cents}¢ erases "
+                f"{erased_pct:.1f}% of {edge_cents:.2f}¢ edge "
+                f"(threshold {threshold_pct:.1f}%)"
+            ),
+            "market_ticker": req.market_ticker,
+            "side": req.side,
+            "requested_count": int(req.count),
+            "filled_available": int(filled),
+            "worst_fill_price_cents": int(worst),
+            "limit_price_cents": limit,
+            "slippage_cents": slip_cents,
+            "model_edge_cents": edge_cents,
+            "edge_erased_pct": round(erased_pct, 4),
+            "threshold_pct": threshold_pct,
+        }
+    return None
+
 
 async def _record(
     req: OrderRequest,

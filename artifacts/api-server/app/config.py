@@ -93,6 +93,14 @@ class Settings:
     settlement_enabled: bool
     settlement_interval_seconds: int
 
+    # Pre-submit slippage guard (see app.kalshi.lifecycle): when an order
+    # request carries a model_edge_cents value, the lifecycle compares the
+    # WS-cached worst-case fill price against the limit price.  If the
+    # projected slippage erases more than this percentage of the model
+    # edge, the trade is rejected with reason=`slippage_guard`.  Set to
+    # 0 to disable.  Default 50%: half the edge gone to slippage = nope.
+    slippage_guard_max_edge_pct: float
+
     # Verticals the orchestrator schedules.  One asyncio task per
     # vertical, each tick runs run_cycle(vertical) which scopes
     # candidate selection to that vertical's leagues.
@@ -211,6 +219,9 @@ def get_settings() -> Settings:
         ),
         settlement_interval_seconds=max(
             10, int(os.environ.get("AXIOM_SETTLEMENT_INTERVAL_SECONDS") or "60")
+        ),
+        slippage_guard_max_edge_pct=max(
+            0.0, float(os.environ.get("AXIOM_SLIPPAGE_GUARD_MAX_EDGE_PCT") or "50")
         ),
         model_cache_dir=resolve_model_cache_dir(),
         port=int(os.environ.get("PORT", "8080")),

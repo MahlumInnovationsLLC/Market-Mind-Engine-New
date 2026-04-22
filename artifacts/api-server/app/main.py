@@ -179,6 +179,8 @@ async def lifespan(_: FastAPI):
     try:
         await kalshi_ws.maybe_start_ws()
         fill_task = await kalshi_lifecycle.attach_ws_fill_handler()
+        from .kalshi import orderbook as kalshi_orderbook
+        await kalshi_orderbook.start_orderbook_consumer()
     except Exception as e:
         log.warning("Kalshi WS startup skipped: %s", e)
 
@@ -306,6 +308,11 @@ async def lifespan(_: FastAPI):
                 pass
         try:
             await kalshi_ws.stop_ws()
+        except Exception:
+            pass
+        try:
+            from .kalshi import orderbook as _kalshi_orderbook
+            await _kalshi_orderbook.stop_orderbook_consumer()
         except Exception:
             pass
         if fill_task is not None:

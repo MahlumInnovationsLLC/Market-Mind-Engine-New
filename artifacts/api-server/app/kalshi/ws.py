@@ -24,7 +24,7 @@ from .bus import bus
 log = logging.getLogger(__name__)
 
 
-DEFAULT_CHANNELS = ("fill", "orderbook_delta", "ticker")
+DEFAULT_CHANNELS = ("fill", "orderbook_snapshot", "orderbook_delta", "ticker")
 
 
 class KalshiWebSocket:
