@@ -594,9 +594,19 @@ async def _predict_for_events_econ_binary(cand: dict[str, Any]) -> dict[str, Any
     except _InvalidEventsEconTicker as e:
         log.debug("events-econ ticker parse failed for %s: %s", market_id, e)
         return None
+    # Pass the candidate's current Kalshi YES mid into the predictor
+    # so it can fold the pre-release market into the consensus-prior
+    # probability via a log-odds Bayesian blend.
+    kalshi_mid_raw = cand.get("current_price")
+    try:
+        kalshi_mid = float(kalshi_mid_raw) if kalshi_mid_raw is not None else None
+    except (TypeError, ValueError):
+        kalshi_mid = None
     try:
         pred = await _events_econ_predictor.predict_events_econ_binary(
-            ticker, league=cand.get("league") or "EVENTS_ECON"
+            ticker,
+            league=cand.get("league") or "EVENTS_ECON",
+            kalshi_mid=kalshi_mid,
         )
     except _events_econ_predictor.EventsEconPredictionError as e:
         log.debug("events-econ predict failed for %s: %s", market_id, e)

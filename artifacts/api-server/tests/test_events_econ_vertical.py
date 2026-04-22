@@ -313,6 +313,72 @@ def test_promotion_ineligible_when_brier_too_high():
     assert "Brier" in status.reason
 
 
+# ---------------------------------------------------------------------------
+# Variance estimator falls back to (previous, actual) when consensus is missing
+# ---------------------------------------------------------------------------
+
+
+def test_variance_uses_previous_when_consensus_missing():
+    """The 2-yr FRED back-fill carries `previous` instead of `consensus`.
+
+    The variance estimator must still learn a sigma from those rows so
+    the model isn't permanently stuck on the per-release-type default.
+    """
+    from app.events_econ.model import _rolling_forecast_error_sigma
+    # Errors vary so the variance estimator gets a non-zero sigma.
+    history = [
+        _row(release_type="CPI", previous=2.0, actual=2.0 + (i - 10) * 0.05,
+             days_ago=30 + i)
+        for i in range(20)
+    ]
+    sigma, n = _rolling_forecast_error_sigma(history)
+    assert n == 20
+    assert sigma > 0.0
+
+
+# ---------------------------------------------------------------------------
+# Kalshi mid blend (predictor)
+# ---------------------------------------------------------------------------
+
+
+def test_kalshi_mid_blend_pulls_probability_toward_market():
+    """When kalshi_mid is provided, probability blends toward it in log-odds."""
+    import asyncio
+    from app.events_econ import predictor as ee_pred
+    from unittest.mock import patch
+
+    upcoming = _row(release_type="CPI", consensus=3.0, days_ago=-1.0)
+    history = [_row(release_type="CPI", consensus=3.0, actual=3.0 + (i-5)*0.05)
+               for i in range(15)]
+
+    async def _fake_resolve(ticker, *, lookback_days=730):
+        return [upcoming, *history]
+
+    with patch.object(ee_pred, "resolve_releases", side_effect=_fake_resolve):
+        # No kalshi_mid -> baseline probability.
+        baseline = asyncio.run(
+            ee_pred.predict_events_econ_binary("KXCPI-24DEC-ABOVE3")
+        )
+        # kalshi_mid = 0.80 -> probability shifts up toward market.
+        with_market_high = asyncio.run(
+            ee_pred.predict_events_econ_binary(
+                "KXCPI-24DEC-ABOVE3", kalshi_mid=0.80,
+            )
+        )
+        # kalshi_mid = 0.20 -> probability shifts down.
+        with_market_low = asyncio.run(
+            ee_pred.predict_events_econ_binary(
+                "KXCPI-24DEC-ABOVE3", kalshi_mid=0.20,
+            )
+        )
+
+    assert with_market_high.probability > baseline.probability
+    assert with_market_low.probability < baseline.probability
+    assert with_market_high.raw["kalshi_blend"]["applied"] is True
+    assert with_market_high.raw["kalshi_blend"]["weight"] > 0.0
+    assert baseline.raw["kalshi_blend"]["applied"] is False
+
+
 def test_promotion_eligible_when_thresholds_met():
     async def _fake_read_mult():
         return promotion_mod.DEFAULT_MULTIPLIER

@@ -287,6 +287,13 @@ async def poll_fred_backfill() -> int:
     light traffic).  Each settled row lands as `(source='fred', ...)`
     keyed by `(series_id, observation_date)` so re-pulling is
     idempotent.
+
+    Each row carries both the print's `actual` AND the prior print's
+    value as `previous` (a random-walk / naive consensus benchmark).
+    The model's variance estimator falls back to (previous, actual)
+    pairs when an explicit (consensus, actual) pair isn't available,
+    so the FRED back-fill alone gives the rolling forecast-error
+    sigma a 2-year settled-history anchor.
     """
     rows: list[dict[str, Any]] = []
     end = datetime.now(timezone.utc)
@@ -305,6 +312,10 @@ async def poll_fred_backfill() -> int:
         if len(lines) <= 1:
             continue
         # CSV header: DATE,VALUE  (or DATE,<series_id>)
+        # Pre-pass: parse all (date, value) rows so we can carry the
+        # prior print's value through as `previous` (the naive
+        # random-walk consensus).
+        parsed: list[tuple[datetime, float]] = []
         for raw_line in lines[1:]:
             try:
                 date_s, value_s = raw_line.split(",", 1)
@@ -323,17 +334,27 @@ async def poll_fred_backfill() -> int:
                 )
             except ValueError:
                 continue
+            parsed.append((release_at, value))
+        # Stable order ascending so previous-row carry works.
+        parsed.sort(key=lambda t: t[0])
+        prev_value: float | None = None
+        for release_at, value in parsed:
             rows.append({
                 "source": "fred",
-                "signal_id": f"{series_id}/{date_s.strip()}",
+                "signal_id": f"{series_id}/{release_at.strftime('%Y-%m-%d')}",
                 "release_type": rtype,
                 "release_at": release_at,
-                "consensus": None,
-                "previous": None,
+                # Naive random-walk consensus = prior print's value.
+                # Lets the variance estimator anchor on (consensus, actual)
+                # pairs for the full 2yr back-fill window even though
+                # FRED itself doesn't publish forecast consensus.
+                "consensus": prev_value,
+                "previous": prev_value,
                 "actual": value,
                 "revised_previous": None,
-                "payload": {"series_id": series_id},
+                "payload": {"series_id": series_id, "naive_consensus": True},
             })
+            prev_value = value
     return await upsert_releases(rows)
 
 

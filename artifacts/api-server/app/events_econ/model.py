@@ -118,15 +118,25 @@ def _rolling_forecast_error_sigma(
 ) -> tuple[float, int]:
     """Return (sigma, n) over recent settled (consensus, actual) pairs.
 
-    Skips rows without both consensus + actual.  When fewer than 3
-    pairs are available, returns (0.0, n) so the caller falls back to
-    the per-release-type default sigma.
+    Falls back to (previous, actual) pairs (random-walk benchmark
+    error) when an explicit consensus isn't available — this keeps
+    the 2-year FRED back-fill, which only carries `previous`, useful
+    for variance estimation.  When fewer than 3 pairs are available
+    in either pool, returns (0.0, n) so the caller falls back to the
+    per-release-type default sigma.
     """
     diffs: list[float] = []
     for r in history:
-        if r.consensus is None or r.actual is None:
+        if r.actual is None:
             continue
-        diffs.append(float(r.actual) - float(r.consensus))
+        anchor: float | None
+        if r.consensus is not None:
+            anchor = float(r.consensus)
+        elif r.previous is not None:
+            anchor = float(r.previous)
+        else:
+            continue
+        diffs.append(float(r.actual) - anchor)
     n = len(diffs)
     if n < 3:
         return 0.0, n

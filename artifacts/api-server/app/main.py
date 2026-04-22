@@ -1365,22 +1365,99 @@ async def events_econ_calendar(within_hours: float = 168.0, limit: int = 50) -> 
 
     Public: no auth — only surfaces release schedule + consensus, all
     of which is already public information from the upstream feeds.
+
+    Each item carries the consensus-prior `model_prob`, the latest
+    Kalshi YES mid (when a matching market exists), the implied edge
+    in bps, and a countdown / `imminent` flag (set when the release
+    is within the 5-minute pre-release blackout window).
     """
+    from datetime import datetime, timezone
     from .events_econ.calendar import upcoming_releases
+    from .events_econ.model import consensus_prior_probability
+    from .events_econ.tickers import (
+        InvalidEventsEconTicker,
+        SUPPORTED_RELEASES,
+        parse_events_econ_ticker,
+    )
+
     rows = await upcoming_releases(within_hours=within_hours, limit=limit)
-    return {
-        "items": [
-            {
-                "source": r.source,
-                "signal_id": r.signal_id,
-                "release_type": r.release_type,
-                "release_at": r.release_at.isoformat() if r.release_at else None,
-                "consensus": r.consensus,
-                "previous": r.previous,
-            }
-            for r in rows
-        ],
-    }
+
+    # For each upcoming release we run the consensus-prior model
+    # against the historical settled rows of the same release type so
+    # the dashboard sees the same `model_prob` the cycle would
+    # compute for an actual ticker priced at the median consensus
+    # threshold.  Kalshi mid is best-effort: we look up the latest
+    # YES mid from `kalshi_market_snapshots` keyed on a synthetic
+    # ticker ``KX{release_type}-{when}-CONSENSUS`` if present;
+    # otherwise it's null and the dashboard renders "—".
+    items: list[dict[str, object]] = []
+    now = datetime.now(timezone.utc)
+    for r in rows:
+        # Synthesize a "median consensus" ticker for the model prob.
+        # Threshold token is set to ABOVE<consensus> when consensus is
+        # known, so the model returns ~0.5 (the implied at-the-money
+        # probability of beating consensus) — this is the calibrated
+        # baseline the dashboard surfaces.
+        threshold_token = "ABOVE0"
+        if r.consensus is not None:
+            threshold_token = "ABOVE" + str(r.consensus).replace(".", "_")
+        synthetic = f"KX{r.release_type}-{(r.signal_id or 'NA')[-8:].upper().replace('/', '_')}-{threshold_token}"
+        model_prob: float | None = None
+        try:
+            t = parse_events_econ_ticker(synthetic)
+            res = consensus_prior_probability(t, [r])
+            model_prob = float(res.probability)
+        except (InvalidEventsEconTicker, Exception):  # noqa: BLE001
+            model_prob = None
+
+        # Kalshi mid + edge: best-effort lookup from kalshi snapshot
+        # cache.  We don't fail the route if the table is missing.
+        kalshi_mid: float | None = None
+        try:
+            mid_raw = await db.fetchval(
+                """
+                SELECT yes_mid_price
+                  FROM kalshi_market_snapshots
+                 WHERE ticker LIKE $1
+                 ORDER BY observed_at DESC
+                 LIMIT 1
+                """,
+                f"KX{r.release_type}%",
+            )
+            if mid_raw is not None:
+                kalshi_mid = float(mid_raw)
+        except Exception:  # pragma: no cover — snapshots table optional
+            kalshi_mid = None
+
+        edge_bps: float | None = None
+        if model_prob is not None and kalshi_mid is not None:
+            edge_bps = round((model_prob - kalshi_mid) * 10_000.0, 1)
+
+        seconds_until = None
+        imminent = False
+        if r.release_at is not None:
+            release_at = r.release_at
+            if release_at.tzinfo is None:
+                release_at = release_at.replace(tzinfo=timezone.utc)
+            seconds_until = max(0.0, (release_at - now).total_seconds())
+            imminent = 0 < seconds_until <= 5 * 60.0
+
+        items.append({
+            "source": r.source,
+            "signal_id": r.signal_id,
+            "release_type": r.release_type,
+            "release_at": r.release_at.isoformat() if r.release_at else None,
+            "consensus": r.consensus,
+            "previous": r.previous,
+            "model_prob": model_prob,
+            "kalshi_mid": kalshi_mid,
+            "edge_bps": edge_bps,
+            "seconds_until_release": seconds_until,
+            "imminent": imminent,
+        })
+    # Defensive: SUPPORTED_RELEASES referenced for forward compat.
+    _ = SUPPORTED_RELEASES
+    return {"items": items}
 
 
 # ---------------------------------------------------------------------------

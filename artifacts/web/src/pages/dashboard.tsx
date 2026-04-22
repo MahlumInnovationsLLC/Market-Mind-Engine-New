@@ -18,6 +18,7 @@ import ModelInventory from "@/components/telemetry/model-inventory";
 import ActiveModelBadge from "@/components/telemetry/active-model-badge";
 import SettlementPanel from "@/components/telemetry/settlement-panel";
 import VerticalPerformance from "@/components/telemetry/vertical-performance";
+import EventsEconCalendarPanel from "@/components/telemetry/events-econ-calendar";
 import ModelHealthAlerts from "@/components/telemetry/model-health-alerts";
 import WsStatusIndicator from "@/components/ws-status-indicator";
 import { useWebSocket } from "@/hooks/use-websocket";
@@ -98,8 +99,9 @@ export default function Dashboard() {
         </div>
       </header>
 
-      <div className="mb-6">
+      <div className="mb-6 grid grid-cols-1 lg:grid-cols-2 gap-6">
         <VerticalPerformance />
+        <EventsEconCalendarPanel />
       </div>
 
       <main className="grid grid-cols-1 xl:grid-cols-12 gap-6">
