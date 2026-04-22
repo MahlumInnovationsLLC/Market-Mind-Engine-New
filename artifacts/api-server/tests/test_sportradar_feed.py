@@ -42,11 +42,12 @@ def test_register_extra_feeds_skips_when_key_missing(monkeypatch):
     monkeypatch.setattr(sportradar, "registry", reg)
     sportradar.register_sportradar_extra_feeds()
 
-    # 6 leagues × 2 feed types = 12 registered feeds, all disabled.
+    # 6 leagues × 3 feed types (rosters + injuries + live) = 18 feeds.
     snap = reg.snapshot()
     names = {s["name"] for s in snap}
-    assert len(snap) == 12
+    assert len(snap) == 18
     for sport in SPORTRADAR_SPORTS:
+        assert f"sportradar_{sport}_rosters" in names
         assert f"sportradar_{sport}_injuries" in names
         assert f"sportradar_{sport}_live" in names
     assert all(s["enabled"] is False for s in snap)
@@ -73,7 +74,7 @@ def test_register_is_idempotent(monkeypatch):
     monkeypatch.setattr(sportradar, "registry", reg)
     sportradar.register_sportradar_extra_feeds()
     sportradar.register_sportradar_extra_feeds()  # second call must not raise
-    assert len(reg.snapshot()) == 12
+    assert len(reg.snapshot()) == 18
 
 
 def test_flatten_injuries_handles_typical_payload():
@@ -253,6 +254,107 @@ def test_persistence_failure_propagates(monkeypatch):
     import asyncio
     with pytest.raises(RuntimeError, match="db down"):
         asyncio.run(sportradar._poll_injuries("nba"))
+
+
+def test_poll_rosters_falls_back_to_team_profile(monkeypatch):
+    """Hierarchy returns teams with no inline players -> we must hit the
+    per-team profile endpoint and still write rows."""
+    import asyncio
+
+    monkeypatch.setenv("SPORTRADAR_NBA_KEY", "k")
+
+    hierarchy = {
+        "conferences": [
+            {"divisions": [
+                {"teams": [
+                    {"id": "team-1", "name": "Lakers", "market": "LA",  "players": []},
+                    {"id": "team-2", "name": "Celtics", "market": "BOS", "players": []},
+                ]}
+            ]}
+        ]
+    }
+    profile_by_team = {
+        "team-1": {"players": [
+            {"id": "p1", "full_name": "LeBron", "position": "F", "jersey_number": 23},
+            {"id": "p2", "full_name": "AD",     "position": "F", "jersey_number": 3},
+        ]},
+        "team-2": {"players": [
+            {"id": "p3", "full_name": "Tatum",  "position": "F", "jersey_number": 0},
+        ]},
+    }
+
+    calls: list[str] = []
+
+    async def fake_get(name, url, key):
+        calls.append(url)
+        if "hierarchy" in url:
+            return hierarchy
+        for tid, prof in profile_by_team.items():
+            if f"/teams/{tid}/" in url:
+                return prof
+        return None
+
+    monkeypatch.setattr(sportradar, "_get_json", fake_get)
+
+    captured: dict[str, list] = {}
+
+    class FakeConn:
+        async def executemany(self, sql, rows):
+            captured["rows"] = list(rows)
+        def transaction(self):
+            class Ctx:
+                async def __aenter__(self_inner): return self_inner
+                async def __aexit__(self_inner, *a): return False
+            return Ctx()
+
+    class FakeAcquire:
+        async def __aenter__(self): return FakeConn()
+        async def __aexit__(self, *a): return False
+
+    class FakeDB:
+        def acquire(self): return FakeAcquire()
+
+    monkeypatch.setattr(sportradar, "db", FakeDB())
+
+    written = asyncio.run(sportradar._poll_rosters("nba"))
+    assert written == 3
+    assert len(captured["rows"]) == 3
+    # 1 hierarchy call + 2 per-team profile calls
+    assert sum(1 for u in calls if "hierarchy" in u) == 1
+    assert sum(1 for u in calls if "/teams/team-1/" in u) == 1
+    assert sum(1 for u in calls if "/teams/team-2/" in u) == 1
+
+
+def test_walk_teams_handles_nested_hierarchy():
+    payload = {
+        "conferences": [
+            {
+                "name": "East",
+                "divisions": [
+                    {
+                        "name": "Atlantic",
+                        "teams": [
+                            {
+                                "id": "t1",
+                                "name": "Celtics",
+                                "market": "Boston",
+                                "players": [
+                                    {"id": "p1", "full_name": "Player One",
+                                     "position": "G", "jersey_number": 0},
+                                    {"id": "p2", "full_name": "Player Two",
+                                     "position": "F"},
+                                ],
+                            }
+                        ],
+                    }
+                ],
+            }
+        ]
+    }
+    teams = sportradar._walk_teams(payload)
+    assert len(teams) == 1
+    assert teams[0]["id"] == "t1"
+    assert len(teams[0]["players"]) == 2
 
 
 def test_api_key_for_prefers_per_sport(monkeypatch):

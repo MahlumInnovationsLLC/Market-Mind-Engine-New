@@ -247,6 +247,15 @@ async def _poll_sportradar(sport: str) -> int:
         # health page surfaces the error rather than reporting "0 rows OK".
         log.warning("sportradar %s upsert failed: %s", sport, e)
         raise
+    # Also mirror to the dedicated sportradar_schedules cache so analytics
+    # queries can hit a clean per-source table.  Failures here are logged
+    # but never poison the primary `games` write — the scheduler still
+    # treats the poll as a success because the canonical row landed.
+    try:
+        from .sportradar import cache_schedule_rows
+        await cache_schedule_rows(league, games)
+    except Exception as e:
+        log.warning("sportradar %s schedule-cache mirror failed: %s", sport, e)
     return len(rows)
 
 

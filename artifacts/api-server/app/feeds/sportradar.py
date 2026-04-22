@@ -47,6 +47,38 @@ _SCHEMA_LOCK = asyncio.Lock()
 _SCHEMA_READY = False
 
 _SCHEMA_SQL = """
+CREATE TABLE IF NOT EXISTS sportradar_schedules (
+    league       text        NOT NULL,
+    game_id      text        NOT NULL,
+    home_team    text,
+    away_team    text,
+    scheduled    timestamptz,
+    status       text,
+    venue        text,
+    payload      jsonb,
+    updated_at   timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (league, game_id)
+);
+CREATE INDEX IF NOT EXISTS sportradar_schedules_when_idx
+    ON sportradar_schedules (league, scheduled);
+
+CREATE TABLE IF NOT EXISTS sportradar_rosters (
+    league       text        NOT NULL,
+    team_id      text        NOT NULL,
+    team_name    text,
+    player_id    text        NOT NULL,
+    player_name  text,
+    position     text,
+    jersey       text,
+    status       text,
+    height       text,
+    weight       text,
+    updated_at   timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (league, team_id, player_id)
+);
+CREATE INDEX IF NOT EXISTS sportradar_rosters_team_idx
+    ON sportradar_rosters (league, team_id);
+
 CREATE TABLE IF NOT EXISTS sportradar_injuries (
     league       text        NOT NULL,
     player_id    text        NOT NULL,
@@ -246,6 +278,216 @@ async def _poll_injuries(sport: str) -> int:
 
 
 # ---------------------------------------------------------------------------
+# Schedule cache (mirror of `games` keyed per-league for backtests/queries)
+# ---------------------------------------------------------------------------
+
+
+async def cache_schedule_rows(
+    league: str, games: list[dict[str, Any]]
+) -> int:
+    """Mirror today's schedule into `sportradar_schedules` for analytics
+    queries that don't want to touch the cross-source `games` table."""
+    if not games:
+        return 0
+    import json as _json
+    rows: list[tuple] = []
+    for g in games:
+        gid = str(g.get("id") or "")
+        if not gid:
+            continue
+        home = (g.get("home") or {}).get("name") or g.get("home_team") or ""
+        away = (g.get("away") or {}).get("name") or g.get("away_team") or ""
+        venue = (g.get("venue") or {}).get("name") if isinstance(g.get("venue"), dict) else ""
+        rows.append((
+            league, gid, home, away,
+            _parse_ts(g.get("scheduled")),
+            str(g.get("status") or "scheduled"),
+            venue,
+            _json.dumps(g, default=str),
+        ))
+    if not rows:
+        return 0
+    try:
+        async with db.acquire() as conn, conn.transaction():
+            await conn.executemany(
+                """
+                INSERT INTO sportradar_schedules
+                  (league, game_id, home_team, away_team, scheduled,
+                   status, venue, payload, updated_at)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, NOW())
+                ON CONFLICT (league, game_id) DO UPDATE SET
+                  home_team  = EXCLUDED.home_team,
+                  away_team  = EXCLUDED.away_team,
+                  scheduled  = EXCLUDED.scheduled,
+                  status     = EXCLUDED.status,
+                  venue      = EXCLUDED.venue,
+                  payload    = EXCLUDED.payload,
+                  updated_at = NOW()
+                """,
+                rows,
+            )
+    except Exception as e:
+        log.warning("sportradar_schedules upsert failed for %s: %s", league, e)
+        raise
+    return len(rows)
+
+
+# ---------------------------------------------------------------------------
+# Rosters
+# ---------------------------------------------------------------------------
+
+
+_ROSTER_PATHS = {
+    "nba":   "https://api.sportradar.us/nba/trial/v8/en/league/hierarchy.json",
+    "nhl":   "https://api.sportradar.us/nhl/trial/v7/en/league/hierarchy.json",
+    "mlb":   "https://api.sportradar.us/mlb/trial/v7/en/league/hierarchy.json",
+    "ncaab": "https://api.sportradar.us/ncaamb/trial/v8/en/league/hierarchy.json",
+    "nfl":   "https://api.sportradar.us/nfl/official/trial/v7/en/league/hierarchy.json",
+    "ncaaf": "https://api.sportradar.us/ncaafb/trial/v1/en/league/hierarchy.json",
+}
+
+# Per-team roster: tail-appended per team_id; some leagues nest the
+# players directly inside the hierarchy payload, so the per-team call is
+# only used as a fallback when the hierarchy has empty `players` lists.
+_TEAM_PROFILE_PATHS = {
+    "nba":   "https://api.sportradar.us/nba/trial/v8/en/teams/{team_id}/profile.json",
+    "nhl":   "https://api.sportradar.us/nhl/trial/v7/en/teams/{team_id}/profile.json",
+    "mlb":   "https://api.sportradar.us/mlb/trial/v7/en/teams/{team_id}/profile.json",
+    "ncaab": "https://api.sportradar.us/ncaamb/trial/v8/en/teams/{team_id}/profile.json",
+    "nfl":   "https://api.sportradar.us/nfl/official/trial/v7/en/teams/{team_id}/full_roster.json",
+    "ncaaf": "https://api.sportradar.us/ncaafb/trial/v1/en/teams/{team_id}/profile.json",
+}
+
+
+def _walk_teams(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    """Walk the league hierarchy and yield every team dict regardless of
+    league-specific nesting (conferences -> divisions -> teams, or
+    leagues -> conferences -> teams)."""
+    out: list[dict[str, Any]] = []
+
+    def visit(node: Any) -> None:
+        if isinstance(node, dict):
+            if node.get("players") is not None or (
+                node.get("id") and node.get("name") and "market" in node
+            ):
+                out.append(node)
+            for v in node.values():
+                visit(v)
+        elif isinstance(node, list):
+            for v in node:
+                visit(v)
+
+    visit(payload)
+    # De-dupe by team id, keeping the version with the most players.
+    by_id: dict[str, dict[str, Any]] = {}
+    for t in out:
+        tid = str(t.get("id") or "")
+        if not tid:
+            continue
+        prev = by_id.get(tid)
+        if prev is None or len(t.get("players") or []) > len(prev.get("players") or []):
+            by_id[tid] = t
+    return list(by_id.values())
+
+
+async def _poll_rosters(sport: str) -> int:
+    api_key = _api_key_for(sport)
+    if not api_key:
+        raise RuntimeError(f"SPORTRADAR_{sport.upper()}_KEY not set")
+    url = _ROSTER_PATHS.get(sport)
+    if not url:
+        return 0
+    payload = await _get_json(f"sportradar:{sport}:rosters", url, api_key)
+    if not payload:
+        return 0
+    teams = _walk_teams(payload)
+    league = _SPORTRADAR_LEAGUE[sport]
+    profile_url_tpl = _TEAM_PROFILE_PATHS.get(sport)
+
+    def _player_row(team_id: str, team_name: str, player: dict[str, Any]) -> tuple | None:
+        pid = str(player.get("id") or "")
+        if not pid:
+            return None
+        return (
+            league,
+            team_id,
+            team_name,
+            pid,
+            player.get("full_name") or player.get("name") or "",
+            player.get("position") or "",
+            str(player.get("jersey_number") or player.get("jersey") or ""),
+            player.get("status") or "",
+            str(player.get("height") or ""),
+            str(player.get("weight") or ""),
+        )
+
+    rows: list[tuple] = []
+    teams_with_players = 0
+    teams_via_fallback = 0
+    for team in teams:
+        tid = str(team.get("id") or "")
+        if not tid:
+            continue
+        tname = team.get("name") or team.get("market") or ""
+        inline_players = team.get("players") or []
+
+        # Fallback: hierarchy returned no inline players for this team.
+        # Hit the per-team profile/full_roster endpoint and merge.
+        if not inline_players and profile_url_tpl:
+            try:
+                prof = await _get_json(
+                    f"sportradar:{sport}:roster:{tid}",
+                    profile_url_tpl.format(team_id=tid),
+                    api_key,
+                )
+            except Exception as e:  # noqa: BLE001 — log + continue, don't poison whole poll
+                log.warning("sportradar %s team %s profile fetch failed: %s", sport, tid, e)
+                prof = None
+            if prof:
+                inline_players = prof.get("players") or []
+                if inline_players:
+                    teams_via_fallback += 1
+
+        if inline_players:
+            teams_with_players += 1
+        for player in inline_players:
+            row = _player_row(tid, tname, player)
+            if row is not None:
+                rows.append(row)
+
+    log.info(
+        "sportradar %s rosters: %d teams scanned, %d with players (%d via per-team fallback), %d player rows",
+        sport, len(teams), teams_with_players, teams_via_fallback, len(rows),
+    )
+    if not rows:
+        return 0
+    try:
+        async with db.acquire() as conn, conn.transaction():
+            await conn.executemany(
+                """
+                INSERT INTO sportradar_rosters
+                  (league, team_id, team_name, player_id, player_name,
+                   position, jersey, status, height, weight, updated_at)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW())
+                ON CONFLICT (league, team_id, player_id) DO UPDATE SET
+                  team_name   = EXCLUDED.team_name,
+                  player_name = EXCLUDED.player_name,
+                  position    = EXCLUDED.position,
+                  jersey      = EXCLUDED.jersey,
+                  status      = EXCLUDED.status,
+                  height      = EXCLUDED.height,
+                  weight      = EXCLUDED.weight,
+                  updated_at  = NOW()
+                """,
+                rows,
+            )
+    except Exception as e:
+        log.warning("sportradar %s rosters upsert failed: %s", sport, e)
+        raise
+    return len(rows)
+
+
+# ---------------------------------------------------------------------------
 # Live in-game state
 # ---------------------------------------------------------------------------
 
@@ -375,18 +617,38 @@ async def _poll_live_state(sport: str) -> int:
 # on a tight quota.
 INJURIES_CADENCE_SECONDS = max(60, int(os.environ.get("AXIOM_SPORTRADAR_INJURIES_CADENCE") or "900"))
 LIVE_STATE_CADENCE_SECONDS = max(15, int(os.environ.get("AXIOM_SPORTRADAR_LIVE_CADENCE") or "60"))
+# Rosters change rarely (transactions / waiver wire) — refresh every 24h
+# by default.
+ROSTERS_CADENCE_SECONDS = max(
+    300, int(os.environ.get("AXIOM_SPORTRADAR_ROSTERS_CADENCE") or str(60 * 60 * 24))
+)
 
 
 def register_sportradar_extra_feeds() -> None:
-    """Register injuries + live-state pollers for every Sportradar sport.
+    """Register injuries + rosters + live-state pollers for every Sportradar
+    sport.
 
     Idempotent: if any feed name is already in the registry we skip — this
     lets the function be called from both lifespan and tests without
-    raising "already registered".
+    raising "already registered".  18 feeds total: 6 leagues × 3 types
+    (rosters, injuries, live state).  Schedules are registered alongside
+    The Odds API in `odds_api.register_odds_feeds`.
     """
     for sport in SPORTRADAR_SPORTS:
         api_key = _api_key_for(sport)
         skipped = None if api_key else f"SPORTRADAR_{sport.upper()}_KEY not set"
+
+        ros_name = f"sportradar_{sport}_rosters"
+        if registry.status_of(ros_name) is None:
+            async def _ros(sport: str = sport) -> int:
+                return await _poll_rosters(sport)
+            registry.register(Feed(
+                name=ros_name,
+                cadence_seconds=float(ROSTERS_CADENCE_SECONDS),
+                poll=_ros,
+                enabled=bool(api_key),
+                skipped_reason=skipped,
+            ))
 
         inj_name = f"sportradar_{sport}_injuries"
         if registry.status_of(inj_name) is None:
