@@ -1,11 +1,12 @@
 import { createContext, useContext, useEffect, useMemo, useRef, useState } from "react";
-import { Link } from "wouter";
-import { useAuth, useClerk, useUser } from "@clerk/react";
+import { useAuth } from "@clerk/react";
 import { getMarketTitle } from "@workspace/api-client-react";
 import { useWebSocket } from "@/hooks/use-websocket";
 import WsStatusIndicator from "@/components/ws-status-indicator";
 import { apiFetch } from "@/lib/api";
 import SwarmTranscript, { useSwarmTranscript } from "@/components/swarm-transcript";
+import PipelineFlowchart from "@/components/pipeline/pipeline-flowchart";
+import ConsoleTail from "@/components/pipeline/console-tail";
 
 type TitleMap = Record<string, string | null>;
 
@@ -451,8 +452,6 @@ function saveCachedEvents(events: Record<string, unknown>[]): void {
 }
 
 export default function PipelinePage() {
-  const { user } = useUser();
-  const { signOut } = useClerk();
   const { getToken, isSignedIn } = useAuth();
   const ws = useWebSocket({ path: "/api/ws/pipeline", bufferSize: 500 });
   const swarm = useSwarmTranscript();
@@ -569,53 +568,34 @@ export default function PipelinePage() {
     }
     return null;
   }, [groups]);
-  const operatorLabel =
-    user?.primaryEmailAddress?.emailAddress ?? user?.username ?? user?.id ?? "—";
-
   return (
     <MarketTitleContext.Provider value={titleResolver}>
-    <div className="min-h-[100dvh] bg-background text-foreground p-4 md:p-6 font-mono">
-      <header className="mb-6 flex flex-col md:flex-row md:items-end justify-between gap-4 border-b border-border pb-4">
+    <div className="space-y-5 font-mono" data-testid="page-pipeline">
+      <header className="flex flex-col gap-2 lg:flex-row lg:items-end lg:justify-between">
         <div>
-          <h1 className="text-xl md:text-2xl font-bold tracking-tight text-primary uppercase">
-            AXIOM_PREDICT :: PIPELINE_MONITOR
+          <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-accent-cyan/80">
+            ORCHESTRATOR
+          </div>
+          <h1 className="text-xl font-bold uppercase tracking-tight text-foreground lg:text-2xl">
+            Pipeline monitor
           </h1>
-          <p className="text-muted-foreground text-xs uppercase tracking-widest mt-1">
-            Live cycle stream · gates · candidate decisions
+          <p className="mt-1 text-xs text-muted-foreground">
+            Live cycle stream · gates · candidate decisions.
           </p>
         </div>
-        <div className="text-xs text-muted-foreground flex flex-wrap items-center gap-4">
+        <div className="flex flex-wrap items-center gap-3 text-xs text-muted-foreground">
           <WsStatusIndicator
             status={ws.status}
             reconnectIn={ws.reconnectIn}
             closeCode={ws.closeCode}
             label="WS_OPEN"
           />
-          <Link
-            href="/"
-            className="border border-border px-3 py-1 uppercase tracking-widest text-[10px] text-muted-foreground hover:text-primary hover:border-primary"
-            data-testid="link-dashboard"
-          >
-            ← Dashboard
-          </Link>
-          <div className="flex items-center gap-2">
-            <span className="uppercase tracking-widest">OP</span>
-            <span className="text-foreground truncate max-w-[200px]">
-              {operatorLabel}
-            </span>
-          </div>
-          <button
-            type="button"
-            onClick={() => signOut({ redirectUrl: import.meta.env.BASE_URL })}
-            className="border border-border px-3 py-1 uppercase tracking-widest text-[10px] text-muted-foreground hover:text-destructive hover:border-destructive"
-            data-testid="button-sign-out"
-          >
-            Sign out
-          </button>
         </div>
       </header>
 
-      <div className="flex items-center justify-between mb-3 text-[10px] uppercase tracking-widest text-muted-foreground">
+      <PipelineFlowchart />
+
+      <div className="flex items-center justify-between text-[10px] uppercase tracking-widest text-muted-foreground">
         <span>
           BUFFERED_EVENTS :: {mergedEvents.length}
           {snapshot.length > 0 && (
@@ -705,6 +685,13 @@ export default function PipelinePage() {
           />
         </aside>
       </main>
+
+      <ConsoleTail
+        events={ws.events}
+        status={ws.status}
+        defaultOpen={false}
+        testId="card-pipeline-console"
+      />
     </div>
     </MarketTitleContext.Provider>
   );

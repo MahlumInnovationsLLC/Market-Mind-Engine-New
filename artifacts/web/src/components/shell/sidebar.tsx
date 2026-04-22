@@ -31,9 +31,11 @@ import {
 } from "@/components/ui/sidebar";
 import {
   getAdminListAccessRequestsQueryKey,
+  getGetRecentCyclesQueryKey,
   getGetVerticalsOverviewQueryKey,
   getListModelHealthAlertsQueryKey,
   useAdminListAccessRequests,
+  useGetRecentCycles,
   useGetVerticalsOverview,
   useListModelHealthAlerts,
 } from "@workspace/api-client-react";
@@ -105,6 +107,26 @@ export function ShellSidebar({ isAdmin, wsStatus }: ShellSidebarProps) {
   });
   const pendingAccessRequests = (accessRequests.data?.items ?? []).length;
 
+  // Cycles in the last hour — drives the Pipeline badge.
+  const cyclesParams = { limit: 50 };
+  const cycles = useGetRecentCycles(cyclesParams, {
+    query: {
+      queryKey: getGetRecentCyclesQueryKey(cyclesParams),
+      staleTime: 30_000,
+      refetchInterval: 60_000,
+    },
+  });
+  const cyclesLastHour = (() => {
+    const items = cycles.data?.items ?? [];
+    const cutoff = Date.now() - 60 * 60 * 1000;
+    let n = 0;
+    for (const c of items) {
+      const t = c.started_at ? new Date(c.started_at).getTime() : NaN;
+      if (Number.isFinite(t) && t >= cutoff) n++;
+    }
+    return n;
+  })();
+
   const sections: SidebarSectionDef[] = [
     {
       label: "Markets",
@@ -161,6 +183,7 @@ export function ShellSidebar({ isAdmin, wsStatus }: ShellSidebarProps) {
           href: "/pipeline",
           label: "Pipeline",
           icon: Activity,
+          badge: cyclesLastHour > 0 ? cyclesLastHour : null,
           testId: "nav-pipeline",
         },
       ],
