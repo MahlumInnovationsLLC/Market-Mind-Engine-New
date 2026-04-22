@@ -53,6 +53,26 @@ showing real production telemetry.
   is also unioned in.
 - `AXIOM_PUBLIC_BASE_URL` (optional) — overrides `https://$REPLIT_DEV_DOMAIN`
   for Stripe Checkout `success_url` / `cancel_url` and Customer Portal returns.
+- `POSTMARK_SERVER_TOKEN`, `POSTMARK_FROM_EMAIL`, `POSTMARK_MESSAGE_STREAM`
+  (optional) — Postmark transactional email. Without the token every send is a
+  logged no-op so dev environments don't need it. The same client powers
+  operator alerts (`alerts.py`) **and** the user-facing subscription lifecycle
+  emails (`notifications/email.py`): payment-failed, subscription-will-cancel,
+  and final-cancellation messages are dispatched from the Stripe webhook
+  handler. A daily operator churn digest is mailed by `notifications/churn.py`
+  at `CHURN_DIGEST_HOUR_UTC` (default 14:00 UTC).
+- `OPERATOR_ALERT_EMAILS` (optional) — comma-separated operator inbox for
+  alerts + the churn digest. Falls back to `OPERATOR_ALLOWED_EMAILS`.
+- `AXIOM_UNSUBSCRIBE_SECRET` (optional) — HMAC key signing one-click
+  unsubscribe links in user-facing emails. Falls back to
+  `STRIPE_WEBHOOK_SECRET` so a fresh install just works. The public endpoints
+  `GET /api/notifications/unsubscribe?email=…&token=…` (user-driven) and
+  `POST /api/notifications/postmark-webhook` (Postmark bounce/complaint feed)
+  populate the `email_suppressions` table; subsequent user-facing sends to
+  suppressed addresses are dropped automatically. Operator alerts bypass the
+  suppression list.
+- `CHURN_DIGEST_ENABLED`, `CHURN_DIGEST_HOUR_UTC`, `CHURN_DIGEST_MINUTE_UTC`
+  (optional) — toggles + send-time for the daily churn digest scheduler.
 
 ## Operator allow-list
 

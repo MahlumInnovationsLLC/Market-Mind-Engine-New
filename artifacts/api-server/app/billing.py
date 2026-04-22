@@ -727,18 +727,43 @@ async def _apply_subscription(sub_obj: dict[str, Any]) -> None:
         tier = TIER_FREE
 
     await ensure_schema()
-    # Resolve the prior tier so we can fire a tier_change alert on
-    # transitions only.  We read it before the upsert so the comparison
-    # is meaningful.
+    # Resolve the prior state so we can fire transition-based alerts
+    # (tier change, will-cancel, cancelled) without spamming on every
+    # webhook redelivery.  Read before the upsert so the comparison is
+    # meaningful.
     prev_tier: str | None = None
+    prev_status: str | None = None
+    prev_cap: bool | None = None
+    prev_email: str | None = None
     if user_id:
         try:
             row = await db.fetchrow(
-                "SELECT tier FROM subscriptions WHERE user_id=$1", user_id
+                "SELECT tier, status, cancel_at_period_end, email "
+                "FROM subscriptions WHERE user_id=$1",
+                user_id,
             )
-            prev_tier = (row["tier"] if row else None) or None
+            if row:
+                prev_tier = (row["tier"] or None)
+                prev_status = (row["status"] or None)
+                prev_cap = bool(row["cancel_at_period_end"]) if row["cancel_at_period_end"] is not None else None
+                prev_email = row["email"]
         except Exception:
-            prev_tier = None
+            pass
+    elif customer_id:
+        try:
+            row = await db.fetchrow(
+                "SELECT user_id, tier, status, cancel_at_period_end, email "
+                "FROM subscriptions WHERE stripe_customer_id=$1",
+                customer_id,
+            )
+            if row:
+                user_id = row["user_id"] or user_id
+                prev_tier = (row["tier"] or None)
+                prev_status = (row["status"] or None)
+                prev_cap = bool(row["cancel_at_period_end"]) if row["cancel_at_period_end"] is not None else None
+                prev_email = row["email"]
+        except Exception:
+            pass
     async with db.acquire() as conn:
         # 1. Raw mirror — keep the unmodified Stripe payload.
         if sub_id:
@@ -871,6 +896,69 @@ async def _apply_subscription(sub_obj: dict[str, Any]) -> None:
         except Exception as e:  # pragma: no cover
             log.warning("tier_change alert dispatch failed: %s", e)
 
+    # User-facing lifecycle emails — fire on real transitions only.
+    # cancel_at_period_end going False -> True is the "scheduled to
+    # cancel" event; status -> canceled is the actual end-of-life.
+    # We resolve the recipient address from the metadata, the prior
+    # subscriptions row, or a Stripe customer fetch as a last resort.
+    try:
+        from .notifications import email as _user_email
+
+        recipient = _resolve_recipient_email(sub_obj, prev_email, customer_id)
+        # 1) "Your subscription is set to cancel at period end."
+        if (
+            cancel_at_period_end
+            and not (prev_cap or False)
+            and status in _ACTIVE_STATUSES
+        ):
+            _user_email.subscription_will_cancel(
+                email=recipient,
+                user_id=user_id,
+                stripe_subscription_id=sub_id,
+                period_end=period_end,
+                tier=_prev_normalized if _prev_normalized != TIER_FREE else tier,
+            )
+        # 2) "Your subscription has ended."  Fire when status crosses
+        # into 'canceled' from any other state.
+        if status == "canceled" and (prev_status or "") != "canceled":
+            _user_email.subscription_canceled(
+                email=recipient,
+                user_id=user_id,
+                stripe_subscription_id=sub_id,
+                tier=_prev_normalized if _prev_normalized != TIER_FREE else None,
+            )
+    except Exception as e:  # pragma: no cover
+        log.warning("user lifecycle email dispatch failed: %s", e)
+
+
+def _resolve_recipient_email(
+    sub_obj: dict[str, Any],
+    prev_email: str | None,
+    customer_id: str | None,
+) -> str | None:
+    """Best-effort recipient lookup for user-facing emails.
+
+    Order: subscription metadata.email (cheapest, present when we set
+    it during checkout), the cached email from our subscriptions row,
+    a Stripe Customer fetch (only attempted when the SDK is configured
+    and we have a customer id).
+    """
+    meta = (sub_obj.get("metadata") or {})
+    cand = meta.get("email") if isinstance(meta, dict) else None
+    if isinstance(cand, str) and "@" in cand:
+        return cand
+    if prev_email and "@" in prev_email:
+        return prev_email
+    if customer_id and stripe_configured():
+        try:
+            cust = stripe.Customer.retrieve(customer_id)
+            email = cust.get("email") if isinstance(cust, dict) else getattr(cust, "email", None)
+            if isinstance(email, str) and "@" in email:
+                return email
+        except Exception as e:  # pragma: no cover
+            log.warning("stripe customer email lookup failed: %s", e)
+    return None
+
 
 async def _apply_invoice(invoice: dict[str, Any], paid: bool) -> None:
     """Update payment status when an invoice succeeds/fails."""
@@ -901,6 +989,53 @@ async def _apply_invoice(invoice: dict[str, Any], paid: bool) -> None:
                 customer_id,
                 new_status,
             )
+
+    # User-facing payment-failed email.  We resolve the recipient from
+    # the invoice payload first (Stripe always includes it on a
+    # payment_failed) and fall back to our cached subscriptions row.
+    if paid:
+        return
+    try:
+        from .notifications import email as _user_email
+
+        recipient: str | None = None
+        cand = invoice.get("customer_email")
+        if isinstance(cand, str) and "@" in cand:
+            recipient = cand
+        user_id: str | None = None
+        try:
+            row = None
+            if sub_id:
+                row = await db.fetchrow(
+                    "SELECT user_id, email FROM subscriptions "
+                    "WHERE stripe_subscription_id=$1",
+                    sub_id,
+                )
+            elif customer_id:
+                row = await db.fetchrow(
+                    "SELECT user_id, email FROM subscriptions "
+                    "WHERE stripe_customer_id=$1",
+                    customer_id,
+                )
+            if row:
+                user_id = row["user_id"]
+                if not recipient and row.get("email") and "@" in (row.get("email") or ""):
+                    recipient = row["email"]
+        except Exception:
+            pass
+
+        next_attempt_ts = invoice.get("next_payment_attempt")
+        next_attempt = _ts_to_dt(next_attempt_ts) if next_attempt_ts else None
+        _user_email.payment_failed(
+            email=recipient,
+            user_id=user_id,
+            invoice_id=invoice.get("id"),
+            amount_cents=int(invoice.get("amount_due") or 0) or None,
+            currency=invoice.get("currency"),
+            next_attempt=next_attempt,
+        )
+    except Exception as e:  # pragma: no cover
+        log.warning("payment_failed email dispatch failed: %s", e)
 
 
 async def handle_webhook(request: Request) -> dict[str, Any]:

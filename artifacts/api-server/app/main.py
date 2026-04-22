@@ -18,7 +18,14 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 from . import admin as admin_module, billing, dashboard, db, health, models_loader, predictor, rc_billing, storage
-from .notifications import alerts as notif_alerts, daily_summary, postmark as notif_postmark
+from .notifications import (
+    alerts as notif_alerts,
+    churn as notif_churn,
+    daily_summary,
+    email as notif_user_email,
+    postmark as notif_postmark,
+    suppression as notif_suppression,
+)
 from .auth import (
     AuthedUser,
     auth_configured,
@@ -186,6 +193,10 @@ async def lifespan(_: FastAPI):
         await daily_summary.start()
     except Exception as e:
         log.warning("daily summary scheduler start failed: %s", e)
+    try:
+        await notif_churn.start()
+    except Exception as e:
+        log.warning("churn digest scheduler start failed: %s", e)
 
     # Kick off model artifact reassembly in the background so a cold cache
     # (~240 MiB download) doesn't block the HTTP server from accepting
@@ -199,6 +210,10 @@ async def lifespan(_: FastAPI):
             await daily_summary.stop()
         except Exception as e:
             log.warning("daily summary stop error: %s", e)
+        try:
+            await notif_churn.stop()
+        except Exception as e:
+            log.warning("churn digest stop error: %s", e)
         try:
             await health.stop()
         except Exception as e:
@@ -869,10 +884,52 @@ async def notifications_status(
     return {
         "postmark": notif_postmark.status(),
         "recent_sends": notif_postmark.recent_sends(limit=25),
+        "suppressions": await notif_suppression.list_recent(limit=50),
     }
 
 
-_ALERT_TYPES = {"halt", "drift", "tier_change", "live_trade", "daily_pnl_summary"}
+@app.post("/api/notifications/postmark-webhook")
+async def notifications_postmark_webhook(request: Request) -> dict[str, object]:
+    """Receive bounce / complaint / subscription-change events from Postmark.
+
+    Public (Postmark posts unauthenticated) but each event must
+    include the standard ``RecordType`` field — we ignore anything
+    else.  Adds matching addresses to the suppression list so future
+    user-facing sends are skipped automatically.
+    """
+    try:
+        payload = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="invalid json body")
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="expected json object")
+    return await notif_suppression.apply_postmark_event(payload)
+
+
+@app.get("/api/notifications/unsubscribe")
+async def notifications_unsubscribe(
+    email: str, token: str
+) -> dict[str, object]:
+    """Public one-click unsubscribe endpoint.
+
+    The link in every user-facing email is HMAC-signed with
+    ``AXIOM_UNSUBSCRIBE_SECRET`` so we can verify the request without
+    storing per-user tokens.  Returning a JSON body keeps the test
+    surface tiny — the marketing site can render a friendlier confirmation
+    page if needed.
+    """
+    if not notif_user_email.verify_unsubscribe_token(email, token):
+        raise HTTPException(status_code=400, detail="invalid token")
+    ok = await notif_suppression.suppress(
+        email, "unsubscribe", detail="user clicked unsubscribe link"
+    )
+    return {"ok": bool(ok), "email": email, "unsubscribed": True}
+
+
+_ALERT_TYPES = {
+    "halt", "drift", "tier_change", "live_trade", "daily_pnl_summary",
+    "churn_digest", "user_payment_failed", "user_will_cancel", "user_canceled",
+}
 
 
 class NotificationsTestRequest(BaseModel):
@@ -926,6 +983,42 @@ async def notifications_test(
             vertical="sports",
             dry_run=body.dry_run,
         )
+    if body.type == "user_payment_failed":
+        result = notif_user_email.payment_failed(
+            email="test@axiom-predict.app",
+            user_id="user_test",
+            invoice_id="in_test",
+            amount_cents=4900,
+            currency="usd",
+            dry_run=body.dry_run,
+        )
+        if asyncio.iscoroutine(result) or isinstance(result, asyncio.Task):
+            return await result
+        return result
+    if body.type == "user_will_cancel":
+        result = notif_user_email.subscription_will_cancel(
+            email="test@axiom-predict.app",
+            user_id="user_test",
+            stripe_subscription_id="sub_test",
+            tier="pro",
+            dry_run=body.dry_run,
+        )
+        if asyncio.iscoroutine(result) or isinstance(result, asyncio.Task):
+            return await result
+        return result
+    if body.type == "user_canceled":
+        result = notif_user_email.subscription_canceled(
+            email="test@axiom-predict.app",
+            user_id="user_test",
+            stripe_subscription_id="sub_test",
+            tier="pro",
+            dry_run=body.dry_run,
+        )
+        if asyncio.iscoroutine(result) or isinstance(result, asyncio.Task):
+            return await result
+        return result
+    if body.type == "churn_digest":
+        return await notif_churn.fire_now(dry_run=body.dry_run)
     # daily_pnl_summary
     return await daily_summary.fire_now(dry_run=body.dry_run)
 

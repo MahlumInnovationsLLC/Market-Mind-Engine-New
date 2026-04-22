@@ -237,6 +237,53 @@ class _FakeConn:
         if q.startswith("SELECT tier FROM subscriptions WHERE user_id="):
             row = self._db.subscriptions.get(args[0])
             return {"tier": row.get("tier")} if row else None
+        if q.startswith(
+            "SELECT tier, status, cancel_at_period_end, email "
+            "FROM subscriptions WHERE user_id="
+        ):
+            row = self._db.subscriptions.get(args[0])
+            if not row:
+                return None
+            return {
+                "tier": row.get("tier"),
+                "status": row.get("status"),
+                "cancel_at_period_end": row.get("cancel_at_period_end"),
+                "email": row.get("email"),
+            }
+        if q.startswith(
+            "SELECT user_id, tier, status, cancel_at_period_end, email "
+            "FROM subscriptions WHERE stripe_customer_id="
+        ):
+            for row in self._db.subscriptions.values():
+                if row.get("stripe_customer_id") == args[0]:
+                    return {
+                        "user_id": row.get("user_id"),
+                        "tier": row.get("tier"),
+                        "status": row.get("status"),
+                        "cancel_at_period_end": row.get("cancel_at_period_end"),
+                        "email": row.get("email"),
+                    }
+            return None
+        if q.startswith(
+            "SELECT user_id, email FROM subscriptions WHERE stripe_subscription_id="
+        ):
+            for row in self._db.subscriptions.values():
+                if row.get("stripe_subscription_id") == args[0]:
+                    return {
+                        "user_id": row.get("user_id"),
+                        "email": row.get("email"),
+                    }
+            return None
+        if q.startswith(
+            "SELECT user_id, email FROM subscriptions WHERE stripe_customer_id="
+        ):
+            for row in self._db.subscriptions.values():
+                if row.get("stripe_customer_id") == args[0]:
+                    return {
+                        "user_id": row.get("user_id"),
+                        "email": row.get("email"),
+                    }
+            return None
         raise AssertionError(f"unhandled fetchrow in fake DB: {q!r}")
 
     async def fetchval(self, query: str, *args: Any) -> Any:
@@ -744,3 +791,267 @@ def test_require_tier_rejects_unknown_tier_at_construction():
     import time, not silently let everyone through."""
     with pytest.raises(ValueError):
         billing.require_tier("super-duper")
+
+
+# ---------------------------------------------------------------------------
+# User-facing lifecycle email wiring
+# ---------------------------------------------------------------------------
+
+
+def _stub_user_email_dispatch(monkeypatch):
+    """Patch the three user-email helpers so we can assert they fire
+    without actually trying to talk to Postmark or to record churn rows
+    in a real database.
+    """
+    from app.notifications import email as user_email
+
+    calls: dict[str, list[dict[str, Any]]] = {
+        "payment_failed": [],
+        "subscription_will_cancel": [],
+        "subscription_canceled": [],
+    }
+
+    def _make(name: str):
+        def _stub(**kwargs):
+            calls[name].append(kwargs)
+            return {"sent": False, "stubbed": True}
+        return _stub
+
+    monkeypatch.setattr(user_email, "payment_failed", _make("payment_failed"))
+    monkeypatch.setattr(
+        user_email, "subscription_will_cancel", _make("subscription_will_cancel")
+    )
+    monkeypatch.setattr(
+        user_email, "subscription_canceled", _make("subscription_canceled")
+    )
+    return calls
+
+
+def test_apply_subscription_fires_will_cancel_on_first_transition(fake_db, monkeypatch):
+    """When ``cancel_at_period_end`` flips False -> True on an active
+    subscription, we must dispatch the user "subscription will cancel"
+    email exactly once."""
+    monkeypatch.setenv("STRIPE_PRICE_PRO_MONTHLY", "price_pro_month")
+    calls = _stub_user_email_dispatch(monkeypatch)
+
+    # Seed the prior state: active pro, not cancelled.
+    fake_db.subscriptions["user_cap"] = {
+        "user_id": "user_cap",
+        "email": "cap@example.com",
+        "tier": "pro",
+        "status": "active",
+        "stripe_customer_id": "cus_cap",
+        "stripe_subscription_id": "sub_cap",
+        "stripe_price_id": "price_pro_month",
+        "interval": "month",
+        "current_period_end": datetime(2099, 1, 1, tzinfo=timezone.utc),
+        "cancel_at_period_end": False,
+    }
+    payload = _sub_payload(sub_id="sub_cap", customer="cus_cap", user_id="user_cap")
+    payload["cancel_at_period_end"] = True
+
+    _run(billing._apply_subscription(payload))
+
+    assert len(calls["subscription_will_cancel"]) == 1, calls
+    sent = calls["subscription_will_cancel"][0]
+    assert sent["email"] == "cap@example.com"
+    assert sent["user_id"] == "user_cap"
+    assert sent["stripe_subscription_id"] == "sub_cap"
+    # No cancellation-final or payment-failed should have fired.
+    assert calls["subscription_canceled"] == []
+    assert calls["payment_failed"] == []
+
+
+def test_apply_subscription_does_not_repeat_will_cancel(fake_db, monkeypatch):
+    """A second webhook with cancel_at_period_end already True must NOT
+    re-fire the email — Stripe re-delivers the same updated event."""
+    monkeypatch.setenv("STRIPE_PRICE_PRO_MONTHLY", "price_pro_month")
+    calls = _stub_user_email_dispatch(monkeypatch)
+
+    fake_db.subscriptions["user_cap2"] = {
+        "user_id": "user_cap2",
+        "email": "cap2@example.com",
+        "tier": "pro",
+        "status": "active",
+        "stripe_customer_id": "cus_cap2",
+        "stripe_subscription_id": "sub_cap2",
+        "stripe_price_id": "price_pro_month",
+        "interval": "month",
+        "current_period_end": datetime(2099, 1, 1, tzinfo=timezone.utc),
+        "cancel_at_period_end": True,
+    }
+    payload = _sub_payload(sub_id="sub_cap2", customer="cus_cap2", user_id="user_cap2")
+    payload["cancel_at_period_end"] = True
+    _run(billing._apply_subscription(payload))
+    assert calls["subscription_will_cancel"] == []
+
+
+def test_apply_subscription_fires_canceled_on_status_transition(fake_db, monkeypatch):
+    """status -> canceled fires the final cancellation email exactly
+    once, even if the subscription was previously past_due."""
+    monkeypatch.setenv("STRIPE_PRICE_PRO_MONTHLY", "price_pro_month")
+    calls = _stub_user_email_dispatch(monkeypatch)
+
+    fake_db.subscriptions["user_end"] = {
+        "user_id": "user_end",
+        "email": "end@example.com",
+        "tier": "pro",
+        "status": "past_due",
+        "stripe_customer_id": "cus_end",
+        "stripe_subscription_id": "sub_end",
+        "stripe_price_id": "price_pro_month",
+        "interval": "month",
+        "current_period_end": None,
+        "cancel_at_period_end": False,
+    }
+    payload = _sub_payload(
+        sub_id="sub_end", customer="cus_end", user_id="user_end", status="canceled"
+    )
+    _run(billing._apply_subscription(payload))
+
+    assert len(calls["subscription_canceled"]) == 1, calls
+    sent = calls["subscription_canceled"][0]
+    assert sent["email"] == "end@example.com"
+    assert sent["user_id"] == "user_end"
+    # And the runtime row must reflect tier=free / status=canceled.
+    row = fake_db.subscriptions["user_end"]
+    assert row["tier"] == billing.TIER_FREE
+    assert row["status"] == "canceled"
+
+
+def test_apply_invoice_payment_failed_fires_user_email(fake_db, monkeypatch):
+    """invoice.payment_failed must trigger the payment-failed email and
+    pass through the amount + invoice id so the message is specific."""
+    calls = _stub_user_email_dispatch(monkeypatch)
+    fake_db.subscriptions["user_pf"] = {
+        "user_id": "user_pf",
+        "email": "pf@example.com",
+        "tier": "pro",
+        "status": "active",
+        "stripe_customer_id": "cus_pf",
+        "stripe_subscription_id": "sub_pf",
+        "stripe_price_id": "price_pro_month",
+        "interval": "month",
+        "current_period_end": None,
+        "cancel_at_period_end": False,
+    }
+    invoice = {
+        "id": "in_pf_1",
+        "subscription": "sub_pf",
+        "customer": "cus_pf",
+        "amount_due": 4900,
+        "currency": "usd",
+        "next_payment_attempt": 4102444800,
+        # customer_email left unset so the row-fallback path is exercised.
+    }
+    _run(billing._apply_invoice(invoice, paid=False))
+
+    assert len(calls["payment_failed"]) == 1, calls
+    sent = calls["payment_failed"][0]
+    assert sent["email"] == "pf@example.com"
+    assert sent["user_id"] == "user_pf"
+    assert sent["invoice_id"] == "in_pf_1"
+    assert sent["amount_cents"] == 4900
+    # And status should have been moved to past_due.
+    assert fake_db.subscriptions["user_pf"]["status"] == "past_due"
+
+
+def test_apply_invoice_payment_succeeded_does_not_fire_email(fake_db, monkeypatch):
+    """Only failures notify the user — successes are silent."""
+    calls = _stub_user_email_dispatch(monkeypatch)
+    fake_db.subscriptions["user_ok"] = {
+        "user_id": "user_ok",
+        "email": "ok@example.com",
+        "tier": "pro",
+        "status": "past_due",
+        "stripe_customer_id": "cus_ok",
+        "stripe_subscription_id": "sub_ok",
+        "stripe_price_id": "price_pro_month",
+        "interval": "month",
+        "current_period_end": None,
+        "cancel_at_period_end": False,
+    }
+    _run(
+        billing._apply_invoice(
+            {"id": "in_ok", "subscription": "sub_ok", "customer": "cus_ok"},
+            paid=True,
+        )
+    )
+    assert calls["payment_failed"] == []
+    assert fake_db.subscriptions["user_ok"]["status"] == "active"
+
+
+def test_unsubscribe_token_round_trip(monkeypatch):
+    """The HMAC-signed unsubscribe token must verify only for the same
+    email + secret it was minted with."""
+    monkeypatch.setenv("AXIOM_UNSUBSCRIBE_SECRET", "test-secret")
+    from app.notifications import email as user_email
+
+    tok = user_email.make_unsubscribe_token("user@example.com")
+    assert user_email.verify_unsubscribe_token("user@example.com", tok)
+    # Wrong email -> False.
+    assert not user_email.verify_unsubscribe_token("other@example.com", tok)
+    # Wrong token -> False.
+    assert not user_email.verify_unsubscribe_token("user@example.com", "garbage")
+    # Case-insensitive on the email side (we lowercased before signing).
+    same = user_email.make_unsubscribe_token("USER@example.com")
+    assert user_email.verify_unsubscribe_token("user@example.com", same)
+
+
+def test_postmark_event_decoder_classifies_bounce_and_complaint():
+    """The Postmark webhook payload decoder must surface the right
+    suppression action for hard bounces and spam complaints, and ignore
+    transient soft bounces."""
+    from app.notifications import suppression
+
+    seen: list[tuple[str, str, str | None]] = []
+
+    async def _fake_suppress(email, reason, detail=None):
+        seen.append((email, reason, detail))
+        return True
+
+    async def _fake_unsuppress(email):
+        seen.append((email, "unsuppress", None))
+        return True
+
+    # Patch for this single test — restore after.
+    orig_s, orig_u = suppression.suppress, suppression.unsuppress
+    suppression.suppress = _fake_suppress  # type: ignore[assignment]
+    suppression.unsuppress = _fake_unsuppress  # type: ignore[assignment]
+    try:
+        out = _run(
+            suppression.apply_postmark_event(
+                {"RecordType": "Bounce", "Type": "HardBounce",
+                 "Email": "u@x.com", "Description": "550 user unknown"}
+            )
+        )
+        assert out["action"] == "suppressed"
+        assert seen[-1] == ("u@x.com", "bounce", "550 user unknown")
+
+        out = _run(
+            suppression.apply_postmark_event(
+                {"RecordType": "Bounce", "Type": "Transient",
+                 "Email": "u2@x.com"}
+            )
+        )
+        assert out["action"] == "ignored"
+
+        out = _run(
+            suppression.apply_postmark_event(
+                {"RecordType": "SpamComplaint", "Email": "u3@x.com"}
+            )
+        )
+        assert out["action"] == "suppressed"
+        assert seen[-1][1] == "complaint"
+
+        out = _run(
+            suppression.apply_postmark_event(
+                {"RecordType": "SubscriptionChange",
+                 "Email": "u4@x.com", "SuppressSending": False}
+            )
+        )
+        assert out["action"] == "unsuppressed"
+        assert seen[-1] == ("u4@x.com", "unsuppress", None)
+    finally:
+        suppression.suppress = orig_s  # type: ignore[assignment]
+        suppression.unsuppress = orig_u  # type: ignore[assignment]
