@@ -82,6 +82,7 @@ PROTECTED_ROUTES: tuple[str, ...] = (
     "/api/admin/tech-ai/promotion-status",
     "/api/dashboard/tech-ai/markets/{ticker}/evidence",
     "/api/admin/elections/promotion-status",
+    "/api/admin/events-econ/promotion-status",
     "/api/dashboard/elections/markets/{ticker}/arb",
     "/api/dashboard/runtime-settings",
     "/api/admin/risk-knobs",
@@ -121,6 +122,7 @@ PROTECTED_POST_ROUTES: tuple[str, ...] = (
     "/api/admin/risk-knobs",
     "/api/admin/tech-ai/promote-kelly",
     "/api/admin/elections/promote-kelly",
+    "/api/admin/events-econ/promote-kelly",
     "/api/admin/orchestrator/run-cycle",
     "/api/admin/models/active",
     "/api/admin/models/mirror/push",
@@ -149,6 +151,9 @@ OTHER_PUBLIC_ROUTES: tuple[str, ...] = (
     "/api/public/stats",
     "/api/public/recent-signals",
     "/api/public/leads",
+    # Events / macro-economics upcoming-release calendar — surfaces only
+    # public release schedule + consensus, no auth required (task #202).
+    "/api/events-econ/calendar",
     "/api/kalshi/halt",
     "/api/ws/kalshi",
     "/api/ws/llm-logs",

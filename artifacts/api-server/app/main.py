@@ -160,6 +160,11 @@ async def lifespan(_: FastAPI):
         except Exception as e:
             log.warning("election_polls feed registration failed: %s", e)
         try:
+            from .feeds.econ_calendar import register_econ_calendar_feeds
+            register_econ_calendar_feeds()
+        except Exception as e:
+            log.warning("econ_calendar feed registration failed: %s", e)
+        try:
             from .feeds import weather_climatology as _wclim
 
             await _wclim.ensure_schema()
@@ -1312,6 +1317,70 @@ async def admin_elections_promote_kelly(
             "status": status.as_dict(),
         })
     return status.as_dict()
+
+
+# ---------------------------------------------------------------------------
+# Events / macro economics vertical (task #202) — admin promotion +
+# public upcoming-release calendar.
+# ---------------------------------------------------------------------------
+
+
+@app.get("/api/admin/events-econ/promotion-status")
+async def admin_events_econ_promotion_status(
+    actor: AuthedUser = Depends(require_admin),
+) -> dict[str, object]:
+    """Current events-econ Kelly promotion eligibility snapshot."""
+    from .events_econ import promotion as _ee_promotion
+    status = await _ee_promotion.evaluate_promotion()
+    return status.as_dict()
+
+
+@app.post("/api/admin/events-econ/promote-kelly")
+async def admin_events_econ_promote_kelly(
+    actor: AuthedUser = Depends(require_admin),
+) -> dict[str, object]:
+    """Promote the events-econ Kelly multiplier from 0.15 to 0.20.
+
+    Refuses unless the latest evaluation reports ``eligible=True``
+    (>= 30 settled trades and rolling Brier < 0.20).  When eligible,
+    writes ``risk.kelly_multiplier_events_econ = 0.20`` into
+    ``system_settings`` and records an audit row.
+    """
+    from .events_econ import promotion as _ee_promotion
+    status = await _ee_promotion.promote(
+        actor_user_id=actor.user_id,
+        actor_email=getattr(actor, "email", None),
+    )
+    if not status.eligible and status.current_multiplier < _ee_promotion.PROMOTED_MULTIPLIER:
+        raise HTTPException(status_code=409, detail={
+            "error": "not_eligible",
+            "status": status.as_dict(),
+        })
+    return status.as_dict()
+
+
+@app.get("/api/events-econ/calendar")
+async def events_econ_calendar(within_hours: float = 168.0, limit: int = 50) -> dict[str, object]:
+    """Upcoming economic releases for the dashboard calendar panel.
+
+    Public: no auth — only surfaces release schedule + consensus, all
+    of which is already public information from the upstream feeds.
+    """
+    from .events_econ.calendar import upcoming_releases
+    rows = await upcoming_releases(within_hours=within_hours, limit=limit)
+    return {
+        "items": [
+            {
+                "source": r.source,
+                "signal_id": r.signal_id,
+                "release_type": r.release_type,
+                "release_at": r.release_at.isoformat() if r.release_at else None,
+                "consensus": r.consensus,
+                "previous": r.previous,
+            }
+            for r in rows
+        ],
+    }
 
 
 # ---------------------------------------------------------------------------

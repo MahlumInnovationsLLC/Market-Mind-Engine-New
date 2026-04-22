@@ -568,6 +568,48 @@ async def _predict_for_elections_binary(cand: dict[str, Any]) -> dict[str, Any] 
     return payload
 
 
+async def _predict_for_events_econ_binary(cand: dict[str, Any]) -> dict[str, Any] | None:
+    """Route an events-econ candidate through `app.events_econ.predictor`.
+
+    Mirrors the elections / tech-AI helper — parse the Kalshi ticker
+    into an `EventsEconTicker`, run the consensus-prior model, fold
+    the calibrated YES probability into the standard cycle telemetry
+    shape.  Failure modes (parse error, sick econ_releases cache)
+    degrade to swarm-only signals.
+    """
+    market_id = _resolve_market_id(cand) or cand.get("kalshi_market_id")
+    if not market_id:
+        return None
+    try:
+        from ..events_econ.tickers import (
+            InvalidEventsEconTicker as _InvalidEventsEconTicker,
+            parse_events_econ_ticker as _parse_events_econ_ticker,
+        )
+        from ..events_econ import predictor as _events_econ_predictor
+    except Exception as e:  # pragma: no cover — defensive
+        log.warning("events-econ module import failed: %s", e)
+        return None
+    try:
+        ticker = _parse_events_econ_ticker(str(market_id))
+    except _InvalidEventsEconTicker as e:
+        log.debug("events-econ ticker parse failed for %s: %s", market_id, e)
+        return None
+    try:
+        pred = await _events_econ_predictor.predict_events_econ_binary(
+            ticker, league=cand.get("league") or "EVENTS_ECON"
+        )
+    except _events_econ_predictor.EventsEconPredictionError as e:
+        log.debug("events-econ predict failed for %s: %s", market_id, e)
+        return None
+    except Exception as e:  # pragma: no cover — defensive
+        log.warning("events-econ predict crashed for %s: %s", market_id, e)
+        return None
+    payload = pred.as_dict()
+    payload["feature_inputs"] = payload.get("raw", {}).get("features", {})
+    payload["feature_count"] = payload.get("raw", {}).get("feature_count")
+    return payload
+
+
 async def _predict_for_candidate(
     cand: dict[str, Any],
     *,
@@ -604,6 +646,8 @@ async def _predict_for_candidate(
         return await _predict_for_tech_ai_binary(cand)
     if spec is not None and spec.predictor_hook == "elections_poll_of_polls":
         return await _predict_for_elections_binary(cand)
+    if spec is not None and spec.predictor_hook == "events_econ_consensus_prior":
+        return await _predict_for_events_econ_binary(cand)
 
     # N-way tournament markets (task #197) — leagues that flag
     # `LeagueConfig.n_way_market=True` (ATP / WTA / F1 / PGA) and ship

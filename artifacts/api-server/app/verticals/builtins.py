@@ -175,6 +175,35 @@ REGISTRY.register(VerticalSpec(
 ))
 
 
+# Events / macro economics (task #202).  Consensus-prior model with
+# rolling forecast-error variance.  Default Kelly multiplier 0.15 —
+# the highest non-sports vertical per spec, justified by macro prints
+# being information-rich and resolving cleanly on a known timestamp.
+# Auto-promotes to 0.20 after 30 settled trades show Brier<0.20 and an
+# admin confirms via `/api/admin/events-econ/promote-kelly`, which
+# writes `risk.kelly_multiplier_events_econ=0.20` into system_settings.
+REGISTRY.register(VerticalSpec(
+    name="events-econ",
+    leagues=("EVENTS_ECON",),
+    ticker_prefixes=(
+        "KXCPI", "KXPPI", "KXGDP", "KXFOMC", "KXNFP",
+        "KXJOBLESS", "KXRETAIL", "KXPCE", "KXISM",
+        "KXCONFIDENCE", "KXHOUSING",
+    ),
+    persona_profile="events-econ",
+    predictor_hook="events_econ_consensus_prior",
+    kelly_multiplier=0.15,
+    default_allocation_pct=0.10,
+    duplicate_trade_exempt=True,
+    description=(
+        "Macro economic-release binary markets across CPI, PPI, GDP, "
+        "FOMC, NFP, jobless claims, retail sales and related prints.  "
+        "Routed through a consensus-prior model with rolling "
+        "forecast-error variance and a 5-minute pre-release blackout."
+    ),
+))
+
+
 REGISTRY.register(VerticalSpec(
     name="soccer",
     leagues=("EPL", "LALIGA", "SERIEA", "BUNDES", "LIGUE1", "MLS", "UCL"),

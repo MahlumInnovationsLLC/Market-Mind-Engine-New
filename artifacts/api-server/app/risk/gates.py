@@ -191,6 +191,51 @@ async def gate_market_cooldown(ctx: RiskContext) -> GateResult:
                 "league": ctx.league,
             },
         )
+    # Pre-release blackout (task #202): events-econ markets are
+    # blacked out from 5 minutes before the upcoming release until the
+    # actual print lands.  Best-effort lookup against `econ_releases`
+    # via `app.events_econ.calendar.next_release_at`; any failure
+    # short-circuits to a no-op so a sick cache table never silently
+    # widens the blackout window.
+    if ctx.vertical == "events-econ":
+        try:
+            from ..events_econ.calendar import next_release_at as _next_release_at
+            from ..events_econ.tickers import (
+                InvalidEventsEconTicker as _InvalidEventsEconTicker,
+                parse_events_econ_ticker as _parse_events_econ_ticker,
+            )
+            try:
+                ticker = _parse_events_econ_ticker(ctx.market_id)
+            except _InvalidEventsEconTicker:
+                ticker = None
+            if ticker is not None:
+                blackout_minutes = int(
+                    ctx.operator_overrides.get("events_econ_pre_release_blackout_minutes", 5)
+                )
+                next_at = await _next_release_at(ticker.release_type)
+                if next_at is not None:
+                    if next_at.tzinfo is None:
+                        next_at = next_at.replace(tzinfo=timezone.utc)
+                    now = datetime.now(timezone.utc)
+                    from datetime import timedelta as _td
+                    window_start = next_at - _td(minutes=max(0, blackout_minutes))
+                    if window_start <= now < next_at:
+                        return GateResult(
+                            "market_cooldown",
+                            False,
+                            (
+                                f"events-econ pre-release blackout "
+                                f"({blackout_minutes}m before {ticker.release_type})"
+                            ),
+                            {
+                                "reason": "pre_release_blackout",
+                                "release_type": ticker.release_type,
+                                "release_at": next_at.isoformat(),
+                                "blackout_minutes": blackout_minutes,
+                            },
+                        )
+        except Exception as e:  # pragma: no cover — never kill the gate
+            log.debug("events-econ pre-release blackout sub-check failed: %s", e)
     # Live-action blackout (task #197): combat & individual sports
     # opt-in via `LeagueConfig.live_action_blackout`.  Once the
     # underlying event is in-progress, pre-event outright markets are

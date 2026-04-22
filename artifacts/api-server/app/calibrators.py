@@ -83,6 +83,11 @@ SUPPORTED_LEAGUES: tuple[str, ...] = (
     # trades feed an isotonic / Platt curve scoped to ELECTIONS just
     # like every other vertical.
     "ELECTIONS",
+    # Events / macro economics (task #202).  Consensus-prior model with
+    # rolling forecast-error variance.  Calibrator still applies
+    # post-model so settled events-econ trades feed an isotonic / Platt
+    # curve scoped to EVENTS_ECON.
+    "EVENTS_ECON",
 )
 
 # Below this sample count we fall back to Platt; below MIN_REFIT we

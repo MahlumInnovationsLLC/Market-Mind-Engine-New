@@ -387,6 +387,21 @@ LEAGUE_CONFIGS: dict[str, LeagueConfig] = {
         live_action_blackout=False,
         max_daily_trades=15,
     ),
+    # Events / macro economics (task #202).  Each macro print resolves
+    # independently — there's no "event in progress" frame, but the
+    # gate enforces a 5-minute pre-release blackout via the events-econ
+    # sub-check on `gate_market_cooldown`.  Conservative max_daily so
+    # the bot doesn't churn around a single CPI day.
+    "EVENTS_ECON": LeagueConfig(
+        league="EVENTS_ECON",
+        priority=9,
+        allocation_pct=0.10,
+        per_game_cap_pct=0.01,
+        per_event_cap_pct=0.05,
+        n_way_market=False,
+        live_action_blackout=False,
+        max_daily_trades=15,
+    ),
 }
 
 

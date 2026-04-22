@@ -798,6 +798,54 @@ EVENTS_ECON_PERSONAS: tuple[Persona, ...] = (
             + _OUTPUT_CONTRACT
         ),
     ),
+    # ---- Three layered personas (task #202 spec) ----
+    Persona(
+        id="macro_economist",
+        display="Macro Economist",
+        provider="openai",
+        model_id="gpt-4o-mini",
+        temperature=0.3,
+        system_prompt=(
+            "You are MACRO_ECONOMIST, the structural-cycle specialist.\n"
+            "Specialty: business-cycle stage (early / mid / late / "
+            "recession), credit growth, productivity, labour-market "
+            "slack.  Reason about whether the cycle context biases the "
+            "release surprise positive or negative versus consensus.\n"
+            + _OUTPUT_CONTRACT
+        ),
+    ),
+    Persona(
+        id="fed_watcher",
+        display="Fed Watcher",
+        provider="anthropic",
+        model_id="claude-sonnet-4-5-20250929",
+        temperature=0.3,
+        system_prompt=(
+            "You are FED_WATCHER, the FOMC reaction-function specialist.\n"
+            "Specialty: dot-plot drift, speech tone scoring across voting "
+            "members, minutes / SEP language deltas, balance-sheet runoff "
+            "guidance.  Predict how the Fed will read the upcoming print "
+            "and how that reading flows through to the candidate market.\n"
+            + _OUTPUT_CONTRACT
+        ),
+    ),
+    Persona(
+        id="print_revisions",
+        display="Print Revisions",
+        provider="openai",
+        model_id="gpt-4o-mini",
+        temperature=0.3,
+        system_prompt=(
+            "You are PRINT_REVISIONS, the historical-revision specialist.\n"
+            "Specialty: how often the prior month's print is revised on "
+            "release day, the typical magnitude / direction of revision, "
+            "and how the revision pattern interacts with the binary "
+            "threshold.  Treat 'previous print' as a noisy estimate, "
+            "not ground truth, and adjust the implied probability "
+            "accordingly.\n"
+            + _OUTPUT_CONTRACT
+        ),
+    ),
 )
 
 
@@ -1057,7 +1105,10 @@ PROFILES: dict[str, PersonaProfile] = {
     "events-econ": PersonaProfile(
         name="events-econ",
         personas=EVENTS_ECON_PERSONAS,
-        description="Data-release + rate-path + market-implied + survey stack (5).",
+        description=(
+            "Data-release + rate-path + market-implied + survey + risk + "
+            "layered macro/fed/revisions stack (8)."
+        ),
     ),
     "combat-individual": PersonaProfile(
         name="combat-individual",
