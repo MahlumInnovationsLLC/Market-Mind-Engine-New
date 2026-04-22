@@ -427,6 +427,65 @@ def test_swarm_runner_resolves_persona_profile_from_registry() -> None:
         verticals.REGISTRY.unregister("profile-test")
 
 
+def test_candidate_predictions_sql_parity_per_vertical(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """End-to-end regression lock: `_candidate_predictions` must use
+    the exact league filter the legacy hardcoded `VERTICAL_LEAGUES`
+    dict produced for each live vertical. We exercise the cycle-level
+    code path with a stubbed db.fetch and capture the SQL parameters
+    so any future drift fails this test."""
+    captured: list[tuple[str, tuple[Any, ...]]] = []
+
+    class _StubDB:
+        async def fetch(self, sql: str, *args: Any) -> list[Any]:
+            captured.append((sql, args))
+            return []
+
+    monkeypatch.setattr(cycle_mod, "db", _StubDB())
+
+    expected = {
+        "sports": None,            # legacy: no league filter parameter
+        "weather": ["WEATHER"],
+        "crypto": ["CRYPTO"],
+        "crypto-binary": ["CRYPTO"],
+        "politics": ["POLITICS"],
+    }
+    for vertical, want_leagues in expected.items():
+        captured.clear()
+        asyncio.run(cycle_mod._candidate_predictions(vertical, limit=5))
+        assert captured, f"{vertical}: db.fetch was never called"
+        sql, args = captured[0]
+        if want_leagues is None:
+            # Sports: no `league = ANY($2)` clause; only $1 = limit.
+            assert "league = ANY" not in sql, f"{vertical}: unexpected league filter"
+            assert args == (5,), (
+                f"{vertical}: expected (limit,) got {args!r}"
+            )
+        else:
+            assert "league = ANY($2)" in sql, (
+                f"{vertical}: expected league filter clause"
+            )
+            assert args == (5, want_leagues), (
+                f"{vertical}: expected (limit, {want_leagues!r}) got {args!r}"
+            )
+
+
+def test_predictor_routing_per_vertical_baseline() -> None:
+    """`crypto-binary` must route through the specialist
+    `crypto_binary` predictor hook; every other built-in vertical
+    must use the generic meta-model (predictor_hook=None)."""
+    routing = {
+        "sports": None,
+        "weather": None,
+        "crypto": None,
+        "crypto-binary": "crypto_binary",
+        "politics": None,
+    }
+    for vertical, want_hook in routing.items():
+        assert verticals.require_spec(vertical).predictor_hook == want_hook
+
+
 def test_scheduler_status_exposes_registered_verticals(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
