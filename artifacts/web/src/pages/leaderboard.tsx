@@ -47,17 +47,6 @@ function formatInt(n: number | null | undefined): string {
   return Math.round(n).toLocaleString();
 }
 
-function operatorName(seed: string, fallback: number): string {
-  // Deterministic anonymized operator handle from the signal vertical/league
-  // hash. Stable per-row so the same signal always renders the same handle.
-  let h = 0;
-  for (let i = 0; i < seed.length; i++) {
-    h = (h * 31 + seed.charCodeAt(i)) >>> 0;
-  }
-  const n = (h % 9000) + 1000 || fallback + 1000;
-  return `Operator #${n}`;
-}
-
 function signalRoi(s: LiveSignal): number | null {
   // Roughly: (settle - entry) on the chosen side. Both are 0..1 prob units.
   if (
@@ -183,17 +172,69 @@ export default function LeaderboardPage() {
         </div>
       </section>
 
-      {/* ---------- Activity table ---------- */}
+      {/* ---------- Operator ranking — coming soon ---------- */}
       <section className="border-t border-border/60 bg-card/40">
+        <div className="max-w-5xl mx-auto px-4 md:px-6 py-16 md:py-20">
+          <div className="text-[11px] uppercase tracking-[0.22em] text-primary mb-3 text-center">
+            Operator ranking
+          </div>
+          <h2 className="text-2xl md:text-3xl font-extrabold tracking-tight text-center">
+            Top anonymized traders —{" "}
+            <span className="text-gradient-brand">coming soon.</span>
+          </h2>
+          <div
+            className="mt-10 rounded-2xl border border-dashed border-primary/40 bg-background/60 p-10 md:p-14 text-center"
+            data-testid="card-leaderboard-coming-soon"
+          >
+            <div className="mx-auto mb-5 inline-flex items-center justify-center rounded-full border border-primary/40 bg-primary/10 text-primary w-12 h-12 text-xl">
+              ✦
+            </div>
+            <h3 className="text-xl font-semibold text-foreground mb-3">
+              Multi-operator leaderboard is coming online.
+            </h3>
+            <p className="text-sm text-muted-foreground max-w-xl mx-auto leading-relaxed">
+              Today this site reports a single operator's live equity curve. As
+              additional operators graduate from shadow trading, an anonymized
+              ranking — ROI, win rate, swarm-debate volume — will appear here.
+              Subscribe to the early-access list to be notified the moment it
+              ships.
+            </p>
+            <div className="mt-7 flex justify-center gap-3 flex-wrap">
+              <Link
+                href="/#early-access"
+                className="rounded-full border border-primary/60 text-primary px-5 py-2.5 text-sm font-semibold hover:bg-primary hover:text-primary-foreground transition-colors"
+                data-testid="link-leaderboard-early-access"
+              >
+                Join early access →
+              </Link>
+              <Link
+                href="/about"
+                className="rounded-full border border-border px-5 py-2.5 text-sm font-medium text-muted-foreground hover:border-primary/60 hover:text-primary transition-colors"
+                data-testid="link-leaderboard-about"
+              >
+                How it works
+              </Link>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      {/* ---------- Recent settled signals ---------- */}
+      <section className="border-t border-border/60">
         <div className="max-w-5xl mx-auto px-4 md:px-6 py-16 md:py-20">
           <div className="flex items-end justify-between gap-4 mb-8">
             <div>
               <div className="text-[11px] uppercase tracking-[0.22em] text-primary mb-2">
-                Recent activity
+                Recent settled signals
               </div>
               <h2 className="text-2xl md:text-3xl font-extrabold tracking-tight">
-                Last twelve settled signals
+                Last twelve from the desk
               </h2>
+              <p className="text-sm text-muted-foreground mt-2 max-w-2xl">
+                Anonymized to vertical, side, model probability, settle price,
+                and outcome. Same data the live equity curve is built from — no
+                cherry-picking.
+              </p>
             </div>
           </div>
 
@@ -220,14 +261,13 @@ export default function LeaderboardPage() {
                 data-testid="empty-leaderboard"
               >
                 No settled signals yet — the next trading cycle will fill this
-                board.
+                feed.
               </div>
             ) : (
               <table className="w-full text-sm">
                 <thead className="bg-card/80">
                   <tr className="text-[10px] uppercase tracking-[0.18em] text-muted-foreground">
                     <th className="text-left px-4 py-3 font-medium">#</th>
-                    <th className="text-left px-4 py-3 font-medium">Operator</th>
                     <th className="text-left px-4 py-3 font-medium">Vertical</th>
                     <th className="text-left px-4 py-3 font-medium">Side</th>
                     <th className="text-right px-4 py-3 font-medium">Model</th>
@@ -239,8 +279,6 @@ export default function LeaderboardPage() {
                   {signals.map((s, i) => {
                     const won = signalWon(s);
                     const roi = signalRoi(s);
-                    const seed = `${s.vertical || "?"}|${s.league || "?"}|${i}`;
-                    const handle = operatorName(seed, i);
                     return (
                       <tr
                         key={i}
@@ -250,10 +288,7 @@ export default function LeaderboardPage() {
                         <td className="px-4 py-3 text-muted-foreground tabular-nums">
                           {i + 1}
                         </td>
-                        <td className="px-4 py-3 font-medium text-foreground">
-                          {handle}
-                        </td>
-                        <td className="px-4 py-3 text-foreground/80">
+                        <td className="px-4 py-3 text-foreground/90">
                           <span className="capitalize">
                             {s.vertical || "—"}
                           </span>
@@ -302,13 +337,6 @@ export default function LeaderboardPage() {
               </table>
             )}
           </div>
-
-          <p className="text-xs text-muted-foreground mt-6 text-center">
-            Operators are anonymized — the leaderboard is a public window into
-            the same{" "}
-            <code className="text-primary font-mono">trades</code> table the
-            equity curve is built from.
-          </p>
         </div>
       </section>
 

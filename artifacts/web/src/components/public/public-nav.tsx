@@ -28,30 +28,25 @@ export function BrandMark({ size = 28 }: { size?: number }) {
   );
 }
 
-interface NavLink {
-  label: string;
-  href: string;
-  /** When true, treat this as an in-page anchor on the marketing page only. */
-  anchorOnHome?: boolean;
-}
-
-const LINKS: NavLink[] = [
-  { label: "Methodology", href: "/#methodology", anchorOnHome: true },
-  { label: "Performance", href: "/#equity", anchorOnHome: true },
-  { label: "Pricing", href: "/pricing" },
-  { label: "Leaderboard", href: "/leaderboard" },
-  { label: "About", href: "/about" },
+// Slim primary nav contract — three persistent links shared across every
+// public page (home / pricing / about / leaderboard).
+const LINKS: { label: string; href: string; key: PublicNavActive }[] = [
+  { label: "Pricing", href: "/pricing", key: "pricing" },
+  { label: "Leaderboard", href: "/leaderboard", key: "leaderboard" },
+  { label: "About", href: "/about", key: "about" },
 ];
+
+export type PublicNavActive = "home" | "pricing" | "about" | "leaderboard";
 
 export interface PublicNavProps {
   /** Highlight the matching link in the nav. */
-  active?: "home" | "pricing" | "about" | "leaderboard";
+  active?: PublicNavActive;
 }
 
 export function PublicNav({ active }: PublicNavProps) {
   const { isSignedIn } = useAuth();
-  const [pathname] = useLocation();
-  const onHome = pathname === "/" || pathname === "";
+  // Pathname is read solely to keep the nav re-render-aware of route changes.
+  useLocation();
 
   return (
     <nav
@@ -77,38 +72,18 @@ export function PublicNav({ active }: PublicNavProps) {
 
         <div className="flex items-center gap-1 md:gap-1 text-sm">
           {LINKS.map((link) => {
-            // Anchor links only behave as anchors on the home page;
-            // elsewhere we send the user back to home with the hash.
-            const href =
-              link.anchorOnHome && !onHome
-                ? link.href
-                : link.anchorOnHome
-                  ? link.href.replace(/^\/+/, "")
-                  : link.href;
-            const isAnchor = link.anchorOnHome && onHome;
-            const isActive =
-              (link.href === "/pricing" && active === "pricing") ||
-              (link.href === "/about" && active === "about") ||
-              (link.href === "/leaderboard" && active === "leaderboard");
+            const isActive = active === link.key;
             const cls = `hidden md:inline px-3 py-2 transition-colors ${
               isActive
                 ? "text-primary"
                 : "text-muted-foreground hover:text-foreground"
             }`;
-            const testId = `link-public-nav-${link.label.toLowerCase()}`;
-            if (isAnchor) {
-              return (
-                <a key={link.href} href={href} className={cls} data-testid={testId}>
-                  {link.label}
-                </a>
-              );
-            }
             return (
               <Link
                 key={link.href}
-                href={href}
+                href={link.href}
                 className={cls}
-                data-testid={testId}
+                data-testid={`link-public-nav-${link.label.toLowerCase()}`}
               >
                 {link.label}
               </Link>

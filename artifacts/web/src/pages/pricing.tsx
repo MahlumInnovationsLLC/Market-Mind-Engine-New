@@ -31,7 +31,15 @@ export default function PricingPage() {
 
   const checkoutMutation = useCreateBillingCheckoutSession();
 
-  const tiers = catalog?.tiers ?? [];
+  // Public-facing tier comparison is strictly Free / Pro / Enterprise.
+  // The internal `founder` tier is excluded from the public grid (it's
+  // resolved server-side via the operator allow-list and bypasses
+  // billing). The `elite` tier is presented as "Enterprise" copy.
+  const tiers = (catalog?.tiers ?? [])
+    .filter((t) => t.id !== "founder")
+    .map((t) =>
+      t.id === "elite" ? { ...t, name: "Enterprise" } : t,
+    );
 
   const startCheckout = async (tierId: string, priceId: string) => {
     setActionTier(tierId);
