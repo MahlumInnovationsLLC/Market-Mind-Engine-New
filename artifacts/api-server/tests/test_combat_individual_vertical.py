@@ -366,6 +366,142 @@ def test_predict_for_candidate_falls_through_for_two_way_league():
     assert pred is None or pred.get("model_name") != "plackett_luce_n_way"
 
 
+# ---------------------------------------------------------------------------
+# Sportradar payload normalization for combat & individual sports
+# ---------------------------------------------------------------------------
+
+
+def test_normalize_ufc_sport_events_envelope():
+    """UFC MMA returns `{"sport_events": [...]}` with no home/away
+    qualifier on competitors — normalizer must fall back to ordinal
+    position so 2-way fights still ingest cleanly."""
+    from app.feeds.odds_api import _normalize_sportradar_payload
+
+    payload = {
+        "sport_events": [
+            {
+                "id": "sr:sport_event:ufc-300-main",
+                "start_time": "2026-04-22T22:00:00+00:00",
+                "tournament": {"name": "UFC 300"},
+                "competitors": [
+                    {"id": "sr:competitor:1", "name": "Pereira"},
+                    {"id": "sr:competitor:2", "name": "Hill"},
+                ],
+            },
+        ],
+    }
+    rows = _normalize_sportradar_payload("ufc", "UFC", payload)
+    assert len(rows) == 1
+    r = rows[0]
+    assert r["id"] == "sr:sport_event:ufc-300-main"
+    assert r["home"]["name"] == "Pereira"
+    assert r["away"]["name"] == "Hill"
+    # 2-way fights MUST NOT carry n_way_field — they belong to the
+    # team-sport meta-model branch.
+    assert "n_way_field" not in r
+
+
+def test_normalize_tennis_sport_events_envelope():
+    """ATP/WTA daily schedule returns `sport_events` with named
+    competitors but no home/away qualifier."""
+    from app.feeds.odds_api import _normalize_sportradar_payload
+
+    payload = {
+        "sport_events": [
+            {
+                "id": "sr:sport_event:rg-r1-1",
+                "start_time": "2026-05-26T11:00:00+00:00",
+                "tournament": {"name": "Roland Garros"},
+                "competitors": [
+                    {"id": "sr:player:1", "name": "Alcaraz"},
+                    {"id": "sr:player:2", "name": "Tiafoe"},
+                ],
+            },
+        ],
+    }
+    rows = _normalize_sportradar_payload("atp", "ATP", payload)
+    assert len(rows) == 1
+    assert rows[0]["home"]["name"] == "Alcaraz"
+    assert rows[0]["away"]["name"] == "Tiafoe"
+
+
+def test_normalize_f1_summaries_envelope_with_n_way_field():
+    """F1 returns `{"summaries": [{"sport_event": {...},
+    "sport_event_status": {...}}]}` with the full grid as
+    competitors — normalizer must surface `n_way_field` so the
+    Plackett-Luce branch can price each driver."""
+    from app.feeds.odds_api import _normalize_sportradar_payload
+
+    payload = {
+        "summaries": [
+            {
+                "sport_event": {
+                    "id": "sr:sport_event:f1-monaco-2026",
+                    "start_time": "2026-05-24T13:00:00+00:00",
+                    "tournament": {"name": "Monaco Grand Prix"},
+                    "competitors": [
+                        {"id": "sr:competitor:1", "name": "Verstappen"},
+                        {"id": "sr:competitor:2", "name": "Leclerc"},
+                        {"id": "sr:competitor:3", "name": "Norris"},
+                        {"id": "sr:competitor:4", "name": "Hamilton"},
+                        {"id": "sr:competitor:5", "name": "Russell"},
+                    ],
+                },
+                "sport_event_status": {"status": "scheduled"},
+            },
+        ],
+    }
+    rows = _normalize_sportradar_payload("f1", "F1", payload)
+    assert len(rows) == 1
+    r = rows[0]
+    assert r["id"] == "sr:sport_event:f1-monaco-2026"
+    field = r["n_way_field"]
+    assert isinstance(field, list)
+    assert len(field) == 5
+    names = [c["name"] for c in field]
+    assert "Verstappen" in names and "Norris" in names
+
+
+def test_normalize_pga_tournaments_envelope():
+    """PGA Golf v3 returns `{"tournaments": [...]}` — each tournament
+    is one outright-winner market.  Normalizer must surface schedule
+    rows so per-event aggregation + event_in_progress derivation work
+    end-to-end even before leaderboard data lands (follow-up #214)."""
+    from app.feeds.odds_api import _normalize_sportradar_payload
+
+    payload = {
+        "tournaments": [
+            {
+                "id": "sr:tournament:masters-2026",
+                "name": "The Masters",
+                "start_date": "2026-04-09",
+                "status": "scheduled",
+            },
+            {
+                "id": "sr:tournament:rbc-heritage-2026",
+                "name": "RBC Heritage",
+                "start_date": "2026-04-16",
+                "status": "scheduled",
+            },
+        ],
+    }
+    rows = _normalize_sportradar_payload("pga", "PGA", payload)
+    assert len(rows) == 2
+    ids = {r["id"] for r in rows}
+    assert "sr:tournament:masters-2026" in ids
+    assert all(r["away"]["name"] == "FIELD" for r in rows)
+
+
+def test_normalize_handles_empty_payloads_gracefully():
+    """An empty / unfamiliar envelope must return [] rather than
+    raise — pollers must keep registered-but-skipped on bad days."""
+    from app.feeds.odds_api import _normalize_sportradar_payload
+
+    assert _normalize_sportradar_payload("ufc", "UFC", {}) == []
+    assert _normalize_sportradar_payload("f1", "F1", {"summaries": []}) == []
+    assert _normalize_sportradar_payload("pga", "PGA", {"tournaments": []}) == []
+
+
 def test_gates_tuple_still_twelve():
     """Lock the 12-gate invariant — combat-individual sub-checks must
     fold into existing gates rather than adding new entries."""

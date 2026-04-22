@@ -240,8 +240,48 @@ def _normalize_sportradar_payload(
     if games:
         return list(games)
 
-    # Soccer-extended shape.
-    schedules = payload.get("schedules") or payload.get("sport_events") or []
+    # PGA Golf v3: `{"tournaments": [{id, name, start_date, end_date,
+    # status, ...}]}`.  Each tournament is one tradable event (the
+    # outright-winner market); competitor field arrives via a
+    # separate leaderboard endpoint (follow-up #214) — for now we
+    # emit the schedule rows so risk-gate per-event aggregation and
+    # event_in_progress derivation work end-to-end.
+    tournaments = payload.get("tournaments") or []
+    if tournaments and league in ("PGA",):
+        out: list[dict] = []
+        for t in tournaments:
+            if not isinstance(t, dict):
+                continue
+            tid = t.get("id")
+            name = t.get("name") or t.get("event_name") or "PGA Tournament"
+            start = (
+                t.get("start_date")
+                or t.get("scheduled")
+                or t.get("start_time")
+            )
+            status = t.get("status") or "scheduled"
+            out.append({
+                "id": tid,
+                "home": {"name": name},  # outright market; "home" = field
+                "away": {"name": "FIELD"},
+                "scheduled": start,
+                "status": status,
+            })
+        return out
+
+    # Combat & individual sports (task #197) and soccer-extended share
+    # the v4-style envelope: schedules/sport_events/summaries lists of
+    # `{sport_event, sport_event_status}` entries.  F1 uses
+    # `summaries`, tennis/MMA use `sport_events`, soccer uses
+    # `schedules`.  Soccer entries get filtered by tournament name;
+    # the others pass through (the URL already scopes the
+    # competition).
+    schedules = (
+        payload.get("schedules")
+        or payload.get("sport_events")
+        or payload.get("summaries")
+        or []
+    )
     if not schedules:
         return []
     hints = _SOCCER_TOURNAMENT_HINTS.get(league, ())
@@ -255,10 +295,22 @@ def _normalize_sportradar_payload(
         if hints and not any(h in tname for h in hints):
             continue  # different competition on the shared global feed
         competitors = ev.get("competitors") or []
-        home_obj = next((c for c in competitors if c.get("qualifier") == "home"), {}) or {}
-        away_obj = next((c for c in competitors if c.get("qualifier") == "away"), {}) or {}
         status_obj = entry.get("sport_event_status") or {}
-        out.append({
+        # Soccer keeps home/away qualifiers; combat & individual
+        # sports usually don't.  Fall back to ordinal position when no
+        # qualifier is present so 2-way fights (UFC) and head-to-head
+        # tennis matches still produce valid {home, away} rows.  For
+        # >2-competitor events (F1 grids, golf fields) we additionally
+        # emit `n_way_field` so the orchestrator's Plackett-Luce branch
+        # can price each entrant.
+        home_obj = next((c for c in competitors if c.get("qualifier") == "home"), None)
+        away_obj = next((c for c in competitors if c.get("qualifier") == "away"), None)
+        if home_obj is None and away_obj is None and len(competitors) >= 1:
+            home_obj = competitors[0] if isinstance(competitors[0], dict) else {}
+            away_obj = competitors[1] if len(competitors) >= 2 and isinstance(competitors[1], dict) else {}
+        home_obj = home_obj or {}
+        away_obj = away_obj or {}
+        row: dict = {
             "id": ev.get("id"),
             "home": {"name": home_obj.get("name")},
             "away": {"name": away_obj.get("name")},
@@ -266,7 +318,22 @@ def _normalize_sportradar_payload(
             "status": status_obj.get("status") or "scheduled",
             "home_points": status_obj.get("home_score"),
             "away_points": status_obj.get("away_score"),
-        })
+        }
+        if len(competitors) > 2:
+            # Field of N (F1 grid, tennis draw bracket, etc.).  Carry
+            # competitor names + any seed/qualifier metadata through to
+            # the candidate so `_predict_for_candidate` can build the
+            # `n_way_field` rating mapping (task #197 follow-up #214).
+            row["n_way_field"] = [
+                {
+                    "name": c.get("name"),
+                    "id": c.get("id"),
+                    "seed": c.get("seed"),
+                    "qualifier": c.get("qualifier"),
+                }
+                for c in competitors if isinstance(c, dict)
+            ]
+        out.append(row)
     return out
 
 
