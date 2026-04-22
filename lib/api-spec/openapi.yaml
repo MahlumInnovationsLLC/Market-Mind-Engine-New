@@ -514,6 +514,64 @@ paths:
         "404":
           description: Candidate not found
 
+  /dashboard/verticals:
+    get:
+      operationId: getVerticalsOverview
+      tags: [dashboard]
+      summary: Per-vertical overview cards (Task #204)
+      parameters:
+        - in: query
+          name: days
+          required: false
+          schema: { type: integer, default: 7, minimum: 1, maximum: 365 }
+      responses:
+        "200":
+          description: Vertical overview
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/VerticalsOverview" }
+
+  /dashboard/vertical-visibility:
+    get:
+      operationId: getVerticalVisibility
+      tags: [dashboard]
+      summary: Operator-set hidden / pinned vertical lists
+      responses:
+        "200":
+          description: Visibility lists
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/VerticalVisibility" }
+
+  /admin/vertical-visibility:
+    get:
+      operationId: adminGetVerticalVisibility
+      tags: [admin]
+      summary: Admin view of the per-vertical visibility lists
+      responses:
+        "200":
+          description: Visibility lists
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/VerticalVisibility" }
+    post:
+      operationId: adminSetVerticalVisibility
+      tags: [admin]
+      summary: Replace the hidden / pinned vertical lists (admin-only)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AdminSetVerticalVisibilityRequest" }
+      responses:
+        "200":
+          description: Updated visibility lists
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/VerticalVisibility" }
+        "400":
+          description: Unknown vertical name in payload
+
   /admin/autoresearch/run:
     post:
       operationId: adminAutoResearchRun
@@ -804,6 +862,82 @@ components:
           type: array
           items: { $ref: "#/components/schemas/VerticalPerformanceEntry" }
       required: [days, verticals]
+
+    VerticalLastCycle:
+      type: object
+      properties:
+        id: { type: integer }
+        picks_evaluated: { type: integer, nullable: true }
+        trades_placed: { type: integer, nullable: true }
+        errors: { type: string, nullable: true }
+        started_at: { type: string, nullable: true }
+        completed_at: { type: string, nullable: true }
+      required: [id]
+
+    VerticalsOverviewEntry:
+      type: object
+      properties:
+        vertical: { type: string }
+        description: { type: string, nullable: true }
+        leagues:
+          type: array
+          items: { type: string }
+        kelly_multiplier: { type: number, nullable: true }
+        enabled: { type: boolean }
+        hidden: { type: boolean }
+        pinned: { type: boolean }
+        trades: { type: integer }
+        wins: { type: integer }
+        losses: { type: integer }
+        win_rate: { type: number, nullable: true }
+        pnl: { type: number }
+        brier: { type: number, nullable: true }
+        sharpe: { type: number, nullable: true }
+        open_positions: { type: integer }
+        edge_predicted_bps: { type: number, nullable: true }
+        edge_realized_bps: { type: number, nullable: true }
+        last_cycle:
+          oneOf:
+            - { $ref: "#/components/schemas/VerticalLastCycle" }
+            - { type: "null" }
+      required:
+        [vertical, leagues, enabled, hidden, pinned,
+         trades, wins, losses, pnl, open_positions]
+
+    VerticalVisibility:
+      type: object
+      properties:
+        hidden:
+          type: array
+          items: { type: string }
+        pinned:
+          type: array
+          items: { type: string }
+      required: [hidden, pinned]
+
+    VerticalsOverview:
+      type: object
+      properties:
+        days: { type: integer }
+        verticals:
+          type: array
+          items: { $ref: "#/components/schemas/VerticalsOverviewEntry" }
+        visibility: { $ref: "#/components/schemas/VerticalVisibility" }
+      required: [days, verticals, visibility]
+
+    AdminSetVerticalVisibilityRequest:
+      type: object
+      properties:
+        hidden:
+          type: array
+          items: { type: string }
+          nullable: true
+          description: If set, REPLACES the hidden list. Pass [] to clear.
+        pinned:
+          type: array
+          items: { type: string }
+          nullable: true
+          description: If set, REPLACES the pinned list (order matters).
 
     SwarmPersona:
       type: object

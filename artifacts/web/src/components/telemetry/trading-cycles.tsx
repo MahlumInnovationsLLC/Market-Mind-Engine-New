@@ -1,4 +1,5 @@
 import { useGetRecentCycles, getGetRecentCyclesQueryKey } from "@workspace/api-client-react";
+import { useSelectedVerticals } from "@/hooks/use-selected-verticals";
 
 function fmtDuration(seconds: number | null | undefined): string {
   if (seconds === null || seconds === undefined) return "—";
@@ -25,11 +26,14 @@ export default function TradingCycles() {
     query: { refetchInterval: 30000, queryKey: getGetRecentCyclesQueryKey(params) },
   });
 
+  const { matches } = useSelectedVerticals();
+
   if (isLoading) {
     return <div className="border border-border p-4 animate-pulse h-64 bg-card" />;
   }
 
-  const items = data?.items ?? [];
+  const allItems = data?.items ?? [];
+  const items = allItems.filter((c) => matches(c.vertical));
 
   return (
     <div className="border border-border bg-card flex flex-col">

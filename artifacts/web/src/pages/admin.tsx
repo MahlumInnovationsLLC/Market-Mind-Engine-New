@@ -15,6 +15,12 @@ import {
   useAdminListUsers,
   useAdminSetUserAdmin,
   useAdminSetUserApproved,
+  useGetVerticalsOverview,
+  useAdminGetVerticalVisibility,
+  useAdminSetVerticalVisibility,
+  getAdminGetVerticalVisibilityQueryKey,
+  getGetVerticalsOverviewQueryKey,
+  getGetVerticalVisibilityQueryKey,
 } from "@workspace/api-client-react";
 
 type Filter = "all" | "pending" | "approved" | "admin";
@@ -25,7 +31,7 @@ export default function AdminPage() {
   const [search, setSearch] = useState("");
   const [activeUserId, setActiveUserId] = useState<string | null>(null);
   const [tab, setTab] = useState<
-    "users" | "audit" | "runtime" | "risk" | "cycle" | "models" | "personas"
+    "users" | "audit" | "runtime" | "risk" | "cycle" | "models" | "personas" | "verticals"
   >("users");
 
   const usersQuery = useAdminListUsers({
@@ -88,7 +94,7 @@ export default function AdminPage() {
 
       <div className="mb-4 flex flex-wrap gap-2 text-xs uppercase tracking-widest">
         {(
-          ["users", "audit", "runtime", "risk", "personas", "cycle", "models"] as const
+          ["users", "audit", "runtime", "risk", "personas", "verticals", "cycle", "models"] as const
         ).map((t) => (
           <button
             key={t}
@@ -111,9 +117,11 @@ export default function AdminPage() {
                     ? "Risk knobs"
                     : t === "personas"
                       ? "Personas"
-                      : t === "cycle"
-                        ? "Trigger cycle"
-                        : "Models"}
+                      : t === "verticals"
+                        ? "Verticals"
+                        : t === "cycle"
+                          ? "Trigger cycle"
+                          : "Models"}
           </button>
         ))}
       </div>
@@ -207,6 +215,8 @@ export default function AdminPage() {
         <RiskKnobsPanel />
       ) : tab === "personas" ? (
         <PersonasPanel />
+      ) : tab === "verticals" ? (
+        <VerticalVisibilityPanel />
       ) : tab === "cycle" ? (
         <TriggerCyclePanel />
       ) : (
@@ -1442,6 +1452,139 @@ function PersonasPanel() {
           </div>
         ) : null}
       </section>
+    </main>
+  );
+}
+
+function VerticalVisibilityPanel() {
+  const qc = useQueryClient();
+  const overview = useGetVerticalsOverview(
+    { days: 7 },
+    {
+      query: {
+        queryKey: getGetVerticalsOverviewQueryKey({ days: 7 }),
+        staleTime: 30_000,
+      },
+    },
+  );
+  const visibility = useAdminGetVerticalVisibility({
+    query: {
+      queryKey: getAdminGetVerticalVisibilityQueryKey(),
+      staleTime: 30_000,
+    },
+  });
+
+  const mutation = useAdminSetVerticalVisibility({
+    mutation: {
+      onSuccess: () => {
+        qc.invalidateQueries({ queryKey: getAdminGetVerticalVisibilityQueryKey() });
+        qc.invalidateQueries({ queryKey: getGetVerticalsOverviewQueryKey() });
+        qc.invalidateQueries({ queryKey: getGetVerticalVisibilityQueryKey() });
+      },
+    },
+  });
+
+  const all = overview.data?.verticals ?? [];
+  const hidden = new Set(visibility.data?.hidden ?? []);
+  const pinned = visibility.data?.pinned ?? [];
+
+  function toggleHidden(name: string) {
+    const next = new Set(hidden);
+    if (next.has(name)) next.delete(name);
+    else next.add(name);
+    mutation.mutate({ data: { hidden: Array.from(next), pinned } });
+  }
+
+  function togglePinned(name: string) {
+    const next = pinned.includes(name)
+      ? pinned.filter((p) => p !== name)
+      : [...pinned, name];
+    mutation.mutate({ data: { hidden: Array.from(hidden), pinned: next } });
+  }
+
+  return (
+    <main className="border border-border bg-card p-4">
+      <header className="mb-3 pb-2 border-b border-border">
+        <h2 className="text-sm uppercase tracking-widest font-bold text-primary">
+          Vertical visibility
+        </h2>
+        <p className="text-xs text-muted-foreground mt-1">
+          Pinned verticals lead the dashboard strip in pin order. Hidden
+          verticals are removed from the strip for non-admin operators
+          (admins still see them in the picker, dimmed). Every change is
+          written to <code>system_settings</code> and audited.
+        </p>
+      </header>
+
+      {(overview.isLoading || visibility.isLoading) && (
+        <div className="text-xs text-muted-foreground uppercase tracking-widest">
+          Loading…
+        </div>
+      )}
+
+      <table className="w-full text-xs">
+        <thead className="text-muted-foreground uppercase tracking-widest">
+          <tr>
+            <th className="text-left p-2">Vertical</th>
+            <th className="text-left p-2">Description</th>
+            <th className="text-left p-2">Pinned</th>
+            <th className="text-left p-2">Hidden</th>
+          </tr>
+        </thead>
+        <tbody>
+          {all.map((entry) => {
+            const pinIdx = pinned.indexOf(entry.vertical);
+            const isPinned = pinIdx >= 0;
+            const isHidden = hidden.has(entry.vertical);
+            return (
+              <tr
+                key={entry.vertical}
+                className="border-t border-border"
+                data-testid={`row-vertical-vis-${entry.vertical}`}
+              >
+                <td className="p-2 uppercase font-bold text-primary">{entry.vertical}</td>
+                <td className="p-2 text-muted-foreground">{entry.description ?? "—"}</td>
+                <td className="p-2">
+                  <button
+                    type="button"
+                    onClick={() => togglePinned(entry.vertical)}
+                    disabled={mutation.isPending}
+                    className={`px-2 py-0.5 border text-[10px] uppercase tracking-widest ${
+                      isPinned
+                        ? "border-primary text-primary"
+                        : "border-border text-muted-foreground hover:text-primary"
+                    }`}
+                    data-testid={`button-pin-${entry.vertical}`}
+                  >
+                    {isPinned ? `★ ${pinIdx + 1}` : "Pin"}
+                  </button>
+                </td>
+                <td className="p-2">
+                  <button
+                    type="button"
+                    onClick={() => toggleHidden(entry.vertical)}
+                    disabled={mutation.isPending}
+                    className={`px-2 py-0.5 border text-[10px] uppercase tracking-widest ${
+                      isHidden
+                        ? "border-destructive text-destructive"
+                        : "border-border text-muted-foreground hover:text-destructive"
+                    }`}
+                    data-testid={`button-hide-${entry.vertical}`}
+                  >
+                    {isHidden ? "Hidden" : "Hide"}
+                  </button>
+                </td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+
+      {mutation.isError && (
+        <div className="mt-3 text-xs text-destructive">
+          Update failed. {(mutation.error as Error)?.message ?? ""}
+        </div>
+      )}
     </main>
   );
 }

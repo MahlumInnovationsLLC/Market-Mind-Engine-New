@@ -914,6 +914,97 @@ export const AdminAutoResearchDecideResponse = zod.object({
 });
 
 /**
+ * @summary Per-vertical overview cards (Task
+ */
+export const getVerticalsOverviewQueryDaysDefault = 7;
+export const getVerticalsOverviewQueryDaysMax = 365;
+
+export const GetVerticalsOverviewQueryParams = zod.object({
+  days: zod.coerce
+    .number()
+    .min(1)
+    .max(getVerticalsOverviewQueryDaysMax)
+    .default(getVerticalsOverviewQueryDaysDefault),
+});
+
+export const GetVerticalsOverviewResponse = zod.object({
+  days: zod.number(),
+  verticals: zod.array(
+    zod.object({
+      vertical: zod.string(),
+      description: zod.string().nullish(),
+      leagues: zod.array(zod.string()),
+      kelly_multiplier: zod.number().nullish(),
+      enabled: zod.boolean(),
+      hidden: zod.boolean(),
+      pinned: zod.boolean(),
+      trades: zod.number(),
+      wins: zod.number(),
+      losses: zod.number(),
+      win_rate: zod.number().nullish(),
+      pnl: zod.number(),
+      brier: zod.number().nullish(),
+      sharpe: zod.number().nullish(),
+      open_positions: zod.number(),
+      edge_predicted_bps: zod.number().nullish(),
+      edge_realized_bps: zod.number().nullish(),
+      last_cycle: zod
+        .union([
+          zod.object({
+            id: zod.number(),
+            picks_evaluated: zod.number().nullish(),
+            trades_placed: zod.number().nullish(),
+            errors: zod.string().nullish(),
+            started_at: zod.string().nullish(),
+            completed_at: zod.string().nullish(),
+          }),
+          zod.null(),
+        ])
+        .optional(),
+    }),
+  ),
+  visibility: zod.object({
+    hidden: zod.array(zod.string()),
+    pinned: zod.array(zod.string()),
+  }),
+});
+
+/**
+ * @summary Operator-set hidden / pinned vertical lists
+ */
+export const GetVerticalVisibilityResponse = zod.object({
+  hidden: zod.array(zod.string()),
+  pinned: zod.array(zod.string()),
+});
+
+/**
+ * @summary Admin view of the per-vertical visibility lists
+ */
+export const AdminGetVerticalVisibilityResponse = zod.object({
+  hidden: zod.array(zod.string()),
+  pinned: zod.array(zod.string()),
+});
+
+/**
+ * @summary Replace the hidden / pinned vertical lists (admin-only)
+ */
+export const AdminSetVerticalVisibilityBody = zod.object({
+  hidden: zod
+    .array(zod.string())
+    .nullish()
+    .describe("If set, REPLACES the hidden list. Pass [] to clear."),
+  pinned: zod
+    .array(zod.string())
+    .nullish()
+    .describe("If set, REPLACES the pinned list (order matters)."),
+});
+
+export const AdminSetVerticalVisibilityResponse = zod.object({
+  hidden: zod.array(zod.string()),
+  pinned: zod.array(zod.string()),
+});
+
+/**
  * @summary Trigger one AutoResearch mining pass synchronously
  */
 export const AdminAutoResearchRunResponse = zod.object({

@@ -371,6 +371,155 @@ async def get_risk_knob_state() -> dict[str, Any]:
     }
 
 
+# ---------------------------------------------------------------------------
+# Per-vertical visibility (admin pin / hide) — Task #204
+#
+# Operators decide which verticals the dashboard surfaces by default and which
+# pinned ones lead the strip.  We persist the lists as JSON arrays in
+# ``system_settings`` so they share the same audit + rollback path as the risk
+# knobs.
+# ---------------------------------------------------------------------------
+
+
+VERTICAL_VISIBILITY_HIDDEN_KEY = "verticals.hidden"
+VERTICAL_VISIBILITY_PINNED_KEY = "verticals.pinned"
+
+
+def _coerce_vertical_list(raw: Any) -> list[str]:
+    if raw is None:
+        return []
+    if isinstance(raw, str):
+        try:
+            import json as _json
+
+            raw = _json.loads(raw)
+        except Exception:
+            return []
+    if not isinstance(raw, list):
+        return []
+    cleaned: list[str] = []
+    for item in raw:
+        if not isinstance(item, str):
+            continue
+        v = item.strip().lower()
+        if not v or v in cleaned:
+            continue
+        cleaned.append(v)
+    return cleaned
+
+
+async def get_vertical_visibility() -> dict[str, list[str]]:
+    """Return the operator-set visibility overrides for the dashboard
+    vertical strip.
+
+    ``hidden`` — verticals omitted from the default strip (admins still
+    see them with a "show hidden" toggle).
+    ``pinned`` — leads the strip in the supplied order.
+    """
+    await _ensure_system_settings_schema()
+    out: dict[str, list[str]] = {"hidden": [], "pinned": []}
+    try:
+        rows = await db.fetch(
+            "SELECT key, value FROM system_settings WHERE key IN ($1, $2)",
+            VERTICAL_VISIBILITY_HIDDEN_KEY,
+            VERTICAL_VISIBILITY_PINNED_KEY,
+        )
+    except Exception as e:
+        log.debug("vertical visibility read failed (best-effort): %s", e)
+        return out
+    for r in rows:
+        if r["key"] == VERTICAL_VISIBILITY_HIDDEN_KEY:
+            out["hidden"] = _coerce_vertical_list(r["value"])
+        elif r["key"] == VERTICAL_VISIBILITY_PINNED_KEY:
+            out["pinned"] = _coerce_vertical_list(r["value"])
+    return out
+
+
+async def set_vertical_visibility(
+    *,
+    hidden: Any | None = None,
+    pinned: Any | None = None,
+    actor_user_id: str,
+    actor_email: str | None,
+) -> dict[str, list[str]]:
+    """Upsert the hidden / pinned vertical lists.
+
+    Either ``hidden`` or ``pinned`` may be ``None`` to leave that side
+    untouched.  Unknown verticals (i.e. not present in the registry)
+    raise ``ValueError`` so a typo can't silently land — there is no
+    "unregister vertical" workflow today, so an unrecognised name is
+    almost certainly a mistake.
+    """
+    if hidden is None and pinned is None:
+        raise ValueError("at least one of hidden/pinned must be provided")
+    await _ensure_system_settings_schema()
+
+    cleaned_hidden = _coerce_vertical_list(hidden) if hidden is not None else None
+    cleaned_pinned = _coerce_vertical_list(pinned) if pinned is not None else None
+
+    # Validate against the registry so a typo can't silently land.
+    from . import verticals as _vertical_registry
+
+    known = {s.name for s in _vertical_registry.all_specs()}
+    for v in list(cleaned_hidden or []) + list(cleaned_pinned or []):
+        if v not in known:
+            raise ValueError(f"unknown vertical: {v!r}")
+
+    before = await get_vertical_visibility()
+
+    import json as _json
+
+    async with db.acquire() as c:
+        if cleaned_hidden is not None:
+            await c.execute(
+                """
+                INSERT INTO system_settings (key, value, updated_at)
+                VALUES ($1, $2, now())
+                ON CONFLICT (key) DO UPDATE SET
+                  value = EXCLUDED.value,
+                  updated_at = EXCLUDED.updated_at
+                """,
+                VERTICAL_VISIBILITY_HIDDEN_KEY,
+                _json.dumps(cleaned_hidden),
+            )
+        if cleaned_pinned is not None:
+            await c.execute(
+                """
+                INSERT INTO system_settings (key, value, updated_at)
+                VALUES ($1, $2, now())
+                ON CONFLICT (key) DO UPDATE SET
+                  value = EXCLUDED.value,
+                  updated_at = EXCLUDED.updated_at
+                """,
+                VERTICAL_VISIBILITY_PINNED_KEY,
+                _json.dumps(cleaned_pinned),
+            )
+
+    after = await get_vertical_visibility()
+
+    try:
+        async with db.acquire() as c:
+            await c.execute(
+                """
+                INSERT INTO admin_audit_log (
+                    actor_user_id, actor_email,
+                    target_user_id, target_email,
+                    action, before_value, after_value
+                ) VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7::jsonb)
+                """,
+                actor_user_id,
+                actor_email,
+                "system",
+                None,
+                "set_vertical_visibility",
+                _json.dumps(before),
+                _json.dumps(after),
+            )
+    except Exception as e:
+        log.warning("audit log insert (vertical visibility) failed: %s", e)
+    return after
+
+
 async def get_state() -> dict[str, Any]:
     """Snapshot of the active mode + its derived gate defaults.
 

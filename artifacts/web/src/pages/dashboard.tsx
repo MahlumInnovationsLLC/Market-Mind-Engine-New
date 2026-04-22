@@ -18,6 +18,7 @@ import ModelInventory from "@/components/telemetry/model-inventory";
 import ActiveModelBadge from "@/components/telemetry/active-model-badge";
 import SettlementPanel from "@/components/telemetry/settlement-panel";
 import VerticalPerformance from "@/components/telemetry/vertical-performance";
+import VerticalPicker from "@/components/telemetry/vertical-picker";
 import EventsEconCalendarPanel from "@/components/telemetry/events-econ-calendar";
 import EntertainmentCalendarPanel from "@/components/telemetry/entertainment-calendar";
 import EntertainmentAwardsLeaderboardPanel from "@/components/telemetry/entertainment-awards-leaderboard";
@@ -100,6 +101,8 @@ export default function Dashboard() {
           </button>
         </div>
       </header>
+
+      <VerticalPicker isAdmin={isAdmin} />
 
       <div className="mb-6 grid grid-cols-1 lg:grid-cols-2 gap-6">
         <VerticalPerformance />

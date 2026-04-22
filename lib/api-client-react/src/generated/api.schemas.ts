@@ -152,6 +152,54 @@ export interface VerticalPerformance {
   verticals: VerticalPerformanceEntry[];
 }
 
+export interface VerticalLastCycle {
+  id: number;
+  picks_evaluated?: number | null;
+  trades_placed?: number | null;
+  errors?: string | null;
+  started_at?: string | null;
+  completed_at?: string | null;
+}
+
+export interface VerticalsOverviewEntry {
+  vertical: string;
+  description?: string | null;
+  leagues: string[];
+  kelly_multiplier?: number | null;
+  enabled: boolean;
+  hidden: boolean;
+  pinned: boolean;
+  trades: number;
+  wins: number;
+  losses: number;
+  win_rate?: number | null;
+  pnl: number;
+  brier?: number | null;
+  sharpe?: number | null;
+  open_positions: number;
+  edge_predicted_bps?: number | null;
+  edge_realized_bps?: number | null;
+  last_cycle?: VerticalLastCycle | null;
+}
+
+export interface VerticalVisibility {
+  hidden: string[];
+  pinned: string[];
+}
+
+export interface VerticalsOverview {
+  days: number;
+  verticals: VerticalsOverviewEntry[];
+  visibility: VerticalVisibility;
+}
+
+export interface AdminSetVerticalVisibilityRequest {
+  /** If set, REPLACES the hidden list. Pass [] to clear. */
+  hidden?: string[] | null;
+  /** If set, REPLACES the pinned list (order matters). */
+  pinned?: string[] | null;
+}
+
 export interface SwarmPersona {
   persona?: string | null;
   league?: string | null;
@@ -877,3 +925,11 @@ export const AdminAutoResearchListFeaturesStatus = {
   production: "production",
   rejected: "rejected",
 } as const;
+
+export type GetVerticalsOverviewParams = {
+  /**
+   * @minimum 1
+   * @maximum 365
+   */
+  days?: number;
+};

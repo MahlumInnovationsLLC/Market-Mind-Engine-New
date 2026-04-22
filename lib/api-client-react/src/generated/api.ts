@@ -28,6 +28,7 @@ import type {
   AdminSetAdminRequest,
   AdminSetApprovedRequest,
   AdminSetFlagResult,
+  AdminSetVerticalVisibilityRequest,
   AdminUserDetail,
   AdminUserList,
   AutoResearchDecisionRequest,
@@ -44,6 +45,7 @@ import type {
   GetRecentDebatesParams,
   GetRecentTradesParams,
   GetVerticalPerformanceParams,
+  GetVerticalsOverviewParams,
   HealthStatus,
   ListModelHealthAlertsParams,
   LiveExecuteState,
@@ -72,6 +74,8 @@ import type {
   TradingCycleList,
   UserSubscription,
   VerticalPerformance,
+  VerticalVisibility,
+  VerticalsOverview,
 } from "./api.schemas";
 
 import { customFetch } from "../custom-fetch";
@@ -2688,6 +2692,344 @@ export const useAdminAutoResearchDecide = <
   TContext
 > => {
   return useMutation(getAdminAutoResearchDecideMutationOptions(options));
+};
+
+/**
+ * @summary Per-vertical overview cards (Task
+ */
+export const getGetVerticalsOverviewUrl = (
+  params?: GetVerticalsOverviewParams,
+) => {
+  const normalizedParams = new URLSearchParams();
+
+  Object.entries(params || {}).forEach(([key, value]) => {
+    if (value !== undefined) {
+      normalizedParams.append(key, value === null ? "null" : value.toString());
+    }
+  });
+
+  const stringifiedParams = normalizedParams.toString();
+
+  return stringifiedParams.length > 0
+    ? `/api/dashboard/verticals?${stringifiedParams}`
+    : `/api/dashboard/verticals`;
+};
+
+export const getVerticalsOverview = async (
+  params?: GetVerticalsOverviewParams,
+  options?: RequestInit,
+): Promise<VerticalsOverview> => {
+  return customFetch<VerticalsOverview>(getGetVerticalsOverviewUrl(params), {
+    ...options,
+    method: "GET",
+  });
+};
+
+export const getGetVerticalsOverviewQueryKey = (
+  params?: GetVerticalsOverviewParams,
+) => {
+  return [`/api/dashboard/verticals`, ...(params ? [params] : [])] as const;
+};
+
+export const getGetVerticalsOverviewQueryOptions = <
+  TData = Awaited<ReturnType<typeof getVerticalsOverview>>,
+  TError = ErrorType<unknown>,
+>(
+  params?: GetVerticalsOverviewParams,
+  options?: {
+    query?: UseQueryOptions<
+      Awaited<ReturnType<typeof getVerticalsOverview>>,
+      TError,
+      TData
+    >;
+    request?: SecondParameter<typeof customFetch>;
+  },
+) => {
+  const { query: queryOptions, request: requestOptions } = options ?? {};
+
+  const queryKey =
+    queryOptions?.queryKey ?? getGetVerticalsOverviewQueryKey(params);
+
+  const queryFn: QueryFunction<
+    Awaited<ReturnType<typeof getVerticalsOverview>>
+  > = ({ signal }) =>
+    getVerticalsOverview(params, { signal, ...requestOptions });
+
+  return { queryKey, queryFn, ...queryOptions } as UseQueryOptions<
+    Awaited<ReturnType<typeof getVerticalsOverview>>,
+    TError,
+    TData
+  > & { queryKey: QueryKey };
+};
+
+export type GetVerticalsOverviewQueryResult = NonNullable<
+  Awaited<ReturnType<typeof getVerticalsOverview>>
+>;
+export type GetVerticalsOverviewQueryError = ErrorType<unknown>;
+
+/**
+ * @summary Per-vertical overview cards (Task
+ */
+
+export function useGetVerticalsOverview<
+  TData = Awaited<ReturnType<typeof getVerticalsOverview>>,
+  TError = ErrorType<unknown>,
+>(
+  params?: GetVerticalsOverviewParams,
+  options?: {
+    query?: UseQueryOptions<
+      Awaited<ReturnType<typeof getVerticalsOverview>>,
+      TError,
+      TData
+    >;
+    request?: SecondParameter<typeof customFetch>;
+  },
+): UseQueryResult<TData, TError> & { queryKey: QueryKey } {
+  const queryOptions = getGetVerticalsOverviewQueryOptions(params, options);
+
+  const query = useQuery(queryOptions) as UseQueryResult<TData, TError> & {
+    queryKey: QueryKey;
+  };
+
+  return { ...query, queryKey: queryOptions.queryKey };
+}
+
+/**
+ * @summary Operator-set hidden / pinned vertical lists
+ */
+export const getGetVerticalVisibilityUrl = () => {
+  return `/api/dashboard/vertical-visibility`;
+};
+
+export const getVerticalVisibility = async (
+  options?: RequestInit,
+): Promise<VerticalVisibility> => {
+  return customFetch<VerticalVisibility>(getGetVerticalVisibilityUrl(), {
+    ...options,
+    method: "GET",
+  });
+};
+
+export const getGetVerticalVisibilityQueryKey = () => {
+  return [`/api/dashboard/vertical-visibility`] as const;
+};
+
+export const getGetVerticalVisibilityQueryOptions = <
+  TData = Awaited<ReturnType<typeof getVerticalVisibility>>,
+  TError = ErrorType<unknown>,
+>(options?: {
+  query?: UseQueryOptions<
+    Awaited<ReturnType<typeof getVerticalVisibility>>,
+    TError,
+    TData
+  >;
+  request?: SecondParameter<typeof customFetch>;
+}) => {
+  const { query: queryOptions, request: requestOptions } = options ?? {};
+
+  const queryKey = queryOptions?.queryKey ?? getGetVerticalVisibilityQueryKey();
+
+  const queryFn: QueryFunction<
+    Awaited<ReturnType<typeof getVerticalVisibility>>
+  > = ({ signal }) => getVerticalVisibility({ signal, ...requestOptions });
+
+  return { queryKey, queryFn, ...queryOptions } as UseQueryOptions<
+    Awaited<ReturnType<typeof getVerticalVisibility>>,
+    TError,
+    TData
+  > & { queryKey: QueryKey };
+};
+
+export type GetVerticalVisibilityQueryResult = NonNullable<
+  Awaited<ReturnType<typeof getVerticalVisibility>>
+>;
+export type GetVerticalVisibilityQueryError = ErrorType<unknown>;
+
+/**
+ * @summary Operator-set hidden / pinned vertical lists
+ */
+
+export function useGetVerticalVisibility<
+  TData = Awaited<ReturnType<typeof getVerticalVisibility>>,
+  TError = ErrorType<unknown>,
+>(options?: {
+  query?: UseQueryOptions<
+    Awaited<ReturnType<typeof getVerticalVisibility>>,
+    TError,
+    TData
+  >;
+  request?: SecondParameter<typeof customFetch>;
+}): UseQueryResult<TData, TError> & { queryKey: QueryKey } {
+  const queryOptions = getGetVerticalVisibilityQueryOptions(options);
+
+  const query = useQuery(queryOptions) as UseQueryResult<TData, TError> & {
+    queryKey: QueryKey;
+  };
+
+  return { ...query, queryKey: queryOptions.queryKey };
+}
+
+/**
+ * @summary Admin view of the per-vertical visibility lists
+ */
+export const getAdminGetVerticalVisibilityUrl = () => {
+  return `/api/admin/vertical-visibility`;
+};
+
+export const adminGetVerticalVisibility = async (
+  options?: RequestInit,
+): Promise<VerticalVisibility> => {
+  return customFetch<VerticalVisibility>(getAdminGetVerticalVisibilityUrl(), {
+    ...options,
+    method: "GET",
+  });
+};
+
+export const getAdminGetVerticalVisibilityQueryKey = () => {
+  return [`/api/admin/vertical-visibility`] as const;
+};
+
+export const getAdminGetVerticalVisibilityQueryOptions = <
+  TData = Awaited<ReturnType<typeof adminGetVerticalVisibility>>,
+  TError = ErrorType<unknown>,
+>(options?: {
+  query?: UseQueryOptions<
+    Awaited<ReturnType<typeof adminGetVerticalVisibility>>,
+    TError,
+    TData
+  >;
+  request?: SecondParameter<typeof customFetch>;
+}) => {
+  const { query: queryOptions, request: requestOptions } = options ?? {};
+
+  const queryKey =
+    queryOptions?.queryKey ?? getAdminGetVerticalVisibilityQueryKey();
+
+  const queryFn: QueryFunction<
+    Awaited<ReturnType<typeof adminGetVerticalVisibility>>
+  > = ({ signal }) => adminGetVerticalVisibility({ signal, ...requestOptions });
+
+  return { queryKey, queryFn, ...queryOptions } as UseQueryOptions<
+    Awaited<ReturnType<typeof adminGetVerticalVisibility>>,
+    TError,
+    TData
+  > & { queryKey: QueryKey };
+};
+
+export type AdminGetVerticalVisibilityQueryResult = NonNullable<
+  Awaited<ReturnType<typeof adminGetVerticalVisibility>>
+>;
+export type AdminGetVerticalVisibilityQueryError = ErrorType<unknown>;
+
+/**
+ * @summary Admin view of the per-vertical visibility lists
+ */
+
+export function useAdminGetVerticalVisibility<
+  TData = Awaited<ReturnType<typeof adminGetVerticalVisibility>>,
+  TError = ErrorType<unknown>,
+>(options?: {
+  query?: UseQueryOptions<
+    Awaited<ReturnType<typeof adminGetVerticalVisibility>>,
+    TError,
+    TData
+  >;
+  request?: SecondParameter<typeof customFetch>;
+}): UseQueryResult<TData, TError> & { queryKey: QueryKey } {
+  const queryOptions = getAdminGetVerticalVisibilityQueryOptions(options);
+
+  const query = useQuery(queryOptions) as UseQueryResult<TData, TError> & {
+    queryKey: QueryKey;
+  };
+
+  return { ...query, queryKey: queryOptions.queryKey };
+}
+
+/**
+ * @summary Replace the hidden / pinned vertical lists (admin-only)
+ */
+export const getAdminSetVerticalVisibilityUrl = () => {
+  return `/api/admin/vertical-visibility`;
+};
+
+export const adminSetVerticalVisibility = async (
+  adminSetVerticalVisibilityRequest: AdminSetVerticalVisibilityRequest,
+  options?: RequestInit,
+): Promise<VerticalVisibility> => {
+  return customFetch<VerticalVisibility>(getAdminSetVerticalVisibilityUrl(), {
+    ...options,
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...options?.headers },
+    body: JSON.stringify(adminSetVerticalVisibilityRequest),
+  });
+};
+
+export const getAdminSetVerticalVisibilityMutationOptions = <
+  TError = ErrorType<void>,
+  TContext = unknown,
+>(options?: {
+  mutation?: UseMutationOptions<
+    Awaited<ReturnType<typeof adminSetVerticalVisibility>>,
+    TError,
+    { data: BodyType<AdminSetVerticalVisibilityRequest> },
+    TContext
+  >;
+  request?: SecondParameter<typeof customFetch>;
+}): UseMutationOptions<
+  Awaited<ReturnType<typeof adminSetVerticalVisibility>>,
+  TError,
+  { data: BodyType<AdminSetVerticalVisibilityRequest> },
+  TContext
+> => {
+  const mutationKey = ["adminSetVerticalVisibility"];
+  const { mutation: mutationOptions, request: requestOptions } = options
+    ? options.mutation &&
+      "mutationKey" in options.mutation &&
+      options.mutation.mutationKey
+      ? options
+      : { ...options, mutation: { ...options.mutation, mutationKey } }
+    : { mutation: { mutationKey }, request: undefined };
+
+  const mutationFn: MutationFunction<
+    Awaited<ReturnType<typeof adminSetVerticalVisibility>>,
+    { data: BodyType<AdminSetVerticalVisibilityRequest> }
+  > = (props) => {
+    const { data } = props ?? {};
+
+    return adminSetVerticalVisibility(data, requestOptions);
+  };
+
+  return { mutationFn, ...mutationOptions };
+};
+
+export type AdminSetVerticalVisibilityMutationResult = NonNullable<
+  Awaited<ReturnType<typeof adminSetVerticalVisibility>>
+>;
+export type AdminSetVerticalVisibilityMutationBody =
+  BodyType<AdminSetVerticalVisibilityRequest>;
+export type AdminSetVerticalVisibilityMutationError = ErrorType<void>;
+
+/**
+ * @summary Replace the hidden / pinned vertical lists (admin-only)
+ */
+export const useAdminSetVerticalVisibility = <
+  TError = ErrorType<void>,
+  TContext = unknown,
+>(options?: {
+  mutation?: UseMutationOptions<
+    Awaited<ReturnType<typeof adminSetVerticalVisibility>>,
+    TError,
+    { data: BodyType<AdminSetVerticalVisibilityRequest> },
+    TContext
+  >;
+  request?: SecondParameter<typeof customFetch>;
+}): UseMutationResult<
+  Awaited<ReturnType<typeof adminSetVerticalVisibility>>,
+  TError,
+  { data: BodyType<AdminSetVerticalVisibilityRequest> },
+  TContext
+> => {
+  return useMutation(getAdminSetVerticalVisibilityMutationOptions(options));
 };
 
 /**

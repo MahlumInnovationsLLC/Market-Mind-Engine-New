@@ -85,6 +85,16 @@ export default function TabsLayout() {
         }}
       />
       <Tabs.Screen
+        name="verticals"
+        options={{
+          title: "VERTICALS",
+          tabBarLabel: "Verticals",
+          tabBarIcon: ({ color }) => (
+            <Feather name="layers" size={20} color={color} />
+          ),
+        }}
+      />
+      <Tabs.Screen
         name="positions"
         options={{
           title: "POSITIONS",

@@ -34,6 +34,7 @@ import BillingPage from "@/pages/billing";
 import HealthPage from "@/pages/health";
 import MarketingPage from "@/pages/marketing";
 import AdminPage from "@/pages/admin";
+import VerticalsPage from "@/pages/verticals";
 import SettingsNotificationsPage from "@/pages/settings-notifications";
 import TradeDetailPage from "@/pages/trade-detail";
 import SessionExpiredOverlay from "@/components/session-expired-overlay";
@@ -392,6 +393,19 @@ function AdminRoute() {
   );
 }
 
+function VerticalsRoute() {
+  return (
+    <>
+      <Show when="signed-in">
+        <VerticalsPage />
+      </Show>
+      <Show when="signed-out">
+        <Redirect to="/" />
+      </Show>
+    </>
+  );
+}
+
 /**
  * Bridges Clerk's session token into the generated API client.  Every
  * outgoing request from `@workspace/api-client-react` will include the
@@ -508,6 +522,7 @@ function ClerkProviderWithRoutes() {
             <Route path="/billing" component={BillingPage} />
             <Route path="/health" component={HealthPage} />
             <Route path="/admin" component={AdminRoute} />
+            <Route path="/verticals" component={VerticalsRoute} />
             <Route path="/settings/notifications" component={SettingsNotificationsRoute} />
             <Route path="/trade/:ref" component={TradeDetailRoute} />
             <Route path="/sign-in/*?" component={SignInPage} />

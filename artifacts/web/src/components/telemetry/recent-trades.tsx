@@ -2,6 +2,7 @@ import { useCallback } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { useGetRecentTrades, getGetRecentTradesQueryKey } from "@workspace/api-client-react";
 import { useWebSocket } from "@/hooks/use-websocket";
+import { useSelectedVerticals } from "@/hooks/use-selected-verticals";
 
 function formatMoney(num: number | null | undefined): string {
   if (num === null || num === undefined) return "—";
@@ -40,12 +41,14 @@ export default function RecentTrades() {
   );
   const pipeline = useWebSocket({ path: "/api/ws/pipeline", onMessage: onPipelineEvent, bufferSize: 50 });
   useWebSocket({ path: "/api/ws/settlement", onMessage: onSettlementEvent, bufferSize: 50 });
+  const { matches } = useSelectedVerticals();
 
   if (isLoading) {
     return <div className="border border-border p-4 animate-pulse h-96 bg-card" />;
   }
 
-  const trades = data?.items || [];
+  const allTrades = data?.items || [];
+  const trades = allTrades.filter((t) => matches(t.vertical));
   const live = pipeline.status === "open";
 
   return (

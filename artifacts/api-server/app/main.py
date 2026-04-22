@@ -2766,6 +2766,67 @@ async def dashboard_vertical_performance(
     return await dashboard.get_vertical_performance(days)
 
 
+@app.get("/api/dashboard/verticals")
+async def dashboard_verticals_overview(
+    days: int = 7, _: object = Depends(require_approved_user)
+) -> dict[str, object]:
+    """Per-vertical overview card backing the new ``/verticals`` page +
+    mobile tab. Returns one entry per registered vertical with rolling
+    P&L, trade counts, win-rate, latest 24h Brier, annualized Sharpe,
+    open positions, predicted vs realized edge, and the latest cycle
+    status — plus the operator-set hidden / pinned visibility lists.
+    """
+    return await dashboard.get_verticals_overview(days)
+
+
+@app.get("/api/dashboard/vertical-visibility")
+async def dashboard_vertical_visibility(
+    _: object = Depends(require_approved_user),
+) -> dict[str, object]:
+    """Read-only view of the operator-set vertical visibility lists.
+
+    Used by the web + mobile dashboard to filter the strip in a way
+    that matches what the admin configured, so a hidden vertical
+    actually disappears for non-admins.
+    """
+    return await runtime_settings_mod.get_vertical_visibility()
+
+
+class AdminSetVerticalVisibilityRequest(BaseModel):
+    hidden: list[str] | None = Field(
+        default=None,
+        description="If set, REPLACES the hidden list. Pass [] to clear.",
+    )
+    pinned: list[str] | None = Field(
+        default=None,
+        description="If set, REPLACES the pinned list (order matters).",
+    )
+
+
+@app.post("/api/admin/vertical-visibility")
+async def admin_set_vertical_visibility(
+    body: AdminSetVerticalVisibilityRequest,
+    actor: AuthedUser = Depends(require_admin),
+) -> dict[str, object]:
+    actor_email = (await check_approval(actor))[1]
+    try:
+        return await runtime_settings_mod.set_vertical_visibility(
+            hidden=body.hidden,
+            pinned=body.pinned,
+            actor_user_id=actor.user_id,
+            actor_email=actor_email,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.get("/api/admin/vertical-visibility")
+async def admin_get_vertical_visibility(
+    _: AuthedUser = Depends(require_admin),
+) -> dict[str, object]:
+    return await runtime_settings_mod.get_vertical_visibility()
+
+
 @app.get("/api/dashboard/recent-cycles")
 async def dashboard_recent_cycles(
     limit: int = 10, _: object = Depends(require_approved_user)
