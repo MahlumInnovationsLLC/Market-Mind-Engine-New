@@ -61,18 +61,8 @@ _DEDUPE_KEY = "daily_pnl_summary"
 
 
 async def _ensure_dedupe_table() -> None:
-    try:
-        await db.execute(
-            """
-            CREATE TABLE IF NOT EXISTS notification_dedupe (
-              key  TEXT PRIMARY KEY,
-              date_utc DATE NOT NULL,
-              sent_at TIMESTAMPTZ NOT NULL DEFAULT now()
-            )
-            """
-        )
-    except Exception as e:
-        log.warning("notification_dedupe table create failed: %s", e)
+    """Schema is now owned by the Alembic baseline migration; no-op."""
+    return None
 
 
 async def _get_last_sent_date() -> str | None:

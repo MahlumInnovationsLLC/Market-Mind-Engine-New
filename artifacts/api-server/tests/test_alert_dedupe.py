@@ -137,7 +137,7 @@ def test_tier_change_dedupe_blocks_webhook_replay(fake_store: _FakeDedupeStore) 
 def test_halt_dedupe_survives_restart(fake_store: _FakeDedupeStore) -> None:
     async def go() -> None:
         # First trip on instance A.
-        from app.kalshi.lifecycle import _KillSwitch
+        from app.exchange_kill_switch import _KillSwitch
         ks_a = _KillSwitch()
         ks_a.trip("data feed stale")
         # Allow the scheduled task to run.

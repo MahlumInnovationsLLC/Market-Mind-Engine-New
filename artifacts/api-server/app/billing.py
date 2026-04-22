@@ -135,88 +135,10 @@ _schema_ready = False
 
 
 async def ensure_schema() -> None:
-    """Create our application-side billing tables if they don't exist."""
+    """Schema is now owned by the Alembic baseline migration; this is a
+    no-op kept for call-site compatibility with the rest of the app."""
     global _schema_ready
-    if _schema_ready:
-        return
-    async with _SCHEMA_LOCK:
-        if _schema_ready:
-            return
-        async with db.acquire() as conn:
-            await conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS subscriptions (
-                    user_id TEXT PRIMARY KEY,
-                    email TEXT,
-                    tier TEXT NOT NULL DEFAULT 'free',
-                    status TEXT NOT NULL DEFAULT 'inactive',
-                    stripe_customer_id TEXT,
-                    stripe_subscription_id TEXT,
-                    stripe_price_id TEXT,
-                    interval TEXT,
-                    current_period_end TIMESTAMPTZ,
-                    cancel_at_period_end BOOLEAN NOT NULL DEFAULT FALSE,
-                    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-                )
-                """
-            )
-            await conn.execute(
-                """
-                CREATE INDEX IF NOT EXISTS subscriptions_customer_idx
-                ON subscriptions (stripe_customer_id)
-                """
-            )
-            await conn.execute(
-                """
-                CREATE INDEX IF NOT EXISTS subscriptions_subscription_idx
-                ON subscriptions (stripe_subscription_id)
-                """
-            )
-            await conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS stripe_events (
-                    event_id TEXT PRIMARY KEY,
-                    event_type TEXT NOT NULL,
-                    received_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-                    payload JSONB
-                )
-                """
-            )
-            # Raw-state mirror of every Stripe Subscription we've seen.
-            # ``subscriptions`` above is the *derived* row our request
-            # path reads (one per Clerk user, with the tier already
-            # resolved); ``stripe_subscriptions`` keeps the unmodified
-            # Stripe payload so we can reconcile / replay without
-            # round-tripping the Stripe API.
-            await conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS stripe_subscriptions (
-                    stripe_subscription_id TEXT PRIMARY KEY,
-                    stripe_customer_id TEXT,
-                    user_id TEXT,
-                    status TEXT,
-                    stripe_price_id TEXT,
-                    interval TEXT,
-                    current_period_end TIMESTAMPTZ,
-                    cancel_at_period_end BOOLEAN NOT NULL DEFAULT FALSE,
-                    raw JSONB,
-                    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-                )
-                """
-            )
-            await conn.execute(
-                """
-                CREATE INDEX IF NOT EXISTS stripe_subscriptions_customer_idx
-                ON stripe_subscriptions (stripe_customer_id)
-                """
-            )
-            await conn.execute(
-                """
-                CREATE INDEX IF NOT EXISTS stripe_subscriptions_user_idx
-                ON stripe_subscriptions (user_id)
-                """
-            )
-        _schema_ready = True
+    _schema_ready = True
 
 
 # ---------------------------------------------------------------------------

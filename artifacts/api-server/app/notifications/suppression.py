@@ -26,27 +26,9 @@ _lock = asyncio.Lock()
 
 
 async def ensure_table() -> None:
+    """Schema is now owned by the Alembic baseline migration; no-op."""
     global _table_ready
-    if _table_ready:
-        return
-    async with _lock:
-        if _table_ready:
-            return
-        from .. import db
-        try:
-            await db.execute(
-                """
-                CREATE TABLE IF NOT EXISTS email_suppressions (
-                  email      TEXT PRIMARY KEY,
-                  reason     TEXT NOT NULL,
-                  detail     TEXT,
-                  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
-                )
-                """
-            )
-            _table_ready = True
-        except Exception as e:
-            log.warning("email_suppressions ensure failed: %s", e)
+    _table_ready = True
 
 
 def _norm(email: str) -> str:

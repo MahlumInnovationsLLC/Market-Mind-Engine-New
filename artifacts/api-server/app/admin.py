@@ -82,17 +82,16 @@ _SCHEMA_READY = False
 
 
 async def ensure_schema() -> None:
-    """Create the admin tables if they do not yet exist.  Idempotent."""
+    """Historically created the admin tables on first request.
+
+    The schema is now owned by the Alembic baseline migration
+    (``0001_baseline``) which runs in the FastAPI lifespan before any
+    request is served. This function is kept as a no-op to preserve the
+    call sites in case a future change wants to reintroduce a
+    fallback path; calling it is cheap and never touches the DB.
+    """
     global _SCHEMA_READY
-    if _SCHEMA_READY:
-        return
-    try:
-        async with db.acquire() as c:
-            await c.execute(_SCHEMA_SQL)
-        _SCHEMA_READY = True
-        log.info("admin schema ready")
-    except Exception as e:  # pragma: no cover — exercised in prod boot
-        log.warning("admin schema bootstrap failed: %s", e)
+    _SCHEMA_READY = True
 
 
 # ---------------------------------------------------------------------------

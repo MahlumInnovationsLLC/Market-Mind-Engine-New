@@ -24,4 +24,6 @@ dependencies = [
     "openai>=1.50,<2",
     "anthropic>=0.40,<1",
     "stripe>=15.0.1",
+    "alembic>=1.13",
+    "psycopg[binary]>=3.2",
 ]

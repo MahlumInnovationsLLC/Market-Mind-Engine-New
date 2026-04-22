@@ -17,7 +17,19 @@ from fastapi import Depends, FastAPI, HTTPException, Request, WebSocket, WebSock
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
-from . import admin as admin_module, billing, dashboard, db, health, models_loader, predictor, rc_billing, storage
+from . import (
+    admin as admin_module,
+    billing,
+    dashboard,
+    db,
+    health,
+    migrations as db_migrations,
+    models_loader,
+    predictor,
+    rc_billing,
+    ready_gate,
+    storage,
+)
 from .notifications import (
     alerts as notif_alerts,
     churn as notif_churn,
@@ -84,6 +96,7 @@ log = logging.getLogger("axiom.api")
 async def lifespan(_: FastAPI):
     log.info("axiom-predict api starting")
     settings = get_settings()  # noqa: F841 — early validation
+    ready_gate.begin()
     if not auth_configured():
         # No Clerk publishable key means no way to verify tokens, which means
         # every protected endpoint will return 503.  Fail fast in production
@@ -104,17 +117,21 @@ async def lifespan(_: FastAPI):
         await db.get_pool()
     except Exception as e:
         log.error("Postgres pool init failed: %s", e)
-    # Make sure the admin tables exist before any request lands.
-    try:
-        await admin_module.ensure_schema()
-    except Exception as e:
-        log.warning("admin schema bootstrap failed: %s", e)
-    try:
-        from .kalshi.market_titles import ensure_schema as _ensure_market_title_schema
 
-        await _ensure_market_title_schema()
+    # Apply Alembic migrations BEFORE any request handler can land. The
+    # baseline migration owns the schema that used to be created by
+    # lazy ALTERs at request time. Run on a worker thread so the sync
+    # psycopg engine doesn't block the event loop.
+    try:
+        await asyncio.to_thread(db_migrations.run_migrations_sync)
+        ready_gate.mark_check(
+            "migrations",
+            ok=True,
+            detail=f"head={db_migrations.current_revision()}",
+        )
     except Exception as e:
-        log.warning("market_title schema bootstrap failed: %s", e)
+        log.error("alembic migrations failed: %s", e)
+        ready_gate.mark_check("migrations", ok=False, detail=f"{type(e).__name__}: {e}")
     # Register + start the external data feed pollers.  Feeds with missing
     # API keys register themselves as `enabled=false` so they show up in
     # /api/feeds/status with a clear skipped_reason but never poll.
@@ -213,6 +230,14 @@ async def lifespan(_: FastAPI):
     # traffic. Health endpoints surface progress while it warms up.
     models_task = asyncio.create_task(models_loader.ensure_artifacts())
 
+    # READY-Gate watcher: stays parked here while the rest of the boot
+    # sequence does its async work, then flips the gate so the
+    # orchestrator (which is parked in `_loop`) can start firing
+    # cycles. Surfaced via /api/health/ready.
+    ready_watcher_task = asyncio.create_task(
+        _ready_gate_watcher(models_task), name="ready-gate-watcher"
+    )
+
     try:
         yield
     finally:
@@ -254,6 +279,12 @@ async def lifespan(_: FastAPI):
                 await models_task
             except (asyncio.CancelledError, Exception):
                 pass
+        if not ready_watcher_task.done():
+            ready_watcher_task.cancel()
+            try:
+                await ready_watcher_task
+            except (asyncio.CancelledError, Exception):
+                pass
         try:
             await kalshi_ws.stop_ws()
         except Exception:
@@ -262,6 +293,109 @@ async def lifespan(_: FastAPI):
             fill_task.cancel()
         await db.close_pool()
         log.info("axiom-predict api stopped")
+
+
+async def _ready_gate_watcher(models_task: asyncio.Task) -> None:
+    """Wait for the boot-time prerequisites and then flip the READY gate.
+
+    Checks (each surfaced by name on /api/health/ready):
+      * `secrets` — required application secrets are set.
+      * `models`  — model_loader.ensure_artifacts() completed and
+                    `state.ready` is True (manifest verification passed).
+      * `feeds`   — every enabled feed has produced at least one poll
+                    outcome (success OR failure — the gate cares only
+                    that the polling pipeline is alive).
+
+    The watcher does not retry: a failed check is reported through
+    /api/health/ready and the orchestrator stays parked until the
+    process restarts (and the next boot runs the checks again).
+    """
+    settings = get_settings()
+    # Secrets check — Settings construction already validated the
+    # mandatory ones (SUPABASE_*); we just record the result and surface
+    # which optional creds are present.
+    missing = []
+    for label, present in (
+        ("supabase_db", bool(settings.supabase_db_password)),
+        ("supabase_service_key", bool(settings.supabase_service_key)),
+        ("clerk", auth_configured()),
+    ):
+        if not present:
+            missing.append(label)
+    if missing:
+        ready_gate.mark_check(
+            "secrets", ok=False, detail=f"missing: {', '.join(missing)}"
+        )
+    else:
+        ready_gate.mark_check("secrets", ok=True, detail="required secrets present")
+
+    # Models — wait for the loader background task; mark ok only when
+    # the resulting state is `ready` (manifest verification passed).
+    try:
+        await models_task
+        state = models_loader.get_state()
+        if state.ready and not state.error:
+            ready_gate.mark_check(
+                "models",
+                ok=True,
+                detail=f"{len(state.predictors)} predictor(s) loaded",
+            )
+        else:
+            ready_gate.mark_check(
+                "models",
+                ok=False,
+                detail=state.error or "models_loader did not reach ready state",
+            )
+    except asyncio.CancelledError:
+        raise
+    except Exception as e:
+        ready_gate.mark_check("models", ok=False, detail=f"{type(e).__name__}: {e}")
+
+    # Feeds — give each enabled feed up to FEED_FIRST_POLL_TIMEOUT to
+    # produce its first outcome. Disabled feeds are ignored. Bound the
+    # wait so a permanently broken feed can't park the trading loop
+    # forever; surface the names of any feeds still missing a response.
+    timeout = float(os.environ.get("AXIOM_READY_FEEDS_TIMEOUT_SECONDS") or "120")
+    deadline = asyncio.get_event_loop().time() + timeout
+    pending_feeds: list[str] = []
+    while True:
+        snap = feed_registry.snapshot()
+        enabled = [s for s in snap if s.get("enabled")]
+        pending_feeds = [
+            s["name"]
+            for s in enabled
+            if not (s.get("last_ok_at") or s.get("last_error_at"))
+        ]
+        if not pending_feeds:
+            break
+        if asyncio.get_event_loop().time() >= deadline:
+            break
+        await asyncio.sleep(1.0)
+    if pending_feeds:
+        ready_gate.mark_check(
+            "feeds",
+            ok=False,
+            detail=f"no first poll within {timeout:.0f}s: {', '.join(pending_feeds)}",
+        )
+    else:
+        n = len([s for s in feed_registry.snapshot() if s.get("enabled")])
+        ready_gate.mark_check(
+            "feeds", ok=True, detail=f"{n} enabled feed(s) responded"
+        )
+
+    # Trip the gate only if every check passed. If any failed, leave
+    # the gate clear so the orchestrator stays parked; ops can inspect
+    # /api/health/ready to see why and either fix the problem and
+    # restart, or surface this to the operator UI.
+    all_checks = ready_gate.status()["checks"]
+    if all(c["ok"] for c in all_checks.values()):
+        ready_gate.set_ready()
+    else:
+        bad = [n for n, c in all_checks.items() if not c["ok"]]
+        log.error(
+            "READY gate NOT flipped — failing checks: %s; orchestrator parked",
+            bad,
+        )
 
 
 app = FastAPI(
@@ -289,6 +423,23 @@ app.add_middleware(
 async def healthz() -> dict[str, str]:
     """Liveness probe (always returns ok if the process is up). Public."""
     return {"status": "ok"}
+
+
+@app.get("/api/health/ready")
+async def health_ready(response: Request) -> dict[str, object]:
+    """Readiness probe — public.
+
+    Returns 200 once the READY gate has flipped (migrations applied,
+    required secrets present, models loaded, every enabled feed has
+    responded at least once). Returns 503 with the per-check status
+    while any prerequisite is still failing or in progress, so a
+    deployment health-check or load-balancer can hold traffic off the
+    instance until the trading loop is allowed to unpark.
+    """
+    snap = ready_gate.status()
+    if snap["ready"]:
+        return {"status": "ready", **snap}
+    raise HTTPException(status_code=503, detail={"status": "not_ready", **snap})
 
 
 # ---------------------------------------------------------------------------
@@ -836,29 +987,12 @@ async def health_errors(
     }
 
 
-_ALERT_SCHEMA_READY = False
+_ALERT_SCHEMA_READY = True  # owned by Alembic baseline migration
 
 
 async def _ensure_alert_schema() -> None:
-    """Ensure the model_health_alerts table has the columns we need to
-    record acknowledgements + snoozes.  Idempotent — safe to call often."""
-    global _ALERT_SCHEMA_READY
-    if _ALERT_SCHEMA_READY:
-        return
-    try:
-        pool = await db.get_pool()
-        async with pool.acquire() as con:
-            await con.execute(
-                """
-                ALTER TABLE model_health_alerts
-                    ADD COLUMN IF NOT EXISTS acknowledged_by  text,
-                    ADD COLUMN IF NOT EXISTS acknowledged_at  timestamptz,
-                    ADD COLUMN IF NOT EXISTS snooze_until     timestamptz
-                """
-            )
-        _ALERT_SCHEMA_READY = True
-    except Exception as e:  # pragma: no cover
-        log.warning("model_health_alerts schema ensure failed: %s", e)
+    """Schema is now owned by the Alembic baseline migration; no-op."""
+    return None
 
 
 @app.get("/api/health/model-alerts")
@@ -1364,7 +1498,19 @@ async def orchestrator_run_cycle(
     _: object = Depends(billing.require_tier(billing.TIER_PRO)),
 ) -> dict[str, object]:
     """Manually fire a single cycle.  Useful for ops + smoke testing
-    without waiting for the next scheduler tick."""
+    without waiting for the next scheduler tick.
+
+    Refuses (503) until the READY gate has flipped — the same gate the
+    background scheduler parks on. Without this, an operator could
+    trigger a trading cycle against half-loaded predictors or before
+    migrations have applied, which is exactly the regression the
+    READY-gate work exists to prevent.
+    """
+    if not ready_gate.is_ready():
+        raise HTTPException(
+            status_code=503,
+            detail={"status": "not_ready", **ready_gate.status()},
+        )
     try:
         cr = await run_cycle(body.vertical)
     except Exception as e:
@@ -1628,7 +1774,17 @@ async def settlement_status(_: object = Depends(require_auth)) -> dict[str, obje
 
 @app.post("/api/settlement/run-cycle")
 async def settlement_run_cycle(_: object = Depends(require_auth)) -> dict[str, object]:
-    """Manually trigger one settlement sweep."""
+    """Manually trigger one settlement sweep.
+
+    Refuses (503) until the READY gate has flipped, mirroring the
+    orchestrator manual-trigger guard so a settlement sweep can't run
+    against an un-migrated DB or partially-loaded process.
+    """
+    if not ready_gate.is_ready():
+        raise HTTPException(
+            status_code=503,
+            detail={"status": "not_ready", **ready_gate.status()},
+        )
     try:
         cr = await run_settlement_cycle()
     except Exception as e:

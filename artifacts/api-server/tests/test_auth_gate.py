@@ -66,6 +66,11 @@ PROTECTED_ROUTES: tuple[str, ...] = (
     "/api/kalshi/kill-switch",
     "/api/admin/access-requests",
     "/api/orchestrator/live-execute",
+    "/api/market-title/{ticker}",
+    "/api/polymarket/balance",
+    "/api/polymarket/positions",
+    "/api/polymarket/markets",
+    "/api/polymarket/orders/resting",
 )
 
 # Mutating endpoints — auth-protected but only accept POST.  We don't
@@ -89,6 +94,9 @@ PROTECTED_POST_ROUTES: tuple[str, ...] = (
     "/api/kalshi/resume",
     "/api/models/reload",
     "/api/models/predict",
+    "/api/admin/access-requests/{clerk_user_id}",
+    "/api/health/acknowledge-alert",
+    "/api/polymarket/paper-order",
 )
 
 # Liveness probes — must answer 200 with no auth (parameterized below).
@@ -117,6 +125,15 @@ OTHER_PUBLIC_ROUTES: tuple[str, ...] = (
     "/api/ws/llm-logs",
     "/api/ws/pipeline",
     "/api/ws/settlement",
+    "/api/ws/polymarket",
+    # Postmark bounce webhook authenticates via shared-secret in body.
+    "/api/notifications/postmark-webhook",
+    # One-click unsubscribe link uses an HMAC-signed token in the URL.
+    "/api/notifications/unsubscribe",
+    # Readiness probe — public, but returns 503 until the READY gate
+    # flips, so it's not parameterized into PUBLIC_ROUTES (which asserts
+    # 200). Exercised directly by tests/test_ready_gate.py.
+    "/api/health/ready",
 )
 
 

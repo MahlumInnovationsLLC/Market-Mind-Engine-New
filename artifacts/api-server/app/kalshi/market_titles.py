@@ -47,19 +47,9 @@ ALTER TABLE trades ADD COLUMN IF NOT EXISTS market_title text;
 
 
 async def ensure_schema() -> None:
-    """Create the cache table + market_title column if missing. Idempotent."""
+    """Schema is now owned by the Alembic baseline migration; no-op."""
     global _SCHEMA_READY
-    if _SCHEMA_READY:
-        return
-    async with _SCHEMA_LOCK:
-        if _SCHEMA_READY:
-            return
-        try:
-            async with db.acquire() as c:
-                await c.execute(_SCHEMA_SQL)
-            _SCHEMA_READY = True
-        except Exception as e:
-            log.warning("market_title_cache schema bootstrap failed: %s", e)
+    _SCHEMA_READY = True
 
 
 def _clean_tickers(tickers: Iterable[str]) -> list[str]:

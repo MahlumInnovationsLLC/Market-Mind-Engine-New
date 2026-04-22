@@ -66,6 +66,26 @@ class _CycleScheduler:
         log.info("orchestrator scheduler stopped")
 
     async def _loop(self, vertical: str) -> None:
+        # READY gate: park until migrations have applied, models have
+        # loaded, required secrets are present, and every enabled feed
+        # has produced at least one poll outcome. Without this the
+        # scheduler would race the boot sequence and could fire a
+        # trading cycle against half-loaded predictors.
+        from .. import ready_gate
+
+        ready_wait = asyncio.create_task(ready_gate.wait())
+        stop_wait = asyncio.create_task(self._stop.wait())
+        done, pending = await asyncio.wait(
+            {ready_wait, stop_wait}, return_when=asyncio.FIRST_COMPLETED
+        )
+        for t in pending:
+            t.cancel()
+        if self._stop.is_set():
+            return
+        log.info(
+            "orchestrator vertical %s: ready gate cleared, starting cycle loop",
+            vertical,
+        )
         backoff = 0.0
         while not self._stop.is_set():
             try:

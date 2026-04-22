@@ -44,45 +44,8 @@ _schema_ready = False
 
 
 async def ensure_schema() -> None:
-    """Create the raw RC mirror table on first use."""
+    """Schema is now owned by the Alembic baseline migration; no-op."""
     global _schema_ready
-    if _schema_ready:
-        return
-    async with db.acquire() as conn:
-        await conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS rc_subscriptions (
-                key TEXT PRIMARY KEY,
-                app_user_id TEXT,
-                user_id TEXT,
-                product_id TEXT,
-                entitlement TEXT,
-                tier TEXT,
-                event_type TEXT,
-                event_id TEXT,
-                store TEXT,
-                expires_at TIMESTAMPTZ,
-                raw JSONB,
-                updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-            )
-            """
-        )
-        await conn.execute(
-            """
-            CREATE INDEX IF NOT EXISTS rc_subscriptions_user_idx
-            ON rc_subscriptions (user_id)
-            """
-        )
-        await conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS rc_events (
-                event_id TEXT PRIMARY KEY,
-                event_type TEXT NOT NULL,
-                received_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-                payload JSONB
-            )
-            """
-        )
     _schema_ready = True
 
 

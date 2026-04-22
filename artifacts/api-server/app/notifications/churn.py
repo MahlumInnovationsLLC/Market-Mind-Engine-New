@@ -34,37 +34,9 @@ _lock = asyncio.Lock()
 
 
 async def ensure_table() -> None:
+    """Schema is now owned by the Alembic baseline migration; no-op."""
     global _table_ready
-    if _table_ready:
-        return
-    async with _lock:
-        if _table_ready:
-            return
-        from .. import db
-        try:
-            await db.execute(
-                """
-                CREATE TABLE IF NOT EXISTS billing_churn_events (
-                  id            BIGSERIAL PRIMARY KEY,
-                  event_type    TEXT NOT NULL,
-                  user_id       TEXT,
-                  email         TEXT,
-                  email_sent    BOOLEAN NOT NULL DEFAULT FALSE,
-                  skipped_reason TEXT,
-                  details       JSONB,
-                  created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
-                )
-                """
-            )
-            await db.execute(
-                """
-                CREATE INDEX IF NOT EXISTS billing_churn_events_created_idx
-                  ON billing_churn_events (created_at DESC)
-                """
-            )
-            _table_ready = True
-        except Exception as e:
-            log.warning("billing_churn_events ensure failed: %s", e)
+    _table_ready = True
 
 
 async def record(

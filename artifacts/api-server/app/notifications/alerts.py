@@ -54,34 +54,9 @@ _dedupe_lock = asyncio.Lock()
 
 
 async def _ensure_dedupe_table() -> None:
+    """Schema is now owned by the Alembic baseline migration; no-op."""
     global _dedupe_table_ready
-    if _dedupe_table_ready:
-        return
-    async with _dedupe_lock:
-        if _dedupe_table_ready:
-            return
-        from .. import db  # local import to avoid cycles at module load
-        try:
-            await db.execute(
-                """
-                CREATE TABLE IF NOT EXISTS notification_dedupe (
-                  key  TEXT PRIMARY KEY,
-                  date_utc DATE,
-                  sent_at TIMESTAMPTZ NOT NULL DEFAULT now()
-                )
-                """
-            )
-            # Make date_utc nullable so generic (non-daily) rows can omit it.
-            await db.execute(
-                "ALTER TABLE notification_dedupe ALTER COLUMN date_utc DROP NOT NULL"
-            )
-            await db.execute(
-                "ALTER TABLE notification_dedupe "
-                "ADD COLUMN IF NOT EXISTS expires_at TIMESTAMPTZ"
-            )
-            _dedupe_table_ready = True
-        except Exception as e:
-            log.warning("notification_dedupe ensure failed: %s", e)
+    _dedupe_table_ready = True
 
 
 def _compose_key(alert_type: str, dedupe_key: str) -> str:
