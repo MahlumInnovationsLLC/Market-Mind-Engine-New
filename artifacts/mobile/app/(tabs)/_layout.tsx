@@ -6,6 +6,7 @@ import { Redirect, Tabs } from "expo-router";
 import React from "react";
 import { Platform, StyleSheet, View, useColorScheme } from "react-native";
 
+import { HeaderRight } from "@/components/HeaderRight";
 import { useColors } from "@/hooks/useColors";
 import { apiFetch } from "@/lib/api";
 
@@ -20,7 +21,7 @@ export default function TabsLayout() {
   });
   const isAdmin = access.data?.is_admin === true;
   const colorScheme = useColorScheme();
-  const isDark = colorScheme === "dark";
+  const isDark = colorScheme !== "light";
   const isIOS = Platform.OS === "ios";
   const isWeb = Platform.OS === "web";
 
@@ -49,6 +50,7 @@ export default function TabsLayout() {
           fontSize: 14,
         },
         headerTintColor: colors.primary,
+        headerRight: () => <HeaderRight />,
         tabBarStyle: {
           position: "absolute",
           backgroundColor: isIOS ? "transparent" : colors.background,
@@ -74,26 +76,19 @@ export default function TabsLayout() {
           ),
       }}
     >
+      {/* Overview group */}
       <Tabs.Screen
         name="index"
         options={{
-          title: "DASHBOARD",
-          tabBarLabel: "Dashboard",
+          title: "OVERVIEW",
+          tabBarLabel: "Overview",
           tabBarIcon: ({ color }) => (
             <Feather name="activity" size={20} color={color} />
           ),
         }}
       />
-      <Tabs.Screen
-        name="verticals"
-        options={{
-          title: "VERTICALS",
-          tabBarLabel: "Verticals",
-          tabBarIcon: ({ color }) => (
-            <Feather name="layers" size={20} color={color} />
-          ),
-        }}
-      />
+
+      {/* Trading group — Positions + Pipeline cluster */}
       <Tabs.Screen
         name="positions"
         options={{
@@ -114,6 +109,18 @@ export default function TabsLayout() {
           ),
         }}
       />
+
+      {/* Intelligence group — Verticals + Research */}
+      <Tabs.Screen
+        name="verticals"
+        options={{
+          title: "VERTICALS",
+          tabBarLabel: "Verticals",
+          tabBarIcon: ({ color }) => (
+            <Feather name="layers" size={20} color={color} />
+          ),
+        }}
+      />
       <Tabs.Screen
         name="research"
         options={{
@@ -124,16 +131,20 @@ export default function TabsLayout() {
           ),
         }}
       />
+
+      {/* Account */}
       <Tabs.Screen
         name="subscription"
         options={{
-          title: "SUBSCRIPTION",
+          title: "PLAN",
           tabBarLabel: "Plan",
           tabBarIcon: ({ color }) => (
             <Feather name="credit-card" size={20} color={color} />
           ),
         }}
       />
+
+      {/* System (admin only) */}
       <Tabs.Screen
         name="settings"
         options={{
@@ -141,8 +152,8 @@ export default function TabsLayout() {
           // The screen itself also redirects non-admins to dashboard.
           // Cast: typed-routes hasn't regen'd yet for this fresh screen.
           href: (isAdmin ? "/settings" : null) as never,
-          title: "SETTINGS",
-          tabBarLabel: "Settings",
+          title: "SYSTEM",
+          tabBarLabel: "System",
           tabBarIcon: ({ color }) => (
             <Feather name="sliders" size={20} color={color} />
           ),

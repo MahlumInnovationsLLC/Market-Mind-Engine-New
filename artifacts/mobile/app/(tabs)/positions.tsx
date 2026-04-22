@@ -1,9 +1,11 @@
 import { useQuery } from "@tanstack/react-query";
-import React from "react";
+import React, { useMemo, useState } from "react";
 import {
   ActivityIndicator,
   FlatList,
+  Pressable,
   RefreshControl,
+  ScrollView,
   StyleSheet,
   Text,
   View,
@@ -55,15 +57,45 @@ function fmtTime(iso: string | null | undefined): string {
   });
 }
 
+type Filter = "all" | "live" | "paper" | "wins" | "losses";
+const FILTERS: { id: Filter; label: string }[] = [
+  { id: "all", label: "ALL" },
+  { id: "live", label: "LIVE" },
+  { id: "paper", label: "PAPER" },
+  { id: "wins", label: "WINS" },
+  { id: "losses", label: "LOSSES" },
+];
+
 export default function PositionsScreen() {
   const colors = useColors();
   const insets = useSafeAreaInsets();
+  const [filter, setFilter] = useState<Filter>("all");
 
   const { data, isLoading, isError, error, refetch, isFetching } = useQuery({
     queryKey: ["dashboard", "recent-trades"],
     queryFn: () => apiFetch<TradeList>("/api/dashboard/recent-trades?limit=50"),
     refetchInterval: 30_000,
   });
+
+  const filtered = useMemo(() => {
+    const items = data?.items ?? [];
+    switch (filter) {
+      case "live":
+        return items.filter(
+          (t) => (t.trading_mode ?? "").toLowerCase() === "live",
+        );
+      case "paper":
+        return items.filter(
+          (t) => (t.trading_mode ?? "").toLowerCase() === "paper",
+        );
+      case "wins":
+        return items.filter((t) => (t.pnl ?? 0) > 0);
+      case "losses":
+        return items.filter((t) => (t.pnl ?? 0) < 0);
+      default:
+        return items;
+    }
+  }, [data, filter]);
 
   if (isLoading) {
     return (
@@ -84,8 +116,6 @@ export default function PositionsScreen() {
     );
   }
 
-  const items = data?.items ?? [];
-
   return (
     <FlatList
       style={{ backgroundColor: colors.background }}
@@ -95,8 +125,47 @@ export default function PositionsScreen() {
         gap: 8,
         flexGrow: 1,
       }}
-      data={items}
+      data={filtered}
       keyExtractor={(t) => String(t.id)}
+      ListHeaderComponent={
+        <ScrollView
+          horizontal
+          showsHorizontalScrollIndicator={false}
+          contentContainerStyle={styles.chipRow}
+          style={styles.chipScroller}
+        >
+          {FILTERS.map((f) => {
+            const active = f.id === filter;
+            return (
+              <Pressable
+                key={f.id}
+                onPress={() => setFilter(f.id)}
+                style={[
+                  styles.chip,
+                  {
+                    borderColor: active ? colors.primary : colors.border,
+                    backgroundColor: active
+                      ? colors.primary + "22"
+                      : "transparent",
+                  },
+                ]}
+                testID={`positions-filter-${f.id}`}
+              >
+                <Text
+                  style={[
+                    styles.chipText,
+                    {
+                      color: active ? colors.primary : colors.mutedForeground,
+                    },
+                  ]}
+                >
+                  {f.label}
+                </Text>
+              </Pressable>
+            );
+          })}
+        </ScrollView>
+      }
       refreshControl={
         <RefreshControl
           refreshing={isFetching && !isLoading}
@@ -107,7 +176,7 @@ export default function PositionsScreen() {
       ListEmptyComponent={
         <View style={styles.empty}>
           <Text style={[styles.muted, { color: colors.mutedForeground }]}>
-            No trades yet
+            {filter === "all" ? "No trades yet" : `No ${filter} trades`}
           </Text>
         </View>
       }
@@ -168,6 +237,19 @@ const styles = StyleSheet.create({
   center: { flex: 1, alignItems: "center", justifyContent: "center" },
   muted: { fontSize: 13, fontFamily: "Inter_400Regular" },
   empty: { paddingVertical: 60, alignItems: "center" },
+  chipScroller: { marginBottom: 8 },
+  chipRow: { gap: 6, paddingRight: 16 },
+  chip: {
+    borderWidth: 1,
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+    marginRight: 6,
+  },
+  chipText: {
+    fontSize: 10,
+    letterSpacing: 1.5,
+    fontFamily: "Inter_700Bold",
+  },
   row: {
     borderWidth: 1,
     padding: 12,

@@ -1,24 +1,26 @@
 import { useColorScheme } from "react-native";
 
 import colors from "@/constants/colors";
+import { radii, typography } from "@/lib/theme";
 
 /**
  * Returns the design tokens for the current color scheme.
  *
- * The returned object contains all color tokens for the active palette
- * plus scheme-independent values like `radius`.
+ * Dark is the default operator palette (cyberpunk-finance navy / cyan
+ * with green-success / red-loss / purple-edge accents). Light is used
+ * when the device is in light appearance mode.
  *
- * Falls back to the light palette when no dark key is defined in
- * constants/colors.ts (the scaffold ships light-only by default).
- * When a sibling web artifact's dark tokens are synced into a `dark`
- * key, this hook will automatically switch palettes based on the
- * device's appearance setting.
+ * The returned object also exposes the typography scale and radii so
+ * callers don't need to import multiple modules to render a single
+ * screen.
  */
 export function useColors() {
   const scheme = useColorScheme();
-  const palette =
-    scheme === "dark" && "dark" in colors
-      ? (colors as Record<string, typeof colors.light>).dark
-      : colors.light;
-  return { ...palette, radius: colors.radius };
+  const palette = scheme === "light" ? colors.light : colors.dark;
+  return {
+    ...palette,
+    radius: colors.radius,
+    radii,
+    typography,
+  };
 }

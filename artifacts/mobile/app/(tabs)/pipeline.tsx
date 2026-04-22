@@ -101,6 +101,57 @@ export default function PipelineScreen() {
         <RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={colors.primary} />
       }
     >
+      <SectionHeader>CYCLE PIPELINE</SectionHeader>
+      <Card style={styles.pipelineCard}>
+        <View style={styles.stageRow}>
+          {[
+            { id: "ingest", label: "INGEST" },
+            { id: "score", label: "SCORE" },
+            { id: "debate", label: "DEBATE" },
+            { id: "risk", label: "RISK" },
+            { id: "execute", label: "EXEC" },
+            { id: "settle", label: "SETTLE" },
+          ].map((stage, idx, arr) => (
+            <React.Fragment key={stage.id}>
+              <View style={styles.stage}>
+                <View
+                  style={[
+                    styles.stageDot,
+                    { borderColor: colors.primary },
+                  ]}
+                >
+                  <Text
+                    style={[
+                      styles.stageNum,
+                      { color: colors.primary },
+                    ]}
+                  >
+                    {idx + 1}
+                  </Text>
+                </View>
+                <Text
+                  style={[
+                    styles.stageLabel,
+                    { color: colors.mutedForeground },
+                  ]}
+                >
+                  {stage.label}
+                </Text>
+              </View>
+              {idx < arr.length - 1 ? (
+                <View
+                  style={[
+                    styles.stageConnector,
+                    { backgroundColor: colors.border },
+                  ]}
+                />
+              ) : null}
+            </React.Fragment>
+          ))}
+        </View>
+      </Card>
+
+      <View style={{ height: 16 }} />
       <SectionHeader>RECENT CYCLES</SectionHeader>
       {(cycles.data?.items ?? []).length === 0 ? (
         <Card>
@@ -187,6 +238,36 @@ const styles = StyleSheet.create({
   center: { flex: 1, alignItems: "center", justifyContent: "center" },
   muted: { fontSize: 13, fontFamily: "Inter_400Regular" },
   card: { gap: 8 },
+  pipelineCard: { paddingVertical: 16 },
+  stageRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+  },
+  stage: { alignItems: "center", gap: 6, minWidth: 36 },
+  stageDot: {
+    width: 28,
+    height: 28,
+    borderRadius: 14,
+    borderWidth: 1.5,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  stageNum: {
+    fontSize: 11,
+    fontFamily: "Inter_700Bold",
+  },
+  stageLabel: {
+    fontSize: 9,
+    letterSpacing: 1.2,
+    fontFamily: "Inter_600SemiBold",
+  },
+  stageConnector: {
+    flex: 1,
+    height: 1,
+    marginHorizontal: 4,
+    marginBottom: 16,
+  },
   rowHead: { flexDirection: "row", justifyContent: "space-between", alignItems: "center" },
   title: { fontSize: 13, fontFamily: "Inter_600SemiBold", flex: 1, marginRight: 8 },
   time: { fontSize: 11, fontFamily: "Inter_400Regular" },

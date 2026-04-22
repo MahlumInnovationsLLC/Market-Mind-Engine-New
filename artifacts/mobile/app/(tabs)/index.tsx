@@ -1,6 +1,14 @@
 import { useQuery } from "@tanstack/react-query";
-import React from "react";
-import { ActivityIndicator, RefreshControl, ScrollView, StyleSheet, Text, View } from "react-native";
+import React, { useState } from "react";
+import {
+  ActivityIndicator,
+  Pressable,
+  RefreshControl,
+  ScrollView,
+  StyleSheet,
+  Text,
+  View,
+} from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
 import type { VerticalsOverview } from "@workspace/api-client-react";
@@ -56,9 +64,18 @@ function fmtRel(iso: string | null | undefined): string {
   return `${Math.floor(diff / 86_400_000)}d ago`;
 }
 
+type Period = 1 | 7 | 30 | 365;
+const PERIOD_LABELS: Record<Period, string> = {
+  1: "1D",
+  7: "7D",
+  30: "30D",
+  365: "YTD",
+};
+
 export default function DashboardScreen() {
   const colors = useColors();
   const insets = useSafeAreaInsets();
+  const [period, setPeriod] = useState<Period>(7);
 
   const overview = useQuery({
     queryKey: ["dashboard", "overview"],
@@ -71,9 +88,9 @@ export default function DashboardScreen() {
     queryFn: () => apiFetch<SubInfo>("/api/me/subscription"),
   });
   const verticals = useQuery({
-    queryKey: ["dashboard", "verticals", 7],
+    queryKey: ["dashboard", "verticals", period],
     queryFn: () =>
-      apiFetch<VerticalsOverview>("/api/dashboard/verticals?days=7"),
+      apiFetch<VerticalsOverview>(`/api/dashboard/verticals?days=${period}`),
     refetchInterval: 60_000,
   });
   const { selected, matches, clear, filterActive, hiddenActive } =
@@ -155,6 +172,46 @@ export default function DashboardScreen() {
     >
       <SectionHeader>OPERATOR :: {sub.data?.email ?? "—"}</SectionHeader>
 
+      <View
+        style={[
+          styles.periodRow,
+          { borderColor: colors.border, backgroundColor: colors.card },
+        ]}
+        testID="overview-period-toggle"
+      >
+        {(Object.keys(PERIOD_LABELS) as unknown as Period[])
+          .map((k) => Number(k) as Period)
+          .map((p) => {
+            const active = p === period;
+            return (
+              <Pressable
+                key={p}
+                onPress={() => setPeriod(p)}
+                style={[
+                  styles.periodChip,
+                  {
+                    backgroundColor: active ? colors.primary : "transparent",
+                  },
+                ]}
+                testID={`overview-period-${p}`}
+              >
+                <Text
+                  style={[
+                    styles.periodLabel,
+                    {
+                      color: active
+                        ? colors.primaryForeground
+                        : colors.mutedForeground,
+                    },
+                  ]}
+                >
+                  {PERIOD_LABELS[p]}
+                </Text>
+              </Pressable>
+            );
+          })}
+      </View>
+
       {filterActive ? (
         <Card>
           <View style={styles.kvRow}>
@@ -223,6 +280,23 @@ export default function DashboardScreen() {
 const styles = StyleSheet.create({
   container: { padding: 16, gap: 8 },
   center: { flex: 1, alignItems: "center", justifyContent: "center" },
+  periodRow: {
+    flexDirection: "row",
+    borderWidth: 1,
+    padding: 4,
+    marginBottom: 12,
+    gap: 4,
+  },
+  periodChip: {
+    flex: 1,
+    paddingVertical: 8,
+    alignItems: "center",
+  },
+  periodLabel: {
+    fontSize: 11,
+    letterSpacing: 1.5,
+    fontFamily: "Inter_700Bold",
+  },
   row: { flexDirection: "row", gap: 8, marginBottom: 8 },
   kvRow: {
     flexDirection: "row",
