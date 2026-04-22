@@ -55,13 +55,18 @@ _MIN_SIGMA = 1e-3
 # BELOW / UNDER / LE -> "below"; the model inverts the probability for
 # below-thresholds.
 _DIR_ABOVE = re.compile(
-    r"^(?:ABOVE|OVER|GE|GT|GTE|UP|HIKE)([0-9_]+)$",
+    r"^(?:ABOVE|OVER|GE|GT|GTE|UP)([0-9_]+)$",
     re.IGNORECASE,
 )
 _DIR_BELOW = re.compile(
-    r"^(?:BELOW|UNDER|LE|LT|LTE|DOWN|CUT)([0-9_]+)$",
+    r"^(?:BELOW|UNDER|LE|LT|LTE|DOWN)([0-9_]+)$",
     re.IGNORECASE,
 )
+# Rate-decision tokens (FOMC) are in basis points: HIKE25 = 25bp = 0.25pp.
+# We special-case these because the rest of the model reasons in
+# percentage points (CPI m/m %, GDP %, NFP thousands, etc).
+_DIR_HIKE = re.compile(r"^(?:HIKE)([0-9_]+)$", re.IGNORECASE)
+_DIR_CUT = re.compile(r"^(?:CUT)([0-9_]+)$", re.IGNORECASE)
 
 
 @dataclass(frozen=True)
@@ -85,11 +90,26 @@ def _parse_threshold_token(token: str) -> tuple[float | None, str]:
     if not token:
         return None, "unknown"
     t = token.upper().strip()
-    m = _DIR_ABOVE.match(t)
+    # Rate-decision tokens first: HIKE25 / CUT25 are basis points,
+    # converted to percentage points for unit consistency.
+    bp_factor = 1.0
+    m = _DIR_HIKE.match(t)
     direction = "above"
+    if m:
+        bp_factor = 0.01
+    if not m:
+        m = _DIR_CUT.match(t)
+        if m:
+            direction = "below"
+            bp_factor = 0.01
+    if not m:
+        m = _DIR_ABOVE.match(t)
+        if m:
+            direction = "above"
     if not m:
         m = _DIR_BELOW.match(t)
-        direction = "below" if m else "above"
+        if m:
+            direction = "below"
     if m is None:
         # Bare numeric token (e.g. "25", "3_5") -> default to above.
         m_bare = re.match(r"^([0-9_]+)$", t)
@@ -99,7 +119,7 @@ def _parse_threshold_token(token: str) -> tuple[float | None, str]:
     else:
         raw = m.group(1)
     try:
-        return float(raw.replace("_", ".")), direction
+        return float(raw.replace("_", ".")) * bp_factor, direction
     except ValueError:
         return None, "unknown"
 

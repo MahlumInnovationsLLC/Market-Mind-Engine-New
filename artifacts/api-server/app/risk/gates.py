@@ -199,7 +199,9 @@ async def gate_market_cooldown(ctx: RiskContext) -> GateResult:
     # widens the blackout window.
     if ctx.vertical == "events-econ":
         try:
-            from ..events_econ.calendar import next_release_at as _next_release_at
+            from ..events_econ.calendar import (
+                resolved_release_for_ticker as _resolved_release_for_ticker,
+            )
             from ..events_econ.tickers import (
                 InvalidEventsEconTicker as _InvalidEventsEconTicker,
                 parse_events_econ_ticker as _parse_events_econ_ticker,
@@ -212,7 +214,11 @@ async def gate_market_cooldown(ctx: RiskContext) -> GateResult:
                 blackout_minutes = int(
                     ctx.operator_overrides.get("events_econ_pre_release_blackout_minutes", 5)
                 )
-                next_at = await _next_release_at(ticker.release_type)
+                # Scope to THIS ticker's release instance, not just the
+                # next same-type release.  Prevents a CPI-Jan blackout
+                # from incorrectly halting trading on CPI-Mar.
+                resolved = await _resolved_release_for_ticker(ticker)
+                next_at = resolved.release_at if resolved is not None else None
                 if next_at is not None:
                     if next_at.tzinfo is None:
                         next_at = next_at.replace(tzinfo=timezone.utc)

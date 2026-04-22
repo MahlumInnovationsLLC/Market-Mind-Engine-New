@@ -232,16 +232,27 @@ def test_kelly_per_vertical_override_beats_spec_default():
 # ---------------------------------------------------------------------------
 
 
+def _fake_resolved_row(release_at):
+    return ReleaseRow(
+        source="trading_economics_rss",
+        signal_id="fake/CPI/2024-12-15",
+        release_type="CPI",
+        release_at=release_at,
+        consensus=2.5, previous=2.4, actual=None,
+        revised_previous=None, payload={},
+    )
+
+
 def test_pre_release_blackout_rejects_within_window():
-    """5-min before the release prints, the gate rejects new entries."""
+    """5-min before THIS ticker's release prints, the gate rejects new entries."""
     next_release = datetime.now(timezone.utc) + timedelta(minutes=2)
 
-    async def _fake_next_release_at(_release_type: str):
-        return next_release
+    async def _fake_resolved(_ticker):
+        return _fake_resolved_row(next_release)
 
     with patch(
-        "app.events_econ.calendar.next_release_at",
-        side_effect=_fake_next_release_at,
+        "app.events_econ.calendar.resolved_release_for_ticker",
+        side_effect=_fake_resolved,
     ):
         res = asyncio.run(gate_market_cooldown(_ctx()))
     assert res.passed is False
@@ -253,18 +264,107 @@ def test_pre_release_blackout_passes_outside_window():
     """Outside the 5-minute window, the gate falls through."""
     next_release = datetime.now(timezone.utc) + timedelta(hours=4)
 
-    async def _fake_next_release_at(_release_type: str):
-        return next_release
+    async def _fake_resolved(_ticker):
+        return _fake_resolved_row(next_release)
 
     with patch(
-        "app.events_econ.calendar.next_release_at",
-        side_effect=_fake_next_release_at,
+        "app.events_econ.calendar.resolved_release_for_ticker",
+        side_effect=_fake_resolved,
     ):
         res = asyncio.run(gate_market_cooldown(_ctx()))
-    # Either the gate passed, or it was rejected for some other reason
-    # (but NOT the pre-release blackout).
     if not res.passed:
         assert res.details.get("reason") != "pre_release_blackout"
+
+
+def test_pre_release_blackout_only_scopes_this_ticker():
+    """When THIS ticker's release isn't imminent, the gate must not block.
+
+    Verifies the fix for the bug where a near-month CPI release would
+    incorrectly blackout a far-month CPI contract.
+    """
+    # The ticker is for KXCPI-25MAR (March 2025); resolved release
+    # for THIS ticker is months out, so no blackout.
+    far_release = datetime.now(timezone.utc) + timedelta(days=60)
+
+    async def _fake_resolved(_ticker):
+        return _fake_resolved_row(far_release)
+
+    ctx = _ctx(market_id="KXCPI-25MAR-ABOVE3")
+    with patch(
+        "app.events_econ.calendar.resolved_release_for_ticker",
+        side_effect=_fake_resolved,
+    ):
+        res = asyncio.run(gate_market_cooldown(ctx))
+    if not res.passed:
+        assert res.details.get("reason") != "pre_release_blackout"
+
+
+# ---------------------------------------------------------------------------
+# Window parsing + ticker-scoped release resolution
+# ---------------------------------------------------------------------------
+
+
+def test_parse_when_to_window_month():
+    from app.events_econ.calendar import parse_when_to_window
+    win = parse_when_to_window("24DEC")
+    assert win is not None
+    start, end = win
+    assert start.year == 2024 and start.month == 12 and start.day == 1
+    assert end.year == 2024 and end.month == 12
+
+
+def test_parse_when_to_window_quarter():
+    from app.events_econ.calendar import parse_when_to_window
+    win = parse_when_to_window("25Q1")
+    assert win is not None
+    start, end = win
+    assert start.year == 2025 and start.month == 1
+    assert end.month == 3
+
+
+def test_parse_when_to_window_week():
+    from app.events_econ.calendar import parse_when_to_window
+    win = parse_when_to_window("25W08")
+    assert win is not None
+
+
+def test_parse_when_to_window_unparseable():
+    from app.events_econ.calendar import parse_when_to_window
+    assert parse_when_to_window("garbage") is None
+    assert parse_when_to_window("") is None
+    assert parse_when_to_window(None) is None
+
+
+# ---------------------------------------------------------------------------
+# FOMC threshold unit (basis points -> percentage points)
+# ---------------------------------------------------------------------------
+
+
+def test_fomc_hike25_token_parses_as_quarter_pp():
+    """HIKE25 must be 25bp = 0.25pp, not 25.0."""
+    from app.events_econ.model import _parse_threshold_token
+    val, direction = _parse_threshold_token("HIKE25")
+    assert val == pytest.approx(0.25)
+    assert direction == "above"
+
+
+def test_fomc_cut50_token_parses_as_half_pp_below():
+    from app.events_econ.model import _parse_threshold_token
+    val, direction = _parse_threshold_token("CUT50")
+    assert val == pytest.approx(0.50)
+    assert direction == "below"
+
+
+def test_fomc_threshold_is_pp_not_raw_bp():
+    """ConsensusPriorResult.threshold must reflect 0.25pp for HIKE25,
+    not the raw 25.0 that the previous bug produced."""
+    t = parse_events_econ_ticker("KXFOMC-25MAR-HIKE25")
+    upcoming = _row(release_type="FOMC", consensus=0.0, days_ago=-1.0)
+    history = [_row(release_type="FOMC", consensus=0.0, actual=0.25 * (i % 2))
+               for i in range(20)]
+    res = consensus_prior_probability(t, [upcoming, *history])
+    assert res.threshold == pytest.approx(0.25)
+    assert res.direction == "above"
 
 
 # ---------------------------------------------------------------------------
