@@ -5,6 +5,7 @@ import { getMarketTitle } from "@workspace/api-client-react";
 import { useWebSocket } from "@/hooks/use-websocket";
 import WsStatusIndicator from "@/components/ws-status-indicator";
 import { apiFetch } from "@/lib/api";
+import SwarmTranscript, { useSwarmTranscript } from "@/components/swarm-transcript";
 
 type TitleMap = Record<string, string | null>;
 
@@ -399,23 +400,6 @@ function fmtTimePart(s: string | null): string {
   });
 }
 
-function formatSwarmLine(ev: Record<string, unknown>): string {
-  const t = pickStr(ev, "type") ?? "event";
-  const persona = pickStr(ev, "persona") ?? pickStr(ev, "analyst_id");
-  const debate = pickStr(ev, "debate_id");
-  const verdict =
-    pickStr(ev, "recommended_action") ??
-    pickStr(ev, "verdict") ??
-    pickStr(ev, "decision");
-  const matchup = pickStr(ev, "matchup");
-  const created = pickStr(ev, "ts") ?? pickStr(ev, "created_at");
-  const head = `${fmtTimePart(created)} · ${t.toUpperCase()}`;
-  const tail = [persona && `@${persona}`, matchup, verdict && `→ ${verdict}`, debate && `[${debate.slice(0, 8)}]`]
-    .filter(Boolean)
-    .join(" · ");
-  return tail ? `${head} · ${tail}` : head;
-}
-
 function formatSettlementLine(ev: Record<string, unknown>): import("react").ReactNode {
   const t = pickStr(ev, "type") ?? "event";
   const market = pickStr(ev, "market_id");
@@ -447,7 +431,7 @@ export default function PipelinePage() {
   const { signOut } = useClerk();
   const { getToken, isSignedIn } = useAuth();
   const ws = useWebSocket({ path: "/api/ws/pipeline", bufferSize: 500 });
-  const llm = useWebSocket({ path: "/api/ws/llm-logs", bufferSize: 200 });
+  const swarm = useSwarmTranscript();
   const settlement = useWebSocket({ path: "/api/ws/settlement", bufferSize: 200 });
 
   // Hydrate from REST so reloading the page mid-cycle still shows the
@@ -496,6 +480,23 @@ export default function PipelinePage() {
 
   const groups = useMemo(() => groupByCycle(mergedEvents), [mergedEvents]);
   const titleResolver = useMarketTitleResolver();
+  // Tie the swarm transcript to the most recent in-flight candidate by
+  // surfacing its market_id; the transcript outlines that debate's card
+  // in the primary colour so operators can correlate at a glance.
+  const liveMarketId = useMemo<string | null>(() => {
+    for (const g of groups) {
+      if (g.status !== "running") continue;
+      // Newest candidate within the running cycle wins.
+      const candIds = Array.from(g.candidates.keys());
+      for (let i = candIds.length - 1; i >= 0; i--) {
+        const evs = g.candidates.get(candIds[i]) ?? [];
+        const last = evs[evs.length - 1];
+        if (pickStr(last ?? {}, "type") === "candidate_complete") continue;
+        return pickStr(evs[0] ?? {}, "market_id") ?? candIds[i];
+      }
+    }
+    return null;
+  }, [groups]);
   const operatorLabel =
     user?.primaryEmailAddress?.emailAddress ?? user?.username ?? user?.id ?? "—";
 
@@ -593,14 +594,12 @@ export default function PipelinePage() {
           )}
         </section>
         <aside className="space-y-3">
-          <OutOfBandFeed
-            title="SWARM_VERDICTS"
-            events={llm.events}
-            status={llm.status}
-            reconnectIn={llm.reconnectIn}
-            closeCode={llm.closeCode}
-            emptyText="Awaiting persona / gatekeeper output…"
-            formatLine={formatSwarmLine}
+          <SwarmTranscript
+            store={swarm.store}
+            status={swarm.ws.status}
+            reconnectIn={swarm.ws.reconnectIn}
+            closeCode={swarm.ws.closeCode}
+            highlightMarketId={liveMarketId}
           />
           <OutOfBandFeed
             title="SETTLEMENT_FILLS"

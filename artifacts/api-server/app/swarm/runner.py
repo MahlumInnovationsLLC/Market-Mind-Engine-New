@@ -10,10 +10,12 @@ Integrations.
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import json
 import logging
 import re
 import time
+import uuid
 from typing import Any
 
 from .. import db
@@ -31,6 +33,33 @@ from .weights import get_persona_weight
 
 
 log = logging.getLogger(__name__)
+
+
+# Per-debate correlation id, propagated via contextvars so helpers
+# (`_call_persona`, `_stream_openai`, `_stream_anthropic`) automatically
+# tag their published events with the originating debate.  This lets the
+# /api/ws/llm-logs subscriber group token deltas, persona verdicts, and
+# moderator/gatekeeper outcomes by debate even when several debates run
+# concurrently in the same process.
+_current_debate_id: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "swarm_debate_id", default=None
+)
+
+
+def _now_iso() -> str:
+    from datetime import datetime, timezone
+
+    return datetime.now(timezone.utc).isoformat()
+
+
+async def _publish(event: dict[str, Any]) -> None:
+    """Inject the active debate_id + timestamp and forward to the hub."""
+    did = _current_debate_id.get()
+    enriched: dict[str, Any] = dict(event)
+    if did and "debate_id" not in enriched:
+        enriched["debate_id"] = did
+    enriched.setdefault("ts", _now_iso())
+    await llm_log_hub.publish(enriched)
 
 
 # ---------------------------------------------------------------------------
@@ -117,7 +146,7 @@ async def _stream_openai(
                 delta = event.choices[0].delta.content or ""
                 if delta:
                     chunks.append(delta)
-                    await llm_log_hub.publish(
+                    await _publish(
                         {"type": "persona_delta", "persona": persona_id, "text": delta}
                     )
             if getattr(event, "usage", None):
@@ -144,7 +173,7 @@ async def _stream_anthropic(
         async for delta in stream.text_stream:
             if delta:
                 chunks.append(delta)
-                await llm_log_hub.publish(
+                await _publish(
                     {"type": "persona_delta", "persona": persona_id, "text": delta}
                 )
         final = await stream.get_final_message()
@@ -159,8 +188,14 @@ async def _call_persona(
 ) -> dict[str, Any]:
     """Run one persona end-to-end and return a verdict dict."""
     started = time.perf_counter()
-    await llm_log_hub.publish(
-        {"type": "persona_start", "persona": persona.id, "model": persona.model_id}
+    await _publish(
+        {
+            "type": "persona_start",
+            "persona": persona.id,
+            "display": persona.display,
+            "provider": persona.provider,
+            "model": persona.model_id,
+        }
     )
     error: str | None = None
     text = ""
@@ -195,7 +230,7 @@ async def _call_persona(
         "latency_ms": latency_ms,
         "error": error,
     }
-    await llm_log_hub.publish(
+    await _publish(
         {
             "type": "persona_done",
             "persona": persona.id,
@@ -247,7 +282,22 @@ async def run_debate(candidate: dict[str, Any]) -> dict[str, Any]:
       - context (str, optional free-text market/game context)
     Returns the persisted swarm_debates row as a dict, plus the full
     transcript under `transcript`.
+
+    Wraps `_run_debate_inner` with a try/finally so the per-debate
+    contextvar is always reset, even if persistence or an LLM call
+    raises mid-debate.
     """
+    stream_debate_id = uuid.uuid4().hex
+    token = _current_debate_id.set(stream_debate_id)
+    try:
+        return await _run_debate_inner(candidate, stream_debate_id)
+    finally:
+        _current_debate_id.reset(token)
+
+
+async def _run_debate_inner(
+    candidate: dict[str, Any], stream_debate_id: str
+) -> dict[str, Any]:
     started = time.perf_counter()
     game_id = str(candidate.get("game_id") or "").strip()
     if not game_id:
@@ -259,6 +309,10 @@ async def run_debate(candidate: dict[str, Any]) -> dict[str, Any]:
     current_price = _coerce_prob(candidate.get("current_price"))
     ctx = str(candidate.get("context") or "").strip()
     aggression_mode = normalize_aggression_mode(candidate.get("aggression_mode"))
+
+    # `stream_debate_id` is set into `_current_debate_id` by the public
+    # `run_debate` wrapper above, which also handles reset() in finally.
+    kalshi_market_id = candidate.get("kalshi_market_id")
 
     user_prompt = (
         f"CANDIDATE TRADE\n"
@@ -273,14 +327,22 @@ async def run_debate(candidate: dict[str, Any]) -> dict[str, Any]:
         f"\nCONTEXT\n{ctx or '(no additional context provided)'}"
     )
 
-    await llm_log_hub.publish(
+    await _publish(
         {
             "type": "debate_start",
             "game_id": game_id,
             "matchup": matchup,
             "league": league,
             "market_type": market_type,
+            "side": side,
+            "current_price": current_price,
             "aggression_mode": aggression_mode,
+            # Mirror the cycle-stream candidate identifier so the UI can
+            # link each debate back to its candidate row.
+            "market_id": kalshi_market_id,
+            "kalshi_market_id": kalshi_market_id,
+            "personas": [p.id for p in PERSONAS] + [MODERATOR.id, GATEKEEPER.id],
+            "ts": _now_iso(),
         }
     )
 
@@ -331,7 +393,7 @@ async def run_debate(candidate: dict[str, Any]) -> dict[str, Any]:
         target_lean = "YES" if consensus >= 0.5 else "NO"
         agreement = sum(1 for v in verdicts if v["lean"] == target_lean) / len(verdicts)
 
-    await llm_log_hub.publish(
+    await _publish(
         {
             "type": "moderator_done",
             "consensus_probability": consensus,
@@ -368,7 +430,7 @@ async def run_debate(candidate: dict[str, Any]) -> dict[str, Any]:
     if not approved:
         final_action = "PASS"
 
-    await llm_log_hub.publish(
+    await _publish(
         {
             "type": "gatekeeper_done",
             "approved": approved,
@@ -403,13 +465,24 @@ async def run_debate(candidate: dict[str, Any]) -> dict[str, Any]:
         aggression_mode=aggression_mode,
     )
 
-    await llm_log_hub.publish(
+    await _publish(
         {
             "type": "debate_complete",
-            "debate_id": debate_id,
+            # Keep the streaming UUID as the canonical correlation id so
+            # subscribers grouping prior events still match this one;
+            # surface the persisted DB id alongside it for cross-reference.
+            "debate_id": stream_debate_id,
+            "persisted_debate_id": debate_id,
+            "game_id": game_id,
+            "matchup": matchup,
+            "league": league,
+            "market_id": kalshi_market_id,
             "approved": approved,
             "recommended_action": final_action,
             "consensus_probability": consensus,
+            "agreement_rate": agreement,
+            "confidence_band_low": band_low,
+            "confidence_band_high": band_high,
             "cost_estimate": total_cost,
             "latency_ms": total_latency_ms,
         }
