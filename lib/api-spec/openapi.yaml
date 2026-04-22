@@ -507,7 +507,25 @@ components:
         secrets_present: { $ref: "#/components/schemas/SecretsPresent" }
         postgres: { $ref: "#/components/schemas/PostgresHealth" }
         storage: { $ref: "#/components/schemas/StorageHealth" }
+        active_predictor:
+          oneOf:
+            - { $ref: "#/components/schemas/ActivePredictor" }
+            - { type: "null" }
       required: [status, supabase_project, paper_mode, kalshi_env, secrets_present]
+
+    ActivePredictor:
+      type: object
+      description: Currently-bound canonical predictor surfaced on the operator console.
+      properties:
+        name: { type: string }
+        version: { type: string, description: "Short version tag (first 12 hex of sha256)." }
+        sha256: { type: string, nullable: true, description: "Full sha256 of the predictor file." }
+        type: { type: string }
+        module: { type: string }
+        n_features_in: { type: integer, nullable: true }
+        bound: { type: boolean, description: "True once predict() has bound the predictor; false during lazy peek." }
+        loaded_at: { type: number, nullable: true, description: "Unix timestamp (seconds) when the predictor was bound." }
+      required: [name, version, type, module, bound]
 
     DashboardCounts:
       type: object

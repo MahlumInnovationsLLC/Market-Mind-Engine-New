@@ -12,6 +12,7 @@ import SwarmAnalysts from "@/components/telemetry/swarm-analysts";
 import TradingCycles from "@/components/telemetry/trading-cycles";
 import SwarmDebates from "@/components/telemetry/swarm-debates";
 import ModelInventory from "@/components/telemetry/model-inventory";
+import ActiveModelBadge from "@/components/telemetry/active-model-badge";
 import SettlementPanel from "@/components/telemetry/settlement-panel";
 import ModelHealthAlerts from "@/components/telemetry/model-health-alerts";
 import WsStatusIndicator from "@/components/ws-status-indicator";
@@ -50,6 +51,7 @@ export default function Dashboard() {
             closeCode={ws.closeCode}
             label="LIVE"
           />
+          <ActiveModelBadge />
           <Link
             href="/pipeline"
             className="border border-border px-3 py-1 uppercase tracking-widest text-[10px] text-muted-foreground hover:text-primary hover:border-primary"

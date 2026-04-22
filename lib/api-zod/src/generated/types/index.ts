@@ -8,6 +8,7 @@
 
 export * from "./acknowledgeAlertRequest";
 export * from "./acknowledgeAlertResult";
+export * from "./activePredictor";
 export * from "./adminAccessRequest";
 export * from "./adminAccessRequestDecision";
 export * from "./adminAccessRequestDecisionDecision";

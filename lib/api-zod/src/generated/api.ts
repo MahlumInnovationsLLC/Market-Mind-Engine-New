@@ -60,6 +60,37 @@ export const HealthFullResponse = zod.object({
       error: zod.string().nullish(),
     })
     .optional(),
+  active_predictor: zod
+    .union([
+      zod
+        .object({
+          name: zod.string(),
+          version: zod
+            .string()
+            .describe("Short version tag (first 12 hex of sha256)."),
+          sha256: zod
+            .string()
+            .nullish()
+            .describe("Full sha256 of the predictor file."),
+          type: zod.string(),
+          module: zod.string(),
+          n_features_in: zod.number().nullish(),
+          bound: zod
+            .boolean()
+            .describe(
+              "True once predict() has bound the predictor; false during lazy peek.",
+            ),
+          loaded_at: zod
+            .number()
+            .nullish()
+            .describe("Unix timestamp (seconds) when the predictor was bound."),
+        })
+        .describe(
+          "Currently-bound canonical predictor surfaced on the operator console.",
+        ),
+      zod.null(),
+    ])
+    .optional(),
 });
 
 /**

@@ -5,6 +5,7 @@
  * Axiom-Predict API — backend for the prediction-market trading platform.
  * OpenAPI spec version: 0.1.0
  */
+import type { ActivePredictor } from "./activePredictor";
 import type { PostgresHealth } from "./postgresHealth";
 import type { SecretsPresent } from "./secretsPresent";
 import type { StorageHealth } from "./storageHealth";
@@ -17,4 +18,5 @@ export interface FullHealth {
   secrets_present: SecretsPresent;
   postgres?: PostgresHealth;
   storage?: StorageHealth;
+  active_predictor?: ActivePredictor | null;
 }

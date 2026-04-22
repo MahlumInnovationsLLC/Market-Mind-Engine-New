@@ -503,6 +503,7 @@ async def health_full(_: object = Depends(require_approved_user)) -> dict[str, o
             "anthropic": bool(settings.anthropic_api_key),
             "kalshi": bool(settings.kalshi_api_key_id and settings.kalshi_private_key),
         },
+        "active_predictor": predictor.active_model_info(),
     }
     # Postgres
     try:

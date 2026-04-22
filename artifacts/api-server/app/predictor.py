@@ -69,15 +69,17 @@ class PredictorInputError(ValueError):
 _active_name: str | None = None
 _active_obj: Any = None
 _active_n_features: int | None = None
+_active_loaded_at: float | None = None
 _select_lock = asyncio.Lock()
 
 
 def invalidate() -> None:
     """Forget the cached active predictor selection."""
-    global _active_name, _active_obj, _active_n_features
+    global _active_name, _active_obj, _active_n_features, _active_loaded_at
     _active_name = None
     _active_obj = None
     _active_n_features = None
+    _active_loaded_at = None
 
 
 def _version_tuple(s: str) -> tuple[int, ...]:
@@ -140,7 +142,7 @@ def _pick_active_sync() -> tuple[str, Any] | None:
 
 async def _ensure_active() -> tuple[str, Any]:
     """Bind an active predictor, lazy-loading from disk if needed."""
-    global _active_name, _active_obj, _active_n_features
+    global _active_name, _active_obj, _active_n_features, _active_loaded_at
     if _active_obj is not None and _active_name is not None:
         return _active_name, _active_obj
     async with _select_lock:
@@ -168,6 +170,7 @@ async def _ensure_active() -> tuple[str, Any]:
             _active_obj = obj
             n = getattr(obj, "n_features_in_", None)
             _active_n_features = int(n) if isinstance(n, int) else None
+            _active_loaded_at = time.time()
             log.info(
                 "[predictor] active=%s type=%s n_features_in=%s",
                 name, type(obj).__name__, _active_n_features,
@@ -181,6 +184,7 @@ async def _ensure_active() -> tuple[str, Any]:
             _active_obj = obj
             n = getattr(obj, "n_features_in_", None)
             _active_n_features = int(n) if isinstance(n, int) else None
+            _active_loaded_at = time.time()
             return name, obj
         raise PredictorUnavailable(
             "no canonical predictor available"
@@ -334,12 +338,16 @@ def active_model_info() -> dict[str, Any] | None:
         obj = _active_obj
         n_features = _active_n_features
     state = models_loader.get_state()
-    version = (state.predictors.get(name) or {}).get("version", "unknown")
+    meta = state.predictors.get(name) or {}
+    version = meta.get("version", "unknown")
+    sha256 = meta.get("sha256")
     return {
         "name": name,
         "version": str(version),
+        "sha256": str(sha256) if sha256 else None,
         "type": type(obj).__name__,
         "module": type(obj).__module__,
         "n_features_in": int(n_features) if isinstance(n_features, int) else None,
         "bound": _active_obj is not None,
+        "loaded_at": _active_loaded_at,
     }

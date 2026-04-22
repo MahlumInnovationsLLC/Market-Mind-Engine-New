@@ -41,6 +41,24 @@ export interface StorageHealth {
   error?: string | null;
 }
 
+/**
+ * Currently-bound canonical predictor surfaced on the operator console.
+ */
+export interface ActivePredictor {
+  name: string;
+  /** Short version tag (first 12 hex of sha256). */
+  version: string;
+  /** Full sha256 of the predictor file. */
+  sha256?: string | null;
+  type: string;
+  module: string;
+  n_features_in?: number | null;
+  /** True once predict() has bound the predictor; false during lazy peek. */
+  bound: boolean;
+  /** Unix timestamp (seconds) when the predictor was bound. */
+  loaded_at?: number | null;
+}
+
 export interface FullHealth {
   status: string;
   supabase_project: string;
@@ -49,6 +67,7 @@ export interface FullHealth {
   secrets_present: SecretsPresent;
   postgres?: PostgresHealth;
   storage?: StorageHealth;
+  active_predictor?: ActivePredictor | null;
 }
 
 export interface DashboardCounts {
