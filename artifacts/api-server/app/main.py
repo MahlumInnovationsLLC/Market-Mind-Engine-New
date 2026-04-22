@@ -38,6 +38,10 @@ from .auth import (
 from .config import get_settings
 from .feeds import registry as feed_registry, scheduler as feed_scheduler
 from .feeds.odds_api import register_odds_feeds
+from .feeds.sportradar import (
+    ensure_schema as _ensure_sportradar_schema,
+    register_sportradar_extra_feeds,
+)
 from .feeds.weather import register_weather_feeds
 from .orchestrator import pipeline_event_hub, run_cycle, scheduler as orchestrator_scheduler
 from .settlement import (
@@ -116,6 +120,11 @@ async def lifespan(_: FastAPI):
     try:
         register_odds_feeds()
         register_weather_feeds()
+        try:
+            await _ensure_sportradar_schema()
+            register_sportradar_extra_feeds()
+        except Exception as e:
+            log.warning("sportradar extra feed registration failed: %s", e)
         await feed_scheduler.start()
     except Exception as e:
         log.error("feed scheduler start failed: %s", e)

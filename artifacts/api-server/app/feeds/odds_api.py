@@ -146,8 +146,19 @@ _SPORTRADAR_SCHEDULE_PATHS = {
     "nhl":   "https://api.sportradar.us/nhl/trial/v7/en/games/{y}/{m:02d}/{d:02d}/schedule.json",
     "mlb":   "https://api.sportradar.us/mlb/trial/v7/en/games/{y}/{m:02d}/{d:02d}/schedule.json",
     "ncaab": "https://api.sportradar.us/ncaamb/trial/v8/en/games/{y}/{m:02d}/{d:02d}/schedule.json",
+    # NFL has no daily-schedule endpoint; current-week is the closest equivalent.
+    "nfl":    "https://api.sportradar.us/nfl/official/trial/v7/en/games/current_week/schedule.json",
+    "ncaaf":  "https://api.sportradar.us/ncaafb/trial/v1/en/games/{y}/{m:02d}/{d:02d}/schedule.json",
 }
-_SPORTRADAR_LEAGUE = {"nba": "NBA", "nhl": "NHL", "mlb": "MLB", "ncaab": "NCAAB"}
+_SPORTRADAR_LEAGUE = {
+    "nba": "NBA",
+    "nhl": "NHL",
+    "mlb": "MLB",
+    "ncaab": "NCAAB",
+    "nfl": "NFL",
+    "ncaaf": "NCAAF",
+}
+SPORTRADAR_SPORTS: tuple[str, ...] = tuple(_SPORTRADAR_SCHEDULE_PATHS.keys())
 
 
 async def _poll_sportradar(sport: str) -> int:
@@ -178,7 +189,14 @@ async def _poll_sportradar(sport: str) -> int:
         except Exception:
             return 0
 
-    games = payload.get("games") or payload.get("league", {}).get("games") or []
+    # Most leagues return either {"games": [...]} or {"league": {"games": [...]}};
+    # NFL's current_week endpoint nests them under {"week": {"games": [...]}}.
+    games = (
+        payload.get("games")
+        or (payload.get("league") or {}).get("games")
+        or (payload.get("week") or {}).get("games")
+        or []
+    )
     if not games:
         return 0
 
@@ -225,9 +243,10 @@ async def _poll_sportradar(sport: str) -> int:
             )
     except Exception as e:
         # If the table doesn't have a unique index on game_id the upsert will
-        # raise — log and surface so the operator can fix the index.
+        # raise.  Re-raise so the scheduler records a real failure and the
+        # health page surfaces the error rather than reporting "0 rows OK".
         log.warning("sportradar %s upsert failed: %s", sport, e)
-        return 0
+        raise
     return len(rows)
 
 
@@ -262,7 +281,12 @@ def register_odds_feeds() -> None:
         skipped_reason=None if odds_key else "THE_ODDS_API_KEY not set",
     ))
 
-    for sport in ("nba", "nhl", "mlb", "ncaab"):
+    # Schedules change slowly (kickoff times, lineups) — default to 4h to be
+    # gentle on the trial-tier quota.  Operators can override per-deployment.
+    schedule_cadence = max(
+        60, int(os.environ.get("AXIOM_SPORTRADAR_SCHEDULE_CADENCE") or str(60 * 60 * 4))
+    )
+    for sport in SPORTRADAR_SPORTS:
         key_var = f"SPORTRADAR_{sport.upper()}_KEY"
         sport_key = os.environ.get(key_var) or os.environ.get("SPORTRADAR_API_KEY")
         # Bind sport into the closure so each feed polls its own URL.
@@ -270,7 +294,7 @@ def register_odds_feeds() -> None:
             return await _poll_sportradar(sport)
         registry.register(Feed(
             name=f"sportradar_{sport}",
-            cadence_seconds=60.0,
+            cadence_seconds=float(schedule_cadence),
             poll=_poll,
             enabled=bool(sport_key),
             skipped_reason=None if sport_key else f"{key_var} not set",
