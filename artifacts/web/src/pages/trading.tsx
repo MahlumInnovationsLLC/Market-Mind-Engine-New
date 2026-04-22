@@ -12,6 +12,7 @@ import RecentTrades from "@/components/telemetry/recent-trades";
 import TradingCycles from "@/components/telemetry/trading-cycles";
 import ActivePositions from "@/components/dashboard/active-positions";
 import TradeStatsPanel from "@/components/dashboard/trade-stats-panel";
+import PnlSparkline from "@/components/dashboard/pnl-sparkline";
 
 type TabKey = "live" | "feed";
 const TABS: { key: TabKey; label: string; subtitle: string }[] = [
@@ -113,8 +114,9 @@ function LiveTab({ isAdmin }: { isAdmin: boolean }) {
           <LiveExecuteToggle />
           {isAdmin && <EmergencyStop />}
         </div>
-        <div className="lg:col-span-2">
+        <div className="space-y-3 lg:col-span-2">
           <TradeStatsPanel />
+          <PnlSparkline />
         </div>
       </div>
 

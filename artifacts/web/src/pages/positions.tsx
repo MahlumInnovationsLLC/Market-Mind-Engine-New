@@ -316,9 +316,9 @@ export default function PositionsPage() {
                   <Th label="Side" k="side" sortKey={sortKey} sortDir={sortDir} onClick={toggleSort} align="left" />
                   <Th label="Qty" k="qty" sortKey={sortKey} sortDir={sortDir} onClick={toggleSort} align="right" />
                   <Th label="Entry" k="entry" sortKey={sortKey} sortDir={sortDir} onClick={toggleSort} align="right" />
-                  <Th label="Mark" k="mark" sortKey={sortKey} sortDir={sortDir} onClick={toggleSort} align="right" />
+                  <Th label="Mark" k="mark" sortKey={sortKey} sortDir={sortDir} onClick={toggleSort} align="right" disabled title="Mark not surfaced on positions endpoint" />
                   <Th label="P&L" k="pnl" sortKey={sortKey} sortDir={sortDir} onClick={toggleSort} align="right" />
-                  <Th label="Edge" k="edge" sortKey={sortKey} sortDir={sortDir} onClick={toggleSort} align="right" />
+                  <Th label="Edge" k="edge" sortKey={sortKey} sortDir={sortDir} onClick={toggleSort} align="right" disabled title="Edge is per-trade — open a row to view" />
                   <Th label="Age" k="age" sortKey={sortKey} sortDir={sortDir} onClick={toggleSort} align="right" />
                 </tr>
               </thead>
@@ -398,6 +398,8 @@ function Th({
   sortDir,
   onClick,
   align,
+  disabled = false,
+  title,
 }: {
   label: string;
   k: SortKey;
@@ -405,15 +407,22 @@ function Th({
   sortDir: SortDir;
   onClick: (k: SortKey) => void;
   align: "left" | "right";
+  disabled?: boolean;
+  title?: string;
 }) {
-  const active = sortKey === k;
+  const active = sortKey === k && !disabled;
   const arrow = active ? (sortDir === "asc" ? "▲" : "▼") : "";
   return (
     <th
-      className={`py-1 font-normal cursor-pointer select-none ${
+      className={`py-1 font-normal select-none ${
         align === "right" ? "text-right" : "text-left"
-      } ${active ? "text-primary" : "hover:text-foreground"}`}
-      onClick={() => onClick(k)}
+      } ${
+        disabled
+          ? "cursor-default text-muted-foreground/60"
+          : `cursor-pointer ${active ? "text-primary" : "hover:text-foreground"}`
+      }`}
+      onClick={disabled ? undefined : () => onClick(k)}
+      title={title}
       data-testid={`th-${k}`}
     >
       {label} {arrow}
