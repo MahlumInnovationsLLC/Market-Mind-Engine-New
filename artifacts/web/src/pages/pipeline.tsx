@@ -426,6 +426,30 @@ function formatSettlementLine(ev: Record<string, unknown>): import("react").Reac
   );
 }
 
+const PIPELINE_CACHE_KEY = "pipeline.recent-events.v1";
+const PIPELINE_CACHE_CYCLE_LIMIT = 50;
+
+function loadCachedEvents(): Record<string, unknown>[] {
+  if (typeof window === "undefined") return [];
+  try {
+    const raw = window.localStorage.getItem(PIPELINE_CACHE_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? (parsed as Record<string, unknown>[]) : [];
+  } catch {
+    return [];
+  }
+}
+
+function saveCachedEvents(events: Record<string, unknown>[]): void {
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.setItem(PIPELINE_CACHE_KEY, JSON.stringify(events));
+  } catch {
+    // quota exceeded or storage disabled — non-fatal.
+  }
+}
+
 export default function PipelinePage() {
   const { user } = useUser();
   const { signOut } = useClerk();
@@ -433,6 +457,13 @@ export default function PipelinePage() {
   const ws = useWebSocket({ path: "/api/ws/pipeline", bufferSize: 500 });
   const swarm = useSwarmTranscript();
   const settlement = useWebSocket({ path: "/api/ws/settlement", bufferSize: 200 });
+
+  // Persisted cache of the last 50 cycles' events, hydrated synchronously
+  // from localStorage so a refresh keeps recent context on screen even
+  // before the WS reconnects or the REST snapshot returns.
+  const [cachedEvents, setCachedEvents] = useState<Record<string, unknown>[]>(
+    () => loadCachedEvents(),
+  );
 
   // Hydrate from REST so reloading the page mid-cycle still shows the
   // last few cycles instead of an empty buffer until the next event.
@@ -458,9 +489,9 @@ export default function PipelinePage() {
     };
   }, [isSignedIn, getToken]);
 
-  // Merge snapshot + live WS events, dedup'd on the server-assigned _seq.
-  // Snapshot events that the WS later replays are filtered out so the
-  // same cycle card never doubles up.
+  // Merge cached + snapshot + live WS events, dedup'd on the server-assigned
+  // _seq. Snapshot/cache events that the WS later replays are filtered out
+  // so the same cycle card never doubles up.
   const mergedEvents = useMemo(() => {
     const seenSeq = new Set<number>();
     const out: Record<string, unknown>[] = [];
@@ -473,16 +504,57 @@ export default function PipelinePage() {
       }
       out.push(ev);
     };
+    for (const ev of cachedEvents) push(ev);
     for (const ev of snapshot) push(ev);
     for (const ev of ws.events) push(ev);
     return out;
-  }, [snapshot, ws.events]);
+  }, [cachedEvents, snapshot, ws.events]);
 
   const groups = useMemo(() => groupByCycle(mergedEvents), [mergedEvents]);
+
+  // Persist the most recent cycles back to localStorage so the next
+  // page load has immediate context. Capped at PIPELINE_CACHE_CYCLE_LIMIT
+  // cycles (newest first in `groups`) to bound storage growth.
+  useEffect(() => {
+    if (groups.length === 0) return;
+    const top = groups.slice(0, PIPELINE_CACHE_CYCLE_LIMIT);
+    const events: Record<string, unknown>[] = [];
+    // Replay events in their original arrival order (oldest cycle first,
+    // and within a cycle in event order) so a future merge re-groups
+    // them identically.
+    for (let i = top.length - 1; i >= 0; i--) {
+      events.push(...top[i].events);
+    }
+    saveCachedEvents(events);
+  }, [groups]);
   const titleResolver = useMarketTitleResolver();
   // Tie the swarm transcript to the most recent in-flight candidate by
   // surfacing its market_id; the transcript outlines that debate's card
   // in the primary colour so operators can correlate at a glance.
+  const visibleGroups = useMemo(
+    () => groups.slice(0, PIPELINE_CACHE_CYCLE_LIMIT),
+    [groups],
+  );
+
+  // Auto-scroll-to-latest: when a new cycle appears at the top of the
+  // list, jump the cycles section to the top so operators can keep an
+  // eye on the freshest activity. The pause toggle lets them stop the
+  // jump while inspecting an older cycle without losing their place.
+  const [autoScroll, setAutoScroll] = useState(true);
+  const cyclesTopRef = useRef<HTMLDivElement | null>(null);
+  const latestCycleId = visibleGroups[0]?.cycle_id ?? null;
+  const lastScrolledCycleRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!autoScroll) return;
+    if (!latestCycleId) return;
+    if (lastScrolledCycleRef.current === latestCycleId) return;
+    lastScrolledCycleRef.current = latestCycleId;
+    const el = cyclesTopRef.current;
+    if (el && typeof el.scrollIntoView === "function") {
+      el.scrollIntoView({ behavior: "smooth", block: "start" });
+    }
+  }, [autoScroll, latestCycleId]);
+
   const liveMarketId = useMemo<string | null>(() => {
     for (const g of groups) {
       if (g.status !== "running") continue;
@@ -559,6 +631,24 @@ export default function PipelinePage() {
         <div className="flex gap-2">
           <button
             type="button"
+            onClick={() => setAutoScroll((v) => !v)}
+            className={`border px-2 py-1 ${
+              autoScroll
+                ? "border-primary text-primary"
+                : "border-border text-muted-foreground hover:text-primary hover:border-primary"
+            }`}
+            data-testid="button-autoscroll"
+            aria-pressed={autoScroll}
+            title={
+              autoScroll
+                ? "Auto-scroll is on — click to pause"
+                : "Auto-scroll is paused — click to resume"
+            }
+          >
+            {autoScroll ? "▮▮ Pause auto-scroll" : "▶ Resume auto-scroll"}
+          </button>
+          <button
+            type="button"
             onClick={ws.reconnectNow}
             className="border border-border px-2 py-1 hover:text-primary hover:border-primary"
             data-testid="button-reconnect"
@@ -569,6 +659,8 @@ export default function PipelinePage() {
             type="button"
             onClick={() => {
               setSnapshot([]);
+              setCachedEvents([]);
+              saveCachedEvents([]);
               ws.clear();
             }}
             className="border border-border px-2 py-1 hover:text-primary hover:border-primary"
@@ -581,14 +673,15 @@ export default function PipelinePage() {
 
       <main className="grid grid-cols-1 xl:grid-cols-3 gap-4">
         <section className="xl:col-span-2 space-y-3">
-          {groups.length === 0 ? (
+          <div ref={cyclesTopRef} aria-hidden="true" />
+          {visibleGroups.length === 0 ? (
             <div className="border border-border bg-card p-8 text-center text-muted-foreground text-xs uppercase tracking-widest">
               {ws.status === "open"
                 ? "Waiting for the next cycle event…"
                 : "Stream not connected."}
             </div>
           ) : (
-            groups.map((g, i) => (
+            visibleGroups.map((g, i) => (
               <CycleCard key={`${g.cycle_id ?? "x"}-${i}`} group={g} />
             ))
           )}
