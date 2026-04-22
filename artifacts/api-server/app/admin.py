@@ -669,7 +669,7 @@ async def _mirror_to_clerk(
         log.warning("clerk metadata mirror failed: %s", e)
 
 
-async def list_audit_log(limit: int = 100) -> list[dict[str, Any]]:
+async def list_audit_log(limit: int = 100, offset: int = 0) -> list[dict[str, Any]]:
     await ensure_schema()
     try:
         async with db.acquire() as c:
@@ -687,9 +687,9 @@ async def list_audit_log(limit: int = 100) -> list[dict[str, Any]]:
                   to_char(created_at, 'YYYY-MM-DD"T"HH24:MI:SSZ') AS created_at
                 FROM admin_audit_log
                 ORDER BY created_at DESC
-                LIMIT $1
+                LIMIT $1 OFFSET $2
                 """,
-                limit,
+                limit, offset,
             )
             out: list[dict[str, Any]] = []
             for r in rows:

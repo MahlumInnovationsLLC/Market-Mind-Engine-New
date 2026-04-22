@@ -35,6 +35,11 @@ type SubscriptionLite = {
 };
 
 const THEME_KEY = "axiom.theme";
+// Custom in-window event so the header toggle and the System → Settings
+// theme picker stay in sync without a full reload (storage events don't
+// fire in the same window). Both components read/write the same
+// localStorage key and dispatch/listen for this event.
+const THEME_EVENT = "axiom:theme-changed";
 
 function applyTheme(mode: "dark" | "light") {
   if (typeof document === "undefined") return;
@@ -55,13 +60,39 @@ export function ShellHeader({ operatorEmail: emailOverride }: ShellHeaderProps) 
   const { getToken, isSignedIn } = useAuth();
   const [, setLocation] = useLocation();
 
-  const [theme, setTheme] = useState<"dark" | "light">(() => loadTheme());
+  const [theme, setThemeState] = useState<"dark" | "light">(() => loadTheme());
   useEffect(() => {
     applyTheme(theme);
-    if (typeof window !== "undefined") {
-      window.localStorage.setItem(THEME_KEY, theme);
-    }
   }, [theme]);
+
+  // Sync theme across the header toggle and the System → Settings picker:
+  // listen for both cross-tab `storage` events and the in-window
+  // `axiom:theme-changed` event the picker dispatches.
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const onStorage = (e: StorageEvent) => {
+      if (e.key === THEME_KEY) setThemeState(loadTheme());
+    };
+    const onLocal = (e: Event) => {
+      const detail = (e as CustomEvent<"dark" | "light">).detail;
+      if (detail === "dark" || detail === "light") setThemeState(detail);
+    };
+    window.addEventListener("storage", onStorage);
+    window.addEventListener(THEME_EVENT, onLocal as EventListener);
+    return () => {
+      window.removeEventListener("storage", onStorage);
+      window.removeEventListener(THEME_EVENT, onLocal as EventListener);
+    };
+  }, []);
+
+  const setTheme = (next: "dark" | "light") => {
+    setThemeState(next);
+    if (typeof window !== "undefined") {
+      window.localStorage.setItem(THEME_KEY, next);
+      window.dispatchEvent(new CustomEvent(THEME_EVENT, { detail: next }));
+    }
+    applyTheme(next);
+  };
 
   const health = useHealthFull({
     query: { refetchInterval: 30_000, queryKey: getHealthFullQueryKey() },
@@ -184,7 +215,7 @@ export function ShellHeader({ operatorEmail: emailOverride }: ShellHeaderProps) 
 
         <button
           type="button"
-          onClick={() => setTheme((t) => (t === "dark" ? "light" : "dark"))}
+          onClick={() => setTheme(theme === "dark" ? "light" : "dark")}
           className="p-2 text-muted-foreground hover:text-primary rounded-sm"
           data-testid="button-shell-theme-toggle"
           title={theme === "dark" ? "Switch to light theme" : "Switch to dark theme"}

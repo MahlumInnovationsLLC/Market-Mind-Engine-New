@@ -371,7 +371,13 @@ function ClerkProviderWithRoutes() {
           <Switch>
             <Route path="/" component={HomeRoute} />
             <Route path="/pricing" component={PricingPage} />
-            <Route path="/billing" component={BillingPage} />
+            <Route path="/billing">
+              {/* /billing now lives inside the authed /profile page; if a
+                  signed-out visitor lands on /billing (or follows an old
+                  link) we redirect them to /profile, which gates them through
+                  Clerk and surfaces the subscription card on success. */}
+              <Redirect to="/profile" />
+            </Route>
             <Route path="/health" component={HealthPage} />
             <Route path="/settings/notifications" component={SettingsNotificationsPage} />
             <Route path="/sign-in/:rest*" component={SignInPage} />

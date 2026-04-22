@@ -790,6 +790,19 @@ class NotificationPrefsRequest(BaseModel):
     sms_phone_number_present: bool = False
 
 
+@app.get("/api/me/push-token")
+async def me_list_push_tokens(
+    user: AuthedUser = Depends(require_auth),
+) -> dict[str, object]:
+    """Non-secret summary of devices registered for push notifications.
+
+    Returned to the web /profile page so the operator can see whether the
+    Axiom Mobile app is connected without us echoing raw expo tokens.
+    """
+    devices = await notif_push.list_user_devices(user.user_id)
+    return {"count": len(devices), "devices": devices}
+
+
 @app.post("/api/me/push-token")
 async def me_register_push_token(
     body: PushTokenRequest,
@@ -1076,10 +1089,13 @@ async def admin_set_runtime_settings(
 @app.get("/api/admin/audit-log")
 async def admin_get_audit_log(
     limit: int = 100,
+    offset: int = 0,
     actor: AuthedUser = Depends(require_admin),
 ) -> dict[str, object]:
     limit = max(1, min(500, int(limit)))
-    return {"items": await admin_module.list_audit_log(limit)}
+    offset = max(0, int(offset))
+    items = await admin_module.list_audit_log(limit, offset)
+    return {"items": items, "limit": limit, "offset": offset}
 
 
 # ---------------------------------------------------------------------------

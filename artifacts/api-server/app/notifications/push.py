@@ -192,6 +192,44 @@ async def _drop_token(expo_token: str) -> None:
         log.warning("drop_token failed for %s: %s", expo_token, e)
 
 
+async def list_user_devices(clerk_user_id: str) -> list[dict[str, object]]:
+    """Return a non-secret summary of the operator's registered push devices.
+
+    Used by the web /profile page to surface "X devices connected" without
+    leaking raw expo tokens. Each row contains platform + last_seen_at +
+    a short masked token suffix so the user can disambiguate devices.
+    """
+    await ensure_schema()
+    try:
+        rows = await db.fetch(
+            """
+            SELECT expo_token, platform, last_seen_at, created_at
+              FROM expo_push_tokens
+             WHERE clerk_user_id = $1
+             ORDER BY last_seen_at DESC NULLS LAST, created_at DESC NULLS LAST
+            """,
+            clerk_user_id,
+        )
+    except Exception as e:
+        log.warning("list_user_devices failed for %s: %s", clerk_user_id, e)
+        return []
+    out: list[dict[str, object]] = []
+    for r in rows:
+        token = str(r.get("expo_token") or "")
+        # Show only the trailing 6 chars before the closing bracket so the
+        # user can tell devices apart without us echoing the full token.
+        suffix = token[-8:-1] if token.endswith("]") else token[-6:]
+        out.append(
+            {
+                "platform": r.get("platform"),
+                "last_seen_at": r.get("last_seen_at"),
+                "created_at": r.get("created_at"),
+                "token_suffix": suffix,
+            }
+        )
+    return out
+
+
 # ---------------------------------------------------------------------------
 # Notification preferences
 # ---------------------------------------------------------------------------

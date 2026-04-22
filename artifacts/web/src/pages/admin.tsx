@@ -10,7 +10,6 @@ import {
   getAdminGetUserQueryKey,
   getAdminListUsersQueryKey,
   getGetMyAccessQueryKey,
-  useAdminGetAuditLog,
   useAdminGetUser,
   useAdminListUsers,
   useAdminSetUserAdmin,
@@ -510,65 +509,152 @@ function Field({ label, value }: { label: string; value: string }) {
 }
 
 export function AuditLogPanel() {
-  const { data, isLoading, isError } = useAdminGetAuditLog(
-    { limit: 100 },
-    { query: { queryKey: getAdminGetAuditLogQueryKey({ limit: 100 }), refetchInterval: 30_000 } },
+  // Server-side pagination (added per UI overhaul code review): we drive
+  // /api/admin/audit-log with `limit` + `offset` query params via raw
+  // apiFetch so we don't have to regen the typed client just to add an
+  // offset arg. The endpoint returns `{ items, limit, offset }`; we infer
+  // hasMore from `items.length === pageSize` (cheap and avoids a count(*)).
+  const { getToken, isSignedIn } = useAuth();
+  const tokenFn = useMemo(
+    () => () => getToken().then((t) => t ?? null),
+    [getToken],
   );
-  const items: AdminAuditLogEntry[] = data?.items ?? [];
+
+  const PAGE_SIZES = [25, 50, 100, 200] as const;
+  const [pageSize, setPageSize] = useState<number>(50);
+  const [page, setPage] = useState<number>(0); // zero-indexed
+
+  type AuditPage = { items: AdminAuditLogEntry[]; limit: number; offset: number };
+  const offset = page * pageSize;
+  const query = useQuery<AuditPage>({
+    queryKey: ["admin", "audit-log", pageSize, offset],
+    queryFn: () =>
+      apiFetch<AuditPage>(
+        `/api/admin/audit-log?limit=${pageSize}&offset=${offset}`,
+        { getToken: tokenFn },
+      ),
+    enabled: !!isSignedIn,
+    refetchInterval: 30_000,
+    placeholderData: (prev) => prev,
+  });
+
+  const items: AdminAuditLogEntry[] = query.data?.items ?? [];
+  const hasMore = items.length === pageSize;
+  const isLoading = query.isLoading;
+  const isError = query.isError;
+
+  const goPrev = () => setPage((p) => Math.max(0, p - 1));
+  const goNext = () => {
+    if (hasMore) setPage((p) => p + 1);
+  };
+  const onChangePageSize = (next: number) => {
+    setPageSize(next);
+    setPage(0);
+  };
+
+  const rangeStart = items.length === 0 ? 0 : offset + 1;
+  const rangeEnd = offset + items.length;
+
   return (
-    <div className="border border-border bg-card overflow-x-auto" data-testid="panel-audit-log">
-      <table className="w-full text-xs">
-        <thead className="bg-muted/20 text-muted-foreground uppercase tracking-widest">
-          <tr>
-            <th className="text-left p-2">When</th>
-            <th className="text-left p-2">Actor</th>
-            <th className="text-left p-2">Target</th>
-            <th className="text-left p-2">Action</th>
-            <th className="text-left p-2">Before → After</th>
-          </tr>
-        </thead>
-        <tbody>
-          {isLoading ? (
+    <div className="space-y-3" data-testid="panel-audit-log">
+      <div className="flex flex-wrap items-center justify-between gap-2 text-[11px] uppercase tracking-widest text-muted-foreground">
+        <div data-testid="text-audit-range">
+          {isLoading && !query.data
+            ? "Loading…"
+            : isError
+              ? "—"
+              : `Showing ${rangeStart}–${rangeEnd} (page ${page + 1})`}
+        </div>
+        <div className="flex items-center gap-2">
+          <label className="flex items-center gap-1">
+            <span>Page size</span>
+            <select
+              value={pageSize}
+              onChange={(e) => onChangePageSize(Number(e.target.value))}
+              className="border border-border bg-card px-1 py-0.5 text-[11px] uppercase tracking-widest text-foreground"
+              data-testid="select-audit-page-size"
+            >
+              {PAGE_SIZES.map((n) => (
+                <option key={n} value={n}>
+                  {n}
+                </option>
+              ))}
+            </select>
+          </label>
+          <button
+            type="button"
+            onClick={goPrev}
+            disabled={page === 0 || isLoading}
+            className="border border-border px-2 py-1 text-[11px] uppercase tracking-widest text-muted-foreground hover:text-foreground disabled:cursor-not-allowed disabled:opacity-40"
+            data-testid="button-audit-prev"
+          >
+            ← Prev
+          </button>
+          <button
+            type="button"
+            onClick={goNext}
+            disabled={!hasMore || isLoading}
+            className="border border-border px-2 py-1 text-[11px] uppercase tracking-widest text-muted-foreground hover:text-foreground disabled:cursor-not-allowed disabled:opacity-40"
+            data-testid="button-audit-next"
+          >
+            Next →
+          </button>
+        </div>
+      </div>
+      <div className="border border-border bg-card overflow-x-auto">
+        <table className="w-full text-xs">
+          <thead className="bg-muted/20 text-muted-foreground uppercase tracking-widest">
             <tr>
-              <td colSpan={5} className="p-6 text-center text-muted-foreground">
-                Loading…
-              </td>
+              <th className="text-left p-2">When</th>
+              <th className="text-left p-2">Actor</th>
+              <th className="text-left p-2">Target</th>
+              <th className="text-left p-2">Action</th>
+              <th className="text-left p-2">Before → After</th>
             </tr>
-          ) : isError ? (
-            <tr>
-              <td colSpan={5} className="p-6 text-center text-destructive">
-                Failed to load audit log.
-              </td>
-            </tr>
-          ) : items.length === 0 ? (
-            <tr>
-              <td colSpan={5} className="p-6 text-center text-muted-foreground">
-                No audit entries yet.
-              </td>
-            </tr>
-          ) : (
-            items.map((e) => (
-              <tr
-                key={e.id}
-                className="border-t border-border"
-                data-testid={`row-audit-${e.id}`}
-              >
-                <td className="p-2 align-top text-muted-foreground">
-                  {e.created_at?.replace("T", " ").replace("Z", "") ?? "—"}
-                </td>
-                <td className="p-2 align-top">{e.actor_email ?? e.actor_user_id}</td>
-                <td className="p-2 align-top">{e.target_email ?? e.target_user_id}</td>
-                <td className="p-2 align-top text-primary uppercase tracking-widest text-[10px]">
-                  {e.action}
-                </td>
-                <td className="p-2 align-top text-[10px] text-muted-foreground">
-                  {JSON.stringify(e.before_value ?? {})} → {JSON.stringify(e.after_value ?? {})}
+          </thead>
+          <tbody>
+            {isLoading && !query.data ? (
+              <tr>
+                <td colSpan={5} className="p-6 text-center text-muted-foreground">
+                  Loading…
                 </td>
               </tr>
-            ))
-          )}
-        </tbody>
-      </table>
+            ) : isError ? (
+              <tr>
+                <td colSpan={5} className="p-6 text-center text-destructive">
+                  Failed to load audit log.
+                </td>
+              </tr>
+            ) : items.length === 0 ? (
+              <tr>
+                <td colSpan={5} className="p-6 text-center text-muted-foreground">
+                  {page === 0 ? "No audit entries yet." : "No more entries."}
+                </td>
+              </tr>
+            ) : (
+              items.map((e) => (
+                <tr
+                  key={e.id}
+                  className="border-t border-border"
+                  data-testid={`row-audit-${e.id}`}
+                >
+                  <td className="p-2 align-top text-muted-foreground">
+                    {e.created_at?.replace("T", " ").replace("Z", "") ?? "—"}
+                  </td>
+                  <td className="p-2 align-top">{e.actor_email ?? e.actor_user_id}</td>
+                  <td className="p-2 align-top">{e.target_email ?? e.target_user_id}</td>
+                  <td className="p-2 align-top text-primary uppercase tracking-widest text-[10px]">
+                    {e.action}
+                  </td>
+                  <td className="p-2 align-top text-[10px] text-muted-foreground">
+                    {JSON.stringify(e.before_value ?? {})} → {JSON.stringify(e.after_value ?? {})}
+                  </td>
+                </tr>
+              ))
+            )}
+          </tbody>
+        </table>
+      </div>
     </div>
   );
 }

@@ -1,7 +1,8 @@
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { Link, useLocation } from "wouter";
-import { useClerk, useUser } from "@clerk/react";
-import { useQueryClient } from "@tanstack/react-query";
+import { useAuth, useClerk, useUser } from "@clerk/react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { apiFetch } from "@/lib/api";
 import {
   ApiError,
   UserSubscriptionTier,
@@ -37,10 +38,53 @@ function fmtDate(iso: string | null | undefined): string {
 export default function ProfilePage() {
   const { user, isLoaded: userLoaded } = useUser();
   const { signOut } = useClerk();
+  const { getToken, isSignedIn } = useAuth();
   const [, setLocation] = useLocation();
   const queryClient = useQueryClient();
   const [portalError, setPortalError] = useState<string | null>(null);
   const [signingOut, setSigningOut] = useState(false);
+
+  // Raw apiFetch (rather than a generated React hook) so /profile doesn't
+  // depend on a regen for /api/me/push-token and /api/me/telegram. Mirrors
+  // the pattern used in settings-notifications.tsx.
+  const tokenGetter = useMemo(
+    () => () => getToken().then((t) => t ?? null),
+    [getToken],
+  );
+
+  type PushDevice = {
+    platform: string | null;
+    last_seen_at: string | null;
+    created_at: string | null;
+    token_suffix: string;
+  };
+  type PushTokenStatus = { count: number; devices: PushDevice[] };
+  const pushQuery = useQuery<PushTokenStatus>({
+    queryKey: ["profile", "push-token"],
+    queryFn: () =>
+      apiFetch<PushTokenStatus>("/api/me/push-token", { getToken: tokenGetter }),
+    enabled: !!isSignedIn,
+    staleTime: 60_000,
+  });
+
+  type TelegramStatus = {
+    linked: boolean;
+    telegram_user_id?: number | null;
+    telegram_username?: string | null;
+    bound_at?: string | null;
+    last_seen_at?: string | null;
+    pending_link_code?: string | null;
+    pending_link_expires_at?: string | null;
+    bot_username?: string | null;
+    bot_running?: boolean;
+  };
+  const telegramQuery = useQuery<TelegramStatus>({
+    queryKey: ["profile", "telegram"],
+    queryFn: () =>
+      apiFetch<TelegramStatus>("/api/me/telegram", { getToken: tokenGetter }),
+    enabled: !!isSignedIn,
+    staleTime: 60_000,
+  });
 
   const subQuery = useGetMySubscription({
     query: { queryKey: getGetMySubscriptionQueryKey() },
@@ -285,6 +329,141 @@ export default function ProfilePage() {
             </Link>
           )}
         </div>
+      </GlassCard>
+
+      <GlassCard tone="solid" padding="md" data-testid="card-profile-push-token">
+        <SectionHeader
+          eyebrow="Mobile"
+          title="Push devices"
+          subtitle="Devices registered via Axiom Mobile that can receive push alerts."
+        />
+        {pushQuery.isLoading && !pushQuery.data ? (
+          <div className="text-xs text-muted-foreground" data-testid="text-push-loading">
+            Loading…
+          </div>
+        ) : pushQuery.isError ? (
+          <div className="text-xs text-destructive" data-testid="text-push-error">
+            Failed to load push device status.
+          </div>
+        ) : (pushQuery.data?.count ?? 0) === 0 ? (
+          <div className="space-y-2 text-xs">
+            <div className="flex items-center gap-2">
+              <span
+                className="border border-border px-2 py-0.5 text-[10px] uppercase tracking-widest text-muted-foreground"
+                data-testid="badge-push-status"
+              >
+                Not connected
+              </span>
+              <span className="text-muted-foreground">No mobile devices registered.</span>
+            </div>
+            <p className="text-muted-foreground">
+              Install the Axiom Mobile app and sign in to start receiving live trade
+              and halt push alerts on this account.
+            </p>
+          </div>
+        ) : (
+          <div className="space-y-2 text-xs">
+            <div className="flex items-center gap-2">
+              <span
+                className="border border-success/60 bg-success/5 px-2 py-0.5 text-[10px] uppercase tracking-widest text-success"
+                data-testid="badge-push-status"
+              >
+                Connected
+              </span>
+              <span className="text-muted-foreground" data-testid="text-push-count">
+                {pushQuery.data!.count} device{pushQuery.data!.count === 1 ? "" : "s"} registered
+              </span>
+            </div>
+            <ul className="space-y-1">
+              {pushQuery.data!.devices.map((d, i) => (
+                <li
+                  key={`${d.token_suffix}-${i}`}
+                  className="flex flex-wrap items-center gap-2 border-t border-border/60 pt-1 text-[11px] text-muted-foreground"
+                  data-testid={`row-push-device-${i}`}
+                >
+                  <span className="text-foreground">
+                    {(d.platform ?? "device").toString().toUpperCase()}
+                  </span>
+                  <span className="text-[10px] tracking-widest">····{d.token_suffix}</span>
+                  <span className="ml-auto text-[10px]">
+                    last seen {fmtDate(d.last_seen_at)}
+                  </span>
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
+      </GlassCard>
+
+      <GlassCard tone="solid" padding="md" data-testid="card-profile-telegram">
+        <SectionHeader
+          eyebrow="Telegram"
+          title="Concierge bot"
+          subtitle="Two-way Telegram concierge — link from System → Settings to receive trade alerts and issue /estop."
+        />
+        {telegramQuery.isLoading && !telegramQuery.data ? (
+          <div className="text-xs text-muted-foreground" data-testid="text-telegram-loading">
+            Loading…
+          </div>
+        ) : telegramQuery.isError ? (
+          <div className="text-xs text-destructive" data-testid="text-telegram-error">
+            Failed to load Telegram link status.
+          </div>
+        ) : telegramQuery.data?.linked ? (
+          <div className="space-y-2 text-xs">
+            <div className="flex flex-wrap items-center gap-2">
+              <span
+                className="border border-success/60 bg-success/5 px-2 py-0.5 text-[10px] uppercase tracking-widest text-success"
+                data-testid="badge-telegram-status"
+              >
+                Linked
+              </span>
+              {telegramQuery.data.telegram_username && (
+                <span className="text-foreground" data-testid="text-telegram-username">
+                  @{telegramQuery.data.telegram_username}
+                </span>
+              )}
+              <span className="text-muted-foreground">
+                bound {fmtDate(telegramQuery.data.bound_at)}
+              </span>
+            </div>
+            {telegramQuery.data.bot_username && (
+              <div className="text-[11px] text-muted-foreground">
+                Bot: @{telegramQuery.data.bot_username}
+                {telegramQuery.data.bot_running === false && (
+                  <span className="ml-2 text-destructive">(offline)</span>
+                )}
+              </div>
+            )}
+          </div>
+        ) : (
+          <div className="space-y-2 text-xs">
+            <div className="flex items-center gap-2">
+              <span
+                className="border border-border px-2 py-0.5 text-[10px] uppercase tracking-widest text-muted-foreground"
+                data-testid="badge-telegram-status"
+              >
+                Not linked
+              </span>
+              {telegramQuery.data?.bot_username && (
+                <span className="text-muted-foreground">
+                  Bot: @{telegramQuery.data.bot_username}
+                </span>
+              )}
+            </div>
+            <p className="text-muted-foreground">
+              Link your Telegram account from{" "}
+              <Link
+                href="/system?tab=settings"
+                className="text-accent-cyan underline hover:opacity-80"
+                data-testid="link-telegram-settings"
+              >
+                System → Settings
+              </Link>{" "}
+              to enable concierge alerts.
+            </p>
+          </div>
+        )}
       </GlassCard>
 
       <GlassCard tone="solid" padding="md" data-testid="card-profile-notifications">

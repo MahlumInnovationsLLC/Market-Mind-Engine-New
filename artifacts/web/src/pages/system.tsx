@@ -1,4 +1,4 @@
-import { useMemo } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Link } from "wouter";
 import {
   getGetMyAccessQueryKey,
@@ -157,13 +157,6 @@ export default function SystemPage() {
 
           <GlassCard tone="solid" padding="md">
             <div className="mb-3 text-[11px] font-semibold uppercase tracking-[0.18em] text-accent-cyan/80">
-              Personas
-            </div>
-            <PersonasPanel />
-          </GlassCard>
-
-          <GlassCard tone="solid" padding="md">
-            <div className="mb-3 text-[11px] font-semibold uppercase tracking-[0.18em] text-accent-cyan/80">
               Models
             </div>
             <ModelsPanel />
@@ -179,16 +172,40 @@ export default function SystemPage() {
       )}
 
       {tab === "risk" && isAdmin && (
-        <div data-testid="panel-system-risk">
+        <div className="space-y-5" data-testid="panel-system-risk">
           <GlassCard tone="solid" padding="md">
+            <div className="mb-3 text-[11px] font-semibold uppercase tracking-[0.18em] text-accent-cyan/80">
+              Gating thresholds
+            </div>
             <RiskKnobsPanel />
+          </GlassCard>
+          <GlassCard tone="solid" padding="md">
+            <div className="mb-3 text-[11px] font-semibold uppercase tracking-[0.18em] text-accent-cyan/80">
+              Personas
+            </div>
+            <p className="mb-3 text-[11px] text-muted-foreground">
+              Per-persona enable / weight controls — paired with the risk
+              knobs above so you can tune the swarm and gating together.
+            </p>
+            <PersonasPanel />
           </GlassCard>
         </div>
       )}
 
       {tab === "settings" && (
-        <div data-testid="panel-system-settings">
-          <NotificationPrefsPanel />
+        <div className="space-y-5" data-testid="panel-system-settings">
+          <GlassCard tone="solid" padding="md">
+            <div className="mb-3 text-[11px] font-semibold uppercase tracking-[0.18em] text-accent-cyan/80">
+              Appearance
+            </div>
+            <ThemePickerPanel />
+          </GlassCard>
+          <GlassCard tone="solid" padding="md">
+            <div className="mb-3 text-[11px] font-semibold uppercase tracking-[0.18em] text-accent-cyan/80">
+              Notifications
+            </div>
+            <NotificationPrefsPanel />
+          </GlassCard>
         </div>
       )}
 
@@ -225,6 +242,105 @@ export default function SystemPage() {
           </p>
         </GlassCard>
       )}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Theme picker — mirrors the dark/light toggle in the shell header so the
+// preference is also discoverable from System → Settings (per the
+// "cyberpunk-finance" UI overhaul). Uses the same localStorage key
+// (`axiom.theme`) and CSS class (`light-theme` on <html>) as the header
+// toggle so flipping either one stays in sync.
+// ---------------------------------------------------------------------------
+
+const THEME_KEY = "axiom.theme";
+
+function applyTheme(mode: "dark" | "light") {
+  if (typeof document === "undefined") return;
+  const html = document.documentElement;
+  if (mode === "light") html.classList.add("light-theme");
+  else html.classList.remove("light-theme");
+}
+
+function loadTheme(): "dark" | "light" {
+  if (typeof window === "undefined") return "dark";
+  const stored = window.localStorage.getItem(THEME_KEY);
+  return stored === "light" ? "light" : "dark";
+}
+
+const THEME_EVENT = "axiom:theme-changed";
+
+function ThemePickerPanel() {
+  const [theme, setThemeState] = useState<"dark" | "light">(() => loadTheme());
+
+  // Cross-component sync: listen for storage events (other tabs) AND a
+  // custom in-window event dispatched by the shell header toggle so
+  // flipping the theme from either control updates the other instantly.
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const onStorage = (e: StorageEvent) => {
+      if (e.key === THEME_KEY) setThemeState(loadTheme());
+    };
+    const onLocal = (e: Event) => {
+      const detail = (e as CustomEvent<"dark" | "light">).detail;
+      if (detail === "dark" || detail === "light") setThemeState(detail);
+    };
+    window.addEventListener("storage", onStorage);
+    window.addEventListener(THEME_EVENT, onLocal as EventListener);
+    return () => {
+      window.removeEventListener("storage", onStorage);
+      window.removeEventListener(THEME_EVENT, onLocal as EventListener);
+    };
+  }, []);
+
+  const setTheme = (next: "dark" | "light") => {
+    setThemeState(next);
+    if (typeof window !== "undefined") {
+      window.localStorage.setItem(THEME_KEY, next);
+      window.dispatchEvent(new CustomEvent(THEME_EVENT, { detail: next }));
+    }
+    applyTheme(next);
+  };
+
+  useEffect(() => {
+    applyTheme(theme);
+  }, [theme]);
+
+  const options: Array<{ value: "dark" | "light"; label: string; hint: string }> = [
+    { value: "dark", label: "Dark", hint: "Default cyberpunk-finance palette." },
+    { value: "light", label: "Light", hint: "High-contrast daytime palette." },
+  ];
+
+  return (
+    <div className="space-y-3" data-testid="panel-theme-picker">
+      <p className="text-[11px] text-muted-foreground">
+        Theme preference is saved to this browser only.
+      </p>
+      <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+        {options.map((opt) => {
+          const active = theme === opt.value;
+          return (
+            <button
+              key={opt.value}
+              type="button"
+              onClick={() => setTheme(opt.value)}
+              className={`flex flex-col items-start gap-1 border px-3 py-2 text-left text-xs uppercase tracking-widest transition ${
+                active
+                  ? "border-primary bg-primary/10 text-primary"
+                  : "border-border bg-card text-muted-foreground hover:border-primary hover:text-foreground"
+              }`}
+              aria-pressed={active}
+              data-testid={`button-theme-${opt.value}`}
+            >
+              <span className="text-[11px] font-bold">{opt.label}</span>
+              <span className="text-[10px] normal-case tracking-normal text-muted-foreground">
+                {opt.hint}
+              </span>
+            </button>
+          );
+        })}
+      </div>
     </div>
   );
 }
