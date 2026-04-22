@@ -314,11 +314,14 @@ def _awards_probability(
         if r.signal_type.upper() != st:
             continue
         r_race = str((r.payload or {}).get("race_category", "")).lower()
-        # Race-scoped tickers must match payload race_category when the
-        # row carries one.  Rows missing race_category are admitted so
-        # legacy variety/HR RSS placeholder rows still contribute.
-        if race_lc and r_race and r_race != race_lc:
-            continue
+        # Strict race scoping: when the ticker carries a
+        # race_category, the field MUST be limited to rows whose
+        # payload carries the same race_category.  Rows lacking a
+        # race_category are excluded so unscoped RSS placeholders
+        # cannot dilute or skew a race-style ticker's posterior.
+        if race_lc:
+            if not r_race or r_race != race_lc:
+                continue
         field.append(r)
 
     def _is_us(r: SignalRow) -> bool:

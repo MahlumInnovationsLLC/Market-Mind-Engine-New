@@ -286,6 +286,37 @@ def test_awards_no_candidate_match_returns_floor_not_unrelated_row():
     assert res.feature_summary["matched_candidate"] == 0.0
 
 
+def test_awards_race_excludes_rows_missing_race_category():
+    # A race-style ticker (carries race_category=BESTPIC) must NOT be
+    # influenced by unsettled rows lacking a payload race_category.
+    # Adding such an unscoped placeholder row must leave the
+    # posterior unchanged.
+    t = parse_entertainment_ticker("KXOSCAR-25-BESTPIC-OPPENHEIMER")
+    now = datetime.now(timezone.utc)
+    scoped_field = [
+        SignalRow(source="v", signal_id="v/oppenheimer",
+                  signal_type="OSCAR", title="OPPENHEIMER",
+                  event_at=now + timedelta(days=30), value=0.5,
+                  settled=False, outcome=None,
+                  payload={"race_category": "BESTPIC"}),
+        SignalRow(source="v", signal_id="v/barbie",
+                  signal_type="OSCAR", title="BARBIE",
+                  event_at=now + timedelta(days=30), value=0.5,
+                  settled=False, outcome=None,
+                  payload={"race_category": "BESTPIC"}),
+    ]
+    unscoped_noise = SignalRow(
+        source="hollywood_reporter_awards_rss",
+        signal_id="hr/headline", signal_type="OSCAR",
+        title="OPPENHEIMER", event_at=now + timedelta(days=30),
+        value=0.9, settled=False, outcome=None,
+        payload={},  # no race_category
+    )
+    p_clean = hybrid_probability(t, scoped_field).probability
+    p_with_noise = hybrid_probability(t, scoped_field + [unscoped_noise]).probability
+    assert p_clean == pytest.approx(p_with_noise, abs=0.001)
+
+
 def test_awards_winners_in_history_do_not_inflate_posterior():
     # Settled winners with value=1.0 (as written by the historical
     # poller) must NOT inflate the posterior — the model is purely
