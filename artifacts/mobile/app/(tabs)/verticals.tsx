@@ -4,7 +4,7 @@ import type {
   VerticalsOverview,
   VerticalsOverviewEntry,
 } from "@workspace/api-client-react";
-import React, { useState } from "react";
+import React from "react";
 import {
   ActivityIndicator,
   FlatList,
@@ -19,6 +19,7 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 
 import { useColors } from "@/hooks/useColors";
 import { apiFetch } from "@/lib/api";
+import { useSelectedVerticals } from "@/lib/vertical-filter";
 
 function fmtMoney(n: number | null | undefined): string {
   if (n === null || n === undefined) return "—";
@@ -47,7 +48,7 @@ function fmtBps(n: number | null | undefined): string {
 export default function VerticalsScreen() {
   const colors = useColors();
   const insets = useSafeAreaInsets();
-  const [selected, setSelected] = useState<string[]>([]);
+  const { selected, toggle, clear, matches } = useSelectedVerticals();
   const query = useQuery({
     queryKey: ["dashboard", "verticals", 7],
     queryFn: () =>
@@ -60,17 +61,6 @@ export default function VerticalsScreen() {
     staleTime: 30_000,
   });
   const isAdmin = !!access.data?.is_admin;
-  const toggle = (v: string) => {
-    const lower = v.toLowerCase();
-    setSelected((prev) =>
-      prev.includes(lower) ? prev.filter((x) => x !== lower) : [...prev, lower],
-    );
-  };
-  const matches = (v: string) => {
-    const lower = v.toLowerCase();
-    if (selected.length === 0) return true;
-    return selected.includes(lower);
-  };
 
   const styles = StyleSheet.create({
     container: { flex: 1, backgroundColor: colors.background },
@@ -213,7 +203,7 @@ export default function VerticalsScreen() {
           })}
           {selected.length > 0 ? (
             <Pressable
-              onPress={() => setSelected([])}
+              onPress={() => clear()}
               testID="chip-vertical-clear"
               style={[styles.chip, { borderColor: colors.border }]}
             >

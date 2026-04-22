@@ -103,10 +103,6 @@ def stub_db(monkeypatch):
     return stub
 
 
-def _run(coro):
-    return asyncio.get_event_loop().run_until_complete(coro) if False else asyncio.new_event_loop().run_until_complete(coro)
-
-
 def test_overview_emits_one_entry_per_registered_vertical(stub_db):
     from app import verticals as _verticals
 

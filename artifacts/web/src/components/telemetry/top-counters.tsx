@@ -1,7 +1,13 @@
 import { useCallback } from "react";
 import { useQueryClient } from "@tanstack/react-query";
-import { useGetDashboardOverview, getGetDashboardOverviewQueryKey } from "@workspace/api-client-react";
+import {
+  useGetDashboardOverview,
+  getGetDashboardOverviewQueryKey,
+  useGetVerticalsOverview,
+  getGetVerticalsOverviewQueryKey,
+} from "@workspace/api-client-react";
 import { useWebSocket } from "@/hooks/use-websocket";
+import { useVerticalFilter } from "@/hooks/use-selected-verticals";
 
 function formatNumber(num: number | null | undefined, isCurrency: boolean = false): string {
   if (num === null || num === undefined) return "—";
@@ -15,6 +21,14 @@ export default function TopCounters() {
   const queryClient = useQueryClient();
   const { data: overview, isLoading } = useGetDashboardOverview({
     query: { refetchInterval: 60_000, queryKey: getGetDashboardOverviewQueryKey() },
+  });
+  const { selected, matches } = useVerticalFilter();
+  const verticalParams = { days: 7 };
+  const { data: verticalOverview } = useGetVerticalsOverview(verticalParams, {
+    query: {
+      queryKey: getGetVerticalsOverviewQueryKey(verticalParams),
+      staleTime: 60_000,
+    },
   });
 
   const invalidate = useCallback(() => {
@@ -46,15 +60,44 @@ export default function TopCounters() {
 
   if (!overview) return null;
 
-  const { counts, realized_pnl, win_rate, open_positions, latest_cycle_at, latest_trade_at } = overview;
+  const filterActive = selected.length > 0;
+  const filteredRows = (verticalOverview?.verticals ?? []).filter((v) =>
+    matches(v.vertical),
+  );
+  const aggTrades = filteredRows.reduce((s, r) => s + (r.trades ?? 0), 0);
+  const aggWins = filteredRows.reduce((s, r) => s + (r.wins ?? 0), 0);
+  const aggLosses = filteredRows.reduce((s, r) => s + (r.losses ?? 0), 0);
+  const aggPnl = filteredRows.reduce((s, r) => s + (r.pnl ?? 0), 0);
+  const aggOpen = filteredRows.reduce(
+    (s, r) => s + (r.open_positions ?? 0),
+    0,
+  );
+  const aggDecided = aggWins + aggLosses;
+  const aggWinRate = aggDecided > 0 ? aggWins / aggDecided : null;
+
+  const counts = overview.counts;
+  const realized_pnl = filterActive ? aggPnl : overview.realized_pnl;
+  const win_rate = filterActive ? aggWinRate : overview.win_rate;
+  const open_positions = filterActive ? aggOpen : overview.open_positions;
+  const tradesCount = filterActive ? aggTrades : counts.trades;
+  const latest_cycle_at = overview.latest_cycle_at;
+  const latest_trade_at = overview.latest_trade_at;
   
   const isLoss = realized_pnl !== null && realized_pnl !== undefined && realized_pnl < 0;
   const isWin = realized_pnl !== null && realized_pnl !== undefined && realized_pnl > 0;
 
   return (
     <div className="border border-border bg-card">
-      <div className="border-b border-border p-2 px-3 bg-muted/20">
+      <div className="border-b border-border p-2 px-3 bg-muted/20 flex items-center justify-between">
         <h2 className="text-xs uppercase tracking-wider font-bold text-muted-foreground">KPI_METRICS</h2>
+        {filterActive ? (
+          <span
+            data-testid="badge-kpi-filtered"
+            className="text-[10px] uppercase tracking-widest text-primary"
+          >
+            FILTERED · {selected.join(", ")}
+          </span>
+        ) : null}
       </div>
       
       <div className="p-4 border-b border-border bg-background">
@@ -75,7 +118,7 @@ export default function TopCounters() {
         </div>
         <div className="p-3">
           <div className="text-muted-foreground mb-1">TRADES</div>
-          <div className="font-bold text-lg">{formatNumber(counts.trades)}</div>
+          <div className="font-bold text-lg">{formatNumber(tradesCount)}</div>
         </div>
         <div className="p-3">
           <div className="text-muted-foreground mb-1">CYCLES</div>

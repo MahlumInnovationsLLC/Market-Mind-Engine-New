@@ -3,9 +3,12 @@ import React from "react";
 import { ActivityIndicator, RefreshControl, ScrollView, StyleSheet, Text, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
+import type { VerticalsOverview } from "@workspace/api-client-react";
+
 import { Card, SectionHeader, StatTile } from "@/components/Card";
 import { useColors } from "@/hooks/useColors";
 import { apiFetch } from "@/lib/api";
+import { useSelectedVerticals } from "@/lib/vertical-filter";
 
 type Counts = {
   trading_cycles?: number | null;
@@ -67,6 +70,14 @@ export default function DashboardScreen() {
     queryKey: ["me", "subscription"],
     queryFn: () => apiFetch<SubInfo>("/api/me/subscription"),
   });
+  const verticals = useQuery({
+    queryKey: ["dashboard", "verticals", 7],
+    queryFn: () =>
+      apiFetch<VerticalsOverview>("/api/dashboard/verticals?days=7"),
+    refetchInterval: 60_000,
+  });
+  const { selected, matches, clear } = useSelectedVerticals();
+  const filterActive = selected.length > 0;
 
   const refreshing = overview.isFetching && overview.isFetched;
 
@@ -106,6 +117,27 @@ export default function DashboardScreen() {
   const data = overview.data!;
   const counts = data.counts ?? {};
 
+  const filteredRows = (verticals.data?.verticals ?? []).filter((v) =>
+    matches(v.vertical),
+  );
+  const aggTrades = filteredRows.reduce((s, r) => s + (r.trades ?? 0), 0);
+  const aggWins = filteredRows.reduce((s, r) => s + (r.wins ?? 0), 0);
+  const aggLosses = filteredRows.reduce((s, r) => s + (r.losses ?? 0), 0);
+  const aggPnl = filteredRows.reduce((s, r) => s + (r.pnl ?? 0), 0);
+  const aggOpen = filteredRows.reduce(
+    (s, r) => s + (r.open_positions ?? 0),
+    0,
+  );
+  const decided = aggWins + aggLosses;
+  const aggWinRate = decided > 0 ? aggWins / decided : null;
+
+  const realizedPnl = filterActive ? aggPnl : data.realized_pnl;
+  const winRate = filterActive ? aggWinRate : data.win_rate;
+  const openPositions = filterActive
+    ? aggOpen
+    : (data.open_positions ?? counts.positions ?? 0);
+  const tradesCount = filterActive ? aggTrades : (counts.trades ?? 0);
+
   return (
     <ScrollView
       style={{ backgroundColor: colors.background }}
@@ -123,16 +155,33 @@ export default function DashboardScreen() {
     >
       <SectionHeader>OPERATOR :: {sub.data?.email ?? "—"}</SectionHeader>
 
+      {filterActive ? (
+        <Card>
+          <View style={styles.kvRow}>
+            <Text
+              style={[styles.kvKey, { color: colors.primary }]}
+              testID="badge-vertical-filtered"
+            >
+              FILTERED · {selected.join(", ").toUpperCase()}
+            </Text>
+            <Text
+              onPress={() => clear()}
+              testID="button-clear-vertical-filter"
+              style={[styles.kvVal, { color: colors.mutedForeground }]}
+            >
+              CLEAR
+            </Text>
+          </View>
+        </Card>
+      ) : null}
+
       <View style={styles.row}>
-        <StatTile label="REALIZED P&L" value={fmtCurrency(data.realized_pnl)} />
-        <StatTile label="WIN RATE" value={fmtPct(data.win_rate)} />
+        <StatTile label="REALIZED P&L" value={fmtCurrency(realizedPnl)} />
+        <StatTile label="WIN RATE" value={fmtPct(winRate)} />
       </View>
       <View style={styles.row}>
-        <StatTile
-          label="OPEN POSITIONS"
-          value={String(data.open_positions ?? counts.positions ?? 0)}
-        />
-        <StatTile label="TRADES" value={String(counts.trades ?? 0)} />
+        <StatTile label="OPEN POSITIONS" value={String(openPositions)} />
+        <StatTile label="TRADES" value={String(tradesCount)} />
       </View>
 
       <SectionHeader>SWARM</SectionHeader>
