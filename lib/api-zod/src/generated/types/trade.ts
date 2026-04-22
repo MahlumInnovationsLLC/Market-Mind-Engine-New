@@ -21,4 +21,5 @@ export interface Trade {
   trading_mode?: string | null;
   exchange?: string | null;
   executed_at?: string | null;
+  market_title?: string | null;
 }

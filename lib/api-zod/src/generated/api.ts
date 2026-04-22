@@ -143,6 +143,7 @@ export const GetRecentTradesResponse = zod.object({
       trading_mode: zod.string().nullish(),
       exchange: zod.string().nullish(),
       executed_at: zod.string().nullish(),
+      market_title: zod.string().nullish(),
     }),
   ),
 });
@@ -229,6 +230,20 @@ export const GetRecentDebatesResponse = zod.object({
       created_at: zod.string().nullish(),
     }),
   ),
+});
+
+/**
+ * @summary Resolve a Kalshi ticker to a human-readable market title
+ */
+export const getMarketTitlePathTickerMax = 200;
+
+export const GetMarketTitleParams = zod.object({
+  ticker: zod.coerce.string().min(1).max(getMarketTitlePathTickerMax),
+});
+
+export const GetMarketTitleResponse = zod.object({
+  ticker: zod.string(),
+  title: zod.string().nullish(),
 });
 
 /**

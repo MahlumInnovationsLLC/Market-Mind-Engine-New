@@ -97,6 +97,12 @@ async def lifespan(_: FastAPI):
         await admin_module.ensure_schema()
     except Exception as e:
         log.warning("admin schema bootstrap failed: %s", e)
+    try:
+        from .kalshi.market_titles import ensure_schema as _ensure_market_title_schema
+
+        await _ensure_market_title_schema()
+    except Exception as e:
+        log.warning("market_title schema bootstrap failed: %s", e)
     # Register + start the external data feed pollers.  Feeds with missing
     # API keys register themselves as `enabled=false` so they show up in
     # /api/feeds/status with a clear skipped_reason but never poll.
@@ -953,6 +959,25 @@ async def dashboard_swarm_personas(
     _: object = Depends(require_approved_user),
 ) -> dict[str, object]:
     return {"items": await dashboard.get_swarm_personas()}
+
+
+@app.get("/api/market-title/{ticker}")
+async def market_title_lookup(
+    ticker: str,
+    _: object = Depends(require_approved_user),
+) -> dict[str, object]:
+    """Resolve a Kalshi ticker to a human-readable market title.
+
+    Backed by the in-process + DB cache, so repeated lookups are cheap
+    and survive a restart without re-hitting Kalshi.
+    """
+    from .kalshi.market_titles import get_title as _get_title
+
+    ticker = (ticker or "").strip()
+    if not ticker:
+        raise HTTPException(status_code=400, detail="ticker required")
+    title = await _get_title(ticker)
+    return {"ticker": ticker, "title": title}
 
 
 @app.get("/api/dashboard/recent-cycles")

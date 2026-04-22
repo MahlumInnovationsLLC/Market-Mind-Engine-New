@@ -17,6 +17,7 @@ type Trade = {
   id: number;
   trade_id?: string | null;
   market_id?: string | null;
+  market_title?: string | null;
   vertical?: string | null;
   league?: string | null;
   side?: string | null;
@@ -119,7 +120,7 @@ export default function PositionsScreen() {
         >
           <View style={styles.rowHead}>
             <Text style={[styles.market, { color: colors.foreground }]} numberOfLines={1}>
-              {item.market_id ?? item.trade_id ?? "—"}
+              {item.market_title ?? item.market_id ?? item.trade_id ?? "—"}
             </Text>
             <Text
               style={[

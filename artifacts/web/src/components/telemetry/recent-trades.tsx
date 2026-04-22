@@ -90,8 +90,8 @@ export default function RecentTrades() {
                   <td className="p-2 whitespace-nowrap text-muted-foreground">
                     {trade.executed_at ? new Date(trade.executed_at).toLocaleTimeString([], {hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit'}) : "—"}
                   </td>
-                  <td className="p-2 max-w-[150px] truncate" title={trade.market_id || ""}>
-                    {trade.market_id || "—"}
+                  <td className="p-2 max-w-[200px] truncate" title={trade.market_id || ""}>
+                    {trade.market_title || trade.market_id || "—"}
                   </td>
                   <td className="p-2 whitespace-nowrap">
                     <span className="uppercase">{trade.side || "—"}</span> / <span className={`${actionClass} uppercase`}>{trade.action || "—"}</span>

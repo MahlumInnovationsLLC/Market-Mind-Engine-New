@@ -9,6 +9,7 @@ import logging
 from typing import Any
 
 from . import db
+from .kalshi.market_titles import resolve_titles as resolve_market_titles
 
 
 log = logging.getLogger(__name__)
@@ -81,6 +82,7 @@ async def get_recent_trades(limit: int = 25) -> list[dict[str, Any]]:
               pnl::float             AS pnl,
               trading_mode,
               exchange,
+              market_title,
               to_char(executed_at, 'YYYY-MM-DD"T"HH24:MI:SSZ') AS executed_at
             FROM trades
             ORDER BY executed_at DESC NULLS LAST
@@ -88,10 +90,28 @@ async def get_recent_trades(limit: int = 25) -> list[dict[str, Any]]:
             """,
             limit,
         )
-        return [dict(r) for r in rows]
+        out = [dict(r) for r in rows]
     except Exception as e:
         log.warning("recent_trades failed: %s", e)
         return []
+
+    # Enrich any rows whose market_title hasn't been backfilled yet.
+    missing = {
+        row["market_id"]
+        for row in out
+        if row.get("market_id") and not row.get("market_title")
+    }
+    if missing:
+        try:
+            titles = await resolve_market_titles(missing)
+        except Exception as e:
+            log.warning("resolve_market_titles failed: %s", e)
+            titles = {}
+        for row in out:
+            mid = row.get("market_id")
+            if mid and not row.get("market_title") and mid in titles:
+                row["market_title"] = titles[mid]
+    return out
 
 
 async def get_swarm_personas() -> list[dict[str, Any]]:

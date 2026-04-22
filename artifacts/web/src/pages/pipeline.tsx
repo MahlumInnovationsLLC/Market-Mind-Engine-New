@@ -1,9 +1,92 @@
-import { useEffect, useMemo, useState } from "react";
+import { createContext, useContext, useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "wouter";
 import { useAuth, useClerk, useUser } from "@clerk/react";
+import { getMarketTitle } from "@workspace/api-client-react";
 import { useWebSocket } from "@/hooks/use-websocket";
 import WsStatusIndicator from "@/components/ws-status-indicator";
 import { apiFetch } from "@/lib/api";
+
+type TitleMap = Record<string, string | null>;
+
+const MarketTitleContext = createContext<{
+  titles: TitleMap;
+  request: (ticker: string) => void;
+}>({ titles: {}, request: () => {} });
+
+function useMarketTitleResolver() {
+  const [titles, setTitles] = useState<TitleMap>({});
+  const inflight = useRef<Set<string>>(new Set());
+  const queue = useRef<Set<string>>(new Set());
+  const flushTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const flush = () => {
+    flushTimer.current = null;
+    const batch = Array.from(queue.current);
+    queue.current.clear();
+    for (const ticker of batch) {
+      if (inflight.current.has(ticker)) continue;
+      inflight.current.add(ticker);
+      getMarketTitle(ticker)
+        .then((res) => {
+          setTitles((prev) =>
+            prev[ticker] === (res?.title ?? null)
+              ? prev
+              : { ...prev, [ticker]: res?.title ?? null },
+          );
+        })
+        .catch(() => {
+          setTitles((prev) =>
+            ticker in prev ? prev : { ...prev, [ticker]: null },
+          );
+        })
+        .finally(() => {
+          inflight.current.delete(ticker);
+        });
+    }
+  };
+
+  const request = (ticker: string) => {
+    if (!ticker) return;
+    if (ticker in titles) return;
+    if (inflight.current.has(ticker) || queue.current.has(ticker)) return;
+    queue.current.add(ticker);
+    if (flushTimer.current === null) {
+      flushTimer.current = setTimeout(flush, 80);
+    }
+  };
+
+  useEffect(() => {
+    return () => {
+      if (flushTimer.current !== null) clearTimeout(flushTimer.current);
+    };
+  }, []);
+
+  return { titles, request };
+}
+
+function MarketLabel({
+  ticker,
+  className,
+  fallback,
+}: {
+  ticker: string | null | undefined;
+  className?: string;
+  fallback?: string;
+}) {
+  const { titles, request } = useContext(MarketTitleContext);
+  useEffect(() => {
+    if (ticker) request(ticker);
+  }, [ticker, request]);
+  if (!ticker) {
+    return <span className={className}>{fallback ?? "—"}</span>;
+  }
+  const resolved = titles[ticker];
+  return (
+    <span className={className} title={ticker}>
+      {resolved || ticker}
+    </span>
+  );
+}
 
 interface CycleGroup {
   cycle_id: string | null;
@@ -146,12 +229,10 @@ function CandidateBlock({
   return (
     <div className="border border-border/60 bg-background/40 p-2 text-[10px]">
       <div className="flex items-center justify-between mb-1">
-        <span
+        <MarketLabel
+          ticker={market}
           className="font-bold text-foreground truncate max-w-[260px]"
-          title={market}
-        >
-          {market}
-        </span>
+        />
         <span
           className={`uppercase tracking-wider ${final === "placed" ? "text-success" : final === "in-progress" ? "text-primary" : "text-muted-foreground"}`}
         >
@@ -202,7 +283,7 @@ interface OutOfBandFeedProps {
   reconnectIn: number | null;
   closeCode: number | null;
   emptyText: string;
-  formatLine: (ev: Record<string, unknown>) => string;
+  formatLine: (ev: Record<string, unknown>) => import("react").ReactNode;
 }
 
 function OutOfBandFeed({
@@ -335,7 +416,7 @@ function formatSwarmLine(ev: Record<string, unknown>): string {
   return tail ? `${head} · ${tail}` : head;
 }
 
-function formatSettlementLine(ev: Record<string, unknown>): string {
+function formatSettlementLine(ev: Record<string, unknown>): import("react").ReactNode {
   const t = pickStr(ev, "type") ?? "event";
   const market = pickStr(ev, "market_id");
   const tradeId = pickStr(ev, "trade_id");
@@ -343,13 +424,22 @@ function formatSettlementLine(ev: Record<string, unknown>): string {
   const pnl = pickNum(ev, "pnl");
   const ts = pickStr(ev, "ts") ?? pickStr(ev, "settled_at") ?? pickStr(ev, "completed_at");
   const head = `${fmtTimePart(ts)} · ${t.toUpperCase()}`;
-  const parts = [
-    market,
-    tradeId && `trade=${tradeId.slice(0, 8)}`,
-    typeof outcomeYes === "number" ? `outcome=${outcomeYes ? "YES" : "NO"}` : null,
-    typeof pnl === "number" ? `pnl=$${pnl.toFixed(2)}` : null,
-  ].filter(Boolean) as string[];
-  return parts.length ? `${head} · ${parts.join(" · ")}` : head;
+  const tail: import("react").ReactNode[] = [];
+  if (typeof tradeId === "string") tail.push(`trade=${tradeId.slice(0, 8)}`);
+  if (typeof outcomeYes === "number") tail.push(`outcome=${outcomeYes ? "YES" : "NO"}`);
+  if (typeof pnl === "number") tail.push(`pnl=$${pnl.toFixed(2)}`);
+  return (
+    <span>
+      {head}
+      {market ? (
+        <>
+          {" · "}
+          <MarketLabel ticker={market} />
+        </>
+      ) : null}
+      {tail.length > 0 ? ` · ${tail.join(" · ")}` : null}
+    </span>
+  );
 }
 
 export default function PipelinePage() {
@@ -405,10 +495,12 @@ export default function PipelinePage() {
   }, [snapshot, ws.events]);
 
   const groups = useMemo(() => groupByCycle(mergedEvents), [mergedEvents]);
+  const titleResolver = useMarketTitleResolver();
   const operatorLabel =
     user?.primaryEmailAddress?.emailAddress ?? user?.username ?? user?.id ?? "—";
 
   return (
+    <MarketTitleContext.Provider value={titleResolver}>
     <div className="min-h-[100dvh] bg-background text-foreground p-4 md:p-6 font-mono">
       <header className="mb-6 flex flex-col md:flex-row md:items-end justify-between gap-4 border-b border-border pb-4">
         <div>
@@ -522,5 +614,6 @@ export default function PipelinePage() {
         </aside>
       </main>
     </div>
+    </MarketTitleContext.Provider>
   );
 }

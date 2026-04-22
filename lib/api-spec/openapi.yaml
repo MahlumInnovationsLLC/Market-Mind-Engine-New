@@ -133,6 +133,23 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/SwarmDebateList" }
 
+  /market-title/{ticker}:
+    get:
+      operationId: getMarketTitle
+      tags: [dashboard]
+      summary: Resolve a Kalshi ticker to a human-readable market title
+      parameters:
+        - in: path
+          name: ticker
+          required: true
+          schema: { type: string, minLength: 1, maxLength: 200 }
+      responses:
+        "200":
+          description: Resolved title (or null if unavailable)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/MarketTitle" }
+
   /swarm/debate:
     post:
       operationId: runSwarmDebate
@@ -565,7 +582,15 @@ components:
         trading_mode: { type: string, nullable: true }
         exchange: { type: string, nullable: true }
         executed_at: { type: string, nullable: true }
+        market_title: { type: string, nullable: true }
       required: [id]
+
+    MarketTitle:
+      type: object
+      properties:
+        ticker: { type: string }
+        title: { type: string, nullable: true }
+      required: [ticker]
 
     TradeList:
       type: object

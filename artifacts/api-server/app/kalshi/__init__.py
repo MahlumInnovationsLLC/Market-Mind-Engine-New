@@ -13,6 +13,7 @@ from .lifecycle import (
     list_resting_orders,
 )
 from .bus import bus
+from .market_titles import get_title as get_market_title, resolve_titles
 from .ws import KalshiWebSocket, get_ws_subscriber
 
 __all__ = [
@@ -29,4 +30,6 @@ __all__ = [
     "bus",
     "KalshiWebSocket",
     "get_ws_subscriber",
+    "resolve_titles",
+    "get_market_title",
 ]

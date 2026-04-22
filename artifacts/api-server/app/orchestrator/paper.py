@@ -16,6 +16,7 @@ from typing import Any
 
 from .. import db
 from ..config import get_settings
+from ..kalshi.market_titles import resolve_titles as resolve_market_titles
 from ..risk.gates import RiskContext
 
 
@@ -65,24 +66,33 @@ async def place_order(
     quantity = max(1, int(ctx.intended_quantity))
     price = float(ctx.current_price or 0.0)
 
+    market_title: str | None = None
+    if ctx.market_id:
+        try:
+            titles = await resolve_market_titles([ctx.market_id])
+            market_title = titles.get(ctx.market_id)
+        except Exception as e:
+            log.warning("resolve market title failed for %s: %s", ctx.market_id, e)
+
     try:
         new_id = await db.fetchval(
             """
             INSERT INTO trades (
-                trade_id, market_id, vertical, side, action,
+                trade_id, market_id, market_title, vertical, side, action,
                 quantity, price, fees, pnl,
                 trading_mode, exchange, executed_at,
                 model_prob, model_edge, kelly_fraction
             ) VALUES (
-                $1, $2, $3, $4, $5,
-                $6, $7, 0, NULL,
+                $1, $2, $3, $4, $5, $6,
+                $7, $8, 0, NULL,
                 'paper', 'kalshi', now(),
-                $8, $9, $10
+                $9, $10, $11
             )
             RETURNING id
             """,
             trade_id,
             ctx.market_id,
+            market_title,
             ctx.vertical or "sports",
             side_norm,
             action,
@@ -100,6 +110,7 @@ async def place_order(
         "trade_id": trade_id,
         "trades_id": int(new_id) if new_id is not None else None,
         "market_id": ctx.market_id,
+        "market_title": market_title,
         "side": side_norm,
         "quantity": quantity,
         "price": price,

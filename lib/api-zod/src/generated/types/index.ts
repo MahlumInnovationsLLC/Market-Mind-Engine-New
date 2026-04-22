@@ -39,6 +39,7 @@ export * from "./getRecentDebatesParams";
 export * from "./getRecentTradesParams";
 export * from "./healthStatus";
 export * from "./listModelHealthAlertsParams";
+export * from "./marketTitle";
 export * from "./modelHealthAlert";
 export * from "./modelHealthAlertList";
 export * from "./modelsInventory";

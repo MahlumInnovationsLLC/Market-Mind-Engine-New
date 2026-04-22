@@ -38,6 +38,7 @@ import type {
   GetRecentTradesParams,
   HealthStatus,
   ListModelHealthAlertsParams,
+  MarketTitle,
   ModelHealthAlertList,
   ModelsInventory,
   MyAccess,
@@ -721,6 +722,93 @@ export function useGetRecentDebates<
   },
 ): UseQueryResult<TData, TError> & { queryKey: QueryKey } {
   const queryOptions = getGetRecentDebatesQueryOptions(params, options);
+
+  const query = useQuery(queryOptions) as UseQueryResult<TData, TError> & {
+    queryKey: QueryKey;
+  };
+
+  return { ...query, queryKey: queryOptions.queryKey };
+}
+
+/**
+ * @summary Resolve a Kalshi ticker to a human-readable market title
+ */
+export const getGetMarketTitleUrl = (ticker: string) => {
+  return `/api/market-title/${ticker}`;
+};
+
+export const getMarketTitle = async (
+  ticker: string,
+  options?: RequestInit,
+): Promise<MarketTitle> => {
+  return customFetch<MarketTitle>(getGetMarketTitleUrl(ticker), {
+    ...options,
+    method: "GET",
+  });
+};
+
+export const getGetMarketTitleQueryKey = (ticker: string) => {
+  return [`/api/market-title/${ticker}`] as const;
+};
+
+export const getGetMarketTitleQueryOptions = <
+  TData = Awaited<ReturnType<typeof getMarketTitle>>,
+  TError = ErrorType<unknown>,
+>(
+  ticker: string,
+  options?: {
+    query?: UseQueryOptions<
+      Awaited<ReturnType<typeof getMarketTitle>>,
+      TError,
+      TData
+    >;
+    request?: SecondParameter<typeof customFetch>;
+  },
+) => {
+  const { query: queryOptions, request: requestOptions } = options ?? {};
+
+  const queryKey = queryOptions?.queryKey ?? getGetMarketTitleQueryKey(ticker);
+
+  const queryFn: QueryFunction<Awaited<ReturnType<typeof getMarketTitle>>> = ({
+    signal,
+  }) => getMarketTitle(ticker, { signal, ...requestOptions });
+
+  return {
+    queryKey,
+    queryFn,
+    enabled: !!ticker,
+    ...queryOptions,
+  } as UseQueryOptions<
+    Awaited<ReturnType<typeof getMarketTitle>>,
+    TError,
+    TData
+  > & { queryKey: QueryKey };
+};
+
+export type GetMarketTitleQueryResult = NonNullable<
+  Awaited<ReturnType<typeof getMarketTitle>>
+>;
+export type GetMarketTitleQueryError = ErrorType<unknown>;
+
+/**
+ * @summary Resolve a Kalshi ticker to a human-readable market title
+ */
+
+export function useGetMarketTitle<
+  TData = Awaited<ReturnType<typeof getMarketTitle>>,
+  TError = ErrorType<unknown>,
+>(
+  ticker: string,
+  options?: {
+    query?: UseQueryOptions<
+      Awaited<ReturnType<typeof getMarketTitle>>,
+      TError,
+      TData
+    >;
+    request?: SecondParameter<typeof customFetch>;
+  },
+): UseQueryResult<TData, TError> & { queryKey: QueryKey } {
+  const queryOptions = getGetMarketTitleQueryOptions(ticker, options);
 
   const query = useQuery(queryOptions) as UseQueryResult<TData, TError> & {
     queryKey: QueryKey;
