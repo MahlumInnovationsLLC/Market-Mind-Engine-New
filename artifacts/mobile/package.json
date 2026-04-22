@@ -13,6 +13,8 @@
     "@clerk/expo": "^3.2.1",
     "expo-auth-session": "~7.0.10",
     "expo-crypto": "~15.0.8",
+    "expo-device": "^55.0.15",
+    "expo-notifications": "^55.0.19",
     "expo-secure-store": "~15.0.8",
     "react-native-purchases": "^10.0.1"
   },

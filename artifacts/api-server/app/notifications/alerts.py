@@ -256,7 +256,21 @@ def live_trade(
         )
         + "\n"
     )
-    return _dispatch(subject, body, tag="live-trade", dry_run=dry_run)
+    result = _dispatch(subject, body, tag="live-trade", dry_run=dry_run)
+    if not dry_run:
+        try:
+            from . import push as _push
+            _push.push_live_trade(
+                market_ticker=market_ticker,
+                side=side,
+                action=action,
+                contracts=int(contracts),
+                price_cents=price_cents,
+                vertical=vertical,
+            )
+        except Exception as e:  # pragma: no cover — push must not break alerting
+            log.warning("live_trade push dispatch failed: %s", e)
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -283,7 +297,14 @@ def halt(
         )
         + "\n"
     )
-    return _dispatch(subject, body, tag="halt", dry_run=dry_run)
+    result = _dispatch(subject, body, tag="halt", dry_run=dry_run)
+    if not dry_run:
+        try:
+            from . import push as _push
+            _push.push_halt(reason=reason)
+        except Exception as e:  # pragma: no cover — push must not break alerting
+            log.warning("halt push dispatch failed: %s", e)
+    return result
 
 
 # ---------------------------------------------------------------------------

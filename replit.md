@@ -73,6 +73,12 @@ showing real production telemetry.
   suppression list.
 - `CHURN_DIGEST_ENABLED`, `CHURN_DIGEST_HOUR_UTC`, `CHURN_DIGEST_MINUTE_UTC`
   (optional) — toggles + send-time for the daily churn digest scheduler.
+- `AXIOM_PUSH_DISABLED` (optional) — set to `1` to disable Expo push fan-out
+  (alerts still send email). The mobile app registers each device via
+  `POST /api/me/push-token` on sign-in; live-trade fills and kill-switch
+  trips fan out via `notifications/push.py` to every device whose owner has
+  the matching toggle in `user_notification_prefs` set (defaults: both on).
+  Tokens that come back as `DeviceNotRegistered` are pruned automatically.
 
 ## Operator allow-list
 

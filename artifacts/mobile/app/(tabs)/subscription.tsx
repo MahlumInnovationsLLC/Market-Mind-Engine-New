@@ -16,6 +16,7 @@ import Purchases, { type PurchasesOffering } from "react-native-purchases";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
 import { Card, SectionHeader } from "@/components/Card";
+import { NotificationPrefs } from "@/components/NotificationPrefs";
 import { useColors } from "@/hooks/useColors";
 import { apiFetch } from "@/lib/api";
 import { revenueCatConfigured } from "@/lib/revenuecat";
@@ -345,6 +346,8 @@ export default function SubscriptionScreen() {
           );
         })
       )}
+
+      <NotificationPrefs />
 
       <View style={{ height: 16 }} />
       <Pressable

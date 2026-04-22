@@ -24,6 +24,7 @@ from .notifications import (
     daily_summary,
     email as notif_user_email,
     postmark as notif_postmark,
+    push as notif_push,
     suppression as notif_suppression,
 )
 from .auth import (
@@ -406,6 +407,69 @@ async def me_access(user: AuthedUser = Depends(require_auth)) -> dict[str, objec
         "email": email,
         "user_id": user.user_id,
     }
+
+
+# ---------------------------------------------------------------------------
+# Mobile push notifications (Expo)
+# ---------------------------------------------------------------------------
+
+
+class PushTokenRequest(BaseModel):
+    expo_token: str = Field(..., min_length=1, max_length=300)
+    platform: str | None = Field(default=None, max_length=32)
+
+
+class NotificationPrefsRequest(BaseModel):
+    notify_live_trade: bool | None = None
+    notify_halt: bool | None = None
+
+
+@app.post("/api/me/push-token")
+async def me_register_push_token(
+    body: PushTokenRequest,
+    user: AuthedUser = Depends(require_auth),
+) -> dict[str, object]:
+    ok = await notif_push.register_token(
+        clerk_user_id=user.user_id,
+        expo_token=body.expo_token,
+        platform=body.platform,
+    )
+    if not ok:
+        raise HTTPException(status_code=400, detail="invalid push token")
+    return {"ok": True}
+
+
+@app.delete("/api/me/push-token")
+async def me_unregister_push_token(
+    body: PushTokenRequest,
+    user: AuthedUser = Depends(require_auth),
+) -> dict[str, object]:
+    removed = await notif_push.unregister_token(
+        clerk_user_id=user.user_id,
+        expo_token=body.expo_token,
+    )
+    return {"ok": True, "removed": removed}
+
+
+@app.get("/api/me/notification-prefs")
+async def me_get_notification_prefs(
+    user: AuthedUser = Depends(require_auth),
+) -> dict[str, object]:
+    prefs = await notif_push.get_prefs(user.user_id)
+    return prefs
+
+
+@app.put("/api/me/notification-prefs")
+async def me_set_notification_prefs(
+    body: NotificationPrefsRequest,
+    user: AuthedUser = Depends(require_auth),
+) -> dict[str, object]:
+    prefs = await notif_push.set_prefs(
+        clerk_user_id=user.user_id,
+        notify_live_trade=body.notify_live_trade,
+        notify_halt=body.notify_halt,
+    )
+    return prefs
 
 
 # ---------------------------------------------------------------------------
