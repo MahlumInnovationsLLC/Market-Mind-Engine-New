@@ -171,7 +171,7 @@ LEAGUE_CONFIGS: dict[str, LeagueConfig] = {
     "MLS": LeagueConfig(
         league="MLS",
         priority=8,
-        allocation_pct=0.03,
+        allocation_pct=0.02,
         per_game_cap_pct=0.01,
         three_way_market=True,
         max_daily_trades=8,

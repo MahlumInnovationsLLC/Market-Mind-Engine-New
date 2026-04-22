@@ -70,9 +70,17 @@ def test_register_extra_feeds_enabled_with_global_key(monkeypatch):
     monkeypatch.setattr(sportradar, "registry", reg)
     sportradar.register_sportradar_extra_feeds()
 
+    # Feeds whose endpoint paths are wired (NA leagues) become enabled;
+    # leagues whose path templates aren't yet implemented (soccer, task
+    # #196) are registered but kept disabled with a clear
+    # `skipped_reason` instead of crashing at poll time on KeyError.
     snap = reg.snapshot()
-    assert all(s["enabled"] is True for s in snap)
-    assert all(s["skipped_reason"] is None for s in snap)
+    enabled_feeds = [s for s in snap if s["enabled"]]
+    disabled_feeds = [s for s in snap if not s["enabled"]]
+    assert enabled_feeds, "expected at least the NA leagues to be enabled"
+    assert all(s["skipped_reason"] is None for s in enabled_feeds)
+    for s in disabled_feeds:
+        assert s["skipped_reason"] and "endpoint not wired" in s["skipped_reason"]
 
 
 def test_register_is_idempotent(monkeypatch):

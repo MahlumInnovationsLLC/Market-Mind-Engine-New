@@ -829,6 +829,15 @@ async def run_cycle(vertical: str = "sports") -> CycleResult:
             league_key = (cand.get("league") or "").upper()
             if league_key:
                 per_league[league_key] = per_league.get(league_key, 0.0) + intended_notional
+                # Increment per-league trade count so the
+                # `max_daily_trades` sub-check inside
+                # `gate_per_vertical_cap` (task #196) sees the just-
+                # placed trade for subsequent candidates in the same
+                # cycle.  Without this, a single cycle can blow past
+                # EPL's 10-trade-day cap.
+                trades_today_per_league[league_key] = (
+                    trades_today_per_league.get(league_key, 0) + 1
+                )
                 matchup_val = cand.get("matchup")
                 if matchup_val:
                     mkey = f"{league_key}:{matchup_val}"

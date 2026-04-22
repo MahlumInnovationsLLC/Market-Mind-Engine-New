@@ -630,13 +630,26 @@ def register_sportradar_extra_feeds() -> None:
 
     Idempotent: if any feed name is already in the registry we skip — this
     lets the function be called from both lifespan and tests without
-    raising "already registered".  18 feeds total: 6 leagues × 3 types
-    (rosters, injuries, live state).  Schedules are registered alongside
-    The Odds API in `odds_api.register_odds_feeds`.
+    raising "already registered".  Each sport that ships with rosters /
+    injuries / live-state path templates contributes 3 feeds.  Soccer
+    leagues (task #196) only ship the daily schedule today and so are
+    registered with the three extra feeds *disabled* with a clear
+    `skipped_reason` — wiring the soccer endpoints is tracked under a
+    separate follow-up task.  Schedules themselves are registered
+    alongside The Odds API in `odds_api.register_odds_feeds`.
     """
     for sport in SPORTRADAR_SPORTS:
         api_key = _api_key_for(sport)
-        skipped = None if api_key else f"SPORTRADAR_{sport.upper()}_KEY not set"
+        has_roster_path = sport in _ROSTER_PATHS
+        has_injury_path = sport in _INJURY_PATHS
+        has_live_path = sport in _DAILY_SCHEDULE_PATHS
+
+        def _reason(have_path: bool, kind: str) -> str | None:
+            if not have_path:
+                return f"sportradar {kind} endpoint not wired for {sport}"
+            if not api_key:
+                return f"SPORTRADAR_{sport.upper()}_KEY not set"
+            return None
 
         ros_name = f"sportradar_{sport}_rosters"
         if registry.status_of(ros_name) is None:
@@ -646,8 +659,8 @@ def register_sportradar_extra_feeds() -> None:
                 name=ros_name,
                 cadence_seconds=float(ROSTERS_CADENCE_SECONDS),
                 poll=_ros,
-                enabled=bool(api_key),
-                skipped_reason=skipped,
+                enabled=bool(api_key) and has_roster_path,
+                skipped_reason=_reason(has_roster_path, "rosters"),
             ))
 
         inj_name = f"sportradar_{sport}_injuries"
@@ -658,8 +671,8 @@ def register_sportradar_extra_feeds() -> None:
                 name=inj_name,
                 cadence_seconds=float(INJURIES_CADENCE_SECONDS),
                 poll=_inj,
-                enabled=bool(api_key),
-                skipped_reason=skipped,
+                enabled=bool(api_key) and has_injury_path,
+                skipped_reason=_reason(has_injury_path, "injuries"),
             ))
 
         live_name = f"sportradar_{sport}_live"
@@ -670,6 +683,6 @@ def register_sportradar_extra_feeds() -> None:
                 name=live_name,
                 cadence_seconds=float(LIVE_STATE_CADENCE_SECONDS),
                 poll=_live,
-                enabled=bool(api_key),
-                skipped_reason=skipped,
+                enabled=bool(api_key) and has_live_path,
+                skipped_reason=_reason(has_live_path, "live"),
             ))
