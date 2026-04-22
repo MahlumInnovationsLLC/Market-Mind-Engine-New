@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { GlassCard } from "@/components/ui/glass-card";
 import AccessRequests from "@/components/telemetry/access-requests";
 import EmergencyStop from "@/components/telemetry/emergency-stop";
@@ -9,16 +9,19 @@ import ModelHealthAlerts from "@/components/telemetry/model-health-alerts";
 /**
  * Collapsible card grouping the orchestrator + risk controls.
  *
- * - Visible to everyone, but admin-only widgets (EmergencyStop,
- *   AccessRequests, ModelHealthAlerts) are gated inside.
- * - LiveExecuteToggle and RuntimeSettings remain visible to all —
- *   each component already self-gates by tier and the API enforces
- *   real authorization.
- * - Expanded by default for admins; collapsed by default for everyone
- *   else, per the §6.1 brief.
+ * Admin-only per §6.1: non-admins do not render the card at all.
+ * Default-open is synced to `isAdmin` via an effect so admins see the
+ * card expanded as soon as `useGetMyAccess` resolves, even if the
+ * first render had `isAdmin=false`.
  */
 export default function OperatorControls({ isAdmin }: { isAdmin: boolean }) {
   const [open, setOpen] = useState(isAdmin);
+
+  useEffect(() => {
+    if (isAdmin) setOpen(true);
+  }, [isAdmin]);
+
+  if (!isAdmin) return null;
 
   return (
     <GlassCard
@@ -31,24 +34,16 @@ export default function OperatorControls({ isAdmin }: { isAdmin: boolean }) {
         type="button"
         onClick={() => setOpen((v) => !v)}
         aria-expanded={open}
-        className={`flex w-full items-center justify-between gap-2 border-b border-border px-3 py-2 text-left transition-colors ${
-          isAdmin ? "bg-loss/5 hover:bg-loss/10" : "bg-muted/20 hover:bg-muted/30"
-        }`}
+        className="flex w-full items-center justify-between gap-2 border-b border-border bg-loss/5 px-3 py-2 text-left transition-colors hover:bg-loss/10"
         data-testid="button-toggle-operator-controls"
       >
         <div className="flex items-center gap-3">
-          <span
-            className={`text-[10px] uppercase tracking-widest font-bold ${
-              isAdmin ? "text-loss" : "text-muted-foreground"
-            }`}
-          >
+          <span className="text-[10px] font-bold uppercase tracking-widest text-loss">
             OPERATOR CONTROLS
           </span>
-          {isAdmin ? (
-            <span className="border border-loss/60 px-1.5 py-0.5 text-[9px] uppercase tracking-widest text-loss">
-              ADMIN
-            </span>
-          ) : null}
+          <span className="border border-loss/60 px-1.5 py-0.5 text-[9px] uppercase tracking-widest text-loss">
+            ADMIN
+          </span>
         </div>
         <span className="text-[10px] uppercase tracking-widest text-muted-foreground">
           {open ? "▼ HIDE" : "▶ EXPAND"}
@@ -59,10 +54,10 @@ export default function OperatorControls({ isAdmin }: { isAdmin: boolean }) {
           className="grid grid-cols-1 gap-3 p-3 lg:grid-cols-2"
           data-testid="operator-controls-body"
         >
-          {isAdmin ? <EmergencyStop /> : null}
+          <EmergencyStop />
           <LiveExecuteToggle />
-          {isAdmin ? <AccessRequests /> : null}
-          {isAdmin ? <ModelHealthAlerts /> : null}
+          <AccessRequests />
+          <ModelHealthAlerts />
           <div className="lg:col-span-2">
             <RuntimeSettingsPanel />
           </div>
