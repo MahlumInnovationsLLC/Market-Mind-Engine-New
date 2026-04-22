@@ -60,6 +60,7 @@ from .feeds.sportradar import (
     register_sportradar_extra_feeds,
 )
 from .feeds.weather import register_weather_feeds
+from .feeds.crypto import register_crypto_feeds
 from .orchestrator import pipeline_event_hub, run_cycle, scheduler as orchestrator_scheduler
 from .settlement import (
     backfill_is_running,
@@ -139,6 +140,7 @@ async def lifespan(_: FastAPI):
     try:
         register_odds_feeds()
         register_weather_feeds()
+        register_crypto_feeds()
         try:
             from .feeds import weather_climatology as _wclim
 
