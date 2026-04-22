@@ -8,6 +8,28 @@
  * lightweight while still flowing through the same Clerk JWT.
  */
 
+/**
+ * Generate a request id (uuid4 hex, no dashes) attached to every outbound
+ * request via the `x-request-id` header.  The backend echoes it on the
+ * response and binds it to its log context, so a single id stitches
+ * frontend → API → swarm → gates → execution into one greppable trace.
+ */
+export function newRequestId(): string {
+  const cryptoApi: Crypto | undefined =
+    typeof globalThis !== "undefined" ? (globalThis as { crypto?: Crypto }).crypto : undefined;
+  if (cryptoApi && typeof cryptoApi.randomUUID === "function") {
+    return cryptoApi.randomUUID().replace(/-/g, "");
+  }
+  // Fallback — sufficient for correlation, not security.
+  let out = "";
+  for (let i = 0; i < 32; i += 1) {
+    out += Math.floor(Math.random() * 16).toString(16);
+  }
+  return out;
+}
+
+export const REQUEST_ID_HEADER = "x-request-id";
+
 export class ApiError extends Error {
   status: number;
   body: unknown;
@@ -37,6 +59,9 @@ export async function apiFetch<T = unknown>(
   }
   if (!headers.has("accept")) {
     headers.set("accept", "application/json");
+  }
+  if (!headers.has(REQUEST_ID_HEADER)) {
+    headers.set(REQUEST_ID_HEADER, newRequestId());
   }
   if (getToken && !headers.has("authorization")) {
     const token = await getToken();

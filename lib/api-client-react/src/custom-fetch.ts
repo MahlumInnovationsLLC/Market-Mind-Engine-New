@@ -27,6 +27,22 @@ export type UnauthorizedHandler = (info: {
 
 const NO_BODY_STATUS = new Set([204, 205, 304]);
 const DEFAULT_JSON_ACCEPT = "application/json, application/problem+json";
+const REQUEST_ID_HEADER = "x-request-id";
+
+function newRequestId(): string {
+  const cryptoApi: Crypto | undefined =
+    typeof globalThis !== "undefined"
+      ? (globalThis as { crypto?: Crypto }).crypto
+      : undefined;
+  if (cryptoApi && typeof cryptoApi.randomUUID === "function") {
+    return cryptoApi.randomUUID().replace(/-/g, "");
+  }
+  let out = "";
+  for (let i = 0; i < 32; i += 1) {
+    out += Math.floor(Math.random() * 16).toString(16);
+  }
+  return out;
+}
 
 // ---------------------------------------------------------------------------
 // Module-level configuration
@@ -380,6 +396,10 @@ export async function customFetch<T = unknown>(
 
   if (responseType === "json" && !baseHeaders.has("accept")) {
     baseHeaders.set("accept", DEFAULT_JSON_ACCEPT);
+  }
+
+  if (!baseHeaders.has(REQUEST_ID_HEADER)) {
+    baseHeaders.set(REQUEST_ID_HEADER, newRequestId());
   }
 
   const requestInfo = { method, url: resolveUrl(input) };

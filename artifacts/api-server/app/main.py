@@ -51,6 +51,8 @@ from .auth import (
     require_auth,
 )
 from .config import get_settings
+from .middleware import RequestIdMiddleware
+from .observability import configure_logging
 from .feeds import registry as feed_registry, scheduler as feed_scheduler
 from .feeds.odds_api import register_odds_feeds
 from .feeds.sportradar import (
@@ -87,10 +89,7 @@ from .polymarket import (
 from .polymarket.lifecycle import OrderRequest as PolymarketOrderRequest
 
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s %(levelname)s %(name)s :: %(message)s",
-)
+configure_logging()
 log = logging.getLogger("axiom.api")
 
 
@@ -432,11 +431,13 @@ app = FastAPI(
 )
 
 _settings = get_settings()
+app.add_middleware(RequestIdMiddleware)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=list(_settings.cors_origins) or ["*"],
     allow_methods=["GET", "POST", "OPTIONS"],
-    allow_headers=["authorization", "content-type", "accept"],
+    allow_headers=["authorization", "content-type", "accept", "x-request-id"],
+    expose_headers=["x-request-id"],
 )
 
 
