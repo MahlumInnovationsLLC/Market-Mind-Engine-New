@@ -1,4 +1,11 @@
+import { useQuery } from "@tanstack/react-query";
+import type {
+  MyAccess,
+  VerticalVisibility,
+} from "@workspace/api-client-react";
 import { useEffect, useState } from "react";
+
+import { apiFetch } from "@/lib/api";
 
 let _selected: string[] = [];
 const _listeners = new Set<(v: string[]) => void>();
@@ -35,6 +42,8 @@ export function useSelectedVerticals(): {
   toggle: (v: string) => void;
   clear: () => void;
   matches: (v: string | null | undefined) => boolean;
+  filterActive: boolean;
+  hiddenActive: boolean;
 } {
   const [selected, setSelected] = useState<string[]>(_selected);
 
@@ -46,10 +55,31 @@ export function useSelectedVerticals(): {
     };
   }, []);
 
+  const access = useQuery({
+    queryKey: ["me", "access"],
+    queryFn: () => apiFetch<MyAccess>("/api/me/access"),
+    staleTime: 30_000,
+  });
+  const visibility = useQuery({
+    queryKey: ["dashboard", "vertical-visibility"],
+    queryFn: () =>
+      apiFetch<VerticalVisibility>("/api/dashboard/vertical-visibility"),
+    staleTime: 60_000,
+  });
+
+  const isAdmin = !!access.data?.is_admin;
+  const hidden = new Set(
+    (visibility.data?.hidden ?? []).map((v) => v.toLowerCase()),
+  );
+  const hiddenActive = !isAdmin && hidden.size > 0;
+  const filterActive = selected.length > 0 || hiddenActive;
+
   const matches = (v: string | null | undefined) => {
+    const lower = v ? v.toLowerCase() : null;
+    if (!isAdmin && lower && hidden.has(lower)) return false;
     if (selected.length === 0) return true;
-    if (!v) return false;
-    return selected.includes(v.toLowerCase());
+    if (!lower) return false;
+    return selected.includes(lower);
   };
 
   return {
@@ -57,5 +87,7 @@ export function useSelectedVerticals(): {
     toggle: toggleSelectedVertical,
     clear: clearSelectedVerticals,
     matches,
+    filterActive,
+    hiddenActive,
   };
 }

@@ -113,6 +113,13 @@ export function useSelectedVerticals(): SelectedVerticalsApi {
 export function useVerticalFilter(): {
   matches: (v: string | null | undefined) => boolean;
   selected: string[];
+  /** True when the user is non-admin and at least one vertical is hidden — KPI
+   * rollups should re-aggregate from the per-vertical overview to suppress
+   * hidden verticals even when no explicit selection is active. */
+  hiddenActive: boolean;
+  /** True when the effective filter is narrowing (explicit selection OR
+   * hidden-active for non-admins). */
+  filterActive: boolean;
 } {
   const base = useSelectedVerticals();
   const access = useGetMyAccess({
@@ -142,5 +149,13 @@ export function useVerticalFilter(): {
     [base.selected, isAdmin, hidden],
   );
 
-  return { matches, selected: base.selected };
+  const hiddenActive = !isAdmin && hidden.size > 0;
+  const filterActive = base.selected.length > 0 || hiddenActive;
+
+  return {
+    matches,
+    selected: base.selected,
+    hiddenActive,
+    filterActive,
+  };
 }

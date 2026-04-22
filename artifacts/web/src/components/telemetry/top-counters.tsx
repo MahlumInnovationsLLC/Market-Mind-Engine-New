@@ -22,7 +22,7 @@ export default function TopCounters() {
   const { data: overview, isLoading } = useGetDashboardOverview({
     query: { refetchInterval: 60_000, queryKey: getGetDashboardOverviewQueryKey() },
   });
-  const { selected, matches } = useVerticalFilter();
+  const { selected, matches, filterActive, hiddenActive } = useVerticalFilter();
   const verticalParams = { days: 7 };
   const { data: verticalOverview } = useGetVerticalsOverview(verticalParams, {
     query: {
@@ -60,7 +60,6 @@ export default function TopCounters() {
 
   if (!overview) return null;
 
-  const filterActive = selected.length > 0;
   const filteredRows = (verticalOverview?.verticals ?? []).filter((v) =>
     matches(v.vertical),
   );
@@ -95,7 +94,12 @@ export default function TopCounters() {
             data-testid="badge-kpi-filtered"
             className="text-[10px] uppercase tracking-widest text-primary"
           >
-            FILTERED · {selected.join(", ")}
+            FILTERED ·{" "}
+            {selected.length > 0
+              ? selected.join(", ")
+              : hiddenActive
+                ? "hidden suppressed"
+                : ""}
           </span>
         ) : null}
       </div>

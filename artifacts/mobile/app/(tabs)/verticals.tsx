@@ -17,9 +17,14 @@ import {
 } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
+import { useRouter } from "expo-router";
+
 import { useColors } from "@/hooks/useColors";
 import { apiFetch } from "@/lib/api";
-import { useSelectedVerticals } from "@/lib/vertical-filter";
+import {
+  setSelectedVerticals,
+  useSelectedVerticals,
+} from "@/lib/vertical-filter";
 
 function fmtMoney(n: number | null | undefined): string {
   if (n === null || n === undefined) return "—";
@@ -49,6 +54,11 @@ export default function VerticalsScreen() {
   const colors = useColors();
   const insets = useSafeAreaInsets();
   const { selected, toggle, clear, matches } = useSelectedVerticals();
+  const router = useRouter();
+  const drillTo = (vertical: string) => {
+    setSelectedVerticals([vertical]);
+    router.push("/(tabs)");
+  };
   const query = useQuery({
     queryKey: ["dashboard", "verticals", 7],
     queryFn: () =>
@@ -231,9 +241,10 @@ export default function VerticalsScreen() {
           <Text style={styles.empty}>No verticals registered.</Text>
         }
         renderItem={({ item }) => (
-          <View
+          <Pressable
             style={[styles.card, item.hidden && styles.hidden]}
             testID={`card-vertical-${item.vertical}`}
+            onPress={() => drillTo(item.vertical)}
           >
             <View style={styles.cardHeader}>
               <Text style={styles.title}>
@@ -288,7 +299,13 @@ export default function VerticalsScreen() {
                 </Text>
               </View>
             ) : null}
-          </View>
+            <Text
+              style={[styles.label, { marginTop: 6, color: colors.primary }]}
+              testID={`link-drill-${item.vertical}`}
+            >
+              TAP TO FILTER DASHBOARD →
+            </Text>
+          </Pressable>
         )}
       />
     </View>

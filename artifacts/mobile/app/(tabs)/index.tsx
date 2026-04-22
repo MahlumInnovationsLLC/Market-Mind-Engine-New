@@ -76,8 +76,8 @@ export default function DashboardScreen() {
       apiFetch<VerticalsOverview>("/api/dashboard/verticals?days=7"),
     refetchInterval: 60_000,
   });
-  const { selected, matches, clear } = useSelectedVerticals();
-  const filterActive = selected.length > 0;
+  const { selected, matches, clear, filterActive, hiddenActive } =
+    useSelectedVerticals();
 
   const refreshing = overview.isFetching && overview.isFetched;
 
@@ -162,7 +162,12 @@ export default function DashboardScreen() {
               style={[styles.kvKey, { color: colors.primary }]}
               testID="badge-vertical-filtered"
             >
-              FILTERED · {selected.join(", ").toUpperCase()}
+              FILTERED ·{" "}
+              {selected.length > 0
+                ? selected.join(", ").toUpperCase()
+                : hiddenActive
+                  ? "HIDDEN SUPPRESSED"
+                  : ""}
             </Text>
             <Text
               onPress={() => clear()}
