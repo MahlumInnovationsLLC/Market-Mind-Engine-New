@@ -14,6 +14,7 @@ import ActiveModelBadge from "@/components/telemetry/active-model-badge";
 import AutoResearchPanel from "@/components/intelligence/autoresearch-panel";
 import CalibrationPanel from "@/components/intelligence/calibration-panel";
 import EdgePanel from "@/components/intelligence/edge-panel";
+import ActivePredictorSelector from "@/components/intelligence/active-predictor-selector";
 
 const TAB_KEYS = ["swarm", "models", "autoresearch", "calibration", "edge"] as const;
 type TabKey = (typeof TAB_KEYS)[number];
@@ -63,7 +64,7 @@ export default function IntelligencePage() {
       </header>
 
       {tab === "swarm" && <SwarmTab />}
-      {tab === "models" && <ModelsTab />}
+      {tab === "models" && <ModelsTab isAdmin={isAdmin} />}
       {tab === "autoresearch" && (
         <div data-testid="panel-intelligence-autoresearch">
           <AutoResearchPanel isAdmin={isAdmin} />
@@ -109,19 +110,19 @@ function SwarmTab() {
   );
 }
 
-function ModelsTab() {
+function ModelsTab({ isAdmin }: { isAdmin: boolean }) {
   return (
     <div
       className="grid grid-cols-1 gap-4 xl:grid-cols-2"
       data-testid="panel-intelligence-models"
     >
-      <GlassCard tone="solid" padding="md" data-testid="card-models-inventory">
+      <GlassCard tone="solid" padding="md" data-testid="card-models-active">
         <SectionHeader
-          eyebrow="INVENTORY"
-          title="Cold storage"
-          subtitle="Replicated model + source archives backing the active predictor."
+          eyebrow="ACTIVE"
+          title="Predictor selector"
+          subtitle="Catalog of trained predictors · select to override the live model."
         />
-        <ModelInventory />
+        <ActivePredictorSelector isAdmin={isAdmin} />
       </GlassCard>
       <GlassCard tone="solid" padding="md" data-testid="card-models-health">
         <SectionHeader
@@ -130,6 +131,14 @@ function ModelsTab() {
           subtitle="Drift / staleness / inference errors raised by the settlement loop."
         />
         <ModelHealthAlerts />
+      </GlassCard>
+      <GlassCard tone="solid" padding="md" className="xl:col-span-2" data-testid="card-models-inventory">
+        <SectionHeader
+          eyebrow="INVENTORY"
+          title="Cold storage"
+          subtitle="Replicated model + source archives backing the active predictor."
+        />
+        <ModelInventory />
       </GlassCard>
     </div>
   );

@@ -8,6 +8,7 @@ import {
 } from "@workspace/api-client-react";
 import { GlassCard } from "@/components/ui/glass-card";
 import { SectionHeader } from "@/components/ui/section-header";
+import VerticalAdminControls from "@/components/intelligence/vertical-admin-controls";
 
 function fmtCurrency(n: number | null | undefined): string {
   if (n === null || n === undefined) return "—";
@@ -36,9 +37,10 @@ function fmt(n: number | null | undefined, digits = 3): string {
 interface VerticalCardProps {
   entry: VerticalsOverviewEntry;
   onDrillIn: (vertical: string) => void;
+  isAdmin: boolean;
 }
 
-function VerticalCard({ entry, onDrillIn }: VerticalCardProps) {
+function VerticalCard({ entry, onDrillIn, isAdmin }: VerticalCardProps) {
   const isLoss = entry.pnl < 0;
   const isWin = entry.pnl > 0;
   const pnlClass = isWin
@@ -65,7 +67,7 @@ function VerticalCard({ entry, onDrillIn }: VerticalCardProps) {
         }
       }}
     >
-      <div className="mb-3 flex items-baseline justify-between">
+      <div className="mb-3 flex items-baseline justify-between gap-2">
         <h3 className="text-sm font-bold uppercase tracking-widest text-primary">
           {entry.vertical.toUpperCase()}
           {entry.pinned && <span className="ml-1 text-primary">★</span>}
@@ -82,6 +84,12 @@ function VerticalCard({ entry, onDrillIn }: VerticalCardProps) {
           Drill in →
         </span>
       </div>
+
+      {isAdmin && (
+        <div className="mb-3">
+          <VerticalAdminControls vertical={entry.vertical} isAdmin={isAdmin} />
+        </div>
+      )}
 
       {entry.description && (
         <p className="mb-3 text-xs text-muted-foreground line-clamp-2">
@@ -222,6 +230,7 @@ export default function VerticalsPage() {
                 key={entry.vertical}
                 entry={entry}
                 onDrillIn={drillIn}
+                isAdmin={isAdmin}
               />
             ))}
           </div>
