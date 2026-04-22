@@ -239,10 +239,12 @@ function AuthedShell() {
         <Route path="/intelligence" component={IntelligencePage} />
         <Route path="/system" component={SystemPage} />
         <Route path="/profile" component={ProfilePage} />
-        <Route path="/settings/notifications" component={SettingsNotificationsPage} />
         <Route path="/trade/:ref" component={TradeDetailPage} />
         <Route path="/admin">
           {isAdmin ? <AdminPage /> : <AdminForbidden email={operatorEmail} />}
+        </Route>
+        <Route path="/billing/:rest*">
+          <Redirect to="/profile" />
         </Route>
         <Route component={NotFound} />
       </Switch>
@@ -371,6 +373,7 @@ function ClerkProviderWithRoutes() {
             <Route path="/pricing" component={PricingPage} />
             <Route path="/billing" component={BillingPage} />
             <Route path="/health" component={HealthPage} />
+            <Route path="/settings/notifications" component={SettingsNotificationsPage} />
             <Route path="/sign-in/:rest*" component={SignInPage} />
             <Route path="/sign-up/:rest*" component={SignUpPage} />
             {/* Catch-all: every other path goes through the

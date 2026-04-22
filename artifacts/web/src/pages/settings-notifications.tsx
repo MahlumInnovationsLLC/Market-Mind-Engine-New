@@ -1,7 +1,14 @@
 import { useEffect, useMemo, useState } from "react";
-import { Link } from "wouter";
+import { Link, Redirect } from "wouter";
 import { useAuth } from "@clerk/react";
 import { apiFetch, ApiError } from "@/lib/api";
+
+export default function SettingsNotificationsPage() {
+  // /settings/notifications now lives inside the unified /system page
+  // (Settings tab). Preserve the URL for older mobile builds and email
+  // links by redirecting to the new home.
+  return <Redirect to="/system?tab=settings" />;
+}
 
 interface PrefsView {
   prefs: {
@@ -94,7 +101,7 @@ const PREMIUM_TOGGLES: ToggleRow[] = [
   },
 ];
 
-export default function SettingsNotificationsPage() {
+export function NotificationPrefsPanel() {
   const { getToken, isSignedIn } = useAuth();
   const token = useMemo(
     () => () => getToken().then((t) => t ?? null),
@@ -170,35 +177,8 @@ export default function SettingsNotificationsPage() {
   };
 
   return (
-    <div className="min-h-[100dvh] bg-background text-foreground p-4 md:p-8 font-mono selection:bg-primary/30">
-      <header className="max-w-3xl mx-auto mb-8 flex flex-col md:flex-row md:items-end justify-between gap-4 border-b border-border pb-4">
-        <div>
-          <h1 className="text-xl md:text-2xl font-bold tracking-tight text-primary uppercase">
-            AXIOM_PREDICT :: NOTIFICATIONS
-          </h1>
-          <p className="text-muted-foreground text-xs uppercase tracking-widest mt-1">
-            Per-channel alert preferences
-          </p>
-        </div>
-        <div className="flex items-center gap-3 text-xs">
-          <Link
-            href="/app"
-            className="border border-border px-3 py-1 uppercase tracking-widest text-[10px] text-muted-foreground hover:text-primary hover:border-primary"
-            data-testid="link-console"
-          >
-            ← Console
-          </Link>
-          <Link
-            href="/billing"
-            className="border border-border px-3 py-1 uppercase tracking-widest text-[10px] text-muted-foreground hover:text-primary hover:border-primary"
-            data-testid="link-billing"
-          >
-            Billing
-          </Link>
-        </div>
-      </header>
-
-      <main className="max-w-3xl mx-auto space-y-6">
+    <div className="font-mono" data-testid="panel-notification-prefs">
+      <main className="max-w-3xl space-y-6">
         {!isSignedIn && (
           <div
             className="border border-border bg-card p-6 text-center text-sm text-muted-foreground"

@@ -1,7 +1,13 @@
 import { useEffect, useMemo, useState } from "react";
-import { Link } from "wouter";
+import { Redirect } from "wouter";
 import { useAuth } from "@clerk/react";
 import { apiFetch, ApiError } from "@/lib/api";
+
+export default function HealthPage() {
+  // /health has been folded into the unified /system page (Health tab).
+  // The route is preserved for bookmarks and external links.
+  return <Redirect to="/system?tab=health" />;
+}
 
 type Card = {
   key: string;
@@ -117,7 +123,7 @@ function formatUptime(seconds: number): string {
   return `${m}m`;
 }
 
-function HealthPage() {
+export function HealthPanel() {
   const { getToken, isSignedIn } = useAuth();
   const [snap, setSnap] = useState<Snapshot | null>(null);
   const [errors, setErrors] = useState<ErrorsResponse | null>(null);
@@ -228,37 +234,14 @@ function HealthPage() {
 
   if (!isSignedIn) {
     return (
-      <div className="min-h-[100dvh] bg-background text-muted-foreground font-mono flex items-center justify-center text-xs uppercase tracking-widest">
+      <div className="text-xs text-muted-foreground uppercase tracking-widest">
         AUTH :: sign in required
       </div>
     );
   }
 
   return (
-    <div className="min-h-[100dvh] bg-background text-foreground font-mono p-6">
-      <div className="mx-auto max-w-6xl space-y-6">
-        <header className="flex items-baseline justify-between border-b border-border pb-4">
-          <div>
-            <div className="text-xs text-muted-foreground uppercase tracking-widest">
-              AXIOM_PREDICT :: SYS_HEALTH
-            </div>
-            <h1 className="text-2xl font-bold uppercase tracking-tight text-primary">
-              System Health
-            </h1>
-          </div>
-          <nav className="flex gap-4 text-xs uppercase tracking-widest text-muted-foreground">
-            <Link href="/" className="hover:text-primary">
-              Dashboard
-            </Link>
-            <Link href="/pipeline" className="hover:text-primary">
-              Pipeline
-            </Link>
-            <Link href="/billing" className="hover:text-primary">
-              Billing
-            </Link>
-          </nav>
-        </header>
-
+    <div className="space-y-6 font-mono" data-testid="panel-health">
         {error && (
           <div className="border border-destructive bg-destructive/10 text-destructive p-3 text-xs">
             {error}
@@ -539,7 +522,6 @@ function HealthPage() {
             </div>
           )}
         </section>
-      </div>
     </div>
   );
 }
@@ -627,4 +609,3 @@ function CardTile({ card }: { card: Card }) {
   );
 }
 
-export default HealthPage;

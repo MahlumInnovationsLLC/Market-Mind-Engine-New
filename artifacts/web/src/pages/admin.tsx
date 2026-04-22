@@ -1,6 +1,6 @@
 import { useMemo, useState } from "react";
-import { Link } from "wouter";
-import { useAuth, useClerk } from "@clerk/react";
+import { Link, Redirect } from "wouter";
+import { useAuth } from "@clerk/react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { apiFetch } from "@/lib/api";
 import {
@@ -26,13 +26,16 @@ import {
 type Filter = "all" | "pending" | "approved" | "admin";
 
 export default function AdminPage() {
-  const { signOut } = useClerk();
+  // /admin has been folded into /system for admins. Keep the path live
+  // but redirect operators to the unified Users tab so any bookmarks
+  // (or links from older mobile builds) still land somewhere useful.
+  return <Redirect to="/system?tab=users" />;
+}
+
+export function UserManagementPanel() {
   const [filter, setFilter] = useState<Filter>("all");
   const [search, setSearch] = useState("");
   const [activeUserId, setActiveUserId] = useState<string | null>(null);
-  const [tab, setTab] = useState<
-    "users" | "audit" | "runtime" | "risk" | "cycle" | "models" | "personas" | "verticals"
-  >("users");
 
   const usersQuery = useAdminListUsers({
     query: {
@@ -60,169 +63,89 @@ export default function AdminPage() {
   }, [items, filter, search]);
 
   return (
-    <div
-      className="min-h-[100dvh] bg-background text-foreground p-4 md:p-6 font-mono selection:bg-primary/30"
-      data-testid="page-admin"
+    <main
+      className="grid grid-cols-1 lg:grid-cols-12 gap-6"
+      data-testid="panel-user-management"
     >
-      <header className="mb-6 flex flex-col md:flex-row md:items-end justify-between gap-4 border-b border-border pb-4">
-        <div>
-          <h1 className="text-xl md:text-2xl font-bold tracking-tight text-primary uppercase">
-            AXIOM_PREDICT :: ADMIN_CONSOLE
-          </h1>
-          <p className="text-muted-foreground text-xs uppercase tracking-widest mt-1">
-            User access &amp; role management
-          </p>
+      <section className="lg:col-span-8 space-y-3">
+        <div className="flex flex-wrap items-center gap-2 text-xs uppercase tracking-widest">
+          {(["all", "pending", "approved", "admin"] as const).map((f) => (
+            <button
+              key={f}
+              type="button"
+              onClick={() => setFilter(f)}
+              data-testid={`filter-${f}`}
+              className={`border px-2 py-1 ${
+                filter === f
+                  ? "border-primary text-primary"
+                  : "border-border text-muted-foreground hover:text-foreground"
+              }`}
+            >
+              {f}
+            </button>
+          ))}
+          <input
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            placeholder="search email / name / id"
+            data-testid="input-admin-search"
+            className="ml-auto bg-input border border-border px-2 py-1 text-xs lowercase tracking-normal w-72 max-w-full"
+          />
         </div>
-        <div className="text-xs text-muted-foreground flex flex-wrap items-center gap-4">
-          <Link
-            href="/"
-            className="border border-border px-3 py-1 uppercase tracking-widest text-[10px] text-muted-foreground hover:text-primary hover:border-primary"
-            data-testid="link-dashboard"
-          >
-            ← Dashboard
-          </Link>
-          <button
-            type="button"
-            onClick={() => signOut({ redirectUrl: import.meta.env.BASE_URL })}
-            className="border border-border px-3 py-1 uppercase tracking-widest text-[10px] text-muted-foreground hover:text-destructive hover:border-destructive transition-colors"
-            data-testid="button-admin-sign-out"
-          >
-            Sign out
-          </button>
+
+        <div className="border border-border bg-card overflow-x-auto">
+          <table className="w-full text-xs">
+            <thead className="bg-muted/20 text-muted-foreground uppercase tracking-widest">
+              <tr>
+                <th className="text-left p-2">User</th>
+                <th className="text-left p-2">Status</th>
+                <th className="text-left p-2">Signed up</th>
+                <th className="text-left p-2">Last sign-in</th>
+                <th className="text-left p-2">Last seen</th>
+                <th className="text-right p-2">Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              {usersQuery.isLoading ? (
+                <tr>
+                  <td colSpan={6} className="p-6 text-center text-muted-foreground">
+                    Loading…
+                  </td>
+                </tr>
+              ) : filtered.length === 0 ? (
+                <tr>
+                  <td colSpan={6} className="p-6 text-center text-muted-foreground">
+                    No users match the current filter.
+                  </td>
+                </tr>
+              ) : (
+                filtered.map((u) => (
+                  <UserRow
+                    key={u.clerk_user_id}
+                    user={u}
+                    active={u.clerk_user_id === activeUserId}
+                    onSelect={() => setActiveUserId(u.clerk_user_id)}
+                  />
+                ))
+              )}
+            </tbody>
+          </table>
         </div>
-      </header>
+      </section>
 
-      <div className="mb-4 flex flex-wrap gap-2 text-xs uppercase tracking-widest">
-        {(
-          ["users", "audit", "runtime", "risk", "personas", "verticals", "cycle", "models"] as const
-        ).map((t) => (
-          <button
-            key={t}
-            type="button"
-            onClick={() => setTab(t)}
-            data-testid={`tab-${t}`}
-            className={`border px-3 py-1 ${
-              tab === t
-                ? "border-primary text-primary"
-                : "border-border text-muted-foreground hover:text-foreground"
-            }`}
-          >
-            {t === "users"
-              ? "Users"
-              : t === "audit"
-                ? "Audit log"
-                : t === "runtime"
-                  ? "Runtime"
-                  : t === "risk"
-                    ? "Risk knobs"
-                    : t === "personas"
-                      ? "Personas"
-                      : t === "verticals"
-                        ? "Verticals"
-                        : t === "cycle"
-                          ? "Trigger cycle"
-                          : "Models"}
-          </button>
-        ))}
-      </div>
-
-      {tab === "users" ? (
-        <main className="grid grid-cols-1 lg:grid-cols-12 gap-6">
-          <section className="lg:col-span-8 space-y-3">
-            <div className="flex flex-wrap items-center gap-2 text-xs uppercase tracking-widest">
-              {(["all", "pending", "approved", "admin"] as const).map((f) => (
-                <button
-                  key={f}
-                  type="button"
-                  onClick={() => setFilter(f)}
-                  data-testid={`filter-${f}`}
-                  className={`border px-2 py-1 ${
-                    filter === f
-                      ? "border-primary text-primary"
-                      : "border-border text-muted-foreground hover:text-foreground"
-                  }`}
-                >
-                  {f}
-                </button>
-              ))}
-              <input
-                value={search}
-                onChange={(e) => setSearch(e.target.value)}
-                placeholder="search email / name / id"
-                data-testid="input-admin-search"
-                className="ml-auto bg-input border border-border px-2 py-1 text-xs lowercase tracking-normal w-72 max-w-full"
-              />
-            </div>
-
-            <div className="border border-border bg-card overflow-x-auto">
-              <table className="w-full text-xs">
-                <thead className="bg-muted/20 text-muted-foreground uppercase tracking-widest">
-                  <tr>
-                    <th className="text-left p-2">User</th>
-                    <th className="text-left p-2">Status</th>
-                    <th className="text-left p-2">Signed up</th>
-                    <th className="text-left p-2">Last sign-in</th>
-                    <th className="text-left p-2">Last seen</th>
-                    <th className="text-right p-2">Actions</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {usersQuery.isLoading ? (
-                    <tr>
-                      <td colSpan={6} className="p-6 text-center text-muted-foreground">
-                        Loading…
-                      </td>
-                    </tr>
-                  ) : filtered.length === 0 ? (
-                    <tr>
-                      <td colSpan={6} className="p-6 text-center text-muted-foreground">
-                        No users match the current filter.
-                      </td>
-                    </tr>
-                  ) : (
-                    filtered.map((u) => (
-                      <UserRow
-                        key={u.clerk_user_id}
-                        user={u}
-                        active={u.clerk_user_id === activeUserId}
-                        onSelect={() => setActiveUserId(u.clerk_user_id)}
-                      />
-                    ))
-                  )}
-                </tbody>
-              </table>
-            </div>
-          </section>
-
-          <aside className="lg:col-span-4">
-            {activeUserId ? (
-              <UserDetail
-                clerkUserId={activeUserId}
-                onClose={() => setActiveUserId(null)}
-              />
-            ) : (
-              <div className="border border-border bg-card p-4 text-xs text-muted-foreground uppercase tracking-widest">
-                Select a user to inspect their account.
-              </div>
-            )}
-          </aside>
-        </main>
-      ) : tab === "audit" ? (
-        <AuditLogPanel />
-      ) : tab === "runtime" ? (
-        <RuntimePanel />
-      ) : tab === "risk" ? (
-        <RiskKnobsPanel />
-      ) : tab === "personas" ? (
-        <PersonasPanel />
-      ) : tab === "verticals" ? (
-        <VerticalVisibilityPanel />
-      ) : tab === "cycle" ? (
-        <TriggerCyclePanel />
-      ) : (
-        <ModelsPanel />
-      )}
-    </div>
+      <aside className="lg:col-span-4">
+        {activeUserId ? (
+          <UserDetail
+            clerkUserId={activeUserId}
+            onClose={() => setActiveUserId(null)}
+          />
+        ) : (
+          <div className="border border-border bg-card p-4 text-xs text-muted-foreground uppercase tracking-widest">
+            Select a user to inspect their account.
+          </div>
+        )}
+      </aside>
+    </main>
   );
 }
 
@@ -239,7 +162,7 @@ type RuntimeSettings = {
   updated_by: string | null;
 };
 
-function RuntimePanel() {
+export function RuntimePanel() {
   const { getToken, isSignedIn } = useAuth();
   const tokenFn = useMemo(
     () => () => getToken().then((t) => t ?? null),
@@ -365,7 +288,7 @@ function ThresholdStat({ label, value }: { label: string; value: string }) {
   );
 }
 
-function StatusPills({ user }: { user: AdminUser }) {
+export function StatusPills({ user }: { user: AdminUser }) {
   return (
     <div className="flex flex-wrap gap-1">
       {user.is_admin ? (
@@ -395,7 +318,7 @@ function StatusPills({ user }: { user: AdminUser }) {
   );
 }
 
-function UserRow({
+export function UserRow({
   user,
   active,
   onSelect,
@@ -497,7 +420,7 @@ function UserRow({
   );
 }
 
-function UserDetail({
+export function UserDetail({
   clerkUserId,
   onClose,
 }: {
@@ -586,7 +509,7 @@ function Field({ label, value }: { label: string; value: string }) {
   );
 }
 
-function AuditLogPanel() {
+export function AuditLogPanel() {
   const { data, isLoading, isError } = useAdminGetAuditLog(
     { limit: 100 },
     { query: { queryKey: getAdminGetAuditLogQueryKey({ limit: 100 }), refetchInterval: 30_000 } },
@@ -682,7 +605,7 @@ function formatKnob(value: number | null | undefined, unit: RiskKnob["unit"]) {
   return String(value);
 }
 
-function RiskKnobsPanel() {
+export function RiskKnobsPanel() {
   const { getToken, isSignedIn } = useAuth();
   const tokenFn = useMemo(
     () => () => getToken().then((t) => t ?? null),
@@ -925,7 +848,7 @@ type CycleResult = {
   }>;
 };
 
-function TriggerCyclePanel() {
+export function TriggerCyclePanel() {
   const { getToken } = useAuth();
   const tokenFn = useMemo(
     () => () => getToken().then((t) => t ?? null),
@@ -1130,7 +1053,7 @@ function fmtTime(epochSeconds: number): string {
   return new Date(epochSeconds * 1000).toISOString().replace("T", " ").slice(0, 19);
 }
 
-function ModelsPanel() {
+export function ModelsPanel() {
   const { getToken, isSignedIn } = useAuth();
   const tokenFn = useMemo(
     () => () => getToken().then((t) => t ?? null),
@@ -1319,7 +1242,7 @@ type PersonaToggleSummary = {
   available_profiles: { name: string; description: string; personas: string[] }[];
 };
 
-function PersonasPanel() {
+export function PersonasPanel() {
   const { getToken, isSignedIn } = useAuth();
   const tokenFn = useMemo(
     () => () => getToken().then((t) => t ?? null),
@@ -1456,7 +1379,7 @@ function PersonasPanel() {
   );
 }
 
-function VerticalVisibilityPanel() {
+export function VerticalVisibilityPanel() {
   const qc = useQueryClient();
   const overview = useGetVerticalsOverview(
     { days: 7 },
