@@ -442,6 +442,17 @@ async def _run_debate_inner(
         f"\nCONTEXT\n{ctx or '(no additional context provided)'}"
     )
 
+    # Per-league prompt augment (e.g. NFL snap counts / OL-DL injuries /
+    # weather guidance for injury_roster + matchup_historian).  Empty
+    # string for leagues without a configured augment.
+    try:
+        from ..sports import persona_context_augment as _persona_aug
+        league_aug = _persona_aug(league)
+    except Exception:
+        league_aug = ""
+    if league_aug:
+        user_prompt = user_prompt + "\n\n" + league_aug
+
     await _publish(
         {
             "type": "debate_start",

@@ -30,7 +30,7 @@ THE_ODDS_API_BASE = "https://api.the-odds-api.com/v4"
 # In-season default — operator can override via env.
 DEFAULT_ODDS_SPORTS = os.environ.get(
     "AXIOM_ODDS_SPORTS",
-    "basketball_nba,baseball_mlb,icehockey_nhl,basketball_ncaab",
+    "basketball_nba,baseball_mlb,icehockey_nhl,basketball_ncaab,americanfootball_nfl",
 ).split(",")
 DEFAULT_ODDS_REGIONS = os.environ.get("AXIOM_ODDS_REGIONS", "us")
 DEFAULT_ODDS_MARKETS = os.environ.get("AXIOM_ODDS_MARKETS", "h2h,spreads,totals")

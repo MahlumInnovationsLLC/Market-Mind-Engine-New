@@ -106,22 +106,42 @@ async def _latest_bankroll() -> float | None:
         return None
 
 
-async def _open_position_aggregates() -> tuple[int, float, dict[str, float]]:
-    """Returns (count, total_notional, per_vertical_notional)."""
+async def _open_position_aggregates() -> tuple[
+    int,
+    float,
+    dict[str, float],
+    dict[str, float],
+    dict[str, float],
+    dict[str, float],
+]:
+    """Returns (count, total_notional, per_vertical, per_league, per_matchup,
+    per_sunday_window).
+
+    Per-league and per-matchup buckets are derived from `positions` joined
+    onto the originating debate's `league` / `matchup` (via
+    `swarm_debates`).  The Sunday-window bucket is keyed by league and
+    only populated when the position's game falls in the league's Sunday
+    concentration window — see `app.sports.leagues.is_sunday_window`.
+
+    Best-effort: if any join fails (e.g. the schema hasn't been migrated
+    on a fresh dev DB), the per-league / per-matchup / Sunday buckets
+    come back empty and the gates short-circuit their sub-checks, leaving
+    behavior identical to the legacy aggregate.
+    """
     try:
         rows = await db.fetch(
             """
-            SELECT vertical,
+            SELECT p.vertical,
                    count(*)::int                                AS n,
-                   coalesce(sum(quantity * avg_price), 0)::float AS notional
-              FROM positions
-             WHERE coalesce(status, 'open') = 'open'
-             GROUP BY vertical
+                   coalesce(sum(p.quantity * p.avg_price), 0)::float AS notional
+              FROM positions p
+             WHERE coalesce(p.status, 'open') = 'open'
+             GROUP BY p.vertical
             """
         )
     except Exception as e:
         log.debug("open position aggregate failed: %s", e)
-        return 0, 0.0, {}
+        return 0, 0.0, {}, {}, {}, {}
     total_n = 0
     total_notional = 0.0
     per_vertical: dict[str, float] = {}
@@ -130,7 +150,43 @@ async def _open_position_aggregates() -> tuple[int, float, dict[str, float]]:
         total_n += int(r["n"])
         total_notional += float(r["notional"])
         per_vertical[v] = per_vertical.get(v, 0.0) + float(r["notional"])
-    return total_n, total_notional, per_vertical
+
+    per_league: dict[str, float] = {}
+    per_matchup: dict[str, float] = {}
+    per_sunday: dict[str, float] = {}
+    try:
+        from ..sports import is_sunday_window as _is_sunday_window
+        league_rows = await db.fetch(
+            """
+            SELECT coalesce(d.league, '')                            AS league,
+                   coalesce(d.matchup, '')                           AS matchup,
+                   coalesce(sum(p.quantity * p.avg_price), 0)::float AS notional,
+                   max(g.scheduled_start)                            AS game_time
+              FROM positions p
+              LEFT JOIN swarm_debates d ON d.id = p.debate_id
+              LEFT JOIN games g ON g.game_id = d.game_id
+             WHERE coalesce(p.status, 'open') = 'open'
+               AND coalesce(d.league, '') <> ''
+             GROUP BY d.league, d.matchup
+            """
+        )
+        for r in league_rows:
+            league = str(r["league"] or "").upper()
+            if not league:
+                continue
+            notional = float(r["notional"] or 0.0)
+            per_league[league] = per_league.get(league, 0.0) + notional
+            matchup = str(r["matchup"] or "").strip()
+            if matchup:
+                key = f"{league}:{matchup}"
+                per_matchup[key] = per_matchup.get(key, 0.0) + notional
+            game_time = r["game_time"]
+            if game_time is not None and _is_sunday_window(league, game_time):
+                per_sunday[league] = per_sunday.get(league, 0.0) + notional
+    except Exception as e:
+        log.debug("per-league position aggregate failed: %s", e)
+
+    return total_n, total_notional, per_vertical, per_league, per_matchup, per_sunday
 
 
 async def _market_cooldown(market_id: str) -> datetime | None:
@@ -227,12 +283,14 @@ async def _cached_debates(
         if leagues:
             params: list[Any] = [limit, leagues]
             sql = """
-                SELECT id            AS debate_id,
-                       game_id, matchup, league, market_type,
-                       consensus_probability, confidence_band_low, confidence_band_high,
-                       agreement_rate, approved, recommended_action,
-                       game_context
+                SELECT sd.id            AS debate_id,
+                       sd.game_id, sd.matchup, sd.league, sd.market_type,
+                       sd.consensus_probability, sd.confidence_band_low, sd.confidence_band_high,
+                       sd.agreement_rate, sd.approved, sd.recommended_action,
+                       sd.game_context,
+                       g.scheduled_start AS game_time
                   FROM swarm_debates sd
+                  LEFT JOIN games g ON g.game_id = sd.game_id
                  WHERE sd.created_at > now() - interval '60 minutes'
                    AND sd.approved = true
                    AND sd.league = ANY($2)
@@ -254,12 +312,14 @@ async def _cached_debates(
         else:
             params = [limit]
             sql = """
-                SELECT id            AS debate_id,
-                       game_id, matchup, league, market_type,
-                       consensus_probability, confidence_band_low, confidence_band_high,
-                       agreement_rate, approved, recommended_action,
-                       game_context
+                SELECT sd.id            AS debate_id,
+                       sd.game_id, sd.matchup, sd.league, sd.market_type,
+                       sd.consensus_probability, sd.confidence_band_low, sd.confidence_band_high,
+                       sd.agreement_rate, sd.approved, sd.recommended_action,
+                       sd.game_context,
+                       g.scheduled_start AS game_time
                   FROM swarm_debates sd
+                  LEFT JOIN games g ON g.game_id = sd.game_id
                  WHERE sd.created_at > now() - interval '60 minutes'
                    AND sd.approved = true
                    AND NOT EXISTS (
@@ -481,7 +541,14 @@ async def run_cycle(vertical: str = "sports") -> CycleResult:
         return result
 
     bankroll = await _latest_bankroll()
-    open_n, open_notional, per_vertical = await _open_position_aggregates()
+    (
+        open_n,
+        open_notional,
+        per_vertical,
+        per_league,
+        per_matchup,
+        per_sunday_window,
+    ) = await _open_position_aggregates()
 
     # 1) Cached approved debates first (cheap — no fresh LLM cost).
     cached = await _cached_debates(vertical, limit=10, aggression_mode=aggression_mode)
@@ -643,6 +710,10 @@ async def run_cycle(vertical: str = "sports") -> CycleResult:
             open_positions_per_vertical_usd=per_vertical,
             operator_overrides=overrides,
             market_cooldown_until=cooldown_until,
+            open_positions_per_league_usd=per_league,
+            open_positions_per_matchup_usd=per_matchup,
+            open_positions_sunday_window_usd=per_sunday_window,
+            game_time=cand.get("game_time"),
         )
 
         await _publish({
@@ -717,6 +788,18 @@ async def run_cycle(vertical: str = "sports") -> CycleResult:
             open_n += 1
             open_notional += intended_notional
             per_vertical[vertical] = per_vertical.get(vertical, 0.0) + intended_notional
+            league_key = (cand.get("league") or "").upper()
+            if league_key:
+                per_league[league_key] = per_league.get(league_key, 0.0) + intended_notional
+                matchup_val = cand.get("matchup")
+                if matchup_val:
+                    mkey = f"{league_key}:{matchup_val}"
+                    per_matchup[mkey] = per_matchup.get(mkey, 0.0) + intended_notional
+                from ..sports import is_sunday_window as _isw
+                if _isw(league_key, datetime.now(timezone.utc)):
+                    per_sunday_window[league_key] = (
+                        per_sunday_window.get(league_key, 0.0) + intended_notional
+                    )
             await _publish({
                 "type": "candidate_complete",
                 "cycle_id": result.cycle_id,

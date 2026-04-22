@@ -15,6 +15,11 @@ from typing import Any, Awaitable, Callable
 from .. import db, verticals as vertical_registry
 from ..config import get_settings
 from ..runtime_settings import profile_for as _aggression_profile
+from ..sports import (
+    get_league_config,
+    is_sunday_window,
+    league_blackout_until,
+)
 
 
 log = logging.getLogger(__name__)
@@ -93,6 +98,18 @@ class RiskContext:
     # Ops controls
     operator_overrides: dict[str, Any]
     market_cooldown_until: datetime | None
+    # Per-league sub-aggregates (NFL Sunday-window concentration, per-game
+    # cap, etc).  Defaulted so legacy call sites that don't populate them
+    # behave identically to the previous behavior — the per-league /
+    # per-game / Sunday-window sub-checks short-circuit when their input
+    # data is empty.
+    open_positions_per_league_usd: dict[str, float] = field(default_factory=dict)
+    open_positions_per_matchup_usd: dict[str, float] = field(default_factory=dict)
+    open_positions_sunday_window_usd: dict[str, float] = field(default_factory=dict)
+    # Game start time (UTC) for the candidate's market.  Used by
+    # gate_market_cooldown to honor per-league pre-kickoff blackouts
+    # (NFL inactive-list window).  None when the market isn't game-bound.
+    game_time: datetime | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -121,7 +138,11 @@ async def gate_kill_switch(ctx: RiskContext) -> GateResult:
 
 
 async def gate_market_cooldown(ctx: RiskContext) -> GateResult:
-    """`watchdog_market_cooldowns` — exchange or risk has muted this market."""
+    """`watchdog_market_cooldowns` — exchange or risk has muted this market.
+
+    Also enforces per-league pre-kickoff blackouts (e.g. NFL inactive-list
+    window, 90 minutes before kickoff) when `ctx.game_time` is populated.
+    """
     if ctx.market_cooldown_until is not None:
         now = datetime.now(timezone.utc)
         cd = ctx.market_cooldown_until
@@ -134,6 +155,18 @@ async def gate_market_cooldown(ctx: RiskContext) -> GateResult:
                 "market on cooldown",
                 {"cooldown_until": cd.isoformat()},
             )
+    blackout = league_blackout_until(ctx.league, ctx.game_time)
+    if blackout is not None:
+        return GateResult(
+            "market_cooldown",
+            False,
+            f"{ctx.league} pre-kickoff blackout",
+            {
+                "cooldown_until": blackout.isoformat(),
+                "reason": "pre_kickoff_blackout",
+                "league": ctx.league,
+            },
+        )
     return GateResult("market_cooldown", True)
 
 
@@ -341,6 +374,23 @@ async def gate_per_vertical_cap(ctx: RiskContext) -> GateResult:
     Default is taken from the registry's `VerticalSpec.default_allocation_pct`
     (so a new vertical can ship its own cap by registering a spec) and
     operator overrides via `risk.per_vertical_cap_pct` still win.
+
+    Also enforces three sports-vertical sub-caps when configured for the
+    candidate's league (see `app.sports.leagues.LeagueConfig`):
+
+    * **per-league cap** — share of bankroll allocated to a single league
+      (NFL ships at 5% by default; football game volume concentrates on a
+      single Sunday so the per-vertical sports cap is not enough on its
+      own);
+    * **per-game cap** — share of bankroll per matchup (limits exposure
+      to a single correlated outcome — e.g. weather, ref crew, late
+      injury);
+    * **Sunday-window concentration cap** — share of bankroll across all
+      games kicking off in the league's Sunday slate window (NFL only by
+      default).
+
+    Each sub-cap is skipped when the corresponding `LeagueConfig` field
+    is `None`, so non-NFL leagues retain prior behavior.
     """
     spec = vertical_registry.get_spec(ctx.vertical or "")
     spec_default = spec.default_allocation_pct if spec is not None else 0.30
@@ -363,6 +413,107 @@ async def gate_per_vertical_cap(ctx: RiskContext) -> GateResult:
                 "cap_pct": cap_pct,
             },
         )
+
+    # League-scoped sub-checks (NFL is the canonical user; other leagues
+    # opt in by populating the corresponding LeagueConfig fields).
+    lcfg = get_league_config(ctx.league)
+    if lcfg is not None:
+        league_key = lcfg.league
+        # Per-league cap.
+        league_cap_pct = float(
+            ctx.operator_overrides.get(
+                f"per_league_cap_pct.{league_key.lower()}",
+                lcfg.allocation_pct,
+            )
+        )
+        league_cap_usd = bankroll * league_cap_pct
+        league_open = ctx.open_positions_per_league_usd.get(league_key, 0.0)
+        league_projected = league_open + ctx.intended_notional_usd
+        if league_projected > league_cap_usd:
+            return GateResult(
+                "per_vertical_cap",
+                False,
+                (
+                    f"{league_key} projected ${league_projected:.2f} > "
+                    f"per-league cap ${league_cap_usd:.2f}"
+                ),
+                {
+                    "vertical": ctx.vertical,
+                    "league": league_key,
+                    "sub_check": "per_league_cap",
+                    "projected": league_projected,
+                    "cap_usd": league_cap_usd,
+                    "cap_pct": league_cap_pct,
+                },
+            )
+
+        # Per-game (matchup) cap.
+        if lcfg.per_game_cap_pct is not None and ctx.matchup:
+            game_cap_pct = float(
+                ctx.operator_overrides.get(
+                    f"per_game_cap_pct.{league_key.lower()}",
+                    lcfg.per_game_cap_pct,
+                )
+            )
+            game_cap_usd = bankroll * game_cap_pct
+            matchup_key = f"{league_key}:{ctx.matchup}"
+            game_open = ctx.open_positions_per_matchup_usd.get(matchup_key, 0.0)
+            game_projected = game_open + ctx.intended_notional_usd
+            if game_projected > game_cap_usd:
+                return GateResult(
+                    "per_vertical_cap",
+                    False,
+                    (
+                        f"{matchup_key} projected ${game_projected:.2f} > "
+                        f"per-game cap ${game_cap_usd:.2f}"
+                    ),
+                    {
+                        "vertical": ctx.vertical,
+                        "league": league_key,
+                        "matchup": ctx.matchup,
+                        "sub_check": "per_game_cap",
+                        "projected": game_projected,
+                        "cap_usd": game_cap_usd,
+                        "cap_pct": game_cap_pct,
+                    },
+                )
+
+        # Sunday-window concentration cap (NFL slate, etc).
+        # Evaluate against the candidate's game kickoff when available so the
+        # cap correctly applies to the slate the new bet would land in,
+        # falling back to wall-clock now() when game_time isn't carried.
+        sunday_check_time = ctx.game_time or datetime.now(timezone.utc)
+        if (
+            lcfg.sunday_window_cap_pct is not None
+            and is_sunday_window(league_key, sunday_check_time)
+        ):
+            sun_cap_pct = float(
+                ctx.operator_overrides.get(
+                    f"sunday_window_cap_pct.{league_key.lower()}",
+                    lcfg.sunday_window_cap_pct,
+                )
+            )
+            sun_cap_usd = bankroll * sun_cap_pct
+            sun_open = ctx.open_positions_sunday_window_usd.get(league_key, 0.0)
+            sun_projected = sun_open + ctx.intended_notional_usd
+            if sun_projected > sun_cap_usd:
+                return GateResult(
+                    "per_vertical_cap",
+                    False,
+                    (
+                        f"{league_key} Sunday window projected "
+                        f"${sun_projected:.2f} > cap ${sun_cap_usd:.2f}"
+                    ),
+                    {
+                        "vertical": ctx.vertical,
+                        "league": league_key,
+                        "sub_check": "sunday_window_cap",
+                        "projected": sun_projected,
+                        "cap_usd": sun_cap_usd,
+                        "cap_pct": sun_cap_pct,
+                    },
+                )
+
     return GateResult(
         "per_vertical_cap",
         True,
