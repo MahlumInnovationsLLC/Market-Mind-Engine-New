@@ -10,6 +10,7 @@ import asyncio
 import logging
 from typing import Any
 
+from .. import calibrators
 from ..config import get_settings
 from .pipeline import run_cycle
 from .retrain import run_retrain_cycle
@@ -83,6 +84,14 @@ class _SettlementScheduler:
                 except Exception as e:
                     log.exception("retrain cycle failed: %s", e)
                     retrain_summary = {"error": f"{type(e).__name__}: {e}"}
+                # Nightly per-league calibrator refit. The helper
+                # internally gates on a 24h cadence so this is cheap on
+                # every other cycle and only does work once per day.
+                try:
+                    calib_summary = await calibrators.maybe_refit()
+                except Exception as e:
+                    log.exception("per-league calibrator refit failed: %s", e)
+                    calib_summary = {"error": f"{type(e).__name__}: {e}"}
                 self._last = {
                     "started_at": cr.started_at,
                     "completed_at": cr.completed_at,
@@ -94,6 +103,7 @@ class _SettlementScheduler:
                     "alerts_raised": cr.alerts_raised,
                     "errors": cr.errors,
                     "retrain": retrain_summary,
+                    "calibrators": calib_summary,
                 }
                 backoff = 0.0
             except asyncio.CancelledError:

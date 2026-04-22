@@ -41,7 +41,7 @@ from typing import Any
 
 import httpx
 
-from . import db, storage
+from . import calibrators, db, storage
 from .config import get_settings
 from .feeds import registry as feed_registry
 from .kalshi import bus as kalshi_bus, client as kalshi_client_mod, lifecycle as kalshi_lifecycle, ws as kalshi_ws
@@ -421,6 +421,49 @@ def _probe_models() -> dict:
     )
 
 
+def _probe_calibration() -> dict:
+    """Per-league probability calibrator freshness.
+
+    Status mapping:
+      * ``ok``        — every supported league has a fresh artifact
+      * ``degraded``  — some leagues are missing OR any loaded
+                        artifact is older than ``FRESH_TTL_SECONDS``
+      * ``down``      — no leagues have a loaded calibrator at all
+    """
+    snap = calibrators.get_state().freshness()
+    loaded = int(snap["loaded_count"])
+    stale = int(snap["stale_count"])
+    missing = int(snap["missing_count"])
+    if loaded == 0:
+        status = "down"
+        detail = "no per-league calibrators loaded"
+    elif missing > 0 or stale > 0:
+        status = "degraded"
+        bits = []
+        if missing:
+            bits.append(f"{missing} league(s) missing")
+        if stale:
+            bits.append(f"{stale} stale")
+        detail = "; ".join(bits)
+    else:
+        status = "ok"
+        detail = f"{loaded}/{len(snap['supported'])} leagues fresh"
+    last_refit = snap.get("last_refit_at")
+    if last_refit:
+        detail = (
+            f"{detail} | last refit "
+            f"{datetime.fromtimestamp(float(last_refit), tz=timezone.utc).isoformat()}"
+        )
+    return _card(
+        key="calibrators",
+        label="Calibration freshness",
+        category="passive",
+        status=status,
+        detail=detail,
+        extras=snap,
+    )
+
+
 def _probe_feeds() -> list[dict]:
     out: list[dict] = []
     for s in feed_registry.snapshot():
@@ -561,6 +604,7 @@ async def _build_snapshot() -> _Snapshot:
         _probe_orchestrator(),
         _probe_settlement(),
         _probe_models(),
+        _probe_calibration(),
         *_probe_feeds(),
     ]
     config = _probe_config()

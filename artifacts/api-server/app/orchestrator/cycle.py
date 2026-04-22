@@ -328,7 +328,10 @@ async def _predict_for_candidate(
         edge=edge,
     )
     try:
-        pred = await predictor.predict(fv.values)
+        pred = await predictor.predict(
+            fv.values,
+            league=cand.get("league"),
+        )
     except predictor.PredictorUnavailable:
         return None
     except Exception as e:  # pragma: no cover — model-specific failures

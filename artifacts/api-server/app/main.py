@@ -20,6 +20,7 @@ from pydantic import BaseModel, Field
 from . import (
     admin as admin_module,
     billing,
+    calibrators,
     dashboard,
     db,
     health,
@@ -230,6 +231,15 @@ async def lifespan(_: FastAPI):
     # (~240 MiB download) doesn't block the HTTP server from accepting
     # traffic. Health endpoints surface progress while it warms up.
     models_task = asyncio.create_task(models_loader.ensure_artifacts())
+
+    # Load any previously-fitted per-league probability calibrators so
+    # `predict()` can apply them on the very first request. Best-effort
+    # — `apply()` cleanly bypasses any league with no fitted artifact,
+    # so a fresh install with no snapshots still trades on raw probs.
+    try:
+        await calibrators.load_all()
+    except Exception as e:
+        log.warning("per-league calibrator bootstrap failed: %s", e)
 
     # READY-Gate watcher: stays parked here while the rest of the boot
     # sequence does its async work, then flips the gate so the

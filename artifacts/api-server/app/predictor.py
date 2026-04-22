@@ -24,7 +24,7 @@ import time
 from dataclasses import asdict, dataclass
 from typing import Any, Sequence
 
-from . import models_loader
+from . import calibrators, models_loader
 
 
 log = logging.getLogger(__name__)
@@ -294,8 +294,17 @@ def _run_predict(obj: Any, vector: list[float]) -> tuple[float, float | None, di
 
 async def predict(
     features: Sequence[float] | dict[str, float] | None = None,
+    *,
+    league: str | None = None,
 ) -> Prediction:
     """Run the active canonical predictor on `features`.
+
+    When ``league`` is supplied (and a per-league calibrator is loaded
+    in the ``calibrators`` module) the raw model probability is passed
+    through the calibrator before being returned, so downstream edge
+    gates work against the corrected probability.  Both the raw and
+    calibrated values are surfaced via the ``raw`` payload for
+    observability.
 
     Raises `PredictorUnavailable` if no model is loaded, or
     `PredictorInputError` if the features can't be coerced.
@@ -305,6 +314,14 @@ async def predict(
     t0 = time.monotonic()
     probability, confidence, raw = await asyncio.to_thread(_run_predict, obj, vector)
     elapsed_ms = (time.monotonic() - t0) * 1000.0
+    # Per-league calibration on top of the raw stack output. Bypasses
+    # cleanly when no calibrator is loaded for the league (or no
+    # league supplied) so cold installs still get a real prediction.
+    cal_prob, cal_info = calibrators.apply(probability, league)
+    if cal_info.get("applied"):
+        raw["uncalibrated_probability"] = float(probability)
+        probability = cal_prob
+    raw["calibration"] = cal_info
     state = models_loader.get_state()
     version = (state.predictors.get(name) or {}).get("version", "unknown")
     return Prediction(
