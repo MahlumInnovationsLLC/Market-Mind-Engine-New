@@ -514,6 +514,9 @@ async def run_cycle(vertical: str = "sports") -> CycleResult:
                 "kalshi_market_id": pred.get("kalshi_market_id"),
                 "kalshi_price": pred.get("kalshi_price"),
                 "aggression_mode": aggression_mode,
+                # Drives swarm.runner persona_profile resolution via the
+                # vertical registry (default profile for legacy verticals).
+                "vertical": vertical,
             })
             result.fresh_debates += 1
             candidates.append({
