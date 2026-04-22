@@ -748,8 +748,23 @@ class PushTokenRequest(BaseModel):
 
 
 class NotificationPrefsRequest(BaseModel):
+    # Mobile push toggles (existing behaviour).
     notify_live_trade: bool | None = None
     notify_halt: bool | None = None
+    # Per-user email channel toggles (task #112).
+    email_daily_summary: bool | None = None
+    email_drift: bool | None = None
+    email_halt: bool | None = None
+    email_live_trade: bool | None = None
+    email_weekly_roundup: bool | None = None
+    # Elite-only premium channels.
+    sms_live_trade: bool | None = None
+    telegram_live_trade: bool | None = None
+    # Phone number for SMS — `null` clears, omitted leaves unchanged.
+    sms_phone_number: str | None = None
+    # Whether the request explicitly intends to clear / set the phone
+    # so we can distinguish "omitted" from "set to null".
+    sms_phone_number_present: bool = False
 
 
 @app.post("/api/me/push-token")
@@ -779,12 +794,23 @@ async def me_unregister_push_token(
     return {"ok": True, "removed": removed}
 
 
+async def _notification_prefs_payload(user: AuthedUser) -> dict[str, object]:
+    prefs = await notif_push.get_prefs(user.user_id)
+    sub = await billing.get_user_subscription(user)
+    elite_unlocked = sub.tier in (billing.TIER_ELITE, billing.TIER_FOUNDER)
+    return {
+        "prefs": prefs,
+        "tier": sub.tier,
+        "elite_unlocked": elite_unlocked,
+        "elite_only_toggles": sorted(notif_push.ELITE_ONLY_TOGGLES),
+    }
+
+
 @app.get("/api/me/notification-prefs")
 async def me_get_notification_prefs(
     user: AuthedUser = Depends(require_auth),
 ) -> dict[str, object]:
-    prefs = await notif_push.get_prefs(user.user_id)
-    return prefs
+    return await _notification_prefs_payload(user)
 
 
 @app.put("/api/me/notification-prefs")
@@ -792,12 +818,40 @@ async def me_set_notification_prefs(
     body: NotificationPrefsRequest,
     user: AuthedUser = Depends(require_auth),
 ) -> dict[str, object]:
-    prefs = await notif_push.set_prefs(
-        clerk_user_id=user.user_id,
-        notify_live_trade=body.notify_live_trade,
-        notify_halt=body.notify_halt,
-    )
-    return prefs
+    # Reject Elite-only toggles for users who can't actually use them so
+    # the dispatch path doesn't have to second-guess stale opt-ins after
+    # a downgrade.
+    sub = await billing.get_user_subscription(user)
+    elite_unlocked = sub.tier in (billing.TIER_ELITE, billing.TIER_FOUNDER)
+    if not elite_unlocked:
+        for col in notif_push.ELITE_ONLY_TOGGLES:
+            v = getattr(body, col, None)
+            if v:
+                raise HTTPException(
+                    status_code=403,
+                    detail={
+                        "error": "tier_required",
+                        "required_tier": "elite",
+                        "current_tier": sub.tier,
+                        "toggle": col,
+                    },
+                )
+
+    toggles: dict[str, bool | None] = {}
+    for col in notif_push.PREF_COLUMNS:
+        toggles[col] = getattr(body, col, None)
+    if body.sms_phone_number_present:
+        await notif_push.set_prefs(
+            clerk_user_id=user.user_id,
+            sms_phone_number=body.sms_phone_number,
+            **toggles,
+        )
+    else:
+        await notif_push.set_prefs(
+            clerk_user_id=user.user_id,
+            **toggles,
+        )
+    return await _notification_prefs_payload(user)
 
 
 # ---------------------------------------------------------------------------
@@ -1761,6 +1815,7 @@ async def notifications_unsubscribe(
 
 _ALERT_TYPES = {
     "halt", "drift", "tier_change", "live_trade", "daily_pnl_summary",
+    "weekly_roundup",
     "churn_digest", "user_payment_failed", "user_will_cancel", "user_canceled",
 }
 
@@ -1852,6 +1907,17 @@ async def notifications_test(
         return result
     if body.type == "churn_digest":
         return await notif_churn.fire_now(dry_run=body.dry_run)
+    if body.type == "weekly_roundup":
+        import datetime as _dt
+        return notif_alerts.weekly_roundup(
+            week_ending_utc=_dt.date.today().isoformat(),
+            realized_pnl_cents=12345,
+            unrealized_pnl_cents=-678,
+            trades_settled=42,
+            win_rate_pct=58.3,
+            notes="test weekly roundup",
+            dry_run=body.dry_run,
+        )
     # daily_pnl_summary
     return await daily_summary.fire_now(dry_run=body.dry_run)
 

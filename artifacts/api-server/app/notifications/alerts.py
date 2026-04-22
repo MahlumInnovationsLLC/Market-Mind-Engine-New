@@ -34,6 +34,26 @@ log = logging.getLogger("axiom.notifications.alerts")
 
 
 # ---------------------------------------------------------------------------
+# Per-user opt-in mapping.
+#
+# Each operator-broadcast tag maps to the `user_notification_prefs`
+# column that controls per-user email opt-ins. Users who toggle the
+# matching pref on (and meet any tier gating, e.g. Elite for the
+# live-trade firehose) are added to the recipient list alongside the
+# existing operator alert emails.
+# ---------------------------------------------------------------------------
+
+
+_TAG_TO_USER_PREF: dict[str, str] = {
+    "daily-summary":   "email_daily_summary",
+    "drift":           "email_drift",
+    "halt":            "email_halt",
+    "live-trade":      "email_live_trade",
+    "weekly-roundup":  "email_weekly_roundup",
+}
+
+
+# ---------------------------------------------------------------------------
 # Persistent dedupe — generalized `(alert_type, dedupe_key)` with TTL.
 #
 # The same `notification_dedupe` table created by `daily_summary` is used.
@@ -245,7 +265,51 @@ def live_trade(
             )
         except Exception as e:  # pragma: no cover — push must not break alerting
             log.warning("live_trade push dispatch failed: %s", e)
+        # Elite-only premium channels: SMS + Telegram fan-out for any
+        # opted-in user who's on an active Elite/Founder plan.
+        try:
+            _schedule_premium_live_trade(subject=subject, body_short=(
+                f"LIVE {action.upper()} {side.upper()} {contracts}x "
+                f"{market_ticker} @ {px}"
+            ))
+        except Exception as e:  # pragma: no cover
+            log.warning("live_trade premium-channel dispatch failed: %s", e)
     return result
+
+
+def _schedule_premium_live_trade(*, subject: str, body_short: str) -> None:
+    """Fan out a live-trade alert to Elite SMS + Telegram opt-ins.
+
+    Both channels are gated on the user being on an active Elite (or
+    Founder) plan; the resolution happens server-side in
+    ``push.opted_in_*`` so we can't accidentally bill SMS for a Pro
+    user who flipped the toggle.
+    """
+    from . import push as _push, sms as _sms
+    from ..telegram import bot as _tg_bot
+
+    async def _runner() -> None:
+        try:
+            phones = await _push.opted_in_sms_phones("sms_live_trade")
+            if phones:
+                await _sms.send(phones, body_short, tag="live-trade")
+        except Exception as e:  # pragma: no cover
+            log.warning("live_trade SMS fan-out failed: %s", e)
+        try:
+            chats = await _push.opted_in_telegram_chats("telegram_live_trade")
+            if chats:
+                _tg_bot.send_to_chats_in_background(chats, f"{subject}\n\n{body_short}")
+        except Exception as e:  # pragma: no cover
+            log.warning("live_trade Telegram fan-out failed: %s", e)
+
+    try:
+        loop = asyncio.get_running_loop()
+        loop.create_task(_runner())
+    except RuntimeError:
+        try:
+            asyncio.run(_runner())
+        except Exception as e:  # pragma: no cover
+            log.warning("inline premium live_trade dispatch failed: %s", e)
 
 
 # ---------------------------------------------------------------------------
@@ -545,9 +609,11 @@ def _dispatch(
             "subject": subject,
             "body_preview": text_body[:4000],
             "would_send_to": postmark.alert_recipients(),
+            "user_pref_column": _TAG_TO_USER_PREF.get(tag),
             "configured": postmark.is_configured(),
         }
     postmark.send_in_background(subject=subject, text_body=text_body, tag=tag)
+    _schedule_user_email_fanout(subject=subject, text_body=text_body, tag=tag)
     return {
         "dry_run": False,
         "tag": tag,
@@ -555,4 +621,98 @@ def _dispatch(
         "queued": True,
         "configured": postmark.is_configured(),
         "recipients": postmark.alert_recipients(),
+        "user_pref_column": _TAG_TO_USER_PREF.get(tag),
     }
+
+
+def _schedule_user_email_fanout(
+    *, subject: str, text_body: str, tag: str
+) -> None:
+    """Send a copy of the alert to each end-user who's opted in for
+    this alert type.
+
+    We send these as a *separate* Postmark batch (not appended to the
+    operator recipient list) so opted-out operators or users keep their
+    independent mailing decisions.  Falls back to a no-op when no users
+    have opted in or the schema isn't initialised yet.
+    """
+    pref_col = _TAG_TO_USER_PREF.get(tag)
+    if not pref_col:
+        return
+    from . import push as _push
+
+    async def _runner() -> None:
+        try:
+            emails = await _push.opted_in_emails(pref_col)
+        except Exception as e:  # pragma: no cover
+            log.warning("opted_in_emails(%s) failed: %s", pref_col, e)
+            return
+        # Strip out anyone who's already on the operator alert list so
+        # we don't double-mail an operator who's also a paying user.
+        ops = {e.lower() for e in postmark.alert_recipients()}
+        targets = [e for e in emails if e.lower() not in ops]
+        if not targets:
+            return
+        try:
+            await postmark.send(
+                subject=subject,
+                text_body=text_body,
+                to=targets,
+                tag=tag,
+            )
+        except Exception as e:  # pragma: no cover
+            log.warning("user-pref email fanout (%s) failed: %s", tag, e)
+
+    try:
+        loop = asyncio.get_running_loop()
+        loop.create_task(_runner())
+    except RuntimeError:
+        try:
+            asyncio.run(_runner())
+        except Exception as e:  # pragma: no cover
+            log.warning("inline user-pref fanout failed: %s", e)
+
+
+# ---------------------------------------------------------------------------
+# Weekly P&L roundup
+# ---------------------------------------------------------------------------
+
+
+def weekly_roundup(
+    *,
+    week_ending_utc: str,
+    realized_pnl_cents: int,
+    unrealized_pnl_cents: int,
+    trades_settled: int,
+    win_rate_pct: float | None = None,
+    notes: str | None = None,
+    dry_run: bool = False,
+) -> dict[str, Any]:
+    """Per-user weekly P&L digest.
+
+    Operators receive a copy on the standard alert list; subscribers
+    who opted in via ``email_weekly_roundup`` get one too. Tag is
+    ``weekly-roundup`` so Postmark dashboards can split the metric out
+    from the daily summary.
+    """
+    fmt_cents = lambda c: f"{'+' if c >= 0 else '-'}${abs(c) / 100.0:,.2f}"
+    subject = (
+        f"[axiom] Weekly roundup w/e {week_ending_utc} :: "
+        f"realized {fmt_cents(realized_pnl_cents)} ({trades_settled} settled)"
+    )
+    rows: list[tuple[str, Any]] = [
+        ("week_ending_utc", week_ending_utc),
+        ("realized_pnl", fmt_cents(realized_pnl_cents)),
+        ("unrealized_pnl", fmt_cents(unrealized_pnl_cents)),
+        ("trades_settled", trades_settled),
+    ]
+    if win_rate_pct is not None:
+        rows.append(("win_rate_pct", f"{win_rate_pct:.1f}%"))
+    body = (
+        "Weekly Axiom-Predict P&L roundup.\n\n"
+        + _format_lines(rows)
+        + "\n"
+    )
+    if notes:
+        body += f"\nNotes:\n  {notes}\n"
+    return _dispatch(subject, body, tag="weekly-roundup", dry_run=dry_run)

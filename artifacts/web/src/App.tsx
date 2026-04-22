@@ -34,6 +34,7 @@ import BillingPage from "@/pages/billing";
 import HealthPage from "@/pages/health";
 import MarketingPage from "@/pages/marketing";
 import AdminPage from "@/pages/admin";
+import SettingsNotificationsPage from "@/pages/settings-notifications";
 import TradeDetailPage from "@/pages/trade-detail";
 import SessionExpiredOverlay from "@/components/session-expired-overlay";
 import GlobalSearch from "@/components/global-search";
@@ -365,6 +366,19 @@ function AdminForbidden({ email }: { email: string | null }) {
   );
 }
 
+function SettingsNotificationsRoute() {
+  return (
+    <>
+      <Show when="signed-in">
+        <SettingsNotificationsPage />
+      </Show>
+      <Show when="signed-out">
+        <Redirect to="/" />
+      </Show>
+    </>
+  );
+}
+
 function AdminRoute() {
   return (
     <>
@@ -494,6 +508,7 @@ function ClerkProviderWithRoutes() {
             <Route path="/billing" component={BillingPage} />
             <Route path="/health" component={HealthPage} />
             <Route path="/admin" component={AdminRoute} />
+            <Route path="/settings/notifications" component={SettingsNotificationsRoute} />
             <Route path="/trade/:ref" component={TradeDetailRoute} />
             <Route path="/sign-in/*?" component={SignInPage} />
             <Route path="/sign-up/*?" component={SignUpPage} />

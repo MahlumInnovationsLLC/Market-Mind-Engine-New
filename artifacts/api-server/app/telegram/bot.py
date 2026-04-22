@@ -406,6 +406,44 @@ def _help_text() -> str:
 # ---------------------------------------------------------------------------
 
 
+async def send_to_chat(chat_id: int, text: str) -> bool:
+    """Send a one-off message to ``chat_id`` from the bot.
+
+    Used by the alert dispatch path (Elite-only ``telegram_live_trade``
+    channel) to push notifications outside the polling loop. Returns
+    ``True`` if the message was accepted by Telegram, ``False`` if the
+    bot isn't configured or the API rejected the call. Never raises so
+    the trading loop can't be derailed by a Telegram outage.
+    """
+    token = _resolve_token()
+    if not token:
+        log.info("telegram send_to_chat skipped (no token): chat=%s", chat_id)
+        return False
+    global _token
+    _token = token
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            await _send(client, int(chat_id), text)
+        return True
+    except Exception as e:  # pragma: no cover
+        log.warning("telegram send_to_chat failed: %s", e)
+        return False
+
+
+def send_to_chats_in_background(chat_ids: list[int], text: str) -> None:
+    """Fire-and-forget fan-out — schedule a Telegram send to every chat."""
+    if not chat_ids or not text:
+        return
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        log.warning("telegram fan-out called with no loop; dropping")
+        return
+    async def _runner() -> None:
+        await asyncio.gather(*[send_to_chat(c, text) for c in chat_ids])
+    loop.create_task(_runner())
+
+
 async def _send(client: httpx.AsyncClient, chat_id: int, text: str) -> None:
     if not text:
         return

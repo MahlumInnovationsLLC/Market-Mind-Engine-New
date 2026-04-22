@@ -2,7 +2,7 @@
 
 Covers:
   * register_token rejects malformed tokens.
-  * get_prefs defaults to both alert types enabled.
+  * get_prefs defaults to every toggle's documented default value.
   * set_prefs round-trips via the in-memory shim.
   * _tokens_for_pref respects pref toggles + defaults.
   * send_to_tokens calls Expo Push API and removes DeviceNotRegistered tokens.
@@ -29,12 +29,15 @@ from app.notifications import push as _push
 # ---------------------------------------------------------------------------
 
 
+_PREF_BOOL_COLS = list(_push.PREF_COLUMNS.keys())
+
+
 class _Store:
     def __init__(self) -> None:
         # token -> {"clerk_user_id": ..., "platform": ...}
         self.tokens: dict[str, dict[str, Any]] = {}
-        # user_id -> {"notify_live_trade": bool, "notify_halt": bool}
-        self.prefs: dict[str, dict[str, bool]] = {}
+        # user_id -> dict of every pref column + sms_phone_number
+        self.prefs: dict[str, dict[str, Any]] = {}
 
     async def execute(self, query: str, *args: Any) -> str:
         q = " ".join(query.split())
@@ -54,14 +57,20 @@ class _Store:
             self.tokens.pop(tok, None)
             return "DELETE 1"
         if q.startswith("INSERT INTO user_notification_prefs"):
-            uid, lt, h = args
-            self.prefs[uid] = {"notify_live_trade": lt, "notify_halt": h}
+            uid = args[0]
+            # All known boolean columns then sms_phone_number, matching
+            # the column order assembled in `push.set_prefs`.
+            row: dict[str, Any] = {}
+            for i, col in enumerate(_PREF_BOOL_COLS):
+                row[col] = args[1 + i]
+            row["sms_phone_number"] = args[1 + len(_PREF_BOOL_COLS)]
+            self.prefs[uid] = row
             return "INSERT 0 1"
         return "OK"
 
     async def fetchrow(self, query: str, *args: Any) -> dict[str, Any] | None:
         q = " ".join(query.split())
-        if q.startswith("SELECT notify_live_trade, notify_halt FROM user_notification_prefs"):
+        if q.startswith("SELECT") and "FROM user_notification_prefs WHERE clerk_user_id" in q:
             (uid,) = args
             return self.prefs.get(uid)
         return None
@@ -69,7 +78,6 @@ class _Store:
     async def fetch(self, query: str, *_args: Any) -> list[dict[str, Any]]:
         q = " ".join(query.split())
         if "FROM expo_push_tokens t" in q:
-            # crude pref column extraction
             col = "notify_live_trade" if "notify_live_trade" in q else "notify_halt"
             out: list[dict[str, str]] = []
             for tok, row in self.tokens.items():
@@ -105,7 +113,7 @@ VALID_TOKEN_2 = "ExponentPushToken[xxxxxxxxxxxxxxxx]"
 
 
 def _run(coro):
-    return asyncio.get_event_loop().run_until_complete(coro) if False else asyncio.run(coro)
+    return asyncio.run(coro)
 
 
 def test_register_token_rejects_malformed(store: _Store) -> None:
@@ -121,31 +129,51 @@ def test_register_token_persists_and_rebinds(store: _Store) -> None:
         clerk_user_id="user_1", expo_token=VALID_TOKEN, platform="ios"
     )) is True
     assert store.tokens[VALID_TOKEN]["clerk_user_id"] == "user_1"
-    # Same token, different user -> rebound
     assert _run(_push.register_token(
         clerk_user_id="user_2", expo_token=VALID_TOKEN, platform="android"
     )) is True
     assert store.tokens[VALID_TOKEN]["clerk_user_id"] == "user_2"
 
 
-def test_prefs_default_true(store: _Store) -> None:
+def test_prefs_default_to_documented_values(store: _Store) -> None:
     prefs = _run(_push.get_prefs("user_1"))
-    assert prefs == {"notify_live_trade": True, "notify_halt": True}
+    for col, default in _push.PREF_COLUMNS.items():
+        assert prefs[col] == default, f"{col} default mismatch"
+    assert prefs["sms_phone_number"] is None
 
 
 def test_prefs_partial_update_preserves_other(store: _Store) -> None:
     _run(_push.set_prefs(clerk_user_id="user_1", notify_halt=False))
     prefs = _run(_push.get_prefs("user_1"))
-    assert prefs == {"notify_live_trade": True, "notify_halt": False}
-    _run(_push.set_prefs(clerk_user_id="user_1", notify_live_trade=False))
+    assert prefs["notify_halt"] is False
+    assert prefs["notify_live_trade"] is True
+    assert prefs["email_daily_summary"] is True
+
+    _run(_push.set_prefs(
+        clerk_user_id="user_1",
+        notify_live_trade=False,
+        email_daily_summary=False,
+    ))
     prefs = _run(_push.get_prefs("user_1"))
-    assert prefs == {"notify_live_trade": False, "notify_halt": False}
+    assert prefs["notify_live_trade"] is False
+    assert prefs["notify_halt"] is False
+    assert prefs["email_daily_summary"] is False
+
+
+def test_prefs_set_phone_number(store: _Store) -> None:
+    _run(_push.set_prefs(
+        clerk_user_id="user_1",
+        sms_phone_number="+15551234567",
+        sms_live_trade=True,
+    ))
+    prefs = _run(_push.get_prefs("user_1"))
+    assert prefs["sms_phone_number"] == "+15551234567"
+    assert prefs["sms_live_trade"] is True
 
 
 def test_tokens_for_pref_respects_toggles(store: _Store) -> None:
     _run(_push.register_token(clerk_user_id="user_1", expo_token=VALID_TOKEN, platform="ios"))
     _run(_push.register_token(clerk_user_id="user_2", expo_token=VALID_TOKEN_2, platform="android"))
-    # user_2 disables live_trade; user_1 has no row (defaults true)
     _run(_push.set_prefs(clerk_user_id="user_2", notify_live_trade=False))
 
     lt = _run(_push._tokens_for_pref("notify_live_trade"))
@@ -202,7 +230,6 @@ def test_send_to_tokens_drops_unregistered_devices(
             [VALID_TOKEN, VALID_TOKEN_2],
             title="t", body="b", data={"type": "live_trade"}, channel_id="trades",
         )
-        # Yield once so the background _drop_token task can run.
         await asyncio.sleep(0)
         await asyncio.sleep(0)
         return result
@@ -212,7 +239,6 @@ def test_send_to_tokens_drops_unregistered_devices(
     assert result["sent"] == 2
     assert result["ok"] == 1
     assert len(result["errors"]) == 1
-    # The bad device is removed; the good one stays.
     assert VALID_TOKEN in store.tokens
     assert VALID_TOKEN_2 not in store.tokens
     assert captured["url"] == _push.EXPO_PUSH_URL

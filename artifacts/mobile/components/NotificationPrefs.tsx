@@ -6,20 +6,26 @@ import { Card, SectionHeader } from "@/components/Card";
 import { useColors } from "@/hooks/useColors";
 import { apiFetch } from "@/lib/api";
 
-type Prefs = { notify_live_trade: boolean; notify_halt: boolean };
+type PrefsBody = { notify_live_trade: boolean; notify_halt: boolean };
+type PrefsResponse = {
+  prefs: PrefsBody & Record<string, unknown>;
+  tier?: string;
+  elite_unlocked?: boolean;
+  elite_only_toggles?: string[];
+};
 
 export function NotificationPrefs(): React.ReactElement {
   const colors = useColors();
   const qc = useQueryClient();
 
-  const prefs = useQuery<Prefs>({
+  const prefs = useQuery<PrefsResponse>({
     queryKey: ["notification-prefs"],
-    queryFn: () => apiFetch<Prefs>("/api/me/notification-prefs"),
+    queryFn: () => apiFetch<PrefsResponse>("/api/me/notification-prefs"),
   });
 
   const mutation = useMutation({
-    mutationFn: (patch: Partial<Prefs>) =>
-      apiFetch<Prefs>("/api/me/notification-prefs", {
+    mutationFn: (patch: Partial<PrefsBody>) =>
+      apiFetch<PrefsResponse>("/api/me/notification-prefs", {
         method: "PUT",
         body: patch,
       }),
@@ -28,7 +34,10 @@ export function NotificationPrefs(): React.ReactElement {
     },
   });
 
-  const data = prefs.data ?? { notify_live_trade: true, notify_halt: true };
+  const data: PrefsBody = {
+    notify_live_trade: prefs.data?.prefs?.notify_live_trade ?? true,
+    notify_halt: prefs.data?.prefs?.notify_halt ?? true,
+  };
   const busy = prefs.isLoading || mutation.isPending;
 
   return (

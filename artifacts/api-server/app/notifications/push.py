@@ -64,7 +64,46 @@ CREATE TABLE IF NOT EXISTS user_notification_prefs (
     notify_halt       boolean NOT NULL DEFAULT true,
     updated_at        timestamptz NOT NULL DEFAULT now()
 );
+
+-- Per-user email channel toggles (task #112). Defaults match the
+-- previous "everyone gets every email" behaviour for the standard
+-- summaries; the live-trade firehose is opt-in because it is noisy
+-- and gated behind the Elite tier.
+ALTER TABLE user_notification_prefs
+    ADD COLUMN IF NOT EXISTS email_daily_summary  boolean NOT NULL DEFAULT true,
+    ADD COLUMN IF NOT EXISTS email_drift          boolean NOT NULL DEFAULT true,
+    ADD COLUMN IF NOT EXISTS email_halt           boolean NOT NULL DEFAULT true,
+    ADD COLUMN IF NOT EXISTS email_live_trade     boolean NOT NULL DEFAULT false,
+    ADD COLUMN IF NOT EXISTS email_weekly_roundup boolean NOT NULL DEFAULT true,
+    ADD COLUMN IF NOT EXISTS sms_live_trade       boolean NOT NULL DEFAULT false,
+    ADD COLUMN IF NOT EXISTS telegram_live_trade  boolean NOT NULL DEFAULT false,
+    ADD COLUMN IF NOT EXISTS sms_phone_number     text;
 """
+
+
+# All boolean toggles owned by `user_notification_prefs`, with their
+# default value when no row exists for the user. Kept in one place so
+# `get_prefs` / `set_prefs` / the `/api/me/notification-prefs` endpoint
+# stay in sync as new alert types are added.
+PREF_COLUMNS: dict[str, bool] = {
+    "notify_live_trade":    True,   # mobile push — live fill
+    "notify_halt":          True,   # mobile push — kill switch
+    "email_daily_summary":  True,
+    "email_drift":          True,
+    "email_halt":           True,
+    "email_live_trade":     False,  # noisy + Elite-only feature
+    "email_weekly_roundup": True,
+    "sms_live_trade":       False,  # Elite-only premium channel
+    "telegram_live_trade":  False,  # Elite-only premium channel
+}
+
+# Subset of toggles that require the Elite (or higher) tier to actually
+# fire — the UI shows them disabled with an upgrade hint for sub-Elite
+# users, and the dispatch path filters opted-in users by tier as well.
+ELITE_ONLY_TOGGLES: frozenset[str] = frozenset({
+    "sms_live_trade",
+    "telegram_live_trade",
+})
 
 
 _schema_ready = False
@@ -158,49 +197,198 @@ async def _drop_token(expo_token: str) -> None:
 # ---------------------------------------------------------------------------
 
 
-async def get_prefs(clerk_user_id: str) -> dict[str, bool]:
+_PREF_COLS_SQL = ", ".join(PREF_COLUMNS.keys())
+
+
+def _defaults() -> dict[str, bool]:
+    return dict(PREF_COLUMNS)
+
+
+async def get_prefs(clerk_user_id: str) -> dict[str, object]:
+    """Return all per-user notification toggles + the optional SMS phone.
+
+    Missing rows yield the documented defaults so the UI can render
+    deterministic state for first-time users.
+    """
     await ensure_schema()
     try:
         row = await db.fetchrow(
-            "SELECT notify_live_trade, notify_halt "
+            f"SELECT {_PREF_COLS_SQL}, sms_phone_number "
             "FROM user_notification_prefs WHERE clerk_user_id = $1",
             clerk_user_id,
         )
     except Exception as e:
         log.warning("get_prefs failed for %s: %s", clerk_user_id, e)
         row = None
-    if row is None:
-        return {"notify_live_trade": True, "notify_halt": True}
-    return {
-        "notify_live_trade": bool(row["notify_live_trade"]),
-        "notify_halt": bool(row["notify_halt"]),
-    }
+    out: dict[str, object] = _defaults()  # type: ignore[assignment]
+    out["sms_phone_number"] = None
+    if row is not None:
+        for k in PREF_COLUMNS:
+            out[k] = bool(row[k])
+        out["sms_phone_number"] = row["sms_phone_number"]
+    return out
 
 
 async def set_prefs(
     *, clerk_user_id: str,
-    notify_live_trade: bool | None = None,
-    notify_halt: bool | None = None,
-) -> dict[str, bool]:
+    sms_phone_number: str | None | object = ...,
+    **toggles: bool | None,
+) -> dict[str, object]:
+    """Partial update of per-user prefs.
+
+    Each known boolean toggle in ``toggles`` is applied when not
+    ``None``; unknown keys are ignored so bumping the schema doesn't
+    break older clients. ``sms_phone_number`` follows the same
+    convention but uses a sentinel (``...``) for "leave unchanged" so
+    callers can explicitly pass ``None`` to clear the number.
+    """
     current = await get_prefs(clerk_user_id)
-    next_lt = current["notify_live_trade"] if notify_live_trade is None else bool(notify_live_trade)
-    next_h  = current["notify_halt"]       if notify_halt       is None else bool(notify_halt)
+    next_vals: dict[str, bool] = {}
+    for col in PREF_COLUMNS:
+        v = toggles.get(col)
+        next_vals[col] = bool(current[col]) if v is None else bool(v)
+    next_phone: str | None = (
+        current["sms_phone_number"]  # type: ignore[assignment]
+        if sms_phone_number is ...
+        else (str(sms_phone_number).strip() or None) if sms_phone_number else None
+    )
+
+    cols = list(PREF_COLUMNS.keys()) + ["sms_phone_number"]
+    placeholders = ", ".join(f"${i + 2}" for i in range(len(cols)))
+    set_clause = ", ".join(f"{c} = EXCLUDED.{c}" for c in cols)
+    sql = (
+        f"INSERT INTO user_notification_prefs (clerk_user_id, {', '.join(cols)}, updated_at) "
+        f"VALUES ($1, {placeholders}, now()) "
+        f"ON CONFLICT (clerk_user_id) DO UPDATE SET {set_clause}, updated_at = now()"
+    )
+    args = [clerk_user_id] + [next_vals[c] for c in PREF_COLUMNS] + [next_phone]
     try:
-        await db.execute(
-            """
-            INSERT INTO user_notification_prefs (
-              clerk_user_id, notify_live_trade, notify_halt, updated_at
-            ) VALUES ($1, $2, $3, now())
-            ON CONFLICT (clerk_user_id) DO UPDATE SET
-              notify_live_trade = EXCLUDED.notify_live_trade,
-              notify_halt       = EXCLUDED.notify_halt,
-              updated_at        = now()
-            """,
-            clerk_user_id, next_lt, next_h,
-        )
+        await db.execute(sql, *args)
     except Exception as e:
         log.warning("set_prefs failed for %s: %s", clerk_user_id, e)
-    return {"notify_live_trade": next_lt, "notify_halt": next_h}
+
+    out: dict[str, object] = dict(next_vals)  # type: ignore[assignment]
+    out["sms_phone_number"] = next_phone
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Per-user recipient resolution for email / SMS / Telegram alerts
+# (consumed by `notifications.alerts` so every dispatch path respects
+# the per-user toggles + Elite gating).
+# ---------------------------------------------------------------------------
+
+
+# Status values that count as an actively paying subscription. Mirrors
+# the set used by `billing.get_user_subscription` (`active`, `trialing`,
+# `past_due`); `founder` is a sentinel tier with no real Stripe row so
+# we just match the tier directly.
+_ACTIVE_SUB_STATUSES = ("active", "trialing", "past_due")
+_ELITE_TIERS = ("elite", "founder")
+
+
+async def _user_rows_for_email(pref_column: str, *, elite_only: bool) -> list[dict[str, object]]:
+    if pref_column not in PREF_COLUMNS:
+        raise ValueError(f"unknown pref column {pref_column!r}")
+    await ensure_schema()
+    # LEFT JOIN so users who never opened /settings/notifications still
+    # match — they inherit the documented default for `pref_column`
+    # (which is `true` for most email channels). Anyone who has saved
+    # prefs at least once is honoured exactly.
+    default_sql = "true" if PREF_COLUMNS[pref_column] else "false"
+    sql = f"""
+        SELECT u.clerk_user_id, u.email
+          FROM app_users u
+          LEFT JOIN user_notification_prefs p ON p.clerk_user_id = u.clerk_user_id
+          LEFT JOIN subscriptions s ON s.user_id = u.clerk_user_id
+         WHERE u.email IS NOT NULL
+           AND u.email <> ''
+           AND COALESCE(u.approved, false) = true
+           AND COALESCE(p.{pref_column}, {default_sql}) = true
+    """
+    if elite_only:
+        sql += (
+            " AND ( (LOWER(COALESCE(s.tier,'')) IN ('elite','founder') "
+            "       AND COALESCE(s.status,'') IN ('active','trialing','past_due')) "
+            "    OR LOWER(COALESCE(s.tier,'')) = 'founder' )"
+        )
+    try:
+        rows = await db.fetch(sql)
+        return [{"clerk_user_id": r["clerk_user_id"], "email": r["email"]} for r in rows]
+    except Exception as e:
+        log.warning("user_rows_for_email %s failed: %s", pref_column, e)
+        return []
+
+
+async def opted_in_emails(pref_column: str, *, elite_only: bool | None = None) -> list[str]:
+    """Email addresses of users who explicitly opted in to ``pref_column``.
+
+    ``elite_only`` defaults to ``True`` for the Elite-gated channels
+    (e.g. ``email_live_trade``) so a Pro user who somehow flipped the
+    toggle still won't receive premium-only blasts.
+    """
+    if elite_only is None:
+        elite_only = pref_column in ELITE_ONLY_TOGGLES
+    rows = await _user_rows_for_email(pref_column, elite_only=elite_only)
+    seen: set[str] = set()
+    out: list[str] = []
+    for r in rows:
+        e = str(r["email"] or "").strip().lower()
+        if e and e not in seen:
+            seen.add(e)
+            out.append(str(r["email"]))
+    return out
+
+
+async def opted_in_sms_phones(pref_column: str = "sms_live_trade") -> list[str]:
+    """E.164-ish phone numbers of Elite users opted in to SMS for the
+    given channel. Always Elite-gated."""
+    if pref_column not in PREF_COLUMNS:
+        raise ValueError(f"unknown pref column {pref_column!r}")
+    await ensure_schema()
+    sql = f"""
+        SELECT p.sms_phone_number
+          FROM user_notification_prefs p
+          LEFT JOIN subscriptions s ON s.user_id = p.clerk_user_id
+         WHERE p.{pref_column} = true
+           AND p.sms_phone_number IS NOT NULL
+           AND p.sms_phone_number <> ''
+           AND ( (LOWER(COALESCE(s.tier,'')) IN ('elite','founder')
+                  AND COALESCE(s.status,'') IN ('active','trialing','past_due'))
+              OR LOWER(COALESCE(s.tier,'')) = 'founder' )
+    """
+    try:
+        rows = await db.fetch(sql)
+        return [str(r["sms_phone_number"]).strip() for r in rows if r["sms_phone_number"]]
+    except Exception as e:
+        log.warning("opted_in_sms_phones %s failed: %s", pref_column, e)
+        return []
+
+
+async def opted_in_telegram_chats(pref_column: str = "telegram_live_trade") -> list[int]:
+    """Telegram chat ids for Elite users opted in to Telegram on the
+    given channel. Skips users who haven't completed the bot binding."""
+    if pref_column not in PREF_COLUMNS:
+        raise ValueError(f"unknown pref column {pref_column!r}")
+    await ensure_schema()
+    sql = f"""
+        SELECT t.telegram_chat_id
+          FROM user_notification_prefs p
+          JOIN telegram_bindings t ON t.clerk_user_id = p.clerk_user_id
+          LEFT JOIN subscriptions s ON s.user_id = p.clerk_user_id
+         WHERE p.{pref_column} = true
+           AND t.telegram_chat_id IS NOT NULL
+           AND t.bound_at IS NOT NULL
+           AND ( (LOWER(COALESCE(s.tier,'')) IN ('elite','founder')
+                  AND COALESCE(s.status,'') IN ('active','trialing','past_due'))
+              OR LOWER(COALESCE(s.tier,'')) = 'founder' )
+    """
+    try:
+        rows = await db.fetch(sql)
+        return [int(r["telegram_chat_id"]) for r in rows if r["telegram_chat_id"] is not None]
+    except Exception as e:
+        log.warning("opted_in_telegram_chats %s failed: %s", pref_column, e)
+        return []
 
 
 # ---------------------------------------------------------------------------
