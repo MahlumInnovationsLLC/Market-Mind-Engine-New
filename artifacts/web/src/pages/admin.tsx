@@ -24,7 +24,9 @@ export default function AdminPage() {
   const [filter, setFilter] = useState<Filter>("all");
   const [search, setSearch] = useState("");
   const [activeUserId, setActiveUserId] = useState<string | null>(null);
-  const [tab, setTab] = useState<"users" | "audit" | "runtime">("users");
+  const [tab, setTab] = useState<
+    "users" | "audit" | "runtime" | "risk" | "cycle" | "models"
+  >("users");
 
   const usersQuery = useAdminListUsers({
     query: {
@@ -84,8 +86,10 @@ export default function AdminPage() {
         </div>
       </header>
 
-      <div className="mb-4 flex gap-2 text-xs uppercase tracking-widest">
-        {(["users", "audit", "runtime"] as const).map((t) => (
+      <div className="mb-4 flex flex-wrap gap-2 text-xs uppercase tracking-widest">
+        {(
+          ["users", "audit", "runtime", "risk", "cycle", "models"] as const
+        ).map((t) => (
           <button
             key={t}
             type="button"
@@ -101,7 +105,13 @@ export default function AdminPage() {
               ? "Users"
               : t === "audit"
                 ? "Audit log"
-                : "Runtime"}
+                : t === "runtime"
+                  ? "Runtime"
+                  : t === "risk"
+                    ? "Risk knobs"
+                    : t === "cycle"
+                      ? "Trigger cycle"
+                      : "Models"}
           </button>
         ))}
       </div>
@@ -189,8 +199,14 @@ export default function AdminPage() {
         </main>
       ) : tab === "audit" ? (
         <AuditLogPanel />
-      ) : (
+      ) : tab === "runtime" ? (
         <RuntimePanel />
+      ) : tab === "risk" ? (
+        <RiskKnobsPanel />
+      ) : tab === "cycle" ? (
+        <TriggerCyclePanel />
+      ) : (
+        <ModelsPanel />
       )}
     </div>
   );
@@ -617,5 +633,648 @@ function AuditLogPanel() {
         </tbody>
       </table>
     </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Risk knob editor panel
+// ---------------------------------------------------------------------------
+
+type RiskKnob = {
+  key: string;
+  label: string;
+  description: string;
+  minimum: number;
+  maximum: number;
+  step: number;
+  kind: "float" | "int";
+  unit: "pp" | "fraction" | "usd" | "count";
+  default_value: number | null;
+  override_value: number | null;
+  effective_value: number | null;
+};
+
+type RiskKnobState = {
+  aggression_mode: string;
+  knobs: RiskKnob[];
+};
+
+function formatKnob(value: number | null | undefined, unit: RiskKnob["unit"]) {
+  if (value == null) return "—";
+  if (unit === "pp") return `${value.toFixed(1)}pp`;
+  if (unit === "fraction") return `${(value * 100).toFixed(0)}%`;
+  if (unit === "usd")
+    return `$${value.toLocaleString(undefined, { maximumFractionDigits: 0 })}`;
+  return String(value);
+}
+
+function RiskKnobsPanel() {
+  const { getToken, isSignedIn } = useAuth();
+  const tokenFn = useMemo(
+    () => () => getToken().then((t) => t ?? null),
+    [getToken],
+  );
+  const queryClient = useQueryClient();
+  const queryKey = ["admin", "risk-knobs"] as const;
+
+  const { data, isLoading, error } = useQuery<RiskKnobState>({
+    queryKey,
+    queryFn: () =>
+      apiFetch<RiskKnobState>("/api/admin/risk-knobs", { getToken: tokenFn }),
+    enabled: !!isSignedIn,
+  });
+
+  // Local draft of slider positions so the UI stays responsive while
+  // the operator drags. Only flushed to the server on "Apply".
+  const [draft, setDraft] = useState<Record<string, number>>({});
+  const draftKeys = Object.keys(draft);
+
+  const dirty = useMemo(() => {
+    if (!data) return [] as string[];
+    return draftKeys.filter((k) => {
+      const knob = data.knobs.find((n) => n.key === k);
+      if (!knob) return false;
+      const eff = knob.effective_value ?? 0;
+      return Math.abs(eff - draft[k]) > 1e-9;
+    });
+  }, [draft, data, draftKeys]);
+
+  const apply = useMutation({
+    mutationFn: () =>
+      apiFetch<RiskKnobState>("/api/admin/risk-knobs", {
+        method: "POST",
+        body: { overrides: Object.fromEntries(dirty.map((k) => [k, draft[k]])) },
+        getToken: tokenFn,
+      }),
+    onSuccess: (next) => {
+      queryClient.setQueryData(queryKey, next);
+      setDraft({});
+    },
+  });
+
+  const reset = useMutation({
+    mutationFn: (key: string) =>
+      apiFetch<RiskKnobState>("/api/admin/risk-knobs", {
+        method: "POST",
+        body: { overrides: { [key]: null } },
+        getToken: tokenFn,
+      }),
+    onSuccess: (next) => {
+      queryClient.setQueryData(queryKey, next);
+      setDraft((d) => {
+        const out = { ...d };
+        return out;
+      });
+    },
+  });
+
+  return (
+    <main
+      className="grid grid-cols-1 gap-4"
+      data-testid="panel-risk-knobs"
+    >
+      <div className="border border-border bg-card p-4">
+        <div className="flex items-start justify-between gap-4 mb-3">
+          <div>
+            <h2 className="text-xs uppercase tracking-widest text-muted-foreground">
+              Live risk knobs
+            </h2>
+            <p className="text-xs text-muted-foreground mt-1 normal-case tracking-normal">
+              Per-knob overrides applied on top of the active aggression mode.
+              Changes take effect on the next orchestrator cycle and are
+              recorded in the admin audit log. Clear an override to fall back
+              to the mode default.
+            </p>
+          </div>
+          <div className="text-[10px] uppercase tracking-widest text-muted-foreground whitespace-nowrap">
+            Mode: {data?.aggression_mode ?? "—"}
+          </div>
+        </div>
+        {isLoading ? (
+          <div className="h-32 animate-pulse bg-muted/30" />
+        ) : error ? (
+          <div className="text-loss text-xs">Failed to load risk knobs.</div>
+        ) : data ? (
+          <div className="space-y-3">
+            {data.knobs.map((knob) => {
+              const draftVal =
+                draft[knob.key] ?? knob.effective_value ?? knob.minimum;
+              const isDirty = dirty.includes(knob.key);
+              return (
+                <div
+                  key={knob.key}
+                  className="border border-border p-3 bg-background"
+                  data-testid={`row-knob-${knob.key}`}
+                >
+                  <div className="flex items-baseline justify-between gap-4">
+                    <div>
+                      <div className="text-xs uppercase tracking-widest text-foreground">
+                        {knob.label}
+                      </div>
+                      <div className="text-[10px] text-muted-foreground normal-case tracking-normal">
+                        {knob.description}
+                      </div>
+                    </div>
+                    <div className="text-right text-[10px] uppercase tracking-widest text-muted-foreground">
+                      <div>
+                        Default {formatKnob(knob.default_value, knob.unit)}
+                      </div>
+                      <div>
+                        Override{" "}
+                        <span
+                          className={
+                            knob.override_value != null
+                              ? "text-primary"
+                              : "text-muted-foreground"
+                          }
+                        >
+                          {knob.override_value != null
+                            ? formatKnob(knob.override_value, knob.unit)
+                            : "none"}
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-3 mt-3">
+                    <input
+                      type="range"
+                      min={knob.minimum}
+                      max={knob.maximum}
+                      step={knob.step}
+                      value={draftVal}
+                      onChange={(e) =>
+                        setDraft((d) => ({
+                          ...d,
+                          [knob.key]: Number(e.target.value),
+                        }))
+                      }
+                      className="flex-1 accent-primary"
+                      data-testid={`slider-knob-${knob.key}`}
+                    />
+                    <input
+                      type="number"
+                      min={knob.minimum}
+                      max={knob.maximum}
+                      step={knob.step}
+                      value={draftVal}
+                      onChange={(e) =>
+                        setDraft((d) => ({
+                          ...d,
+                          [knob.key]: Number(e.target.value),
+                        }))
+                      }
+                      className="w-24 bg-input border border-border px-2 py-1 text-xs"
+                      data-testid={`input-knob-${knob.key}`}
+                    />
+                    <span
+                      className={`text-xs uppercase tracking-widest ${
+                        isDirty ? "text-primary" : "text-muted-foreground"
+                      }`}
+                    >
+                      {formatKnob(draftVal, knob.unit)}
+                    </span>
+                    {knob.override_value != null ? (
+                      <button
+                        type="button"
+                        disabled={reset.isPending}
+                        onClick={() => reset.mutate(knob.key)}
+                        data-testid={`button-knob-reset-${knob.key}`}
+                        className="border border-border px-2 py-1 text-[10px] uppercase tracking-widest text-muted-foreground hover:text-destructive hover:border-destructive"
+                      >
+                        Clear
+                      </button>
+                    ) : null}
+                  </div>
+                </div>
+              );
+            })}
+            <div className="flex items-center gap-3 pt-2">
+              <button
+                type="button"
+                disabled={dirty.length === 0 || apply.isPending}
+                onClick={() => apply.mutate()}
+                data-testid="button-knobs-apply"
+                className={`border px-4 py-2 text-xs uppercase tracking-widest ${
+                  dirty.length === 0
+                    ? "border-border text-muted-foreground"
+                    : "border-primary text-primary hover:bg-primary/10"
+                }`}
+              >
+                {apply.isPending
+                  ? "Applying…"
+                  : `Apply ${dirty.length} change${dirty.length === 1 ? "" : "s"}`}
+              </button>
+              {dirty.length > 0 ? (
+                <button
+                  type="button"
+                  disabled={apply.isPending}
+                  onClick={() => setDraft({})}
+                  data-testid="button-knobs-discard"
+                  className="border border-border px-3 py-2 text-xs uppercase tracking-widest text-muted-foreground hover:text-foreground"
+                >
+                  Discard
+                </button>
+              ) : null}
+              {apply.isError ? (
+                <span className="text-loss text-xs">
+                  {(apply.error as Error)?.message ?? "Failed to apply."}
+                </span>
+              ) : null}
+            </div>
+          </div>
+        ) : null}
+      </div>
+    </main>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Trigger cycle panel
+// ---------------------------------------------------------------------------
+
+type CycleResult = {
+  cycle_id: string;
+  vertical: string;
+  started_at: string | null;
+  completed_at: string | null;
+  duration_seconds: number | null;
+  picks_evaluated: number;
+  trades_placed: number;
+  fresh_debates: number;
+  errors: string[];
+  trace: Array<{
+    cycle_id?: string;
+    stage?: string;
+    event?: string;
+    ts?: string;
+    [k: string]: unknown;
+  }>;
+};
+
+function TriggerCyclePanel() {
+  const { getToken } = useAuth();
+  const tokenFn = useMemo(
+    () => () => getToken().then((t) => t ?? null),
+    [getToken],
+  );
+  const [vertical, setVertical] = useState("sports");
+  const [last, setLast] = useState<CycleResult | null>(null);
+
+  const trigger = useMutation({
+    mutationFn: () =>
+      apiFetch<CycleResult>("/api/admin/orchestrator/run-cycle", {
+        method: "POST",
+        body: { vertical },
+        getToken: tokenFn,
+      }),
+    onSuccess: (res) => setLast(res),
+  });
+
+  return (
+    <main className="grid grid-cols-1 gap-4" data-testid="panel-trigger-cycle">
+      <div className="border border-border bg-card p-4">
+        <h2 className="text-xs uppercase tracking-widest text-muted-foreground mb-3">
+          Trigger one orchestrator cycle
+        </h2>
+        <p className="text-xs text-muted-foreground mb-4 normal-case tracking-normal">
+          Runs a single out-of-band cycle for the chosen vertical and shows
+          the pipeline trace it produced. Refused (503) until the readiness
+          gate has flipped.
+        </p>
+        <div className="flex items-center gap-2 mb-3">
+          <label className="text-[10px] uppercase tracking-widest text-muted-foreground">
+            Vertical
+          </label>
+          <input
+            value={vertical}
+            onChange={(e) => setVertical(e.target.value)}
+            data-testid="input-cycle-vertical"
+            className="bg-input border border-border px-2 py-1 text-xs w-40"
+          />
+          <button
+            type="button"
+            disabled={trigger.isPending || !vertical.trim()}
+            onClick={() => trigger.mutate()}
+            data-testid="button-trigger-cycle"
+            className={`border px-4 py-1.5 text-xs uppercase tracking-widest ${
+              trigger.isPending
+                ? "border-border text-muted-foreground"
+                : "border-primary text-primary hover:bg-primary/10"
+            }`}
+          >
+            {trigger.isPending ? "Running…" : "Trigger cycle"}
+          </button>
+          {trigger.isError ? (
+            <span className="text-loss text-xs">
+              {(trigger.error as Error)?.message ?? "Cycle failed."}
+            </span>
+          ) : null}
+        </div>
+        {last ? (
+          <div
+            className="border border-border bg-background p-3"
+            data-testid="block-cycle-result"
+          >
+            <div className="grid grid-cols-2 md:grid-cols-5 gap-3 text-xs">
+              <ThresholdStat label="CYCLE_ID" value={last.cycle_id.slice(0, 12)} />
+              <ThresholdStat label="VERTICAL" value={last.vertical} />
+              <ThresholdStat
+                label="DURATION"
+                value={
+                  last.duration_seconds != null
+                    ? `${last.duration_seconds.toFixed(2)}s`
+                    : "—"
+                }
+              />
+              <ThresholdStat
+                label="PICKS"
+                value={String(last.picks_evaluated)}
+              />
+              <ThresholdStat
+                label="TRADES"
+                value={String(last.trades_placed)}
+              />
+            </div>
+            {last.errors.length > 0 ? (
+              <div className="mt-3 text-xs text-loss">
+                {last.errors.length} error(s):
+                <ul className="list-disc list-inside">
+                  {last.errors.map((e, i) => (
+                    <li key={i}>{e}</li>
+                  ))}
+                </ul>
+              </div>
+            ) : null}
+            <div className="mt-4">
+              <div className="text-[10px] uppercase tracking-widest text-muted-foreground mb-2">
+                Pipeline trace ({last.trace.length} events)
+              </div>
+              <div
+                className="max-h-96 overflow-auto border border-border bg-muted/10"
+                data-testid="block-cycle-trace"
+              >
+                <table className="w-full text-[11px]">
+                  <thead className="bg-muted/20 text-muted-foreground uppercase tracking-widest text-[10px]">
+                    <tr>
+                      <th className="text-left p-2">Stage</th>
+                      <th className="text-left p-2">Event</th>
+                      <th className="text-left p-2">Time</th>
+                      <th className="text-left p-2">Detail</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {last.trace.length === 0 ? (
+                      <tr>
+                        <td
+                          colSpan={4}
+                          className="p-3 text-center text-muted-foreground"
+                        >
+                          No trace events captured.
+                        </td>
+                      </tr>
+                    ) : (
+                      last.trace.map((ev, i) => {
+                        const detail = { ...ev };
+                        delete (detail as Record<string, unknown>).stage;
+                        delete (detail as Record<string, unknown>).event;
+                        delete (detail as Record<string, unknown>).ts;
+                        delete (detail as Record<string, unknown>).cycle_id;
+                        return (
+                          <tr
+                            key={i}
+                            className="border-t border-border/50 align-top"
+                          >
+                            <td className="p-2 text-foreground">
+                              {String(ev.stage ?? "")}
+                            </td>
+                            <td className="p-2 text-primary">
+                              {String(ev.event ?? "")}
+                            </td>
+                            <td className="p-2 text-muted-foreground">
+                              {String(ev.ts ?? "")}
+                            </td>
+                            <td className="p-2 text-muted-foreground font-mono break-all">
+                              {Object.keys(detail).length > 0
+                                ? JSON.stringify(detail)
+                                : ""}
+                            </td>
+                          </tr>
+                        );
+                      })
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+        ) : null}
+      </div>
+    </main>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Models browser panel
+// ---------------------------------------------------------------------------
+
+type ModelRow = {
+  name: string;
+  version: string;
+  sha256: string;
+  size: number;
+  mtime: number;
+  loaded: boolean;
+  last_loaded_at: string | null;
+  smoke_load_seconds: number | null;
+  is_active: boolean;
+  is_override: boolean;
+};
+
+type ModelsPayload = {
+  items: ModelRow[];
+  ready: boolean;
+  in_progress: boolean;
+  active_predictor: { name?: string; version?: string } | null;
+  active_override: string | null;
+  manifest: Record<string, unknown> | null;
+};
+
+function fmtSize(bytes: number): string {
+  if (!bytes) return "—";
+  const units = ["B", "KiB", "MiB", "GiB"];
+  let v = bytes;
+  let i = 0;
+  while (v >= 1024 && i < units.length - 1) {
+    v /= 1024;
+    i++;
+  }
+  return `${v.toFixed(v < 10 ? 2 : 1)} ${units[i]}`;
+}
+
+function fmtTime(epochSeconds: number): string {
+  if (!epochSeconds) return "—";
+  return new Date(epochSeconds * 1000).toISOString().replace("T", " ").slice(0, 19);
+}
+
+function ModelsPanel() {
+  const { getToken, isSignedIn } = useAuth();
+  const tokenFn = useMemo(
+    () => () => getToken().then((t) => t ?? null),
+    [getToken],
+  );
+  const queryClient = useQueryClient();
+  const queryKey = ["admin", "models"] as const;
+
+  const { data, isLoading, error } = useQuery<ModelsPayload>({
+    queryKey,
+    queryFn: () =>
+      apiFetch<ModelsPayload>("/api/admin/models", { getToken: tokenFn }),
+    enabled: !!isSignedIn,
+    refetchInterval: 30_000,
+  });
+
+  const setActive = useMutation({
+    mutationFn: (name: string | null) =>
+      apiFetch<ModelsPayload>("/api/admin/models/active", {
+        method: "POST",
+        body: { name },
+        getToken: tokenFn,
+      }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey });
+    },
+  });
+
+  return (
+    <main className="grid grid-cols-1 gap-4" data-testid="panel-models">
+      <div className="border border-border bg-card p-4">
+        <div className="flex items-start justify-between gap-4 mb-3">
+          <div>
+            <h2 className="text-xs uppercase tracking-widest text-muted-foreground">
+              Predictor catalog
+            </h2>
+            <p className="text-xs text-muted-foreground mt-1 normal-case tracking-normal">
+              Versioned predictor artifacts in storage. Click "Make active" to
+              pin one as the predictor used by the next /predict call. Pinning
+              survives a restart and is recorded in the audit log.
+            </p>
+          </div>
+          <div className="text-[10px] uppercase tracking-widest text-muted-foreground text-right">
+            <div>
+              Active:{" "}
+              <span className="text-primary">
+                {data?.active_predictor?.name ?? "—"}
+              </span>
+            </div>
+            <div>
+              Override:{" "}
+              <span
+                className={
+                  data?.active_override ? "text-primary" : "text-muted-foreground"
+                }
+              >
+                {data?.active_override ?? "none"}
+              </span>
+            </div>
+            {data?.active_override ? (
+              <button
+                type="button"
+                disabled={setActive.isPending}
+                onClick={() => setActive.mutate(null)}
+                data-testid="button-clear-active-override"
+                className="mt-1 border border-border px-2 py-0.5 text-[10px] uppercase tracking-widest text-muted-foreground hover:text-destructive hover:border-destructive"
+              >
+                Clear override
+              </button>
+            ) : null}
+          </div>
+        </div>
+        {isLoading ? (
+          <div className="h-32 animate-pulse bg-muted/30" />
+        ) : error ? (
+          <div className="text-loss text-xs">Failed to load model catalog.</div>
+        ) : data ? (
+          <div className="border border-border bg-background overflow-x-auto">
+            <table className="w-full text-xs">
+              <thead className="bg-muted/20 text-muted-foreground uppercase tracking-widest">
+                <tr>
+                  <th className="text-left p-2">Name</th>
+                  <th className="text-left p-2">Version</th>
+                  <th className="text-left p-2">SHA-256</th>
+                  <th className="text-right p-2">Size</th>
+                  <th className="text-left p-2">Updated</th>
+                  <th className="text-left p-2">Last loaded</th>
+                  <th className="text-right p-2">Action</th>
+                </tr>
+              </thead>
+              <tbody>
+                {data.items.length === 0 ? (
+                  <tr>
+                    <td colSpan={7} className="p-6 text-center text-muted-foreground">
+                      No predictors in catalog.
+                    </td>
+                  </tr>
+                ) : (
+                  data.items.map((m) => (
+                    <tr
+                      key={m.name}
+                      className="border-t border-border/50 align-top"
+                      data-testid={`row-model-${m.name}`}
+                    >
+                      <td className="p-2 text-foreground break-all">
+                        {m.name}
+                        {m.is_active ? (
+                          <span className="ml-2 border border-primary text-primary px-1.5 py-0.5 text-[10px] uppercase tracking-widest">
+                            Active
+                          </span>
+                        ) : null}
+                        {m.loaded && !m.is_active ? (
+                          <span className="ml-2 border border-success text-success px-1.5 py-0.5 text-[10px] uppercase tracking-widest">
+                            Loaded
+                          </span>
+                        ) : null}
+                      </td>
+                      <td className="p-2 text-muted-foreground">{m.version || "—"}</td>
+                      <td className="p-2 text-muted-foreground font-mono">
+                        {m.sha256 ? `${m.sha256.slice(0, 12)}…` : "—"}
+                      </td>
+                      <td className="p-2 text-muted-foreground text-right">
+                        {fmtSize(m.size)}
+                      </td>
+                      <td className="p-2 text-muted-foreground">{fmtTime(m.mtime)}</td>
+                      <td className="p-2 text-muted-foreground">
+                        {m.last_loaded_at ?? "—"}
+                      </td>
+                      <td className="p-2 text-right">
+                        {m.is_override ? (
+                          <span className="text-[10px] uppercase tracking-widest text-primary">
+                            Pinned
+                          </span>
+                        ) : (
+                          <button
+                            type="button"
+                            disabled={setActive.isPending}
+                            onClick={() => setActive.mutate(m.name)}
+                            data-testid={`button-make-active-${m.name}`}
+                            className="border border-border px-2 py-1 text-[10px] uppercase tracking-widest hover:text-primary hover:border-primary"
+                          >
+                            Make active
+                          </button>
+                        )}
+                      </td>
+                    </tr>
+                  ))
+                )}
+              </tbody>
+            </table>
+          </div>
+        ) : null}
+        {setActive.isError ? (
+          <div className="text-loss text-xs mt-2">
+            {(setActive.error as Error)?.message ?? "Failed to set active model."}
+          </div>
+        ) : null}
+      </div>
+    </main>
   );
 }

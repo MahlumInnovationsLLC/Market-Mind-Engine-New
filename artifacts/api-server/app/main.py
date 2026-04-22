@@ -250,6 +250,20 @@ async def lifespan(_: FastAPI):
     except Exception as e:
         log.warning("per-league calibrator bootstrap failed: %s", e)
 
+    # Restore the operator-set active-predictor override (if any) so the
+    # next /predict call honours the last "make active" choice without
+    # waiting for an admin POST. Best-effort: a missing setting just
+    # leaves the static priority chain in place.
+    try:
+        active_name = await db.fetchval(
+            "SELECT value FROM system_settings WHERE key = 'predictor.active_name'"
+        )
+        if active_name:
+            predictor.set_active_override(str(active_name))
+            log.info("[predictor] restored active override -> %s", active_name)
+    except Exception as e:
+        log.debug("predictor active override restore skipped: %s", e)
+
     # READY-Gate watcher: stays parked here while the rest of the boot
     # sequence does its async work, then flips the gate so the
     # orchestrator (which is parked in `_loop`) can start firing
@@ -862,6 +876,233 @@ async def admin_get_audit_log(
 ) -> dict[str, object]:
     limit = max(1, min(500, int(limit)))
     return {"items": await admin_module.list_audit_log(limit)}
+
+
+# ---------------------------------------------------------------------------
+# Risk-knob editor (admin-only)
+# ---------------------------------------------------------------------------
+
+
+class AdminSetRiskKnobsRequest(BaseModel):
+    """Partial update — keys absent from the payload are left unchanged.
+
+    Setting a key to ``null`` clears the override so the gate falls back
+    to the active aggression-mode default.
+    """
+    overrides: dict[str, float | int | None]
+
+
+@app.get("/api/admin/risk-knobs")
+async def admin_get_risk_knobs(
+    actor: AuthedUser = Depends(require_admin),
+) -> dict[str, object]:
+    return await runtime_settings_mod.get_risk_knob_state()
+
+
+@app.post("/api/admin/risk-knobs")
+async def admin_set_risk_knobs(
+    body: AdminSetRiskKnobsRequest,
+    actor: AuthedUser = Depends(require_admin),
+) -> dict[str, object]:
+    actor_email = (await check_approval(actor))[1]
+    try:
+        await runtime_settings_mod.set_risk_knob_overrides(
+            body.overrides,
+            actor_user_id=actor.user_id,
+            actor_email=actor_email,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return await runtime_settings_mod.get_risk_knob_state()
+
+
+# ---------------------------------------------------------------------------
+# Manual cycle trigger (admin-only) + trace
+# ---------------------------------------------------------------------------
+
+
+class AdminRunCycleRequest(BaseModel):
+    vertical: str = Field("sports", min_length=1, max_length=64)
+
+
+@app.post("/api/admin/orchestrator/run-cycle")
+async def admin_run_cycle(
+    body: AdminRunCycleRequest,
+    actor: AuthedUser = Depends(require_admin),
+) -> dict[str, object]:
+    """Fire one orchestrator cycle out-of-band and return the result
+    plus the pipeline trace events the cycle produced.
+
+    Refuses (503) until the READY gate has flipped, mirroring the
+    Pro+ ``/api/orchestrator/run-cycle`` endpoint — without this, an
+    operator could trigger a trade against half-loaded predictors.
+    """
+    if not ready_gate.is_ready():
+        raise HTTPException(
+            status_code=503,
+            detail={"status": "not_ready", **ready_gate.status()},
+        )
+    try:
+        cr = await run_cycle(body.vertical)
+    except Exception as e:
+        log.exception("admin manual cycle failed")
+        raise HTTPException(status_code=502, detail=f"cycle error: {e}")
+    # Pull the trace events the cycle just produced from the in-process
+    # ring buffer so the admin UI can render them inline without
+    # subscribing to the WS.
+    all_recent = pipeline_event_hub.recent_events(max_cycles=10)
+    trace = [ev for ev in all_recent if ev.get("cycle_id") == cr.cycle_id]
+    return {
+        "cycle_id": cr.cycle_id,
+        "vertical": cr.vertical,
+        "started_at": cr.started_at,
+        "completed_at": cr.completed_at,
+        "duration_seconds": cr.duration_seconds,
+        "picks_evaluated": cr.picks_evaluated,
+        "trades_placed": cr.trades_placed,
+        "fresh_debates": cr.fresh_debates,
+        "errors": cr.errors,
+        "trace": trace,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Models inventory browser + active-predictor selector (admin-only)
+# ---------------------------------------------------------------------------
+
+
+class AdminSetActiveModelRequest(BaseModel):
+    name: str | None = Field(
+        None,
+        description="Catalog name of the predictor to make active. "
+                    "Pass null/omit to clear the override and fall "
+                    "back to the static priority chain.",
+    )
+
+
+def _model_inventory_payload() -> list[dict[str, object]]:
+    """Build a row per known predictor in the loader catalog.
+
+    Each row carries the version tag, full sha256, on-disk size,
+    last-modified time, plus loaded / last-loaded / active flags so
+    the admin browser can render a single table without further calls.
+    """
+    state = models_loader.get_state()
+    active = predictor.active_model_info() or {}
+    active_name = active.get("name") if active.get("bound") else None
+    override = predictor.get_active_override()
+    rows: list[dict[str, object]] = []
+    for name, meta in sorted(state.predictors.items()):
+        loaded_obj = models_loader.get_loaded_predictor(name)
+        # `loaded_at` is only known for the currently-bound predictor;
+        # for any other smoke-loaded predictor we report the smoke
+        # `load_seconds` timestamp via state.loaded[name].
+        smoke = state.loaded.get(name) if isinstance(state.loaded, dict) else None
+        loaded_seconds = None
+        if isinstance(smoke, dict):
+            loaded_seconds = smoke.get("load_seconds")
+        last_loaded_at = None
+        if active_name == name and active.get("loaded_at"):
+            last_loaded_at = active.get("loaded_at")
+        rows.append({
+            "name": name,
+            "version": str(meta.get("version") or ""),
+            "sha256": str(meta.get("sha256") or ""),
+            "size": int(meta.get("size") or 0),
+            "mtime": float(meta.get("mtime") or 0.0),
+            "loaded": loaded_obj is not None,
+            "last_loaded_at": last_loaded_at,
+            "smoke_load_seconds": loaded_seconds,
+            "is_active": active_name == name,
+            "is_override": override == name,
+        })
+    return rows
+
+
+@app.get("/api/admin/models")
+async def admin_list_models(
+    actor: AuthedUser = Depends(require_admin),
+) -> dict[str, object]:
+    """Predictor catalog + active selection state for the admin browser."""
+    state = models_loader.get_state()
+    return {
+        "items": _model_inventory_payload(),
+        "ready": bool(state.ready),
+        "in_progress": bool(state.in_progress),
+        "active_predictor": predictor.active_model_info(),
+        "active_override": predictor.get_active_override(),
+        "manifest": state.manifest,
+    }
+
+
+@app.post("/api/admin/models/active")
+async def admin_set_active_model(
+    body: AdminSetActiveModelRequest,
+    actor: AuthedUser = Depends(require_admin),
+) -> dict[str, object]:
+    """Persist + apply the operator's choice of active predictor.
+
+    Stores the name in ``system_settings.predictor.active_name`` so the
+    selection survives a restart, then mirrors it into the in-process
+    override and invalidates the cached predictor selection so the
+    next ``predict()`` rebinds.  Audited via ``admin_audit_log``.
+    """
+    name = (body.name or "").strip() or None
+    if name is not None:
+        state = models_loader.get_state()
+        if name not in state.predictors:
+            raise HTTPException(
+                status_code=400,
+                detail=f"unknown predictor name: {name!r}",
+            )
+    actor_email = (await check_approval(actor))[1]
+    before = predictor.get_active_override()
+    try:
+        if name is None:
+            await db.execute(
+                "DELETE FROM system_settings WHERE key = 'predictor.active_name'"
+            )
+        else:
+            await db.execute(
+                """
+                INSERT INTO system_settings (key, value, updated_at)
+                VALUES ('predictor.active_name', $1, now())
+                ON CONFLICT (key) DO UPDATE SET
+                  value = EXCLUDED.value,
+                  updated_at = EXCLUDED.updated_at
+                """,
+                name,
+            )
+    except Exception as e:
+        log.exception("active model persist failed")
+        raise HTTPException(status_code=502, detail=f"persist failed: {e}")
+    predictor.set_active_override(name)
+    try:
+        import json
+        async with db.acquire() as c:
+            await c.execute(
+                """
+                INSERT INTO admin_audit_log (
+                    actor_user_id, actor_email,
+                    target_user_id, target_email,
+                    action, before_value, after_value
+                ) VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7::jsonb)
+                """,
+                actor.user_id,
+                actor_email,
+                "system",
+                None,
+                "set_active_model",
+                json.dumps({"name": before}),
+                json.dumps({"name": name}),
+            )
+    except Exception as e:
+        log.warning("audit log insert (active model) failed: %s", e)
+    return {
+        "items": _model_inventory_payload(),
+        "active_predictor": predictor.active_model_info(),
+        "active_override": predictor.get_active_override(),
+    }
 
 
 @app.get("/api/health")

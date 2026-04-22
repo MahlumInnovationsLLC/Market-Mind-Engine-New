@@ -13,6 +13,7 @@ module only changes the *defaults* that the gates fall back to.
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 from typing import Any
 
 from . import db
@@ -117,6 +118,257 @@ async def set_aggression_mode(mode: str, *, actor_user_id: str | None) -> str:
             actor_user_id,
         )
     return raw
+
+
+# ---------------------------------------------------------------------------
+# Risk-knob editor — operator-tunable per-knob overrides persisted in
+# ``system_settings`` under ``risk.<knob>``.  The orchestrator picks
+# these up via ``_load_operator_overrides`` so changes apply on the
+# next cycle (no restart).  Each value is bounded to the range below
+# so a fat-fingered slider can't disable the gates entirely.
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class _KnobSpec:
+    key: str  # short name (no risk. prefix)
+    label: str
+    description: str
+    minimum: float
+    maximum: float
+    step: float
+    kind: str  # "float" | "int"
+    unit: str  # "pp" | "fraction" | "usd" | "count"
+
+
+RISK_KNOB_SPECS: tuple["_KnobSpec", ...] = (
+    _KnobSpec("min_edge_pp", "Min edge", "Minimum edge in percentage points",
+              0.0, 25.0, 0.5, "float", "pp"),
+    _KnobSpec("kelly_fraction_cap", "Kelly fraction cap",
+              "Fraction of full-Kelly stake the gate will allow",
+              0.05, 1.0, 0.05, "float", "fraction"),
+    _KnobSpec("min_agreement_rate", "Min persona agreement",
+              "Floor on swarm agreement rate before the gate clears",
+              0.0, 1.0, 0.05, "float", "fraction"),
+    _KnobSpec("max_confidence_band", "Max confidence band",
+              "Maximum acceptable consensus confidence-band width",
+              0.05, 0.80, 0.05, "float", "fraction"),
+    _KnobSpec("bankroll_floor_usd", "Bankroll floor",
+              "Refuse to trade when bankroll dips below this",
+              0.0, 100_000.0, 50.0, "float", "usd"),
+    _KnobSpec("global_exposure_cap_pct", "Global exposure cap",
+              "Total open notional + intended as a fraction of bankroll",
+              0.05, 1.0, 0.05, "float", "fraction"),
+    _KnobSpec("per_vertical_cap_pct", "Per-vertical exposure cap",
+              "Per-vertical open notional cap as a fraction of bankroll",
+              0.05, 1.0, 0.05, "float", "fraction"),
+    _KnobSpec("max_concurrent_positions", "Max concurrent positions",
+              "Hard ceiling on simultaneously open positions",
+              1.0, 200.0, 1.0, "int", "count"),
+)
+
+RISK_KNOB_KEYS: frozenset[str] = frozenset(s.key for s in RISK_KNOB_SPECS)
+_KNOB_BY_KEY: dict[str, _KnobSpec] = {s.key: s for s in RISK_KNOB_SPECS}
+
+
+_SYSTEM_SETTINGS_SCHEMA_SQL = """
+CREATE TABLE IF NOT EXISTS system_settings (
+    key         text PRIMARY KEY,
+    value       text,
+    updated_at  timestamptz NOT NULL DEFAULT now()
+);
+"""
+
+_system_settings_ready = False
+
+
+async def _ensure_system_settings_schema() -> None:
+    global _system_settings_ready
+    if _system_settings_ready:
+        return
+    try:
+        async with db.acquire() as c:
+            await c.execute(_SYSTEM_SETTINGS_SCHEMA_SQL)
+        _system_settings_ready = True
+    except Exception as e:
+        log.warning("system_settings ensure_schema failed: %s", e)
+
+
+def _coerce_knob_value(spec: "_KnobSpec", raw: Any) -> float | int:
+    try:
+        v = float(raw)
+    except (TypeError, ValueError) as e:
+        raise ValueError(f"{spec.key}: not numeric ({raw!r})") from e
+    if v < spec.minimum or v > spec.maximum:
+        raise ValueError(
+            f"{spec.key}: {v} outside [{spec.minimum}, {spec.maximum}]"
+        )
+    if spec.kind == "int":
+        return int(round(v))
+    return float(v)
+
+
+async def get_risk_knob_overrides() -> dict[str, float | int]:
+    """Read every ``risk.<knob>`` row currently in ``system_settings``,
+    filtered to the spec keys + coerced to numeric. Missing rows mean
+    the gate falls back to the aggression-mode default."""
+    await _ensure_system_settings_schema()
+    out: dict[str, float | int] = {}
+    try:
+        rows = await db.fetch(
+            "SELECT key, value FROM system_settings WHERE key LIKE 'risk.%'"
+        )
+    except Exception as e:
+        log.debug("risk knob read failed (best-effort): %s", e)
+        return out
+    for r in rows:
+        full = r["key"] or ""
+        short = full[len("risk."):]
+        if short not in RISK_KNOB_KEYS:
+            continue
+        spec = _KNOB_BY_KEY[short]
+        try:
+            out[short] = _coerce_knob_value(spec, r["value"])
+        except Exception:
+            continue
+    return out
+
+
+async def set_risk_knob_overrides(
+    updates: dict[str, Any],
+    *,
+    actor_user_id: str,
+    actor_email: str | None,
+) -> dict[str, float | int]:
+    """Upsert (or clear with value=None) the supplied risk knobs.
+
+    Unknown keys raise ``ValueError`` so a typo can't silently land in
+    ``system_settings``. Each mutation writes an ``admin_audit_log``
+    row with action ``set_risk_knob`` so the existing audit panel
+    surfaces it next to the user / role changes.
+    """
+    if not isinstance(updates, dict):
+        raise ValueError("updates must be a dict")
+    await _ensure_system_settings_schema()
+
+    # Validate everything BEFORE writing so partial failures don't
+    # leave the configuration half-applied.
+    cleaned: dict[str, float | int | None] = {}
+    for key, raw in updates.items():
+        if key not in RISK_KNOB_KEYS:
+            raise ValueError(f"unknown risk knob: {key!r}")
+        if raw is None:
+            cleaned[key] = None
+            continue
+        cleaned[key] = _coerce_knob_value(_KNOB_BY_KEY[key], raw)
+
+    before = await get_risk_knob_overrides()
+
+    async with db.acquire() as c:
+        for key, val in cleaned.items():
+            full = f"risk.{key}"
+            if val is None:
+                await c.execute(
+                    "DELETE FROM system_settings WHERE key = $1", full
+                )
+            else:
+                await c.execute(
+                    """
+                    INSERT INTO system_settings (key, value, updated_at)
+                    VALUES ($1, $2, now())
+                    ON CONFLICT (key) DO UPDATE SET
+                      value = EXCLUDED.value,
+                      updated_at = EXCLUDED.updated_at
+                    """,
+                    full,
+                    str(val),
+                )
+
+    after = await get_risk_knob_overrides()
+    # Audit row — uses the shared admin_audit_log so the existing
+    # admin audit panel renders it. ``target_user_id`` is "system"
+    # since the change isn't scoped to a single user.
+    try:
+        import json
+
+        async with db.acquire() as c:
+            await c.execute(
+                """
+                INSERT INTO admin_audit_log (
+                    actor_user_id, actor_email,
+                    target_user_id, target_email,
+                    action, before_value, after_value
+                ) VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7::jsonb)
+                """,
+                actor_user_id,
+                actor_email,
+                "system",
+                None,
+                "set_risk_knob",
+                json.dumps(before),
+                json.dumps(after),
+            )
+    except Exception as e:
+        log.warning("audit log insert (risk knob) failed: %s", e)
+    return after
+
+
+def risk_knob_specs_payload() -> list[dict[str, Any]]:
+    return [
+        {
+            "key": s.key,
+            "label": s.label,
+            "description": s.description,
+            "minimum": s.minimum,
+            "maximum": s.maximum,
+            "step": s.step,
+            "kind": s.kind,
+            "unit": s.unit,
+        }
+        for s in RISK_KNOB_SPECS
+    ]
+
+
+# Defaults for knobs that don't live in MODE_PROFILES — these mirror
+# the hard-coded fallbacks inside ``risk/gates.py`` so the editor can
+# display a meaningful "default" column for every knob.
+_STATIC_KNOB_DEFAULTS: dict[str, float | int] = {
+    "bankroll_floor_usd": 100.0,
+    "global_exposure_cap_pct": 0.50,
+    "per_vertical_cap_pct": 0.30,
+    "max_concurrent_positions": 25,
+}
+
+
+async def get_risk_knob_state() -> dict[str, Any]:
+    """Combined view for the editor: spec + current override + the
+    aggression-mode default that the override would replace."""
+    overrides = await get_risk_knob_overrides()
+    mode = await get_aggression_mode()
+    profile = profile_for(mode)
+    knobs: list[dict[str, Any]] = []
+    for s in RISK_KNOB_SPECS:
+        default = profile.get(s.key, _STATIC_KNOB_DEFAULTS.get(s.key))
+        ov = overrides.get(s.key)
+        knobs.append(
+            {
+                "key": s.key,
+                "label": s.label,
+                "description": s.description,
+                "minimum": s.minimum,
+                "maximum": s.maximum,
+                "step": s.step,
+                "kind": s.kind,
+                "unit": s.unit,
+                "default_value": default,
+                "override_value": ov,
+                "effective_value": ov if ov is not None else default,
+            }
+        )
+    return {
+        "aggression_mode": mode,
+        "knobs": knobs,
+    }
 
 
 async def get_state() -> dict[str, Any]:

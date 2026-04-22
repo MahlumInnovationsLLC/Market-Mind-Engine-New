@@ -102,10 +102,33 @@ def _latest_versioned(catalog: dict[str, Any]) -> str | None:
     return best[1] if best else None
 
 
+_ACTIVE_OVERRIDE: str | None = None
+
+
+def set_active_override(name: str | None) -> None:
+    """In-process override of the predictor priority chain.
+
+    When set, ``_ensure_active`` will prefer the named predictor before
+    falling back to the static priority list. Persisted in
+    ``system_settings.predictor.active_name`` by the admin "make active"
+    endpoint and re-read on boot — this function is the in-memory
+    mirror so a flip takes effect immediately.
+    """
+    global _ACTIVE_OVERRIDE
+    _ACTIVE_OVERRIDE = name or None
+    invalidate()
+
+
+def get_active_override() -> str | None:
+    return _ACTIVE_OVERRIDE
+
+
 def _priority_chain() -> list[str]:
     """Resolve the per-call selection priority against the live catalog."""
     state = models_loader.get_state()
     chain: list[str] = []
+    if _ACTIVE_OVERRIDE:
+        chain.append(_ACTIVE_OVERRIDE)
     chain.append(_STATIC_PRIORITY[0])              # saved/meta_model.pkl
     latest = _latest_versioned(state.predictors)   # versions/vN/meta_model.pkl
     if latest:
