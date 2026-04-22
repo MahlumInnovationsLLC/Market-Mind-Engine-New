@@ -268,6 +268,88 @@ def test_per_vertical_cap_rejects_correlated_overflow():
     assert "SILVER" in res.details["pair_contributions"]
 
 
+def test_end_to_end_predictor_from_bars(monkeypatch):
+    """End-to-end cold path: synthetic bars -> commodities_ohlcv stub
+    -> predict_commodity_binary -> Prediction.
+
+    Validates the full pipeline including model loader fallback to
+    baseline, calibrator application (no-op in test env), and the
+    Prediction dataclass shape orchestrator consumes.
+    """
+    from app.commodities import predictor as cp
+
+    bars = _synthetic_bars(n=80, base=75.0, trend=0.0015)
+    db_rows = [
+        {"ts": b["ts"], "o": b["o"], "h": b["h"],
+         "l": b["l"], "c": b["c"], "v": b["v"]}
+        for b in reversed(bars)  # build_commodity_features fetches DESC then re-reverses
+    ]
+
+    async def fake_fetch(query, *args, **kwargs):
+        return db_rows
+
+    monkeypatch.setattr(cp, "build_commodity_features",
+                        cp.build_commodity_features)  # keep real builder
+    from app import db as app_db
+    monkeypatch.setattr(app_db, "fetch", fake_fetch)
+
+    pred = asyncio.run(cp.predict_commodity_binary("KXOIL-26APR-T80"))
+    assert 0.0 <= pred.probability <= 1.0
+    assert pred.model_name.startswith("commodities:1d:")
+    assert pred.elapsed_ms is not None and pred.elapsed_ms >= 0
+    raw = pred.raw or {}
+    assert raw["ticker"]["symbol"] == "WTI"
+    assert raw["ticker"]["timeframe"] == "1d"
+    assert raw["ticker"]["threshold"] == 80.0
+    assert raw["feature_count"] == FEATURE_COUNT
+    assert raw["feature_present"] == len(db_rows)
+    assert "calibration" in raw
+
+
+def test_end_to_end_predictor_handles_missing_bars(monkeypatch):
+    """Empty OHLCV cache must surface as CommodityPredictionError so the
+    cycle's `_predict_for_commodities_binary` branch can degrade to
+    swarm-only signals (rather than crash the orchestrator)."""
+    from app.commodities import predictor as cp
+    from app import db as app_db
+
+    async def empty_fetch(query, *args, **kwargs):
+        return []
+
+    monkeypatch.setattr(app_db, "fetch", empty_fetch)
+    with pytest.raises(cp.CommodityPredictionError):
+        asyncio.run(cp.predict_commodity_binary("KXOIL-26APR-T80"))
+
+
+def test_upsert_bars_writes_rows(monkeypatch):
+    """Feed-side smoke test: upsert_bars hands each bar to db.execute
+    and reports the count of rows touched.  Guards against silent
+    breakage of the (symbol, granularity, ts) UPSERT path."""
+    from app.feeds import commodities as feed
+    from app import db as app_db
+
+    calls: list[tuple] = []
+
+    async def fake_execute(query, *args, **kwargs):
+        calls.append(args)
+
+    monkeypatch.setattr(app_db, "execute", fake_execute)
+    bars = [
+        {"ts": datetime.now(timezone.utc), "o": 75.0, "h": 75.5,
+         "l": 74.8, "c": 75.2, "v": 1000.0},
+        {"ts": datetime.now(timezone.utc), "o": 75.2, "h": 75.6,
+         "l": 75.0, "c": 75.4, "v": 1100.0},
+    ]
+    n = asyncio.run(feed.upsert_bars("WTI", "1h", bars, source="test"))
+    assert n == 2
+    assert len(calls) == 2
+    # Validates the binding order matches the SQL: symbol, granularity, ts, o, h, l, c, v, source
+    args0 = calls[0]
+    assert args0[0] == "WTI"
+    assert args0[1] == "1h"
+    assert args0[8] == "test"
+
+
 def test_per_vertical_cap_correlation_ignores_uncorrelated_sym():
     """Heavy COFFEE exposure must NOT trip a GOLD candidate (rho=0)."""
     ctx = _commodities_ctx(
