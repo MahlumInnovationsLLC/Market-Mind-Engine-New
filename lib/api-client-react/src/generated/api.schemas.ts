@@ -147,6 +147,13 @@ export interface TradingCycleList {
   items: TradingCycle[];
 }
 
+export type SwarmDebateAnalystVerdicts =
+  | { [key: string]: unknown }[]
+  | { [key: string]: unknown }
+  | null;
+
+export type SwarmDebateModeratorSynthesis = { [key: string]: unknown } | null;
+
 export interface SwarmDebate {
   id: number;
   league?: string | null;
@@ -162,10 +169,28 @@ export interface SwarmDebate {
   cost_estimate?: number | null;
   latency_ms?: number | null;
   created_at?: string | null;
+  analyst_verdicts?: SwarmDebateAnalystVerdicts;
+  moderator_synthesis?: SwarmDebateModeratorSynthesis;
+  redacted?: boolean | null;
 }
 
 export interface SwarmDebateList {
   items: SwarmDebate[];
+  tier?: string | null;
+}
+
+export interface LiveExecuteState {
+  enabled: boolean;
+  effective_mode: string;
+  env_mode: string;
+  db_mode?: string | null;
+  source: string;
+  caller_tier: string;
+  can_toggle: boolean;
+}
+
+export interface LiveExecuteToggleRequest {
+  enabled: boolean;
 }
 
 export interface StorageFile {

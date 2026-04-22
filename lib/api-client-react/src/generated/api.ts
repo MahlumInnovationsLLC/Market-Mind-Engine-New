@@ -38,6 +38,8 @@ import type {
   GetRecentTradesParams,
   HealthStatus,
   ListModelHealthAlertsParams,
+  LiveExecuteState,
+  LiveExecuteToggleRequest,
   MarketTitle,
   ModelHealthAlertList,
   ModelsInventory,
@@ -2104,6 +2106,168 @@ export function useAdminGetAuditLog<
 
   return { ...query, queryKey: queryOptions.queryKey };
 }
+
+/**
+ * @summary Effective live-execute state + caller's permission to flip it
+ */
+export const getGetLiveExecuteStateUrl = () => {
+  return `/api/orchestrator/live-execute`;
+};
+
+export const getLiveExecuteState = async (
+  options?: RequestInit,
+): Promise<LiveExecuteState> => {
+  return customFetch<LiveExecuteState>(getGetLiveExecuteStateUrl(), {
+    ...options,
+    method: "GET",
+  });
+};
+
+export const getGetLiveExecuteStateQueryKey = () => {
+  return [`/api/orchestrator/live-execute`] as const;
+};
+
+export const getGetLiveExecuteStateQueryOptions = <
+  TData = Awaited<ReturnType<typeof getLiveExecuteState>>,
+  TError = ErrorType<unknown>,
+>(options?: {
+  query?: UseQueryOptions<
+    Awaited<ReturnType<typeof getLiveExecuteState>>,
+    TError,
+    TData
+  >;
+  request?: SecondParameter<typeof customFetch>;
+}) => {
+  const { query: queryOptions, request: requestOptions } = options ?? {};
+
+  const queryKey = queryOptions?.queryKey ?? getGetLiveExecuteStateQueryKey();
+
+  const queryFn: QueryFunction<
+    Awaited<ReturnType<typeof getLiveExecuteState>>
+  > = ({ signal }) => getLiveExecuteState({ signal, ...requestOptions });
+
+  return { queryKey, queryFn, ...queryOptions } as UseQueryOptions<
+    Awaited<ReturnType<typeof getLiveExecuteState>>,
+    TError,
+    TData
+  > & { queryKey: QueryKey };
+};
+
+export type GetLiveExecuteStateQueryResult = NonNullable<
+  Awaited<ReturnType<typeof getLiveExecuteState>>
+>;
+export type GetLiveExecuteStateQueryError = ErrorType<unknown>;
+
+/**
+ * @summary Effective live-execute state + caller's permission to flip it
+ */
+
+export function useGetLiveExecuteState<
+  TData = Awaited<ReturnType<typeof getLiveExecuteState>>,
+  TError = ErrorType<unknown>,
+>(options?: {
+  query?: UseQueryOptions<
+    Awaited<ReturnType<typeof getLiveExecuteState>>,
+    TError,
+    TData
+  >;
+  request?: SecondParameter<typeof customFetch>;
+}): UseQueryResult<TData, TError> & { queryKey: QueryKey } {
+  const queryOptions = getGetLiveExecuteStateQueryOptions(options);
+
+  const query = useQuery(queryOptions) as UseQueryResult<TData, TError> & {
+    queryKey: QueryKey;
+  };
+
+  return { ...query, queryKey: queryOptions.queryKey };
+}
+
+/**
+ * @summary Toggle live-execute on or off (Elite-only)
+ */
+export const getSetLiveExecuteStateUrl = () => {
+  return `/api/orchestrator/live-execute`;
+};
+
+export const setLiveExecuteState = async (
+  liveExecuteToggleRequest: LiveExecuteToggleRequest,
+  options?: RequestInit,
+): Promise<LiveExecuteState> => {
+  return customFetch<LiveExecuteState>(getSetLiveExecuteStateUrl(), {
+    ...options,
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...options?.headers },
+    body: JSON.stringify(liveExecuteToggleRequest),
+  });
+};
+
+export const getSetLiveExecuteStateMutationOptions = <
+  TError = ErrorType<void>,
+  TContext = unknown,
+>(options?: {
+  mutation?: UseMutationOptions<
+    Awaited<ReturnType<typeof setLiveExecuteState>>,
+    TError,
+    { data: BodyType<LiveExecuteToggleRequest> },
+    TContext
+  >;
+  request?: SecondParameter<typeof customFetch>;
+}): UseMutationOptions<
+  Awaited<ReturnType<typeof setLiveExecuteState>>,
+  TError,
+  { data: BodyType<LiveExecuteToggleRequest> },
+  TContext
+> => {
+  const mutationKey = ["setLiveExecuteState"];
+  const { mutation: mutationOptions, request: requestOptions } = options
+    ? options.mutation &&
+      "mutationKey" in options.mutation &&
+      options.mutation.mutationKey
+      ? options
+      : { ...options, mutation: { ...options.mutation, mutationKey } }
+    : { mutation: { mutationKey }, request: undefined };
+
+  const mutationFn: MutationFunction<
+    Awaited<ReturnType<typeof setLiveExecuteState>>,
+    { data: BodyType<LiveExecuteToggleRequest> }
+  > = (props) => {
+    const { data } = props ?? {};
+
+    return setLiveExecuteState(data, requestOptions);
+  };
+
+  return { mutationFn, ...mutationOptions };
+};
+
+export type SetLiveExecuteStateMutationResult = NonNullable<
+  Awaited<ReturnType<typeof setLiveExecuteState>>
+>;
+export type SetLiveExecuteStateMutationBody =
+  BodyType<LiveExecuteToggleRequest>;
+export type SetLiveExecuteStateMutationError = ErrorType<void>;
+
+/**
+ * @summary Toggle live-execute on or off (Elite-only)
+ */
+export const useSetLiveExecuteState = <
+  TError = ErrorType<void>,
+  TContext = unknown,
+>(options?: {
+  mutation?: UseMutationOptions<
+    Awaited<ReturnType<typeof setLiveExecuteState>>,
+    TError,
+    { data: BodyType<LiveExecuteToggleRequest> },
+    TContext
+  >;
+  request?: SecondParameter<typeof customFetch>;
+}): UseMutationResult<
+  Awaited<ReturnType<typeof setLiveExecuteState>>,
+  TError,
+  { data: BodyType<LiveExecuteToggleRequest> },
+  TContext
+> => {
+  return useMutation(getSetLiveExecuteStateMutationOptions(options));
+};
 
 /**
  * @summary The signed-in user's effective subscription / tier

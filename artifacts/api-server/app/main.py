@@ -1166,11 +1166,26 @@ async def dashboard_recent_cycles(
 @app.get("/api/dashboard/recent-debates")
 async def dashboard_recent_debates(
     limit: int = 10,
-    _: object = Depends(billing.require_tier(billing.TIER_PRO)),
+    user: AuthedUser = Depends(require_auth),
 ) -> dict[str, object]:
-    """Full LLM swarm transcripts — gated to Pro+ subscribers (founders bypass)."""
+    """LLM swarm debates feed.
+
+    Free / unpaid callers receive a redacted view: consensus, agreement,
+    verdict, and timing — but no per-persona reasoning and no moderator
+    narrative.  Pro+ (and founders) get the full transcript.  We never
+    403 here; the dashboard is meant to render *something* for every
+    signed-in user, with an upsell rendered against ``redacted=true``
+    items.
+    """
     limit = max(1, min(100, int(limit)))
-    return {"items": await dashboard.get_recent_swarm_debates(limit)}
+    items = await dashboard.get_recent_swarm_debates(limit)
+    sub = await billing.get_user_subscription(user)
+    if billing._TIER_RANK[sub.tier] < billing._TIER_RANK[billing.TIER_PRO]:
+        items = dashboard.redact_swarm_debate_transcripts(items)
+    else:
+        for it in items:
+            it.setdefault("redacted", False)
+    return {"items": items, "tier": sub.tier}
 
 
 # ---------------------------------------------------------------------------
@@ -1230,6 +1245,21 @@ async def ws_llm_logs(ws: WebSocket) -> None:
     user = await ws_authenticate(ws)
     if user is None and auth_configured():
         return
+    # Real-time persona deltas leak the same reasoning the redacted
+    # transcript endpoint hides — gate the live stream to Pro+ so
+    # watching the WS isn't a free-tier escape hatch.
+    if user is not None:
+        try:
+            sub = await billing.get_user_subscription(user)
+        except Exception as e:
+            log.warning("ws/llm-logs subscription lookup failed: %s", e)
+            await ws.close(code=1011)
+            return
+        if billing._TIER_RANK[sub.tier] < billing._TIER_RANK[billing.TIER_PRO]:
+            # 4403 = "policy violation, subscription required"; matches
+            # the convention used elsewhere for tier-gated WebSockets.
+            await ws.close(code=4403, reason="pro_tier_required")
+            return
     q = llm_log_hub.subscribe()
     try:
         while True:
@@ -1279,6 +1309,109 @@ async def orchestrator_run_cycle(
         "trades_placed": cr.trades_placed,
         "fresh_debates": cr.fresh_debates,
         "errors": cr.errors,
+    }
+
+
+class LiveExecuteToggleRequest(BaseModel):
+    enabled: bool
+
+
+async def _read_live_execute_db_mode() -> str | None:
+    """Operator override of ``trading_mode`` from ``system_settings``.
+
+    Same key the kill-switch gate consults via ``_load_operator_overrides``
+    so the dashboard reflects whatever the gate is about to honour.
+    Returns ``None`` if the row is missing or the table doesn't exist.
+    """
+    try:
+        v = await db.fetchval(
+            "SELECT value FROM system_settings WHERE key = 'risk.trading_mode'"
+        )
+    except Exception as e:
+        log.debug("live-execute db read failed (best-effort): %s", e)
+        return None
+    return str(v).lower() if v is not None else None
+
+
+def _live_execute_payload(
+    db_mode: str | None,
+    sub_tier: str,
+) -> dict[str, object]:
+    settings = get_settings()
+    env_mode = (settings.trading_mode or "paper").lower()
+    effective = (db_mode or env_mode).lower()
+    return {
+        "enabled": effective == "live",
+        "effective_mode": effective,
+        "env_mode": env_mode,
+        "db_mode": db_mode,
+        "source": "db" if db_mode else "env",
+        "caller_tier": sub_tier,
+        "can_toggle": (
+            billing._TIER_RANK[sub_tier] >= billing._TIER_RANK[billing.TIER_ELITE]
+        ),
+    }
+
+
+@app.get("/api/orchestrator/live-execute")
+async def orchestrator_live_execute_state(
+    user: AuthedUser = Depends(require_auth),
+) -> dict[str, object]:
+    """Current live-execute state.
+
+    Readable by every signed-in user (so the dashboard can render the
+    indicator), but the ``can_toggle`` flag is only true for Elite+ —
+    the same tier the ``POST`` requires.
+    """
+    sub = await billing.get_user_subscription(user)
+    db_mode = await _read_live_execute_db_mode()
+    return _live_execute_payload(db_mode, sub.tier)
+
+
+@app.post("/api/orchestrator/live-execute")
+async def orchestrator_live_execute_toggle(
+    body: LiveExecuteToggleRequest,
+    sub: billing.UserSubscription = Depends(billing.require_tier(billing.TIER_ELITE)),
+) -> dict[str, object]:
+    """Flip live-execute on or off.  Elite-only — sub-Elite callers get
+    the standard ``tier_required`` 403 from :func:`billing.require_tier`.
+
+    Persists into ``system_settings.risk.trading_mode`` which the
+    kill-switch gate already honours (operator override beats env).
+    """
+    new_mode = "live" if body.enabled else "paper"
+    try:
+        await db.execute(
+            """
+            INSERT INTO system_settings (key, value, updated_at)
+            VALUES ('risk.trading_mode', $1, now())
+            ON CONFLICT (key) DO UPDATE
+              SET value = EXCLUDED.value,
+                  updated_at = EXCLUDED.updated_at
+            """,
+            new_mode,
+        )
+    except Exception as e:
+        log.exception("live-execute toggle failed")
+        raise HTTPException(status_code=502, detail=f"toggle write failed: {e}")
+    log.info(
+        "live-execute toggled to %s by %s (tier=%s)",
+        new_mode,
+        sub.user_id,
+        sub.tier,
+    )
+    db_mode = await _read_live_execute_db_mode()
+    settings = get_settings()
+    env_mode = (settings.trading_mode or "paper").lower()
+    effective = (db_mode or env_mode).lower()
+    return {
+        "enabled": effective == "live",
+        "effective_mode": effective,
+        "env_mode": env_mode,
+        "db_mode": db_mode,
+        "source": "db" if db_mode else "env",
+        "caller_tier": sub.tier,
+        "can_toggle": True,
     }
 
 

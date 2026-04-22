@@ -65,6 +65,7 @@ PROTECTED_ROUTES: tuple[str, ...] = (
     "/api/kalshi/orders/resting",
     "/api/kalshi/kill-switch",
     "/api/admin/access-requests",
+    "/api/orchestrator/live-execute",
 )
 
 # Mutating endpoints — auth-protected but only accept POST.  We don't

@@ -5,6 +5,8 @@
  * Axiom-Predict API — backend for the prediction-market trading platform.
  * OpenAPI spec version: 0.1.0
  */
+import type { SwarmDebateAnalystVerdicts } from "./swarmDebateAnalystVerdicts";
+import type { SwarmDebateModeratorSynthesis } from "./swarmDebateModeratorSynthesis";
 
 export interface SwarmDebate {
   id: number;
@@ -21,4 +23,7 @@ export interface SwarmDebate {
   cost_estimate?: number | null;
   latency_ms?: number | null;
   created_at?: string | null;
+  analyst_verdicts?: SwarmDebateAnalystVerdicts;
+  moderator_synthesis?: SwarmDebateModeratorSynthesis;
+  redacted?: boolean | null;
 }

@@ -228,8 +228,17 @@ export const GetRecentDebatesResponse = zod.object({
       cost_estimate: zod.number().nullish(),
       latency_ms: zod.number().nullish(),
       created_at: zod.string().nullish(),
+      analyst_verdicts: zod
+        .union([
+          zod.array(zod.record(zod.string(), zod.unknown())),
+          zod.record(zod.string(), zod.unknown()),
+        ])
+        .nullish(),
+      moderator_synthesis: zod.record(zod.string(), zod.unknown()).nullish(),
+      redacted: zod.boolean().nullish(),
     }),
   ),
+  tier: zod.string().nullish(),
 });
 
 /**
@@ -655,6 +664,36 @@ export const AdminGetAuditLogResponse = zod.object({
       created_at: zod.string().nullish(),
     }),
   ),
+});
+
+/**
+ * @summary Effective live-execute state + caller's permission to flip it
+ */
+export const GetLiveExecuteStateResponse = zod.object({
+  enabled: zod.boolean(),
+  effective_mode: zod.string(),
+  env_mode: zod.string(),
+  db_mode: zod.string().nullish(),
+  source: zod.string(),
+  caller_tier: zod.string(),
+  can_toggle: zod.boolean(),
+});
+
+/**
+ * @summary Toggle live-execute on or off (Elite-only)
+ */
+export const SetLiveExecuteStateBody = zod.object({
+  enabled: zod.boolean(),
+});
+
+export const SetLiveExecuteStateResponse = zod.object({
+  enabled: zod.boolean(),
+  effective_mode: zod.string(),
+  env_mode: zod.string(),
+  db_mode: zod.string().nullish(),
+  source: zod.string(),
+  caller_tier: zod.string(),
+  can_toggle: zod.boolean(),
 });
 
 /**

@@ -9,4 +9,5 @@ import type { SwarmDebate } from "./swarmDebate";
 
 export interface SwarmDebateList {
   items: SwarmDebate[];
+  tier?: string | null;
 }

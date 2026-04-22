@@ -11,6 +11,7 @@ import RecentTrades from "@/components/telemetry/recent-trades";
 import SwarmAnalysts from "@/components/telemetry/swarm-analysts";
 import TradingCycles from "@/components/telemetry/trading-cycles";
 import SwarmDebates from "@/components/telemetry/swarm-debates";
+import LiveExecuteToggle from "@/components/telemetry/live-execute-toggle";
 import ModelInventory from "@/components/telemetry/model-inventory";
 import ActiveModelBadge from "@/components/telemetry/active-model-badge";
 import SettlementPanel from "@/components/telemetry/settlement-panel";
@@ -87,6 +88,7 @@ export default function Dashboard() {
         {/* Left Column - Health & Stats */}
         <div className="xl:col-span-3 space-y-6">
           <HealthSnapshot />
+          <LiveExecuteToggle />
           {isAdmin && <AccessRequests />}
           <TopCounters />
           <ModelInventory />

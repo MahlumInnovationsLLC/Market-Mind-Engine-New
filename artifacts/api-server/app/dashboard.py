@@ -260,6 +260,13 @@ async def get_public_stats() -> dict[str, Any]:
 
 
 async def get_recent_swarm_debates(limit: int = 10) -> list[dict[str, Any]]:
+    """Recent swarm-debate rows including the per-persona ``analyst_verdicts``
+    and ``moderator_synthesis`` jsonb columns.
+
+    The transcript columns are returned raw — the calling endpoint is
+    responsible for redacting them for sub-Pro callers (see
+    :func:`redact_swarm_debate_transcripts`).
+    """
     try:
         rows = await db.fetch(
             """
@@ -277,6 +284,8 @@ async def get_recent_swarm_debates(limit: int = 10) -> list[dict[str, Any]]:
               outcome,
               cost_estimate,
               latency_ms,
+              analyst_verdicts,
+              moderator_synthesis,
               to_char(created_at, 'YYYY-MM-DD"T"HH24:MI:SSZ') AS created_at
             FROM swarm_debates
             ORDER BY created_at DESC NULLS LAST
@@ -288,3 +297,20 @@ async def get_recent_swarm_debates(limit: int = 10) -> list[dict[str, Any]]:
     except Exception as e:
         log.warning("recent_swarm_debates failed: %s", e)
         return []
+
+
+def redact_swarm_debate_transcripts(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Drop the per-persona reasoning + moderator narrative from each item
+    and stamp ``redacted: True`` so the frontend can show an upsell.
+
+    Sub-Pro callers see the consensus + verdict (already public-safe on
+    the marketing site) but never the raw persona reasoning.
+    """
+    out: list[dict[str, Any]] = []
+    for it in items:
+        clone = dict(it)
+        clone.pop("analyst_verdicts", None)
+        clone.pop("moderator_synthesis", None)
+        clone["redacted"] = True
+        out.append(clone)
+    return out

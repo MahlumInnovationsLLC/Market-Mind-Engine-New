@@ -43,6 +43,7 @@ export default function BillingPage() {
   const subQuery = useGetMySubscription({
     query: {
       enabled: !!isSignedIn,
+      queryKey: getGetMySubscriptionQueryKey(),
     },
   });
   const sub = subQuery.data ?? null;

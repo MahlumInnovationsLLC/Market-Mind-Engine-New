@@ -397,6 +397,35 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/AdminAuditLogList" }
 
+  /orchestrator/live-execute:
+    get:
+      operationId: getLiveExecuteState
+      tags: [orchestrator]
+      summary: Effective live-execute state + caller's permission to flip it
+      responses:
+        "200":
+          description: Live-execute state
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/LiveExecuteState" }
+    post:
+      operationId: setLiveExecuteState
+      tags: [orchestrator]
+      summary: Toggle live-execute on or off (Elite-only)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/LiveExecuteToggleRequest" }
+      responses:
+        "200":
+          description: Updated live-execute state
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/LiveExecuteState" }
+        "403":
+          description: Caller's tier is below Elite
+
   /me/subscription:
     get:
       operationId: getMySubscription
@@ -660,6 +689,22 @@ components:
         cost_estimate: { type: number, nullable: true }
         latency_ms: { type: number, nullable: true }
         created_at: { type: string, nullable: true }
+        # Per-persona reasoning + moderator narrative.  Only populated
+        # for Pro+ callers; sub-Pro callers get null + redacted=true.
+        analyst_verdicts:
+          nullable: true
+          oneOf:
+            - type: array
+              items:
+                type: object
+                additionalProperties: true
+            - type: object
+              additionalProperties: true
+        moderator_synthesis:
+          nullable: true
+          type: object
+          additionalProperties: true
+        redacted: { type: boolean, nullable: true }
       required: [id]
 
     SwarmDebateList:
@@ -668,7 +713,26 @@ components:
         items:
           type: array
           items: { $ref: "#/components/schemas/SwarmDebate" }
+        tier: { type: string, nullable: true }
       required: [items]
+
+    LiveExecuteState:
+      type: object
+      properties:
+        enabled: { type: boolean }
+        effective_mode: { type: string }
+        env_mode: { type: string }
+        db_mode: { type: string, nullable: true }
+        source: { type: string }
+        caller_tier: { type: string }
+        can_toggle: { type: boolean }
+      required: [enabled, effective_mode, env_mode, source, caller_tier, can_toggle]
+
+    LiveExecuteToggleRequest:
+      type: object
+      properties:
+        enabled: { type: boolean }
+      required: [enabled]
 
     StorageFile:
       type: object
