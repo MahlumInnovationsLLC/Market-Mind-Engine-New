@@ -307,6 +307,16 @@ def build_features(
         ("agreement_rate", _lookup(candidate, ctx, key="agreement_rate")),
         ("league", candidate.get("league") or ctx.get("league")),
         ("market_type", candidate.get("market_type") or ctx.get("market_type")),
+        # Internal Elo signals — not part of the meta-model's fixed
+        # 32-feature vector (which would break trained-model alignment),
+        # but exposed via `present` so sports-specific predictors and
+        # the dashboard can read them off the candidate payload.
+        ("team_elo", _lookup(candidate, ctx, key="team_elo")),
+        ("opponent_elo", _lookup(candidate, ctx, key="opponent_elo")),
+        ("elo_diff", _lookup(candidate, ctx, key="elo_diff")),
+        ("recent_form_delta", _lookup(candidate, ctx, key="recent_form_delta")),
+        ("opponent_recent_form_delta",
+         _lookup(candidate, ctx, key="opponent_recent_form_delta")),
     ):
         if raw_value is not None:
             try:

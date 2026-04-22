@@ -10,6 +10,7 @@ from typing import Any
 
 from .. import db, predictor
 from ..config import get_settings
+from ..elo import attach_elo_to_candidate
 from ..risk import RiskContext, run_all_gates
 from ..swarm import run_debate
 from .features import build_features
@@ -448,6 +449,17 @@ async def run_cycle(vertical: str = "sports") -> CycleResult:
         except Exception as e:
             result.errors.append(f"fresh debate failed for {pred.get('game_id')}: {e}")
             log.warning("fresh debate failed: %s", e)
+
+    # 2.5) Best-effort enrichment: attach internal Elo features to each
+    # candidate's game_context so sports predictors and the dashboard
+    # see team_elo / opponent_elo / recent_form_delta alongside the
+    # other inputs.  Silently no-ops when team names or league are
+    # missing or the elo tables aren't reachable.
+    for cand in candidates:
+        try:
+            await attach_elo_to_candidate(cand)
+        except Exception as e:
+            log.debug("elo enrichment failed for %s: %s", cand.get("game_id"), e)
 
     # 3) Evaluate every candidate against the 12 gates.
     for cand in candidates:
