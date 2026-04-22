@@ -9,6 +9,8 @@ from datetime import datetime, timezone
 from typing import Any
 
 from .. import db, margin_regressor, predictor
+from ..crypto import predictor as crypto_predictor
+from ..crypto.tickers import InvalidCryptoTicker, parse_crypto_ticker
 from ..config import get_settings
 from ..elo import attach_elo_to_candidate
 from ..risk import RiskContext, run_all_gates
@@ -38,6 +40,11 @@ VERTICAL_LEAGUES: dict[str, list[str]] = {
     "sports": [],  # all leagues
     "weather": ["WEATHER"],
     "crypto": ["CRYPTO"],
+    # The crypto-binary vertical is the BTC/ETH "closes above K" stack
+    # served by `app.crypto.predictor` (5m/15m/1h LGB+XGB ensembles +
+    # GRU directional blend).  Both verticals filter on the CRYPTO
+    # league code so a single OHLCV feed primes either pipeline.
+    "crypto-binary": ["CRYPTO"],
     "politics": ["POLITICS"],
 }
 
@@ -299,12 +306,46 @@ async def _publish(event: dict[str, Any]) -> None:
     await pipeline_event_hub.publish(event)
 
 
+async def _predict_for_crypto_binary(cand: dict[str, Any]) -> dict[str, Any] | None:
+    """Route a crypto-binary candidate through `app.crypto.predictor`.
+
+    Returns the prediction's `as_dict()` payload (so the cycle's
+    downstream telemetry/gates see the same shape they get from the
+    generic predictor) or None when the ticker can't be parsed or the
+    OHLCV window is missing.  Both failure modes degrade to swarm-only
+    signals — same fallback the meta-model path uses.
+    """
+    market_id = _resolve_market_id(cand) or cand.get("kalshi_market_id")
+    if not market_id:
+        return None
+    try:
+        ticker = parse_crypto_ticker(str(market_id))
+    except InvalidCryptoTicker as e:
+        log.debug("crypto ticker parse failed for %s: %s", market_id, e)
+        return None
+    try:
+        pred = await crypto_predictor.predict_crypto_binary(
+            ticker, league=cand.get("league") or "CRYPTO"
+        )
+    except crypto_predictor.CryptoPredictionError as e:
+        log.debug("crypto predict failed for %s: %s", market_id, e)
+        return None
+    except Exception as e:  # pragma: no cover — defensive
+        log.warning("crypto predict crashed for %s: %s", market_id, e)
+        return None
+    payload = pred.as_dict()
+    payload["feature_inputs"] = payload.get("raw", {}).get("features", {})
+    payload["feature_count"] = payload.get("raw", {}).get("feature_count")
+    return payload
+
+
 async def _predict_for_candidate(
     cand: dict[str, Any],
     *,
     consensus: float | None,
     current_price: float | None,
     edge: float | None,
+    vertical: str = "sports",
 ) -> dict[str, Any] | None:
     """Run the active canonical predictor on a candidate's signals.
 
@@ -321,6 +362,12 @@ async def _predict_for_candidate(
     logged at debug — a sick model must NOT take down the trading loop,
     the loop just falls back to swarm-only signals.
     """
+    # The crypto-binary vertical has its own OHLCV-driven feature builder
+    # and dedicated ensemble + GRU stack — bypass the meta-model entirely
+    # and surface the crypto Prediction payload to the rest of the cycle.
+    if vertical.lower() == "crypto-binary":
+        return await _predict_for_crypto_binary(cand)
+
     fv = build_features(
         cand,
         consensus=consensus,
@@ -546,6 +593,7 @@ async def run_cycle(vertical: str = "sports") -> CycleResult:
             consensus=consensus,
             current_price=current_price,
             edge=pre_edge,
+            vertical=vertical,
         )
         # If swarm consensus is missing, fall back to the live model
         # probability so the gates still get a real number to chew on —
