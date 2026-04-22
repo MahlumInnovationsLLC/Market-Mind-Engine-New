@@ -622,6 +622,75 @@ export interface AdminAuditLogList {
   items: AdminAuditLogEntry[];
 }
 
+export type AutoResearchFeatureStatus =
+  (typeof AutoResearchFeatureStatus)[keyof typeof AutoResearchFeatureStatus];
+
+export const AutoResearchFeatureStatus = {
+  shadow: "shadow",
+  production: "production",
+  rejected: "rejected",
+} as const;
+
+export type AutoResearchFeatureMetadata = { [key: string]: unknown };
+
+export interface AutoResearchFeature {
+  id: number;
+  name: string;
+  vertical: string;
+  signal_type: string;
+  aggregator: string;
+  status: AutoResearchFeatureStatus;
+  ic?: number | null;
+  sharpe?: number | null;
+  monotonicity?: number | null;
+  n_samples?: number | null;
+  last_evaluated_at?: string | null;
+  promoted_at?: string | null;
+  promoted_by?: string | null;
+  rejected_at?: string | null;
+  rejected_by?: string | null;
+  metadata?: AutoResearchFeatureMetadata;
+  created_at?: string | null;
+}
+
+export type AutoResearchSchedulerStatusLastRun = { [key: string]: unknown };
+
+export interface AutoResearchSchedulerStatus {
+  enabled: boolean;
+  running: boolean;
+  interval_seconds: number;
+  last_run?: AutoResearchSchedulerStatusLastRun;
+}
+
+export interface AutoResearchFeatureList {
+  items: AutoResearchFeature[];
+  scheduler: AutoResearchSchedulerStatus;
+}
+
+export type AutoResearchDecisionRequestDecision =
+  (typeof AutoResearchDecisionRequestDecision)[keyof typeof AutoResearchDecisionRequestDecision];
+
+export const AutoResearchDecisionRequestDecision = {
+  promote: "promote",
+  reject: "reject",
+  reset: "reset",
+} as const;
+
+export interface AutoResearchDecisionRequest {
+  decision: AutoResearchDecisionRequestDecision;
+}
+
+export interface AutoResearchRunResult {
+  started_at: string;
+  completed_at: string;
+  duration_seconds: number;
+  verticals_examined: number;
+  candidates_evaluated: number;
+  candidates_persisted: number;
+  insufficient_samples: number;
+  errors: string[];
+}
+
 export type UserSubscriptionTier =
   (typeof UserSubscriptionTier)[keyof typeof UserSubscriptionTier];
 
@@ -794,3 +863,17 @@ export type AdminGetAuditLogParams = {
    */
   limit?: number;
 };
+
+export type AdminAutoResearchListFeaturesParams = {
+  status?: AdminAutoResearchListFeaturesStatus;
+  vertical?: string;
+};
+
+export type AdminAutoResearchListFeaturesStatus =
+  (typeof AdminAutoResearchListFeaturesStatus)[keyof typeof AdminAutoResearchListFeaturesStatus];
+
+export const AdminAutoResearchListFeaturesStatus = {
+  shadow: "shadow",
+  production: "production",
+  rejected: "rejected",
+} as const;

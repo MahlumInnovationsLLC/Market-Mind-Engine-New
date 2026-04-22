@@ -471,6 +471,61 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/AdminAuditLogList" }
 
+  /admin/autoresearch/features:
+    get:
+      operationId: adminAutoResearchListFeatures
+      tags: [admin]
+      summary: List AutoResearch-discovered candidate features (UW signals)
+      parameters:
+        - in: query
+          name: status
+          schema: { type: string, enum: [shadow, production, rejected] }
+        - in: query
+          name: vertical
+          schema: { type: string }
+      responses:
+        "200":
+          description: Candidate features + scheduler status
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AutoResearchFeatureList" }
+
+  /admin/autoresearch/features/{name}/decision:
+    post:
+      operationId: adminAutoResearchDecide
+      tags: [admin]
+      summary: Promote / reject / reset a discovered candidate feature
+      parameters:
+        - in: path
+          name: name
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AutoResearchDecisionRequest" }
+      responses:
+        "200":
+          description: Updated candidate
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AutoResearchFeature" }
+        "404":
+          description: Candidate not found
+
+  /admin/autoresearch/run:
+    post:
+      operationId: adminAutoResearchRun
+      tags: [admin]
+      summary: Trigger one AutoResearch mining pass synchronously
+      responses:
+        "200":
+          description: Mining-run summary
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AutoResearchRunResult" }
+
   /orchestrator/live-execute:
     get:
       operationId: getLiveExecuteState
@@ -1336,6 +1391,79 @@ components:
           type: array
           items: { $ref: "#/components/schemas/AdminAuditLogEntry" }
       required: [items]
+
+    AutoResearchFeature:
+      type: object
+      properties:
+        id: { type: integer }
+        name: { type: string }
+        vertical: { type: string }
+        signal_type: { type: string }
+        aggregator: { type: string }
+        status: { type: string, enum: [shadow, production, rejected] }
+        ic: { type: number, nullable: true }
+        sharpe: { type: number, nullable: true }
+        monotonicity: { type: number, nullable: true }
+        n_samples: { type: integer, nullable: true }
+        last_evaluated_at: { type: string, nullable: true }
+        promoted_at: { type: string, nullable: true }
+        promoted_by: { type: string, nullable: true }
+        rejected_at: { type: string, nullable: true }
+        rejected_by: { type: string, nullable: true }
+        metadata:
+          type: object
+          additionalProperties: true
+        created_at: { type: string, nullable: true }
+      required: [id, name, vertical, signal_type, aggregator, status]
+
+    AutoResearchSchedulerStatus:
+      type: object
+      properties:
+        enabled: { type: boolean }
+        running: { type: boolean }
+        interval_seconds: { type: number }
+        last_run:
+          type: object
+          additionalProperties: true
+      required: [enabled, running, interval_seconds]
+
+    AutoResearchFeatureList:
+      type: object
+      properties:
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/AutoResearchFeature" }
+        scheduler: { $ref: "#/components/schemas/AutoResearchSchedulerStatus" }
+      required: [items, scheduler]
+
+    AutoResearchDecisionRequest:
+      type: object
+      properties:
+        decision: { type: string, enum: [promote, reject, reset] }
+      required: [decision]
+
+    AutoResearchRunResult:
+      type: object
+      properties:
+        started_at: { type: string }
+        completed_at: { type: string }
+        duration_seconds: { type: number }
+        verticals_examined: { type: integer }
+        candidates_evaluated: { type: integer }
+        candidates_persisted: { type: integer }
+        insufficient_samples: { type: integer }
+        errors:
+          type: array
+          items: { type: string }
+      required:
+        - started_at
+        - completed_at
+        - duration_seconds
+        - verticals_examined
+        - candidates_evaluated
+        - candidates_persisted
+        - insufficient_samples
+        - errors
 
     UserSubscription:
       type: object

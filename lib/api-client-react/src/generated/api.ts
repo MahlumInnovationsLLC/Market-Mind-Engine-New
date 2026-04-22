@@ -23,12 +23,17 @@ import type {
   AdminAccessRequestList,
   AdminAccessRequestResult,
   AdminAuditLogList,
+  AdminAutoResearchListFeaturesParams,
   AdminGetAuditLogParams,
   AdminSetAdminRequest,
   AdminSetApprovedRequest,
   AdminSetFlagResult,
   AdminUserDetail,
   AdminUserList,
+  AutoResearchDecisionRequest,
+  AutoResearchFeature,
+  AutoResearchFeatureList,
+  AutoResearchRunResult,
   CheckoutSessionRequest,
   CheckoutSessionResult,
   DashboardOverview,
@@ -2487,6 +2492,284 @@ export function useAdminGetAuditLog<
 
   return { ...query, queryKey: queryOptions.queryKey };
 }
+
+/**
+ * @summary List AutoResearch-discovered candidate features (UW signals)
+ */
+export const getAdminAutoResearchListFeaturesUrl = (
+  params?: AdminAutoResearchListFeaturesParams,
+) => {
+  const normalizedParams = new URLSearchParams();
+
+  Object.entries(params || {}).forEach(([key, value]) => {
+    if (value !== undefined) {
+      normalizedParams.append(key, value === null ? "null" : value.toString());
+    }
+  });
+
+  const stringifiedParams = normalizedParams.toString();
+
+  return stringifiedParams.length > 0
+    ? `/api/admin/autoresearch/features?${stringifiedParams}`
+    : `/api/admin/autoresearch/features`;
+};
+
+export const adminAutoResearchListFeatures = async (
+  params?: AdminAutoResearchListFeaturesParams,
+  options?: RequestInit,
+): Promise<AutoResearchFeatureList> => {
+  return customFetch<AutoResearchFeatureList>(
+    getAdminAutoResearchListFeaturesUrl(params),
+    {
+      ...options,
+      method: "GET",
+    },
+  );
+};
+
+export const getAdminAutoResearchListFeaturesQueryKey = (
+  params?: AdminAutoResearchListFeaturesParams,
+) => {
+  return [
+    `/api/admin/autoresearch/features`,
+    ...(params ? [params] : []),
+  ] as const;
+};
+
+export const getAdminAutoResearchListFeaturesQueryOptions = <
+  TData = Awaited<ReturnType<typeof adminAutoResearchListFeatures>>,
+  TError = ErrorType<unknown>,
+>(
+  params?: AdminAutoResearchListFeaturesParams,
+  options?: {
+    query?: UseQueryOptions<
+      Awaited<ReturnType<typeof adminAutoResearchListFeatures>>,
+      TError,
+      TData
+    >;
+    request?: SecondParameter<typeof customFetch>;
+  },
+) => {
+  const { query: queryOptions, request: requestOptions } = options ?? {};
+
+  const queryKey =
+    queryOptions?.queryKey ?? getAdminAutoResearchListFeaturesQueryKey(params);
+
+  const queryFn: QueryFunction<
+    Awaited<ReturnType<typeof adminAutoResearchListFeatures>>
+  > = ({ signal }) =>
+    adminAutoResearchListFeatures(params, { signal, ...requestOptions });
+
+  return { queryKey, queryFn, ...queryOptions } as UseQueryOptions<
+    Awaited<ReturnType<typeof adminAutoResearchListFeatures>>,
+    TError,
+    TData
+  > & { queryKey: QueryKey };
+};
+
+export type AdminAutoResearchListFeaturesQueryResult = NonNullable<
+  Awaited<ReturnType<typeof adminAutoResearchListFeatures>>
+>;
+export type AdminAutoResearchListFeaturesQueryError = ErrorType<unknown>;
+
+/**
+ * @summary List AutoResearch-discovered candidate features (UW signals)
+ */
+
+export function useAdminAutoResearchListFeatures<
+  TData = Awaited<ReturnType<typeof adminAutoResearchListFeatures>>,
+  TError = ErrorType<unknown>,
+>(
+  params?: AdminAutoResearchListFeaturesParams,
+  options?: {
+    query?: UseQueryOptions<
+      Awaited<ReturnType<typeof adminAutoResearchListFeatures>>,
+      TError,
+      TData
+    >;
+    request?: SecondParameter<typeof customFetch>;
+  },
+): UseQueryResult<TData, TError> & { queryKey: QueryKey } {
+  const queryOptions = getAdminAutoResearchListFeaturesQueryOptions(
+    params,
+    options,
+  );
+
+  const query = useQuery(queryOptions) as UseQueryResult<TData, TError> & {
+    queryKey: QueryKey;
+  };
+
+  return { ...query, queryKey: queryOptions.queryKey };
+}
+
+/**
+ * @summary Promote / reject / reset a discovered candidate feature
+ */
+export const getAdminAutoResearchDecideUrl = (name: string) => {
+  return `/api/admin/autoresearch/features/${name}/decision`;
+};
+
+export const adminAutoResearchDecide = async (
+  name: string,
+  autoResearchDecisionRequest: AutoResearchDecisionRequest,
+  options?: RequestInit,
+): Promise<AutoResearchFeature> => {
+  return customFetch<AutoResearchFeature>(getAdminAutoResearchDecideUrl(name), {
+    ...options,
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...options?.headers },
+    body: JSON.stringify(autoResearchDecisionRequest),
+  });
+};
+
+export const getAdminAutoResearchDecideMutationOptions = <
+  TError = ErrorType<void>,
+  TContext = unknown,
+>(options?: {
+  mutation?: UseMutationOptions<
+    Awaited<ReturnType<typeof adminAutoResearchDecide>>,
+    TError,
+    { name: string; data: BodyType<AutoResearchDecisionRequest> },
+    TContext
+  >;
+  request?: SecondParameter<typeof customFetch>;
+}): UseMutationOptions<
+  Awaited<ReturnType<typeof adminAutoResearchDecide>>,
+  TError,
+  { name: string; data: BodyType<AutoResearchDecisionRequest> },
+  TContext
+> => {
+  const mutationKey = ["adminAutoResearchDecide"];
+  const { mutation: mutationOptions, request: requestOptions } = options
+    ? options.mutation &&
+      "mutationKey" in options.mutation &&
+      options.mutation.mutationKey
+      ? options
+      : { ...options, mutation: { ...options.mutation, mutationKey } }
+    : { mutation: { mutationKey }, request: undefined };
+
+  const mutationFn: MutationFunction<
+    Awaited<ReturnType<typeof adminAutoResearchDecide>>,
+    { name: string; data: BodyType<AutoResearchDecisionRequest> }
+  > = (props) => {
+    const { name, data } = props ?? {};
+
+    return adminAutoResearchDecide(name, data, requestOptions);
+  };
+
+  return { mutationFn, ...mutationOptions };
+};
+
+export type AdminAutoResearchDecideMutationResult = NonNullable<
+  Awaited<ReturnType<typeof adminAutoResearchDecide>>
+>;
+export type AdminAutoResearchDecideMutationBody =
+  BodyType<AutoResearchDecisionRequest>;
+export type AdminAutoResearchDecideMutationError = ErrorType<void>;
+
+/**
+ * @summary Promote / reject / reset a discovered candidate feature
+ */
+export const useAdminAutoResearchDecide = <
+  TError = ErrorType<void>,
+  TContext = unknown,
+>(options?: {
+  mutation?: UseMutationOptions<
+    Awaited<ReturnType<typeof adminAutoResearchDecide>>,
+    TError,
+    { name: string; data: BodyType<AutoResearchDecisionRequest> },
+    TContext
+  >;
+  request?: SecondParameter<typeof customFetch>;
+}): UseMutationResult<
+  Awaited<ReturnType<typeof adminAutoResearchDecide>>,
+  TError,
+  { name: string; data: BodyType<AutoResearchDecisionRequest> },
+  TContext
+> => {
+  return useMutation(getAdminAutoResearchDecideMutationOptions(options));
+};
+
+/**
+ * @summary Trigger one AutoResearch mining pass synchronously
+ */
+export const getAdminAutoResearchRunUrl = () => {
+  return `/api/admin/autoresearch/run`;
+};
+
+export const adminAutoResearchRun = async (
+  options?: RequestInit,
+): Promise<AutoResearchRunResult> => {
+  return customFetch<AutoResearchRunResult>(getAdminAutoResearchRunUrl(), {
+    ...options,
+    method: "POST",
+  });
+};
+
+export const getAdminAutoResearchRunMutationOptions = <
+  TError = ErrorType<unknown>,
+  TContext = unknown,
+>(options?: {
+  mutation?: UseMutationOptions<
+    Awaited<ReturnType<typeof adminAutoResearchRun>>,
+    TError,
+    void,
+    TContext
+  >;
+  request?: SecondParameter<typeof customFetch>;
+}): UseMutationOptions<
+  Awaited<ReturnType<typeof adminAutoResearchRun>>,
+  TError,
+  void,
+  TContext
+> => {
+  const mutationKey = ["adminAutoResearchRun"];
+  const { mutation: mutationOptions, request: requestOptions } = options
+    ? options.mutation &&
+      "mutationKey" in options.mutation &&
+      options.mutation.mutationKey
+      ? options
+      : { ...options, mutation: { ...options.mutation, mutationKey } }
+    : { mutation: { mutationKey }, request: undefined };
+
+  const mutationFn: MutationFunction<
+    Awaited<ReturnType<typeof adminAutoResearchRun>>,
+    void
+  > = () => {
+    return adminAutoResearchRun(requestOptions);
+  };
+
+  return { mutationFn, ...mutationOptions };
+};
+
+export type AdminAutoResearchRunMutationResult = NonNullable<
+  Awaited<ReturnType<typeof adminAutoResearchRun>>
+>;
+
+export type AdminAutoResearchRunMutationError = ErrorType<unknown>;
+
+/**
+ * @summary Trigger one AutoResearch mining pass synchronously
+ */
+export const useAdminAutoResearchRun = <
+  TError = ErrorType<unknown>,
+  TContext = unknown,
+>(options?: {
+  mutation?: UseMutationOptions<
+    Awaited<ReturnType<typeof adminAutoResearchRun>>,
+    TError,
+    void,
+    TContext
+  >;
+  request?: SecondParameter<typeof customFetch>;
+}): UseMutationResult<
+  Awaited<ReturnType<typeof adminAutoResearchRun>>,
+  TError,
+  void,
+  TContext
+> => {
+  return useMutation(getAdminAutoResearchRunMutationOptions(options));
+};
 
 /**
  * @summary Effective live-execute state + caller's permission to flip it

@@ -71,10 +71,14 @@ def build_vector(
         candidate=candidate, ctx=ctx, now=now, overrides=overrides,
     )
     values: list[float] = []
-    for spec in registry.specs():
+    # Walk every registered spec — production AND shadow — so AutoResearch
+    # shadow candidates are computed each cycle (training-row collection)
+    # but only non-shadow values land in the model's positional vector.
+    for spec in registry.all_specs():
         v = float(spec.compute(bc))
         bc.computed[spec.name] = v
-        values.append(v)
+        if not spec.shadow:
+            values.append(v)
 
     # Pseudo-feature: pull Elo-style internal signals onto ``present``
     # without pushing them into the model vector (would break trained

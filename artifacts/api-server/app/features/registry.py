@@ -76,6 +76,13 @@ class FeatureSpec:
     dtype: str
     default: float
     compute: Transform
+    # When True the spec is computed every cycle (so AutoResearch can
+    # collect telemetry / training rows for it) but is **not** part of
+    # the production feature vector emitted by :func:`build`. Promotion
+    # to production happens out-of-band via the admin console; flipping
+    # this flag at runtime would shift the trained model's column
+    # alignment, so we keep promotion gated on an offline retrain.
+    shadow: bool = False
 
 
 class FeatureRegistry:
@@ -99,34 +106,57 @@ class FeatureRegistry:
         return spec
 
     def specs(self) -> tuple[FeatureSpec, ...]:
+        """Production specs in declared order (excludes shadow features).
+
+        This is the predictor's view: column order and count match the
+        trained meta-model. Shadow specs registered by AutoResearch are
+        excluded so they cannot accidentally drift the schema.
+        """
+        return tuple(s for s in self._specs if not s.shadow)
+
+    def all_specs(self) -> tuple[FeatureSpec, ...]:
+        """Every registered spec, production *and* shadow, in declared order."""
         return tuple(self._specs)
 
+    def shadow_specs(self) -> tuple[FeatureSpec, ...]:
+        return tuple(s for s in self._specs if s.shadow)
+
     def names(self) -> tuple[str, ...]:
-        return tuple(s.name for s in self._specs)
+        """Production-only names (column order of the live feature vector)."""
+        return tuple(s.name for s in self._specs if not s.shadow)
 
     def __len__(self) -> int:
-        return len(self._specs)
+        """Production-only count (matches :meth:`names`)."""
+        return sum(1 for s in self._specs if not s.shadow)
 
     def get(self, name: str) -> FeatureSpec | None:
         return self._by_name.get(name)
 
-    def metadata(self) -> list[dict[str, Any]]:
+    def metadata(self, *, include_shadow: bool = False) -> list[dict[str, Any]]:
         """JSON-serialisable description of every registered feature.
 
         Used by ``GET /api/features/registry`` and AutoResearch when it
-        needs to enumerate the available signals.
+        needs to enumerate the available signals. By default only
+        production specs are returned; pass ``include_shadow=True`` to
+        also surface shadow candidates (e.g. for the AutoResearch admin
+        view).
         """
-        return [
-            {
-                "index": i,
+        out: list[dict[str, Any]] = []
+        idx = 0
+        for s in self._specs:
+            if s.shadow and not include_shadow:
+                continue
+            out.append({
+                "index": idx,
                 "name": s.name,
                 "source": s.source,
                 "transform": s.transform,
                 "dtype": s.dtype,
                 "default": s.default,
-            }
-            for i, s in enumerate(self._specs)
-        ]
+                "shadow": s.shadow,
+            })
+            idx += 1
+        return out
 
     def build(
         self,
@@ -149,10 +179,16 @@ class FeatureRegistry:
             overrides=overrides,
         )
         values: list[float] = []
+        # Walk every registered spec — production AND shadow — so derived
+        # production features can read upstream shadow values from
+        # ``bc.computed`` if needed, and so AutoResearch shadow rows are
+        # collected each cycle. Only non-shadow values are appended to
+        # the output vector to keep the predictor's column count stable.
         for spec in self._specs:
             v = float(spec.compute(bc))
             bc.computed[spec.name] = v
-            values.append(v)
+            if not spec.shadow:
+                values.append(v)
         return values, dict(bc.present)
 
 

@@ -55,6 +55,7 @@ from .auth import (
 from .config import get_settings
 from .middleware import RequestIdMiddleware
 from .observability import configure_logging
+from . import autoresearch
 from .feeds import registry as feed_registry, scheduler as feed_scheduler
 from .feeds.odds_api import register_odds_feeds
 from .feeds.sportradar import (
@@ -267,6 +268,15 @@ async def lifespan(_: FastAPI):
     except Exception as e:
         log.warning("bankroll sync start failed: %s", e)
 
+    # AutoResearch — nightly UW-signal mining job. Discovered candidates
+    # land in `autoresearch_features` with status='shadow' for an admin
+    # to promote (see /api/admin/autoresearch/*). Disabled by setting
+    # AXIOM_AUTORESEARCH_DISABLED=1.
+    try:
+        await autoresearch.scheduler.start()
+    except Exception as e:
+        log.warning("autoresearch scheduler start failed: %s", e)
+
     # Kick off model artifact reassembly in the background so a cold cache
     # (~240 MiB download) doesn't block the HTTP server from accepting
     # traffic. Health endpoints surface progress while it warms up.
@@ -318,6 +328,10 @@ async def lifespan(_: FastAPI):
             await feature_drift.scheduler.stop()
         except Exception as e:
             log.warning("feature drift scheduler stop error: %s", e)
+        try:
+            await autoresearch.scheduler.stop()
+        except Exception as e:
+            log.warning("autoresearch scheduler stop error: %s", e)
         try:
             await health.stop()
         except Exception as e:
@@ -916,6 +930,118 @@ async def admin_get_audit_log(
 ) -> dict[str, object]:
     limit = max(1, min(500, int(limit)))
     return {"items": await admin_module.list_audit_log(limit)}
+
+
+# ---------------------------------------------------------------------------
+# AutoResearch — UW signal mining + shadow feature promotion
+# ---------------------------------------------------------------------------
+
+
+class AutoResearchDecision(BaseModel):
+    decision: str = Field(..., pattern="^(promote|reject|reset)$")
+
+
+@app.get("/api/admin/autoresearch/features")
+async def admin_autoresearch_list(
+    status: str | None = None,
+    vertical: str | None = None,
+    actor: AuthedUser = Depends(require_admin),
+) -> dict[str, object]:
+    """List discovered candidate features (default: all statuses).
+
+    The mining job ranks by |IC| so the most promising candidates are
+    returned first. Filter by ``status`` (``shadow``/``production``/
+    ``rejected``) and/or ``vertical`` to narrow the view.
+    """
+    if status is not None and status not in autoresearch.store.VALID_STATUSES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"status must be one of {autoresearch.store.VALID_STATUSES}",
+        )
+    items = await autoresearch.store.list_candidates(
+        status=status, vertical=vertical
+    )
+    return {
+        "items": items,
+        "scheduler": autoresearch.scheduler.status(),
+    }
+
+
+@app.post("/api/admin/autoresearch/features/{name}/decision")
+async def admin_autoresearch_decide(
+    name: str,
+    body: AutoResearchDecision,
+    actor: AuthedUser = Depends(require_admin),
+) -> dict[str, object]:
+    """Promote, reject, or reset a discovered candidate to ``shadow``.
+
+    Promotion does not retroactively change the live predictor's column
+    layout (the trained meta-model has fixed columns); it records the
+    operator's intent so the next retrain pipeline picks the feature
+    up. Every decision lands in ``admin_audit_log``.
+    """
+    actor_email = (await check_approval(actor))[1]
+    before = await autoresearch.store.get_candidate(name)
+    if before is None:
+        raise HTTPException(status_code=404, detail="autoresearch feature not found")
+    new_status = {
+        "promote": "production",
+        "reject": "rejected",
+        "reset": "shadow",
+    }[body.decision]
+    after = await autoresearch.store.set_status(
+        name=name, status=new_status, actor_user_id=actor.user_id,
+    )
+    if after is None:
+        raise HTTPException(status_code=502, detail="status update failed")
+    try:
+        import json
+        async with db.acquire() as c:
+            await c.execute(
+                """
+                INSERT INTO admin_audit_log (
+                    actor_user_id, actor_email,
+                    target_user_id, target_email,
+                    action, before_value, after_value
+                ) VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7::jsonb)
+                """,
+                actor.user_id,
+                actor_email,
+                f"autoresearch:{name}",
+                None,
+                f"autoresearch_{body.decision}",
+                json.dumps({
+                    "status": before.get("status"),
+                    "ic": before.get("ic"),
+                    "sharpe": before.get("sharpe"),
+                }),
+                json.dumps({
+                    "status": after.get("status"),
+                    "ic": after.get("ic"),
+                    "sharpe": after.get("sharpe"),
+                }),
+            )
+    except Exception as e:
+        log.warning("autoresearch audit log write failed: %s", e)
+    return after
+
+
+@app.post("/api/admin/autoresearch/run")
+async def admin_autoresearch_run(
+    actor: AuthedUser = Depends(require_admin),
+) -> dict[str, object]:
+    """Trigger one mining pass synchronously (handy for backfills + tests)."""
+    result = await autoresearch.scheduler.run_now()
+    return {
+        "started_at": result.started_at,
+        "completed_at": result.completed_at,
+        "duration_seconds": result.duration_seconds,
+        "verticals_examined": result.verticals_examined,
+        "candidates_evaluated": result.candidates_evaluated,
+        "candidates_persisted": result.candidates_persisted,
+        "insufficient_samples": result.insufficient_samples,
+        "errors": result.errors,
+    }
 
 
 # ---------------------------------------------------------------------------

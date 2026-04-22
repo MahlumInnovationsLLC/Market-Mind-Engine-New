@@ -845,6 +845,89 @@ export const AdminGetAuditLogResponse = zod.object({
 });
 
 /**
+ * @summary List AutoResearch-discovered candidate features (UW signals)
+ */
+export const AdminAutoResearchListFeaturesQueryParams = zod.object({
+  status: zod.enum(["shadow", "production", "rejected"]).optional(),
+  vertical: zod.coerce.string().optional(),
+});
+
+export const AdminAutoResearchListFeaturesResponse = zod.object({
+  items: zod.array(
+    zod.object({
+      id: zod.number(),
+      name: zod.string(),
+      vertical: zod.string(),
+      signal_type: zod.string(),
+      aggregator: zod.string(),
+      status: zod.enum(["shadow", "production", "rejected"]),
+      ic: zod.number().nullish(),
+      sharpe: zod.number().nullish(),
+      monotonicity: zod.number().nullish(),
+      n_samples: zod.number().nullish(),
+      last_evaluated_at: zod.string().nullish(),
+      promoted_at: zod.string().nullish(),
+      promoted_by: zod.string().nullish(),
+      rejected_at: zod.string().nullish(),
+      rejected_by: zod.string().nullish(),
+      metadata: zod.record(zod.string(), zod.unknown()).optional(),
+      created_at: zod.string().nullish(),
+    }),
+  ),
+  scheduler: zod.object({
+    enabled: zod.boolean(),
+    running: zod.boolean(),
+    interval_seconds: zod.number(),
+    last_run: zod.record(zod.string(), zod.unknown()).optional(),
+  }),
+});
+
+/**
+ * @summary Promote / reject / reset a discovered candidate feature
+ */
+export const AdminAutoResearchDecideParams = zod.object({
+  name: zod.coerce.string(),
+});
+
+export const AdminAutoResearchDecideBody = zod.object({
+  decision: zod.enum(["promote", "reject", "reset"]),
+});
+
+export const AdminAutoResearchDecideResponse = zod.object({
+  id: zod.number(),
+  name: zod.string(),
+  vertical: zod.string(),
+  signal_type: zod.string(),
+  aggregator: zod.string(),
+  status: zod.enum(["shadow", "production", "rejected"]),
+  ic: zod.number().nullish(),
+  sharpe: zod.number().nullish(),
+  monotonicity: zod.number().nullish(),
+  n_samples: zod.number().nullish(),
+  last_evaluated_at: zod.string().nullish(),
+  promoted_at: zod.string().nullish(),
+  promoted_by: zod.string().nullish(),
+  rejected_at: zod.string().nullish(),
+  rejected_by: zod.string().nullish(),
+  metadata: zod.record(zod.string(), zod.unknown()).optional(),
+  created_at: zod.string().nullish(),
+});
+
+/**
+ * @summary Trigger one AutoResearch mining pass synchronously
+ */
+export const AdminAutoResearchRunResponse = zod.object({
+  started_at: zod.string(),
+  completed_at: zod.string(),
+  duration_seconds: zod.number(),
+  verticals_examined: zod.number(),
+  candidates_evaluated: zod.number(),
+  candidates_persisted: zod.number(),
+  insufficient_samples: zod.number(),
+  errors: zod.array(zod.string()),
+});
+
+/**
  * @summary Effective live-execute state + caller's permission to flip it
  */
 export const GetLiveExecuteStateResponse = zod.object({

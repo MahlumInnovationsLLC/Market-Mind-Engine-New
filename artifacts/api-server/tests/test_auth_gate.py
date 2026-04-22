@@ -81,6 +81,7 @@ PROTECTED_ROUTES: tuple[str, ...] = (
     "/api/admin/risk-knobs",
     "/api/admin/models",
     "/api/admin/models/mirror/status",
+    "/api/admin/autoresearch/features",
 )
 
 # Mutating endpoints — auth-protected but only accept POST.  We don't
@@ -113,6 +114,8 @@ PROTECTED_POST_ROUTES: tuple[str, ...] = (
     "/api/admin/orchestrator/run-cycle",
     "/api/admin/models/active",
     "/api/admin/models/mirror/push",
+    "/api/admin/autoresearch/features/{name}/decision",
+    "/api/admin/autoresearch/run",
 )
 
 # Liveness probes — must answer 200 with no auth (parameterized below).
