@@ -25,10 +25,15 @@ def _isolated_registry():
     return reg
 
 
-def test_sports_constant_covers_six_leagues():
-    # Spec calls for NFL/NBA/MLB/NHL/NCAAF/NCAAB across the swarm; make
-    # sure every league lands in the schedule + extras registration loop.
-    assert set(SPORTRADAR_SPORTS) == {"nba", "nhl", "mlb", "ncaab", "nfl", "ncaaf"}
+def test_sports_constant_covers_every_supported_league():
+    # NA sports (task #195) + international soccer (task #196) — every
+    # league must appear in both the schedule and league-code maps so
+    # the registration loop wires the correct upper-cased league name.
+    expected = {
+        "nba", "nhl", "mlb", "ncaab", "nfl", "ncaaf",
+        "epl", "laliga", "seriea", "bundes", "ligue1", "mls", "ucl",
+    }
+    assert expected.issubset(set(SPORTRADAR_SPORTS))
     assert set(_SPORTRADAR_LEAGUE) == set(SPORTRADAR_SPORTS)
 
 
@@ -42,10 +47,12 @@ def test_register_extra_feeds_skips_when_key_missing(monkeypatch):
     monkeypatch.setattr(sportradar, "registry", reg)
     sportradar.register_sportradar_extra_feeds()
 
-    # 6 leagues × 3 feed types (rosters + injuries + live) = 18 feeds.
+    # N leagues × 3 feed types (rosters + injuries + live).  Derived
+    # from SPORTRADAR_SPORTS so adding a league (task #196 added 7
+    # soccer competitions) doesn't require fixing this assertion.
     snap = reg.snapshot()
     names = {s["name"] for s in snap}
-    assert len(snap) == 18
+    assert len(snap) == 3 * len(SPORTRADAR_SPORTS)
     for sport in SPORTRADAR_SPORTS:
         assert f"sportradar_{sport}_rosters" in names
         assert f"sportradar_{sport}_injuries" in names
@@ -74,7 +81,7 @@ def test_register_is_idempotent(monkeypatch):
     monkeypatch.setattr(sportradar, "registry", reg)
     sportradar.register_sportradar_extra_feeds()
     sportradar.register_sportradar_extra_feeds()  # second call must not raise
-    assert len(reg.snapshot()) == 18
+    assert len(reg.snapshot()) == 3 * len(SPORTRADAR_SPORTS)
 
 
 def test_flatten_injuries_handles_typical_payload():

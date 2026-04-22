@@ -189,6 +189,38 @@ async def _open_position_aggregates() -> tuple[
     return total_n, total_notional, per_vertical, per_league, per_matchup, per_sunday
 
 
+async def _today_trade_counts_per_league() -> dict[str, int]:
+    """Returns the per-league count of trades executed during the current
+    UTC day, joined to `swarm_debates.league` so soccer's per-matchday
+    cap (task #196) can throttle churn.
+
+    Best-effort: empty dict on any DB failure so the daily-trade gate
+    short-circuits to a no-op rather than killing the cycle.
+    """
+    try:
+        rows = await db.fetch(
+            """
+            SELECT upper(coalesce(d.league, ''))    AS league,
+                   count(*)::int                    AS n
+              FROM trades t
+              LEFT JOIN swarm_debates d ON d.id = t.debate_id
+             WHERE ((t.executed_at at time zone 'UTC')::date)
+                   = (now() at time zone 'UTC')::date
+               AND coalesce(d.league, '') <> ''
+             GROUP BY upper(coalesce(d.league, ''))
+            """
+        )
+    except Exception as e:
+        log.debug("today trade counts per league failed: %s", e)
+        return {}
+    out: dict[str, int] = {}
+    for r in rows:
+        league = str(r["league"] or "").upper()
+        if league:
+            out[league] = int(r["n"])
+    return out
+
+
 async def _market_cooldown(market_id: str) -> datetime | None:
     try:
         v = await db.fetchval(
@@ -549,6 +581,7 @@ async def run_cycle(vertical: str = "sports") -> CycleResult:
         per_matchup,
         per_sunday_window,
     ) = await _open_position_aggregates()
+    trades_today_per_league = await _today_trade_counts_per_league()
 
     # 1) Cached approved debates first (cheap — no fresh LLM cost).
     cached = await _cached_debates(vertical, limit=10, aggression_mode=aggression_mode)
@@ -717,6 +750,7 @@ async def run_cycle(vertical: str = "sports") -> CycleResult:
             open_positions_per_league_usd=per_league,
             open_positions_per_matchup_usd=per_matchup,
             open_positions_sunday_window_usd=per_sunday_window,
+            trades_today_per_league=trades_today_per_league,
             game_time=cand.get("game_time"),
         )
 

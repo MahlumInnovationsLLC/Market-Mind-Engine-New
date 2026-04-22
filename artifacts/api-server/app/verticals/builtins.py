@@ -56,3 +56,29 @@ REGISTRY.register(VerticalSpec(
     persona_profile="politics",
     description="Legacy politics vertical kept for backward compatibility.",
 ))
+
+# Soccer (task #196).  Distinct from `sports` so the orchestrator can
+# route candidates through the soccer-specific persona stack (xG /
+# rotation / market microstructure) and hit per-league caps tuned for
+# 3-way moneyline shape.  Operators select between `sports` and
+# `soccer` via `AXIOM_ORCHESTRATOR_VERTICALS`; running both is
+# supported but soccer leagues will be debated under the soccer
+# profile only when this spec is enabled.
+REGISTRY.register(VerticalSpec(
+    name="soccer",
+    leagues=("EPL", "LALIGA", "SERIEA", "BUNDES", "LIGUE1", "MLS", "UCL"),
+    ticker_prefixes=(
+        "KXEPL", "KXLALIGA", "KXSERIEA", "KXBUNDES",
+        "KXLIGUE1", "KXMLS", "KXUCL",
+    ),
+    persona_profile="soccer",
+    # Kept off the legacy 3-column dashboard strip
+    # ("sports","weather","crypto") to preserve `test_dashboard_strip
+    # _preserves_legacy_order`.  A future follow-up can promote it.
+    include_in_dashboard_strip=False,
+    description=(
+        "International soccer 3-way moneyline (home/draw/away) markets "
+        "across EPL, La Liga, Serie A, Bundesliga, Ligue 1, MLS and "
+        "UEFA Champions League."
+    ),
+))

@@ -30,7 +30,14 @@ THE_ODDS_API_BASE = "https://api.the-odds-api.com/v4"
 # In-season default — operator can override via env.
 DEFAULT_ODDS_SPORTS = os.environ.get(
     "AXIOM_ODDS_SPORTS",
-    "basketball_nba,baseball_mlb,icehockey_nhl,basketball_ncaab,americanfootball_nfl",
+    # NA sports + international soccer (task #196).  Soccer keys map
+    # 1:1 to The-Odds-API's `sports/{key}/odds` endpoint and produce
+    # 3-way h2h markets (home/draw/away) which the persistor branches
+    # on via LeagueConfig.three_way_market.
+    "basketball_nba,baseball_mlb,icehockey_nhl,basketball_ncaab,"
+    "americanfootball_nfl,soccer_epl,soccer_spain_la_liga,"
+    "soccer_italy_serie_a,soccer_germany_bundesliga,"
+    "soccer_france_ligue_one,soccer_usa_mls,soccer_uefa_champs_league",
 ).split(",")
 DEFAULT_ODDS_REGIONS = os.environ.get("AXIOM_ODDS_REGIONS", "us")
 DEFAULT_ODDS_MARKETS = os.environ.get("AXIOM_ODDS_MARKETS", "h2h,spreads,totals")
@@ -149,6 +156,17 @@ _SPORTRADAR_SCHEDULE_PATHS = {
     # NFL has no daily-schedule endpoint; current-week is the closest equivalent.
     "nfl":    "https://api.sportradar.us/nfl/official/trial/v7/en/games/current_week/schedule.json",
     "ncaaf":  "https://api.sportradar.us/ncaafb/trial/v1/en/games/{y}/{m:02d}/{d:02d}/schedule.json",
+    # International soccer (task #196).  Sportradar splits soccer by
+    # competition under the soccer-extended package; the daily schedule
+    # endpoint accepts a competition tournament_id baked into the path.
+    # Operators must set per-league SPORTRADAR_<LEAGUE>_KEY env vars.
+    "epl":    "https://api.sportradar.us/soccer-extended/trial/v4/en/schedules/{y}-{m:02d}-{d:02d}/schedule.json?tournament=sr:tournament:17",
+    "laliga": "https://api.sportradar.us/soccer-extended/trial/v4/en/schedules/{y}-{m:02d}-{d:02d}/schedule.json?tournament=sr:tournament:8",
+    "seriea": "https://api.sportradar.us/soccer-extended/trial/v4/en/schedules/{y}-{m:02d}-{d:02d}/schedule.json?tournament=sr:tournament:23",
+    "bundes": "https://api.sportradar.us/soccer-extended/trial/v4/en/schedules/{y}-{m:02d}-{d:02d}/schedule.json?tournament=sr:tournament:35",
+    "ligue1": "https://api.sportradar.us/soccer-extended/trial/v4/en/schedules/{y}-{m:02d}-{d:02d}/schedule.json?tournament=sr:tournament:34",
+    "mls":    "https://api.sportradar.us/soccer-extended/trial/v4/en/schedules/{y}-{m:02d}-{d:02d}/schedule.json?tournament=sr:tournament:242",
+    "ucl":    "https://api.sportradar.us/soccer-extended/trial/v4/en/schedules/{y}-{m:02d}-{d:02d}/schedule.json?tournament=sr:tournament:7",
 }
 _SPORTRADAR_LEAGUE = {
     "nba": "NBA",
@@ -157,6 +175,13 @@ _SPORTRADAR_LEAGUE = {
     "ncaab": "NCAAB",
     "nfl": "NFL",
     "ncaaf": "NCAAF",
+    "epl": "EPL",
+    "laliga": "LALIGA",
+    "seriea": "SERIEA",
+    "bundes": "BUNDES",
+    "ligue1": "LIGUE1",
+    "mls": "MLS",
+    "ucl": "UCL",
 }
 SPORTRADAR_SPORTS: tuple[str, ...] = tuple(_SPORTRADAR_SCHEDULE_PATHS.keys())
 

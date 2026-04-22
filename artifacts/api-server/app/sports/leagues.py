@@ -54,6 +54,37 @@ class LeagueConfig:
     # injury_roster + matchup_historian personas reason about the right
     # signals.
     persona_context: str = ""
+    # 3-way moneyline (home / draw / away) — soccer leagues, including
+    # cup competitions.  Settlement / margin-regressor / per-side caps
+    # gate on this to avoid treating a draw outcome as a 2-way miss.
+    three_way_market: bool = False
+    # Per-league daily trade count cap.  When set, gate_per_vertical_cap
+    # rejects new candidates after the cap is reached for the UTC day.
+    # None disables (default — no cap).  EPL ships at 10/day per spec
+    # because the league has 10 fixtures per matchweek and we don't want
+    # the entire bankroll churning through one matchday.
+    max_daily_trades: int | None = None
+
+
+_SOCCER_PERSONA_CONTEXT = (
+    "SOCCER-SPECIFIC SIGNALS:\n"
+    "  * Markets are 3-way (home / draw / away) — a 2-way moneyline frame "
+    "will systematically misprice draw-prone matchups (low xG, defensive "
+    "managers, derbies).  Reason about the draw share explicitly.\n"
+    "  * Confirmed lineups land ~60 minutes before kickoff and dominate "
+    "short-term price moves; rotation, suspensions and 'rested' starters "
+    "(midweek UCL, international break, congested fixture lists) are the "
+    "primary edge sources.\n"
+    "  * xG and shot-quality differentials over the last 6-10 matches "
+    "predict win probability better than table position.  Anchor on xG, "
+    "then nudge for matchup, venue and referee.\n"
+    "  * Set-pieces account for ~30% of goals — corner counts, free-kick "
+    "specialists and aerial duel rates carry signal that totals models "
+    "miss.\n"
+    "  * Late-window markets are extremely thin in pre-season, "
+    "international breaks and final matchday dead-rubber fixtures; "
+    "default toward PASS when liquidity is absent."
+)
 
 
 LEAGUE_CONFIGS: dict[str, LeagueConfig] = {
@@ -142,12 +173,63 @@ LEAGUE_CONFIGS: dict[str, LeagueConfig] = {
         priority=8,
         allocation_pct=0.03,
         per_game_cap_pct=0.01,
+        three_way_market=True,
+        max_daily_trades=8,
+        persona_context=_SOCCER_PERSONA_CONTEXT,
     ),
     "EPL": LeagueConfig(
         league="EPL",
-        priority=8,
+        priority=5,
         allocation_pct=0.03,
         per_game_cap_pct=0.01,
+        three_way_market=True,
+        max_daily_trades=10,
+        persona_context=_SOCCER_PERSONA_CONTEXT,
+    ),
+    "LALIGA": LeagueConfig(
+        league="LALIGA",
+        priority=6,
+        allocation_pct=0.02,
+        per_game_cap_pct=0.008,
+        three_way_market=True,
+        max_daily_trades=8,
+        persona_context=_SOCCER_PERSONA_CONTEXT,
+    ),
+    "SERIEA": LeagueConfig(
+        league="SERIEA",
+        priority=6,
+        allocation_pct=0.02,
+        per_game_cap_pct=0.008,
+        three_way_market=True,
+        max_daily_trades=8,
+        persona_context=_SOCCER_PERSONA_CONTEXT,
+    ),
+    "BUNDES": LeagueConfig(
+        league="BUNDES",
+        priority=6,
+        allocation_pct=0.02,
+        per_game_cap_pct=0.008,
+        three_way_market=True,
+        max_daily_trades=8,
+        persona_context=_SOCCER_PERSONA_CONTEXT,
+    ),
+    "LIGUE1": LeagueConfig(
+        league="LIGUE1",
+        priority=7,
+        allocation_pct=0.02,
+        per_game_cap_pct=0.008,
+        three_way_market=True,
+        max_daily_trades=8,
+        persona_context=_SOCCER_PERSONA_CONTEXT,
+    ),
+    "UCL": LeagueConfig(
+        league="UCL",
+        priority=4,
+        allocation_pct=0.01,
+        per_game_cap_pct=0.005,
+        three_way_market=True,
+        max_daily_trades=6,
+        persona_context=_SOCCER_PERSONA_CONTEXT,
     ),
 }
 

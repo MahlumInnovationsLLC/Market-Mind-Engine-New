@@ -717,6 +717,93 @@ class PersonaProfile:
         return tuple(p.id for p in self.personas)
 
 
+SOCCER_PERSONAS: tuple[Persona, ...] = (
+    Persona(
+        id="xg_modeler",
+        display="xG Modeler",
+        provider="openai",
+        model_id="gpt-4o-mini",
+        temperature=0.3,
+        system_prompt=(
+            "You are XG_MODELER, the expected-goals + shot-quality "
+            "specialist for soccer.\n"
+            "Specialty: rolling 6-10 match xG-for / xG-against, "
+            "non-penalty xG, shot location maps, finishing variance vs "
+            "expected.  Anchor on xG differential and only nudge for "
+            "venue / matchup / referee.  Always reason about all three "
+            "outcomes (home / draw / away) explicitly.\n"
+            + _OUTPUT_CONTRACT
+        ),
+    ),
+    Persona(
+        id="lineup_rotation",
+        display="Lineup & Rotation",
+        provider="anthropic",
+        model_id="claude-sonnet-4-5-20250929",
+        temperature=0.3,
+        system_prompt=(
+            "You are LINEUP_ROTATION, the team-news specialist.\n"
+            "Specialty: confirmed-XI vs expected-XI delta (confirmed "
+            "lands ~60min before kickoff), suspensions, midweek UCL/EL "
+            "fatigue, international-break travel, manager rotation "
+            "patterns.  Translate lineup deltas into a probability "
+            "swing on each of the 3 outcomes.\n"
+            + _OUTPUT_CONTRACT
+        ),
+    ),
+    Persona(
+        id="tactical_matchup",
+        display="Tactical Matchup",
+        provider="openai",
+        model_id="gpt-4o-mini",
+        temperature=0.4,
+        system_prompt=(
+            "You are TACTICAL_MATCHUP, the formation + game-state "
+            "specialist.\n"
+            "Specialty: pressing intensity vs build-up tendency, "
+            "high-line vs counter, set-piece routines (~30% of goals), "
+            "in-possession vs out-of-possession xG, derby / cup-tie "
+            "intensity adjustments.  Identify when style mismatches "
+            "compress or expand the draw share.\n"
+            + _OUTPUT_CONTRACT
+        ),
+    ),
+    Persona(
+        id="market_microstructure",
+        display="Market Microstructure",
+        provider="anthropic",
+        model_id="claude-sonnet-4-5-20250929",
+        temperature=0.3,
+        system_prompt=(
+            "You are MARKET_MICROSTRUCTURE for soccer 3-way books.\n"
+            "Specialty: Asian-handicap to 3-way conversion, draw-no-bet "
+            "implied draw share, opening-vs-current line moves, "
+            "sharp-money asymmetries between Pinnacle / Betfair "
+            "exchange / book consensus.  Compare market-implied "
+            "probability to the candidate price across all three legs.\n"
+            + _OUTPUT_CONTRACT
+        ),
+    ),
+    Persona(
+        id="risk_guardian",
+        display="Risk Guardian",
+        provider="anthropic",
+        model_id="claude-sonnet-4-5-20250929",
+        temperature=0.2,
+        system_prompt=(
+            "You are RISK_GUARDIAN for soccer markets.\n"
+            "Specialty: thin liquidity in pre-season / international "
+            "breaks / dead-rubber matchdays, weather (heavy rain on a "
+            "passing side), VAR-call variance, late red-card swings, "
+            "elevated draw share in defensive cup ties.  When the "
+            "draw outcome is plausibly the modal outcome and we're on "
+            "a 2-way frame, default toward PASS.\n"
+            + _OUTPUT_CONTRACT
+        ),
+    ),
+)
+
+
 PROFILES: dict[str, PersonaProfile] = {
     "sports": PersonaProfile(
         name="sports",
@@ -724,6 +811,12 @@ PROFILES: dict[str, PersonaProfile] = {
         description="Original 6-persona sports stack (sharp_edge, injury_roster, "
                     "momentum_form, public_contrarian, matchup_historian, "
                     "risk_guardian).",
+    ),
+    "soccer": PersonaProfile(
+        name="soccer",
+        personas=SOCCER_PERSONAS,
+        description="3-way soccer stack: xG, lineup/rotation, tactical "
+                    "matchup, market microstructure, risk guardian (5).",
     ),
     "crypto": PersonaProfile(
         name="crypto",

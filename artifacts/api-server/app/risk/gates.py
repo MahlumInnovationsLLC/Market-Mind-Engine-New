@@ -106,6 +106,11 @@ class RiskContext:
     open_positions_per_league_usd: dict[str, float] = field(default_factory=dict)
     open_positions_per_matchup_usd: dict[str, float] = field(default_factory=dict)
     open_positions_sunday_window_usd: dict[str, float] = field(default_factory=dict)
+    # Per-league trade count for the current UTC day.  Populated by the
+    # cycle aggregator; defaulted empty so legacy call sites + leagues
+    # without `LeagueConfig.max_daily_trades` are no-ops.  Soccer leagues
+    # ship this cap to throttle matchday churn (task #196).
+    trades_today_per_league: dict[str, int] = field(default_factory=dict)
     # Game start time (UTC) for the candidate's market.  Used by
     # gate_market_cooldown to honor per-league pre-kickoff blackouts
     # (NFL inactive-list window).  None when the market isn't game-bound.
@@ -419,6 +424,36 @@ async def gate_per_vertical_cap(ctx: RiskContext) -> GateResult:
     lcfg = get_league_config(ctx.league)
     if lcfg is not None:
         league_key = lcfg.league
+
+        # Per-league daily trade-count cap (task #196 — soccer matchday
+        # churn throttle).  Opt-in via `LeagueConfig.max_daily_trades`;
+        # operator override key mirrors the per-league cap convention.
+        max_daily = ctx.operator_overrides.get(
+            f"max_daily_trades.{league_key.lower()}",
+            lcfg.max_daily_trades,
+        )
+        if max_daily is not None:
+            max_daily_int = int(max_daily)
+            today_count = int(
+                ctx.trades_today_per_league.get(league_key, 0)
+            )
+            if today_count >= max_daily_int:
+                return GateResult(
+                    "per_vertical_cap",
+                    False,
+                    (
+                        f"{league_key} daily trade count "
+                        f"{today_count} >= cap {max_daily_int}"
+                    ),
+                    {
+                        "vertical": ctx.vertical,
+                        "league": league_key,
+                        "sub_check": "max_daily_trades",
+                        "trades_today": today_count,
+                        "cap": max_daily_int,
+                    },
+                )
+
         # Per-league cap.
         league_cap_pct = float(
             ctx.operator_overrides.get(

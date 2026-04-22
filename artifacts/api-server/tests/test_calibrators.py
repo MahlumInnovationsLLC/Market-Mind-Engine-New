@@ -177,7 +177,8 @@ def test_load_all_picks_most_recent_per_league(fake_db):
     assert state.calibrators["MLB"].type == "isotonic"
     fresh = state.freshness()
     assert fresh["loaded_count"] == 2
-    assert fresh["missing_count"] == 3  # NHL, NCAAB, NFL
+    # Two leagues fitted (NBA, MLB); the rest of SUPPORTED_LEAGUES are missing.
+    assert fresh["missing_count"] == len(calibrators.SUPPORTED_LEAGUES) - 2
 
 
 # ---------------------------------------------------------------------------
@@ -232,7 +233,9 @@ def test_refit_all_skips_below_min_samples(fake_db):
     assert mlb["snapshot_id"] is None
     assert mlb["skipped_reason"] is not None
     assert summary["fitted"] == 0
-    assert summary["skipped"] == 5  # all 5 leagues skipped
+    # Every supported league skipped (only one had any rows, all below
+    # MIN_REFIT_SAMPLES).
+    assert summary["skipped"] == len(calibrators.SUPPORTED_LEAGUES)
 
 
 # ---------------------------------------------------------------------------

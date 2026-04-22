@@ -54,7 +54,15 @@ log = logging.getLogger(__name__)
 # Leagues we maintain dedicated calibrators for.  Casing matches what
 # the orchestrator carries on candidates (``cand['league']``) and what
 # the trades / postmortems tables store.
-SUPPORTED_LEAGUES: tuple[str, ...] = ("NBA", "NHL", "MLB", "NCAAB", "NFL")
+SUPPORTED_LEAGUES: tuple[str, ...] = (
+    "NBA", "NHL", "MLB", "NCAAB", "NFL",
+    # Soccer (task #196).  3-way markets — `apply()` is shape-agnostic
+    # because we calibrate the YES probability post-meta-model, but the
+    # settlement pipeline branches on `LeagueConfig.three_way_market`
+    # so a soccer draw outcome is scored as a YES miss on both
+    # home-side and away-side legs rather than treated as a tie.
+    "EPL", "LALIGA", "SERIEA", "BUNDES", "LIGUE1", "MLS", "UCL",
+)
 
 # Below this sample count we fall back to Platt; below MIN_REFIT we
 # don't fit anything at all (nothing useful to learn from).
