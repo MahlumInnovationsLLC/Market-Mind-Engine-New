@@ -10,7 +10,7 @@ import asyncio
 import logging
 from typing import Any
 
-from .. import calibrators
+from .. import calibrators, margin_regressor
 from ..config import get_settings
 from .pipeline import run_cycle
 from .retrain import run_retrain_cycle
@@ -92,6 +92,16 @@ class _SettlementScheduler:
                 except Exception as e:
                     log.exception("per-league calibrator refit failed: %s", e)
                     calib_summary = {"error": f"{type(e).__name__}: {e}"}
+                # Refresh the per-league margin regressors against the
+                # latest finished games + closing lines so spread/total
+                # adjustments use freshly-fitted coefficients (not the
+                # cold-start defaults).  Best-effort — failures here
+                # never take down the settlement loop.
+                try:
+                    mr_summary = (await margin_regressor.refit_all_leagues()).as_dict()
+                except Exception as e:
+                    log.exception("margin regressor refit failed: %s", e)
+                    mr_summary = {"error": f"{type(e).__name__}: {e}"}
                 self._last = {
                     "started_at": cr.started_at,
                     "completed_at": cr.completed_at,
@@ -104,6 +114,7 @@ class _SettlementScheduler:
                     "errors": cr.errors,
                     "retrain": retrain_summary,
                     "calibrators": calib_summary,
+                    "margin_regressor": mr_summary,
                 }
                 backoff = 0.0
             except asyncio.CancelledError:

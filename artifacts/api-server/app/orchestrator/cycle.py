@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
-from .. import db, predictor
+from .. import db, margin_regressor, predictor
 from ..config import get_settings
 from ..elo import attach_elo_to_candidate
 from ..risk import RiskContext, run_all_gates
@@ -340,6 +340,22 @@ async def _predict_for_candidate(
     payload = pred.as_dict()
     payload["feature_inputs"] = fv.present
     payload["feature_count"] = len(fv.values)
+    # Spread / total tickers benefit from a continuous-quantity model:
+    # blend the binary baseline with the per-league margin regressor
+    # so the live probability picks up the regressor's edge while
+    # keeping every signal the meta-model sees on top.  Best-effort —
+    # any failure leaves the baseline untouched.
+    try:
+        adj = margin_regressor.adjust_probability(
+            float(payload["probability"]), cand,
+        )
+    except Exception as e:  # pragma: no cover — never let this kill the loop
+        log.debug("margin regressor adjust failed for %s: %s", cand.get("game_id"), e)
+        adj = None
+    if adj is not None:
+        payload["baseline_probability"] = payload["probability"]
+        payload["probability"] = adj["blended"]
+        payload["margin_adjustment"] = adj
     return payload
 
 
@@ -481,6 +497,14 @@ async def run_cycle(vertical: str = "sports") -> CycleResult:
             await attach_elo_to_candidate(cand)
         except Exception as e:
             log.debug("elo enrichment failed for %s: %s", cand.get("game_id"), e)
+        # Spread/Total candidates also need the closing line on
+        # game_context so the margin regressor has something to
+        # compare its expected margin/total against.  Best-effort —
+        # silent no-op if the line table is empty for the game.
+        try:
+            await margin_regressor.attach_lines_to_candidate(cand)
+        except Exception as e:
+            log.debug("line enrichment failed for %s: %s", cand.get("game_id"), e)
 
     # 3) Evaluate every candidate against the 12 gates.
     for cand in candidates:
