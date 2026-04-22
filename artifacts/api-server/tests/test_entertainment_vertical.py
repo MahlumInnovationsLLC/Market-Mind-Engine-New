@@ -239,6 +239,87 @@ def test_awards_race_style_ticker_finds_candidate():
     assert res.probability > 0.6
 
 
+def test_awards_race_normalises_across_candidates():
+    # Three-candidate BESTPIC field with priors {0.5, 0.3, 0.2}.  The
+    # ticker for OPPENHEIMER (prior 0.5) must be priced at exactly its
+    # normalized share (0.5 / 1.0 = 0.5), NOT inflated by a winners
+    # base rate.
+    t = parse_entertainment_ticker("KXOSCAR-25-BESTPIC-OPPENHEIMER")
+    now = datetime.now(timezone.utc)
+    field = [
+        SignalRow(source="variety_awards_rss", signal_id=f"v/{c}",
+                  signal_type="OSCAR", title=c,
+                  event_at=now + timedelta(days=30), value=v,
+                  settled=False, outcome=None,
+                  payload={"race_category": "BESTPIC"})
+        for c, v in [("OPPENHEIMER", 0.5), ("BARBIE", 0.3), ("KILLERS", 0.2)]
+    ]
+    res = hybrid_probability(t, field)
+    assert res.head == "awards"
+    assert res.probability == pytest.approx(0.5, abs=0.05)
+    # Sum across all three candidates must be ~1 (within clamp band).
+    sums = [
+        hybrid_probability(
+            parse_entertainment_ticker(f"KXOSCAR-25-BESTPIC-{c}"), field
+        ).probability
+        for c in ("OPPENHEIMER", "BARBIE", "KILLERS")
+    ]
+    assert sum(sums) == pytest.approx(1.0, abs=0.05)
+
+
+def test_awards_no_candidate_match_returns_floor_not_unrelated_row():
+    # A ticker for a candidate with NO row in the race field must NOT
+    # bind to an unrelated candidate's signal — it must return the
+    # floor probability instead.
+    t = parse_entertainment_ticker("KXOSCAR-25-BESTPIC-DUNE2")
+    now = datetime.now(timezone.utc)
+    field = [
+        SignalRow(source="variety_awards_rss", signal_id="v/oppenheimer",
+                  signal_type="OSCAR", title="OPPENHEIMER",
+                  event_at=now + timedelta(days=30), value=0.9,
+                  settled=False, outcome=None,
+                  payload={"race_category": "BESTPIC"}),
+    ]
+    res = hybrid_probability(t, field)
+    assert res.head == "awards"
+    assert res.probability == pytest.approx(0.05, abs=0.001)
+    assert res.feature_summary["matched_candidate"] == 0.0
+
+
+def test_awards_winners_in_history_do_not_inflate_posterior():
+    # Settled winners with value=1.0 (as written by the historical
+    # poller) must NOT inflate the posterior — the model is purely
+    # race-normalized, so adding winners to history must leave the
+    # ticker's probability unchanged.
+    t = parse_entertainment_ticker("KXOSCAR-25-BESTPIC-OPPENHEIMER")
+    now = datetime.now(timezone.utc)
+    field = [
+        SignalRow(source="v", signal_id="v/oppenheimer",
+                  signal_type="OSCAR", title="OPPENHEIMER",
+                  event_at=now + timedelta(days=30), value=0.5,
+                  settled=False, outcome=None,
+                  payload={"race_category": "BESTPIC"}),
+        SignalRow(source="v", signal_id="v/barbie",
+                  signal_type="OSCAR", title="BARBIE",
+                  event_at=now + timedelta(days=30), value=0.5,
+                  settled=False, outcome=None,
+                  payload={"race_category": "BESTPIC"}),
+    ]
+    winners = [
+        SignalRow(source="awards_historical_outcomes",
+                  signal_id=f"OSCAR/{2020 - i}/BESTPIC/PASTWINNER{i}",
+                  signal_type="OSCAR", title=f"PASTWINNER{i}",
+                  event_at=now - timedelta(days=365 * (i + 1)),
+                  value=1.0, settled=True, outcome="win",
+                  payload={"race_category": "BESTPIC", "year": 2020 - i})
+        for i in range(5)
+    ]
+    p_no_winners = hybrid_probability(t, field).probability
+    p_with_winners = hybrid_probability(t, field + winners).probability
+    assert p_with_winners == pytest.approx(p_no_winners, abs=0.001)
+    assert p_with_winners == pytest.approx(0.5, abs=0.05)
+
+
 def test_charts_top10_share():
     t = parse_entertainment_ticker("KXSPOTIFY-25W08-TAYLOR-TOP10")
     history = [

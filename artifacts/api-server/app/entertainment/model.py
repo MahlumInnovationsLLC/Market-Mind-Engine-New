@@ -282,54 +282,90 @@ def _awards_probability(
     ticker: EntertainmentTicker,
     history_list: list[SignalRow],
 ) -> HybridResult:
-    """Bayesian update on a precursor-derived prior.
+    """Race-scoped discrete winner probability for an awards market.
 
-    The upcoming signal row carries a per-candidate `value` interpreted
-    as the precursor-derived YES probability (Golden Globes / SAG /
-    Critics' Choice / DGA / etc winner share for the candidate title).
-    We blend it with the category base rate (mean winner share for
-    *eventual winners* across settled history) using a 0.7 / 0.3 weight
-    so the precursor signal dominates while never letting a missing
-    one collapse the prior to 0.
+    For an awards binary (e.g. KXOSCAR-25-BESTPIC-OPPENHEIMER):
+
+      1. Identify the race field — every unsettled signal row of the
+         same ``signal_type`` whose payload ``race_category`` matches
+         the ticker's race (when the ticker carries one).  Each
+         candidate row's ``value`` is the precursor-derived prior
+         (Golden Globes / SAG / Critics' Choice / DGA winner share for
+         that candidate).
+      2. Match the ticker's candidate name against the field exactly
+         (no fall-through to an unrelated row — that would price an
+         unrelated candidate's signal into our market).
+      3. Normalise across the field so the posteriors over the race
+         sum to 1.  Our candidate's posterior is its share of that
+         total.
+
+    A ticker whose candidate has no representative row in the race
+    field returns a small floor probability (5%) — we don't have
+    evidence to support a YES.
     """
-    # Awards race-style tickers carry the candidate name on .candidate;
-    # the legacy 3-segment shape carries it on .title.  Match against
-    # whichever is populated.
+    st = ticker.signal_type.upper()
+    race_lc = (ticker.race_category or "").lower()
     needle = (ticker.candidate or ticker.title).lower()
-    race_lc = ticker.title.lower() if ticker.candidate else None
-    upcoming = next(
-        (r for r in history_list
-         if not r.settled and r.value is not None
-         and (needle in r.title.lower() or r.title.lower() in needle)
-         and (race_lc is None
-              or race_lc in str((r.payload or {}).get("race_category", "")).lower()
-              or not (r.payload or {}).get("race_category"))),
-        None,
-    )
-    if upcoming is None:
-        upcoming = next(
-            (r for r in history_list if not r.settled and r.value is not None),
-            None,
-        )
-    prior = float(upcoming.value) if upcoming is not None else 0.5
-    prior = _clamp(prior, 0.01, 0.99)
 
-    settled_winners = [
-        float(r.value) for r in history_list
-        if r.settled and r.value is not None
-        and (r.outcome or "").lower() == "win"
-    ]
-    n_hist = len(settled_winners)
-    if n_hist >= 3:
-        base_rate = sum(settled_winners) / n_hist
+    field: list[SignalRow] = []
+    for r in history_list:
+        if r.settled or r.value is None or r.value <= 0.0:
+            continue
+        if r.signal_type.upper() != st:
+            continue
+        r_race = str((r.payload or {}).get("race_category", "")).lower()
+        # Race-scoped tickers must match payload race_category when the
+        # row carries one.  Rows missing race_category are admitted so
+        # legacy variety/HR RSS placeholder rows still contribute.
+        if race_lc and r_race and r_race != race_lc:
+            continue
+        field.append(r)
+
+    def _is_us(r: SignalRow) -> bool:
+        if r.title.lower() == needle:
+            return True
+        cand = str((r.payload or {}).get("candidate", "")).lower()
+        return bool(cand) and cand == needle
+
+    our_row = next((r for r in field if _is_us(r)), None)
+
+    settled_field_wins = sum(
+        1 for r in history_list
+        if r.settled and (r.outcome or "").lower() == "win"
+        and r.signal_type.upper() == st
+        and (not race_lc
+             or str((r.payload or {}).get("race_category", "")).lower() == race_lc)
+    )
+
+    if our_row is None:
+        # No representative row for our candidate in the race — return
+        # a small floor probability so we don't price unrelated rows
+        # into this market.
+        return HybridResult(
+            probability=_clamp(0.05),
+            head="awards", threshold=None, direction="unknown", sigma=0.0,
+            contributing_history=settled_field_wins,
+            feature_summary={"field_size": float(len(field)),
+                             "matched_candidate": 0.0,
+                             "race_category": float(1.0 if race_lc else 0.0)},
+        )
+
+    total = sum(float(r.value) for r in field)
+    if total <= 0.0:
+        # Degenerate field — fall back to the raw prior (clamped).
+        posterior = float(our_row.value)
     else:
-        base_rate = 0.5
-    posterior = 0.7 * prior + 0.3 * base_rate
+        posterior = float(our_row.value) / total
     return HybridResult(
-        probability=_clamp(posterior), head="awards", threshold=None,
-        direction="unknown", sigma=0.0, contributing_history=n_hist,
-        feature_summary={"history": float(n_hist), "prior": prior,
-                         "base_rate": base_rate, "posterior": posterior},
+        probability=_clamp(posterior),
+        head="awards", threshold=None, direction="unknown", sigma=0.0,
+        contributing_history=settled_field_wins,
+        feature_summary={"field_size": float(len(field)),
+                         "matched_candidate": 1.0,
+                         "candidate_value": float(our_row.value),
+                         "field_total": float(total),
+                         "posterior": posterior,
+                         "race_category": float(1.0 if race_lc else 0.0)},
     )
 
 
