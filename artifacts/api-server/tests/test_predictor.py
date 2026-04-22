@@ -168,13 +168,22 @@ def test_predict_unavailable_when_loader_not_ready():
         asyncio.run(predictor.predict([1.0, 2.0, 3.0]))
 
 
-def test_predict_unavailable_when_no_canonical_loaded():
+def test_predict_unavailable_when_no_canonical_loaded(monkeypatch):
     saved = "models/saved/meta_model.pkl"
     _seed_state(
         {saved: _make_meta("v1")},
         {saved: {"ok": False, "error": "broken"}},
         {},  # nothing actually loaded
     )
+
+    # The lazy-load path would otherwise read the real on-disk artifact
+    # cache (if a prior dev session populated it). Force the lazy load
+    # to fail so we exercise the "nothing canonical loaded" branch.
+    async def _boom(name):
+        raise RuntimeError(f"forced load failure for {name}")
+
+    monkeypatch.setattr(models_loader, "load_predictor", _boom)
+
     with pytest.raises(predictor.PredictorUnavailable):
         asyncio.run(predictor.predict([1.0, 2.0, 3.0, 4.0]))
 
