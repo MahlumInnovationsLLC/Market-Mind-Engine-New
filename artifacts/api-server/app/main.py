@@ -12,6 +12,7 @@ import asyncio
 import logging
 import os
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 
 from fastapi import Depends, FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
@@ -66,6 +67,7 @@ from .feeds.weather import register_weather_feeds
 from .feeds.crypto import register_crypto_feeds
 from .feeds.commodities import register_commodities_feeds
 from .feeds.tech_evidence import register_tech_evidence_feeds
+from .feeds.election_polls import register_election_polls_feeds
 from .feeds.unusual_whales import register_unusual_whales_feeds
 from .feeds.public_betting import register_public_betting_feeds
 from .features import drift as feature_drift, registry as feature_registry
@@ -153,6 +155,10 @@ async def lifespan(_: FastAPI):
         register_crypto_feeds()
         register_commodities_feeds()
         register_tech_evidence_feeds()
+        try:
+            register_election_polls_feeds()
+        except Exception as e:
+            log.warning("election_polls feed registration failed: %s", e)
         try:
             from .feeds import weather_climatology as _wclim
 
@@ -1153,6 +1159,154 @@ async def admin_tech_ai_promote_kelly(
         actor_email=getattr(actor, "email", None),
     )
     if not status.eligible and status.current_multiplier < _tech_ai_promotion.PROMOTED_MULTIPLIER:
+        raise HTTPException(status_code=409, detail={
+            "error": "not_eligible",
+            "status": status.as_dict(),
+        })
+    return status.as_dict()
+
+
+# ---------------------------------------------------------------------------
+# Elections vertical (task #201) — dashboard arb panel + Kelly auto-promote
+# ---------------------------------------------------------------------------
+
+
+@app.get("/api/dashboard/elections/markets/{ticker}/arb")
+async def dashboard_elections_market_arb(
+    ticker: str,
+    threshold_pp: float = 4.0,
+    lookback_days: int = 60,
+    _: object = Depends(require_approved_user),
+) -> dict[str, object]:
+    """Surface the Kalshi-vs-Polymarket arb panel for an election market.
+
+    Powers the dashboard's side-by-side arb panel: parses the ticker,
+    pulls the latest Kalshi market price + the freshest Polymarket
+    cross-reference row from `election_polls`, runs the arb detector
+    and returns the spread alongside the model prediction so the UI
+    can render a one-click "send to Kalshi" call-to-action.
+    """
+    from .elections.tickers import (
+        InvalidElectionTicker,
+        parse_election_ticker,
+    )
+    from .elections.polls import resolve_polls
+    from .elections.arb import detect_arb
+    from .elections import predictor as _elections_predictor
+    try:
+        parsed = parse_election_ticker(ticker)
+    except InvalidElectionTicker as e:
+        raise HTTPException(status_code=400, detail=f"invalid election ticker: {e}")
+    lookback_days = max(1, min(180, int(lookback_days)))
+    threshold_pp = max(0.0, min(50.0, float(threshold_pp)))
+    polls = await resolve_polls(parsed, lookback_days=lookback_days)
+
+    # Pick the *freshest* polymarket xref row whose candidate matches
+    # the ticker's candidate slot — falling back to nothing rather than
+    # reading the wrong leg (binary YES/NO markets list both outcomes,
+    # multi-outcome markets list every candidate; picking the first
+    # row would frequently invert the arb direction).
+    from .elections.model import _candidate_matches as _cand_match
+    polymarket_price: float | None = None
+    polymarket_meta: dict[str, object] | None = None
+    xref_rows = [
+        r for r in polls
+        if (r.kind or "").lower() == "polymarket_xref"
+        and r.support_pct is not None
+        and _cand_match(parsed.candidate or "", r.candidate or "")
+    ]
+    xref_rows.sort(
+        key=lambda r: r.observed_at or datetime.min.replace(tzinfo=timezone.utc),
+        reverse=True,
+    )
+    if xref_rows:
+        row = xref_rows[0]
+        polymarket_price = float(row.support_pct) / 100.0
+        polymarket_meta = {
+            "observed_at": row.observed_at.isoformat() if row.observed_at else None,
+            "candidate": row.candidate,
+            "payload": row.payload,
+        }
+
+    kalshi_price: float | None = None
+    try:
+        from . import db as _db
+        row = await _db.fetchrow(
+            """
+            SELECT yes_price_cents
+              FROM kalshi_markets
+             WHERE market_id = $1
+             ORDER BY observed_at DESC
+             LIMIT 1
+            """,
+            parsed.raw,
+        )
+        if row and row.get("yes_price_cents") is not None:
+            kalshi_price = float(row["yes_price_cents"]) / 100.0
+    except Exception as e:
+        log.debug("kalshi price lookup failed for %s: %s", parsed.raw, e)
+
+    arb = detect_arb(
+        market_id=parsed.raw,
+        candidate=parsed.candidate,
+        kalshi_price=kalshi_price,
+        polymarket_price=polymarket_price,
+        threshold_pp=threshold_pp,
+    )
+
+    try:
+        pred = await _elections_predictor.predict_election_binary(
+            parsed, league="ELECTIONS", lookback_days=lookback_days
+        )
+        prediction = pred.as_dict()
+    except Exception as e:
+        log.debug("elections dashboard predict failed for %s: %s", ticker, e)
+        prediction = None
+
+    return {
+        "ticker": {
+            "raw": parsed.raw,
+            "office": parsed.office,
+            "candidate": parsed.candidate,
+            "region": parsed.region,
+            "scope": parsed.scope,
+            "when": parsed.when,
+        },
+        "kalshi": {"price": kalshi_price},
+        "polymarket": {"price": polymarket_price, **(polymarket_meta or {})},
+        "arb": arb.as_dict(),
+        "prediction": prediction,
+        "lookback_days": lookback_days,
+    }
+
+
+@app.get("/api/admin/elections/promotion-status")
+async def admin_elections_promotion_status(
+    actor: AuthedUser = Depends(require_admin),
+) -> dict[str, object]:
+    """Return the current elections Kelly promotion eligibility snapshot."""
+    from .elections import promotion as _elections_promotion
+    status = await _elections_promotion.evaluate_promotion()
+    return status.as_dict()
+
+
+@app.post("/api/admin/elections/promote-kelly")
+async def admin_elections_promote_kelly(
+    actor: AuthedUser = Depends(require_admin),
+) -> dict[str, object]:
+    """Promote the elections Kelly multiplier from 0.05 to 0.08.
+
+    Refuses unless the latest evaluation reports ``eligible=True``
+    (>= 30 settled trades and rolling Brier < 0.20).  When eligible,
+    writes ``risk.kelly_multiplier_elections = 0.08`` into
+    ``system_settings`` and records an audit row.
+    """
+    from .elections import promotion as _elections_promotion
+    status = await _elections_promotion.promote(
+        actor_user_id=actor.user_id,
+        actor_email=getattr(actor, "email", None),
+    )
+    if not status.eligible and status.current_multiplier < _elections_promotion.PROMOTED_MULTIPLIER:
         raise HTTPException(status_code=409, detail={
             "error": "not_eligible",
             "status": status.as_dict(),

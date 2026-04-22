@@ -526,6 +526,48 @@ async def _predict_for_tech_ai_binary(cand: dict[str, Any]) -> dict[str, Any] | 
     return payload
 
 
+async def _predict_for_elections_binary(cand: dict[str, Any]) -> dict[str, Any] | None:
+    """Route an elections candidate through `app.elections.predictor`.
+
+    Mirrors the tech-AI helper — parse the Kalshi ticker into an
+    `ElectionTicker`, run the poll-of-polls model, fold the
+    calibrated YES probability into the standard cycle telemetry
+    shape.  Failure modes (parse error, sick election_polls cache)
+    degrade to swarm-only signals.
+    """
+    market_id = _resolve_market_id(cand) or cand.get("kalshi_market_id")
+    if not market_id:
+        return None
+    try:
+        from ..elections.tickers import (
+            InvalidElectionTicker as _InvalidElectionTicker,
+            parse_election_ticker as _parse_election_ticker,
+        )
+        from ..elections import predictor as _elections_predictor
+    except Exception as e:  # pragma: no cover — defensive
+        log.warning("elections module import failed: %s", e)
+        return None
+    try:
+        ticker = _parse_election_ticker(str(market_id))
+    except _InvalidElectionTicker as e:
+        log.debug("elections ticker parse failed for %s: %s", market_id, e)
+        return None
+    try:
+        pred = await _elections_predictor.predict_election_binary(
+            ticker, league=cand.get("league") or "ELECTIONS"
+        )
+    except _elections_predictor.ElectionPredictionError as e:
+        log.debug("elections predict failed for %s: %s", market_id, e)
+        return None
+    except Exception as e:  # pragma: no cover — defensive
+        log.warning("elections predict crashed for %s: %s", market_id, e)
+        return None
+    payload = pred.as_dict()
+    payload["feature_inputs"] = payload.get("raw", {}).get("features", {})
+    payload["feature_count"] = payload.get("raw", {}).get("feature_count")
+    return payload
+
+
 async def _predict_for_candidate(
     cand: dict[str, Any],
     *,
@@ -560,6 +602,8 @@ async def _predict_for_candidate(
         return await _predict_for_commodities_binary(cand)
     if spec is not None and spec.predictor_hook == "tech_ai_evidence":
         return await _predict_for_tech_ai_binary(cand)
+    if spec is not None and spec.predictor_hook == "elections_poll_of_polls":
+        return await _predict_for_elections_binary(cand)
 
     # N-way tournament markets (task #197) — leagues that flag
     # `LeagueConfig.n_way_market=True` (ATP / WTA / F1 / PGA) and ship

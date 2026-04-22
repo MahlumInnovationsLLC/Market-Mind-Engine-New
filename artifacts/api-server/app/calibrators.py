@@ -78,6 +78,11 @@ SUPPORTED_LEAGUES: tuple[str, ...] = (
     # trades feed an isotonic / Platt curve scoped to TECH_AI just
     # like every other vertical.
     "TECH_AI",
+    # Elections (task #201).  Poll-of-polls + state-bias-correction
+    # model.  Calibrator still applies post-model so settled elections
+    # trades feed an isotonic / Platt curve scoped to ELECTIONS just
+    # like every other vertical.
+    "ELECTIONS",
 )
 
 # Below this sample count we fall back to Platt; below MIN_REFIT we

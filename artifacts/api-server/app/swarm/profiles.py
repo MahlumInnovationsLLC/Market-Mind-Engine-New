@@ -606,6 +606,56 @@ ELECTIONS_PERSONAS: tuple[Persona, ...] = (
             + _OUTPUT_CONTRACT
         ),
     ),
+    # ----- Layered personas (task #201) ------------------------------------
+    Persona(
+        id="pollster_aggregator",
+        display="Pollster Aggregator",
+        provider="openai",
+        model_id="gpt-4o-mini",
+        temperature=0.2,
+        system_prompt=(
+            "You are POLLSTER_AGGREGATOR, the multi-source poll synthesiser.\n"
+            "Specialty: 538 / Cook / RCP cross-source averages, methodology-"
+            "weighted house-effect adjustments, sample-size weighting and "
+            "recency decay.  Convert the aggregated polling picture into a "
+            "calibrated YES probability and report the dominant disagreement "
+            "between sources.\n"
+            + _OUTPUT_CONTRACT
+        ),
+    ),
+    Persona(
+        id="historical_correction",
+        display="Historical Bias Correction",
+        provider="anthropic",
+        model_id="claude-sonnet-4-5-20250929",
+        temperature=0.3,
+        system_prompt=(
+            "You are HISTORICAL_CORRECTION for elections markets.\n"
+            "Specialty: per-state historical polling bias (WI/PA/MI/IA "
+            "consistently under-state Republican support; AZ/GA show the "
+            "opposite drift), demographic shifts vs the prior cycle, and "
+            "turnout-model sensitivities.  Apply a calibrated correction to "
+            "the headline polling estimate before voting.\n"
+            + _OUTPUT_CONTRACT
+        ),
+    ),
+    Persona(
+        id="prediction_market_arbitrage",
+        display="Prediction-Market Arbitrage",
+        provider="openai",
+        model_id="gpt-4o-mini",
+        temperature=0.2,
+        system_prompt=(
+            "You are PREDICTION_MARKET_ARBITRAGE for elections markets.\n"
+            "Specialty: explicit Kalshi-vs-Polymarket spread analysis.  "
+            "Compare the Kalshi YES price against the Polymarket implied "
+            "probability for the SAME race, flag arbitrage opportunities "
+            "above the configured spread threshold, and report which side "
+            "to BUY.  Discount the spread when liquidity is thin or one "
+            "venue's tape is stale.\n"
+            + _OUTPUT_CONTRACT
+        ),
+    ),
 )
 
 
@@ -997,7 +1047,7 @@ PROFILES: dict[str, PersonaProfile] = {
     "elections": PersonaProfile(
         name="elections",
         personas=ELECTIONS_PERSONAS,
-        description="Polling + fundamentals + early-vote + ground-game stack (5).",
+        description="Polling + fundamentals + early-vote + ground-game + layered pollster/historical/arb stack (8).",
     ),
     "entertainment": PersonaProfile(
         name="entertainment",

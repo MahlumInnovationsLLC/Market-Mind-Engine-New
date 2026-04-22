@@ -144,6 +144,37 @@ REGISTRY.register(VerticalSpec(
 ))
 
 
+# Elections (task #201).  Poll-of-polls + state-bias-correction +
+# Polymarket cross-reference + arb detection.  Conservative
+# paper-grade Kelly multiplier (0.05 — lower than tech-AI's 0.06
+# because election markets historically resolve in correlated
+# clusters that punish over-sizing).  Auto-promotes to 0.08 (also
+# lower than tech-AI's 0.10) after 30 settled trades show
+# Brier<0.20 and an admin confirms via the
+# `/api/admin/elections/promote-kelly` endpoint, which writes
+# `risk.kelly_multiplier_elections=0.08` into `system_settings`.
+REGISTRY.register(VerticalSpec(
+    name="elections",
+    leagues=("ELECTIONS",),
+    ticker_prefixes=(
+        "KXPRES", "KXGOV", "KXSEN", "KXHOUSE",
+        "KXFRPRES", "KXUKPM", "KXDEPM", "KXCAPM", "KXAUPM", "KXELE",
+    ),
+    persona_profile="elections",
+    predictor_hook="elections_poll_of_polls",
+    kelly_multiplier=0.05,
+    default_allocation_pct=0.10,
+    duplicate_trade_exempt=True,
+    description=(
+        "US + foreign election binary markets across presidential, "
+        "gubernatorial, senate, house and foreign-leadership races.  "
+        "Routed through a poll-of-polls model with per-state "
+        "historical bias correction and a Polymarket cross-reference "
+        "that powers a Kalshi-vs-Polymarket arb panel."
+    ),
+))
+
+
 REGISTRY.register(VerticalSpec(
     name="soccer",
     leagues=("EPL", "LALIGA", "SERIEA", "BUNDES", "LIGUE1", "MLS", "UCL"),

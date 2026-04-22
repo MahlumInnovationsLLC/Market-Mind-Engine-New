@@ -371,6 +371,22 @@ LEAGUE_CONFIGS: dict[str, LeagueConfig] = {
         live_action_blackout=False,
         max_daily_trades=20,
     ),
+    # Elections (task #201).  Single bucket — `per_event_cap_pct` is
+    # set so a single race can't accumulate too much exposure across
+    # YES/NO + tie-breaker legs.  Live blackout disabled (election
+    # markets stay open through tape).  Conservative max_daily_trades
+    # to throttle churn during the 24-48h before resolution when
+    # polls update most aggressively.
+    "ELECTIONS": LeagueConfig(
+        league="ELECTIONS",
+        priority=9,
+        allocation_pct=0.10,
+        per_game_cap_pct=0.01,
+        per_event_cap_pct=0.05,
+        n_way_market=False,
+        live_action_blackout=False,
+        max_daily_trades=15,
+    ),
 }
 
 
