@@ -94,6 +94,7 @@ from .polymarket import (
     ws as polymarket_ws,
 )
 from .polymarket.lifecycle import OrderRequest as PolymarketOrderRequest
+from .telegram import bindings as telegram_bindings, bot as telegram_bot
 
 
 configure_logging()
@@ -251,6 +252,12 @@ async def lifespan(_: FastAPI):
         await notif_churn.start()
     except Exception as e:
         log.warning("churn digest scheduler start failed: %s", e)
+    # Telegram concierge bot (per task #111). No-op when
+    # TELEGRAM_BOT_TOKEN is unset (the dev / CI default).
+    try:
+        await telegram_bot.start()
+    except Exception as e:
+        log.warning("telegram bot start failed: %s", e)
 
     # Periodic feature-drift snapshot logger.  Pure in-process — no DB
     # dependency, so it's safe to start before the ready gate clears.
@@ -324,6 +331,10 @@ async def lifespan(_: FastAPI):
             await notif_churn.stop()
         except Exception as e:
             log.warning("churn digest stop error: %s", e)
+        try:
+            await telegram_bot.stop()
+        except Exception as e:
+            log.warning("telegram bot stop error: %s", e)
         try:
             await feature_drift.scheduler.stop()
         except Exception as e:
@@ -787,6 +798,68 @@ async def me_set_notification_prefs(
         notify_halt=body.notify_halt,
     )
     return prefs
+
+
+# ---------------------------------------------------------------------------
+# Telegram concierge binding (per task #111)
+# ---------------------------------------------------------------------------
+
+
+def _binding_public_view(row: dict[str, object] | None) -> dict[str, object]:
+    if not row:
+        return {"linked": False, "bot_username": telegram_bot.bot_username()}
+    bound_at = row.get("bound_at")
+    return {
+        "linked": bound_at is not None,
+        "telegram_user_id": row.get("telegram_user_id"),
+        "telegram_username": row.get("telegram_username"),
+        "bound_at": bound_at,
+        "last_seen_at": row.get("last_seen_at"),
+        "pending_link_code": row.get("link_code") if not bound_at else None,
+        "pending_link_expires_at": (
+            row.get("link_code_expires_at") if not bound_at else None
+        ),
+        "bot_username": telegram_bot.bot_username(),
+        "bot_running": telegram_bot.is_running(),
+    }
+
+
+@app.get("/api/me/telegram")
+async def me_telegram_status(
+    user: AuthedUser = Depends(require_approved_user),
+) -> dict[str, object]:
+    """Current Telegram binding for the calling operator."""
+    row = await telegram_bindings.get_binding_by_clerk(user.user_id)
+    return _binding_public_view(row)
+
+
+@app.post("/api/me/telegram/link")
+async def me_telegram_issue_link(
+    user: AuthedUser = Depends(require_approved_user),
+) -> dict[str, object]:
+    """Issue a fresh short-lived link code.
+
+    The operator pastes the returned ``code`` into Telegram as
+    ``/start <code>`` and the bot binds the chat to this Clerk user.
+    Calling this again before the prior code is used invalidates the
+    earlier code (the row carries a single pending code at a time).
+    """
+    row = await telegram_bindings.issue_link_code(user.user_id)
+    out = _binding_public_view(row)
+    # Surface the new code at the top level so the dashboard doesn't have
+    # to look it up under pending_link_code (the read endpoint hides it
+    # once the code has been consumed).
+    out["code"] = row.get("link_code")
+    out["expires_at"] = row.get("link_code_expires_at")
+    return out
+
+
+@app.delete("/api/me/telegram")
+async def me_telegram_unbind(
+    user: AuthedUser = Depends(require_approved_user),
+) -> dict[str, object]:
+    removed = await telegram_bindings.unbind(user.user_id)
+    return {"ok": True, "removed": removed}
 
 
 # ---------------------------------------------------------------------------
@@ -2638,91 +2711,21 @@ async def admin_emergency_stop(
     a single ``emergency_stop`` row to the admin audit log, and emails
     the on-call operator.
 
-    Per task #104.
+    Per task #104. The body is shared with the Telegram concierge
+    (task #111) — see :func:`app.telegram.estop.execute_emergency_stop`.
     """
-    import json as _json
+    from .telegram import estop as _estop
     reason = (body.reason if body else None) or "operator emergency stop"
     actor_email: str | None = None
     try:
         actor_email = (await check_approval(actor))[1]
     except Exception:
         pass
-
-    # 1. Cancel every resting Kalshi order (best-effort — individual
-    #    failures are logged and counted, but we still proceed to halt
-    #    so a flaky cancel doesn't leave the loop trading).
-    try:
-        canceled = await kalshi_lifecycle.cancel_all_resting()
-    except Exception as e:
-        log.exception("emergency-stop: cancel_all_resting failed")
-        canceled = 0
-    canceled_count = int(canceled or 0)
-
-    # 2. Trip the kill switch (idempotent — also fires the halt alert).
-    kalshi_lifecycle.halt(reason)
-
-    # 3. Persist trading_mode=halt so the cycle gate keeps refusing
-    #    placement even after a restart (kill switch is in-memory only).
-    try:
-        await db.execute(
-            """
-            INSERT INTO system_settings (key, value, updated_at)
-            VALUES ('risk.trading_mode', 'halt', now())
-            ON CONFLICT (key) DO UPDATE
-              SET value = EXCLUDED.value,
-                  updated_at = EXCLUDED.updated_at
-            """,
-        )
-    except Exception as e:
-        log.warning("emergency-stop: trading_mode persist failed: %s", e)
-
-    # 4. One audit-log row capturing what happened.
-    try:
-        await db.execute(
-            """
-            INSERT INTO admin_audit_log (
-                actor_user_id, actor_email,
-                target_user_id, target_email,
-                action, before_value, after_value
-            ) VALUES ($1, $2, $1, $2, $3, $4::jsonb, $5::jsonb)
-            """,
-            actor.user_id,
-            actor_email,
-            "emergency_stop",
-            _json.dumps({"trading_mode": "live_or_paper"}),
-            _json.dumps({
-                "trading_mode": "halt",
-                "reason": reason,
-                "canceled_orders": canceled_count,
-            }),
-        )
-    except Exception as e:
-        log.warning("emergency-stop: audit log insert failed: %s", e)
-
-    # 5. Email the on-call operator. Halt alert already fired from the
-    #    kill-switch trip above; this one carries the cancel count + the
-    #    actor so the on-call knows who hit the button and what it cost.
-    try:
-        notif_alerts.emergency_stop(
-            actor=actor_email or actor.user_id,
-            canceled_count=canceled_count,
-            reason=reason,
-        )
-    except Exception as e:
-        log.warning("emergency-stop: alert dispatch failed: %s", e)
-
-    log.warning(
-        "EMERGENCY STOP by %s (%s): canceled=%d reason=%r",
-        actor_email or actor.user_id, actor.user_id, canceled_count, reason,
+    return await _estop.execute_emergency_stop(
+        actor_user_id=actor.user_id,
+        actor_email=actor_email,
+        reason=reason,
     )
-
-    return {
-        "ok": True,
-        "canceled_orders": canceled_count,
-        "trading_mode": "halt",
-        "reason": reason,
-        "kill_switch": kalshi_lifecycle.kill_switch_state(),
-    }
 
 
 @app.post("/api/kalshi/halt")

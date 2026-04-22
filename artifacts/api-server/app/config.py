@@ -110,6 +110,10 @@ class Settings:
     # Populated from AXIOM_MODEL_CACHE_DIR or DEFAULT_MODEL_CACHE_DIR.
     model_cache_dir: Path
 
+    # Telegram concierge bot. When unset the long-poll loop stays asleep
+    # (dev / CI default). Per task #111.
+    telegram_bot_token: str | None
+
     # Server
     port: int
 
@@ -224,6 +228,7 @@ def get_settings() -> Settings:
             0.0, float(os.environ.get("AXIOM_SLIPPAGE_GUARD_MAX_EDGE_PCT") or "50")
         ),
         model_cache_dir=resolve_model_cache_dir(),
+        telegram_bot_token=(os.environ.get("TELEGRAM_BOT_TOKEN") or "").strip() or None,
         port=int(os.environ.get("PORT", "8080")),
         cors_origins=cors_origins,
     )
