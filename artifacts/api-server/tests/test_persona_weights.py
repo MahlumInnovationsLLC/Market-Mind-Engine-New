@@ -19,9 +19,17 @@ class _Row(dict):
     pass
 
 
-def _row(analyst: str, league: str | None, mt: str | None, brier: float, recent: bool) -> _Row:
+def _row(
+    analyst: str,
+    league: str | None,
+    mt: str | None,
+    brier: float,
+    recent: bool,
+    vertical: str | None = None,
+) -> _Row:
     return _Row(
         analyst_id=analyst,
+        vertical=vertical,
         league=league,
         market_type=mt,
         brier_score=brier,
@@ -89,8 +97,8 @@ def test_snapshot_only_returns_specific_tuples(monkeypatch):
     _patch_rows(
         monkeypatch,
         [
-            _row("quant", "NFL", "moneyline", brier=0.20, recent=True),
-            _row("quant", None, None, brier=0.50, recent=True),
+            _row("quant", "NFL", "moneyline", brier=0.20, recent=True, vertical="sports"),
+            _row("quant", None, None, brier=0.50, recent=True, vertical="sports"),
         ],
     )
 
@@ -99,3 +107,68 @@ def test_snapshot_only_returns_specific_tuples(monkeypatch):
     assert ("quant", "NFL", "moneyline") in keys
     # The fallback aggregates (None, None) must not surface to the dashboard.
     assert all(r["league"] and r["market_type"] for r in snap)
+
+
+# ---------------------------------------------------------------------------
+# Per-vertical scoping (Task #194)
+# ---------------------------------------------------------------------------
+
+
+def test_vertical_scoped_lookup_isolates_brier(monkeypatch):
+    # Same persona, two verticals — sports has a great Brier (=> high
+    # weight) and crypto has a terrible one.  Each lookup must return
+    # the weight for its own vertical without the other leaking in.
+    _patch_rows(
+        monkeypatch,
+        [
+            _row("quant", "NFL", "moneyline", brier=0.10, recent=True, vertical="sports"),
+            _row("quant", "BTC", "binary",    brier=0.45, recent=True, vertical="crypto"),
+        ],
+    )
+    sports_w = asyncio.run(
+        w.get_persona_weight("quant", "NFL", "moneyline", vertical="sports")
+    )
+    crypto_w = asyncio.run(
+        w.get_persona_weight("quant", "BTC", "binary", vertical="crypto")
+    )
+    assert abs(sports_w - 0.90) < 1e-6
+    assert abs(crypto_w - 0.55) < 1e-6
+
+
+def test_vertical_lookup_falls_back_to_unscoped_legacy_rows(monkeypatch):
+    # Legacy rows pre-0005-backfill have vertical=None.  A brand-new
+    # vertical (geopolitics) with no rows of its own must inherit the
+    # persona's all-domain history rather than collapsing to neutral.
+    _patch_rows(
+        monkeypatch,
+        [
+            _row("quant", "NFL", "moneyline", brier=0.20, recent=True, vertical=None),
+        ],
+    )
+    geo_w = asyncio.run(
+        w.get_persona_weight("quant", "NFL", "moneyline", vertical="geopolitics")
+    )
+    # Falls back through the (analyst, None, league, market_type) tier.
+    assert abs(geo_w - 0.80) < 1e-6
+
+
+def test_vertical_lookup_falls_back_to_neutral_when_unknown(monkeypatch):
+    _patch_rows(monkeypatch, [])
+    val = asyncio.run(
+        w.get_persona_weight("ghost", "NFL", "moneyline", vertical="sports")
+    )
+    assert abs(val - w._NEUTRAL) < 1e-6
+
+
+def test_legacy_call_signature_without_vertical_still_works(monkeypatch):
+    # Backwards compatibility: callers that haven't been updated to
+    # pass `vertical=` keep getting the unscoped resolver behaviour.
+    _patch_rows(
+        monkeypatch,
+        [
+            _row("quant", "NFL", "moneyline", brier=0.10, recent=True, vertical="sports"),
+        ],
+    )
+    val = asyncio.run(w.get_persona_weight("quant", "NFL", "moneyline"))
+    # Hits the (analyst, None, league, market_type) legacy tier.
+    assert abs(val - 0.90) < 1e-6

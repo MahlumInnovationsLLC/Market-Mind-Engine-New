@@ -233,7 +233,8 @@ async def _update_personas_for_market(market_id: str, outcome_yes: int) -> int:
     try:
         debates = await db.fetch(
             """
-            SELECT id, league, market_type, analyst_verdicts, outcome
+            SELECT id, league, market_type, analyst_verdicts, outcome,
+                   game_context
               FROM swarm_debates
              WHERE ((game_context->>'kalshi_market_id') = $1 OR game_id = $1)
                AND outcome IS NULL
@@ -274,6 +275,22 @@ async def _update_personas_for_market(market_id: str, outcome_yes: int) -> int:
 
         league = d["league"] or "ALL"
         mtype = d["market_type"] or "moneyline"
+        # Per task #194 the persona Brier table is scoped per-vertical
+        # so a sports-Brier history doesn't leak into a crypto cycle.
+        # The vertical is recorded on the debate's game_context jsonb;
+        # legacy rows missing the field are treated as 'sports' which
+        # matches the migration 0005 backfill.
+        gctx = d["game_context"]
+        if isinstance(gctx, str):
+            try:
+                gctx = json.loads(gctx)
+            except Exception:
+                gctx = None
+        debate_vertical = "sports"
+        if isinstance(gctx, dict):
+            v_raw = gctx.get("vertical")
+            if isinstance(v_raw, str) and v_raw.strip():
+                debate_vertical = v_raw.strip().lower()
         for v in verdicts:
             if not isinstance(v, dict):
                 continue
@@ -300,6 +317,7 @@ async def _update_personas_for_market(market_id: str, outcome_yes: int) -> int:
                            directional_accuracy, avg_confidence
                       FROM swarm_analyst_metrics
                      WHERE analyst_id = $1
+                       AND coalesce(vertical, 'sports') = $4
                        AND league = $2
                        AND market_type = $3
                        AND coalesce(home_away, 'all') = 'all'
@@ -307,22 +325,23 @@ async def _update_personas_for_market(market_id: str, outcome_yes: int) -> int:
                        AND coalesce(injury_context, 'all') = 'all'
                      LIMIT 1
                     """,
-                    persona_id, league, mtype,
+                    persona_id, league, mtype, debate_vertical,
                 )
                 if existing is None:
                     await db.execute(
                         """
                         INSERT INTO swarm_analyst_metrics
-                            (analyst_id, league, market_type, home_away,
+                            (analyst_id, vertical, league, market_type, home_away,
                              spread_bucket, injury_context,
                              total_predictions, correct_predictions,
                              brier_score, directional_accuracy, avg_confidence,
                              last_updated)
-                        VALUES ($1, $2, $3, 'all', 'all', 'all',
+                        VALUES ($1, $8, $2, $3, 'all', 'all', 'all',
                                 1, $4, $5, $6, $7, now())
                         """,
                         persona_id, league, mtype,
                         directional, sq_err, float(directional), conf_f or 0.0,
+                        debate_vertical,
                     )
                     touched += 1
                 else:

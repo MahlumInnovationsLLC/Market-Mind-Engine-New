@@ -29,7 +29,9 @@ from .personas import (
     fallback_for,
     normalize_aggression_mode,
 )
+from .profiles import resolve_for_vertical
 from .streams import llm_log_hub
+from .toggles import disabled_persona_ids
 from .weights import get_persona_weight
 
 
@@ -411,6 +413,18 @@ async def _run_debate_inner(
     _vspec = _verticals.get_spec(candidate_vertical) if candidate_vertical else None
     persona_profile = _vspec.persona_profile if _vspec is not None else "default"
 
+    # Resolve the *active* persona tuple for this debate by combining the
+    # vertical's profile with any operator deny-list from
+    # ``swarm_persona_toggles``.  When a vertical has no toggle rows, the
+    # full profile runs.  When every persona in the profile has been
+    # disabled, ``resolve_for_vertical`` falls back to the full profile
+    # so the swarm never silently degrades to a single LLM call.
+    disabled_ids = await disabled_persona_ids(candidate_vertical)
+    resolved = resolve_for_vertical(
+        persona_profile, disabled_persona_ids=disabled_ids
+    )
+    active_personas: tuple[Persona, ...] = resolved.active
+
     # `stream_debate_id` is set into `_current_debate_id` by the public
     # `run_debate` wrapper above, which also handles reset() in finally.
     kalshi_market_id = candidate.get("kalshi_market_id")
@@ -444,18 +458,24 @@ async def _run_debate_inner(
             "kalshi_market_id": kalshi_market_id,
             "vertical": candidate_vertical,
             "persona_profile": persona_profile,
-            "personas": [p.id for p in PERSONAS] + [MODERATOR.id, GATEKEEPER.id],
+            "personas": (
+                [p.id for p in active_personas]
+                + [MODERATOR.id, GATEKEEPER.id]
+            ),
+            "disabled_personas": list(resolved.disabled_ids),
             "ts": _now_iso(),
         }
     )
 
-    # 1) Six personas in parallel.
-    persona_tasks = [_call_persona(p, user_prompt) for p in PERSONAS]
+    # 1) Profile personas in parallel.
+    persona_tasks = [_call_persona(p, user_prompt) for p in active_personas]
     verdicts = await asyncio.gather(*persona_tasks)
 
-    # 2) Resolve weights from swarm_analyst_metrics.
+    # 2) Resolve weights from swarm_analyst_metrics scoped to this vertical.
     for v in verdicts:
-        v["weight"] = await get_persona_weight(v["persona"], league, market_type)
+        v["weight"] = await get_persona_weight(
+            v["persona"], league, market_type, vertical=candidate_vertical
+        )
 
     # 3) Moderator synthesizes weighted consensus.
     mod_input = (

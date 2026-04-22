@@ -25,7 +25,7 @@ export default function AdminPage() {
   const [search, setSearch] = useState("");
   const [activeUserId, setActiveUserId] = useState<string | null>(null);
   const [tab, setTab] = useState<
-    "users" | "audit" | "runtime" | "risk" | "cycle" | "models"
+    "users" | "audit" | "runtime" | "risk" | "cycle" | "models" | "personas"
   >("users");
 
   const usersQuery = useAdminListUsers({
@@ -88,7 +88,7 @@ export default function AdminPage() {
 
       <div className="mb-4 flex flex-wrap gap-2 text-xs uppercase tracking-widest">
         {(
-          ["users", "audit", "runtime", "risk", "cycle", "models"] as const
+          ["users", "audit", "runtime", "risk", "personas", "cycle", "models"] as const
         ).map((t) => (
           <button
             key={t}
@@ -109,9 +109,11 @@ export default function AdminPage() {
                   ? "Runtime"
                   : t === "risk"
                     ? "Risk knobs"
-                    : t === "cycle"
-                      ? "Trigger cycle"
-                      : "Models"}
+                    : t === "personas"
+                      ? "Personas"
+                      : t === "cycle"
+                        ? "Trigger cycle"
+                        : "Models"}
           </button>
         ))}
       </div>
@@ -203,6 +205,8 @@ export default function AdminPage() {
         <RuntimePanel />
       ) : tab === "risk" ? (
         <RiskKnobsPanel />
+      ) : tab === "personas" ? (
+        <PersonasPanel />
       ) : tab === "cycle" ? (
         <TriggerCyclePanel />
       ) : (
@@ -1275,6 +1279,169 @@ function ModelsPanel() {
           </div>
         ) : null}
       </div>
+    </main>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Personas tab — per-vertical persona enable/disable (Task #194)
+// ---------------------------------------------------------------------------
+
+type PersonaToggleRow = {
+  id: string;
+  display: string;
+  provider: string | null;
+  model_id: string | null;
+  enabled: boolean;
+};
+
+type PersonaToggleVertical = {
+  vertical: string;
+  vertical_label: string;
+  persona_profile: string | null;
+  profile_description: string | null;
+  personas: PersonaToggleRow[];
+  orphaned?: boolean;
+};
+
+type PersonaToggleSummary = {
+  items: PersonaToggleVertical[];
+  available_profiles: { name: string; description: string; personas: string[] }[];
+};
+
+function PersonasPanel() {
+  const { getToken, isSignedIn } = useAuth();
+  const tokenFn = useMemo(
+    () => () => getToken().then((t) => t ?? null),
+    [getToken],
+  );
+  const queryClient = useQueryClient();
+  const queryKey = ["admin", "persona-toggles"] as const;
+
+  const { data, isLoading, error } = useQuery<PersonaToggleSummary>({
+    queryKey,
+    queryFn: () =>
+      apiFetch<PersonaToggleSummary>("/api/admin/persona-toggles", {
+        getToken: tokenFn,
+      }),
+    enabled: !!isSignedIn,
+  });
+
+  const mutation = useMutation({
+    mutationFn: (vars: {
+      vertical: string;
+      persona: string;
+      enabled: boolean;
+    }) =>
+      apiFetch<unknown>("/api/admin/persona-toggles", {
+        method: "POST",
+        body: vars,
+        getToken: tokenFn,
+      }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey });
+    },
+  });
+
+  return (
+    <main
+      className="grid grid-cols-1 gap-6"
+      data-testid="panel-persona-toggles"
+    >
+      <section className="border border-border bg-card p-4">
+        <h2 className="text-xs uppercase tracking-widest text-muted-foreground mb-3">
+          Per-vertical persona profiles
+        </h2>
+        <p className="text-xs text-muted-foreground normal-case tracking-normal mb-4">
+          Each vertical runs its own swarm profile. Toggle individual personas
+          off when you want the swarm to ignore one in that domain — the change
+          applies on the next debate. Disabling every persona in a vertical
+          falls back to the full profile so the swarm never silently drops to
+          a single LLM call. The moderator and gatekeeper layer is unaffected.
+        </p>
+        {isLoading ? (
+          <div className="h-24 animate-pulse bg-muted/30" />
+        ) : error ? (
+          <div className="text-loss text-xs">
+            Failed to load persona toggles.
+          </div>
+        ) : data ? (
+          <div className="space-y-4">
+            {data.items.map((v) => (
+              <div
+                key={v.vertical}
+                className="border border-border"
+                data-testid={`persona-vertical-${v.vertical}`}
+              >
+                <header className="flex flex-wrap items-baseline gap-2 px-3 py-2 bg-muted/20">
+                  <h3 className="text-xs uppercase tracking-widest">
+                    {v.vertical_label}
+                  </h3>
+                  <span className="text-[10px] uppercase tracking-widest text-muted-foreground">
+                    profile: {v.persona_profile ?? "—"}
+                    {v.orphaned ? " (orphaned override)" : ""}
+                  </span>
+                  {v.profile_description ? (
+                    <span className="text-[11px] text-muted-foreground normal-case tracking-normal ml-auto">
+                      {v.profile_description}
+                    </span>
+                  ) : null}
+                </header>
+                <table className="w-full text-xs">
+                  <thead className="bg-muted/10 text-muted-foreground uppercase tracking-widest">
+                    <tr>
+                      <th className="text-left p-2">Persona</th>
+                      <th className="text-left p-2">Provider / model</th>
+                      <th className="text-right p-2">State</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {v.personas.map((p) => (
+                      <tr key={p.id} className="border-t border-border">
+                        <td className="p-2">
+                          <div>{p.display}</div>
+                          <div className="text-[10px] text-muted-foreground font-mono">
+                            {p.id}
+                          </div>
+                        </td>
+                        <td className="p-2 text-muted-foreground">
+                          {p.provider ?? "—"} / {p.model_id ?? "—"}
+                        </td>
+                        <td className="p-2 text-right">
+                          <button
+                            type="button"
+                            disabled={mutation.isPending}
+                            onClick={() =>
+                              mutation.mutate({
+                                vertical: v.vertical,
+                                persona: p.id,
+                                enabled: !p.enabled,
+                              })
+                            }
+                            data-testid={`button-toggle-${v.vertical}-${p.id}`}
+                            className={`border px-3 py-1 text-[10px] uppercase tracking-widest ${
+                              p.enabled
+                                ? "border-primary text-primary"
+                                : "border-border text-muted-foreground hover:text-foreground"
+                            } ${mutation.isPending ? "opacity-50" : ""}`}
+                          >
+                            {p.enabled ? "Enabled" : "Disabled"}
+                          </button>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            ))}
+          </div>
+        ) : null}
+        {mutation.isError ? (
+          <div className="text-loss text-xs mt-2">
+            {(mutation.error as Error)?.message ?? "Toggle failed."}
+          </div>
+        ) : null}
+      </section>
     </main>
   );
 }

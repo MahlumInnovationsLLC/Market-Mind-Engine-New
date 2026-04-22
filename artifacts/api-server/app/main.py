@@ -78,6 +78,7 @@ from .settlement import (
     settlement_event_hub,
 )
 from .swarm import llm_log_hub, refresh_persona_weights, run_debate
+from .swarm import profiles as swarm_profiles, toggles as swarm_toggles
 from .kalshi import (
     OrderRequest,
     auth as kalshi_auth,
@@ -1207,6 +1208,121 @@ async def admin_set_risk_knobs(
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     return await runtime_settings_mod.get_risk_knob_state()
+
+
+# ---------------------------------------------------------------------------
+# Per-vertical persona toggles (admin-only) — Task #194
+# ---------------------------------------------------------------------------
+
+
+class AdminSetPersonaToggleRequest(BaseModel):
+    vertical: str = Field(..., min_length=1, max_length=64)
+    persona: str = Field(..., min_length=1, max_length=128)
+    enabled: bool
+
+
+@app.get("/api/admin/persona-toggles")
+async def admin_get_persona_toggles(
+    actor: AuthedUser = Depends(require_admin),
+) -> dict[str, object]:
+    """Snapshot of every per-vertical persona profile + the current
+    enabled/disabled state.  Drives the operator-console "Personas"
+    tab. Verticals not listed in the registry still appear if a stored
+    toggle row references them, so a forgotten override never becomes
+    invisible.
+    """
+    from . import verticals as _verticals
+
+    overrides = await swarm_toggles.list_all_overrides()
+    override_by_vertical: dict[str, dict[str, bool]] = {}
+    for row in overrides:
+        override_by_vertical.setdefault(row["vertical"], {})[row["persona"]] = row[
+            "enabled"
+        ]
+
+    items: list[dict[str, object]] = []
+    seen_verticals: set[str] = set()
+    for spec in _verticals.all_specs():
+        v = spec.name
+        seen_verticals.add(v)
+        profile = swarm_profiles.get_profile(spec.persona_profile)
+        ov = override_by_vertical.get(v, {})
+        personas_payload = [
+            {
+                "id": p.id,
+                "display": p.display,
+                "provider": p.provider,
+                "model_id": p.model_id,
+                "enabled": ov.get(p.id, True),
+            }
+            for p in profile.personas
+        ]
+        items.append(
+            {
+                "vertical": v,
+                "vertical_label": spec.description or v,
+                "persona_profile": profile.name,
+                "profile_description": profile.description,
+                "personas": personas_payload,
+            }
+        )
+    # Surface dangling overrides (vertical disappeared from the
+    # registry) so the operator can clean them up rather than have
+    # them silently apply to nothing.
+    for v in sorted(set(override_by_vertical.keys()) - seen_verticals):
+        items.append(
+            {
+                "vertical": v,
+                "vertical_label": v,
+                "persona_profile": None,
+                "profile_description": None,
+                "personas": [
+                    {
+                        "id": pid,
+                        "display": pid,
+                        "provider": None,
+                        "model_id": None,
+                        "enabled": enabled,
+                    }
+                    for pid, enabled in sorted(override_by_vertical[v].items())
+                ],
+                "orphaned": True,
+            }
+        )
+    return {
+        "items": items,
+        "available_profiles": [
+            {"name": p.name, "description": p.description,
+             "personas": [pp.id for pp in p.personas]}
+            for p in swarm_profiles.PROFILES.values()
+        ],
+    }
+
+
+@app.post("/api/admin/persona-toggles")
+async def admin_set_persona_toggle(
+    body: AdminSetPersonaToggleRequest,
+    actor: AuthedUser = Depends(require_admin),
+) -> dict[str, object]:
+    """Toggle one persona on/off for one vertical.
+
+    The runner picks the change up on the next debate (no restart
+    required) and an ``admin_audit_log`` row is written so the audit
+    panel surfaces it next to runtime / risk-knob changes.
+    """
+    actor_email = (await check_approval(actor))[1]
+    try:
+        await swarm_toggles.set_toggle(
+            body.vertical,
+            body.persona,
+            enabled=bool(body.enabled),
+            actor_user_id=actor.user_id,
+            actor_email=actor_email,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"vertical": body.vertical,
+            "toggles": await swarm_toggles.get_toggles_for_vertical(body.vertical)}
 
 
 # ---------------------------------------------------------------------------

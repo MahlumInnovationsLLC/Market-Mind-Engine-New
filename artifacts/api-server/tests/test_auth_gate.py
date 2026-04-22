@@ -109,6 +109,7 @@ PROTECTED_POST_ROUTES: tuple[str, ...] = (
     "/api/models/reload",
     "/api/models/predict",
     "/api/admin/access-requests/{clerk_user_id}",
+    "/api/admin/persona-toggles",
     "/api/admin/emergency-stop",
     "/api/health/acknowledge-alert",
     "/api/polymarket/paper-order",
