@@ -95,6 +95,23 @@ async def _load_operator_overrides() -> dict[str, Any]:
 
 
 async def _latest_bankroll() -> float | None:
+    """Most recent bankroll, in dollars.
+
+    Prefers `bankroll_events` (fed by the continuous Kalshi balance sync —
+    see `app.bankroll_sync`) so the floor gate always reflects the live
+    exchange balance. Falls back to legacy `bankroll_snapshots` when the
+    events table is empty (e.g. during the very first boot before the
+    sync loop has ticked).
+    """
+    try:
+        v = await db.fetchval(
+            "SELECT balance_cents FROM bankroll_events "
+            "ORDER BY id DESC LIMIT 1"
+        )
+        if v is not None:
+            return float(int(v)) / 100.0
+    except Exception as e:
+        log.debug("bankroll_events read failed: %s", e)
     try:
         v = await db.fetchval(
             "SELECT balance::float FROM bankroll_snapshots ORDER BY date DESC LIMIT 1"

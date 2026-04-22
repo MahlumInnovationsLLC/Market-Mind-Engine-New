@@ -800,6 +800,21 @@ export const AdminDecideAccessRequestResponse = zod.object({
 });
 
 /**
+ * @summary Cancel every resting Kalshi order and halt trading
+ */
+export const AdminEmergencyStopBody = zod.object({
+  reason: zod.string().nullish(),
+});
+
+export const AdminEmergencyStopResponse = zod.object({
+  ok: zod.boolean(),
+  canceled_orders: zod.number(),
+  trading_mode: zod.string(),
+  reason: zod.string().nullish(),
+  kill_switch: zod.record(zod.string(), zod.unknown()).optional(),
+});
+
+/**
  * @summary Recent admin role / approval audit entries
  */
 export const adminGetAuditLogQueryLimitDefault = 100;

@@ -438,6 +438,23 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/AdminAccessRequestResult" }
 
+  /admin/emergency-stop:
+    post:
+      operationId: adminEmergencyStop
+      tags: [admin]
+      summary: Cancel every resting Kalshi order and halt trading
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/EmergencyStopRequest" }
+      responses:
+        "200":
+          description: Stop completed (cancel + halt + audit + alert)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/EmergencyStopResult" }
+
   /admin/audit-log:
     get:
       operationId: adminGetAuditLog
@@ -837,6 +854,23 @@ components:
       properties:
         enabled: { type: boolean }
       required: [enabled]
+
+    EmergencyStopRequest:
+      type: object
+      properties:
+        reason: { type: string, nullable: true }
+
+    EmergencyStopResult:
+      type: object
+      properties:
+        ok: { type: boolean }
+        canceled_orders: { type: integer }
+        trading_mode: { type: string }
+        reason: { type: string, nullable: true }
+        kill_switch:
+          type: object
+          additionalProperties: true
+      required: [ok, canceled_orders, trading_mode]
 
     TradeDetailPoint:
       type: object

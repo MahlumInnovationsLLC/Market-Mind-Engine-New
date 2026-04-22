@@ -32,6 +32,8 @@ import type {
   CheckoutSessionRequest,
   CheckoutSessionResult,
   DashboardOverview,
+  EmergencyStopRequest,
+  EmergencyStopResult,
   FullHealth,
   GetRecentCyclesParams,
   GetRecentDebatesParams,
@@ -2301,6 +2303,92 @@ export const useAdminDecideAccessRequest = <
   TContext
 > => {
   return useMutation(getAdminDecideAccessRequestMutationOptions(options));
+};
+
+/**
+ * @summary Cancel every resting Kalshi order and halt trading
+ */
+export const getAdminEmergencyStopUrl = () => {
+  return `/api/admin/emergency-stop`;
+};
+
+export const adminEmergencyStop = async (
+  emergencyStopRequest?: EmergencyStopRequest,
+  options?: RequestInit,
+): Promise<EmergencyStopResult> => {
+  return customFetch<EmergencyStopResult>(getAdminEmergencyStopUrl(), {
+    ...options,
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...options?.headers },
+    body: JSON.stringify(emergencyStopRequest),
+  });
+};
+
+export const getAdminEmergencyStopMutationOptions = <
+  TError = ErrorType<unknown>,
+  TContext = unknown,
+>(options?: {
+  mutation?: UseMutationOptions<
+    Awaited<ReturnType<typeof adminEmergencyStop>>,
+    TError,
+    { data: BodyType<EmergencyStopRequest> },
+    TContext
+  >;
+  request?: SecondParameter<typeof customFetch>;
+}): UseMutationOptions<
+  Awaited<ReturnType<typeof adminEmergencyStop>>,
+  TError,
+  { data: BodyType<EmergencyStopRequest> },
+  TContext
+> => {
+  const mutationKey = ["adminEmergencyStop"];
+  const { mutation: mutationOptions, request: requestOptions } = options
+    ? options.mutation &&
+      "mutationKey" in options.mutation &&
+      options.mutation.mutationKey
+      ? options
+      : { ...options, mutation: { ...options.mutation, mutationKey } }
+    : { mutation: { mutationKey }, request: undefined };
+
+  const mutationFn: MutationFunction<
+    Awaited<ReturnType<typeof adminEmergencyStop>>,
+    { data: BodyType<EmergencyStopRequest> }
+  > = (props) => {
+    const { data } = props ?? {};
+
+    return adminEmergencyStop(data, requestOptions);
+  };
+
+  return { mutationFn, ...mutationOptions };
+};
+
+export type AdminEmergencyStopMutationResult = NonNullable<
+  Awaited<ReturnType<typeof adminEmergencyStop>>
+>;
+export type AdminEmergencyStopMutationBody = BodyType<EmergencyStopRequest>;
+export type AdminEmergencyStopMutationError = ErrorType<unknown>;
+
+/**
+ * @summary Cancel every resting Kalshi order and halt trading
+ */
+export const useAdminEmergencyStop = <
+  TError = ErrorType<unknown>,
+  TContext = unknown,
+>(options?: {
+  mutation?: UseMutationOptions<
+    Awaited<ReturnType<typeof adminEmergencyStop>>,
+    TError,
+    { data: BodyType<EmergencyStopRequest> },
+    TContext
+  >;
+  request?: SecondParameter<typeof customFetch>;
+}): UseMutationResult<
+  Awaited<ReturnType<typeof adminEmergencyStop>>,
+  TError,
+  { data: BodyType<EmergencyStopRequest> },
+  TContext
+> => {
+  return useMutation(getAdminEmergencyStopMutationOptions(options));
 };
 
 /**

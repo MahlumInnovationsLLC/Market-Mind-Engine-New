@@ -283,6 +283,35 @@ def halt(
 
 
 # ---------------------------------------------------------------------------
+# Emergency stop alert (operator hit the kill-all button)
+# ---------------------------------------------------------------------------
+
+
+def emergency_stop(
+    *,
+    actor: str | None,
+    canceled_count: int,
+    reason: str | None = None,
+    dry_run: bool = False,
+) -> dict[str, Any]:
+    subject = "[axiom][EMERGENCY STOP] Trading halted, all orders canceled"
+    body = (
+        "An operator triggered the emergency-stop endpoint. Every resting "
+        "Kalshi order has been canceled and trading_mode is now `halt`.\n\n"
+        + _format_lines(
+            [
+                ("actor", actor or "(unknown)"),
+                ("canceled_orders", canceled_count),
+                ("reason", reason or "(unspecified)"),
+                ("at", _utc_now_iso()),
+            ]
+        )
+        + "\n"
+    )
+    return _dispatch(subject, body, tag="emergency_stop", dry_run=dry_run)
+
+
+# ---------------------------------------------------------------------------
 # Drift alert (raised by settlement loop)
 # ---------------------------------------------------------------------------
 

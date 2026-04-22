@@ -230,6 +230,20 @@ export interface LiveExecuteToggleRequest {
   enabled: boolean;
 }
 
+export interface EmergencyStopRequest {
+  reason?: string | null;
+}
+
+export type EmergencyStopResultKillSwitch = { [key: string]: unknown };
+
+export interface EmergencyStopResult {
+  ok: boolean;
+  canceled_orders: number;
+  trading_mode: string;
+  reason?: string | null;
+  kill_switch?: EmergencyStopResultKillSwitch;
+}
+
 /**
  * One sample of (market price, model probability) at time t
  */

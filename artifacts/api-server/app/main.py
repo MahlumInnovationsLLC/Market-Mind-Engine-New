@@ -258,6 +258,15 @@ async def lifespan(_: FastAPI):
     except Exception as e:
         log.warning("feature drift scheduler start failed: %s", e)
 
+    # Continuous Kalshi balance -> bankroll_events sync. Polls every 60s
+    # and writes a delta row whenever the live balance moves so the
+    # bankroll-floor risk gate and equity curve always reflect reality.
+    try:
+        from . import bankroll_sync as _bankroll_sync
+        await _bankroll_sync.start()
+    except Exception as e:
+        log.warning("bankroll sync start failed: %s", e)
+
     # Kick off model artifact reassembly in the background so a cold cache
     # (~240 MiB download) doesn't block the HTTP server from accepting
     # traffic. Health endpoints surface progress while it warms up.
@@ -329,6 +338,11 @@ async def lifespan(_: FastAPI):
             await orchestrator_scheduler.stop()
         except Exception as e:
             log.warning("orchestrator scheduler stop error: %s", e)
+        try:
+            from . import bankroll_sync as _bankroll_sync
+            await _bankroll_sync.stop()
+        except Exception as e:
+            log.warning("bankroll sync stop error: %s", e)
         try:
             await feed_scheduler.stop()
         except Exception as e:
@@ -2479,6 +2493,110 @@ async def kalshi_paper_order(
     except kalshi_lifecycle.OrderRejected as e:
         raise HTTPException(status_code=409, detail=str(e))
     return rec.to_dict()
+
+
+class EmergencyStopRequest(BaseModel):
+    reason: str | None = None
+
+
+@app.post("/api/admin/emergency-stop")
+async def admin_emergency_stop(
+    body: EmergencyStopRequest | None = None,
+    actor: AuthedUser = Depends(require_admin),
+) -> dict[str, object]:
+    """High-priority "kill all" for the operator on call.
+
+    Cancels every resting Kalshi order, trips the process-wide kill
+    switch, persists ``risk.trading_mode = 'halt'`` so the cycle gate
+    keeps refusing to place orders even after a process restart, writes
+    a single ``emergency_stop`` row to the admin audit log, and emails
+    the on-call operator.
+
+    Per task #104.
+    """
+    import json as _json
+    reason = (body.reason if body else None) or "operator emergency stop"
+    actor_email: str | None = None
+    try:
+        actor_email = (await check_approval(actor))[1]
+    except Exception:
+        pass
+
+    # 1. Cancel every resting Kalshi order (best-effort — individual
+    #    failures are logged and counted, but we still proceed to halt
+    #    so a flaky cancel doesn't leave the loop trading).
+    try:
+        canceled = await kalshi_lifecycle.cancel_all_resting()
+    except Exception as e:
+        log.exception("emergency-stop: cancel_all_resting failed")
+        canceled = 0
+    canceled_count = int(canceled or 0)
+
+    # 2. Trip the kill switch (idempotent — also fires the halt alert).
+    kalshi_lifecycle.halt(reason)
+
+    # 3. Persist trading_mode=halt so the cycle gate keeps refusing
+    #    placement even after a restart (kill switch is in-memory only).
+    try:
+        await db.execute(
+            """
+            INSERT INTO system_settings (key, value, updated_at)
+            VALUES ('risk.trading_mode', 'halt', now())
+            ON CONFLICT (key) DO UPDATE
+              SET value = EXCLUDED.value,
+                  updated_at = EXCLUDED.updated_at
+            """,
+        )
+    except Exception as e:
+        log.warning("emergency-stop: trading_mode persist failed: %s", e)
+
+    # 4. One audit-log row capturing what happened.
+    try:
+        await db.execute(
+            """
+            INSERT INTO admin_audit_log (
+                actor_user_id, actor_email,
+                target_user_id, target_email,
+                action, before_value, after_value
+            ) VALUES ($1, $2, $1, $2, $3, $4::jsonb, $5::jsonb)
+            """,
+            actor.user_id,
+            actor_email,
+            "emergency_stop",
+            _json.dumps({"trading_mode": "live_or_paper"}),
+            _json.dumps({
+                "trading_mode": "halt",
+                "reason": reason,
+                "canceled_orders": canceled_count,
+            }),
+        )
+    except Exception as e:
+        log.warning("emergency-stop: audit log insert failed: %s", e)
+
+    # 5. Email the on-call operator. Halt alert already fired from the
+    #    kill-switch trip above; this one carries the cancel count + the
+    #    actor so the on-call knows who hit the button and what it cost.
+    try:
+        notif_alerts.emergency_stop(
+            actor=actor_email or actor.user_id,
+            canceled_count=canceled_count,
+            reason=reason,
+        )
+    except Exception as e:
+        log.warning("emergency-stop: alert dispatch failed: %s", e)
+
+    log.warning(
+        "EMERGENCY STOP by %s (%s): canceled=%d reason=%r",
+        actor_email or actor.user_id, actor.user_id, canceled_count, reason,
+    )
+
+    return {
+        "ok": True,
+        "canceled_orders": canceled_count,
+        "trading_mode": "halt",
+        "reason": reason,
+        "kill_switch": kalshi_lifecycle.kill_switch_state(),
+    }
 
 
 @app.post("/api/kalshi/halt")
