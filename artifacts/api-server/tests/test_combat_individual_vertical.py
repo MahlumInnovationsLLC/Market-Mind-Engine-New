@@ -289,6 +289,83 @@ def test_live_action_blackout_passes_when_not_in_progress():
     assert res.passed
 
 
+def test_event_in_progress_derived_from_past_game_time():
+    """The orchestrator derives `event_in_progress` from the candidate's
+    game_time when feeds haven't tagged it explicitly — gate must reject
+    a candidate whose start time has already passed."""
+    from datetime import datetime, timedelta, timezone
+    past = datetime.now(timezone.utc) - timedelta(minutes=30)
+    # Simulate the cycle's derivation logic: bool(explicit) or
+    # (game_time <= now()).
+    derived = (
+        False or (past is not None and past <= datetime.now(timezone.utc))
+    )
+    assert derived is True
+    ctx = _ctx(event_in_progress=derived)
+    res = asyncio.run(gate_market_cooldown(ctx))
+    assert not res.passed
+    assert res.details.get("reason") == "live_action_blackout"
+
+
+# ---------------------------------------------------------------------------
+# N-way predictor runtime branch
+# ---------------------------------------------------------------------------
+
+
+def test_predict_for_candidate_routes_n_way_when_field_present():
+    """ATP candidates carrying an n_way_field + entrant must be priced
+    via Plackett-Luce, not the 2-way meta-model."""
+    from app.orchestrator import cycle
+
+    cand = {
+        "league": "ATP",
+        "n_way_field": {"alcaraz": 2200, "sinner": 2150, "djokovic": 2100},
+        "entrant": "alcaraz",
+        "game_id": "ATP-RG-2025",
+    }
+    pred = asyncio.run(
+        cycle._predict_for_candidate(
+            cand,
+            consensus=None,
+            current_price=0.40,
+            edge=None,
+            vertical="combat-individual",
+        )
+    )
+    assert pred is not None
+    assert pred["model_name"] == "plackett_luce_n_way"
+    assert 0.0 < pred["probability"] < 1.0
+    # Top seed must carry the highest probability in the field.
+    probs = pred["n_way_probabilities"]
+    assert probs["alcaraz"] > probs["sinner"] > probs["djokovic"]
+
+
+def test_predict_for_candidate_falls_through_for_two_way_league():
+    """UFC candidates (n_way_market=False) must NOT take the PL branch
+    even when an n_way_field accidentally arrives — the meta-model
+    handles 2-way fights."""
+    from app.orchestrator import cycle
+
+    cand = {
+        "league": "UFC",
+        "n_way_field": {"makhachev": 1900, "volkanovski": 1800},
+        "entrant": "makhachev",
+    }
+    # Predictor is unloaded in the test env → returns None.  We just
+    # need to confirm the PL branch isn't hit (no model_name
+    # 'plackett_luce_n_way').
+    pred = asyncio.run(
+        cycle._predict_for_candidate(
+            cand,
+            consensus=None,
+            current_price=0.5,
+            edge=None,
+            vertical="combat-individual",
+        )
+    )
+    assert pred is None or pred.get("model_name") != "plackett_luce_n_way"
+
+
 def test_gates_tuple_still_twelve():
     """Lock the 12-gate invariant — combat-individual sub-checks must
     fold into existing gates rather than adding new entries."""

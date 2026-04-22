@@ -13,7 +13,9 @@ from ..crypto import predictor as crypto_predictor
 from ..crypto.tickers import InvalidCryptoTicker, parse_crypto_ticker
 from ..config import get_settings
 from ..elo import attach_elo_to_candidate
+from ..predictor_n_way import plackett_luce_from_mapping
 from ..risk import RiskContext, run_all_gates
+from ..sports import get_league_config
 from ..runtime_settings import get_aggression_mode
 from ..swarm import run_debate
 from .features import build_features
@@ -483,6 +485,48 @@ async def _predict_for_candidate(
     if spec is not None and spec.predictor_hook == "crypto_binary":
         return await _predict_for_crypto_binary(cand)
 
+    # N-way tournament markets (task #197) — leagues that flag
+    # `LeagueConfig.n_way_market=True` (ATP / WTA / F1 / PGA) and ship
+    # an `n_way_field` mapping `{entrant: rating}` on the candidate are
+    # priced through the closed-form Plackett-Luce module instead of
+    # the team-sport meta-model (which is undefined for N>2 fields).
+    # The candidate's `entrant` field selects which leg's YES
+    # probability to surface.  Falls through to the meta-model when
+    # the field/entrant isn't supplied so live trading isn't blocked
+    # while the feed is being wired (follow-up #214).
+    league = cand.get("league")
+    league_cfg = get_league_config(league) if league else None
+    n_way_field = cand.get("n_way_field")
+    entrant = cand.get("entrant") or cand.get("side_entrant")
+    if (
+        league_cfg is not None
+        and league_cfg.n_way_market
+        and isinstance(n_way_field, dict)
+        and entrant in n_way_field
+    ):
+        try:
+            ratings = {str(k): float(v) for k, v in n_way_field.items()}
+            probs = plackett_luce_from_mapping(ratings)
+            yes_prob = float(probs[entrant])
+            return {
+                "probability": yes_prob,
+                "model_name": "plackett_luce_n_way",
+                "model_version": "1",
+                "feature_inputs": {
+                    "n_way_field_size": len(ratings),
+                    "entrant": entrant,
+                    "entrant_rating": ratings[entrant],
+                },
+                "feature_count": len(ratings),
+                "n_way_probabilities": probs,
+            }
+        except Exception as e:  # pragma: no cover - never kill the loop
+            log.debug(
+                "n-way predict failed for %s/%s: %s",
+                league, cand.get("game_id"), e,
+            )
+            # Fall through to the team-sport meta-model on any failure.
+
     fv = build_features(
         cand,
         consensus=consensus,
@@ -783,7 +827,21 @@ async def run_cycle(vertical: str = "sports") -> CycleResult:
             # is None for them).
             event_id=cand.get("event_id") or cand.get("game_id"),
             open_positions_per_event_usd=per_event,
-            event_in_progress=bool(cand.get("event_in_progress", False)),
+            # Derive `event_in_progress` from the candidate's game_time
+            # when the feed hasn't tagged it explicitly: a candidate
+            # whose start time has passed is treated as in-progress so
+            # the live-action blackout (task #197) can reject it.  The
+            # candidate query filters `game_time > now()` for typical
+            # team-sport flows so this only fires when feeds widen the
+            # filter to surface in-play events for combat & individual
+            # sports — exactly the scenario the blackout protects.
+            event_in_progress=(
+                bool(cand.get("event_in_progress", False))
+                or (
+                    cand.get("game_time") is not None
+                    and cand.get("game_time") <= datetime.now(timezone.utc)
+                )
+            ),
         )
 
         await _publish({
