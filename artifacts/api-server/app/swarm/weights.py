@@ -83,16 +83,24 @@ async def refresh_persona_weights() -> int:
         # backfill — we treat those as unscoped (None) so they still
         # surface in the legacy fallback tier.
         v = r["vertical"] or None
-        keys: tuple[_WeightKey, ...] = (
+        keys: list[_WeightKey] = [
             (r["analyst_id"], v, r["league"], r["market_type"]),
             (r["analyst_id"], v, r["league"], None),
             (r["analyst_id"], v, None, None),
-            # Legacy unscoped fallbacks so cold-start verticals can
-            # anchor on the persona's all-domain history.
-            (r["analyst_id"], None, r["league"], r["market_type"]),
-            (r["analyst_id"], None, r["league"], None),
-            (r["analyst_id"], None, None, None),
-        )
+        ]
+        # Only TRUE legacy rows (vertical IS NULL in the source table)
+        # populate the unscoped ``(analyst, None, ...)`` fallback tier.
+        # If we mirrored every row into the unscoped keys, sports rows
+        # would leak into a cold-start crypto lookup via the fallback
+        # chain — defeating the entire point of vertical scoping.
+        if v is None:
+            keys.extend(
+                [
+                    (r["analyst_id"], None, r["league"], r["market_type"]),
+                    (r["analyst_id"], None, r["league"], None),
+                    (r["analyst_id"], None, None, None),
+                ]
+            )
         for key in keys:
             (recent if is_recent else alltime).setdefault(key, []).append(w)
     for key in set(recent.keys()) | set(alltime.keys()):

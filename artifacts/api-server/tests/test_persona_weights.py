@@ -160,9 +160,46 @@ def test_vertical_lookup_falls_back_to_neutral_when_unknown(monkeypatch):
     assert abs(val - w._NEUTRAL) < 1e-6
 
 
-def test_legacy_call_signature_without_vertical_still_works(monkeypatch):
+def test_vertical_scoped_rows_do_not_leak_across_verticals(monkeypatch):
+    # Hardening for the exact regression flagged in code review:
+    # if sports rows are mirrored into the unscoped (analyst, None, ...)
+    # tier, a cold-start crypto lookup for the SAME (league,
+    # market_type) tuple would inherit the sports weight via the
+    # legacy fallback chain.  With proper scoping it must drop to
+    # neutral instead.
+    _patch_rows(
+        monkeypatch,
+        [
+            _row("quant", "NFL", "moneyline", brier=0.10, recent=True, vertical="sports"),
+        ],
+    )
+    crypto_w = asyncio.run(
+        w.get_persona_weight("quant", "NFL", "moneyline", vertical="crypto")
+    )
+    assert abs(crypto_w - w._NEUTRAL) < 1e-6, (
+        "sports-scoped row leaked into crypto via the unscoped fallback tier"
+    )
+
+
+def test_legacy_call_without_vertical_resolves_pre_backfill_rows(monkeypatch):
     # Backwards compatibility: callers that haven't been updated to
-    # pass `vertical=` keep getting the unscoped resolver behaviour.
+    # pass `vertical=` only see unscoped (vertical IS NULL) rows —
+    # which is the right behaviour because true legacy callers are
+    # also pre-backfill and shouldn't pull in vertical-scoped data.
+    _patch_rows(
+        monkeypatch,
+        [
+            _row("quant", "NFL", "moneyline", brier=0.10, recent=True, vertical=None),
+        ],
+    )
+    val = asyncio.run(w.get_persona_weight("quant", "NFL", "moneyline"))
+    assert abs(val - 0.90) < 1e-6
+
+
+def test_legacy_call_without_vertical_does_not_see_scoped_rows(monkeypatch):
+    # Conversely, an un-keyed call must NOT pick up rows that have
+    # been written with a vertical (post-0005-backfill data) — that
+    # path is reserved for callers that opt into scoping.
     _patch_rows(
         monkeypatch,
         [
@@ -170,5 +207,4 @@ def test_legacy_call_signature_without_vertical_still_works(monkeypatch):
         ],
     )
     val = asyncio.run(w.get_persona_weight("quant", "NFL", "moneyline"))
-    # Hits the (analyst, None, league, market_type) legacy tier.
-    assert abs(val - 0.90) < 1e-6
+    assert abs(val - w._NEUTRAL) < 1e-6
