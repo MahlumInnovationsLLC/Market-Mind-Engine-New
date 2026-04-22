@@ -424,6 +424,12 @@ def _probe_models() -> dict:
 def _probe_feeds() -> list[dict]:
     out: list[dict] = []
     for s in feed_registry.snapshot():
+        polls = int(s.get("poll_count") or 0)
+        fails = int(s.get("failure_count") or 0)
+        # Bound to 4dp so the UI can render `xx.yy%` without further math.
+        error_rate = round(fails / polls, 4) if polls > 0 else 0.0
+        last_pull = s.get("last_finished_at") or s.get("last_ok_at")
+
         if not s.get("enabled"):
             status = "unconfigured"
             detail = s.get("skipped_reason") or "disabled"
@@ -433,14 +439,28 @@ def _probe_feeds() -> list[dict]:
             # If last error is more recent than last success -> degraded.
             if last_err and (not last_ok or last_err > last_ok):
                 status = "degraded"
-                detail = (s.get("last_error") or "recent failure")[:240]
+                detail = (
+                    f"last pull {last_pull or 'n/a'} | err {error_rate * 100:.1f}% "
+                    f"({fails}/{polls}) | "
+                    + (s.get("last_error") or "recent failure")[:160]
+                )
                 error_log(f"feed:{s['name']}", str(s.get("last_error") or "")[:240])
             elif not last_ok:
                 status = "degraded"
                 detail = "no successful poll yet"
             else:
                 status = "ok"
-                detail = f"last ok {last_ok}; written={s.get('last_records_written')}"
+                detail = (
+                    f"last pull {last_pull} | err {error_rate * 100:.1f}% "
+                    f"({fails}/{polls}) | written={s.get('last_records_written')}"
+                )
+
+        # Promote last_pull + error_rate into the card extras so the
+        # Health UI can render them as first-class metrics without
+        # parsing the detail string.
+        extras = dict(s)
+        extras["last_pull"] = last_pull
+        extras["error_rate"] = error_rate
         out.append(
             _card(
                 key=f"feed:{s['name']}",
@@ -448,7 +468,7 @@ def _probe_feeds() -> list[dict]:
                 category="passive",
                 status=status,
                 detail=detail,
-                extras=s,
+                extras=extras,
             )
         )
     return out

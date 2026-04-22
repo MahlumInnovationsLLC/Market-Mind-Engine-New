@@ -609,6 +609,15 @@ async def health_full(_: object = Depends(require_approved_user)) -> dict[str, o
                     "last_records_written": s.get("last_records_written"),
                     "rate_limited_until": s.get("rate_limited_until"),
                     "rate_limited_count": s.get("rate_limited_count"),
+                    # Per-feed counters so the Health page can render
+                    # last-pull + error-rate without a second round trip.
+                    "success_count": s.get("success_count") or 0,
+                    "failure_count": s.get("failure_count") or 0,
+                    "poll_count": s.get("poll_count") or 0,
+                    "error_rate": (
+                        round((s.get("failure_count") or 0) / (s.get("poll_count") or 1), 4)
+                        if (s.get("poll_count") or 0) > 0 else 0.0
+                    ),
                 }
                 for s in snap
             ],

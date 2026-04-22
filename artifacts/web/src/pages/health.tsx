@@ -570,6 +570,23 @@ function SummaryStat({
 }
 
 function CardTile({ card }: { card: Card }) {
+  const isFeed = card.key.startsWith("feed:");
+  const lastPull =
+    isFeed && card.extras && typeof card.extras === "object"
+      ? ((card.extras as Record<string, unknown>).last_pull as string | null) ?? null
+      : null;
+  const errorRate =
+    isFeed && card.extras && typeof card.extras === "object"
+      ? ((card.extras as Record<string, unknown>).error_rate as number | null) ?? null
+      : null;
+  const polls =
+    isFeed && card.extras && typeof card.extras === "object"
+      ? ((card.extras as Record<string, unknown>).poll_count as number | null) ?? null
+      : null;
+  const fails =
+    isFeed && card.extras && typeof card.extras === "object"
+      ? ((card.extras as Record<string, unknown>).failure_count as number | null) ?? null
+      : null;
   return (
     <div className={`border ${STATUS_COLOR[card.status]} p-3 text-xs space-y-1`}>
       <div className="flex items-center justify-between">
@@ -579,6 +596,26 @@ function CardTile({ card }: { card: Card }) {
           {card.status}
         </span>
       </div>
+      {isFeed && (
+        <div
+          className="grid grid-cols-2 gap-1 text-[10px] uppercase tracking-widest text-muted-foreground"
+          data-testid={`feed-metrics-${card.key}`}
+        >
+          <span>
+            last pull:{" "}
+            <span className="text-foreground normal-case tracking-normal">
+              {lastPull ?? "never"}
+            </span>
+          </span>
+          <span>
+            err rate:{" "}
+            <span className="text-foreground normal-case tracking-normal">
+              {errorRate != null ? `${(errorRate * 100).toFixed(1)}%` : "—"}
+              {polls != null && fails != null ? ` (${fails}/${polls})` : ""}
+            </span>
+          </span>
+        </div>
+      )}
       <div className="text-muted-foreground break-all">
         {card.detail || "(no detail)"}
       </div>
