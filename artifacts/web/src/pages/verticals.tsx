@@ -48,7 +48,7 @@ function VerticalCard({ entry }: { entry: VerticalsOverviewEntry }) {
           ) : null}
         </h3>
         <Link
-          href={`/?verticals=${encodeURIComponent(entry.vertical)}`}
+          href={`/?selectedVerticals=${encodeURIComponent(entry.vertical)}`}
           className="text-[10px] uppercase tracking-widest text-muted-foreground hover:text-primary"
           data-testid={`link-vertical-drill-${entry.vertical}`}
         >

@@ -1,4 +1,5 @@
 import { useMemo, useState } from "react";
+import { useVerticalFilter } from "@/hooks/use-selected-verticals";
 import {
   Bar,
   BarChart,
@@ -262,6 +263,7 @@ export default function VerticalPerformance() {
   const [range, setRange] = useState<RangeKey>("30");
   const days = RANGE_DAYS[range];
   const params = { days };
+  const { matches } = useVerticalFilter();
   const { data, isLoading } = useGetVerticalPerformance(params, {
     query: {
       queryKey: getGetVerticalPerformanceQueryKey(params),
@@ -270,7 +272,7 @@ export default function VerticalPerformance() {
     },
   });
 
-  const verticals = data?.verticals ?? [];
+  const verticals = (data?.verticals ?? []).filter((v) => matches(v.vertical));
 
   return (
     <div className="border border-border bg-card">

@@ -1,9 +1,16 @@
 import { useQuery } from "@tanstack/react-query";
-import React from "react";
+import type {
+  MyAccess,
+  VerticalsOverview,
+  VerticalsOverviewEntry,
+} from "@workspace/api-client-react";
+import React, { useState } from "react";
 import {
   ActivityIndicator,
   FlatList,
+  Pressable,
   RefreshControl,
+  ScrollView,
   StyleSheet,
   Text,
   View,
@@ -12,38 +19,6 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 
 import { useColors } from "@/hooks/useColors";
 import { apiFetch } from "@/lib/api";
-
-type LastCycle = {
-  id: number;
-  picks_evaluated?: number | null;
-  trades_placed?: number | null;
-  errors?: string | null;
-  started_at?: string | null;
-  completed_at?: string | null;
-};
-
-type VerticalEntry = {
-  vertical: string;
-  description?: string | null;
-  pinned: boolean;
-  hidden: boolean;
-  trades: number;
-  wins: number;
-  losses: number;
-  win_rate?: number | null;
-  pnl: number;
-  brier?: number | null;
-  sharpe?: number | null;
-  open_positions: number;
-  edge_predicted_bps?: number | null;
-  edge_realized_bps?: number | null;
-  last_cycle?: LastCycle | null;
-};
-
-type Overview = {
-  days: number;
-  verticals: VerticalEntry[];
-};
 
 function fmtMoney(n: number | null | undefined): string {
   if (n === null || n === undefined) return "—";
@@ -72,11 +47,30 @@ function fmtBps(n: number | null | undefined): string {
 export default function VerticalsScreen() {
   const colors = useColors();
   const insets = useSafeAreaInsets();
+  const [selected, setSelected] = useState<string[]>([]);
   const query = useQuery({
     queryKey: ["dashboard", "verticals", 7],
-    queryFn: () => apiFetch<Overview>("/api/dashboard/verticals?days=7"),
+    queryFn: () =>
+      apiFetch<VerticalsOverview>("/api/dashboard/verticals?days=7"),
     refetchInterval: 60_000,
   });
+  const access = useQuery({
+    queryKey: ["me", "access"],
+    queryFn: () => apiFetch<MyAccess>("/api/me/access"),
+    staleTime: 30_000,
+  });
+  const isAdmin = !!access.data?.is_admin;
+  const toggle = (v: string) => {
+    const lower = v.toLowerCase();
+    setSelected((prev) =>
+      prev.includes(lower) ? prev.filter((x) => x !== lower) : [...prev, lower],
+    );
+  };
+  const matches = (v: string) => {
+    const lower = v.toLowerCase();
+    if (selected.length === 0) return true;
+    return selected.includes(lower);
+  };
 
   const styles = StyleSheet.create({
     container: { flex: 1, backgroundColor: colors.background },
@@ -143,6 +137,19 @@ export default function VerticalsScreen() {
       marginTop: 8,
       paddingTop: 8,
     },
+    chipRow: { paddingTop: 8, gap: 6, paddingRight: 16 },
+    chip: {
+      borderWidth: 1,
+      paddingHorizontal: 10,
+      paddingVertical: 4,
+      marginRight: 6,
+    },
+    chipText: {
+      fontSize: 10,
+      letterSpacing: 1.5,
+      textTransform: "uppercase",
+      fontFamily: "Inter_600SemiBold",
+    },
     empty: {
       color: colors.mutedForeground,
       textAlign: "center",
@@ -159,7 +166,10 @@ export default function VerticalsScreen() {
     );
   }
 
-  const items = (query.data?.verticals ?? []).filter((e) => !e.hidden);
+  const all: VerticalsOverviewEntry[] = query.data?.verticals ?? [];
+  const visible = isAdmin ? all : all.filter((e) => !e.hidden);
+  const items = visible.filter((e) => matches(e.vertical));
+  const chips = visible;
 
   return (
     <View style={styles.container}>
@@ -167,6 +177,54 @@ export default function VerticalsScreen() {
         <Text style={styles.headerText}>
           {items.length} verticals · 7-day window
         </Text>
+        <ScrollView
+          horizontal
+          showsHorizontalScrollIndicator={false}
+          contentContainerStyle={styles.chipRow}
+        >
+          {chips.map((c) => {
+            const active = selected.includes(c.vertical.toLowerCase());
+            return (
+              <Pressable
+                key={c.vertical}
+                onPress={() => toggle(c.vertical)}
+                testID={`chip-vertical-${c.vertical}`}
+                style={[
+                  styles.chip,
+                  {
+                    borderColor: active ? colors.primary : colors.border,
+                    backgroundColor: active
+                      ? colors.primary + "22"
+                      : "transparent",
+                  },
+                ]}
+              >
+                <Text
+                  style={[
+                    styles.chipText,
+                    { color: active ? colors.primary : colors.foreground },
+                  ]}
+                >
+                  {c.vertical}
+                  {c.pinned ? " ★" : ""}
+                </Text>
+              </Pressable>
+            );
+          })}
+          {selected.length > 0 ? (
+            <Pressable
+              onPress={() => setSelected([])}
+              testID="chip-vertical-clear"
+              style={[styles.chip, { borderColor: colors.border }]}
+            >
+              <Text
+                style={[styles.chipText, { color: colors.mutedForeground }]}
+              >
+                clear
+              </Text>
+            </Pressable>
+          ) : null}
+        </ScrollView>
       </View>
       <FlatList
         data={items}

@@ -9,10 +9,17 @@
  * components subscribed to the same hook re-render synchronously through
  * a tiny module-level event bus.
  */
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
+
+import {
+  getGetMyAccessQueryKey,
+  getGetVerticalVisibilityQueryKey,
+  useGetMyAccess,
+  useGetVerticalVisibility,
+} from "@workspace/api-client-react";
 
 const EVENT = "axiom:selected-verticals-change";
-const PARAM = "verticals";
+const PARAM = "selectedVerticals";
 
 function readFromUrl(): string[] {
   if (typeof window === "undefined") return [];
@@ -95,4 +102,45 @@ export function useSelectedVerticals(): SelectedVerticalsApi {
   );
 
   return { selected, isSelected, toggle, setAll, clear, matches };
+}
+
+/**
+ * Composite hook used by every dashboard panel that wants the *effective*
+ * filter: explicit user selection PLUS the admin-managed hidden set
+ * (which silently removes hidden verticals from non-admin views even when
+ * no explicit selection is active).
+ */
+export function useVerticalFilter(): {
+  matches: (v: string | null | undefined) => boolean;
+  selected: string[];
+} {
+  const base = useSelectedVerticals();
+  const access = useGetMyAccess({
+    query: { queryKey: getGetMyAccessQueryKey(), staleTime: 30_000 },
+  });
+  const visibility = useGetVerticalVisibility({
+    query: {
+      queryKey: getGetVerticalVisibilityQueryKey(),
+      staleTime: 60_000,
+    },
+  });
+
+  const isAdmin = !!access.data?.is_admin;
+  const hidden = useMemo(
+    () => new Set((visibility.data?.hidden ?? []).map((v) => v.toLowerCase())),
+    [visibility.data?.hidden],
+  );
+
+  const matches = useCallback(
+    (v: string | null | undefined) => {
+      const lower = v ? v.toLowerCase() : null;
+      if (!isAdmin && lower && hidden.has(lower)) return false;
+      if (base.selected.length === 0) return true;
+      if (!lower) return false;
+      return base.selected.includes(lower);
+    },
+    [base.selected, isAdmin, hidden],
+  );
+
+  return { matches, selected: base.selected };
 }
