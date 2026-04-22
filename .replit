@@ -34,7 +34,7 @@ isValidation = true
 [agent]
 stack = "PNPM_WORKSPACE"
 expertMode = true
-integrations = ["revenuecat:1.0.0"]
+integrations = ["revenuecat:1.0.0", "github:1.0.0"]
 
 [postMerge]
 path = "scripts/post-merge.sh"

@@ -24,6 +24,7 @@ from . import (
     dashboard,
     db,
     free_tier,
+    github_mirror,
     health,
     migrations as db_migrations,
     models_loader,
@@ -1101,10 +1102,17 @@ async def admin_set_active_model(
             )
     except Exception as e:
         log.warning("audit log insert (active model) failed: %s", e)
+    # Trigger the GitHub recovery mirror in the background. This is the
+    # canonical "make active" promotion event; spec calls for every such
+    # promotion to push the artifact + manifest to the private mirror so
+    # we can recover from a Supabase outage. Best-effort: never blocks.
+    if github_mirror.is_enabled():
+        asyncio.create_task(github_mirror.mirror_active_model())
     return {
         "items": _model_inventory_payload(),
         "active_predictor": predictor.active_model_info(),
         "active_override": predictor.get_active_override(),
+        "mirror_enabled": github_mirror.is_enabled(),
     }
 
 
@@ -2638,14 +2646,80 @@ async def models_status(_: object = Depends(require_auth)) -> dict[str, object]:
     }
 
 
+async def _reload_and_mirror() -> None:
+    """Reload model artifacts and, on success, mirror them to GitHub.
+
+    The mirror is best-effort: if `GITHUB_MIRROR_REPO`/`GITHUB_TOKEN` aren't
+    set or the push fails, we log and continue — model promotion must not
+    block on the mirror.
+    """
+    state = await models_loader.ensure_artifacts(force=True)
+    if not state.ready:
+        log.warning(
+            "[models_reload] skipping github mirror; loader not ready (error=%s)",
+            state.error,
+        )
+        return
+    if not github_mirror.is_enabled():
+        log.info("[models_reload] github mirror disabled (no GITHUB_MIRROR_REPO/TOKEN)")
+        return
+    try:
+        result = await github_mirror.mirror_active_model()
+        log.info("[models_reload] github mirror result: %s", result.as_dict())
+    except Exception:
+        log.exception("[models_reload] github mirror raised unexpectedly")
+
+
 @app.post("/api/models/reload")
 async def models_reload(_: object = Depends(require_auth)) -> dict[str, object]:
     """Force a full reload: clears the in-memory state + cached predictor
     objects and re-runs the reassemble/extract/scan/smoke-load pipeline.
-    Cached on-disk archives are reused if intact."""
+    Cached on-disk archives are reused if intact.
+
+    On a successful reload, the loaded artifacts + manifest are mirrored to
+    the configured private GitHub repo (best-effort, non-blocking).
+    """
     predictor.invalidate()
-    asyncio.create_task(models_loader.ensure_artifacts(force=True))
-    return {"started": True, "state": models_loader.get_state().as_dict()}
+    asyncio.create_task(_reload_and_mirror())
+    return {
+        "started": True,
+        "state": models_loader.get_state().as_dict(),
+        "mirror_enabled": github_mirror.is_enabled(),
+    }
+
+
+@app.get("/api/admin/models/mirror/status")
+async def admin_models_mirror_status(
+    _: AuthedUser = Depends(require_admin),
+) -> dict[str, object]:
+    """Report whether the GitHub mirror is configured and the result of the
+    most recent push attempt. Admin-only because the response surfaces
+    repo identity + push errors that include credentials in some failure
+    paths."""
+    return {
+        "enabled": github_mirror.is_enabled(),
+        "last_result": github_mirror.last_result(),
+    }
+
+
+@app.post("/api/admin/models/mirror/push")
+async def admin_models_mirror_push(
+    _: AuthedUser = Depends(require_admin),
+) -> dict[str, object]:
+    """Force-push the currently-loaded model artifacts to the GitHub mirror,
+    ignoring the last-mirrored version state. Synchronous so the caller
+    sees the outcome directly; intended for manual recovery / first-time
+    setup. Admin-only because each call burns GitHub Contents API quota
+    against a privileged backend token — exposing this to general
+    authenticated users would let any signed-in user exhaust the rate
+    limit or force unwanted writes."""
+    if not github_mirror.is_enabled():
+        raise HTTPException(
+            status_code=400,
+            detail="github mirror is not configured (set GITHUB_MIRROR_REPO and GITHUB_TOKEN)",
+        )
+    result = await github_mirror.mirror_active_model(force=True)
+    return result.as_dict()
 
 
 class PredictRequest(BaseModel):

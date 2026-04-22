@@ -15,7 +15,17 @@ run = "pnpm --filter @workspace/api-server run dev"
 [services.production]
 
 [services.production.run]
+# L1 (this process supervisor) -> L2 (watchdog) -> uvicorn child.
+# The watchdog polls /api/healthz on port 8080 every 5s and restarts
+# uvicorn after 3 consecutive failures, with restart-storm rate limiting.
+# It also exposes a status endpoint on port 8099.
 args = [
+  "/home/runner/workspace/.pythonlibs/bin/python3",
+  "/home/runner/workspace/artifacts/api-server/scripts/watchdog.py",
+  "--supervise",
+  "--target",
+  "http://127.0.0.1:8080/api/healthz",
+  "--",
   "/home/runner/workspace/.pythonlibs/bin/python3",
   "-m",
   "uvicorn",
