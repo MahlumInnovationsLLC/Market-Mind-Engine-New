@@ -492,6 +492,96 @@ def test_normalize_pga_tournaments_envelope():
     assert all(r["away"]["name"] == "FIELD" for r in rows)
 
 
+def test_normalize_populates_ratings_cache_for_n_way_fields():
+    """The normalizer must populate `app.sports.ratings` so the
+    orchestrator can pull the field by game_id without DB plumbing."""
+    from app.feeds.odds_api import _normalize_sportradar_payload
+    from app.sports import get_field, ratings
+
+    ratings.clear_cache()
+    payload = {
+        "summaries": [
+            {
+                "sport_event": {
+                    "id": "sr:sport_event:f1-silverstone-2026",
+                    "start_time": "2026-07-05T13:00:00+00:00",
+                    "tournament": {"name": "British Grand Prix"},
+                    "competitors": [
+                        {"id": "c1", "name": "Verstappen", "seed": 1},
+                        {"id": "c2", "name": "Norris", "seed": 2},
+                        {"id": "c3", "name": "Leclerc", "seed": 3},
+                    ],
+                },
+                "sport_event_status": {"status": "scheduled"},
+            },
+        ],
+    }
+    _normalize_sportradar_payload("f1", "F1", payload)
+    cached = get_field("sr:sport_event:f1-silverstone-2026")
+    assert cached is not None
+    assert set(cached.keys()) == {"Verstappen", "Norris", "Leclerc"}
+    # Lower seed → higher rating.
+    assert cached["Verstappen"] > cached["Norris"] > cached["Leclerc"]
+
+
+def test_end_to_end_feed_payload_routes_through_plackett_luce():
+    """Integration: a Sportradar F1 payload must flow through
+    normalization → ratings cache → `_predict_for_candidate` and
+    surface as the `plackett_luce_n_way` model with no synthetic
+    hand-crafted dict inputs."""
+    from app.feeds.odds_api import _normalize_sportradar_payload
+    from app.orchestrator import cycle
+    from app.sports import ratings
+
+    ratings.clear_cache()
+    payload = {
+        "summaries": [
+            {
+                "sport_event": {
+                    "id": "sr:sport_event:f1-spa-2026",
+                    "start_time": "2026-08-30T13:00:00+00:00",
+                    "tournament": {"name": "Belgian Grand Prix"},
+                    "competitors": [
+                        {"id": "c1", "name": "Verstappen", "seed": 1},
+                        {"id": "c2", "name": "Norris", "seed": 2},
+                        {"id": "c3", "name": "Leclerc", "seed": 3},
+                        {"id": "c4", "name": "Hamilton", "seed": 4},
+                    ],
+                },
+                "sport_event_status": {"status": "scheduled"},
+            },
+        ],
+    }
+    rows = _normalize_sportradar_payload("f1", "F1", payload)
+    assert len(rows) == 1
+
+    # Build a candidate with ONLY the columns the standard
+    # `_candidate_predictions` SELECT carries (game_id, league,
+    # home name) — n_way_field/entrant must be derived by the
+    # enrichment layer, not synthesized in the test.
+    cand = {
+        "game_id": rows[0]["id"],
+        "league": "F1",
+        "home": {"name": "Verstappen"},  # YES side of the outright
+    }
+    pred = asyncio.run(
+        cycle._predict_for_candidate(
+            cand,
+            consensus=None,
+            current_price=0.30,
+            edge=None,
+            vertical="combat-individual",
+        )
+    )
+    assert pred is not None
+    assert pred["model_name"] == "plackett_luce_n_way"
+    # Field of 4, top seed Verstappen — probability should clearly
+    # exceed a uniform 1/4 prior.
+    assert pred["probability"] > 0.25
+    probs = pred["n_way_probabilities"]
+    assert probs["Verstappen"] > probs["Norris"] > probs["Hamilton"]
+
+
 def test_normalize_handles_empty_payloads_gracefully():
     """An empty / unfamiliar envelope must return [] rather than
     raise — pollers must keep registered-but-skipped on bad days."""

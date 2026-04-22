@@ -15,7 +15,7 @@ from ..config import get_settings
 from ..elo import attach_elo_to_candidate
 from ..predictor_n_way import plackett_luce_from_mapping
 from ..risk import RiskContext, run_all_gates
-from ..sports import get_league_config
+from ..sports import coerce_to_ratings, get_field, get_league_config
 from ..runtime_settings import get_aggression_mode
 from ..swarm import run_debate
 from .features import build_features
@@ -496,8 +496,24 @@ async def _predict_for_candidate(
     # while the feed is being wired (follow-up #214).
     league = cand.get("league")
     league_cfg = get_league_config(league) if league else None
-    n_way_field = cand.get("n_way_field")
-    entrant = cand.get("entrant") or cand.get("side_entrant")
+    # Enrichment: candidates persisted via the standard
+    # `_candidate_predictions` SELECT don't carry n_way_field /
+    # entrant directly (no DB column).  Pull the field from the
+    # process-local ratings cache populated by the Sportradar
+    # normalizer, and derive `entrant` from the candidate's
+    # `home.name` / `team` / `selection` field which the predictions
+    # row already records as the YES side of the outright market.
+    n_way_field_raw = cand.get("n_way_field")
+    if n_way_field_raw is None and league_cfg is not None and league_cfg.n_way_market:
+        n_way_field_raw = get_field(cand.get("game_id") or cand.get("event_id"))
+    n_way_field = coerce_to_ratings(n_way_field_raw)
+    entrant = (
+        cand.get("entrant")
+        or cand.get("side_entrant")
+        or cand.get("selection")
+        or cand.get("team")
+        or ((cand.get("home") or {}).get("name") if isinstance(cand.get("home"), dict) else None)
+    )
     if (
         league_cfg is not None
         and league_cfg.n_way_market

@@ -14,6 +14,12 @@ from .leagues import (
     is_sunday_window,
     persona_context_augment,
 )
+from .ratings import (
+    coerce_to_ratings,
+    derive_field_ratings,
+    get_field,
+    set_field,
+)
 
 __all__ = [
     "LeagueConfig",
@@ -22,4 +28,8 @@ __all__ = [
     "league_blackout_until",
     "is_sunday_window",
     "persona_context_augment",
+    "coerce_to_ratings",
+    "derive_field_ratings",
+    "get_field",
+    "set_field",
 ]

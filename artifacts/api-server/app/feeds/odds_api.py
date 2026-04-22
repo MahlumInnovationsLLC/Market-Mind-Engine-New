@@ -322,9 +322,11 @@ def _normalize_sportradar_payload(
         if len(competitors) > 2:
             # Field of N (F1 grid, tennis draw bracket, etc.).  Carry
             # competitor names + any seed/qualifier metadata through to
-            # the candidate so `_predict_for_candidate` can build the
-            # `n_way_field` rating mapping (task #197 follow-up #214).
-            row["n_way_field"] = [
+            # the candidate AND populate the per-event ratings cache
+            # so `_predict_for_candidate` can route the candidate
+            # through Plackett-Luce without extra plumbing
+            # (task #197).
+            field_meta = [
                 {
                     "name": c.get("name"),
                     "id": c.get("id"),
@@ -333,6 +335,12 @@ def _normalize_sportradar_payload(
                 }
                 for c in competitors if isinstance(c, dict)
             ]
+            row["n_way_field"] = field_meta
+            try:
+                from ..sports import set_field as _set_field
+                _set_field(str(ev.get("id") or ""), field_meta)
+            except Exception:  # pragma: no cover — never kill ingest
+                pass
         out.append(row)
     return out
 
