@@ -2049,6 +2049,27 @@ async def dashboard_recent_cycles(
     return {"items": await dashboard.get_recent_cycles(limit)}
 
 
+@app.get("/api/dashboard/uw-signals")
+async def dashboard_uw_signals(
+    limit: int = 20,
+    since_hours: int = 24,
+    signal_type: str | None = None,
+    _: object = Depends(require_approved_user),
+) -> dict[str, object]:
+    """Recent Unusual Whales signals for the operator research feed.
+
+    Mobile research tab + web equivalents read from this endpoint.  Approved
+    operators only — same gating as `/api/dashboard/recent-cycles`.
+    """
+    return {
+        "items": await dashboard.get_recent_uw_signals(
+            limit=limit,
+            since_hours=since_hours,
+            signal_type=signal_type,
+        ),
+    }
+
+
 @app.get("/api/dashboard/recent-debates")
 async def dashboard_recent_debates(
     limit: int = 10,

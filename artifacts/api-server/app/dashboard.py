@@ -811,6 +811,92 @@ async def get_vertical_performance(days: int = 30) -> dict[str, Any]:
     return {"days": days, "verticals": out}
 
 
+async def get_recent_uw_signals(
+    limit: int = 20,
+    since_hours: int = 24,
+    signal_type: str | None = None,
+) -> list[dict[str, Any]]:
+    """Most-recent Unusual Whales signals for the operator research feed.
+
+    Reads from ``uw_signals`` (populated by :mod:`app.feeds.unusual_whales`)
+    and projects a small, mobile-friendly subset of the raw payload —
+    enough for an operator on the train to glance at flow alerts /
+    dark-pool prints / per-ticker snapshots.
+    """
+    limit = max(1, min(int(limit), 100))
+    since_hours = max(1, min(int(since_hours), 24 * 7))
+    try:
+        params: list[Any] = [since_hours, limit]
+        type_filter = ""
+        if signal_type:
+            type_filter = "AND signal_type = $3"
+            params.append(signal_type)
+        rows = await db.fetch(
+            f"""
+            SELECT
+              id,
+              signal_type,
+              ticker,
+              to_char(occurred_at, 'YYYY-MM-DD"T"HH24:MI:SSZ') AS occurred_at,
+              to_char(fetched_at,  'YYYY-MM-DD"T"HH24:MI:SSZ') AS fetched_at,
+              payload
+              FROM uw_signals
+             WHERE coalesce(occurred_at, fetched_at)
+                   >= now() - ($1 || ' hours')::interval
+               {type_filter}
+             ORDER BY coalesce(occurred_at, fetched_at) DESC NULLS LAST
+             LIMIT $2
+            """,
+            *params,
+        )
+        out: list[dict[str, Any]] = []
+        for r in rows:
+            payload = r["payload"] or {}
+            if isinstance(payload, str):
+                try:
+                    import json as _json
+                    payload = _json.loads(payload)
+                except Exception:
+                    payload = {}
+            if not isinstance(payload, dict):
+                payload = {}
+            # Best-effort surface the most operator-relevant fields. UW
+            # response shapes vary by endpoint; we tolerate misses.
+            summary = (
+                payload.get("alert_rule")
+                or payload.get("rule")
+                or payload.get("title")
+                or payload.get("description")
+                or payload.get("type")
+                or payload.get("name")
+            )
+            size = (
+                payload.get("size")
+                or payload.get("volume")
+                or payload.get("total_size")
+                or payload.get("premium")
+            )
+            price = (
+                payload.get("price")
+                or payload.get("last_price")
+                or payload.get("avg_price")
+            )
+            out.append({
+                "id": r["id"],
+                "signal_type": r["signal_type"],
+                "ticker": r["ticker"],
+                "occurred_at": r["occurred_at"],
+                "fetched_at": r["fetched_at"],
+                "summary": str(summary) if summary is not None else None,
+                "size": size,
+                "price": price,
+            })
+        return out
+    except Exception as e:
+        log.warning("recent_uw_signals failed: %s", e)
+        return []
+
+
 async def get_recent_swarm_debates(limit: int = 10) -> list[dict[str, Any]]:
     """Recent swarm-debate rows including the per-persona ``analyst_verdicts``
     and ``moderator_synthesis`` jsonb columns.

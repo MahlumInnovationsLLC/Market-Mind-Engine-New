@@ -1,15 +1,24 @@
 import { useAuth } from "@clerk/expo";
 import { Feather } from "@expo/vector-icons";
+import { useQuery } from "@tanstack/react-query";
 import { BlurView } from "expo-blur";
 import { Redirect, Tabs } from "expo-router";
 import React from "react";
 import { Platform, StyleSheet, View, useColorScheme } from "react-native";
 
 import { useColors } from "@/hooks/useColors";
+import { apiFetch } from "@/lib/api";
 
 export default function TabsLayout() {
   const { isLoaded, isSignedIn } = useAuth();
   const colors = useColors();
+  const access = useQuery({
+    queryKey: ["me", "access"],
+    queryFn: () =>
+      apiFetch<{ is_admin: boolean; approved: boolean }>("/api/me/access"),
+    enabled: isLoaded && isSignedIn,
+  });
+  const isAdmin = access.data?.is_admin === true;
   const colorScheme = useColorScheme();
   const isDark = colorScheme === "dark";
   const isIOS = Platform.OS === "ios";
@@ -96,12 +105,36 @@ export default function TabsLayout() {
         }}
       />
       <Tabs.Screen
+        name="research"
+        options={{
+          title: "RESEARCH",
+          tabBarLabel: "Research",
+          tabBarIcon: ({ color }) => (
+            <Feather name="search" size={20} color={color} />
+          ),
+        }}
+      />
+      <Tabs.Screen
         name="subscription"
         options={{
           title: "SUBSCRIPTION",
           tabBarLabel: "Plan",
           tabBarIcon: ({ color }) => (
             <Feather name="credit-card" size={20} color={color} />
+          ),
+        }}
+      />
+      <Tabs.Screen
+        name="settings"
+        options={{
+          // Admin-only — hide entirely from the tab bar for non-admins.
+          // The screen itself also redirects non-admins to dashboard.
+          // Cast: typed-routes hasn't regen'd yet for this fresh screen.
+          href: (isAdmin ? "/settings" : null) as never,
+          title: "SETTINGS",
+          tabBarLabel: "Settings",
+          tabBarIcon: ({ color }) => (
+            <Feather name="sliders" size={20} color={color} />
           ),
         }}
       />
