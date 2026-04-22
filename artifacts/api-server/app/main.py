@@ -1372,62 +1372,59 @@ async def events_econ_calendar(within_hours: float = 168.0, limit: int = 50) -> 
     is within the 5-minute pre-release blackout window).
     """
     from datetime import datetime, timezone
-    from .events_econ.calendar import upcoming_releases
-    from .events_econ.model import consensus_prior_probability
-    from .events_econ.tickers import (
-        InvalidEventsEconTicker,
-        SUPPORTED_RELEASES,
-        parse_events_econ_ticker,
+    from .events_econ.calendar import (
+        kalshi_ticker_prefix_for_release,
+        settled_history_for_type,
+        upcoming_releases,
     )
+    from .events_econ.model import at_consensus_probability
 
     rows = await upcoming_releases(within_hours=within_hours, limit=limit)
 
-    # For each upcoming release we run the consensus-prior model
-    # against the historical settled rows of the same release type so
-    # the dashboard sees the same `model_prob` the cycle would
-    # compute for an actual ticker priced at the median consensus
-    # threshold.  Kalshi mid is best-effort: we look up the latest
-    # YES mid from `kalshi_market_snapshots` keyed on a synthetic
-    # ticker ``KX{release_type}-{when}-CONSENSUS`` if present;
-    # otherwise it's null and the dashboard renders "—".
+    # Cache settled history per release_type for the duration of the
+    # request so we don't hammer the DB with N identical lookups when
+    # the calendar lists multiple upcoming prints of the same type.
+    history_cache: dict[str, list] = {}
     items: list[dict[str, object]] = []
     now = datetime.now(timezone.utc)
     for r in rows:
-        # Synthesize a "median consensus" ticker for the model prob.
-        # Threshold token is set to ABOVE<consensus> when consensus is
-        # known, so the model returns ~0.5 (the implied at-the-money
-        # probability of beating consensus) — this is the calibrated
-        # baseline the dashboard surfaces.
-        threshold_token = "ABOVE0"
-        if r.consensus is not None:
-            threshold_token = "ABOVE" + str(r.consensus).replace(".", "_")
-        synthetic = f"KX{r.release_type}-{(r.signal_id or 'NA')[-8:].upper().replace('/', '_')}-{threshold_token}"
+        if r.release_type not in history_cache:
+            history_cache[r.release_type] = await settled_history_for_type(
+                r.release_type
+            )
+        history = history_cache[r.release_type]
+
+        # Model probability: at-consensus baseline given the rolling
+        # forecast-error distribution of settled same-type prints.
+        # Always deterministic — no synthetic ticker parsing.
         model_prob: float | None = None
         try:
-            t = parse_events_econ_ticker(synthetic)
-            res = consensus_prior_probability(t, [r])
+            res = at_consensus_probability(r, history)
             model_prob = float(res.probability)
-        except (InvalidEventsEconTicker, Exception):  # noqa: BLE001
+        except Exception:  # pragma: no cover — never fail the route
             model_prob = None
 
-        # Kalshi mid + edge: best-effort lookup from kalshi snapshot
-        # cache.  We don't fail the route if the table is missing.
+        # Kalshi mid + edge: scope the snapshot lookup to THIS release
+        # instance's canonical ticker prefix (e.g. KXCPI-25MAR-) so we
+        # don't surface a mid from an unrelated contract month.
         kalshi_mid: float | None = None
-        try:
-            mid_raw = await db.fetchval(
-                """
-                SELECT yes_mid_price
-                  FROM kalshi_market_snapshots
-                 WHERE ticker LIKE $1
-                 ORDER BY observed_at DESC
-                 LIMIT 1
-                """,
-                f"KX{r.release_type}%",
-            )
-            if mid_raw is not None:
-                kalshi_mid = float(mid_raw)
-        except Exception:  # pragma: no cover — snapshots table optional
-            kalshi_mid = None
+        prefix = kalshi_ticker_prefix_for_release(r.release_type, r.release_at)
+        if prefix is not None:
+            try:
+                mid_raw = await db.fetchval(
+                    """
+                    SELECT yes_mid_price
+                      FROM kalshi_market_snapshots
+                     WHERE ticker LIKE $1
+                     ORDER BY observed_at DESC
+                     LIMIT 1
+                    """,
+                    f"{prefix}%",
+                )
+                if mid_raw is not None:
+                    kalshi_mid = float(mid_raw)
+            except Exception:  # pragma: no cover — snapshots table optional
+                kalshi_mid = None
 
         edge_bps: float | None = None
         if model_prob is not None and kalshi_mid is not None:
@@ -1451,12 +1448,11 @@ async def events_econ_calendar(within_hours: float = 168.0, limit: int = 50) -> 
             "previous": r.previous,
             "model_prob": model_prob,
             "kalshi_mid": kalshi_mid,
+            "kalshi_ticker_prefix": prefix,
             "edge_bps": edge_bps,
             "seconds_until_release": seconds_until,
             "imminent": imminent,
         })
-    # Defensive: SUPPORTED_RELEASES referenced for forward compat.
-    _ = SUPPORTED_RELEASES
     return {"items": items}
 
 

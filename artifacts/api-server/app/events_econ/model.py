@@ -165,6 +165,49 @@ def _rolling_forecast_error_sigma(
     return math.sqrt(max(0.0, var)), n
 
 
+def at_consensus_probability(
+    row: "object",
+    history: list,
+) -> "ConsensusPriorResult":
+    """Compute the model's at-consensus probability for an upcoming release.
+
+    Used by the public calendar route (no ticker needed): we ask
+    "what is the model's probability of beating the published
+    consensus?" given the rolling forecast-error distribution.  This
+    surfaces the same signal the cycle would compute when pricing an
+    ABOVE-consensus contract.
+    """
+    consensus = getattr(row, "consensus", None)
+    previous = getattr(row, "previous", None)
+    release_type = getattr(row, "release_type", "UNKNOWN")
+    if consensus is None and previous is None:
+        return ConsensusPriorResult(
+            probability=0.5, consensus=None, threshold=None,
+            direction="above", sigma=0.0, count=0,
+            entropy={"history": 0.0, "has_consensus": 0.0,
+                     "has_threshold": 0.0, "z": 0.0, "sigma": 0.0},
+        )
+    threshold = float(consensus if consensus is not None else previous)
+    sigma, n = _rolling_forecast_error_sigma(
+        [r for r in history if getattr(r, "actual", None) is not None]
+    )
+    if sigma <= 0.0:
+        sigma = _DEFAULT_SIGMAS.get(release_type, 0.5)
+    z = 0.0  # at-consensus -> z=0 -> raw probability 0.5
+    raw = 1.0 - _norm_cdf(z)
+    prob = max(0.05, min(0.95, raw))
+    return ConsensusPriorResult(
+        probability=prob,
+        consensus=threshold,
+        threshold=threshold,
+        direction="above",
+        sigma=sigma,
+        count=n,
+        entropy={"history": float(n), "has_consensus": 1.0,
+                 "has_threshold": 1.0, "z": z, "sigma": sigma},
+    )
+
+
 def consensus_prior_probability(
     ticker: EventsEconTicker,
     history: Iterable[ReleaseRow],

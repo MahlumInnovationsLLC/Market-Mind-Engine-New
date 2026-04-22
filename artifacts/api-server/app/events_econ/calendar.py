@@ -206,6 +206,88 @@ async def resolve_releases(
     return out
 
 
+async def settled_history_for_type(
+    release_type: str,
+    *,
+    lookback_days: int = DEFAULT_LOOKBACK_DAYS,
+    limit: int = 200,
+) -> list[ReleaseRow]:
+    """Return *settled* (actual is not null) rows of a release type.
+
+    Used by the public calendar route so the surfaced model_prob is
+    computed against real historical settlement, not just the row
+    itself (the cycle's predictor uses the same history via
+    resolve_releases).
+    """
+    now = datetime.now(timezone.utc)
+    start = now - timedelta(days=max(1, lookback_days))
+    try:
+        rows = await db.fetch(
+            """
+            SELECT source, signal_id, release_type, release_at,
+                   consensus, previous, actual, revised_previous, payload
+              FROM econ_releases
+             WHERE release_type = $1
+               AND actual IS NOT NULL
+               AND release_at >= $2
+             ORDER BY release_at DESC
+             LIMIT $3
+            """,
+            release_type, start, limit,
+        )
+    except Exception as e:
+        log.debug("econ settled history lookup failed for %s: %s", release_type, e)
+        return []
+    out: list[ReleaseRow] = []
+    for r in rows:
+        payload = r["payload"]
+        if isinstance(payload, str):
+            try:
+                import json as _json
+                payload = _json.loads(payload)
+            except Exception:
+                payload = {}
+        out.append(
+            ReleaseRow(
+                source=str(r["source"]),
+                signal_id=str(r["signal_id"]),
+                release_type=str(r["release_type"]),
+                release_at=r["release_at"],
+                consensus=(float(r["consensus"]) if r["consensus"] is not None else None),
+                previous=(float(r["previous"]) if r["previous"] is not None else None),
+                actual=(float(r["actual"]) if r["actual"] is not None else None),
+                revised_previous=(
+                    float(r["revised_previous"]) if r["revised_previous"] is not None else None
+                ),
+                payload=dict(payload or {}),
+            )
+        )
+    return out
+
+
+_MONTH_ABBR = ["JAN", "FEB", "MAR", "APR", "MAY", "JUN",
+               "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"]
+
+
+def kalshi_ticker_prefix_for_release(
+    release_type: str,
+    release_at: datetime | None,
+) -> str | None:
+    """Build the canonical Kalshi ticker prefix for a release instance.
+
+    e.g. CPI release on 2025-03-12 -> ``KXCPI-25MAR-``.  Used by the
+    calendar route to look up the *correct* contract's snapshot mid
+    rather than the next same-type contract.
+    """
+    if release_at is None:
+        return None
+    if release_at.tzinfo is None:
+        release_at = release_at.replace(tzinfo=timezone.utc)
+    yy = release_at.year % 100
+    mon = _MONTH_ABBR[release_at.month - 1]
+    return f"KX{release_type}-{yy:02d}{mon}-"
+
+
 async def resolved_release_for_ticker(
     ticker: EventsEconTicker,
 ) -> ReleaseRow | None:
