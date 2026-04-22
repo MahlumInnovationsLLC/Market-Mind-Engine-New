@@ -104,7 +104,7 @@ def test_apply_bypasses_without_league():
 
 def test_apply_bypasses_unsupported_league():
     calibrators.invalidate()
-    out, info = calibrators.apply(0.4, "PGA")
+    out, info = calibrators.apply(0.4, "NCAAF")
     assert out == 0.4
     assert info["applied"] is False
     assert info["reason"] == "unsupported league"

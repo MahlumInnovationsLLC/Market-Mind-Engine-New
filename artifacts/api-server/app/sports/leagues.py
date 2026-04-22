@@ -64,6 +64,25 @@ class LeagueConfig:
     # because the league has 10 fixtures per matchweek and we don't want
     # the entire bankroll churning through one matchday.
     max_daily_trades: int | None = None
+    # N-way winner market — UFC fight card / tennis tournament / F1 race
+    # / PGA tournament.  Distinct from `three_way_market` (soccer h/d/a)
+    # because settlement and predictor branch on a list of participants
+    # rather than a fixed 3-outcome frame.  Combat / individual sports
+    # ship this flag (task #197).
+    n_way_market: bool = False
+    # Per-event concentration cap as a share of bankroll.  Aggregates
+    # across every market that shares the same `event_id` (UFC fight
+    # night, F1 GP, tennis tournament, PGA tournament) so the bot can't
+    # accidentally pile 30% of bankroll on a single weekend's slate.
+    # None disables (default — no cap).
+    per_event_cap_pct: float | None = None
+    # If True, gate_market_cooldown blocks NEW pre-event entries while
+    # the underlying event is in-progress (status=live).  Combat /
+    # individual sports flip this on so a UFC main-card pick doesn't
+    # land mid-fight or an F1 outright after lights-out.  In-play
+    # markets are out of scope for #197 so the bot has no business
+    # touching the same market once it's live.
+    live_action_blackout: bool = False
 
 
 _SOCCER_PERSONA_CONTEXT = (
@@ -84,6 +103,34 @@ _SOCCER_PERSONA_CONTEXT = (
     "  * Late-window markets are extremely thin in pre-season, "
     "international breaks and final matchday dead-rubber fixtures; "
     "default toward PASS when liquidity is absent."
+)
+
+
+_COMBAT_INDIVIDUAL_PERSONA_CONTEXT = (
+    "COMBAT & INDIVIDUAL-SPORT SIGNALS:\n"
+    "  * Outcomes are per-fighter / per-player / per-driver — there is "
+    "NO 'home / away' frame.  N-way tournament-winner markets (UFC "
+    "card winners, F1 race winners, ATP/WTA/PGA outright) require "
+    "reasoning about every entrant, not just two sides.  Use rolling "
+    "rating priors (Elo / ATP-points / OWGR) and Bradley-Terry / "
+    "Plackett-Luce conversion when you sketch a probability.\n"
+    "  * Surface / track / course matters as much as raw form: clay vs "
+    "grass vs hard for tennis, octagon-vs-cage and weight-class for "
+    "UFC, street vs permanent circuit and weather for F1, links vs "
+    "parkland and wind for PGA.  Anchor on surface-conditional H2H "
+    "before nudging on recent form.\n"
+    "  * Recent fitness + travel / time-zone change dominates short-term "
+    "edges.  A driver carrying a grid penalty, a fighter cutting weight "
+    "the day before, or a tennis player on day-3 of a back-to-back tour "
+    "stop should compress the implied probability.\n"
+    "  * Live-action blackout: once the event is in-progress (lights-out, "
+    "first-round bell, opening tee, first ball), pre-event outright "
+    "markets are not eligible — recommend PASS rather than chase a "
+    "moving line we cannot price reliably.\n"
+    "  * Per-event concentration risk is high — UFC card upsets, F1 "
+    "safety-car chaos, tennis upset draws and PGA weather waves can "
+    "wipe out the whole slate.  Default toward smaller sizing and "
+    "fewer concurrent legs per event."
 )
 
 
@@ -230,6 +277,66 @@ LEAGUE_CONFIGS: dict[str, LeagueConfig] = {
         three_way_market=True,
         max_daily_trades=6,
         persona_context=_SOCCER_PERSONA_CONTEXT,
+    ),
+    # Combat & individual sports (task #197).  All five leagues are
+    # event-shaped (one fight night / GP / tournament dominates the
+    # weekend) so per-event concentration matters more than per-game,
+    # and the bot blacks out NEW pre-event entries once the underlying
+    # event is live (in-play prop trading is out of scope for #197).
+    "UFC": LeagueConfig(
+        league="UFC",
+        priority=6,
+        allocation_pct=0.02,
+        per_game_cap_pct=0.005,           # per fight (head-to-head)
+        per_event_cap_pct=0.015,          # whole fight card / numbered event
+        n_way_market=False,               # individual fights are 2-way
+        live_action_blackout=True,
+        max_daily_trades=6,
+        persona_context=_COMBAT_INDIVIDUAL_PERSONA_CONTEXT,
+    ),
+    "ATP": LeagueConfig(
+        league="ATP",
+        priority=7,
+        allocation_pct=0.02,
+        per_game_cap_pct=0.005,           # per match (h2h)
+        per_event_cap_pct=0.015,          # tournament outright + R32..final
+        n_way_market=True,                # tournament-winner markets
+        live_action_blackout=True,
+        max_daily_trades=8,
+        persona_context=_COMBAT_INDIVIDUAL_PERSONA_CONTEXT,
+    ),
+    "WTA": LeagueConfig(
+        league="WTA",
+        priority=7,
+        allocation_pct=0.02,
+        per_game_cap_pct=0.005,
+        per_event_cap_pct=0.015,
+        n_way_market=True,
+        live_action_blackout=True,
+        max_daily_trades=8,
+        persona_context=_COMBAT_INDIVIDUAL_PERSONA_CONTEXT,
+    ),
+    "F1": LeagueConfig(
+        league="F1",
+        priority=6,
+        allocation_pct=0.015,
+        per_game_cap_pct=0.005,           # per session (qualifying / race)
+        per_event_cap_pct=0.012,          # entire GP weekend
+        n_way_market=True,                # race-winner / pole markets
+        live_action_blackout=True,
+        max_daily_trades=4,
+        persona_context=_COMBAT_INDIVIDUAL_PERSONA_CONTEXT,
+    ),
+    "PGA": LeagueConfig(
+        league="PGA",
+        priority=7,
+        allocation_pct=0.015,
+        per_game_cap_pct=0.004,           # per single golfer outright
+        per_event_cap_pct=0.012,          # tournament-wide cap
+        n_way_market=True,                # tournament-winner markets
+        live_action_blackout=True,
+        max_daily_trades=6,
+        persona_context=_COMBAT_INDIVIDUAL_PERSONA_CONTEXT,
     ),
 }
 

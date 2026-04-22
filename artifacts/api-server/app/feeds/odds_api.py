@@ -167,6 +167,16 @@ _SPORTRADAR_SCHEDULE_PATHS = {
     "ligue1": "https://api.sportradar.us/soccer-extended/trial/v4/en/schedules/{y}-{m:02d}-{d:02d}/schedule.json?tournament=sr:tournament:34",
     "mls":    "https://api.sportradar.us/soccer-extended/trial/v4/en/schedules/{y}-{m:02d}-{d:02d}/schedule.json?tournament=sr:tournament:242",
     "ucl":    "https://api.sportradar.us/soccer-extended/trial/v4/en/schedules/{y}-{m:02d}-{d:02d}/schedule.json?tournament=sr:tournament:7",
+    # Combat & individual sports (task #197).  Each discipline ships
+    # under its own Sportradar package with a discipline-specific
+    # daily-schedule endpoint.  Operators must set the matching
+    # SPORTRADAR_<LEAGUE>_KEY env var; missing keys leave the feed
+    # registered-but-skipped so /api/feeds/status surfaces the gap.
+    "ufc":    "https://api.sportradar.us/mma/trial/v2/en/schedules/{y}-{m:02d}-{d:02d}/schedule.json",
+    "atp":    "https://api.sportradar.us/tennis/trial/v3/en/schedules/{y}-{m:02d}-{d:02d}/schedule.json?gender=men",
+    "wta":    "https://api.sportradar.us/tennis/trial/v3/en/schedules/{y}-{m:02d}-{d:02d}/schedule.json?gender=women",
+    "f1":     "https://api.sportradar.us/formula1/trial/v2/en/sport_events/{y}-{m:02d}-{d:02d}/summaries.json",
+    "pga":    "https://api.sportradar.us/golf/trial/v3/en/schedules/{y}/pga/tournaments/schedule.json",
 }
 _SPORTRADAR_LEAGUE = {
     "nba": "NBA",
@@ -182,6 +192,11 @@ _SPORTRADAR_LEAGUE = {
     "ligue1": "LIGUE1",
     "mls": "MLS",
     "ucl": "UCL",
+    "ufc": "UFC",
+    "atp": "ATP",
+    "wta": "WTA",
+    "f1": "F1",
+    "pga": "PGA",
 }
 SPORTRADAR_SPORTS: tuple[str, ...] = tuple(_SPORTRADAR_SCHEDULE_PATHS.keys())
 

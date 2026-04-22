@@ -64,6 +64,32 @@ REGISTRY.register(VerticalSpec(
 # `soccer` via `AXIOM_ORCHESTRATOR_VERTICALS`; running both is
 # supported but soccer leagues will be debated under the soccer
 # profile only when this spec is enabled.
+# Combat & individual sports (task #197).  Distinct from the generic
+# `sports` vertical because outcome shape (per-fighter / per-driver /
+# per-player N-way fields) breaks the home/away assumption baked into
+# the team-sport feature builder + persona prompts.  Operators select
+# via `AXIOM_ORCHESTRATOR_VERTICALS`; off the dashboard strip by
+# default so the existing 4-column strip layout doesn't shift until UI
+# work catches up.
+REGISTRY.register(VerticalSpec(
+    name="combat-individual",
+    leagues=("UFC", "ATP", "WTA", "F1", "PGA"),
+    ticker_prefixes=("KXUFC", "KXATP", "KXWTA", "KXF1", "KXPGA"),
+    persona_profile="combat-individual",
+    # Tighter Kelly here than team sports — N-way fields carry more
+    # variance per leg and the bot already concentrates exposure via
+    # `LeagueConfig.per_event_cap_pct`.
+    kelly_multiplier=0.5,
+    default_allocation_pct=0.10,
+    description=(
+        "Combat & individual sports: UFC fight cards, ATP/WTA tennis "
+        "tournaments (h2h + outright winner), F1 race + qualifying, "
+        "PGA tournament leaderboards.  N-way winner markets priced "
+        "via Bradley-Terry / Plackett-Luce on rolling rating priors."
+    ),
+))
+
+
 REGISTRY.register(VerticalSpec(
     name="soccer",
     leagues=("EPL", "LALIGA", "SERIEA", "BUNDES", "LIGUE1", "MLS", "UCL"),

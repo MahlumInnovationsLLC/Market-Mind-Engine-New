@@ -62,6 +62,12 @@ SUPPORTED_LEAGUES: tuple[str, ...] = (
     # so a soccer draw outcome is scored as a YES miss on both
     # home-side and away-side legs rather than treated as a tie.
     "EPL", "LALIGA", "SERIEA", "BUNDES", "LIGUE1", "MLS", "UCL",
+    # Combat & individual sports (task #197).  N-way outright fields —
+    # the calibrator still operates on a per-leg YES probability so the
+    # apply() shape doesn't change, but each leg of a UFC card / F1
+    # race / ATP/WTA bracket / PGA tournament is calibrated against
+    # its own league's settled-trade history.
+    "UFC", "ATP", "WTA", "F1", "PGA",
 )
 
 # Below this sample count we fall back to Platt; below MIN_REFIT we

@@ -113,9 +113,14 @@ async def _open_position_aggregates() -> tuple[
     dict[str, float],
     dict[str, float],
     dict[str, float],
+    dict[str, float],
 ]:
     """Returns (count, total_notional, per_vertical, per_league, per_matchup,
-    per_sunday_window).
+    per_sunday_window, per_event).
+
+    `per_event` is keyed `LEAGUE:event_id` (event_id derived from the
+    debate's `game_id`, which combat & individual sports re-use as the
+    fight-card / GP / tournament identifier — see task #197).
 
     Per-league and per-matchup buckets are derived from `positions` joined
     onto the originating debate's `league` / `matchup` (via
@@ -141,7 +146,7 @@ async def _open_position_aggregates() -> tuple[
         )
     except Exception as e:
         log.debug("open position aggregate failed: %s", e)
-        return 0, 0.0, {}, {}, {}, {}
+        return 0, 0.0, {}, {}, {}, {}, {}
     total_n = 0
     total_notional = 0.0
     per_vertical: dict[str, float] = {}
@@ -154,12 +159,14 @@ async def _open_position_aggregates() -> tuple[
     per_league: dict[str, float] = {}
     per_matchup: dict[str, float] = {}
     per_sunday: dict[str, float] = {}
+    per_event: dict[str, float] = {}
     try:
         from ..sports import is_sunday_window as _is_sunday_window
         league_rows = await db.fetch(
             """
             SELECT coalesce(d.league, '')                            AS league,
                    coalesce(d.matchup, '')                           AS matchup,
+                   coalesce(d.game_id, '')                           AS event_id,
                    coalesce(sum(p.quantity * p.avg_price), 0)::float AS notional,
                    max(g.scheduled_start)                            AS game_time
               FROM positions p
@@ -167,7 +174,7 @@ async def _open_position_aggregates() -> tuple[
               LEFT JOIN games g ON g.game_id = d.game_id
              WHERE coalesce(p.status, 'open') = 'open'
                AND coalesce(d.league, '') <> ''
-             GROUP BY d.league, d.matchup
+             GROUP BY d.league, d.matchup, d.game_id
             """
         )
         for r in league_rows:
@@ -180,13 +187,26 @@ async def _open_position_aggregates() -> tuple[
             if matchup:
                 key = f"{league}:{matchup}"
                 per_matchup[key] = per_matchup.get(key, 0.0) + notional
+            # Per-event bucket (task #197): combat & individual sports
+            # group many markets/matchups under a single event_id (UFC
+            # fight card, F1 GP weekend, tennis tournament, PGA event).
+            # We re-use `swarm_debates.game_id` as the event identifier
+            # — the feed populates it with the card / GP / tournament
+            # key for these leagues.
+            event_id = str(r["event_id"] or "").strip()
+            if event_id:
+                ekey = f"{league}:{event_id}"
+                per_event[ekey] = per_event.get(ekey, 0.0) + notional
             game_time = r["game_time"]
             if game_time is not None and _is_sunday_window(league, game_time):
                 per_sunday[league] = per_sunday.get(league, 0.0) + notional
     except Exception as e:
         log.debug("per-league position aggregate failed: %s", e)
 
-    return total_n, total_notional, per_vertical, per_league, per_matchup, per_sunday
+    return (
+        total_n, total_notional, per_vertical,
+        per_league, per_matchup, per_sunday, per_event,
+    )
 
 
 async def _today_trade_counts_per_league() -> dict[str, int]:
@@ -580,6 +600,7 @@ async def run_cycle(vertical: str = "sports") -> CycleResult:
         per_league,
         per_matchup,
         per_sunday_window,
+        per_event,
     ) = await _open_position_aggregates()
     trades_today_per_league = await _today_trade_counts_per_league()
 
@@ -752,6 +773,17 @@ async def run_cycle(vertical: str = "sports") -> CycleResult:
             open_positions_sunday_window_usd=per_sunday_window,
             trades_today_per_league=trades_today_per_league,
             game_time=cand.get("game_time"),
+            # Per-event concentration + live-action blackout (task #197).
+            # `event_id` falls back to the candidate's game_id so combat
+            # & individual sports — which group many markets per card /
+            # GP / tournament — cap their per-event exposure correctly.
+            # Legacy team-sport candidates carry game_id == matchup-id
+            # so the per-event sub-check is a stricter mirror of the
+            # per-game cap (no behavior change since per_event_cap_pct
+            # is None for them).
+            event_id=cand.get("event_id") or cand.get("game_id"),
+            open_positions_per_event_usd=per_event,
+            event_in_progress=bool(cand.get("event_in_progress", False)),
         )
 
         await _publish({
@@ -842,6 +874,14 @@ async def run_cycle(vertical: str = "sports") -> CycleResult:
                 if matchup_val:
                     mkey = f"{league_key}:{matchup_val}"
                     per_matchup[mkey] = per_matchup.get(mkey, 0.0) + intended_notional
+                # Same-cycle per-event aggregation (task #197) — without
+                # this, multiple legs on the same UFC card / F1 GP /
+                # tournament inside a single cycle could individually
+                # pass the per-event cap.
+                event_id_val = cand.get("event_id") or cand.get("game_id")
+                if event_id_val:
+                    ekey = f"{league_key}:{event_id_val}"
+                    per_event[ekey] = per_event.get(ekey, 0.0) + intended_notional
                 # Sunday-window aggregation must follow the *candidate's*
                 # kickoff, not wall-clock now() — otherwise a midweek
                 # pre-position on a Sunday game would not show up in the

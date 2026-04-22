@@ -115,6 +115,25 @@ class RiskContext:
     # gate_market_cooldown to honor per-league pre-kickoff blackouts
     # (NFL inactive-list window).  None when the market isn't game-bound.
     game_time: datetime | None = None
+    # Event identifier shared across every market that belongs to the
+    # same UFC fight night / F1 GP / tennis tournament / PGA tournament
+    # (task #197).  Per-event concentration sub-check aggregates open
+    # exposure on this key so the bot can't accidentally pile the
+    # whole bankroll into one weekend's slate.  None for markets that
+    # aren't event-bound (legacy team-sport candidates carry None and
+    # the sub-check no-ops).
+    event_id: str | None = None
+    # Per-event open exposure aggregate (USD) — populated by the cycle
+    # aggregator alongside `open_positions_per_matchup_usd`.  Defaults
+    # empty so legacy call sites short-circuit the per-event sub-check.
+    open_positions_per_event_usd: dict[str, float] = field(default_factory=dict)
+    # Whether the candidate's underlying event is currently in-progress
+    # (UFC fight underway, F1 race lights-out, PGA tournament Sunday
+    # back-9, tennis match in-play).  When True and the league has
+    # `live_action_blackout=True`, gate_market_cooldown rejects the
+    # candidate as a pre-event entry against an active event.  Defaults
+    # False so legacy candidates are unaffected.
+    event_in_progress: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -170,6 +189,26 @@ async def gate_market_cooldown(ctx: RiskContext) -> GateResult:
                 "cooldown_until": blackout.isoformat(),
                 "reason": "pre_kickoff_blackout",
                 "league": ctx.league,
+            },
+        )
+    # Live-action blackout (task #197): combat & individual sports
+    # opt-in via `LeagueConfig.live_action_blackout`.  Once the
+    # underlying event is in-progress, pre-event outright markets are
+    # not eligible for new entries.
+    lcfg = get_league_config(ctx.league)
+    if (
+        lcfg is not None
+        and lcfg.live_action_blackout
+        and ctx.event_in_progress
+    ):
+        return GateResult(
+            "market_cooldown",
+            False,
+            f"{ctx.league} live-action blackout (event in progress)",
+            {
+                "reason": "live_action_blackout",
+                "league": ctx.league,
+                "event_id": ctx.event_id,
             },
         )
     return GateResult("market_cooldown", True)
@@ -510,6 +549,44 @@ async def gate_per_vertical_cap(ctx: RiskContext) -> GateResult:
                         "projected": game_projected,
                         "cap_usd": game_cap_usd,
                         "cap_pct": game_cap_pct,
+                    },
+                )
+
+        # Per-event concentration cap (task #197).  Combat & individual
+        # sports opt in via `LeagueConfig.per_event_cap_pct`: a single
+        # UFC fight night / F1 GP / tennis tournament / PGA tournament
+        # can spawn 8-30 outright legs; without an explicit per-event
+        # cap the per-league cap can bunch all of them onto one weekend.
+        if (
+            lcfg.per_event_cap_pct is not None
+            and ctx.event_id
+        ):
+            event_cap_pct = float(
+                ctx.operator_overrides.get(
+                    f"per_event_cap_pct.{league_key.lower()}",
+                    lcfg.per_event_cap_pct,
+                )
+            )
+            event_cap_usd = bankroll * event_cap_pct
+            event_key = f"{league_key}:{ctx.event_id}"
+            event_open = ctx.open_positions_per_event_usd.get(event_key, 0.0)
+            event_projected = event_open + ctx.intended_notional_usd
+            if event_projected > event_cap_usd:
+                return GateResult(
+                    "per_vertical_cap",
+                    False,
+                    (
+                        f"{event_key} projected ${event_projected:.2f} > "
+                        f"per-event cap ${event_cap_usd:.2f}"
+                    ),
+                    {
+                        "vertical": ctx.vertical,
+                        "league": league_key,
+                        "event_id": ctx.event_id,
+                        "sub_check": "per_event_cap",
+                        "projected": event_projected,
+                        "cap_usd": event_cap_usd,
+                        "cap_pct": event_cap_pct,
                     },
                 )
 
