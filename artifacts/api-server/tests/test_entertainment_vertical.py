@@ -317,6 +317,49 @@ def test_awards_race_excludes_rows_missing_race_category():
     assert p_clean == pytest.approx(p_with_noise, abs=0.001)
 
 
+def test_awards_feed_emits_structured_race_rows_for_race_tickers():
+    # Integration: a Variety/HR-style headline mentioning a race +
+    # candidate must produce a feed row with payload.race_category +
+    # payload.candidate so a race-style ticker scores above the floor.
+    from app.feeds.entertainment_signals import _parse_awards_rss_body
+    body = """
+    <rss><channel>
+      <item>
+        <title>Oppenheimer leads Oscar Best Picture race</title>
+        <description>The Christopher Nolan epic is the favorite for the Academy Award Best Picture.</description>
+        <guid>variety/oppenheimer-bestpic</guid>
+        <pubDate>Wed, 15 Jan 2025 12:00:00 +0000</pubDate>
+      </item>
+      <item>
+        <title>Barbie tipped for Best Picture nomination</title>
+        <description>Greta Gerwig's blockbuster eyes Oscar Best Picture spot.</description>
+        <guid>variety/barbie-bestpic</guid>
+        <pubDate>Wed, 15 Jan 2025 12:00:00 +0000</pubDate>
+      </item>
+    </channel></rss>
+    """
+    now = datetime.now(timezone.utc)
+    rows = _parse_awards_rss_body(body, "variety_awards_rss", now)
+    assert len(rows) == 2
+    for r in rows:
+        assert r["payload"].get("race_category") == "BESTPIC"
+        assert r["payload"].get("candidate") in {"OPPENHEIMER", "BARBIE"}
+    feed_signal_rows = [
+        SignalRow(
+            source=r["source"], signal_id=r["signal_id"],
+            signal_type=r["signal_type"], title=r["title"],
+            event_at=r["event_at"], value=r["value"],
+            settled=r["settled"], outcome=r["outcome"],
+            payload=r["payload"],
+        ) for r in rows
+    ]
+    t = parse_entertainment_ticker("KXOSCAR-25-BESTPIC-OPPENHEIMER")
+    res = hybrid_probability(t, feed_signal_rows)
+    assert res.head == "awards"
+    # Two equal-prior candidates → posterior must be ~0.5, not the floor.
+    assert res.probability == pytest.approx(0.5, abs=0.05)
+
+
 def test_awards_winners_in_history_do_not_inflate_posterior():
     # Settled winners with value=1.0 (as written by the historical
     # poller) must NOT inflate the posterior — the model is purely

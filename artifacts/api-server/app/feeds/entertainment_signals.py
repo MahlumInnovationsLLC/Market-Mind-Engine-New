@@ -322,6 +322,64 @@ _AWARD_KEYWORDS: tuple[tuple[re.Pattern[str], str], ...] = (
 )
 
 
+# Per-award race-category extraction.  Headlines are scanned for the
+# canonical race name; the first match wins.  Markets without a
+# detectable race fall through with race_category=None and are kept on
+# unscoped tickers only (never bind to race-style tickers — see the
+# strict scoping in app.entertainment.model._awards_probability).
+_RACE_PATTERNS: dict[str, tuple[tuple[re.Pattern[str], str], ...]] = {
+    "OSCAR": (
+        (re.compile(r"\bbest\s+picture\b", re.I), "BESTPIC"),
+        (re.compile(r"\bbest\s+director\b", re.I), "BESTDIR"),
+        (re.compile(r"\bbest\s+actor\b", re.I), "BESTACTOR"),
+        (re.compile(r"\bbest\s+actress\b", re.I), "BESTACTRESS"),
+        (re.compile(r"\bbest\s+supporting\s+actor\b", re.I), "BESTSUPACTOR"),
+        (re.compile(r"\bbest\s+supporting\s+actress\b", re.I), "BESTSUPACTRESS"),
+        (re.compile(r"\bbest\s+(?:original|adapted)\s+screenplay\b", re.I), "BESTSCREEN"),
+        (re.compile(r"\bbest\s+animated\s+feature\b", re.I), "BESTANIM"),
+        (re.compile(r"\bbest\s+international\s+feature\b", re.I), "BESTINTL"),
+    ),
+    "EMMY": (
+        (re.compile(r"\boutstanding\s+drama\s+series\b", re.I), "DRAMA"),
+        (re.compile(r"\boutstanding\s+comedy\s+series\b", re.I), "COMEDY"),
+        (re.compile(r"\boutstanding\s+limited\s+(?:or\s+anthology\s+)?series\b", re.I), "LIMITED"),
+    ),
+    "GRAMMY": (
+        (re.compile(r"\brecord\s+of\s+the\s+year\b", re.I), "RECORD"),
+        (re.compile(r"\balbum\s+of\s+the\s+year\b", re.I), "ALBUM"),
+        (re.compile(r"\bsong\s+of\s+the\s+year\b", re.I), "SONG"),
+        (re.compile(r"\bbest\s+new\s+artist\b", re.I), "NEWARTIST"),
+    ),
+}
+
+
+# Candidate-extraction cues used in headlines:
+#   "Oppenheimer leads/wins/sweeps Oscar Best Picture race"
+#   "Critics' Choice: Killers of the Flower Moon for Best Picture"
+_CANDIDATE_CUES = re.compile(
+    r"^\s*([A-Z][\w&'\-:.\s]{1,60}?)\s+(?:leads|sweeps|wins|tops|favored|favoured|"
+    r"frontrunner|to\s+win|nominated|nomination|tipped|emerges)\b",
+    re.I,
+)
+
+
+def _extract_race_category(award_type: str, blob: str) -> str | None:
+    for pat, race in _RACE_PATTERNS.get(award_type, ()):
+        if pat.search(blob):
+            return race
+    return None
+
+
+def _extract_candidate(title_raw: str, description: str) -> str | None:
+    blob = f"{title_raw} {description}".strip()
+    m = _CANDIDATE_CUES.match(blob)
+    if not m:
+        return None
+    cand = m.group(1).strip()
+    cand = re.sub(r"\s+", "_", cand).upper()
+    return cand[:80] or None
+
+
 async def poll_awards_calendar() -> int:
     """Pull awards-cycle headlines + emit per-nominee placeholder rows.
 
@@ -366,8 +424,24 @@ def _parse_awards_rss_body(body: str, source_id: str, now: datetime) -> list[dic
         if award_type is None:
             continue
         observed = _parse_rss_pubdate(fields.get("pubdate", ""))
-        # Nominee title is best-effort: use the cleaned RSS title.
-        title = _title_from_rss(title_raw)
+        # Best-effort structured extraction: pull race_category +
+        # candidate from the headline so race-style tickers
+        # (KXOSCAR-25-BESTPIC-OPPENHEIMER) can match.
+        blob = f"{title_raw} {description}"
+        race_category = _extract_race_category(award_type, blob)
+        candidate = _extract_candidate(title_raw, description)
+        # When we extracted a candidate, anchor the row's title on the
+        # candidate so the model's exact-match also succeeds via .title.
+        title = candidate if candidate else _title_from_rss(title_raw)
+        payload = {
+            "title": title_raw[:500],
+            "description": description[:1000],
+            "award_type": award_type,
+        }
+        if race_category:
+            payload["race_category"] = race_category
+        if candidate:
+            payload["candidate"] = candidate
         out.append({
             "source": source_id,
             "signal_id": f"{source_id}/{guid}"[:300],
@@ -377,11 +451,7 @@ def _parse_awards_rss_body(body: str, source_id: str, now: datetime) -> list[dic
             "value": 0.5,  # placeholder prior, refined by precursor pollers
             "settled": False,
             "outcome": None,
-            "payload": {
-                "title": title_raw[:500],
-                "description": description[:1000],
-                "award_type": award_type,
-            },
+            "payload": payload,
         })
     return out
 
