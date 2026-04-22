@@ -1,30 +1,23 @@
-import { useQuery } from "@tanstack/react-query";
 import {
   getGetDashboardOverviewQueryKey,
-  getGetRecentTradesQueryKey,
-  getGetVerticalsOverviewQueryKey,
   useGetDashboardOverview,
-  useGetRecentTrades,
-  useGetVerticalsOverview,
 } from "@workspace/api-client-react";
 import { GlassCard } from "@/components/ui/glass-card";
-import { usePeriod } from "./period-context";
 
-type EquityPoint = {
-  date: string;
-  daily_pnl: number;
-  cumulative_pnl: number;
-  trades: number;
-};
-type EquityCurve = { days: number; points: EquityPoint[] };
+/**
+ * 6-tile KPI strip. All values are sourced **directly** from
+ * `/api/dashboard/overview` — no derived formulas. The dashboard's
+ * period strip below this bar drives the equity charts and trade
+ * stats; overview KPIs are intentionally period-invariant lifetime
+ * counters per the API contract.
+ */
 
-function fmtCurrency(n: number | null | undefined, fractionDigits = 0): string {
+function fmtCurrency(n: number | null | undefined): string {
   if (n === null || n === undefined || Number.isNaN(n)) return "—";
   return new Intl.NumberFormat("en-US", {
     style: "currency",
     currency: "USD",
-    maximumFractionDigits: fractionDigits,
-    minimumFractionDigits: 0,
+    maximumFractionDigits: 0,
   }).format(n);
 }
 
@@ -33,12 +26,24 @@ function fmtPct(n: number | null | undefined, digits = 1): string {
   return `${(n * 100).toFixed(digits)}%`;
 }
 
-function fmtNumber(n: number | null | undefined): string {
+function fmtCount(n: number | null | undefined): string {
   if (n === null || n === undefined || Number.isNaN(n)) return "—";
-  return new Intl.NumberFormat("en-US", {
-    notation: "compact",
-    maximumFractionDigits: 1,
-  }).format(n);
+  return new Intl.NumberFormat("en-US").format(n);
+}
+
+function fmtRelative(iso: string | null | undefined): string {
+  if (!iso) return "—";
+  const ms = new Date(iso).getTime();
+  if (Number.isNaN(ms)) return "—";
+  const diff = Math.max(0, Date.now() - ms);
+  const s = Math.floor(diff / 1000);
+  if (s < 60) return `${s}s ago`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m ago`;
+  const h = Math.floor(m / 60);
+  if (h < 24) return `${h}h ago`;
+  const d = Math.floor(h / 24);
+  return `${d}d ago`;
 }
 
 function pnlClass(n: number | null | undefined): string {
@@ -90,101 +95,22 @@ function KpiTile({
 }
 
 export default function KpiSummaryBar() {
-  const { period, days } = usePeriod();
-  const overviewQ = useGetDashboardOverview({
+  const { data, isLoading } = useGetDashboardOverview({
     query: {
       queryKey: getGetDashboardOverviewQueryKey(),
       refetchInterval: 60_000,
     },
   });
-  const verticalsParams = { days };
-  const verticalsQ = useGetVerticalsOverview(verticalsParams, {
-    query: {
-      queryKey: getGetVerticalsOverviewQueryKey(verticalsParams),
-      refetchInterval: 60_000,
-    },
-  });
-  const tradesParams = { limit: 200 };
-  const tradesQ = useGetRecentTrades(tradesParams, {
-    query: {
-      queryKey: getGetRecentTradesQueryKey(tradesParams),
-      refetchInterval: 60_000,
-    },
-  });
-  const equityQ = useQuery<EquityCurve>({
-    queryKey: ["public-equity-curve", days],
-    queryFn: async () => {
-      const r = await fetch(
-        `${import.meta.env.BASE_URL}api/public/equity-curve?days=${days}`,
-      );
-      if (!r.ok) throw new Error(`equity-curve ${r.status}`);
-      return r.json();
-    },
-    refetchInterval: 60_000,
-    staleTime: 30_000,
-  });
 
-  const overview = overviewQ.data;
-  const verticals = verticalsQ.data?.verticals ?? [];
-  const equityPoints = equityQ.data?.points ?? [];
-  const trades = tradesQ.data?.items ?? [];
-
-  const loading =
-    overviewQ.isLoading ||
-    verticalsQ.isLoading ||
-    equityQ.isLoading ||
-    tradesQ.isLoading;
-
-  const todayPnl =
-    equityPoints.length > 0
-      ? equityPoints[equityPoints.length - 1].daily_pnl
-      : null;
-
-  // Trade-weighted Sharpe across verticals — most representative
-  // operator-level number that the verticals endpoint actually returns.
-  const sharpeNumer = verticals.reduce(
-    (s, v) =>
-      s + (v.sharpe !== null && v.sharpe !== undefined ? v.sharpe * v.trades : 0),
-    0,
-  );
-  const sharpeDenom = verticals.reduce(
-    (s, v) =>
-      s + (v.sharpe !== null && v.sharpe !== undefined ? v.trades : 0),
-    0,
-  );
-  const sharpe = sharpeDenom > 0 ? sharpeNumer / sharpeDenom : null;
-
-  // Volume = sum(|qty| * price) across recent fills clipped to the
-  // selected window. The dashboard endpoint doesn't expose a volume
-  // figure directly so this is the closest faithful aggregate.
-  const cutoffMs = Date.now() - days * 86_400_000;
-  let volume = 0;
-  for (const t of trades) {
-    if (t.executed_at) {
-      const ms = new Date(t.executed_at).getTime();
-      if (!Number.isNaN(ms) && ms < cutoffMs) continue;
-    }
-    volume += Math.abs(Number(t.quantity ?? 0)) * Number(t.price ?? 0);
-  }
-
-  // ROI = period realized PnL / opening cumulative bankroll baseline.
-  // We use the first non-zero |cumulative_pnl| point in the window as
-  // a denominator proxy when no bankroll endpoint is available; this
-  // mirrors how the marketing landing computes its "growth %".
-  let baseline = 0;
-  for (const p of equityPoints) {
-    if (Math.abs(p.cumulative_pnl) > 0) {
-      baseline = Math.abs(p.cumulative_pnl);
-      break;
-    }
-  }
-  const periodPnl = equityPoints.reduce((s, p) => s + (p.daily_pnl ?? 0), 0);
-  const roi = baseline > 0 ? periodPnl / baseline : null;
-
-  const winRate = overview?.win_rate ?? null;
-  const openPositions = overview?.open_positions ?? null;
-
-  const periodLabel = period.toUpperCase();
+  const realizedPnl = data?.realized_pnl ?? null;
+  const winRate = data?.win_rate ?? null;
+  const openPositions = data?.open_positions ?? null;
+  const counts = data?.counts;
+  const tradesCount = counts?.trades ?? null;
+  const cyclesCount = counts?.trading_cycles ?? null;
+  const debatesCount = counts?.swarm_debates ?? null;
+  const latestCycleAt = data?.latest_cycle_at ?? null;
+  const latestTradeAt = data?.latest_trade_at ?? null;
 
   return (
     <div
@@ -192,53 +118,61 @@ export default function KpiSummaryBar() {
       data-testid="kpi-summary-bar"
     >
       <KpiTile
-        loading={loading && todayPnl === null}
-        label="P&L TODAY"
-        value={fmtCurrency(todayPnl)}
-        hint="since 00:00 UTC"
-        valueClassName={pnlClass(todayPnl)}
-        testId="kpi-pnl-today"
+        loading={isLoading}
+        label="REALIZED P&L"
+        value={fmtCurrency(realizedPnl)}
+        hint={
+          latestTradeAt ? `last fill ${fmtRelative(latestTradeAt)}` : undefined
+        }
+        valueClassName={pnlClass(realizedPnl)}
+        testId="kpi-realized-pnl"
       />
       <KpiTile
-        loading={overviewQ.isLoading}
+        loading={isLoading}
         label="WIN RATE"
         value={fmtPct(winRate, 1)}
         hint="all-time settled"
         testId="kpi-win-rate"
       />
       <KpiTile
-        loading={loading && roi === null}
-        label={`ROI · ${periodLabel}`}
-        value={roi !== null ? fmtPct(roi, 1) : "—"}
-        hint="period P&L vs baseline"
-        valueClassName={pnlClass(roi)}
-        testId="kpi-roi"
-      />
-      <KpiTile
-        loading={tradesQ.isLoading}
-        label={`VOLUME · ${periodLabel}`}
-        value={fmtCurrency(volume)}
-        hint={`${fmtNumber(trades.length)} fills`}
-        valueClassName="text-primary"
-        testId="kpi-volume"
-      />
-      <KpiTile
-        loading={overviewQ.isLoading}
-        label="OPEN POS"
+        loading={isLoading}
+        label="OPEN POSITIONS"
         value={openPositions !== null ? String(openPositions) : "—"}
-        hint={`${verticals.length} verticals`}
+        hint={
+          counts?.positions !== null && counts?.positions !== undefined
+            ? `${fmtCount(counts.positions)} lifetime`
+            : undefined
+        }
         valueClassName={
           openPositions && openPositions > 0 ? "text-primary" : undefined
         }
         testId="kpi-open-positions"
       />
       <KpiTile
-        loading={verticalsQ.isLoading}
-        label="SHARPE (W)"
-        value={sharpe !== null ? sharpe.toFixed(2) : "—"}
-        hint="trade-weighted"
-        valueClassName={pnlClass(sharpe)}
-        testId="kpi-sharpe"
+        loading={isLoading}
+        label="TRADES"
+        value={fmtCount(tradesCount)}
+        hint="lifetime fills"
+        valueClassName="text-primary"
+        testId="kpi-trades"
+      />
+      <KpiTile
+        loading={isLoading}
+        label="CYCLES"
+        value={fmtCount(cyclesCount)}
+        hint={
+          debatesCount !== null && debatesCount !== undefined
+            ? `${fmtCount(debatesCount)} debates`
+            : undefined
+        }
+        testId="kpi-cycles"
+      />
+      <KpiTile
+        loading={isLoading}
+        label="LAST CYCLE"
+        value={fmtRelative(latestCycleAt)}
+        hint={latestCycleAt ? "swarm activity" : "awaiting first run"}
+        testId="kpi-last-cycle"
       />
     </div>
   );

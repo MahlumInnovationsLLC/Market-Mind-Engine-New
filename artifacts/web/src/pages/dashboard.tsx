@@ -111,28 +111,14 @@ export default function Dashboard() {
           </GlassCard>
         </div>
 
-        <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
-          <GlassCard
-            tone="solid"
-            padding="md"
-            data-testid="card-trading-cycles"
-          >
-            <SectionHeader
-              eyebrow="ORCHESTRATOR"
-              title="Trading cycles"
-              subtitle="Last 10 swarm loops with placement counts."
-            />
-            <TradingCycles />
-          </GlassCard>
-          <GlassCard tone="solid" padding="md" data-testid="card-swarm-debates">
-            <SectionHeader
-              eyebrow="SWARM"
-              title="Recent debates"
-              subtitle="Most recent consensus verdicts."
-            />
-            <SwarmDebates />
-          </GlassCard>
-        </div>
+        <GlassCard tone="solid" padding="md" data-testid="card-swarm-debates">
+          <SectionHeader
+            eyebrow="SWARM"
+            title="Recent debates"
+            subtitle="Most recent consensus verdicts."
+          />
+          <SwarmDebates />
+        </GlassCard>
 
         <GlassCard tone="solid" padding="md" data-testid="card-swarm-analysts">
           <SectionHeader
