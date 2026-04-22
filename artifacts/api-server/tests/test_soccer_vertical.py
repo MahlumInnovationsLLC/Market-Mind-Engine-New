@@ -353,3 +353,83 @@ def test_league_configs_table_covers_every_supported_league():
     """Drift guard: every calibrator-listed league must have a config."""
     for lg in SUPPORTED_LEAGUES:
         assert lg in LEAGUE_CONFIGS, f"missing LeagueConfig for {lg}"
+
+
+# ---------------------------------------------------------------------------
+# Sportradar soccer-extended payload normalizer (task #196)
+# ---------------------------------------------------------------------------
+
+
+def test_normalize_sportradar_payload_filters_by_competition():
+    """A single soccer-extended global daily endpoint feeds 7 per-league
+    pollers; each must keep ONLY rows whose tournament matches its
+    competition or we'd cross-attribute EPL events to MLS, etc.
+    """
+    from app.feeds.odds_api import _normalize_sportradar_payload
+
+    payload = {
+        "schedules": [
+            {
+                "sport_event": {
+                    "id": "sr:sport_event:111",
+                    "start_time": "2026-04-22T15:00:00Z",
+                    "tournament": {"id": "sr:tournament:17", "name": "Premier League"},
+                    "competitors": [
+                        {"qualifier": "home", "name": "Arsenal"},
+                        {"qualifier": "away", "name": "Chelsea"},
+                    ],
+                },
+                "sport_event_status": {"status": "scheduled"},
+            },
+            {
+                "sport_event": {
+                    "id": "sr:sport_event:222",
+                    "start_time": "2026-04-22T18:30:00Z",
+                    "tournament": {"id": "sr:tournament:35", "name": "Bundesliga"},
+                    "competitors": [
+                        {"qualifier": "home", "name": "Bayern Munich"},
+                        {"qualifier": "away", "name": "Borussia Dortmund"},
+                    ],
+                },
+                "sport_event_status": {
+                    "status": "closed", "home_score": 2, "away_score": 1,
+                },
+            },
+        ]
+    }
+
+    epl_rows = _normalize_sportradar_payload("epl", "EPL", payload)
+    assert len(epl_rows) == 1
+    assert epl_rows[0]["id"] == "sr:sport_event:111"
+    assert epl_rows[0]["home"]["name"] == "Arsenal"
+    assert epl_rows[0]["away"]["name"] == "Chelsea"
+
+    bundes_rows = _normalize_sportradar_payload("bundes", "BUNDES", payload)
+    assert len(bundes_rows) == 1
+    assert bundes_rows[0]["id"] == "sr:sport_event:222"
+    assert bundes_rows[0]["status"] == "closed"
+    assert bundes_rows[0]["home_points"] == 2
+    assert bundes_rows[0]["away_points"] == 1
+
+    # MLS shares the global feed but has no rows in this payload.
+    mls_rows = _normalize_sportradar_payload("mls", "MLS", payload)
+    assert mls_rows == []
+
+
+def test_normalize_sportradar_payload_preserves_na_league_shape():
+    """Adding the soccer branch must not regress NA-league parsing."""
+    from app.feeds.odds_api import _normalize_sportradar_payload
+
+    nba_payload = {"games": [
+        {"id": "g_a", "home": {"name": "Lakers"}, "away": {"name": "Celtics"},
+         "scheduled": "2026-04-22T19:00:00Z", "status": "scheduled"},
+    ]}
+    rows = _normalize_sportradar_payload("nba", "NBA", nba_payload)
+    assert len(rows) == 1 and rows[0]["id"] == "g_a"
+
+    nfl_payload = {"week": {"games": [
+        {"id": "g_b", "home": {"name": "Chiefs"}, "away": {"name": "49ers"},
+         "scheduled": "2026-04-22T20:00:00Z", "status": "scheduled"},
+    ]}}
+    rows = _normalize_sportradar_payload("nfl", "NFL", nfl_payload)
+    assert len(rows) == 1 and rows[0]["id"] == "g_b"

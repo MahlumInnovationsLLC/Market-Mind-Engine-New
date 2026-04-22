@@ -186,6 +186,75 @@ _SPORTRADAR_LEAGUE = {
 SPORTRADAR_SPORTS: tuple[str, ...] = tuple(_SPORTRADAR_SCHEDULE_PATHS.keys())
 
 
+# Soccer-extended uses tournament names that don't always match our
+# league code 1:1 (e.g. "Premier League" vs "EPL").  Map league code →
+# substrings to match against `tournament.name` so we keep ONLY rows
+# for the requested competition when ingesting per-league soccer feeds.
+_SOCCER_TOURNAMENT_HINTS: dict[str, tuple[str, ...]] = {
+    "EPL":    ("premier league", "english premier"),
+    "LALIGA": ("laliga", "la liga", "primera division"),
+    "SERIEA": ("serie a",),
+    "BUNDES": ("bundesliga",),
+    "LIGUE1": ("ligue 1",),
+    "MLS":    ("major league soccer", "mls"),
+    "UCL":    ("uefa champions league", "champions league"),
+}
+
+
+def _normalize_sportradar_payload(
+    sport: str, league: str, payload: dict,
+) -> list[dict]:
+    """Map a Sportradar schedule payload to a list of canonical
+    game-shaped dicts ({id, home/away, scheduled, status, scores}).
+
+    Handles both the NA-league shapes
+    (`{"games": [...]}` / `{"league": {"games": [...]}}` /
+    `{"week": {"games": [...]}}`) and the soccer-extended /v4 shape
+    (`{"schedules": [{"sport_event": {...},
+    "sport_event_status": {...}}]}`), which we additionally filter by
+    competition so a single global daily endpoint feeds 7 distinct
+    per-league pollers without cross-attribution (task #196).
+    """
+    # NA shapes first — cheapest match.
+    games = (
+        payload.get("games")
+        or (payload.get("league") or {}).get("games")
+        or (payload.get("week") or {}).get("games")
+        or []
+    )
+    if games:
+        return list(games)
+
+    # Soccer-extended shape.
+    schedules = payload.get("schedules") or payload.get("sport_events") or []
+    if not schedules:
+        return []
+    hints = _SOCCER_TOURNAMENT_HINTS.get(league, ())
+    out: list[dict] = []
+    for entry in schedules:
+        ev = entry.get("sport_event") or entry  # sport_events list omits the wrapper
+        if not isinstance(ev, dict):
+            continue
+        tournament = (ev.get("tournament") or {})
+        tname = str(tournament.get("name") or "").lower()
+        if hints and not any(h in tname for h in hints):
+            continue  # different competition on the shared global feed
+        competitors = ev.get("competitors") or []
+        home_obj = next((c for c in competitors if c.get("qualifier") == "home"), {}) or {}
+        away_obj = next((c for c in competitors if c.get("qualifier") == "away"), {}) or {}
+        status_obj = entry.get("sport_event_status") or {}
+        out.append({
+            "id": ev.get("id"),
+            "home": {"name": home_obj.get("name")},
+            "away": {"name": away_obj.get("name")},
+            "scheduled": ev.get("start_time") or ev.get("scheduled"),
+            "status": status_obj.get("status") or "scheduled",
+            "home_points": status_obj.get("home_score"),
+            "away_points": status_obj.get("away_score"),
+        })
+    return out
+
+
 async def _poll_sportradar(sport: str) -> int:
     """Fetch today's schedule from Sportradar and upsert into `games`."""
     key_var = f"SPORTRADAR_{sport.upper()}_KEY"
@@ -214,18 +283,17 @@ async def _poll_sportradar(sport: str) -> int:
         except Exception:
             return 0
 
-    # Most leagues return either {"games": [...]} or {"league": {"games": [...]}};
-    # NFL's current_week endpoint nests them under {"week": {"games": [...]}}.
-    games = (
-        payload.get("games")
-        or (payload.get("league") or {}).get("games")
-        or (payload.get("week") or {}).get("games")
-        or []
-    )
+    # NA-league shapes: {"games": [...]} | {"league": {"games": [...]}}
+    # | {"week": {"games": [...]}} (NFL current_week).  Soccer-extended
+    # /v4 returns {"schedules": [{"sport_event": {...},
+    # "sport_event_status": {...}}]} keyed across competitions, so we
+    # filter by tournament when ingesting per-league soccer feeds (task
+    # #196).
+    league = _SPORTRADAR_LEAGUE[sport]
+    games = _normalize_sportradar_payload(sport, league, payload)
     if not games:
         return 0
 
-    league = _SPORTRADAR_LEAGUE[sport]
     rows: list[tuple] = []
     from datetime import datetime as _dt, timezone as _tz
     now_iso = _dt.now(tz=_tz.utc).isoformat(timespec="seconds")
