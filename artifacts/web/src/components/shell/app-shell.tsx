@@ -21,7 +21,10 @@ export function AppShell({ isAdmin, operatorEmail, children }: AppShellProps) {
   const ws = useWebSocket({ path: "/api/ws/pipeline", bufferSize: 5 });
 
   return (
-    <SidebarProvider>
+    <SidebarProvider
+      // Spec: 240px desktop sidebar (default shadcn token is 16rem=256px).
+      style={{ "--sidebar-width": "240px" } as React.CSSProperties}
+    >
       <ShellSidebar isAdmin={isAdmin} wsStatus={ws.status} />
       <SidebarInset className="flex flex-col min-h-[100dvh] bg-background">
         <DegradedModeBanner />

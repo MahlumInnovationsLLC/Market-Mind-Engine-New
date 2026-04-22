@@ -30,6 +30,10 @@ type RuntimeSettingsLite = {
   aggression_mode?: string;
 };
 
+type SubscriptionLite = {
+  tier?: string | null;
+};
+
 const THEME_KEY = "axiom.theme";
 
 function applyTheme(mode: "dark" | "light") {
@@ -94,6 +98,21 @@ export function ShellHeader({ operatorEmail: emailOverride }: ShellHeaderProps) 
     refetchInterval: 30_000,
     staleTime: 15_000,
   });
+
+  // Subscription tier — drives the small tier badge next to the avatar
+  // (spec: avatar + tier badge + sign-out). No generated hook exists for
+  // /api/me/subscription so we fetch it directly.
+  const subscription = useQuery<SubscriptionLite>({
+    queryKey: ["shell", "me-subscription"],
+    queryFn: () =>
+      apiFetch<SubscriptionLite>("/api/me/subscription", {
+        getToken: tokenGetter,
+      }),
+    enabled: !!isSignedIn,
+    staleTime: 5 * 60_000,
+    refetchInterval: 5 * 60_000,
+  });
+  const tier = (subscription.data?.tier ?? "").toString().trim().toUpperCase();
 
   const paperMode = health.data?.paper_mode;
   const tradingHalted = !!runtime.data?.trading_halted;
@@ -212,6 +231,15 @@ export function ShellHeader({ operatorEmail: emailOverride }: ShellHeaderProps) 
                   {operatorEmail}
                 </span>
               </div>
+              {tier ? (
+                <span
+                  className="hidden md:inline-flex items-center border border-primary/40 bg-primary/10 text-primary px-1.5 py-0.5 rounded-sm text-[9px] uppercase tracking-widest font-bold ml-1"
+                  data-testid="badge-shell-tier"
+                  title={`Subscription tier: ${tier}`}
+                >
+                  {tier}
+                </span>
+              ) : null}
             </button>
           </DropdownMenuTrigger>
           <DropdownMenuContent align="end" className="w-56">
