@@ -80,7 +80,9 @@ _SAMPLE_DEBATE: dict[str, Any] = {
         {"persona": "contrarian", "lean": "NO", "reasoning": "books are sharp"},
     ],
     "moderator_synthesis": {"reasoning": "weighted majority lands YES"},
-    "created_at": "2026-04-22T12:00:00Z",
+    # Pinned to a far-past timestamp so the free-tier 15-minute signal
+    # delay (see app/free_tier.py) never drops this fixture row.
+    "created_at": "2020-01-01T00:00:00Z",
 }
 
 

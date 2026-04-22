@@ -23,6 +23,7 @@ from . import (
     calibrators,
     dashboard,
     db,
+    free_tier,
     health,
     migrations as db_migrations,
     models_loader,
@@ -1630,10 +1631,28 @@ async def dashboard_overview(_: object = Depends(require_approved_user)) -> dict
 
 @app.get("/api/dashboard/recent-trades")
 async def dashboard_recent_trades(
-    limit: int = 25, _: object = Depends(require_approved_user)
+    limit: int = 25,
+    user: AuthedUser = Depends(require_approved_user),
 ) -> dict[str, object]:
+    """Recent fills feed.
+
+    Free callers see the same shape, but only rows whose ``executed_at``
+    is at least 15 minutes old — the live edge is reserved for paid
+    tiers.  Pro+ (and founders) get the unfiltered feed.
+    """
     limit = max(1, min(200, int(limit)))
-    return {"items": await dashboard.get_recent_trades(limit)}
+    items = await dashboard.get_recent_trades(limit)
+    sub = await billing.get_user_subscription(user)
+    delayed = False
+    if billing._TIER_RANK[sub.tier] < billing._TIER_RANK[billing.TIER_PRO]:
+        items = free_tier.apply_signal_delay(items, timestamp_key="executed_at")
+        delayed = True
+    return {
+        "items": items,
+        "tier": sub.tier,
+        "delayed": delayed,
+        "delay_minutes": free_tier.FREE_TIER_DELAY_MINUTES if delayed else 0,
+    }
 
 
 @app.get("/api/dashboard/swarm-personas")
@@ -1679,16 +1698,50 @@ async def dashboard_runtime_settings(
 @app.get("/api/dashboard/trades/{trade_ref}")
 async def dashboard_trade_detail(
     trade_ref: str,
-    _: object = Depends(require_approved_user),
+    user: AuthedUser = Depends(require_approved_user),
 ) -> dict[str, object]:
     """Single-trade detail + market-vs-model time series.
 
     `trade_ref` accepts either the integer `trades.id` or the UUID-ish
     `trades.trade_id` so the operator can deep-link from either column.
+
+    Free callers count one "market evaluation" per distinct market_id
+    per UTC day.  The 6th distinct market in a day returns HTTP 402
+    with an ``upgrade_required`` payload (see :mod:`app.free_tier`).
+    Re-opening a market the user already viewed today is free.
     """
     detail = await dashboard.get_trade_detail(trade_ref)
     if detail is None:
         raise HTTPException(status_code=404, detail="trade not found")
+
+    sub = await billing.get_user_subscription(user)
+    if billing._TIER_RANK[sub.tier] < billing._TIER_RANK[billing.TIER_PRO]:
+        # Apply the same 15-minute signal delay that the list endpoints
+        # use: free callers must not be able to read sub-15-min points
+        # by deep-linking into a market.  Trades whose own
+        # ``executed_at`` is too fresh are 404'd outright (the row
+        # exists, but the signal isn't due to the free tier yet); the
+        # series is filtered point-by-point.
+        trade_row = detail.get("trade") or {}
+        if not free_tier.apply_signal_delay(
+            [trade_row], timestamp_key="executed_at"
+        ):
+            raise HTTPException(status_code=404, detail="trade not found")
+        detail["series"] = free_tier.apply_signal_delay(
+            detail.get("series") or [], timestamp_key="t"
+        )
+        detail["delayed"] = True
+        detail["delay_minutes"] = free_tier.FREE_TIER_DELAY_MINUTES
+        market_id = trade_row.get("market_id")
+        if market_id:
+            viewed = await free_tier.enforce_market_view_quota(
+                user.user_id, str(market_id)
+            )
+            detail["quota"] = {
+                "tier": sub.tier,
+                "viewed_today": viewed,
+                "limit": free_tier.FREE_TIER_DAILY_MARKET_LIMIT,
+            }
     return detail
 
 
@@ -1740,12 +1793,20 @@ async def dashboard_recent_debates(
     limit = max(1, min(100, int(limit)))
     items = await dashboard.get_recent_swarm_debates(limit)
     sub = await billing.get_user_subscription(user)
+    delayed = False
     if billing._TIER_RANK[sub.tier] < billing._TIER_RANK[billing.TIER_PRO]:
+        items = free_tier.apply_signal_delay(items, timestamp_key="created_at")
         items = dashboard.redact_swarm_debate_transcripts(items)
+        delayed = True
     else:
         for it in items:
             it.setdefault("redacted", False)
-    return {"items": items, "tier": sub.tier}
+    return {
+        "items": items,
+        "tier": sub.tier,
+        "delayed": delayed,
+        "delay_minutes": free_tier.FREE_TIER_DELAY_MINUTES if delayed else 0,
+    }
 
 
 # ---------------------------------------------------------------------------
