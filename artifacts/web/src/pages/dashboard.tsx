@@ -8,6 +8,7 @@ import AccessRequests from "@/components/telemetry/access-requests";
 import HealthSnapshot from "@/components/telemetry/health-snapshot";
 import TopCounters from "@/components/telemetry/top-counters";
 import RecentTrades from "@/components/telemetry/recent-trades";
+import RuntimeSettingsPanel from "@/components/telemetry/runtime-settings";
 import SwarmAnalysts from "@/components/telemetry/swarm-analysts";
 import TradingCycles from "@/components/telemetry/trading-cycles";
 import SwarmDebates from "@/components/telemetry/swarm-debates";
@@ -104,6 +105,7 @@ export default function Dashboard() {
         {/* Right Column - Swarm Intelligence */}
         <div className="xl:col-span-4 space-y-6">
           <ModelHealthAlerts />
+          <RuntimeSettingsPanel />
           <SwarmAnalysts />
           <SwarmDebates />
         </div>

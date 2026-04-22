@@ -12,6 +12,7 @@ from .. import db, predictor
 from ..config import get_settings
 from ..elo import attach_elo_to_candidate
 from ..risk import RiskContext, run_all_gates
+from ..runtime_settings import get_aggression_mode
 from ..swarm import run_debate
 from .features import build_features
 from .paper import place_order
@@ -196,18 +197,28 @@ async def _candidate_predictions(vertical: str, limit: int) -> list[dict[str, An
         return []
 
 
-async def _cached_debates(vertical: str, limit: int) -> list[dict[str, Any]]:
+async def _cached_debates(
+    vertical: str, limit: int, aggression_mode: str | None = None
+) -> list[dict[str, Any]]:
     """Recent approved debates that haven't been traded today.
 
     Filters `approved = true` here (not just at gate_swarm_approval) so
     we don't churn through obviously-rejected debates inside the gate
     pipeline.  gate_swarm_approval still re-checks for safety.
+
+    When `aggression_mode` is supplied, also discards cached debates whose
+    `game_context.aggression_mode` doesn't match — otherwise an operator
+    flipping Conservative -> Aggressive could keep trading on stale
+    moderator/gatekeeper verdicts that were biased for the prior mode.
     """
     leagues = _league_filter(vertical)
+    mode_clause = (
+        "AND COALESCE(sd.game_context->>'aggression_mode', 'balanced') = $%d"
+    )
     try:
         if leagues:
-            rows = await db.fetch(
-                """
+            params: list[Any] = [limit, leagues]
+            sql = """
                 SELECT id            AS debate_id,
                        game_id, matchup, league, market_type,
                        consensus_probability, confidence_band_low, confidence_band_high,
@@ -226,15 +237,15 @@ async def _cached_debates(vertical: str, limit: int) -> list[dict[str, Any]]:
                             OR t.market_id = sd.game_id
                           )
                    )
-                 ORDER BY sd.created_at DESC
-                 LIMIT $1
-                """,
-                limit,
-                leagues,
-            )
-        else:
-            rows = await db.fetch(
                 """
+            if aggression_mode:
+                params.append(aggression_mode)
+                sql += "\n                   " + (mode_clause % len(params))
+            sql += "\n                 ORDER BY sd.created_at DESC\n                 LIMIT $1\n                "
+            rows = await db.fetch(sql, *params)
+        else:
+            params = [limit]
+            sql = """
                 SELECT id            AS debate_id,
                        game_id, matchup, league, market_type,
                        consensus_probability, confidence_band_low, confidence_band_high,
@@ -252,11 +263,12 @@ async def _cached_debates(vertical: str, limit: int) -> list[dict[str, Any]]:
                             OR t.market_id = sd.game_id
                           )
                    )
-                 ORDER BY sd.created_at DESC
-                 LIMIT $1
-                """,
-                limit,
-            )
+                """
+            if aggression_mode:
+                params.append(aggression_mode)
+                sql += "\n                   " + (mode_clause % len(params))
+            sql += "\n                 ORDER BY sd.created_at DESC\n                 LIMIT $1\n                "
+            rows = await db.fetch(sql, *params)
         return [dict(r) for r in rows]
     except Exception as e:
         log.debug("cached debate read failed: %s", e)
@@ -379,6 +391,11 @@ async def run_cycle(vertical: str = "sports") -> CycleResult:
     })
 
     overrides = await _load_operator_overrides()
+    # Inject the operator-tunable aggression mode so the gates can use
+    # it as the *default* threshold (explicit `risk.*` overrides still
+    # win — see `risk.gates._mode_default`).
+    aggression_mode = await get_aggression_mode()
+    overrides.setdefault("aggression_mode", aggression_mode)
     # Effective trading mode honors the operator override too — same
     # contract as gate_kill_switch.
     effective_mode = (
@@ -398,7 +415,7 @@ async def run_cycle(vertical: str = "sports") -> CycleResult:
     open_n, open_notional, per_vertical = await _open_position_aggregates()
 
     # 1) Cached approved debates first (cheap — no fresh LLM cost).
-    cached = await _cached_debates(vertical, limit=10)
+    cached = await _cached_debates(vertical, limit=10, aggression_mode=aggression_mode)
     # 2) Then up to N fresh swarm debates if budget allows.
     fresh_pool = await _candidate_predictions(
         vertical, limit=settings.max_fresh_debates_per_cycle
@@ -427,6 +444,7 @@ async def run_cycle(vertical: str = "sports") -> CycleResult:
                 # can join debates -> markets -> persona Brier updates.
                 "kalshi_market_id": pred.get("kalshi_market_id"),
                 "kalshi_price": pred.get("kalshi_price"),
+                "aggression_mode": aggression_mode,
             })
             result.fresh_debates += 1
             candidates.append({

@@ -14,9 +14,24 @@ from typing import Any, Awaitable, Callable
 
 from .. import db
 from ..config import get_settings
+from ..runtime_settings import profile_for as _aggression_profile
 
 
 log = logging.getLogger(__name__)
+
+
+def _mode_default(ctx: "RiskContext", key: str, fallback: float) -> float:
+    """Default value for a tunable gate threshold given the active
+    aggression mode (read off ``operator_overrides['aggression_mode']``).
+
+    An explicit ``operator_overrides[key]`` always wins — operators can
+    still pin a single knob without leaving the active mode.
+    """
+    mode = ctx.operator_overrides.get("aggression_mode")
+    if not mode:
+        return fallback
+    profile = _aggression_profile(mode)
+    return float(profile.get(key, fallback))
 
 
 # ---------------------------------------------------------------------------
@@ -147,7 +162,8 @@ async def gate_swarm_approval(ctx: RiskContext) -> GateResult:
 
 async def gate_min_edge(ctx: RiskContext) -> GateResult:
     """edge >= operator override / default."""
-    min_edge = float(ctx.operator_overrides.get("min_edge_pp", 3.0)) / 100.0
+    default_pp = _mode_default(ctx, "min_edge_pp", 3.0)
+    min_edge = float(ctx.operator_overrides.get("min_edge_pp", default_pp)) / 100.0
     edge = ctx.edge if ctx.edge is not None else 0.0
     if edge < min_edge:
         return GateResult(
@@ -163,7 +179,12 @@ async def gate_drift(ctx: RiskContext) -> GateResult:
     """Confidence band must not be wider than allowed drift cap.
     Wide bands signal the personas disagree dramatically on the
     underlying probability and the edge is unreliable."""
-    cap = float(ctx.operator_overrides.get("max_confidence_band", 0.30))
+    cap = float(
+        ctx.operator_overrides.get(
+            "max_confidence_band",
+            _mode_default(ctx, "max_confidence_band", 0.30),
+        )
+    )
     if ctx.confidence_band_low is None or ctx.confidence_band_high is None:
         return GateResult("drift", True, "no band reported", {"cap": cap})
     width = float(ctx.confidence_band_high - ctx.confidence_band_low)
@@ -179,7 +200,12 @@ async def gate_drift(ctx: RiskContext) -> GateResult:
 
 async def gate_agreement(ctx: RiskContext) -> GateResult:
     """Persona agreement rate >= floor."""
-    floor = float(ctx.operator_overrides.get("min_agreement_rate", 0.50))
+    floor = float(
+        ctx.operator_overrides.get(
+            "min_agreement_rate",
+            _mode_default(ctx, "min_agreement_rate", 0.50),
+        )
+    )
     if ctx.agreement_rate is None:
         return GateResult("agreement", True, "no agreement reported", {"floor": floor})
     if ctx.agreement_rate < floor:
@@ -221,7 +247,12 @@ async def gate_kelly_fraction(ctx: RiskContext) -> GateResult:
             f"kelly {kelly:.4f} <= 0",
             {"kelly": kelly},
         )
-    fraction_cap = float(ctx.operator_overrides.get("kelly_fraction_cap", 0.25))
+    fraction_cap = float(
+        ctx.operator_overrides.get(
+            "kelly_fraction_cap",
+            _mode_default(ctx, "kelly_fraction_cap", 0.25),
+        )
+    )
     bankroll = ctx.bankroll_usd or 0.0
     max_notional = bankroll * kelly * fraction_cap
     if ctx.intended_notional_usd > max_notional and bankroll > 0:

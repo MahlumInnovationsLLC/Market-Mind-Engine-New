@@ -71,6 +71,8 @@ PROTECTED_ROUTES: tuple[str, ...] = (
     "/api/polymarket/positions",
     "/api/polymarket/markets",
     "/api/polymarket/orders/resting",
+    "/api/admin/runtime-settings",
+    "/api/dashboard/runtime-settings",
 )
 
 # Mutating endpoints — auth-protected but only accept POST.  We don't
@@ -97,6 +99,7 @@ PROTECTED_POST_ROUTES: tuple[str, ...] = (
     "/api/admin/access-requests/{clerk_user_id}",
     "/api/health/acknowledge-alert",
     "/api/polymarket/paper-order",
+    "/api/admin/runtime-settings",
 )
 
 # Liveness probes — must answer 200 with no auth (parameterized below).

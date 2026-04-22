@@ -28,6 +28,7 @@ from . import (
     predictor,
     rc_billing,
     ready_gate,
+    runtime_settings as runtime_settings_mod,
     storage,
 )
 from .notifications import (
@@ -796,6 +797,38 @@ async def admin_decide_access_request(
         raise HTTPException(status_code=409, detail=str(e))
 
 
+class AdminSetAggressionModeRequest(BaseModel):
+    aggression_mode: str = Field(
+        ..., pattern="^(conservative|balanced|aggressive)$"
+    )
+
+
+@app.get("/api/admin/runtime-settings")
+async def admin_get_runtime_settings(
+    actor: AuthedUser = Depends(require_admin),
+) -> dict[str, object]:
+    """Snapshot of operator-tunable runtime knobs (aggression_mode)."""
+    return await runtime_settings_mod.get_state()
+
+
+@app.post("/api/admin/runtime-settings")
+async def admin_set_runtime_settings(
+    body: AdminSetAggressionModeRequest,
+    actor: AuthedUser = Depends(require_admin),
+) -> dict[str, object]:
+    """Switch the global aggression mode.  The change is picked up on
+    the next orchestrator cycle (no restart required) and immediately
+    retunes the moderator/gatekeeper bias plus min-edge / Kelly defaults.
+    """
+    try:
+        await runtime_settings_mod.set_aggression_mode(
+            body.aggression_mode, actor_user_id=actor.user_id
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return await runtime_settings_mod.get_state()
+
+
 @app.get("/api/admin/audit-log")
 async def admin_get_audit_log(
     limit: int = 100,
@@ -1360,6 +1393,20 @@ async def market_title_lookup(
     return {"ticker": ticker, "title": title}
 
 
+@app.get("/api/dashboard/runtime-settings")
+async def dashboard_runtime_settings(
+    _: object = Depends(require_approved_user),
+) -> dict[str, object]:
+    """Active aggression mode + the per-(persona, league, market_type)
+    weights the swarm runner is currently applying.  The dashboard
+    surfaces this so operators can see the swarm's bias at a glance."""
+    from .swarm import snapshot_persona_weights
+
+    state = await runtime_settings_mod.get_state()
+    state["persona_weights"] = await snapshot_persona_weights()
+    return state
+
+
 @app.get("/api/dashboard/recent-cycles")
 async def dashboard_recent_cycles(
     limit: int = 10, _: object = Depends(require_approved_user)
@@ -1409,7 +1456,7 @@ class SwarmDebateRequest(BaseModel):
     # Aggression-mode bias: conservative | balanced | aggressive.  Drives
     # both the moderator's edge/agreement thresholds and the gatekeeper's
     # veto criteria; see app/swarm/personas.py.
-    aggression_mode: str | None = "balanced"
+    aggression_mode: str | None = None
 
 
 @app.post("/api/swarm/debate")
@@ -1427,8 +1474,14 @@ async def swarm_debate(
                 f"anthropic={bool(settings.anthropic_api_key)}"
             ),
         )
+    payload = body.model_dump()
+    # Default to the global operator-tunable aggression mode so direct
+    # debates stay consistent with the orchestrator cycle.  Callers may
+    # still override per-request.
+    if not payload.get("aggression_mode"):
+        payload["aggression_mode"] = await runtime_settings_mod.get_aggression_mode()
     try:
-        return await run_debate(body.model_dump())
+        return await run_debate(payload)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:

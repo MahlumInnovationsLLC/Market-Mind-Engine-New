@@ -1,7 +1,8 @@
 import { useMemo, useState } from "react";
 import { Link } from "wouter";
-import { useClerk } from "@clerk/react";
-import { useQueryClient } from "@tanstack/react-query";
+import { useAuth, useClerk } from "@clerk/react";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { apiFetch } from "@/lib/api";
 import {
   AdminAuditLogEntry,
   AdminUser,
@@ -23,7 +24,7 @@ export default function AdminPage() {
   const [filter, setFilter] = useState<Filter>("all");
   const [search, setSearch] = useState("");
   const [activeUserId, setActiveUserId] = useState<string | null>(null);
-  const [tab, setTab] = useState<"users" | "audit">("users");
+  const [tab, setTab] = useState<"users" | "audit" | "runtime">("users");
 
   const usersQuery = useAdminListUsers({
     query: {
@@ -84,7 +85,7 @@ export default function AdminPage() {
       </header>
 
       <div className="mb-4 flex gap-2 text-xs uppercase tracking-widest">
-        {(["users", "audit"] as const).map((t) => (
+        {(["users", "audit", "runtime"] as const).map((t) => (
           <button
             key={t}
             type="button"
@@ -96,7 +97,11 @@ export default function AdminPage() {
                 : "border-border text-muted-foreground hover:text-foreground"
             }`}
           >
-            {t === "users" ? "Users" : "Audit log"}
+            {t === "users"
+              ? "Users"
+              : t === "audit"
+                ? "Audit log"
+                : "Runtime"}
           </button>
         ))}
       </div>
@@ -182,9 +187,150 @@ export default function AdminPage() {
             )}
           </aside>
         </main>
-      ) : (
+      ) : tab === "audit" ? (
         <AuditLogPanel />
+      ) : (
+        <RuntimePanel />
       )}
+    </div>
+  );
+}
+
+type RuntimeSettings = {
+  aggression_mode: string;
+  thresholds: {
+    min_edge_pp: number;
+    kelly_fraction_cap: number;
+    min_agreement_rate: number;
+    max_confidence_band: number;
+  };
+  available_modes: string[];
+  updated_at: string | null;
+  updated_by: string | null;
+};
+
+function RuntimePanel() {
+  const { getToken, isSignedIn } = useAuth();
+  const tokenFn = useMemo(
+    () => () => getToken().then((t) => t ?? null),
+    [getToken],
+  );
+  const queryClient = useQueryClient();
+  const queryKey = ["admin", "runtime-settings"] as const;
+
+  const { data, isLoading, error } = useQuery<RuntimeSettings>({
+    queryKey,
+    queryFn: () =>
+      apiFetch<RuntimeSettings>("/api/admin/runtime-settings", {
+        getToken: tokenFn,
+      }),
+    enabled: !!isSignedIn,
+  });
+
+  const mutation = useMutation({
+    mutationFn: (mode: string) =>
+      apiFetch<RuntimeSettings>("/api/admin/runtime-settings", {
+        method: "POST",
+        body: { aggression_mode: mode },
+        getToken: tokenFn,
+      }),
+    onSuccess: (next) => {
+      queryClient.setQueryData(queryKey, next);
+      queryClient.invalidateQueries({
+        queryKey: ["dashboard", "runtime-settings"],
+      });
+    },
+  });
+
+  return (
+    <main className="grid grid-cols-1 lg:grid-cols-12 gap-6">
+      <section className="lg:col-span-7 space-y-3">
+        <div
+          className="border border-border bg-card p-4"
+          data-testid="panel-aggression-control"
+        >
+          <h2 className="text-xs uppercase tracking-widest text-muted-foreground mb-3">
+            Aggression mode
+          </h2>
+          <p className="text-xs text-muted-foreground mb-4 normal-case tracking-normal">
+            Sets the global Conservative / Balanced / Aggressive bias for the
+            swarm and risk gates. Changes take effect on the next orchestrator
+            cycle — the moderator and gatekeeper rebias, and min-edge / Kelly
+            defaults retune to match.
+          </p>
+          {isLoading ? (
+            <div className="h-10 animate-pulse bg-muted/30" />
+          ) : error ? (
+            <div className="text-loss text-xs">
+              Failed to load runtime settings.
+            </div>
+          ) : data ? (
+            <div className="space-y-4">
+              <div className="flex flex-wrap gap-2">
+                {data.available_modes.map((m) => {
+                  const active = data.aggression_mode === m;
+                  return (
+                    <button
+                      key={m}
+                      type="button"
+                      disabled={mutation.isPending || active}
+                      onClick={() => mutation.mutate(m)}
+                      data-testid={`button-aggression-${m}`}
+                      className={`border px-4 py-2 uppercase text-xs tracking-widest ${
+                        active
+                          ? "border-primary text-primary bg-primary/10"
+                          : "border-border text-muted-foreground hover:text-foreground hover:border-foreground"
+                      } ${mutation.isPending ? "opacity-50" : ""}`}
+                    >
+                      {m}
+                    </button>
+                  );
+                })}
+              </div>
+              {mutation.isError ? (
+                <div className="text-loss text-xs">
+                  Failed to update aggression mode.
+                </div>
+              ) : null}
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-3 border-t border-border pt-4 text-xs">
+                <ThresholdStat
+                  label="MIN_EDGE"
+                  value={`${data.thresholds.min_edge_pp.toFixed(1)}pp`}
+                />
+                <ThresholdStat
+                  label="KELLY_CAP"
+                  value={`${(data.thresholds.kelly_fraction_cap * 100).toFixed(0)}%`}
+                />
+                <ThresholdStat
+                  label="MIN_AGREE"
+                  value={`${(data.thresholds.min_agreement_rate * 100).toFixed(0)}%`}
+                />
+                <ThresholdStat
+                  label="MAX_BAND"
+                  value={`${(data.thresholds.max_confidence_band * 100).toFixed(0)}%`}
+                />
+              </div>
+              {data.updated_at ? (
+                <div className="text-[10px] uppercase tracking-widest text-muted-foreground border-t border-border pt-3">
+                  Updated {data.updated_at}
+                  {data.updated_by ? ` by ${data.updated_by}` : ""}
+                </div>
+              ) : null}
+            </div>
+          ) : null}
+        </div>
+      </section>
+    </main>
+  );
+}
+
+function ThresholdStat({ label, value }: { label: string; value: string }) {
+  return (
+    <div>
+      <div className="text-[10px] uppercase tracking-widest text-muted-foreground">
+        {label}
+      </div>
+      <div className="text-sm font-bold text-foreground">{value}</div>
     </div>
   );
 }
