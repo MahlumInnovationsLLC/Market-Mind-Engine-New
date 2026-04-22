@@ -27,6 +27,18 @@ _OUTPUT_CONTRACT = (
 )
 
 
+_DEFAULT_TEMPERATURE = 0.4
+
+
+# Default cross-provider fallback model.  When a persona's primary provider
+# returns a rate-limit or 5xx, the runner re-issues the prompt against the
+# OTHER provider's comparable model so the swarm still produces a verdict.
+_FALLBACK_BY_PROVIDER: dict[str, tuple[str, str]] = {
+    "openai":    ("anthropic", "claude-sonnet-4-5-20250929"),
+    "anthropic": ("openai",    "gpt-4o-mini"),
+}
+
+
 @dataclass(frozen=True)
 class Persona:
     id: str
@@ -34,6 +46,27 @@ class Persona:
     provider: str  # 'openai' | 'anthropic'
     model_id: str
     system_prompt: str
+    temperature: float = _DEFAULT_TEMPERATURE
+    # If a persona explicitly opts out of cross-provider fallback (e.g. a
+    # provider-pinned persona) set fallback_provider="" / model_id="".  When
+    # `None`, `fallback_for(persona)` resolves the cross-provider default.
+    fallback_provider: str | None = None
+    fallback_model_id: str | None = None
+
+
+def fallback_for(persona: "Persona") -> tuple[str, str] | None:
+    """Resolve the (provider, model_id) to retry on a retryable failure.
+
+    Returns None when no fallback is configured (either explicitly disabled
+    or no default exists for the primary provider).
+    """
+    if persona.fallback_provider is not None or persona.fallback_model_id is not None:
+        prov = persona.fallback_provider or ""
+        model = persona.fallback_model_id or ""
+        if not prov or not model:
+            return None
+        return prov, model
+    return _FALLBACK_BY_PROVIDER.get(persona.provider)
 
 
 PERSONAS: tuple[Persona, ...] = (
@@ -42,6 +75,7 @@ PERSONAS: tuple[Persona, ...] = (
         display="Sharp Edge",
         provider="openai",
         model_id="gpt-4o-mini",
+        temperature=0.3,
         system_prompt=(
             "You are SHARP_EDGE, the line-movement specialist on the Axiom-Predict swarm.\n"
             "Specialty: detect steam, reverse-line-movement, and where sharp money is "
@@ -56,6 +90,7 @@ PERSONAS: tuple[Persona, ...] = (
         display="Injury & Roster",
         provider="anthropic",
         model_id="claude-sonnet-4-5-20250929",
+        temperature=0.3,
         system_prompt=(
             "You are INJURY_ROSTER, the availability and depth-chart specialist.\n"
             "Specialty: late scratches, questionable tags, starting pitcher / starting "
@@ -70,6 +105,7 @@ PERSONAS: tuple[Persona, ...] = (
         display="Momentum & Form",
         provider="openai",
         model_id="gpt-4o-mini",
+        temperature=0.4,
         system_prompt=(
             "You are MOMENTUM_FORM, the recent-performance specialist.\n"
             "Specialty: rolling form windows (last 5/10/20), opponent-adjusted "
@@ -84,6 +120,7 @@ PERSONAS: tuple[Persona, ...] = (
         display="Public Contrarian",
         provider="anthropic",
         model_id="claude-sonnet-4-5-20250929",
+        temperature=0.6,
         system_prompt=(
             "You are PUBLIC_CONTRARIAN, the fade-the-square specialist.\n"
             "Specialty: identify when public ticket % is heavily lopsided on the wrong "
@@ -98,6 +135,7 @@ PERSONAS: tuple[Persona, ...] = (
         display="Matchup Historian",
         provider="openai",
         model_id="gpt-4o-mini",
+        temperature=0.3,
         system_prompt=(
             "You are MATCHUP_HISTORIAN, the head-to-head and base-rate specialist.\n"
             "Specialty: historical H2H, coach vs coach, ump/ref tendencies, venue and "
@@ -111,6 +149,7 @@ PERSONAS: tuple[Persona, ...] = (
         display="Risk Guardian",
         provider="anthropic",
         model_id="claude-sonnet-4-5-20250929",
+        temperature=0.3,
         system_prompt=(
             "You are RISK_GUARDIAN, the variance and downside specialist.\n"
             "Specialty: variance of outcomes, correlation with already-open positions, "
@@ -128,6 +167,7 @@ MODERATOR = Persona(
     display="Moderator",
     provider="openai",
     model_id="gpt-4o-mini",
+    temperature=0.2,
     system_prompt=(
         "You are the swarm MODERATOR.  You will be given the six persona verdicts "
         "with their Brier-derived weights, plus an AGGRESSION_MODE.  Synthesize a "
@@ -156,6 +196,7 @@ GATEKEEPER = Persona(
     display="Gatekeeper",
     provider="anthropic",
     model_id="claude-sonnet-4-5-20250929",
+    temperature=0.2,
     system_prompt=(
         "You are the LLM GATEKEEPER.  You see the moderator's synthesis, the "
         "candidate trade, and an AGGRESSION_MODE.  Your job is to VETO trades that "

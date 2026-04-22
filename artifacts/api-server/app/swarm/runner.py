@@ -26,6 +26,7 @@ from .personas import (
     PERSONAS,
     Persona,
     estimate_cost,
+    fallback_for,
     normalize_aggression_mode,
 )
 from .streams import llm_log_hub
@@ -124,7 +125,7 @@ def _extract_json(text: str) -> dict[str, Any] | None:
 # and returns (full_text, input_tokens, output_tokens).
 # ---------------------------------------------------------------------------
 async def _stream_openai(
-    persona_id: str, model_id: str, system: str, user: str
+    persona_id: str, model_id: str, system: str, user: str, temperature: float
 ) -> tuple[str, int, int]:
     client = _get_openai()
     chunks: list[str] = []
@@ -136,7 +137,7 @@ async def _stream_openai(
                 {"role": "system", "content": system},
                 {"role": "user", "content": user},
             ],
-            temperature=0.4,
+            temperature=temperature,
             max_tokens=600,
             stream=True,
             stream_options={"include_usage": True},
@@ -158,7 +159,7 @@ async def _stream_openai(
 
 
 async def _stream_anthropic(
-    persona_id: str, model_id: str, system: str, user: str
+    persona_id: str, model_id: str, system: str, user: str, temperature: float
 ) -> tuple[str, int, int]:
     client = _get_anthropic()
     chunks: list[str] = []
@@ -167,7 +168,7 @@ async def _stream_anthropic(
         model=model_id,
         system=system,
         max_tokens=600,
-        temperature=0.4,
+        temperature=temperature,
         messages=[{"role": "user", "content": user}],
     ) as stream:
         async for delta in stream.text_stream:
@@ -183,10 +184,50 @@ async def _stream_anthropic(
     return "".join(chunks), in_tok, out_tok
 
 
+def _is_retryable_provider_error(exc: BaseException) -> bool:
+    """True for rate-limit (HTTP 429) or 5xx upstream failures.
+
+    Uses duck-typing on the SDK exception classes so we don't pay an
+    import cost when both libraries aren't installed in tests, and so a
+    future SDK refactor doesn't silently disable the fallback.
+    """
+    name = type(exc).__name__
+    if name in ("RateLimitError", "APITimeoutError", "APIConnectionError"):
+        return True
+    status = getattr(exc, "status_code", None)
+    if isinstance(status, int) and (status == 429 or 500 <= status < 600):
+        return True
+    return False
+
+
+async def _invoke_provider(
+    *,
+    persona_id: str,
+    provider: str,
+    model_id: str,
+    system: str,
+    user: str,
+    temperature: float,
+) -> tuple[str, int, int]:
+    """Single dispatch point so callers (persona + fallback) share one path."""
+    if provider == "openai":
+        return await _stream_openai(persona_id, model_id, system, user, temperature)
+    if provider == "anthropic":
+        return await _stream_anthropic(persona_id, model_id, system, user, temperature)
+    raise RuntimeError(f"unknown provider {provider!r}")
+
+
 async def _call_persona(
     persona: Persona, user_prompt: str
 ) -> dict[str, Any]:
-    """Run one persona end-to-end and return a verdict dict."""
+    """Run one persona end-to-end and return a verdict dict.
+
+    On a retryable provider failure (rate-limit or 5xx) we re-issue the
+    prompt against the persona's configured fallback so a single provider
+    outage cannot silence a persona.  The verdict reports `provider` /
+    `model` of the call that ACTUALLY produced the answer plus a
+    `fallback_used` flag for telemetry.
+    """
     started = time.perf_counter()
     await _publish(
         {
@@ -200,25 +241,69 @@ async def _call_persona(
     error: str | None = None
     text = ""
     in_tok = out_tok = 0
+    used_provider = persona.provider
+    used_model = persona.model_id
+    fallback_used = False
+    fallback_error: str | None = None
+
     try:
-        if persona.provider == "openai":
-            text, in_tok, out_tok = await _stream_openai(
-                persona.id, persona.model_id, persona.system_prompt, user_prompt
+        text, in_tok, out_tok = await _invoke_provider(
+            persona_id=persona.id,
+            provider=persona.provider,
+            model_id=persona.model_id,
+            system=persona.system_prompt,
+            user=user_prompt,
+            temperature=persona.temperature,
+        )
+    except Exception as e:  # noqa: BLE001 - provider error handled below
+        primary_error = f"{type(e).__name__}: {e}"
+        retryable = _is_retryable_provider_error(e)
+        fb = fallback_for(persona) if retryable else None
+        if fb is not None:
+            fb_provider, fb_model = fb
+            log.warning(
+                "persona %s primary %s/%s failed (%s); falling back to %s/%s",
+                persona.id, persona.provider, persona.model_id,
+                primary_error, fb_provider, fb_model,
             )
+            await _publish(
+                {
+                    "type": "persona_fallback",
+                    "persona": persona.id,
+                    "from": {"provider": persona.provider, "model": persona.model_id},
+                    "to": {"provider": fb_provider, "model": fb_model},
+                    "reason": primary_error,
+                }
+            )
+            try:
+                text, in_tok, out_tok = await _invoke_provider(
+                    persona_id=persona.id,
+                    provider=fb_provider,
+                    model_id=fb_model,
+                    system=persona.system_prompt,
+                    user=user_prompt,
+                    temperature=persona.temperature,
+                )
+                used_provider = fb_provider
+                used_model = fb_model
+                fallback_used = True
+                fallback_error = primary_error
+            except Exception as e2:  # noqa: BLE001
+                error = (
+                    f"primary={primary_error}; "
+                    f"fallback={type(e2).__name__}: {e2}"
+                )
+                log.warning("persona %s fallback also failed: %s", persona.id, error)
         else:
-            text, in_tok, out_tok = await _stream_anthropic(
-                persona.id, persona.model_id, persona.system_prompt, user_prompt
-            )
-    except Exception as e:  # provider error — record but don't crash the swarm
-        error = f"{type(e).__name__}: {e}"
-        log.warning("persona %s failed: %s", persona.id, error)
+            error = primary_error
+            log.warning("persona %s failed: %s", persona.id, error)
 
     latency_ms = int((time.perf_counter() - started) * 1000)
     parsed = _extract_json(text) or {}
     verdict = {
         "persona": persona.id,
-        "provider": persona.provider,
-        "model": persona.model_id,
+        "provider": used_provider,
+        "model": used_model,
         "probability": _coerce_prob(parsed.get("probability")),
         "confidence": _coerce_prob(parsed.get("confidence")),
         "lean": _coerce_lean(parsed.get("lean")),
@@ -226,9 +311,13 @@ async def _call_persona(
         "raw_text": text,
         "input_tokens": in_tok,
         "output_tokens": out_tok,
-        "cost": estimate_cost(persona.model_id, in_tok, out_tok),
+        "cost": estimate_cost(used_model, in_tok, out_tok),
         "latency_ms": latency_ms,
         "error": error,
+        "primary_provider": persona.provider,
+        "primary_model": persona.model_id,
+        "fallback_used": fallback_used,
+        "fallback_reason": fallback_error,
     }
     await _publish(
         {
@@ -546,6 +635,10 @@ async def _persist_debate(
                 "persona": v["persona"],
                 "provider": v["provider"],
                 "model": v["model"],
+                "primary_provider": v.get("primary_provider"),
+                "primary_model": v.get("primary_model"),
+                "fallback_used": v.get("fallback_used", False),
+                "fallback_reason": v.get("fallback_reason"),
                 "probability": v["probability"],
                 "confidence": v["confidence"],
                 "lean": v["lean"],
@@ -622,6 +715,10 @@ async def _persist_debate(
                     "input_tokens": v["input_tokens"],
                     "output_tokens": v["output_tokens"],
                     "error": v["error"],
+                    "primary_provider": v.get("primary_provider"),
+                    "primary_model": v.get("primary_model"),
+                    "fallback_used": v.get("fallback_used", False),
+                    "fallback_reason": v.get("fallback_reason"),
                 },
             }
         )
