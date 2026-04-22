@@ -58,6 +58,111 @@ def _ctx(vertical: str, **overrides: Any) -> RiskContext:
     return RiskContext(**base)
 
 
+# ---------------------------------------------------------------------------
+# Frozen baseline of every built-in vertical's full spec serialization.
+#
+# This is the "byte-identical regression lock" for the registry foundation:
+# any change to a built-in spec — kelly_multiplier, default_allocation_pct,
+# leagues, predictor_hook, duplicate_trade_exempt, persona_profile,
+# include_in_dashboard_strip, etc. — must update this fixture *and* be
+# justified in code review.  This guards the legacy production behaviour
+# of the sports / weather / crypto / crypto-binary / politics paths.
+# ---------------------------------------------------------------------------
+_BASELINE_BUILTINS: dict[str, dict[str, Any]] = {
+    "sports": {
+        "name": "sports",
+        "leagues": [],
+        "ticker_prefixes": [
+            "KXNFL", "KXNBA", "KXMLB", "KXNHL",
+            "KXMLS", "KXEPL", "KXNCAAF", "KXNCAAB",
+        ],
+        "persona_profile": "sports",
+        "kelly_multiplier": 1.0,
+        "default_allocation_pct": 0.30,
+        "blackout_windows": [],
+        "predictor_hook": None,
+        "feature_builder_hook": None,
+        "duplicate_trade_exempt": False,
+        "include_in_dashboard_strip": True,
+        "enabled": True,
+    },
+    "weather": {
+        "name": "weather",
+        "leagues": ["WEATHER"],
+        "ticker_prefixes": ["KXHIGH", "KXTEMP", "KXLOW", "KXRAIN"],
+        "persona_profile": "weather",
+        "kelly_multiplier": 1.0,
+        "default_allocation_pct": 0.30,
+        "predictor_hook": None,
+        "feature_builder_hook": None,
+        "duplicate_trade_exempt": False,
+        "include_in_dashboard_strip": True,
+        "enabled": True,
+    },
+    "crypto": {
+        "name": "crypto",
+        "leagues": ["CRYPTO"],
+        "ticker_prefixes": ["KXBTC", "KXETH"],
+        "persona_profile": "crypto",
+        "kelly_multiplier": 1.0,
+        "default_allocation_pct": 0.30,
+        "predictor_hook": None,
+        "feature_builder_hook": None,
+        "duplicate_trade_exempt": True,
+        "include_in_dashboard_strip": True,
+        "enabled": True,
+    },
+    "crypto-binary": {
+        "name": "crypto-binary",
+        "leagues": ["CRYPTO"],
+        "ticker_prefixes": ["KXBTC", "KXETH"],
+        "persona_profile": "crypto",
+        "kelly_multiplier": 1.0,
+        "default_allocation_pct": 0.30,
+        "predictor_hook": "crypto_binary",
+        "feature_builder_hook": None,
+        "duplicate_trade_exempt": False,
+        "enabled": True,
+    },
+    "politics": {
+        "name": "politics",
+        "leagues": ["POLITICS"],
+        "persona_profile": "politics",
+        "kelly_multiplier": 1.0,
+        "default_allocation_pct": 0.30,
+        "predictor_hook": None,
+        "feature_builder_hook": None,
+        "duplicate_trade_exempt": False,
+        "enabled": True,
+    },
+}
+
+
+def test_builtin_spec_baseline_frozen() -> None:
+    """Every key listed in `_BASELINE_BUILTINS` must equal the live
+    spec's `to_dict()` output for that field. New fields can be added
+    to the spec without updating this fixture, but no listed value may
+    drift silently."""
+    for name, expected in _BASELINE_BUILTINS.items():
+        live = verticals.require_spec(name).to_dict()
+        for key, want in expected.items():
+            assert live[key] == want, (
+                f"baseline drift on built-in {name!r}.{key}: "
+                f"expected {want!r}, got {live[key]!r}"
+            )
+
+
+def test_builtin_registration_order_frozen() -> None:
+    """The registration order of the built-ins is observable through
+    `dashboard_strip_verticals()` and `_registered_verticals_snapshot()`;
+    pin it so dashboard ordering can never silently rearrange."""
+    names = [s.name for s in verticals.all_specs()]
+    # Built-ins must appear in this exact relative order; later
+    # registrations from #194+ may append after `politics`.
+    expected_prefix = ["sports", "weather", "crypto", "crypto-binary", "politics"]
+    assert names[: len(expected_prefix)] == expected_prefix
+
+
 def test_builtins_match_legacy_vertical_leagues() -> None:
     """Every vertical that the old `VERTICAL_LEAGUES` dict mapped is
     registered with the same league filter."""
