@@ -1522,6 +1522,16 @@ async def entertainment_calendar(
     history_cache: dict[str, list] = {}
     items: list[dict[str, object]] = []
     now = datetime.now(timezone.utc)
+
+    # Best-effort: pull a Kalshi mid for each row's matching market so
+    # the dashboard can surface model-vs-market expected edge.  Failures
+    # degrade silently (kalshi_mid=None).
+    try:
+        from .entertainment.predictor import snapshot_kalshi_mids as _ent_kalshi_snap
+        _kalshi_mids = await _ent_kalshi_snap()
+    except Exception:  # pragma: no cover — kalshi snapshot optional
+        _kalshi_mids = {}
+
     for r in rows:
         if r.signal_type not in history_cache:
             history_cache[r.signal_type] = await settled_history_for_type(r.signal_type)
@@ -1532,6 +1542,10 @@ async def entertainment_calendar(
             res = at_baseline_probability(r, history)
             model_prob = float(res.probability)
         except Exception:  # pragma: no cover — never fail the route
+            log.debug(
+                "entertainment calendar at_baseline_probability failed for %s/%s",
+                r.source, r.signal_id,
+            )
             model_prob = None
 
         seconds_until = None
@@ -1543,6 +1557,12 @@ async def entertainment_calendar(
             seconds_until = max(0.0, (event_at - now).total_seconds())
             imminent = 0 < seconds_until <= 60 * 60.0
 
+        kalshi_key = f"{r.signal_type}:{r.title}".upper()
+        kalshi_mid = _kalshi_mids.get(kalshi_key)
+        edge_bps: float | None = None
+        if model_prob is not None and isinstance(kalshi_mid, (int, float)):
+            edge_bps = (float(model_prob) - float(kalshi_mid)) * 10_000.0
+
         items.append({
             "source": r.source,
             "signal_id": r.signal_id,
@@ -1551,6 +1571,8 @@ async def entertainment_calendar(
             "event_at": r.event_at.isoformat() if r.event_at else None,
             "value": r.value,
             "model_prob": model_prob,
+            "kalshi_mid": kalshi_mid,
+            "edge_bps": edge_bps,
             "seconds_until_event": seconds_until,
             "imminent": imminent,
         })

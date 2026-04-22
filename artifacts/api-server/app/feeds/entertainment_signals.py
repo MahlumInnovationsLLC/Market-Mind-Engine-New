@@ -48,6 +48,13 @@ _CADENCE_AWARDS = 24 * 3600.0
 _BOX_OFFICE_MOJO_RSS = "https://www.boxofficemojo.com/rss/weekend.xml"
 _RT_RSS = "https://www.rottentomatoes.com/news/rss/"
 _VARIETY_AWARDS_RSS = "https://variety.com/v/awards/feed/"
+_HOLLYWOOD_REPORTER_AWARDS_RSS = "https://www.hollywoodreporter.com/c/news/awards/feed/"
+# Historical winners JSON (Wikipedia / DBpedia mirror) — backfills the
+# settled-winners list so the awards head has a calibrated base rate
+# from cycle 1.  Best-effort: missing source no-ops.
+_AWARDS_HISTORICAL_OUTCOMES_URL = (
+    "https://raw.githubusercontent.com/axiom-predict/awards-historical/main/winners.json"
+)
 _SPOTIFY_CHARTS_CSV = (
     "https://charts.spotify.com/charts/view/regional-global-weekly/latest/download"
 )
@@ -318,16 +325,29 @@ _AWARD_KEYWORDS: tuple[tuple[re.Pattern[str], str], ...] = (
 async def poll_awards_calendar() -> int:
     """Pull awards-cycle headlines + emit per-nominee placeholder rows.
 
-    Each headline that mentions a frontrunner (e.g. "Oppenheimer leads
-    Oscar nominations") becomes an *unsettled* row carrying a 0.5
-    placeholder prior so the awards head has a candidate to anchor on
-    before the precursor-derived prior arrives via a later poll cycle.
+    Pulls from BOTH Variety RSS and Hollywood Reporter awards RSS to
+    blend two predictor-market signal sources before the precursor
+    rounds (Globes / SAG / DGA) land.  Each headline that mentions a
+    frontrunner (e.g. "Oppenheimer leads Oscar nominations") becomes
+    an *unsettled* row carrying a 0.5 placeholder prior so the awards
+    head has a candidate to anchor on before the precursor-derived
+    prior arrives via a later poll cycle.
     """
-    body = await _http_get_text(_VARIETY_AWARDS_RSS)
-    if not body:
-        return 0
     out: list[dict[str, Any]] = []
     now = datetime.now(timezone.utc)
+    for url, source_id in (
+        (_VARIETY_AWARDS_RSS, "variety_awards_rss"),
+        (_HOLLYWOOD_REPORTER_AWARDS_RSS, "hollywood_reporter_awards_rss"),
+    ):
+        body = await _http_get_text(url)
+        if not body:
+            continue
+        out.extend(_parse_awards_rss_body(body, source_id, now))
+    return await upsert_signals(out) if out else 0
+
+
+def _parse_awards_rss_body(body: str, source_id: str, now: datetime) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
     for item_match in _RSS_ITEM_RE.finditer(body):
         item = item_match.group(1)
         fields: dict[str, str] = {}
@@ -349,8 +369,8 @@ async def poll_awards_calendar() -> int:
         # Nominee title is best-effort: use the cleaned RSS title.
         title = _title_from_rss(title_raw)
         out.append({
-            "source": "variety_awards_rss",
-            "signal_id": guid[:300],
+            "source": source_id,
+            "signal_id": f"{source_id}/{guid}"[:300],
             "signal_type": award_type,
             "title": title,
             "event_at": observed if observed > now - timedelta(days=180) else now,
@@ -363,7 +383,57 @@ async def poll_awards_calendar() -> int:
                 "award_type": award_type,
             },
         })
-    return await upsert_signals(out)
+    return out
+
+
+async def poll_awards_historical_outcomes() -> int:
+    """Backfill historical OSCAR/EMMY/GRAMMY winners.
+
+    Pulls a curated JSON list of past winners (year, award, race
+    category, candidate) and upserts them as *settled* rows with
+    outcome='win' so the awards head has a calibrated base rate from
+    cycle 1.  The expected payload shape is:
+
+        {"OSCAR": [{"year": 2023, "race": "BESTPIC", "winner": "EVERYTHING_EVERYWHERE"}, ...], ...}
+
+    Best-effort: a missing or malformed source no-ops without crashing.
+    """
+    body = await _http_get_text(_AWARDS_HISTORICAL_OUTCOMES_URL)
+    if not body:
+        return 0
+    try:
+        doc = json.loads(body)
+    except Exception as e:  # pragma: no cover — defensive
+        log.warning("awards historical JSON parse failed: %s", e)
+        return 0
+    out: list[dict[str, Any]] = []
+    for award_type, entries in (doc or {}).items():
+        if award_type not in {"OSCAR", "EMMY", "GRAMMY"}:
+            continue
+        if not isinstance(entries, list):
+            continue
+        for entry in entries:
+            try:
+                year = int(entry.get("year"))
+                race = str(entry.get("race") or "").upper()
+                winner = str(entry.get("winner") or "").upper()
+            except Exception:
+                continue
+            if not race or not winner:
+                continue
+            event_at = datetime(year, 1, 1, tzinfo=timezone.utc)
+            out.append({
+                "source": "awards_historical_outcomes",
+                "signal_id": f"{award_type}/{year}/{race}/{winner}"[:300],
+                "signal_type": award_type,
+                "title": winner,
+                "event_at": event_at,
+                "value": 1.0,  # winner share = 1.0 for the actual winner
+                "settled": True,
+                "outcome": "win",
+                "payload": {"race_category": race, "year": year},
+            })
+    return await upsert_signals(out) if out else 0
 
 
 # --- Feed registration -------------------------------------------------------
@@ -380,6 +450,11 @@ def register_entertainment_signal_feeds() -> None:
         ("entertainment_signals.rotten_tomatoes", _CADENCE_RT, poll_rotten_tomatoes),
         ("entertainment_signals.spotify", _CADENCE_SPOTIFY, poll_spotify_charts),
         ("entertainment_signals.awards", _CADENCE_AWARDS, poll_awards_calendar),
+        # Daily backfill of past winners — cheap idempotent re-poll
+        # keeps the awards head's base rate fresh as new ceremonies
+        # complete and the historical JSON updates.
+        ("entertainment_signals.awards_historical",
+         _CADENCE_AWARDS, poll_awards_historical_outcomes),
     ]
     registered = 0
     for name, cadence, poll in candidates:

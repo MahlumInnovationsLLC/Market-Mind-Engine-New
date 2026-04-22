@@ -11,6 +11,8 @@ type CalendarItem = {
   event_at: string | null;
   value: number | null;
   model_prob: number | null;
+  kalshi_mid: number | null;
+  edge_bps: number | null;
   seconds_until_event: number | null;
   imminent: boolean;
 };
@@ -86,39 +88,55 @@ export default function EntertainmentCalendarPanel() {
       )}
       {items.length > 0 && (
         <ul className="text-xs font-mono divide-y divide-border">
-          <li className="grid grid-cols-[5rem_1fr_5rem_5rem_5rem] gap-2 py-1 text-[10px] uppercase text-muted-foreground">
+          <li className="grid grid-cols-[5rem_1fr_4rem_4rem_4rem_4rem_4rem] gap-2 py-1 text-[10px] uppercase text-muted-foreground">
             <span>Type</span>
             <span>Title</span>
             <span className="text-right">Signal</span>
             <span className="text-right">Model</span>
+            <span className="text-right">Mkt</span>
+            <span className="text-right">Edge</span>
             <span className="text-right">In</span>
           </li>
-          {items.map((it) => (
-            <li
-              key={`${it.source}/${it.signal_id}`}
-              className="grid grid-cols-[5rem_1fr_5rem_5rem_5rem] gap-2 py-1 items-center"
-            >
-              <span className="font-bold">
-                {it.signal_type}
-                {it.imminent && (
-                  <span className="ml-1 text-[9px] text-warn">●LIVE</span>
-                )}
-              </span>
-              <span className="text-muted-foreground truncate" title={it.title}>
-                {it.title}
-              </span>
-              <span className="text-right">{fmtValue(it)}</span>
-              <span className="text-right">{fmtPct(it.model_prob)}</span>
-              <span
-                className={
-                  "text-right " +
-                  (it.imminent ? "text-warn font-bold" : "text-muted-foreground")
-                }
+          {items.map((it) => {
+            const edgeColor =
+              it.edge_bps == null
+                ? "text-muted-foreground"
+                : it.edge_bps > 250
+                  ? "text-profit font-bold"
+                  : it.edge_bps < -250
+                    ? "text-loss font-bold"
+                    : "text-muted-foreground";
+            return (
+              <li
+                key={`${it.source}/${it.signal_id}`}
+                className="grid grid-cols-[5rem_1fr_4rem_4rem_4rem_4rem_4rem] gap-2 py-1 items-center"
               >
-                {fmtCountdown(it.seconds_until_event)}
-              </span>
-            </li>
-          ))}
+                <span className="font-bold">
+                  {it.signal_type}
+                  {it.imminent && (
+                    <span className="ml-1 text-[9px] text-warn">●LIVE</span>
+                  )}
+                </span>
+                <span className="text-muted-foreground truncate" title={it.title}>
+                  {it.title}
+                </span>
+                <span className="text-right">{fmtValue(it)}</span>
+                <span className="text-right">{fmtPct(it.model_prob)}</span>
+                <span className="text-right">{fmtPct(it.kalshi_mid)}</span>
+                <span className={"text-right " + edgeColor}>
+                  {it.edge_bps == null ? "—" : `${it.edge_bps > 0 ? "+" : ""}${it.edge_bps.toFixed(0)}bp`}
+                </span>
+                <span
+                  className={
+                    "text-right " +
+                    (it.imminent ? "text-warn font-bold" : "text-muted-foreground")
+                  }
+                >
+                  {fmtCountdown(it.seconds_until_event)}
+                </span>
+              </li>
+            );
+          })}
         </ul>
       )}
     </section>

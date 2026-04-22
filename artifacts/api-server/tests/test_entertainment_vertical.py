@@ -43,14 +43,30 @@ def test_parse_oscar_ticker_three_segments():
     assert t.when == "25"
     assert t.title == "OPPENHEIMER"
     assert t.threshold is None
+    assert t.candidate is None
+    assert t.race_category is None
     assert t.category == "awards"
 
 
+def test_parse_oscar_race_style_ticker_four_segments():
+    t = parse_entertainment_ticker("KXOSCAR-25-BESTPIC-OPPENHEIMER")
+    assert t.signal_type == "OSCAR"
+    assert t.when == "25"
+    # title carries the race category for race-style tickers; candidate
+    # carries the nominee name.
+    assert t.title == "BESTPIC"
+    assert t.candidate == "OPPENHEIMER"
+    assert t.race_category == "BESTPIC"
+    assert t.threshold is None
+
+
 def test_parse_emmy_grammy_tickers():
-    e = parse_entertainment_ticker("KXEMMY-25-SUCCESSION")
-    g = parse_entertainment_ticker("KXGRAMMY-25-FLOWERS")
+    e = parse_entertainment_ticker("KXEMMY-25-DRAMA-SUCCESSION")
+    g = parse_entertainment_ticker("KXGRAMMY-25-RECORD-FLOWERS")
     assert e.signal_type == "EMMY" and e.category == "awards"
+    assert e.candidate == "SUCCESSION" and e.race_category == "DRAMA"
     assert g.signal_type == "GRAMMY" and g.category == "awards"
+    assert g.candidate == "FLOWERS" and g.race_category == "RECORD"
 
 
 def test_parse_spotify_chart_top10():
@@ -203,6 +219,24 @@ def test_awards_uses_precursor_prior():
     assert res.head == "awards"
     # Posterior must be pulled toward the high prior.
     assert res.probability > 0.65
+
+
+def test_awards_race_style_ticker_finds_candidate():
+    t = parse_entertainment_ticker("KXOSCAR-25-BESTPIC-OPPENHEIMER")
+    upcoming = SignalRow(
+        source="variety_awards_rss",
+        signal_id="variety/oscar/oppenheimer",
+        signal_type="OSCAR",
+        title="OPPENHEIMER",
+        event_at=datetime.now(timezone.utc) + timedelta(days=30),
+        value=0.82,
+        settled=False,
+        outcome=None,
+        payload={"race_category": "BESTPIC"},
+    )
+    res = hybrid_probability(t, [upcoming])
+    assert res.head == "awards"
+    assert res.probability > 0.6
 
 
 def test_charts_top10_share():

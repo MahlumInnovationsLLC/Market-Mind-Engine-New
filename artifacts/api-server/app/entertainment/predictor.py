@@ -22,6 +22,52 @@ log = logging.getLogger(__name__)
 _DEFAULT_KALSHI_BLEND_WEIGHT = 0.4
 
 
+async def snapshot_kalshi_mids() -> dict[str, float]:
+    """Return a {SIGNAL_TYPE:TITLE: yes_mid} snapshot of live Kalshi
+    entertainment markets, used by the public calendar route to surface
+    model-vs-market expected edge.
+
+    Best-effort — returns an empty dict when Kalshi is unreachable, the
+    auth secrets aren't configured, or no entertainment markets are
+    open.  The calendar route swallows any exception this raises.
+    """
+    out: dict[str, float] = {}
+    try:
+        from ..kalshi import client as _kalshi_client
+    except Exception:
+        return out
+    list_markets = getattr(_kalshi_client, "list_open_markets", None)
+    if list_markets is None:
+        return out
+    try:
+        markets = await list_markets(series_prefix="KX")
+    except Exception:
+        return out
+    for m in markets or []:
+        ticker_str = (m.get("ticker") or m.get("market_id") or "").strip()
+        if not ticker_str:
+            continue
+        try:
+            t = parse_entertainment_ticker(ticker_str)
+        except Exception:
+            continue
+        yes_mid = m.get("yes_mid") or m.get("last_price")
+        if yes_mid is None:
+            yes_bid, yes_ask = m.get("yes_bid"), m.get("yes_ask")
+            if yes_bid is not None and yes_ask is not None:
+                try:
+                    yes_mid = (float(yes_bid) + float(yes_ask)) / 2.0
+                except (TypeError, ValueError):
+                    yes_mid = None
+        if yes_mid is None:
+            continue
+        try:
+            out[f"{t.signal_type}:{t.title}".upper()] = float(yes_mid)
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
 def _logit(p: float) -> float:
     p = min(0.999, max(0.001, p))
     return math.log(p / (1.0 - p))

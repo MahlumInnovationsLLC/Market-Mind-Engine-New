@@ -20,6 +20,7 @@ import SettlementPanel from "@/components/telemetry/settlement-panel";
 import VerticalPerformance from "@/components/telemetry/vertical-performance";
 import EventsEconCalendarPanel from "@/components/telemetry/events-econ-calendar";
 import EntertainmentCalendarPanel from "@/components/telemetry/entertainment-calendar";
+import EntertainmentAwardsLeaderboardPanel from "@/components/telemetry/entertainment-awards-leaderboard";
 import ModelHealthAlerts from "@/components/telemetry/model-health-alerts";
 import WsStatusIndicator from "@/components/ws-status-indicator";
 import { useWebSocket } from "@/hooks/use-websocket";
@@ -105,8 +106,9 @@ export default function Dashboard() {
         <EventsEconCalendarPanel />
       </div>
 
-      <div className="mb-6">
+      <div className="mb-6 grid grid-cols-1 lg:grid-cols-2 gap-6">
         <EntertainmentCalendarPanel />
+        <EntertainmentAwardsLeaderboardPanel />
       </div>
 
       <main className="grid grid-cols-1 xl:grid-cols-12 gap-6">

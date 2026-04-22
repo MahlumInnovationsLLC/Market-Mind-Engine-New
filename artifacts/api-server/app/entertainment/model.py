@@ -149,30 +149,105 @@ def _normal_fit(history: Iterable[SignalRow]) -> tuple[float, float, int]:
     return mean, math.sqrt(max(0.0, var)), len(values)
 
 
+def _box_office_conditioning(
+    ticker: EntertainmentTicker,
+    history_list: list[SignalRow],
+) -> tuple[list[SignalRow], dict[str, float]]:
+    """Pick the conditioning subset of settled history for the box-office head.
+
+    Conditions on (in priority order):
+      1. **Genre**: when an upcoming row carrying genre metadata exists
+         for this title, we restrict history to the same genre tag.
+      2. **Release window**: same calendar quarter / month bucket as
+         the ticker's ``when`` (e.g. summer tentpoles vs winter
+         drama).  Falls back to the unrestricted history when fewer
+         than 3 rows survive.
+      3. **Competitor load**: when an upcoming row carries a
+         ``competitors_in_window`` payload field, we down-weight rows
+         whose competitor load was lower than the upcoming release's.
+    """
+    settled = [r for r in history_list if r.settled and r.value is not None and r.value > 0.0]
+    feats: dict[str, float] = {}
+
+    upcoming = next(
+        (r for r in history_list if not r.settled), None,
+    )
+    pl = (upcoming.payload or {}) if upcoming else {}
+    genre = str(pl.get("genre", "")).lower() or None
+    if genre:
+        genre_subset = [
+            r for r in settled
+            if str((r.payload or {}).get("genre", "")).lower() == genre
+        ]
+        if len(genre_subset) >= 3:
+            settled = genre_subset
+            feats["cond_genre"] = 1.0
+
+    when_token = ticker.when.upper()
+    month_match = re.match(r"^\d{2}([A-Z]{3})$", when_token)
+    if month_match:
+        month_abbr = month_match.group(1)
+        win_subset = [
+            r for r in settled
+            if r.event_at is not None
+            and r.event_at.strftime("%b").upper() == month_abbr
+        ]
+        if len(win_subset) >= 3:
+            settled = win_subset
+            feats["cond_release_window"] = 1.0
+    else:
+        quarter_match = re.match(r"^\d{2}Q([1-4])$", when_token)
+        if quarter_match:
+            q = int(quarter_match.group(1))
+            months = {1: (1, 2, 3), 2: (4, 5, 6), 3: (7, 8, 9), 4: (10, 11, 12)}[q]
+            win_subset = [
+                r for r in settled
+                if r.event_at is not None and r.event_at.month in months
+            ]
+            if len(win_subset) >= 3:
+                settled = win_subset
+                feats["cond_release_window"] = 1.0
+
+    competitors = pl.get("competitors_in_window")
+    if isinstance(competitors, (int, float)) and competitors >= 0:
+        feats["competitors_in_window"] = float(competitors)
+        # Heavy competitor load (>=3) — penalise the central tendency
+        # by 5% per extra competitor (capped 25%).
+        feats["competitor_penalty"] = max(0.0, min(0.25, (float(competitors) - 2.0) * 0.05))
+
+    return settled, feats
+
+
 def _box_office_probability(
     ticker: EntertainmentTicker,
     history_list: list[SignalRow],
 ) -> HybridResult:
     threshold, direction = _parse_threshold_token(ticker.threshold)
-    mu, sigma, n_hist = _lognormal_fit(history_list)
+    cond_history, cond_feats = _box_office_conditioning(ticker, history_list)
+    mu, sigma, n_hist = _lognormal_fit(cond_history)
     if sigma <= 0.0:
         sigma = _DEFAULT_LOG_SIGMA["BOX"]
     sigma = max(_MIN_SIGMA, sigma)
-    if threshold is None or threshold <= 0.0 or mu <= 0.0:
+    # Apply competitor-load penalty by shifting mu downward (heavier
+    # competitor week => lower expected take => lower P(ABOVE)).
+    competitor_penalty = cond_feats.get("competitor_penalty", 0.0)
+    mu_eff = mu - competitor_penalty
+    if threshold is None or threshold <= 0.0 or mu_eff <= 0.0:
         return HybridResult(
             probability=0.5, head="box_office", threshold=threshold,
             direction=direction, sigma=sigma, contributing_history=n_hist,
-            feature_summary={"history": float(n_hist), "mu_log": mu, "sigma_log": sigma,
-                             "has_threshold": 0.0 if threshold is None else 1.0},
+            feature_summary={"history": float(n_hist), "mu_log": mu_eff, "sigma_log": sigma,
+                             "has_threshold": 0.0 if threshold is None else 1.0,
+                             **cond_feats},
         )
-    z = (math.log(threshold) - mu) / sigma
+    z = (math.log(threshold) - mu_eff) / sigma
     p_above = 1.0 - _norm_cdf(z)
     p_yes = p_above if direction != "below" else 1.0 - p_above
     return HybridResult(
         probability=_clamp(p_yes), head="box_office", threshold=threshold,
         direction=direction, sigma=sigma, contributing_history=n_hist,
-        feature_summary={"history": float(n_hist), "mu_log": mu, "sigma_log": sigma,
-                         "z": z, "has_threshold": 1.0},
+        feature_summary={"history": float(n_hist), "mu_log": mu_eff, "sigma_log": sigma,
+                         "z": z, "has_threshold": 1.0, **cond_feats},
     )
 
 
@@ -217,11 +292,18 @@ def _awards_probability(
     so the precursor signal dominates while never letting a missing
     one collapse the prior to 0.
     """
-    title_lc = ticker.title.lower()
+    # Awards race-style tickers carry the candidate name on .candidate;
+    # the legacy 3-segment shape carries it on .title.  Match against
+    # whichever is populated.
+    needle = (ticker.candidate or ticker.title).lower()
+    race_lc = ticker.title.lower() if ticker.candidate else None
     upcoming = next(
         (r for r in history_list
          if not r.settled and r.value is not None
-         and (title_lc in r.title.lower() or r.title.lower() in title_lc)),
+         and (needle in r.title.lower() or r.title.lower() in needle)
+         and (race_lc is None
+              or race_lc in str((r.payload or {}).get("race_category", "")).lower()
+              or not (r.payload or {}).get("race_category"))),
         None,
     )
     if upcoming is None:
