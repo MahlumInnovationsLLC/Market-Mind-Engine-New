@@ -195,7 +195,7 @@ export default function PricingPage() {
           </div>
         )}
 
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-5">
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-5 max-w-5xl mx-auto">
           {tiers.map((tier) => {
             const slot = interval === "month" ? tier.monthly : tier.annual;
             const isPaid = tier.id === "pro" || tier.id === "elite";
