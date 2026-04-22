@@ -68,6 +68,11 @@ SUPPORTED_LEAGUES: tuple[str, ...] = (
     # race / ATP/WTA bracket / PGA tournament is calibrated against
     # its own league's settled-trade history.
     "UFC", "ATP", "WTA", "F1", "PGA",
+    # Commodities (task #198).  Single league bucket — per-contract
+    # calibration scoped via the calibrator's `(league, market_type)`
+    # key already covers oil/gold/grains/etc separately when the
+    # settlement pipeline records `market_type='commodity:WTI'` etc.
+    "COMMODITIES",
 )
 
 # Below this sample count we fall back to Platt; below MIN_REFIT we

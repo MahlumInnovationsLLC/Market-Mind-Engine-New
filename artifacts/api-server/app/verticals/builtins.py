@@ -57,6 +57,32 @@ REGISTRY.register(VerticalSpec(
     description="Legacy politics vertical kept for backward compatibility.",
 ))
 
+# Commodities (task #198).  Per-contract LGB+XGB binary-close stack
+# with a tight Kelly multiplier (0.15) — the swarm's geopolitics +
+# weather + curve personas already concentrate risk on macro events,
+# so the size cap stays well below the team-sport default.
+# Registered AFTER `politics` so the dashboard frozen-order snapshot
+# (sports/weather/crypto/crypto-binary/politics) is preserved.
+REGISTRY.register(VerticalSpec(
+    name="commodities",
+    leagues=("COMMODITIES",),
+    ticker_prefixes=(
+        "KXOIL", "KXGOLD", "KXNATGAS", "KXCORN", "KXSOY",
+        "KXWHEAT", "KXCOPPER", "KXSILVER", "KXCOFFEE", "KXSUGAR",
+    ),
+    persona_profile="commodities",
+    predictor_hook="commodities_binary",
+    kelly_multiplier=0.15,
+    default_allocation_pct=0.10,
+    duplicate_trade_exempt=True,
+    description=(
+        "Commodities binary-close markets across WTI, gold, natgas, "
+        "corn, soy, wheat, copper, silver, coffee and sugar.  Routed "
+        "through the per-contract LGB+XGB stack with an 11-pair "
+        "correlation sub-check on the per_vertical_cap risk gate."
+    ),
+))
+
 # Soccer (task #196).  Distinct from `sports` so the orchestrator can
 # route candidates through the soccer-specific persona stack (xG /
 # rotation / market microstructure) and hit per-league caps tuned for

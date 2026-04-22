@@ -64,6 +64,7 @@ from .feeds.sportradar import (
 )
 from .feeds.weather import register_weather_feeds
 from .feeds.crypto import register_crypto_feeds
+from .feeds.commodities import register_commodities_feeds
 from .feeds.unusual_whales import register_unusual_whales_feeds
 from .feeds.public_betting import register_public_betting_feeds
 from .features import drift as feature_drift, registry as feature_registry
@@ -149,6 +150,7 @@ async def lifespan(_: FastAPI):
         register_odds_feeds()
         register_weather_feeds()
         register_crypto_feeds()
+        register_commodities_feeds()
         try:
             from .feeds import weather_climatology as _wclim
 

@@ -338,6 +338,23 @@ LEAGUE_CONFIGS: dict[str, LeagueConfig] = {
         max_daily_trades=6,
         persona_context=_COMBAT_INDIVIDUAL_PERSONA_CONTEXT,
     ),
+    # Commodities binary-close (task #198).  Per-symbol 1h/4h/1d markets;
+    # event-shaped concentration doesn't apply (each contract settles
+    # independently on its own bar close).  The real concentration
+    # limiter for this vertical is the 11-pair correlation sub-check on
+    # `gate_per_vertical_cap`, so we explicitly disable per_event_cap
+    # here (None) to avoid double-counting.  Live blackout disabled —
+    # bot trades right up to settlement.
+    "COMMODITIES": LeagueConfig(
+        league="COMMODITIES",
+        priority=8,
+        allocation_pct=0.10,
+        per_game_cap_pct=0.01,
+        per_event_cap_pct=None,
+        n_way_market=False,
+        live_action_blackout=False,
+        max_daily_trades=20,
+    ),
 }
 
 

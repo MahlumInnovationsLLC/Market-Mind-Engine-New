@@ -458,6 +458,66 @@ async def gate_per_vertical_cap(ctx: RiskContext) -> GateResult:
             },
         )
 
+    # Commodities correlation sub-check (task #198).  Inside the
+    # per_vertical_cap gate so the 12-gate invariant is preserved.
+    # Projects the candidate's intended notional against open exposure
+    # in correlated commodities (11 high-magnitude pairs from
+    # `app.commodities.correlations`) and rejects if the correlation-
+    # weighted projection exceeds the operator cap (default 25%
+    # bankroll).  Best-effort: any failure short-circuits to a no-op
+    # so the gate falls back to the per-vertical aggregate above.
+    if ctx.vertical == "commodities" and bankroll > 0:
+        try:
+            from ..commodities.correlations import correlated_exposure
+            from ..commodities.tickers import (
+                InvalidCommodityTicker,
+                parse_commodity_ticker,
+            )
+            try:
+                cand_ticker = parse_commodity_ticker(ctx.market_id)
+                cand_symbol = cand_ticker.symbol
+            except InvalidCommodityTicker:
+                cand_symbol = None
+            if cand_symbol is not None:
+                corr_cap_pct = float(
+                    ctx.operator_overrides.get("commodities_correlation_cap_pct", 0.25)
+                )
+                corr_cap_usd = bankroll * corr_cap_pct
+                # `open_positions_per_matchup_usd` is keyed `LEAGUE:matchup`;
+                # the orchestrator persists commodities matchup as the
+                # canonical symbol so we can reuse the same dict here.
+                open_per_symbol: dict[str, float] = {}
+                for k, v in ctx.open_positions_per_matchup_usd.items():
+                    if k.upper().startswith("COMMODITIES:"):
+                        sym = k.split(":", 1)[1].upper()
+                        open_per_symbol[sym] = open_per_symbol.get(sym, 0.0) + float(v)
+                corr_report = correlated_exposure(
+                    open_per_symbol,
+                    cand_symbol,
+                    ctx.intended_notional_usd,
+                )
+                if corr_report["projected"] > corr_cap_usd:
+                    return GateResult(
+                        "per_vertical_cap",
+                        False,
+                        (
+                            f"commodities correlated exposure "
+                            f"${corr_report['projected']:.2f} > cap "
+                            f"${corr_cap_usd:.2f}"
+                        ),
+                        {
+                            "vertical": ctx.vertical,
+                            "sub_check": "commodities_correlation",
+                            "intended_symbol": cand_symbol,
+                            "projected": corr_report["projected"],
+                            "cap_usd": corr_cap_usd,
+                            "cap_pct": corr_cap_pct,
+                            "pair_contributions": corr_report["pair_contributions"],
+                        },
+                    )
+        except Exception as e:  # pragma: no cover — never kill the gate
+            log.debug("commodities correlation sub-check failed: %s", e)
+
     # League-scoped sub-checks (NFL is the canonical user; other leagues
     # opt in by populating the corresponding LeagueConfig fields).
     lcfg = get_league_config(ctx.league)
