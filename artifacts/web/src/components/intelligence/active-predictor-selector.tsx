@@ -41,7 +41,9 @@ export default function ActivePredictorSelector({ isAdmin }: { isAdmin: boolean 
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: QUERY_KEY });
       qc.invalidateQueries({ queryKey: ["/api/admin/models/active"] });
-      qc.invalidateQueries();
+      qc.invalidateQueries({ queryKey: ["/api/dashboard/active-model"] });
+      qc.invalidateQueries({ queryKey: ["/api/models/active"] });
+      qc.invalidateQueries({ queryKey: ["/api/models/inventory"] });
     },
   });
 
