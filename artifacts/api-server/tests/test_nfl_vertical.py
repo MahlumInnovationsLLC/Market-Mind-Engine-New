@@ -435,6 +435,40 @@ def test_open_position_aggregates_uses_correct_games_columns():
         "games.start_time is not a real column"
 
 
+def test_fresh_candidate_carries_game_time_into_riskcontext():
+    """Regression: fresh-debate candidates must carry pred['game_time']
+    onto the candidate dict so RiskContext.game_time is populated and the
+    pre-kickoff blackout / Sunday-window gates actually fire on the
+    fresh path (not just the cached path)."""
+    import inspect
+    from app.orchestrator import cycle as cycle_mod
+
+    src = inspect.getsource(cycle_mod.run_cycle)
+    # The fresh-candidate dict literal must include game_time.
+    assert '"game_time": pred.get("game_time")' in src, (
+        "fresh candidate must propagate pred['game_time'] so RiskContext "
+        "sees the kickoff for blackout/Sunday-window evaluation"
+    )
+
+
+def test_post_placement_sunday_aggregation_uses_candidate_game_time():
+    """Regression: after a placement, the in-cycle Sunday bucket update
+    must use the candidate's kickoff (ctx.game_time), not wall-clock
+    now().  Otherwise a midweek pre-position on a Sunday game silently
+    fails to bump the bucket and lets later same-cycle candidates evade
+    the slate cap."""
+    import inspect
+    from app.orchestrator import cycle as cycle_mod
+
+    src = inspect.getsource(cycle_mod.run_cycle)
+    assert "sunday_anchor = ctx.game_time or datetime.now" in src, (
+        "post-placement Sunday aggregation must anchor on candidate "
+        "kickoff before falling back to now()"
+    )
+    # And the bucket update must be gated on that anchor.
+    assert "_isw(league_key, sunday_anchor)" in src
+
+
 def test_cached_debates_select_carries_game_time():
     """Cached-debate candidates must surface `game_time` so blackout +
     Sunday-window gates trip on the cached path too.  Asserts the SQL

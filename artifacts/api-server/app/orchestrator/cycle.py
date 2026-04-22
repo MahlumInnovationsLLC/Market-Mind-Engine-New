@@ -598,6 +598,10 @@ async def run_cycle(vertical: str = "sports") -> CycleResult:
                 "agreement_rate": d.get("agreement_rate"),
                 "approved": d.get("approved"),
                 "recommended_action": d.get("recommended_action"),
+                # Carry kickoff onto the candidate so RiskContext.game_time
+                # is populated for the fresh-debate path too — drives
+                # pre-kickoff blackout + Sunday-window cap evaluation.
+                "game_time": pred.get("game_time"),
                 "game_context": {
                     "kalshi_market_id": pred.get("kalshi_market_id"),
                     "kalshi_price": pred.get("kalshi_price"),
@@ -795,8 +799,14 @@ async def run_cycle(vertical: str = "sports") -> CycleResult:
                 if matchup_val:
                     mkey = f"{league_key}:{matchup_val}"
                     per_matchup[mkey] = per_matchup.get(mkey, 0.0) + intended_notional
+                # Sunday-window aggregation must follow the *candidate's*
+                # kickoff, not wall-clock now() — otherwise a midweek
+                # pre-position on a Sunday game would not show up in the
+                # Sunday bucket, letting subsequent same-cycle candidates
+                # evade the slate concentration cap.
                 from ..sports import is_sunday_window as _isw
-                if _isw(league_key, datetime.now(timezone.utc)):
+                sunday_anchor = ctx.game_time or datetime.now(timezone.utc)
+                if _isw(league_key, sunday_anchor):
                     per_sunday_window[league_key] = (
                         per_sunday_window.get(league_key, 0.0) + intended_notional
                     )
