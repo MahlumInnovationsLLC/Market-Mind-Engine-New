@@ -60,6 +60,27 @@ def _reset_lifecycle(monkeypatch):
 
     monkeypatch.setattr(lifecycle, "_write_lifecycle", _fake_write_lifecycle)
 
+    # The new partial-fill rollup helpers also touch Postgres — stub them.
+    # Tests that need to exercise dedupe replays override `seen_fills`.
+    seen_fills: set[tuple[str, str]] = set()
+    positions: list[dict[str, Any]] = []
+
+    async def _fake_record_fill(**kwargs):
+        key = (kwargs["order_id"], kwargs["fill_id"])
+        if key in seen_fills:
+            return False
+        seen_fills.add(key)
+        return True
+
+    async def _fake_upsert_position(**kwargs):
+        positions.append(kwargs)
+
+    monkeypatch.setattr(lifecycle, "_record_fill_idempotent", _fake_record_fill)
+    monkeypatch.setattr(lifecycle, "_upsert_position_rollup", _fake_upsert_position)
+    # Expose side-channel state on the module so tests can introspect.
+    lifecycle._test_seen_fills = seen_fills      # type: ignore[attr-defined]
+    lifecycle._test_positions = positions        # type: ignore[attr-defined]
+
     # Best-effort: silence the alerts module so notifications don't blow up
     # without Stripe / SMTP envs.
     yield written
@@ -393,3 +414,129 @@ def test_handle_ws_fill_marks_resting_filled(monkeypatch, _reset_lifecycle):
     assert "ws-1" not in lifecycle._resting
     filled = [w for w in _reset_lifecycle if w["event_type"] == "filled"]
     assert filled and filled[0]["price_cents"] == 47
+
+
+# ---------------------------------------------------------------------------
+# GTC partial-fill rollup (task #103)
+# ---------------------------------------------------------------------------
+
+def _stub_alerts(monkeypatch):
+    import sys
+    monkeypatch.setitem(sys.modules, "app.notifications.alerts",
+                        SimpleNamespace(halt=lambda **kw: None,
+                                        live_trade=lambda **kw: None,
+                                        _hash_reason=lambda s: f"h{abs(hash(s)) % 10000}",
+                                        dedupe_or_skip=_async_true))
+
+
+async def _async_true(*a, **kw):
+    return True
+
+
+def _seed_resting(client_order_id: str, *, count: int, side="yes", price=50):
+    req = lifecycle.OrderRequest(
+        market_ticker="MKT-1", side=side, action="buy", count=count,
+        limit_price_cents=price, client_order_id=client_order_id,
+    )
+    lifecycle._resting[client_order_id] = lifecycle.OrderRecord(
+        order_id=client_order_id, request=req, paper=False, state="resting",
+        exchange_order_id=f"exo-{client_order_id}",
+    )
+
+
+def _ws(coid: str, count: int, price: int, trade_id: str) -> dict[str, Any]:
+    return {
+        "type": "kalshi_event",
+        "msg": {
+            "type": "fill",
+            "msg": {"client_order_id": coid, "count": count,
+                    "yes_price": price, "trade_id": trade_id},
+        },
+    }
+
+
+def test_partial_fills_roll_up_with_weighted_average(monkeypatch, _reset_lifecycle):
+    """Three partials (3@50, 4@60, 3@70) for a 10-contract GTC order roll
+    up to one position with quantity=10 and weighted-average price 60¢."""
+    _stub_alerts(monkeypatch)
+    _seed_resting("gtc-1", count=10)
+
+    async def go():
+        await lifecycle.handle_ws_fill(_ws("gtc-1", 3, 50, "t1"))
+        await lifecycle.handle_ws_fill(_ws("gtc-1", 4, 60, "t2"))
+        await lifecycle.handle_ws_fill(_ws("gtc-1", 3, 70, "t3"))
+
+    _run(go())
+
+    # Order is fully filled and removed from the resting book.
+    assert "gtc-1" not in lifecycle._resting
+    # Three audit rows in order_lifecycle, one per partial.
+    filled = [w for w in _reset_lifecycle if w["event_type"] == "filled"]
+    assert len(filled) == 3
+
+    # Exactly one rolled-up position upsert PER fill, but each upsert
+    # carries the running rollup. The FINAL upsert is what the PnL
+    # pipeline observes.
+    positions = lifecycle._test_positions
+    assert len(positions) == 3
+    final = positions[-1]
+    assert final["order_id"] == "gtc-1"
+    assert final["market_id"] == "MKT-1"
+    assert final["side"] == "yes"
+    assert final["quantity"] == 10
+    # Weighted avg: (3*50 + 4*60 + 3*70) / 10 = (150+240+210)/10 = 60
+    assert final["avg_price_cents"] == 60
+    assert final["over_filled"] is False
+
+
+def test_overfill_partials_warn_and_do_not_double_count(monkeypatch, _reset_lifecycle, caplog):
+    """3 partials totalling > requested size: capped at requested, flag set,
+    warning logged, position quantity does NOT exceed the order size."""
+    _stub_alerts(monkeypatch)
+    _seed_resting("gtc-of", count=5)
+
+    async def go():
+        await lifecycle.handle_ws_fill(_ws("gtc-of", 2, 40, "t1"))
+        await lifecycle.handle_ws_fill(_ws("gtc-of", 2, 50, "t2"))
+        # Third partial pushes over: 2+2+3=7 > 5. Only 1 should be accepted.
+        await lifecycle.handle_ws_fill(_ws("gtc-of", 3, 90, "t3"))
+
+    import logging as _logging
+    with caplog.at_level(_logging.WARNING, logger="app.kalshi.lifecycle"):
+        _run(go())
+
+    final = lifecycle._test_positions[-1]
+    assert final["quantity"] == 5
+    assert final["over_filled"] is True
+    # Weighted avg counts the ACCEPTED slice of the third fill (1 contract,
+    # not 3): (2*40 + 2*50 + 1*90) / 5 = (80+100+90)/5 = 54
+    assert final["avg_price_cents"] == 54
+    # Warning surfaced for the over-fill event.
+    assert any("over-fill" in r.getMessage() for r in caplog.records)
+    # Resting record is gone (treated as fully filled at the cap).
+    assert "gtc-of" not in lifecycle._resting
+
+
+def test_duplicate_fill_event_is_suppressed(monkeypatch, _reset_lifecycle):
+    """A re-delivered partial (same trade_id) must not double-count the
+    rollup or write a second order_lifecycle row."""
+    _stub_alerts(monkeypatch)
+    _seed_resting("gtc-dup", count=4)
+
+    async def go():
+        await lifecycle.handle_ws_fill(_ws("gtc-dup", 2, 40, "t1"))
+        # Exact replay of the same fill — should be a no-op.
+        await lifecycle.handle_ws_fill(_ws("gtc-dup", 2, 40, "t1"))
+        await lifecycle.handle_ws_fill(_ws("gtc-dup", 2, 60, "t2"))
+
+    _run(go())
+
+    final = lifecycle._test_positions[-1]
+    assert final["quantity"] == 4
+    # Weighted avg over the two REAL fills: (2*40 + 2*60)/4 = 50
+    assert final["avg_price_cents"] == 50
+    # Only two filled audit rows (the replay was suppressed).
+    filled = [w for w in _reset_lifecycle if w["event_type"] == "filled"]
+    assert len(filled) == 2
+    # Position upsert also fired only twice.
+    assert len(lifecycle._test_positions) == 2

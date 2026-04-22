@@ -111,6 +111,7 @@ class OrderRecord:
     exchange_order_id: str | None = None
     filled_count: int = 0
     avg_fill_price_cents: int | None = None
+    over_filled: bool = False
     created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
     def to_dict(self) -> dict[str, Any]:
@@ -121,6 +122,7 @@ class OrderRecord:
             "exchange_order_id": self.exchange_order_id,
             "filled_count": self.filled_count,
             "avg_fill_price_cents": self.avg_fill_price_cents,
+            "over_filled": self.over_filled,
             "created_at": self.created_at.isoformat(),
             "request": {**asdict(self.request)},
         }
@@ -174,6 +176,85 @@ async def _write_lifecycle(
 
 async def _emit(event: dict[str, Any]) -> None:
     await bus.publish({"type": "order_lifecycle", **event})
+
+
+async def _record_fill_idempotent(
+    *, order_id: str, fill_id: str, count: int, price_cents: int
+) -> bool:
+    """Insert one row into `order_fills`. Returns True iff the row was newly
+    inserted (i.e. this fill event is NOT a WebSocket replay).
+
+    Acts as the dedupe gate for `handle_ws_fill`: when Kalshi re-delivers
+    the same partial-fill on reconnect, the unique (order_id, fill_id)
+    constraint trips and we report False so the caller skips state
+    mutation. Returns True on DB error too — failing-open is the safer
+    default than silently dropping a real fill.
+    """
+    try:
+        rid = await db.fetchval(
+            """
+            INSERT INTO order_fills (order_id, fill_id, count, price_cents)
+            VALUES ($1, $2, $3, $4)
+            ON CONFLICT (order_id, fill_id) DO NOTHING
+            RETURNING order_id
+            """,
+            order_id, fill_id, int(count), int(price_cents),
+        )
+        return rid is not None
+    except Exception as e:
+        log.warning("order_fills insert failed (%s/%s): %s", order_id, fill_id, e)
+        return True
+
+
+async def _upsert_position_rollup(
+    *,
+    order_id: str,
+    market_id: str,
+    side: Side,
+    vertical: str,
+    quantity: int,
+    avg_price_cents: int,
+    over_filled: bool,
+    closed: bool,
+) -> None:
+    """UPSERT the rolled-up position row keyed by `order_id`.
+
+    `quantity` is the cumulative filled count CAPPED at the order's
+    requested size (over-fill never inflates exposure here — see the
+    `over_filled` flag for the audit trail). `avg_price_cents` is the
+    weighted average across all accepted partial fills.
+
+    The PnL pipeline reads from `positions` and now sees one row per
+    completed/partially-filled order rather than one row per raw fill
+    event from `order_lifecycle`.
+    """
+    try:
+        # Store avg_price as a unit price (0..1) to match the convention used
+        # by orchestrator/paper.py (`price = ctx.current_price`) so the
+        # settlement pipeline's `_trade_pnl` math is consistent.
+        avg_unit = float(avg_price_cents) / 100.0
+        status = "closed" if closed and quantity > 0 else "open"
+        await db.execute(
+            """
+            INSERT INTO positions (
+                order_id, market_id, side, vertical, exchange,
+                quantity, avg_price, status, filled_count, over_filled
+            ) VALUES (
+                $1, $2, $3, $4, 'kalshi',
+                $5, $6, $7, $5, $8
+            )
+            ON CONFLICT (order_id) DO UPDATE
+               SET quantity     = EXCLUDED.quantity,
+                   avg_price    = EXCLUDED.avg_price,
+                   filled_count = EXCLUDED.filled_count,
+                   over_filled  = positions.over_filled OR EXCLUDED.over_filled,
+                   status       = EXCLUDED.status
+            """,
+            order_id, market_id, side, vertical,
+            int(quantity), avg_unit, status, bool(over_filled),
+        )
+    except Exception as e:
+        log.warning("position rollup upsert failed (%s): %s", order_id, e)
 
 
 # --- main entry ----------------------------------------------------------
@@ -325,39 +406,93 @@ async def handle_ws_fill(message: dict[str, Any]) -> None:
     count = int(fill.get("count") or 0)
     side_price = fill.get("yes_price") if rec.request.side == "yes" else fill.get("no_price")
     price = int(side_price or 0)
-    rec.filled_count += count
-    rec.avg_fill_price_cents = price
-    rec.state = "filled" if rec.filled_count >= rec.request.count else "resting"
+    if count <= 0:
+        return
+
+    # ---- fill-event idempotency (resolve fill_id BEFORE state mutation) ----
+    # Kalshi's WS can re-deliver the same partial fill on reconnect; without
+    # a persistent dedupe gate `rec.filled_count` and the rolled-up position
+    # would double-count. Use the same fill_id derivation as the alert path
+    # (trade_id/fill_id when present, else a hash of the immutable payload).
+    from ..notifications import alerts as _alerts
+    fill_id = str(fill.get("trade_id") or fill.get("fill_id") or "")
+    if not fill_id:
+        raw_count = fill.get("count") or 0
+        raw_yes = fill.get("yes_price") or ""
+        raw_no = fill.get("no_price") or ""
+        raw_ts = (
+            fill.get("created_time")
+            or fill.get("ts")
+            or fill.get("timestamp")
+            or ""
+        )
+        fallback = f"{raw_count}|{raw_yes}|{raw_no}|{raw_ts}"
+        fill_id = f"raw:{_alerts._hash_reason(fallback)}"
+
+    fresh = await _record_fill_idempotent(
+        order_id=rec.order_id, fill_id=fill_id,
+        count=count, price_cents=price,
+    )
+    if not fresh:
+        log.info(
+            "ws fill replay suppressed: order_id=%s fill_id=%s",
+            rec.order_id, fill_id,
+        )
+        return
+
+    # ---- weighted-average rollup, with overfill cap+warn -------------------
+    requested = int(rec.request.count)
+    prior_count = int(rec.filled_count)
+    prior_avg = int(rec.avg_fill_price_cents or 0)
+    remaining = max(0, requested - prior_count)
+    accepted = min(count, remaining)
+    if count > remaining:
+        rec.over_filled = True
+        log.warning(
+            "GTC over-fill detected: order_id=%s exchange_order_id=%s "
+            "requested=%d prior_filled=%d this_fill=%d (accepting=%d, "
+            "discarding=%d to avoid double-count)",
+            rec.order_id, rec.exchange_order_id,
+            requested, prior_count, count, accepted, count - accepted,
+        )
+    new_count = prior_count + accepted
+    if new_count > 0 and accepted > 0:
+        # Weighted average across all ACCEPTED partial fills.
+        rec.avg_fill_price_cents = int(round(
+            (prior_avg * prior_count + price * accepted) / new_count
+        ))
+    rec.filled_count = new_count
+    rec.state = "filled" if rec.filled_count >= requested else "resting"
     if rec.state == "filled":
         async with _resting_lock:
             _resting.pop(rec.order_id, None)
+
+    # ---- single rolled-up position row -------------------------------------
+    await _upsert_position_rollup(
+        order_id=rec.order_id,
+        market_id=rec.request.market_ticker,
+        side=rec.request.side,
+        vertical=rec.request.vertical,
+        quantity=rec.filled_count,
+        avg_price_cents=int(rec.avg_fill_price_cents or 0),
+        over_filled=rec.over_filled,
+        closed=False,
+    )
+
     await _record(rec.request, paper=False, state="filled", price=price,
-                  extra={"exchange_order_id": rec.exchange_order_id, "fill": fill})
+                  extra={"exchange_order_id": rec.exchange_order_id, "fill": fill,
+                         "accepted_count": accepted, "over_filled": rec.over_filled,
+                         "rolled_up_avg_price_cents": rec.avg_fill_price_cents,
+                         "rolled_up_filled_count": rec.filled_count})
     await _emit({"event": "filled", "order": rec.to_dict()})
     # LIVE-trade alert (Elite-tier per spec). Paper fills never get
     # here — they short-circuit in submit_order().
     try:
-        from ..notifications import alerts as _alerts
-        fill_id = str(fill.get("trade_id") or fill.get("fill_id") or "")
-        # Persistent dedupe: Kalshi's fill websocket can re-deliver the
-        # same fill on reconnect.  Preferred key is (order_id, fill_id)
-        # — both together are the natural idempotency token.  When the
-        # fill payload omits fill_id, fall back to a hash of the *raw*
-        # immutable fields of the payload (count + price + exchange ts
-        # + side) so a replay produces the same key.  We deliberately
-        # do NOT use `rec.filled_count` here — it mutates as fills land.
-        if not fill_id:
-            raw_count = fill.get("count") or 0
-            raw_yes = fill.get("yes_price") or ""
-            raw_no = fill.get("no_price") or ""
-            raw_ts = (
-                fill.get("created_time")
-                or fill.get("ts")
-                or fill.get("timestamp")
-                or ""
-            )
-            fallback = f"{raw_count}|{raw_yes}|{raw_no}|{raw_ts}"
-            fill_id = f"raw:{_alerts._hash_reason(fallback)}"
+        # `fill_id` was already resolved above (with the same raw-field
+        # fallback) so the rolled-up dedupe and the alert dedupe share
+        # an idempotency key. Replays would have returned early above
+        # before reaching here, so this is purely a belt-and-braces
+        # guard against the alerts pipeline mis-routing.
         dk = f"{rec.order_id or coid}:{fill_id}"
         if await _alerts.dedupe_or_skip(
             "live_trade", dk, ttl_seconds=7 * 24 * 3600
