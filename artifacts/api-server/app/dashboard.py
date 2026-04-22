@@ -638,6 +638,179 @@ async def get_trade_detail(trade_ref: str) -> dict[str, Any] | None:
     return {"trade": trade, "series": series}
 
 
+async def get_vertical_performance(days: int = 30) -> dict[str, Any]:
+    """Per-vertical (sports/weather/crypto) performance for the operator strip.
+
+    Returns one entry per known vertical with rolling-window P&L, win rate,
+    trade count, latest 24h Brier (from `calibration_snapshots`), plus a
+    10-bucket calibration curve and a 10-bucket PIT-style histogram.
+
+    Predicted probability is aligned to the trade's side (NO trades flip
+    `model_prob` and the actual outcome) so the curves measure how well
+    the *bet* was priced, not just P(YES).  All buckets are 0.05 wide
+    (10 bins over [0,1]); buckets with no samples are still emitted with
+    `n=0` so the front-end can render a continuous axis.
+
+    Window is clamped to [1, 365] days; the dashboard widget only ever
+    asks for 7 / 30 / 90.  Every per-vertical sub-query is wrapped so a
+    single failure doesn't blank the whole strip.
+    """
+    days = max(1, min(int(days), 365))
+    verticals = ["sports", "weather", "crypto"]
+
+    out: list[dict[str, Any]] = []
+    for vertical in verticals:
+        entry: dict[str, Any] = {
+            "vertical": vertical,
+            "trades": 0,
+            "wins": 0,
+            "losses": 0,
+            "win_rate": None,
+            "pnl": 0.0,
+            "brier": None,
+            "calibration": [],
+            "pit": [],
+        }
+        # Aggregate trade stats over the rolling window.
+        try:
+            agg = await db.fetchrow(
+                """
+                SELECT count(*)::int                                    AS n,
+                       coalesce(sum(pnl), 0)::float                     AS pnl,
+                       sum((pnl > 0)::int)::int                         AS wins,
+                       sum((pnl < 0)::int)::int                         AS losses,
+                       (sum((pnl > 0)::int)::float
+                        / nullif(count(*) filter (where pnl is not null), 0))
+                                                                        AS win_rate
+                  FROM trades
+                 WHERE vertical = $1
+                   AND executed_at >= now() - ($2::int || ' days')::interval
+                """,
+                vertical, days,
+            )
+            if agg:
+                entry["trades"] = int(agg["n"] or 0)
+                entry["pnl"] = float(agg["pnl"] or 0.0)
+                entry["wins"] = int(agg["wins"] or 0)
+                entry["losses"] = int(agg["losses"] or 0)
+                entry["win_rate"] = (
+                    float(agg["win_rate"]) if agg["win_rate"] is not None else None
+                )
+        except Exception as e:
+            log.warning("vertical_perf trade-agg %s: %s", vertical, e)
+
+        # Latest 24h Brier from calibration_snapshots.
+        try:
+            entry["brier"] = await db.fetchval(
+                """
+                SELECT brier_score::float
+                  FROM calibration_snapshots
+                 WHERE vertical = $1 AND sub_category = '24h'
+                 ORDER BY created_at DESC
+                 LIMIT 1
+                """,
+                vertical,
+            )
+            if entry["brier"] is not None:
+                entry["brier"] = float(entry["brier"])
+        except Exception as e:
+            log.warning("vertical_perf brier %s: %s", vertical, e)
+
+        # Calibration buckets (predicted vs observed) and PIT histogram
+        # over the same rolling window, computed from settled trades.
+        try:
+            rows = await db.fetch(
+                """
+                WITH settled AS (
+                  SELECT t.model_prob::float                AS p_yes,
+                         lower(coalesce(t.side, ''))        AS side_lc,
+                         pm.actual_outcome::int             AS y
+                    FROM trades t
+                    JOIN trade_postmortems pm
+                      ON pm.trade_id = coalesce(t.trade_id, t.id::text)
+                   WHERE t.vertical = $1
+                     AND t.executed_at >= now() - ($2::int || ' days')::interval
+                     AND t.model_prob IS NOT NULL
+                     AND pm.actual_outcome IS NOT NULL
+                ), aligned AS (
+                  SELECT CASE WHEN side_lc IN ('no','n','sell')
+                              THEN 1.0 - p_yes ELSE p_yes END AS p_side,
+                         CASE WHEN side_lc IN ('no','n','sell')
+                              THEN 1 - y       ELSE y       END AS y_side
+                    FROM settled
+                ), bucketed AS (
+                  SELECT least(9, floor(p_side * 10)::int)            AS cal_bin,
+                         CASE WHEN y_side = 1
+                              THEN least(9, floor(p_side * 10)::int)
+                              ELSE least(9, floor((1.0 - p_side) * 10)::int)
+                         END                                          AS pit_bin,
+                         p_side, y_side
+                    FROM aligned
+                )
+                SELECT bin,
+                       sum(cal_n)::int        AS cal_n,
+                       sum(cal_p)::float      AS cal_p_sum,
+                       sum(cal_y)::float      AS cal_y_sum,
+                       sum(pit_n)::int        AS pit_n
+                  FROM (
+                    SELECT cal_bin AS bin,
+                           1 AS cal_n, p_side AS cal_p, y_side::float AS cal_y,
+                           0 AS pit_n
+                      FROM bucketed
+                    UNION ALL
+                    SELECT pit_bin AS bin, 0, 0::float, 0::float, 1
+                      FROM bucketed
+                  ) u
+                 GROUP BY bin
+                 ORDER BY bin
+                """,
+                vertical, days,
+            )
+        except Exception as e:
+            log.warning("vertical_perf curves %s: %s", vertical, e)
+            rows = []
+
+        cal_by_bin: dict[int, dict[str, Any]] = {}
+        pit_by_bin: dict[int, int] = {}
+        for r in rows:
+            b = int(r["bin"])
+            n = int(r["cal_n"] or 0)
+            if n > 0:
+                cal_by_bin[b] = {
+                    "n": n,
+                    "p_sum": float(r["cal_p_sum"] or 0.0),
+                    "y_sum": float(r["cal_y_sum"] or 0.0),
+                }
+            pit_by_bin[b] = int(r["pit_n"] or 0)
+
+        calibration: list[dict[str, Any]] = []
+        pit: list[dict[str, Any]] = []
+        for b in range(10):
+            lo = b / 10.0
+            hi = (b + 1) / 10.0
+            mid = (lo + hi) / 2.0
+            c = cal_by_bin.get(b)
+            calibration.append({
+                "bucket": round(mid, 3),
+                "bucket_low": round(lo, 3),
+                "bucket_high": round(hi, 3),
+                "predicted": round(c["p_sum"] / c["n"], 4) if c else None,
+                "observed":  round(c["y_sum"] / c["n"], 4) if c else None,
+                "n": c["n"] if c else 0,
+            })
+            pit.append({
+                "bucket": round(mid, 3),
+                "bucket_low": round(lo, 3),
+                "bucket_high": round(hi, 3),
+                "count": pit_by_bin.get(b, 0),
+            })
+        entry["calibration"] = calibration
+        entry["pit"] = pit
+        out.append(entry)
+
+    return {"days": days, "verticals": out}
+
+
 async def get_recent_swarm_debates(limit: int = 10) -> list[dict[str, Any]]:
     """Recent swarm-debate rows including the per-persona ``analyst_verdicts``
     and ``moderator_synthesis`` jsonb columns.

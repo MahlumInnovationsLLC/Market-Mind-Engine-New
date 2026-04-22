@@ -36,6 +36,7 @@ import type {
   GetRecentCyclesParams,
   GetRecentDebatesParams,
   GetRecentTradesParams,
+  GetVerticalPerformanceParams,
   HealthStatus,
   ListModelHealthAlertsParams,
   LiveExecuteState,
@@ -63,6 +64,7 @@ import type {
   TradeList,
   TradingCycleList,
   UserSubscription,
+  VerticalPerformance,
 } from "./api.schemas";
 
 import { customFetch } from "../custom-fetch";
@@ -715,6 +717,112 @@ export function useSearchAll<
   },
 ): UseQueryResult<TData, TError> & { queryKey: QueryKey } {
   const queryOptions = getSearchAllQueryOptions(params, options);
+
+  const query = useQuery(queryOptions) as UseQueryResult<TData, TError> & {
+    queryKey: QueryKey;
+  };
+
+  return { ...query, queryKey: queryOptions.queryKey };
+}
+
+/**
+ * @summary Per-vertical P&L, win rate, Brier, calibration, and PIT histogram
+ */
+export const getGetVerticalPerformanceUrl = (
+  params?: GetVerticalPerformanceParams,
+) => {
+  const normalizedParams = new URLSearchParams();
+
+  Object.entries(params || {}).forEach(([key, value]) => {
+    if (value !== undefined) {
+      normalizedParams.append(key, value === null ? "null" : value.toString());
+    }
+  });
+
+  const stringifiedParams = normalizedParams.toString();
+
+  return stringifiedParams.length > 0
+    ? `/api/dashboard/vertical-performance?${stringifiedParams}`
+    : `/api/dashboard/vertical-performance`;
+};
+
+export const getVerticalPerformance = async (
+  params?: GetVerticalPerformanceParams,
+  options?: RequestInit,
+): Promise<VerticalPerformance> => {
+  return customFetch<VerticalPerformance>(
+    getGetVerticalPerformanceUrl(params),
+    {
+      ...options,
+      method: "GET",
+    },
+  );
+};
+
+export const getGetVerticalPerformanceQueryKey = (
+  params?: GetVerticalPerformanceParams,
+) => {
+  return [
+    `/api/dashboard/vertical-performance`,
+    ...(params ? [params] : []),
+  ] as const;
+};
+
+export const getGetVerticalPerformanceQueryOptions = <
+  TData = Awaited<ReturnType<typeof getVerticalPerformance>>,
+  TError = ErrorType<unknown>,
+>(
+  params?: GetVerticalPerformanceParams,
+  options?: {
+    query?: UseQueryOptions<
+      Awaited<ReturnType<typeof getVerticalPerformance>>,
+      TError,
+      TData
+    >;
+    request?: SecondParameter<typeof customFetch>;
+  },
+) => {
+  const { query: queryOptions, request: requestOptions } = options ?? {};
+
+  const queryKey =
+    queryOptions?.queryKey ?? getGetVerticalPerformanceQueryKey(params);
+
+  const queryFn: QueryFunction<
+    Awaited<ReturnType<typeof getVerticalPerformance>>
+  > = ({ signal }) =>
+    getVerticalPerformance(params, { signal, ...requestOptions });
+
+  return { queryKey, queryFn, ...queryOptions } as UseQueryOptions<
+    Awaited<ReturnType<typeof getVerticalPerformance>>,
+    TError,
+    TData
+  > & { queryKey: QueryKey };
+};
+
+export type GetVerticalPerformanceQueryResult = NonNullable<
+  Awaited<ReturnType<typeof getVerticalPerformance>>
+>;
+export type GetVerticalPerformanceQueryError = ErrorType<unknown>;
+
+/**
+ * @summary Per-vertical P&L, win rate, Brier, calibration, and PIT histogram
+ */
+
+export function useGetVerticalPerformance<
+  TData = Awaited<ReturnType<typeof getVerticalPerformance>>,
+  TError = ErrorType<unknown>,
+>(
+  params?: GetVerticalPerformanceParams,
+  options?: {
+    query?: UseQueryOptions<
+      Awaited<ReturnType<typeof getVerticalPerformance>>,
+      TError,
+      TData
+    >;
+    request?: SecondParameter<typeof customFetch>;
+  },
+): UseQueryResult<TData, TError> & { queryKey: QueryKey } {
+  const queryOptions = getGetVerticalPerformanceQueryOptions(params, options);
 
   const query = useQuery(queryOptions) as UseQueryResult<TData, TError> & {
     queryKey: QueryKey;

@@ -1705,6 +1705,14 @@ async def dashboard_search(
     return await dashboard.search_global(q, limit)
 
 
+@app.get("/api/dashboard/vertical-performance")
+async def dashboard_vertical_performance(
+    days: int = 30, _: object = Depends(require_approved_user)
+) -> dict[str, object]:
+    days = max(1, min(365, int(days)))
+    return await dashboard.get_vertical_performance(days)
+
+
 @app.get("/api/dashboard/recent-cycles")
 async def dashboard_recent_cycles(
     limit: int = 10, _: object = Depends(require_approved_user)

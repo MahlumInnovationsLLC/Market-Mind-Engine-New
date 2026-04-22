@@ -115,6 +115,43 @@ export interface TradeList {
   items: Trade[];
 }
 
+export interface CalibrationBucket {
+  /** Midpoint of the bin (e.g. 0.05). */
+  bucket: number;
+  bucket_low: number;
+  bucket_high: number;
+  /** Mean predicted probability in the bin. */
+  predicted?: number | null;
+  /** Empirical outcome rate in the bin. */
+  observed?: number | null;
+  n: number;
+}
+
+export interface PitBucket {
+  bucket: number;
+  bucket_low: number;
+  bucket_high: number;
+  count: number;
+}
+
+export interface VerticalPerformanceEntry {
+  vertical: string;
+  trades: number;
+  wins: number;
+  losses: number;
+  win_rate?: number | null;
+  pnl: number;
+  /** Latest 24h Brier from calibration_snapshots. */
+  brier?: number | null;
+  calibration: CalibrationBucket[];
+  pit: PitBucket[];
+}
+
+export interface VerticalPerformance {
+  days: number;
+  verticals: VerticalPerformanceEntry[];
+}
+
 export interface SwarmPersona {
   persona?: string | null;
   league?: string | null;
@@ -698,6 +735,14 @@ export type SearchAllParams = {
    * @maximum 50
    */
   limit?: number;
+};
+
+export type GetVerticalPerformanceParams = {
+  /**
+   * @minimum 1
+   * @maximum 365
+   */
+  days?: number;
 };
 
 export type GetRecentCyclesParams = {

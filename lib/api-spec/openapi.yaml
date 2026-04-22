@@ -142,6 +142,22 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/SearchResults" }
 
+  /dashboard/vertical-performance:
+    get:
+      operationId: getVerticalPerformance
+      tags: [dashboard]
+      summary: Per-vertical P&L, win rate, Brier, calibration, and PIT histogram
+      parameters:
+        - in: query
+          name: days
+          schema: { type: integer, minimum: 1, maximum: 365, default: 30 }
+      responses:
+        "200":
+          description: Vertical performance bundle
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/VerticalPerformance" }
+
   /dashboard/recent-cycles:
     get:
       operationId: getRecentCycles
@@ -669,6 +685,53 @@ components:
           type: array
           items: { $ref: "#/components/schemas/Trade" }
       required: [items]
+
+    CalibrationBucket:
+      type: object
+      properties:
+        bucket: { type: number, description: "Midpoint of the bin (e.g. 0.05)." }
+        bucket_low: { type: number }
+        bucket_high: { type: number }
+        predicted: { type: number, nullable: true, description: "Mean predicted probability in the bin." }
+        observed: { type: number, nullable: true, description: "Empirical outcome rate in the bin." }
+        n: { type: integer }
+      required: [bucket, bucket_low, bucket_high, n]
+
+    PitBucket:
+      type: object
+      properties:
+        bucket: { type: number }
+        bucket_low: { type: number }
+        bucket_high: { type: number }
+        count: { type: integer }
+      required: [bucket, bucket_low, bucket_high, count]
+
+    VerticalPerformanceEntry:
+      type: object
+      properties:
+        vertical: { type: string }
+        trades: { type: integer }
+        wins: { type: integer }
+        losses: { type: integer }
+        win_rate: { type: number, nullable: true }
+        pnl: { type: number }
+        brier: { type: number, nullable: true, description: "Latest 24h Brier from calibration_snapshots." }
+        calibration:
+          type: array
+          items: { $ref: "#/components/schemas/CalibrationBucket" }
+        pit:
+          type: array
+          items: { $ref: "#/components/schemas/PitBucket" }
+      required: [vertical, trades, wins, losses, pnl, calibration, pit]
+
+    VerticalPerformance:
+      type: object
+      properties:
+        days: { type: integer }
+        verticals:
+          type: array
+          items: { $ref: "#/components/schemas/VerticalPerformanceEntry" }
+      required: [days, verticals]
 
     SwarmPersona:
       type: object

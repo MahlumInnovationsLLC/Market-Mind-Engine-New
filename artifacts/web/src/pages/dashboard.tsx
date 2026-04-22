@@ -16,6 +16,7 @@ import LiveExecuteToggle from "@/components/telemetry/live-execute-toggle";
 import ModelInventory from "@/components/telemetry/model-inventory";
 import ActiveModelBadge from "@/components/telemetry/active-model-badge";
 import SettlementPanel from "@/components/telemetry/settlement-panel";
+import VerticalPerformance from "@/components/telemetry/vertical-performance";
 import ModelHealthAlerts from "@/components/telemetry/model-health-alerts";
 import WsStatusIndicator from "@/components/ws-status-indicator";
 import { useWebSocket } from "@/hooks/use-websocket";
@@ -95,6 +96,10 @@ export default function Dashboard() {
           </button>
         </div>
       </header>
+
+      <div className="mb-6">
+        <VerticalPerformance />
+      </div>
 
       <main className="grid grid-cols-1 xl:grid-cols-12 gap-6">
         {/* Left Column - Health & Stats */}

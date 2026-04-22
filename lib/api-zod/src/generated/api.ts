@@ -276,6 +276,62 @@ export const SearchAllResponse = zod.object({
 });
 
 /**
+ * @summary Per-vertical P&L, win rate, Brier, calibration, and PIT histogram
+ */
+export const getVerticalPerformanceQueryDaysDefault = 30;
+export const getVerticalPerformanceQueryDaysMax = 365;
+
+export const GetVerticalPerformanceQueryParams = zod.object({
+  days: zod.coerce
+    .number()
+    .min(1)
+    .max(getVerticalPerformanceQueryDaysMax)
+    .default(getVerticalPerformanceQueryDaysDefault),
+});
+
+export const GetVerticalPerformanceResponse = zod.object({
+  days: zod.number(),
+  verticals: zod.array(
+    zod.object({
+      vertical: zod.string(),
+      trades: zod.number(),
+      wins: zod.number(),
+      losses: zod.number(),
+      win_rate: zod.number().nullish(),
+      pnl: zod.number(),
+      brier: zod
+        .number()
+        .nullish()
+        .describe("Latest 24h Brier from calibration_snapshots."),
+      calibration: zod.array(
+        zod.object({
+          bucket: zod.number().describe("Midpoint of the bin (e.g. 0.05)."),
+          bucket_low: zod.number(),
+          bucket_high: zod.number(),
+          predicted: zod
+            .number()
+            .nullish()
+            .describe("Mean predicted probability in the bin."),
+          observed: zod
+            .number()
+            .nullish()
+            .describe("Empirical outcome rate in the bin."),
+          n: zod.number(),
+        }),
+      ),
+      pit: zod.array(
+        zod.object({
+          bucket: zod.number(),
+          bucket_low: zod.number(),
+          bucket_high: zod.number(),
+          count: zod.number(),
+        }),
+      ),
+    }),
+  ),
+});
+
+/**
  * @summary Most recent trading-loop cycles
  */
 export const getRecentCyclesQueryLimitDefault = 10;
