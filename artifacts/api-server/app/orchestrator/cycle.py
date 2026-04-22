@@ -10,6 +10,8 @@ from typing import Any
 
 from .. import db, margin_regressor, predictor, verticals as vertical_registry
 from ..commodities import predictor as commodities_predictor
+from ..tech_ai import predictor as tech_ai_predictor
+from ..tech_ai.tickers import InvalidTechAITicker, parse_tech_ai_ticker
 from ..commodities.tickers import (
     InvalidCommodityTicker,
     parse_commodity_ticker,
@@ -491,6 +493,39 @@ async def _predict_for_commodities_binary(cand: dict[str, Any]) -> dict[str, Any
     return payload
 
 
+async def _predict_for_tech_ai_binary(cand: dict[str, Any]) -> dict[str, Any] | None:
+    """Route a tech-AI candidate through `app.tech_ai.predictor`.
+
+    Mirrors the commodities/crypto helpers — parse the Kalshi ticker
+    into a `TechAITicker`, run the Bayesian evidence model, fold the
+    calibrated YES probability into the standard cycle telemetry
+    shape.  Failure modes (parse error, sick evidence cache) degrade
+    to swarm-only signals exactly like every other vertical.
+    """
+    market_id = _resolve_market_id(cand) or cand.get("kalshi_market_id")
+    if not market_id:
+        return None
+    try:
+        ticker = parse_tech_ai_ticker(str(market_id))
+    except InvalidTechAITicker as e:
+        log.debug("tech-ai ticker parse failed for %s: %s", market_id, e)
+        return None
+    try:
+        pred = await tech_ai_predictor.predict_tech_ai_binary(
+            ticker, league=cand.get("league") or "TECH_AI"
+        )
+    except tech_ai_predictor.TechAIPredictionError as e:
+        log.debug("tech-ai predict failed for %s: %s", market_id, e)
+        return None
+    except Exception as e:  # pragma: no cover — defensive
+        log.warning("tech-ai predict crashed for %s: %s", market_id, e)
+        return None
+    payload = pred.as_dict()
+    payload["feature_inputs"] = payload.get("raw", {}).get("features", {})
+    payload["feature_count"] = payload.get("raw", {}).get("feature_count")
+    return payload
+
+
 async def _predict_for_candidate(
     cand: dict[str, Any],
     *,
@@ -523,6 +558,8 @@ async def _predict_for_candidate(
         return await _predict_for_crypto_binary(cand)
     if spec is not None and spec.predictor_hook == "commodities_binary":
         return await _predict_for_commodities_binary(cand)
+    if spec is not None and spec.predictor_hook == "tech_ai_evidence":
+        return await _predict_for_tech_ai_binary(cand)
 
     # N-way tournament markets (task #197) — leagues that flag
     # `LeagueConfig.n_way_market=True` (ATP / WTA / F1 / PGA) and ship

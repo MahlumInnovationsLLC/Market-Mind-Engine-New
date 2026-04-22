@@ -337,9 +337,23 @@ async def gate_kelly_fraction(ctx: RiskContext) -> GateResult:
     from .. import verticals as _verticals
     spec = _verticals.get_spec(ctx.vertical) if ctx.vertical else None
     spec_multiplier = spec.kelly_multiplier if spec is not None else 1.0
-    kelly_multiplier = float(
-        ctx.operator_overrides.get("kelly_multiplier", spec_multiplier)
+    # Per-vertical override: the auto-promote pipeline (e.g. tech-ai)
+    # writes `kelly_multiplier_<vertical>` into operator_overrides /
+    # system_settings so a single vertical can be bumped past the
+    # spec default without touching the others.  Hyphens in vertical
+    # names are normalised to underscores for the lookup key.
+    vertical_key: str | None = None
+    if ctx.vertical:
+        vertical_key = f"kelly_multiplier_{ctx.vertical.replace('-', '_')}"
+    per_vertical_override = (
+        ctx.operator_overrides.get(vertical_key) if vertical_key else None
     )
+    if per_vertical_override is not None:
+        kelly_multiplier = float(per_vertical_override)
+    else:
+        kelly_multiplier = float(
+            ctx.operator_overrides.get("kelly_multiplier", spec_multiplier)
+        )
     bankroll = ctx.bankroll_usd or 0.0
     max_notional = bankroll * kelly * fraction_cap * kelly_multiplier
     if ctx.intended_notional_usd > max_notional and bankroll > 0:

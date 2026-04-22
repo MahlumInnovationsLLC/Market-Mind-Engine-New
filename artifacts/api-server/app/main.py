@@ -65,6 +65,7 @@ from .feeds.sportradar import (
 from .feeds.weather import register_weather_feeds
 from .feeds.crypto import register_crypto_feeds
 from .feeds.commodities import register_commodities_feeds
+from .feeds.tech_evidence import register_tech_evidence_feeds
 from .feeds.unusual_whales import register_unusual_whales_feeds
 from .feeds.public_betting import register_public_betting_feeds
 from .features import drift as feature_drift, registry as feature_registry
@@ -151,6 +152,7 @@ async def lifespan(_: FastAPI):
         register_weather_feeds()
         register_crypto_feeds()
         register_commodities_feeds()
+        register_tech_evidence_feeds()
         try:
             from .feeds import weather_climatology as _wclim
 
@@ -1060,6 +1062,45 @@ async def admin_get_audit_log(
 ) -> dict[str, object]:
     limit = max(1, min(500, int(limit)))
     return {"items": await admin_module.list_audit_log(limit)}
+
+
+# ---------------------------------------------------------------------------
+# Tech / AI Kelly auto-promote (task #199)
+# ---------------------------------------------------------------------------
+
+
+@app.get("/api/admin/tech-ai/promotion-status")
+async def admin_tech_ai_promotion_status(
+    actor: AuthedUser = Depends(require_admin),
+) -> dict[str, object]:
+    """Return the current tech-AI Kelly promotion eligibility snapshot."""
+    from .tech_ai import promotion as _tech_ai_promotion
+    status = await _tech_ai_promotion.evaluate_promotion()
+    return status.as_dict()
+
+
+@app.post("/api/admin/tech-ai/promote-kelly")
+async def admin_tech_ai_promote_kelly(
+    actor: AuthedUser = Depends(require_admin),
+) -> dict[str, object]:
+    """Promote the tech-AI Kelly multiplier from 0.06 to 0.10.
+
+    Refuses unless the latest evaluation reports ``eligible=True``
+    (>= 30 settled trades and rolling Brier < 0.20).  When eligible,
+    writes ``risk.kelly_multiplier_tech_ai = 0.10`` into
+    ``system_settings`` and records an audit row.
+    """
+    from .tech_ai import promotion as _tech_ai_promotion
+    status = await _tech_ai_promotion.promote(
+        actor_user_id=actor.user_id,
+        actor_email=getattr(actor, "email", None),
+    )
+    if not status.eligible and status.current_multiplier < _tech_ai_promotion.PROMOTED_MULTIPLIER:
+        raise HTTPException(status_code=409, detail={
+            "error": "not_eligible",
+            "status": status.as_dict(),
+        })
+    return status.as_dict()
 
 
 # ---------------------------------------------------------------------------
