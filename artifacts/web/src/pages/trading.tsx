@@ -1,11 +1,11 @@
-import { useEffect, useMemo, useState } from "react";
-import { useLocation, useSearch } from "wouter";
+import { useMemo } from "react";
 import {
   getGetMyAccessQueryKey,
   useGetMyAccess,
 } from "@workspace/api-client-react";
 import { GlassCard } from "@/components/ui/glass-card";
 import { SectionHeader } from "@/components/ui/section-header";
+import { TabBar, useTabState, type TabDef } from "@/components/shell/tab-bar";
 import LiveExecuteToggle from "@/components/telemetry/live-execute-toggle";
 import EmergencyStop from "@/components/telemetry/emergency-stop";
 import RecentTrades from "@/components/telemetry/recent-trades";
@@ -14,37 +14,16 @@ import ActivePositions from "@/components/dashboard/active-positions";
 import TradeStatsPanel from "@/components/dashboard/trade-stats-panel";
 import PnlSparkline from "@/components/dashboard/pnl-sparkline";
 
-type TabKey = "live" | "feed";
-const TABS: { key: TabKey; label: string; subtitle: string }[] = [
+const TAB_KEYS = ["live", "feed"] as const;
+type TabKey = (typeof TAB_KEYS)[number];
+
+const TABS: TabDef<TabKey>[] = [
   { key: "live", label: "Live", subtitle: "Command center · positions · cycles" },
   { key: "feed", label: "Feed", subtitle: "Chronological execution stream" },
 ];
 
-function parseTab(qs: string): TabKey {
-  const params = new URLSearchParams(qs);
-  const t = params.get("tab");
-  return t === "feed" ? "feed" : "live";
-}
-
 export default function TradingPage() {
-  const search = useSearch();
-  const [, setLocation] = useLocation();
-  const [tab, setTab] = useState<TabKey>(() => parseTab(search));
-
-  // Sync state ← URL on back/forward navigation.
-  useEffect(() => {
-    const next = parseTab(search);
-    setTab((prev) => (prev === next ? prev : next));
-  }, [search]);
-
-  const onSelectTab = (next: TabKey) => {
-    setTab(next);
-    const params = new URLSearchParams(search);
-    if (next === "live") params.delete("tab");
-    else params.set("tab", next);
-    const q = params.toString();
-    setLocation(`/trading${q ? `?${q}` : ""}`, { replace: false });
-  };
+  const [tab, setTab] = useTabState<TabKey>(TAB_KEYS, "live", "/trading");
 
   const { data: access } = useGetMyAccess({
     query: { queryKey: getGetMyAccessQueryKey(), staleTime: 30_000 },
@@ -68,33 +47,13 @@ export default function TradingPage() {
           </h1>
           <p className="mt-1 text-xs text-muted-foreground">{subtitle}</p>
         </div>
-        <div
-          className="flex gap-1 self-start rounded-md border border-border bg-card p-1"
-          role="tablist"
-          aria-label="Trading view"
-          data-testid="tabs-trading"
-        >
-          {TABS.map((t) => {
-            const active = t.key === tab;
-            return (
-              <button
-                key={t.key}
-                type="button"
-                role="tab"
-                aria-selected={active}
-                onClick={() => onSelectTab(t.key)}
-                className={`rounded px-4 py-1.5 text-xs uppercase tracking-widest transition-colors ${
-                  active
-                    ? "bg-primary/10 text-primary"
-                    : "text-muted-foreground hover:text-foreground"
-                }`}
-                data-testid={`tab-trading-${t.key}`}
-              >
-                {t.label}
-              </button>
-            );
-          })}
-        </div>
+        <TabBar
+          tabs={TABS}
+          active={tab}
+          onSelect={setTab}
+          ariaLabel="Trading view"
+          testIdPrefix="trading"
+        />
       </header>
 
       {tab === "live" ? (
