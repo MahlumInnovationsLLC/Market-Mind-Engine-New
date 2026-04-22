@@ -11,8 +11,8 @@ const buttonVariants = cva(
     variants: {
       variant: {
         default:
-           // @replit: no hover, and add primary border
-           "bg-primary text-primary-foreground border border-primary-border shadow-[0_0_18px_-6px_hsl(var(--accent-cyan)/0.65)]",
+           // @replit: subtle glow on hover/focus only — primary stays calm at rest
+           "bg-primary text-primary-foreground border border-primary-border transition-shadow hover:shadow-[0_0_22px_-4px_hsl(var(--accent-cyan)/0.7)] focus-visible:shadow-[0_0_22px_-4px_hsl(var(--accent-cyan)/0.7)]",
         destructive:
           "bg-destructive text-destructive-foreground shadow-sm border-destructive-border",
         success:

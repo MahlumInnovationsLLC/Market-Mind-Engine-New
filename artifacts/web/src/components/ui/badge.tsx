@@ -24,10 +24,18 @@ const badgeVariants = cva(
         outline: "text-foreground border [border-color:var(--badge-outline)]",
         success:
           "border-transparent bg-accent-green/15 text-accent-green shadow-xs",
+        profit:
+          "border-transparent bg-accent-green/15 text-accent-green shadow-xs",
+        loss:
+          "border-transparent bg-accent-red/15 text-accent-red shadow-xs",
         warning:
+          "border-transparent bg-accent-amber/15 text-accent-amber shadow-xs",
+        warn:
           "border-transparent bg-accent-amber/15 text-accent-amber shadow-xs",
         info:
           "border-transparent bg-accent-cyan/15 text-accent-cyan shadow-xs",
+        ai:
+          "border-transparent bg-accent-purple/15 text-accent-purple shadow-xs",
         purple:
           "border-transparent bg-accent-purple/15 text-accent-purple shadow-xs",
         live:
