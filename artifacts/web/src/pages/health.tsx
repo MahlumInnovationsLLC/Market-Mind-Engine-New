@@ -114,6 +114,12 @@ function formatAge(seconds: number): string {
   return rh > 0 ? `${d}d ${rh}h` : `${d}d`;
 }
 
+function formatSnoozeLabel(minutes: number): string {
+  if (minutes < 60) return `${minutes}m`;
+  if (minutes < 1440) return `${Math.round(minutes / 60)}h`;
+  return `${Math.round(minutes / 1440)}d`;
+}
+
 function formatUptime(seconds: number): string {
   const d = Math.floor(seconds / 86400);
   const h = Math.floor((seconds % 86400) / 3600);
@@ -131,6 +137,7 @@ export function HealthPanel() {
   const [modelAlerts, setModelAlerts] = useState<ModelAlertsResponse | null>(null);
   const [alertBusy, setAlertBusy] = useState<number | null>(null);
   const [alertError, setAlertError] = useState<string | null>(null);
+  const [snoozeMinutes, setSnoozeMinutes] = useState<number>(60);
   const [error, setError] = useState<string | null>(null);
   const [testing, setTesting] = useState<AlertType | null>(null);
   const [testResult, setTestResult] = useState<unknown>(null);
@@ -311,9 +318,20 @@ export function HealthPanel() {
                 ({modelAlerts?.count ?? 0})
               </span>
             </h2>
-            <span className="text-[10px] text-muted-foreground/70 uppercase tracking-widest">
-              ack to clear · snooze hides for 1h
-            </span>
+            <div className="flex items-center gap-2 text-[10px] text-muted-foreground/70 uppercase tracking-widest">
+              <span>ack to clear · snooze hides for</span>
+              <select
+                value={snoozeMinutes}
+                onChange={(e) => setSnoozeMinutes(Number(e.target.value))}
+                data-testid="select-snooze-duration"
+                className="border border-border bg-card px-1 py-0.5 uppercase tracking-widest text-[10px]"
+              >
+                <option value={15}>15m</option>
+                <option value={60}>1h</option>
+                <option value={240}>4h</option>
+                <option value={1440}>24h</option>
+              </select>
+            </div>
           </div>
           {alertError && (
             <div className="border border-destructive bg-destructive/10 text-destructive p-2 text-xs">
@@ -381,11 +399,14 @@ export function HealthPanel() {
                             {alertBusy === a.id ? "…" : "Ack"}
                           </button>
                           <button
-                            onClick={() => ackAlert(a.id, 60)}
+                            onClick={() => ackAlert(a.id, snoozeMinutes)}
                             disabled={alertBusy !== null}
+                            data-testid={`button-snooze-${a.id}`}
                             className="border border-border bg-card hover:bg-muted px-2 py-1 uppercase tracking-widest text-[10px] disabled:opacity-50"
                           >
-                            {alertBusy === a.id ? "…" : "Snooze 1h"}
+                            {alertBusy === a.id
+                              ? "…"
+                              : `Snooze ${formatSnoozeLabel(snoozeMinutes)}`}
                           </button>
                         </div>
                       </td>
