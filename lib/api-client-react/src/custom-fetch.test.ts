@@ -129,6 +129,34 @@ describe("customFetch silent token refresh", () => {
     expect(onUnauthorized).toHaveBeenCalledTimes(1);
   });
 
+  it("attaches a fresh x-request-id header to every outbound request", async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse(200, { ok: true }));
+    fetchMock.mockResolvedValueOnce(jsonResponse(200, { ok: true }));
+
+    await customFetch("https://api.test/a");
+    await customFetch("https://api.test/b");
+
+    const first = new Headers(fetchMock.mock.calls[0][1].headers);
+    const second = new Headers(fetchMock.mock.calls[1][1].headers);
+
+    const a = first.get("x-request-id");
+    const b = second.get("x-request-id");
+    expect(a).toMatch(/^[0-9a-f]{32}$/);
+    expect(b).toMatch(/^[0-9a-f]{32}$/);
+    expect(a).not.toBe(b);
+  });
+
+  it("preserves a caller-supplied x-request-id header instead of overwriting it", async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse(200, { ok: true }));
+
+    await customFetch("https://api.test/r", {
+      headers: { "x-request-id": "caller-supplied-rid" },
+    });
+
+    const sent = new Headers(fetchMock.mock.calls[0][1].headers);
+    expect(sent.get("x-request-id")).toBe("caller-supplied-rid");
+  });
+
   it("never retries more than once even if the refreshed request also returns 401", async () => {
     const getter = vi.fn(async () => "token");
     setAuthTokenGetter(getter);

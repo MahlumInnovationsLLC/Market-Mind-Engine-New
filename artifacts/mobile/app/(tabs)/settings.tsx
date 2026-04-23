@@ -201,6 +201,9 @@ export default function SettingsScreen() {
             {`Could not load trading mode (HTTP ${
               (liveExec.error as ApiError | undefined)?.status ?? "?"
             })`}
+            {(liveExec.error as ApiError | undefined)?.requestId
+              ? `\nrequest_id=${(liveExec.error as ApiError).requestId}`
+              : ""}
           </Text>
         ) : !live?.can_toggle ? (
           <Text style={[styles.muted, { color: colors.mutedForeground }]}>
@@ -262,6 +265,9 @@ export default function SettingsScreen() {
             {toggleErr.status === 403
               ? "Forbidden — Elite tier required"
               : `Toggle failed (HTTP ${toggleErr.status ?? "?"})`}
+            {toggleErr.requestId
+              ? `\nrequest_id=${toggleErr.requestId}`
+              : ""}
           </Text>
         ) : null}
       </Card>
@@ -374,6 +380,7 @@ export default function SettingsScreen() {
         {stopErr ? (
           <Text style={[styles.muted, { color: colors.destructive }]}>
             {`Emergency stop failed (HTTP ${stopErr.status ?? "?"})`}
+            {stopErr.requestId ? `\nrequest_id=${stopErr.requestId}` : ""}
           </Text>
         ) : null}
         {stopResult ? (
