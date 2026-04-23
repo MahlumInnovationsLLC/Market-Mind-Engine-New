@@ -71,6 +71,7 @@ from .feeds.tech_evidence import register_tech_evidence_feeds
 from .feeds.election_polls import register_election_polls_feeds
 from .feeds.unusual_whales import register_unusual_whales_feeds
 from .feeds.public_betting import register_public_betting_feeds
+from .feeds.outlier_bet import register_outlier_bet_feed
 from .features import drift as feature_drift, registry as feature_registry
 from .orchestrator import pipeline_event_hub, run_cycle, scheduler as orchestrator_scheduler
 from .settlement import (
@@ -193,6 +194,10 @@ async def lifespan(_: FastAPI):
             register_public_betting_feeds()
         except Exception as e:
             log.warning("public_betting feed registration failed: %s", e)
+        try:
+            register_outlier_bet_feed()
+        except Exception as e:
+            log.warning("outlier_bet feed registration failed: %s", e)
         await feed_scheduler.start()
     except Exception as e:
         log.error("feed scheduler start failed: %s", e)

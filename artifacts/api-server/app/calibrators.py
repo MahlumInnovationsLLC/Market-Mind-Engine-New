@@ -303,6 +303,7 @@ async def load_all() -> CalibratorsState:
                    AND sub_category LIKE 'per_league:%'
                    AND calibrator_state IS NOT NULL
                    AND calibrator_state::text <> '{}'
+                   AND COALESCE(drift_status->>'status', '') <> 'rolled_back'
                  ORDER BY sub_category, created_at DESC
                 """
             )
