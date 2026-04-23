@@ -1,10 +1,16 @@
 import { Feather } from "@expo/vector-icons";
 import { useQuery } from "@tanstack/react-query";
+import { useRouter } from "expo-router";
 import React from "react";
 import { Pressable, StyleSheet, Text, View } from "react-native";
 
+import {
+  useListModelHealthAlerts,
+  getListModelHealthAlertsQueryKey,
+} from "@workspace/api-client-react";
 import { useColors } from "@/hooks/useColors";
 import { ApiError, apiFetch } from "@/lib/api";
+import { usePipelineSocket } from "@/components/realtime/WebSocketProvider";
 
 type LiveExecuteState = {
   enabled: boolean;
@@ -25,8 +31,20 @@ type Overview = {
  *  - Connection dot — green when the dashboard query is succeeding,
  *    red when it's failing, amber while reconnecting
  */
+const ALERTS_PARAMS = { ack: false, limit: 50 } as const;
+
 export function HeaderRight() {
   const c = useColors();
+  const router = useRouter();
+  const ws = usePipelineSocket();
+
+  const alertsQuery = useListModelHealthAlerts(ALERTS_PARAMS, {
+    query: {
+      queryKey: getListModelHealthAlertsQueryKey(ALERTS_PARAMS),
+      staleTime: 30_000,
+      refetchInterval: 60_000,
+    },
+  });
 
   const live = useQuery({
     queryKey: ["orchestrator", "live-execute"],
@@ -62,15 +80,20 @@ export function HeaderRight() {
         : c.mutedForeground;
   const modeBg = mode === "LIVE" ? c.destructive + "22" : "transparent";
 
-  // Connection dot
+  // Connection dot — prefer the shared pipeline WS state when available
+  // since that's the realtime feed everything else hangs off; fall back
+  // to the dashboard query as a slow REST probe.
   const connStatus: "ok" | "warn" | "err" = (() => {
+    if (ws.status === "open") return "ok";
+    if (ws.status === "connecting" || ws.status === "idle") return "warn";
+    if (ws.status === "unauthorized") return "warn";
     if (overview.isError) {
       const s = (overview.error as ApiError | undefined)?.status;
       if (s === 401 || s === 403) return "warn";
       return "err";
     }
     if (overview.isLoading) return "warn";
-    return "ok";
+    return "err";
   })();
   const dotColor =
     connStatus === "ok"
@@ -79,9 +102,10 @@ export function HeaderRight() {
         ? c.warning
         : c.destructive;
 
-  // Alert bell — backend alerts feed not yet implemented; show a static
-  // bell with no badge for now (wired up by task #236).
-  const unreadAlerts = 0;
+  // Alert bell badge — wired to the same /api/health/model-alerts feed
+  // the web shell uses. Tapping the bell jumps to the settings screen
+  // where the operator can review + acknowledge them.
+  const unreadAlerts = alertsQuery.data?.items?.length ?? 0;
 
   return (
     <View style={styles.row}>
@@ -99,8 +123,11 @@ export function HeaderRight() {
       </View>
 
       <Pressable
-        accessibilityLabel="Alerts"
+        accessibilityLabel={
+          unreadAlerts > 0 ? `${unreadAlerts} unread alerts` : "Alerts"
+        }
         testID="header-alert-bell"
+        onPress={() => router.push("/(tabs)/settings" as never)}
         style={({ pressed }) => [
           styles.iconBtn,
           { borderColor: c.border, opacity: pressed ? 0.6 : 1 },

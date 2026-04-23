@@ -17,7 +17,11 @@ import { KeyboardProvider } from "react-native-keyboard-controller";
 import { SafeAreaProvider } from "react-native-safe-area-context";
 
 import { ErrorBoundary } from "@/components/ErrorBoundary";
+import { ToastHost } from "@/components/realtime/Toaster";
+import { WebSocketProvider } from "@/components/realtime/WebSocketProvider";
+import { RealtimeNotifications } from "@/components/realtime/RealtimeNotifications";
 import { setTokenGetter } from "@/lib/api";
+import { setWsTokenGetter } from "@/lib/use-websocket";
 import {
   deepLinkFromNotificationData,
   registerPushTokenForSignedInUser,
@@ -43,13 +47,17 @@ function ClerkBridges() {
 
   useEffect(() => {
     setTokenGetter(async () => (await getToken()) ?? null);
+    setWsTokenGetter(async () => (await getToken()) ?? null);
     ensureRevenueCat(userId ?? null).catch(() => undefined);
     if (isSignedIn) {
       registerPushTokenForSignedInUser().catch(() => undefined);
     } else {
       unregisterPushTokenForSignedOutUser().catch(() => undefined);
     }
-    return () => setTokenGetter(null);
+    return () => {
+      setTokenGetter(null);
+      setWsTokenGetter(null);
+    };
   }, [isSignedIn, getToken, userId]);
 
   useEffect(() => {
@@ -71,6 +79,22 @@ function ClerkBridges() {
   }, [router]);
 
   return null;
+}
+
+/**
+ * Inner tree that runs *inside* `ClerkLoaded` so it can read the auth
+ * state to gate the realtime layer (WS connection + alert poll). Both
+ * are no-ops until the user is signed in.
+ */
+function RealtimeTree({ children }: { children: React.ReactNode }) {
+  const { isSignedIn } = useAuth();
+  return (
+    <WebSocketProvider enabled={!!isSignedIn}>
+      <RealtimeNotifications enabled={!!isSignedIn} />
+      {children}
+      <ToastHost />
+    </WebSocketProvider>
+  );
 }
 
 export default function RootLayout() {
@@ -106,7 +130,9 @@ export default function RootLayout() {
               <GestureHandlerRootView style={{ flex: 1 }}>
                 <KeyboardProvider>
                   <ClerkBridges />
-                  <Slot />
+                  <RealtimeTree>
+                    <Slot />
+                  </RealtimeTree>
                 </KeyboardProvider>
               </GestureHandlerRootView>
             </QueryClientProvider>

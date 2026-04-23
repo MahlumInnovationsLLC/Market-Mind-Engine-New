@@ -7,6 +7,7 @@ import {
   getGetVerticalsOverviewQueryKey,
 } from "@workspace/api-client-react";
 import { useWebSocket } from "@/hooks/use-websocket";
+import { usePipelineSubscription } from "@/components/realtime/websocket-provider";
 import { useVerticalFilter } from "@/hooks/use-selected-verticals";
 
 function formatNumber(num: number | null | undefined, isCurrency: boolean = false): string {
@@ -51,7 +52,7 @@ export default function TopCounters() {
     },
     [invalidate],
   );
-  useWebSocket({ path: "/api/ws/pipeline", onMessage: onPipelineEvent, bufferSize: 50 });
+  usePipelineSubscription(onPipelineEvent);
   useWebSocket({ path: "/api/ws/settlement", onMessage: onSettlementEvent, bufferSize: 50 });
 
   if (isLoading) {

@@ -6,7 +6,10 @@ import {
 } from "@workspace/api-client-react";
 import { GlassCard } from "@/components/ui/glass-card";
 import { SectionHeader } from "@/components/ui/section-header";
-import { useWebSocket } from "@/hooks/use-websocket";
+import {
+  usePipelineSocket,
+  usePipelineSubscription,
+} from "@/components/realtime/websocket-provider";
 
 function fmtTime(s: string | null | undefined): string {
   if (!s) return "—";
@@ -64,11 +67,8 @@ export default function PipelineTracker() {
     [queryClient],
   );
 
-  const ws = useWebSocket({
-    path: "/api/ws/pipeline",
-    onMessage: onEvent,
-    bufferSize: 50,
-  });
+  usePipelineSubscription(onEvent);
+  const ws = usePipelineSocket();
   const statusClass = STATUS_COLOR[ws.status] ?? "text-muted-foreground";
   const cycles = data?.items ?? [];
   const latest = cycles[0];

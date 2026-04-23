@@ -2,6 +2,10 @@ import { useCallback } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { useGetRecentTrades, getGetRecentTradesQueryKey } from "@workspace/api-client-react";
 import { useWebSocket } from "@/hooks/use-websocket";
+import {
+  usePipelineSocket,
+  usePipelineSubscription,
+} from "@/components/realtime/websocket-provider";
 import { useVerticalFilter } from "@/hooks/use-selected-verticals";
 
 function formatMoney(num: number | null | undefined): string {
@@ -39,7 +43,8 @@ export default function RecentTrades() {
     },
     [queryClient],
   );
-  const pipeline = useWebSocket({ path: "/api/ws/pipeline", onMessage: onPipelineEvent, bufferSize: 50 });
+  usePipelineSubscription(onPipelineEvent);
+  const pipeline = usePipelineSocket();
   useWebSocket({ path: "/api/ws/settlement", onMessage: onSettlementEvent, bufferSize: 50 });
   const { matches } = useVerticalFilter();
 

@@ -7,6 +7,7 @@ import React from "react";
 import { Platform, StyleSheet, View, useColorScheme } from "react-native";
 
 import { HeaderRight } from "@/components/HeaderRight";
+import { DegradedModeBanner } from "@/components/realtime/DegradedModeBanner";
 import { useColors } from "@/hooks/useColors";
 import { apiFetch } from "@/lib/api";
 
@@ -29,6 +30,9 @@ export default function TabsLayout() {
   if (!isSignedIn) return <Redirect href="/(auth)/sign-in" />;
 
   return (
+    <View style={{ flex: 1, backgroundColor: colors.background }}>
+      <DegradedModeBanner />
+      <View style={{ flex: 1 }}>
     <Tabs
       screenOptions={{
         tabBarActiveTintColor: colors.primary,
@@ -160,5 +164,7 @@ export default function TabsLayout() {
         }}
       />
     </Tabs>
+      </View>
+    </View>
   );
 }

@@ -1,14 +1,13 @@
 import { useEffect, useMemo, useState } from "react";
-import { Link, useLocation } from "wouter";
+import { useLocation } from "wouter";
 import { useAuth, useClerk, useUser } from "@clerk/react";
 import { useQuery } from "@tanstack/react-query";
-import { Bell, LogOut, Moon, Search, Sun } from "lucide-react";
+import { LogOut, Moon, Search, Sun } from "lucide-react";
 import {
   useHealthFull,
   getHealthFullQueryKey,
-  useListModelHealthAlerts,
-  getListModelHealthAlertsQueryKey,
 } from "@workspace/api-client-react";
+import { AlertsBell } from "@/components/realtime/alerts-bell";
 import { apiFetch } from "@/lib/api";
 import { SidebarTrigger } from "@/components/ui/sidebar";
 import { Separator } from "@/components/ui/separator";
@@ -97,16 +96,6 @@ export function ShellHeader({ operatorEmail: emailOverride }: ShellHeaderProps) 
   const health = useHealthFull({
     query: { refetchInterval: 30_000, queryKey: getHealthFullQueryKey() },
   });
-  const alertsParams = { ack: false, limit: 50 };
-  const alerts = useListModelHealthAlerts(alertsParams, {
-    query: {
-      queryKey: getListModelHealthAlertsQueryKey(alertsParams),
-      staleTime: 60_000,
-      refetchInterval: 60_000,
-    },
-  });
-  const unreadAlerts = (alerts.data?.items ?? []).length;
-
   // Runtime settings drives the kill-switch / dry-run portion of the
   // trading-mode pill. The spec asks for PAPER / LIVE / DRY-RUN derived
   // from runtime settings; the current API exposes `trading_halted` (kill
@@ -227,22 +216,7 @@ export function ShellHeader({ operatorEmail: emailOverride }: ShellHeaderProps) 
           )}
         </button>
 
-        <Link
-          href="/settings/notifications"
-          className="relative p-2 text-muted-foreground hover:text-primary rounded-sm"
-          data-testid="button-shell-alerts"
-          title={unreadAlerts > 0 ? `${unreadAlerts} unread alerts` : "Alerts"}
-        >
-          <Bell className="w-4 h-4" />
-          {unreadAlerts > 0 ? (
-            <span
-              className="absolute top-1 right-1 min-w-[14px] h-[14px] px-0.5 rounded-full bg-loss text-[9px] text-loss-foreground font-bold flex items-center justify-center"
-              data-testid="badge-shell-alerts"
-            >
-              {unreadAlerts > 99 ? "99+" : unreadAlerts}
-            </span>
-          ) : null}
-        </Link>
+        <AlertsBell />
 
         <DropdownMenu>
           <DropdownMenuTrigger asChild>

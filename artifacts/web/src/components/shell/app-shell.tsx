@@ -1,7 +1,11 @@
 import type { ReactNode } from "react";
 import { SidebarInset, SidebarProvider } from "@/components/ui/sidebar";
 import { Toaster } from "@/components/ui/toaster";
-import { useWebSocket } from "@/hooks/use-websocket";
+import {
+  WebSocketProvider,
+  usePipelineSocket,
+} from "@/components/realtime/websocket-provider";
+import { RealtimeNotifications } from "@/components/realtime/realtime-notifications";
 import { ShellSidebar } from "./sidebar";
 import { ShellHeader } from "./header";
 import { DegradedModeBanner } from "./degraded-mode-banner";
@@ -13,12 +17,14 @@ interface AppShellProps {
   children: ReactNode;
 }
 
-export function AppShell({ isAdmin, operatorEmail, children }: AppShellProps) {
-  // Single shell-wide pipeline subscription drives the brand-block
-  // connection dot and lets pages share its status via context if
-  // needed later. Buffer is tiny — pages keep their own WS hooks
-  // for full event streams.
-  const ws = useWebSocket({ path: "/api/ws/pipeline", bufferSize: 5 });
+/**
+ * Inner shell that runs *inside* the WebSocketProvider so it can
+ * pull the shared pipeline status into the sidebar dot. All page
+ * subscribers (pipeline tracker, top-counters, etc.) read from the
+ * same context.
+ */
+function AppShellInner({ isAdmin, operatorEmail, children }: AppShellProps) {
+  const ws = usePipelineSocket();
 
   return (
     <SidebarProvider
@@ -36,10 +42,21 @@ export function AppShell({ isAdmin, operatorEmail, children }: AppShellProps) {
         >
           {children}
         </main>
+        {/* Realtime notifications bridge — fires toasts for new alerts and
+            live trade fills off the shared pipeline socket. */}
+        <RealtimeNotifications />
         {/* Toaster lives inside the shell so toasts render above all
             authed surfaces and unmount cleanly when the user signs out. */}
         <Toaster />
       </SidebarInset>
     </SidebarProvider>
+  );
+}
+
+export function AppShell(props: AppShellProps) {
+  return (
+    <WebSocketProvider>
+      <AppShellInner {...props} />
+    </WebSocketProvider>
   );
 }
