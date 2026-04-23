@@ -376,6 +376,17 @@ async def lifespan(_: FastAPI):
     except Exception as e:
         log.warning("per-league calibrator bootstrap failed: %s", e)
 
+    # Per-vertical retrained calibrator listener (task #88).  The
+    # online-learning worker writes fresh isotonic snapshots tagged
+    # `drift_status.status='retrained'`; this listener invalidates
+    # the in-process cache on every `retrain_complete` event so the
+    # next trading cycle picks up the freshly-promoted calibrator.
+    try:
+        from .models import live_calibrator as _live_calibrator
+        _live_calibrator.start_invalidation_listener()
+    except Exception as e:
+        log.warning("live calibrator listener start failed: %s", e)
+
     # Restore the operator-set active-predictor override (if any) so the
     # next /predict call honours the last "make active" choice without
     # waiting for an admin POST. Best-effort: a missing setting just

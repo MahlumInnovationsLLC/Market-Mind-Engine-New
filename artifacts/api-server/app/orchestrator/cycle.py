@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from .. import db, margin_regressor, predictor, verticals as vertical_registry
+from ..models import live_calibrator
 from ..commodities import predictor as commodities_predictor
 from ..tech_ai import predictor as tech_ai_predictor
 from ..tech_ai.tickers import InvalidTechAITicker, parse_tech_ai_ticker
@@ -1245,8 +1246,34 @@ async def run_cycle(vertical: str = "sports") -> CycleResult:
         effective_consensus = consensus
         if effective_consensus is None and live_pred is not None:
             effective_consensus = live_pred["probability"]
+        # Route the model probability through the freshly-retrained
+        # per-vertical isotonic calibrator (online-learning loop, task
+        # #88).  Bypasses cleanly when no retrained snapshot has landed
+        # yet for this vertical — gates then see the raw probability,
+        # exactly the behavior before this loader existed.  Edge is
+        # recomputed from the (possibly-calibrated) value below so the
+        # gatekeeper's edge math stays consistent with what it sees as
+        # the model probability.
+        pre_calibration_consensus = effective_consensus
+        if effective_consensus is not None:
+            try:
+                effective_consensus = await live_calibrator.apply(
+                    vertical, float(effective_consensus)
+                )
+            except Exception as e:  # pragma: no cover — defensive
+                log.debug(
+                    "live_calibrator apply failed for %s: %s",
+                    cand.get("game_id"), e,
+                )
         edge = pre_edge
-        if edge is None and effective_consensus is not None and current_price is not None:
+        if (
+            effective_consensus is not None
+            and current_price is not None
+            and (
+                edge is None
+                or pre_calibration_consensus != effective_consensus
+            )
+        ):
             edge = (
                 float(effective_consensus) - float(current_price)
                 if side == "YES"
