@@ -366,22 +366,23 @@ def test_halt_endpoint_requires_admin(monkeypatch):
     # Authenticate as a known user, but leave require_admin in place so
     # the check_admin lookup (which returns False by default in tests)
     # surfaces the 403.
+    from app import auth as auth_module
+
+    async def _deny(_user):
+        return False
+
+    monkeypatch.setattr(auth_module, "check_admin", _deny)
     app.dependency_overrides[require_auth] = _admin_user
+    # Raw TestClient (no `with`) so the app lifespan — which would open
+    # the real DB pool — does not run during unit tests.
+    client = TestClient(app)
     try:
-        with TestClient(app) as client:
-            # check_admin is DB-backed; force it to deny for this test.
-            from app import auth as auth_module
-
-            async def _deny(_user):
-                return False
-
-            monkeypatch.setattr(auth_module, "check_admin", _deny)
-            r = client.post("/api/admin/verticals/sports/halt")
-            assert r.status_code == 403
-            r = client.post("/api/admin/verticals/sports/resume")
-            assert r.status_code == 403
-            r = client.get("/api/admin/verticals/halts")
-            assert r.status_code == 403
+        r = client.post("/api/admin/verticals/sports/halt")
+        assert r.status_code == 403
+        r = client.post("/api/admin/verticals/sports/resume")
+        assert r.status_code == 403
+        r = client.get("/api/admin/verticals/halts")
+        assert r.status_code == 403
     finally:
         app.dependency_overrides.pop(require_auth, None)
 
@@ -418,37 +419,37 @@ def test_halt_endpoint_happy_path_as_admin(monkeypatch, mem_db):
     monkeypatch.setattr(kalshi_lifecycle, "cancel_order", _cancel)
 
     app.dependency_overrides[require_auth] = _admin_user
+    client = TestClient(app)
     try:
-        with TestClient(app) as client:
-            target = _first_known_vertical()
-            r = client.post(
-                f"/api/admin/verticals/{target}/halt",
-                json={"reason": "smoke"},
-            )
-            assert r.status_code == 200, r.text
-            body = r.json()
-            assert body["halted"] is True
-            assert body["changed"] is True
+        target = _first_known_vertical()
+        r = client.post(
+            f"/api/admin/verticals/{target}/halt",
+            json={"reason": "smoke"},
+        )
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["halted"] is True
+        assert body["changed"] is True
 
-            # Second halt: idempotent.
-            r2 = client.post(f"/api/admin/verticals/{target}/halt")
-            assert r2.status_code == 200
-            assert r2.json()["changed"] is False
+        # Second halt: idempotent.
+        r2 = client.post(f"/api/admin/verticals/{target}/halt")
+        assert r2.status_code == 200
+        assert r2.json()["changed"] is False
 
-            # List halts.
-            r3 = client.get("/api/admin/verticals/halts")
-            assert r3.status_code == 200
-            assert target in r3.json()["halts"]
+        # List halts.
+        r3 = client.get("/api/admin/verticals/halts")
+        assert r3.status_code == 200
+        assert target in r3.json()["halts"]
 
-            # Resume.
-            r4 = client.post(f"/api/admin/verticals/{target}/resume")
-            assert r4.status_code == 200
-            assert r4.json()["halted"] is False
-            assert r4.json()["changed"] is True
+        # Resume.
+        r4 = client.post(f"/api/admin/verticals/{target}/resume")
+        assert r4.status_code == 200
+        assert r4.json()["halted"] is False
+        assert r4.json()["changed"] is True
 
-            # Unknown vertical rejected.
-            r5 = client.post("/api/admin/verticals/not-a-real/halt")
-            assert r5.status_code == 400
+        # Unknown vertical rejected.
+        r5 = client.post("/api/admin/verticals/not-a-real/halt")
+        assert r5.status_code == 400
     finally:
         app.dependency_overrides.pop(require_auth, None)
 
