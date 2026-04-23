@@ -1,5 +1,5 @@
 import { useHealthFull, getHealthFullQueryKey } from "@workspace/api-client-react";
-import { Database, HardDrive, KeyRound, Globe, Server } from "lucide-react";
+import { Database, HardDrive, KeyRound, Globe, Server, Radio } from "lucide-react";
 
 export default function HealthSnapshot() {
   const { data: health, isLoading, isError } = useHealthFull({
@@ -66,6 +66,54 @@ export default function HealthSnapshot() {
             <span className={health.secrets_present.kalshi ? "text-success" : "text-destructive"} title="Kalshi">K</span>
           </div>
         </div>
+
+        {health.kalshi_ws && (
+          <div className="flex items-start justify-between gap-2">
+            <div className="flex items-center gap-2 text-muted-foreground">
+              <Radio className="w-3 h-3" />
+              <span>KALSHI_WS</span>
+            </div>
+            <div className="flex flex-col items-end gap-1 min-w-0">
+              <div className="flex items-center gap-1.5">
+                <span
+                  className={
+                    health.kalshi_ws.env === "demo"
+                      ? "px-1 border border-warning text-warning text-[10px] uppercase tracking-wider"
+                      : "px-1 border border-success text-success text-[10px] uppercase tracking-wider"
+                  }
+                  title={
+                    health.kalshi_ws.env === "demo"
+                      ? "Connected to the Kalshi demo cluster"
+                      : "Connected to the Kalshi production cluster"
+                  }
+                >
+                  {health.kalshi_ws.env}
+                </span>
+                <span
+                  className={
+                    health.kalshi_ws.connected ? "text-success" : "text-destructive"
+                  }
+                >
+                  {health.kalshi_ws.connected ? "OK" : "DOWN"}
+                </span>
+              </div>
+              <span
+                className="text-[10px] text-muted-foreground truncate max-w-[180px]"
+                title={health.kalshi_ws.url}
+              >
+                {health.kalshi_ws.url.replace(/^wss?:\/\//, "")}
+              </span>
+              {health.kalshi_ws.last_error && !health.kalshi_ws.connected && (
+                <span
+                  className="text-[10px] text-destructive truncate max-w-[180px]"
+                  title={health.kalshi_ws.last_error}
+                >
+                  {health.kalshi_ws.last_error}
+                </span>
+              )}
+            </div>
+          </div>
+        )}
 
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2 text-muted-foreground">

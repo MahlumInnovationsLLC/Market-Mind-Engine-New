@@ -42,6 +42,30 @@ export interface StorageHealth {
 }
 
 /**
+ * Kalshi cluster the WS is connected to ("demo" or "prod").
+ */
+export type KalshiWsHealthEnv =
+  (typeof KalshiWsHealthEnv)[keyof typeof KalshiWsHealthEnv];
+
+export const KalshiWsHealthEnv = {
+  demo: "demo",
+  prod: "prod",
+} as const;
+
+/**
+ * Live state of the Kalshi WebSocket subscriber, including which cluster (demo vs prod) the upgrade is pointed at.
+ */
+export interface KalshiWsHealth {
+  connected: boolean;
+  last_error?: string | null;
+  subscribers?: number;
+  /** Kalshi cluster the WS is connected to ("demo" or "prod"). */
+  env: KalshiWsHealthEnv;
+  /** Full WebSocket URL used for the upgrade. Lets operators spot wrong-cluster mistakes at a glance. */
+  url: string;
+}
+
+/**
  * Currently-bound canonical predictor surfaced on the operator console.
  */
 export interface ActivePredictor {
@@ -67,6 +91,7 @@ export interface FullHealth {
   secrets_present: SecretsPresent;
   postgres?: PostgresHealth;
   storage?: StorageHealth;
+  kalshi_ws?: KalshiWsHealth;
   active_predictor?: ActivePredictor | null;
 }
 

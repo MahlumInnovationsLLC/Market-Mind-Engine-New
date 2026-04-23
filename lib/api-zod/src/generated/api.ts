@@ -60,6 +60,26 @@ export const HealthFullResponse = zod.object({
       error: zod.string().nullish(),
     })
     .optional(),
+  kalshi_ws: zod
+    .object({
+      connected: zod.boolean(),
+      last_error: zod.string().nullish(),
+      subscribers: zod.number().optional(),
+      env: zod
+        .enum(["demo", "prod"])
+        .describe(
+          'Kalshi cluster the WS is connected to (\"demo\" or \"prod\").',
+        ),
+      url: zod
+        .string()
+        .describe(
+          "Full WebSocket URL used for the upgrade. Lets operators spot wrong-cluster mistakes at a glance.",
+        ),
+    })
+    .optional()
+    .describe(
+      "Live state of the Kalshi WebSocket subscriber, including which cluster (demo vs prod) the upgrade is pointed at.",
+    ),
   active_predictor: zod
     .union([
       zod

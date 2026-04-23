@@ -57,6 +57,8 @@ export * from "./getRecentTradesParams";
 export * from "./getVerticalPerformanceParams";
 export * from "./getVerticalsOverviewParams";
 export * from "./healthStatus";
+export * from "./kalshiWsHealth";
+export * from "./kalshiWsHealthEnv";
 export * from "./listModelHealthAlertsParams";
 export * from "./liveExecuteState";
 export * from "./liveExecuteToggleRequest";

@@ -2216,6 +2216,8 @@ async def health_full(_: object = Depends(require_approved_user)) -> dict[str, o
         "connected": bool(ws and ws.connected),
         "last_error": ws.last_error if ws else None,
         "subscribers": kalshi_bus.subscriber_count,
+        "env": settings.kalshi_env,
+        "url": settings.kalshi_ws_url,
     }
     out["kill_switch"] = kalshi_lifecycle.kill_switch_state()
     # Storage

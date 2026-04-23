@@ -769,6 +769,24 @@ components:
         error: { type: string, nullable: true }
       required: [ok]
 
+    KalshiWsHealth:
+      type: object
+      description: Live state of the Kalshi WebSocket subscriber, including which
+        cluster (demo vs prod) the upgrade is pointed at.
+      properties:
+        connected: { type: boolean }
+        last_error: { type: string, nullable: true }
+        subscribers: { type: integer }
+        env:
+          type: string
+          enum: [demo, prod]
+          description: Kalshi cluster the WS is connected to ("demo" or "prod").
+        url:
+          type: string
+          description: Full WebSocket URL used for the upgrade. Lets operators
+            spot wrong-cluster mistakes at a glance.
+      required: [connected, env, url]
+
     FullHealth:
       type: object
       properties:
@@ -779,6 +797,7 @@ components:
         secrets_present: { $ref: "#/components/schemas/SecretsPresent" }
         postgres: { $ref: "#/components/schemas/PostgresHealth" }
         storage: { $ref: "#/components/schemas/StorageHealth" }
+        kalshi_ws: { $ref: "#/components/schemas/KalshiWsHealth" }
         active_predictor:
           oneOf:
             - { $ref: "#/components/schemas/ActivePredictor" }

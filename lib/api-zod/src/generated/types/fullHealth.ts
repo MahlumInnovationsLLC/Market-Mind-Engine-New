@@ -6,6 +6,7 @@
  * OpenAPI spec version: 0.1.0
  */
 import type { ActivePredictor } from "./activePredictor";
+import type { KalshiWsHealth } from "./kalshiWsHealth";
 import type { PostgresHealth } from "./postgresHealth";
 import type { SecretsPresent } from "./secretsPresent";
 import type { StorageHealth } from "./storageHealth";
@@ -18,5 +19,6 @@ export interface FullHealth {
   secrets_present: SecretsPresent;
   postgres?: PostgresHealth;
   storage?: StorageHealth;
+  kalshi_ws?: KalshiWsHealth;
   active_predictor?: ActivePredictor | null;
 }
