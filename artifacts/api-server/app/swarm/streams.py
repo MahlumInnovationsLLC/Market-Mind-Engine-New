@@ -11,9 +11,9 @@ import logging
 from typing import Any
 
 from ..ws_backpressure import (
-    DEFAULT_MAXSIZE,
     DROP_OLDEST,
     Subscription,
+    resolve_maxsize,
 )
 
 
@@ -21,9 +21,9 @@ log = logging.getLogger(__name__)
 
 
 class LLMLogHub:
-    def __init__(self, queue_size: int = DEFAULT_MAXSIZE) -> None:
+    def __init__(self, queue_size: int | None = None) -> None:
         self._subs: set[Subscription] = set()
-        self._queue_size = queue_size
+        self._queue_size = queue_size if queue_size is not None else resolve_maxsize("llm-logs")
 
     def subscribe(
         self,

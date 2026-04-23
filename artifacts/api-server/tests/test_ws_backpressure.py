@@ -24,12 +24,16 @@ from app.ws_backpressure import (
     DROP_OLDEST,
     Subscription,
     SubscriberOverflow,
+    queue_config_snapshot,
     registry_snapshot,
     registry_summary,
+    resolve_maxsize,
 )
 from app.orchestrator.streams import _PipelineEventHub
 from app.settlement.streams import _Hub as _SettlementHub
 from app.kalshi.bus import _Bus as _KalshiBus
+from app.polymarket.bus import _Bus as _PolymarketBus
+from app.swarm.streams import LLMLogHub
 
 
 def _run(coro):
@@ -240,6 +244,87 @@ def test_registry_snapshot_reports_per_connection_depth():
 # ---------------------------------------------------------------------------
 # Load test — a single stuck subscriber cannot OOM the publisher.
 # ---------------------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------------
+# Env-var override (task #257): operators can tune the per-channel queue
+# ceiling without a redeploy.
+# ---------------------------------------------------------------------------
+
+
+def test_resolve_maxsize_defaults_to_legacy(monkeypatch):
+    monkeypatch.delenv("AXIOM_WS_QUEUE_MAXSIZE", raising=False)
+    for hub in ("pipeline", "settlement", "kalshi", "polymarket", "llm-logs"):
+        monkeypatch.delenv(f"AXIOM_WS_QUEUE_MAXSIZE_{hub.upper().replace('-', '_')}", raising=False)
+    assert resolve_maxsize("pipeline") == 256
+
+
+def test_resolve_maxsize_global_override(monkeypatch):
+    monkeypatch.setenv("AXIOM_WS_QUEUE_MAXSIZE", "1024")
+    monkeypatch.delenv("AXIOM_WS_QUEUE_MAXSIZE_PIPELINE", raising=False)
+    assert resolve_maxsize("pipeline") == 1024
+    assert resolve_maxsize("kalshi") == 1024
+
+
+def test_resolve_maxsize_per_hub_overrides_global(monkeypatch):
+    monkeypatch.setenv("AXIOM_WS_QUEUE_MAXSIZE", "1024")
+    monkeypatch.setenv("AXIOM_WS_QUEUE_MAXSIZE_KALSHI", "64")
+    monkeypatch.setenv("AXIOM_WS_QUEUE_MAXSIZE_LLM_LOGS", "2048")
+    assert resolve_maxsize("kalshi") == 64
+    assert resolve_maxsize("llm-logs") == 2048
+    # Unset hubs still fall back to the global override.
+    monkeypatch.delenv("AXIOM_WS_QUEUE_MAXSIZE_PIPELINE", raising=False)
+    assert resolve_maxsize("pipeline") == 1024
+
+
+def test_resolve_maxsize_invalid_value_falls_back(monkeypatch):
+    monkeypatch.setenv("AXIOM_WS_QUEUE_MAXSIZE", "not-an-int")
+    monkeypatch.delenv("AXIOM_WS_QUEUE_MAXSIZE_PIPELINE", raising=False)
+    assert resolve_maxsize("pipeline") == 256
+    monkeypatch.setenv("AXIOM_WS_QUEUE_MAXSIZE", "0")
+    assert resolve_maxsize("pipeline") == 256
+
+
+def test_hubs_honour_env_override_at_construction(monkeypatch):
+    monkeypatch.setenv("AXIOM_WS_QUEUE_MAXSIZE", "777")
+    monkeypatch.setenv("AXIOM_WS_QUEUE_MAXSIZE_KALSHI", "33")
+    monkeypatch.setenv("AXIOM_WS_QUEUE_MAXSIZE_LLM_LOGS", "44")
+    monkeypatch.setenv("AXIOM_WS_QUEUE_MAXSIZE_SETTLEMENT", "55")
+    monkeypatch.setenv("AXIOM_WS_QUEUE_MAXSIZE_POLYMARKET", "66")
+
+    pipe = _PipelineEventHub()
+    settlement = _SettlementHub()
+    kalshi = _KalshiBus()
+    poly = _PolymarketBus()
+    llm = LLMLogHub()
+
+    assert pipe.QUEUE_MAXSIZE == 777
+    assert settlement.QUEUE_MAXSIZE == 55
+    assert kalshi._max_queue == 33
+    assert poly._max_queue == 66
+    assert llm._queue_size == 44
+
+
+def test_queue_config_snapshot_surfaces_resolved_values(monkeypatch):
+    monkeypatch.setenv("AXIOM_WS_QUEUE_MAXSIZE", "300")
+    monkeypatch.setenv("AXIOM_WS_QUEUE_MAXSIZE_KALSHI", "64")
+    snap = queue_config_snapshot()
+    assert snap["global_env"] == "AXIOM_WS_QUEUE_MAXSIZE"
+    assert snap["global_env_set"] is True
+    assert snap["by_hub"]["kalshi"]["maxsize"] == 64
+    assert snap["by_hub"]["kalshi"]["env"] == "AXIOM_WS_QUEUE_MAXSIZE_KALSHI"
+    assert snap["by_hub"]["kalshi"]["env_set"] is True
+    assert snap["by_hub"]["pipeline"]["maxsize"] == 300
+    assert snap["by_hub"]["pipeline"]["env_set"] is False
+    assert set(snap["by_hub"].keys()) == {
+        "pipeline", "settlement", "kalshi", "polymarket", "llm-logs",
+    }
+
+
+def test_explicit_constructor_arg_still_wins_over_env(monkeypatch):
+    monkeypatch.setenv("AXIOM_WS_QUEUE_MAXSIZE_KALSHI", "1000")
+    bus = _KalshiBus(max_queue=8)
+    assert bus._max_queue == 8
 
 
 def test_stuck_subscriber_does_not_oom_publisher():

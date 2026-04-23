@@ -7,9 +7,9 @@ from collections import deque
 from typing import Any
 
 from ..ws_backpressure import (
-    DEFAULT_MAXSIZE,
     DROP_OLDEST,
     Subscription,
+    resolve_maxsize,
 )
 
 
@@ -28,10 +28,12 @@ class _PipelineEventHub:
     monotonic ``_seq`` so the client can dedupe snapshot+stream.
     """
 
-    QUEUE_MAXSIZE = DEFAULT_MAXSIZE
     BUFFER_MAXSIZE = 500
 
     def __init__(self) -> None:
+        # Resolve at construction time so the env var override applies
+        # without re-importing the module.
+        self.QUEUE_MAXSIZE = resolve_maxsize("pipeline")
         self._subs: set[Subscription] = set()
         self._lock = asyncio.Lock()
         self._buffer: deque[dict[str, Any]] = deque(maxlen=self.BUFFER_MAXSIZE)

@@ -684,9 +684,13 @@ def _probe_ws_subscribers() -> dict:
     alert into the operator Postmark pipeline (deduped via the shared
     ``notification_dedupe`` table).
     """
-    from .ws_backpressure import registry_summary
+    from .ws_backpressure import queue_config_snapshot, registry_summary
 
     snap = registry_summary()
+    # Surface the resolved per-hub queue ceiling (set by
+    # AXIOM_WS_QUEUE_MAXSIZE / AXIOM_WS_QUEUE_MAXSIZE_<HUB>) so operators
+    # can confirm an env-var override actually took effect.
+    snap["queue_config"] = queue_config_snapshot()
     subs = snap["subscribers"]
     by_hub = snap["by_hub"]
     total = snap["total_subscribers"]

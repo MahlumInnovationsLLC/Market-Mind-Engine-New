@@ -11,20 +11,18 @@ import logging
 from typing import Any
 
 from ..ws_backpressure import (
-    DEFAULT_MAXSIZE,
     DROP_OLDEST,
     Subscription,
+    resolve_maxsize,
 )
 
 
 log = logging.getLogger(__name__)
-_QUEUE_SIZE = DEFAULT_MAXSIZE
 
 
 class _Hub:
-    QUEUE_MAXSIZE = _QUEUE_SIZE
-
     def __init__(self) -> None:
+        self.QUEUE_MAXSIZE = resolve_maxsize("settlement")
         self._subs: set[Subscription] = set()
 
     def subscribe(

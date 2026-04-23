@@ -23,6 +23,8 @@ from __future__ import annotations
 
 import asyncio
 import itertools
+import logging
+import os
 import time
 import weakref
 from typing import Any
@@ -30,7 +32,101 @@ from typing import Any
 
 DROP_OLDEST = "drop_oldest"
 CLOSE = "close"
-DEFAULT_MAXSIZE = 256
+
+# Legacy hard-coded ceiling from task #248.  Used as the floor when the
+# operator has not set ``AXIOM_WS_QUEUE_MAXSIZE`` so behaviour is
+# unchanged on existing deployments.
+_LEGACY_DEFAULT_MAXSIZE = 256
+
+# Recognised hubs.  Each accepts a per-hub override env var of the form
+# ``AXIOM_WS_QUEUE_MAXSIZE_<HUB>`` (uppercased, dashes -> underscores)
+# that takes precedence over the global ``AXIOM_WS_QUEUE_MAXSIZE``.
+HUB_NAMES: tuple[str, ...] = (
+    "pipeline",
+    "settlement",
+    "kalshi",
+    "polymarket",
+    "llm-logs",
+)
+
+_GLOBAL_ENV = "AXIOM_WS_QUEUE_MAXSIZE"
+
+_log = logging.getLogger(__name__)
+
+
+def _coerce_maxsize(raw: str | None, *, source: str) -> int | None:
+    """Parse an env var value into a positive int, or return ``None`` if
+    unset / invalid.  An invalid value is logged once and ignored so a
+    typo doesn't take the API down at import time.
+    """
+    if raw is None:
+        return None
+    raw = raw.strip()
+    if not raw:
+        return None
+    try:
+        value = int(raw)
+    except ValueError:
+        _log.warning(
+            "ignoring %s=%r (not an integer); falling back to default", source, raw
+        )
+        return None
+    if value < 1:
+        _log.warning(
+            "ignoring %s=%r (must be >= 1); falling back to default", source, raw
+        )
+        return None
+    return value
+
+
+def _hub_env_name(hub: str) -> str:
+    return f"{_GLOBAL_ENV}_{hub.upper().replace('-', '_')}"
+
+
+def resolve_maxsize(hub: str) -> int:
+    """Resolve the per-hub queue ceiling from env vars at call time.
+
+    Precedence: ``AXIOM_WS_QUEUE_MAXSIZE_<HUB>`` then
+    ``AXIOM_WS_QUEUE_MAXSIZE`` then the legacy default of 256.
+    """
+    per_hub = _coerce_maxsize(os.environ.get(_hub_env_name(hub)), source=_hub_env_name(hub))
+    if per_hub is not None:
+        return per_hub
+    glb = _coerce_maxsize(os.environ.get(_GLOBAL_ENV), source=_GLOBAL_ENV)
+    if glb is not None:
+        return glb
+    return _LEGACY_DEFAULT_MAXSIZE
+
+
+# Resolved at import time so call sites can keep referring to a plain
+# module-level constant.  Per-hub values are resolved lazily by each
+# hub on construction (see ``resolve_maxsize``) — the global default
+# only honours ``AXIOM_WS_QUEUE_MAXSIZE`` (no per-hub suffix).
+DEFAULT_MAXSIZE = (
+    _coerce_maxsize(os.environ.get(_GLOBAL_ENV), source=_GLOBAL_ENV)
+    or _LEGACY_DEFAULT_MAXSIZE
+)
+
+
+def queue_config_snapshot() -> dict[str, Any]:
+    """Per-hub configured queue ceiling for /api/health/snapshot.
+
+    Lets operators confirm the env-var override actually took effect on
+    the running deployment without grepping logs.
+    """
+    return {
+        "default": DEFAULT_MAXSIZE,
+        "global_env": _GLOBAL_ENV,
+        "global_env_set": os.environ.get(_GLOBAL_ENV) is not None,
+        "by_hub": {
+            hub: {
+                "maxsize": resolve_maxsize(hub),
+                "env": _hub_env_name(hub),
+                "env_set": os.environ.get(_hub_env_name(hub)) is not None,
+            }
+            for hub in HUB_NAMES
+        },
+    }
 
 # Standard WebSocket close code + reason for backpressure overflow.
 # 1011 = "internal server error" in the RFC 6455 / IANA registry; we

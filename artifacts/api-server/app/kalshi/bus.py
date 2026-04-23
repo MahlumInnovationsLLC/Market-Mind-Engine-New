@@ -13,19 +13,19 @@ import logging
 from typing import Any, AsyncIterator
 
 from ..ws_backpressure import (
-    DEFAULT_MAXSIZE,
     DROP_OLDEST,
     Subscription,
+    resolve_maxsize,
 )
 
 log = logging.getLogger(__name__)
 
 
 class _Bus:
-    def __init__(self, *, max_queue: int = DEFAULT_MAXSIZE) -> None:
+    def __init__(self, *, max_queue: int | None = None) -> None:
         self._subs: set[Subscription] = set()
         self._lock = asyncio.Lock()
-        self._max_queue = max_queue
+        self._max_queue = max_queue if max_queue is not None else resolve_maxsize("kalshi")
 
     async def publish(self, message: dict[str, Any]) -> None:
         async with self._lock:
