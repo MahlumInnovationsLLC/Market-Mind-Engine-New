@@ -29,8 +29,9 @@ import {
 import LiveExecuteToggle from "@/components/telemetry/live-execute-toggle";
 import EmergencyStop from "@/components/telemetry/emergency-stop";
 import AccessRequests from "@/components/telemetry/access-requests";
+import AutoResearchPanel from "@/components/intelligence/autoresearch-panel";
 
-const ALL_TABS = ["health", "controls", "risk", "settings", "audit", "users", "leads"] as const;
+const ALL_TABS = ["health", "controls", "risk", "settings", "research", "audit", "users", "leads"] as const;
 type TabKey = (typeof ALL_TABS)[number];
 
 const TAB_DEFS: Record<TabKey, TabDef<TabKey> & { adminOnly: boolean; subtitle: string }> = {
@@ -57,6 +58,12 @@ const TAB_DEFS: Record<TabKey, TabDef<TabKey> & { adminOnly: boolean; subtitle: 
     label: "Settings",
     adminOnly: false,
     subtitle: "Per-channel notification preferences (email · push · SMS · Telegram).",
+  },
+  research: {
+    key: "research",
+    label: "Research",
+    adminOnly: true,
+    subtitle: "AutoResearch candidate queue — promote, reject, or reset discovered signals.",
   },
   audit: {
     key: "audit",
@@ -255,6 +262,12 @@ export default function SystemPage() {
             </div>
             <NotificationPrefsPanel />
           </GlassCard>
+        </div>
+      )}
+
+      {tab === "research" && isAdmin && (
+        <div data-testid="panel-system-research">
+          <AutoResearchPanel isAdmin={isAdmin} />
         </div>
       )}
 

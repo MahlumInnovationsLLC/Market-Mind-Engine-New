@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import {
   AutoResearchDecisionRequestDecision,
@@ -142,11 +142,30 @@ export default function AutoResearchPanel({ isAdmin }: { isAdmin: boolean }) {
   const [pendingName, setPendingName] = useState<string | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [runResult, setRunResult] = useState<string | null>(null);
+  const [sortDir, setSortDir] = useState<"desc" | "asc">("desc");
+
+  const rawItems = data?.items ?? [];
+  const sortedItems = useMemo(() => {
+    const sorted = [...rawItems];
+    sorted.sort((a, b) => {
+      const ai = Math.abs(a.ic ?? 0);
+      const bi = Math.abs(b.ic ?? 0);
+      if (ai === bi) return a.name.localeCompare(b.name);
+      return sortDir === "desc" ? bi - ai : ai - bi;
+    });
+    return sorted;
+  }, [rawItems, sortDir]);
 
   const onDecide = (
     name: string,
     decision: keyof typeof AutoResearchDecisionRequestDecision,
   ) => {
+    if (
+      typeof window !== "undefined" &&
+      !window.confirm(`Are you sure you want to ${decision} candidate "${name}"?`)
+    ) {
+      return;
+    }
     setPendingName(name);
     setErrorMsg(null);
     decide.mutate(
@@ -168,6 +187,12 @@ export default function AutoResearchPanel({ isAdmin }: { isAdmin: boolean }) {
   };
 
   const onRunCycle = () => {
+    if (
+      typeof window !== "undefined" &&
+      !window.confirm("Run the AutoResearch mining cycle now?")
+    ) {
+      return;
+    }
     setRunResult(null);
     setErrorMsg(null);
     run.mutate(undefined, {
@@ -198,7 +223,7 @@ export default function AutoResearchPanel({ isAdmin }: { isAdmin: boolean }) {
     );
   }
 
-  const items = data?.items ?? [];
+  const items = sortedItems;
   const scheduler = data?.scheduler;
 
   return (
@@ -281,7 +306,17 @@ export default function AutoResearchPanel({ isAdmin }: { isAdmin: boolean }) {
                 <th className="px-3 py-1 text-left font-normal">Feature</th>
                 <th className="px-3 py-1 text-left font-normal">Vertical</th>
                 <th className="px-3 py-1 text-left font-normal">Status</th>
-                <th className="px-3 py-1 text-right font-normal">IC</th>
+                <th className="px-3 py-1 text-right font-normal">
+                  <button
+                    type="button"
+                    onClick={() => setSortDir((d) => (d === "desc" ? "asc" : "desc"))}
+                    className="uppercase tracking-widest text-muted-foreground hover:text-foreground"
+                    data-testid="button-autoresearch-sort-ic"
+                    title="Sort by absolute IC"
+                  >
+                    |IC| {sortDir === "desc" ? "↓" : "↑"}
+                  </button>
+                </th>
                 <th className="px-3 py-1 text-right font-normal">Sharpe</th>
                 <th className="px-3 py-1 text-right font-normal">Mono</th>
                 <th className="px-3 py-1 text-right font-normal">N</th>
