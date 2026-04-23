@@ -28,7 +28,9 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+from datetime import datetime
 from typing import Any, Iterable
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import httpx
 
@@ -79,8 +81,28 @@ ALTER TABLE user_notification_prefs
     ADD COLUMN IF NOT EXISTS digest_partials           boolean NOT NULL DEFAULT false,
     ADD COLUMN IF NOT EXISTS sms_live_trade            boolean NOT NULL DEFAULT false,
     ADD COLUMN IF NOT EXISTS telegram_live_trade       boolean NOT NULL DEFAULT false,
-    ADD COLUMN IF NOT EXISTS sms_phone_number          text;
+    ADD COLUMN IF NOT EXISTS sms_phone_number          text,
+    -- Per-user "do not disturb" window for mobile push (task #131).
+    -- All three fields must be set for the window to take effect; any
+    -- NULL disables the feature so existing users see no behaviour
+    -- change. `start == end` is also treated as disabled (zero-length).
+    -- Hours are 0-23 in the user's IANA `quiet_hours_tz`. If start <
+    -- end, the window is the same calendar day; if start > end, the
+    -- window wraps midnight (e.g. 22 → 7 = 10pm to 7am).
+    ADD COLUMN IF NOT EXISTS quiet_hours_start_hour    smallint,
+    ADD COLUMN IF NOT EXISTS quiet_hours_end_hour      smallint,
+    ADD COLUMN IF NOT EXISTS quiet_hours_tz            text;
 """
+
+
+# Non-boolean per-user pref columns. Kept separate from `PREF_COLUMNS`
+# (which is boolean-only) so the existing toggle-driven plumbing stays
+# simple. Each entry maps the column name to its Python default.
+QUIET_HOURS_COLUMNS: dict[str, Any] = {
+    "quiet_hours_start_hour": None,
+    "quiet_hours_end_hour":   None,
+    "quiet_hours_tz":         None,
+}
 
 
 # All boolean toggles owned by `user_notification_prefs`, with their
@@ -260,9 +282,10 @@ async def get_prefs(clerk_user_id: str) -> dict[str, object]:
     deterministic state for first-time users.
     """
     await ensure_schema()
+    extra_cols = ["sms_phone_number"] + list(QUIET_HOURS_COLUMNS.keys())
     try:
         row = await db.fetchrow(
-            f"SELECT {_PREF_COLS_SQL}, sms_phone_number "
+            f"SELECT {_PREF_COLS_SQL}, {', '.join(extra_cols)} "
             "FROM user_notification_prefs WHERE clerk_user_id = $1",
             clerk_user_id,
         )
@@ -271,16 +294,51 @@ async def get_prefs(clerk_user_id: str) -> dict[str, object]:
         row = None
     out: dict[str, object] = _defaults()  # type: ignore[assignment]
     out["sms_phone_number"] = None
+    for k, default in QUIET_HOURS_COLUMNS.items():
+        out[k] = default
     if row is not None:
         for k in PREF_COLUMNS:
             out[k] = bool(row[k])
         out["sms_phone_number"] = row["sms_phone_number"]
+        for k in QUIET_HOURS_COLUMNS:
+            out[k] = row[k]
     return out
+
+
+_UNSET: Any = object()
+
+
+def _normalize_quiet_hour(v: Any) -> int | None:
+    if v is None:
+        return None
+    try:
+        h = int(v)
+    except (TypeError, ValueError):
+        raise ValueError("quiet hour must be an integer 0-23")
+    if not 0 <= h <= 23:
+        raise ValueError("quiet hour must be 0-23")
+    return h
+
+
+def _normalize_quiet_tz(v: Any) -> str | None:
+    if v is None:
+        return None
+    s = str(v).strip()
+    if not s:
+        return None
+    try:
+        ZoneInfo(s)
+    except (ZoneInfoNotFoundError, ValueError):
+        raise ValueError(f"unknown time zone {s!r}")
+    return s
 
 
 async def set_prefs(
     *, clerk_user_id: str,
     sms_phone_number: str | None | object = ...,
+    quiet_hours_start_hour: Any = _UNSET,
+    quiet_hours_end_hour: Any = _UNSET,
+    quiet_hours_tz: Any = _UNSET,
     **toggles: bool | None,
 ) -> dict[str, object]:
     """Partial update of per-user prefs.
@@ -290,6 +348,11 @@ async def set_prefs(
     break older clients. ``sms_phone_number`` follows the same
     convention but uses a sentinel (``...``) for "leave unchanged" so
     callers can explicitly pass ``None`` to clear the number.
+
+    The three ``quiet_hours_*`` fields use a separate ``_UNSET`` sentinel
+    so callers can explicitly pass ``None`` to clear any of them
+    individually (e.g. blanking the timezone effectively disables the
+    window without forgetting the saved start/end hours).
     """
     current = await get_prefs(clerk_user_id)
     next_vals: dict[str, bool] = {}
@@ -302,7 +365,21 @@ async def set_prefs(
         else (str(sms_phone_number).strip() or None) if sms_phone_number else None
     )
 
-    cols = list(PREF_COLUMNS.keys()) + ["sms_phone_number"]
+    next_qh: dict[str, Any] = {
+        k: current[k] for k in QUIET_HOURS_COLUMNS
+    }
+    if quiet_hours_start_hour is not _UNSET:
+        next_qh["quiet_hours_start_hour"] = _normalize_quiet_hour(quiet_hours_start_hour)
+    if quiet_hours_end_hour is not _UNSET:
+        next_qh["quiet_hours_end_hour"] = _normalize_quiet_hour(quiet_hours_end_hour)
+    if quiet_hours_tz is not _UNSET:
+        next_qh["quiet_hours_tz"] = _normalize_quiet_tz(quiet_hours_tz)
+
+    cols = (
+        list(PREF_COLUMNS.keys())
+        + ["sms_phone_number"]
+        + list(QUIET_HOURS_COLUMNS.keys())
+    )
     placeholders = ", ".join(f"${i + 2}" for i in range(len(cols)))
     set_clause = ", ".join(f"{c} = EXCLUDED.{c}" for c in cols)
     sql = (
@@ -310,7 +387,12 @@ async def set_prefs(
         f"VALUES ($1, {placeholders}, now()) "
         f"ON CONFLICT (clerk_user_id) DO UPDATE SET {set_clause}, updated_at = now()"
     )
-    args = [clerk_user_id] + [next_vals[c] for c in PREF_COLUMNS] + [next_phone]
+    args = (
+        [clerk_user_id]
+        + [next_vals[c] for c in PREF_COLUMNS]
+        + [next_phone]
+        + [next_qh[c] for c in QUIET_HOURS_COLUMNS]
+    )
     try:
         await db.execute(sql, *args)
     except Exception as e:
@@ -318,7 +400,49 @@ async def set_prefs(
 
     out: dict[str, object] = dict(next_vals)  # type: ignore[assignment]
     out["sms_phone_number"] = next_phone
+    for k in QUIET_HOURS_COLUMNS:
+        out[k] = next_qh[k]
     return out
+
+
+# ---------------------------------------------------------------------------
+# Quiet-hours evaluation
+# ---------------------------------------------------------------------------
+
+
+def is_in_quiet_hours(
+    start_hour: Any,
+    end_hour: Any,
+    tz_name: Any,
+    *,
+    now: datetime | None = None,
+) -> bool:
+    """True if the user's current local time falls inside their DND window.
+
+    All three inputs must be present and valid for the window to apply.
+    Equal start/end hours mean "no window" (a zero-length range, not
+    24h) — to mute around the clock, users should disable push entirely.
+    """
+    if start_hour is None or end_hour is None or not tz_name:
+        return False
+    try:
+        start = int(start_hour)
+        end = int(end_hour)
+    except (TypeError, ValueError):
+        return False
+    if not (0 <= start <= 23 and 0 <= end <= 23):
+        return False
+    if start == end:
+        return False
+    try:
+        tz = ZoneInfo(str(tz_name))
+    except (ZoneInfoNotFoundError, ValueError):
+        return False
+    local_hour = (now or datetime.now(tz)).astimezone(tz).hour
+    if start < end:
+        return start <= local_hour < end
+    # Overnight window, e.g. 22 -> 7 means [22, 24) ∪ [0, 7).
+    return local_hour >= start or local_hour < end
 
 
 # ---------------------------------------------------------------------------
@@ -447,26 +571,43 @@ async def opted_in_telegram_chats(pref_column: str = "telegram_live_trade") -> l
 
 async def _tokens_for_pref(pref_column: str) -> list[str]:
     """Return every Expo token whose owner has the given pref enabled
-    (or has no prefs row, i.e. defaults).
+    (or has no prefs row, i.e. defaults), and is not currently inside
+    their configured quiet-hours window.
 
     We left-join `user_notification_prefs` so a user with a registered
-    device but no row gets the default-true treatment.
+    device but no row gets the default-true treatment. Quiet-hours
+    filtering happens in Python because Postgres timezone math on
+    user-supplied IANA strings would crash the whole query if any one
+    user has a malformed value.
     """
     if pref_column not in ("notify_live_trade", "notify_halt"):
         raise ValueError(f"bad pref column {pref_column!r}")
     await ensure_schema()
     sql = (
-        "SELECT t.expo_token FROM expo_push_tokens t "
-        "LEFT JOIN user_notification_prefs p "
-        "  ON p.clerk_user_id = t.clerk_user_id "
-        f"WHERE COALESCE(p.{pref_column}, true) = true"
+        "SELECT t.expo_token, "
+        "       p.quiet_hours_start_hour, "
+        "       p.quiet_hours_end_hour, "
+        "       p.quiet_hours_tz "
+        "  FROM expo_push_tokens t "
+        "  LEFT JOIN user_notification_prefs p "
+        "    ON p.clerk_user_id = t.clerk_user_id "
+        f" WHERE COALESCE(p.{pref_column}, true) = true"
     )
     try:
         rows = await db.fetch(sql)
-        return [r["expo_token"] for r in rows]
     except Exception as e:
         log.warning("tokens_for_pref %s failed: %s", pref_column, e)
         return []
+    out: list[str] = []
+    for r in rows:
+        if is_in_quiet_hours(
+            r["quiet_hours_start_hour"],
+            r["quiet_hours_end_hour"],
+            r["quiet_hours_tz"],
+        ):
+            continue
+        out.append(r["expo_token"])
+    return out
 
 
 # ---------------------------------------------------------------------------

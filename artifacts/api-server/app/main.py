@@ -949,6 +949,17 @@ class NotificationPrefsRequest(BaseModel):
     # Whether the request explicitly intends to clear / set the phone
     # so we can distinguish "omitted" from "set to null".
     sms_phone_number_present: bool = False
+    # Per-user quiet-hours window (task #131). Each field follows the
+    # same "omitted vs explicit null" pattern as the phone number — the
+    # `*_present` flags let the client clear an individual value (e.g.
+    # blanking the timezone disables the window) while leaving any
+    # un-mentioned field untouched.
+    quiet_hours_start_hour: int | None = None
+    quiet_hours_start_hour_present: bool = False
+    quiet_hours_end_hour: int | None = None
+    quiet_hours_end_hour_present: bool = False
+    quiet_hours_tz: str | None = None
+    quiet_hours_tz_present: bool = False
 
 
 @app.get("/api/me/push-token")
@@ -1037,17 +1048,24 @@ async def me_set_notification_prefs(
     toggles: dict[str, bool | None] = {}
     for col in notif_push.PREF_COLUMNS:
         toggles[col] = getattr(body, col, None)
+
+    extra: dict[str, object] = {}
     if body.sms_phone_number_present:
+        extra["sms_phone_number"] = body.sms_phone_number
+    if body.quiet_hours_start_hour_present:
+        extra["quiet_hours_start_hour"] = body.quiet_hours_start_hour
+    if body.quiet_hours_end_hour_present:
+        extra["quiet_hours_end_hour"] = body.quiet_hours_end_hour
+    if body.quiet_hours_tz_present:
+        extra["quiet_hours_tz"] = body.quiet_hours_tz
+    try:
         await notif_push.set_prefs(
             clerk_user_id=user.user_id,
-            sms_phone_number=body.sms_phone_number,
+            **extra,
             **toggles,
         )
-    else:
-        await notif_push.set_prefs(
-            clerk_user_id=user.user_id,
-            **toggles,
-        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     return await _notification_prefs_payload(user)
 
 

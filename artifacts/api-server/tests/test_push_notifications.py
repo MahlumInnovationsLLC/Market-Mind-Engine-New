@@ -30,6 +30,7 @@ from app.notifications import push as _push
 
 
 _PREF_BOOL_COLS = list(_push.PREF_COLUMNS.keys())
+_QUIET_HOURS_COLS = list(_push.QUIET_HOURS_COLUMNS.keys())
 
 
 class _Store:
@@ -58,12 +59,15 @@ class _Store:
             return "DELETE 1"
         if q.startswith("INSERT INTO user_notification_prefs"):
             uid = args[0]
-            # All known boolean columns then sms_phone_number, matching
-            # the column order assembled in `push.set_prefs`.
+            # All known boolean columns, then sms_phone_number, then
+            # the quiet-hours columns — matching the column order
+            # assembled in `push.set_prefs`.
             row: dict[str, Any] = {}
             for i, col in enumerate(_PREF_BOOL_COLS):
                 row[col] = args[1 + i]
             row["sms_phone_number"] = args[1 + len(_PREF_BOOL_COLS)]
+            for j, col in enumerate(_QUIET_HOURS_COLS):
+                row[col] = args[2 + len(_PREF_BOOL_COLS) + j]
             self.prefs[uid] = row
             return "INSERT 0 1"
         return "OK"
@@ -79,12 +83,18 @@ class _Store:
         q = " ".join(query.split())
         if "FROM expo_push_tokens t" in q:
             col = "notify_live_trade" if "notify_live_trade" in q else "notify_halt"
-            out: list[dict[str, str]] = []
+            out: list[dict[str, Any]] = []
             for tok, row in self.tokens.items():
                 pref = self.prefs.get(row["clerk_user_id"])
                 enabled = True if pref is None else bool(pref[col])
-                if enabled:
-                    out.append({"expo_token": tok})
+                if not enabled:
+                    continue
+                out.append({
+                    "expo_token": tok,
+                    "quiet_hours_start_hour": (pref or {}).get("quiet_hours_start_hour"),
+                    "quiet_hours_end_hour": (pref or {}).get("quiet_hours_end_hour"),
+                    "quiet_hours_tz": (pref or {}).get("quiet_hours_tz"),
+                })
             return out
         return []
 
@@ -181,6 +191,104 @@ def test_tokens_for_pref_respects_toggles(store: _Store) -> None:
 
     halt = _run(_push._tokens_for_pref("notify_halt"))
     assert sorted(halt) == sorted([VALID_TOKEN, VALID_TOKEN_2])
+
+
+def test_is_in_quiet_hours_handles_same_day_and_overnight() -> None:
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    tz = "America/New_York"
+    nyc = ZoneInfo(tz)
+
+    # Same-day window 13:00-15:00 — 14:00 is inside, 15:00 is the
+    # exclusive upper bound and 12:59 is before.
+    inside = datetime(2026, 1, 5, 14, 0, tzinfo=nyc)
+    boundary = datetime(2026, 1, 5, 15, 0, tzinfo=nyc)
+    before = datetime(2026, 1, 5, 12, 59, tzinfo=nyc)
+    assert _push.is_in_quiet_hours(13, 15, tz, now=inside) is True
+    assert _push.is_in_quiet_hours(13, 15, tz, now=boundary) is False
+    assert _push.is_in_quiet_hours(13, 15, tz, now=before) is False
+
+    # Overnight 22:00 -> 07:00 — 23:00 and 03:00 inside, 07:00 outside.
+    late = datetime(2026, 1, 5, 23, 0, tzinfo=nyc)
+    early = datetime(2026, 1, 6, 3, 0, tzinfo=nyc)
+    morning = datetime(2026, 1, 6, 7, 0, tzinfo=nyc)
+    assert _push.is_in_quiet_hours(22, 7, tz, now=late) is True
+    assert _push.is_in_quiet_hours(22, 7, tz, now=early) is True
+    assert _push.is_in_quiet_hours(22, 7, tz, now=morning) is False
+
+    # Equal start/end is treated as disabled, not 24h mute.
+    assert _push.is_in_quiet_hours(8, 8, tz, now=inside) is False
+    # Any missing field disables the window.
+    assert _push.is_in_quiet_hours(None, 7, tz, now=inside) is False
+    assert _push.is_in_quiet_hours(22, None, tz, now=inside) is False
+    assert _push.is_in_quiet_hours(22, 7, "", now=inside) is False
+    # Bad timezone strings just disable the window rather than crash.
+    assert _push.is_in_quiet_hours(22, 7, "Not/A_Zone", now=inside) is False
+
+
+def test_set_prefs_round_trips_quiet_hours(store: _Store) -> None:
+    out = _run(_push.set_prefs(
+        clerk_user_id="user_1",
+        quiet_hours_start_hour=22,
+        quiet_hours_end_hour=7,
+        quiet_hours_tz="America/Los_Angeles",
+    ))
+    assert out["quiet_hours_start_hour"] == 22
+    assert out["quiet_hours_end_hour"] == 7
+    assert out["quiet_hours_tz"] == "America/Los_Angeles"
+    again = _run(_push.get_prefs("user_1"))
+    assert again["quiet_hours_start_hour"] == 22
+    assert again["quiet_hours_end_hour"] == 7
+    assert again["quiet_hours_tz"] == "America/Los_Angeles"
+
+    # A partial update of a single boolean must preserve quiet hours.
+    _run(_push.set_prefs(clerk_user_id="user_1", notify_halt=False))
+    again = _run(_push.get_prefs("user_1"))
+    assert again["quiet_hours_start_hour"] == 22
+    assert again["quiet_hours_tz"] == "America/Los_Angeles"
+
+    # Explicitly clearing the timezone disables the window.
+    _run(_push.set_prefs(clerk_user_id="user_1", quiet_hours_tz=None))
+    again = _run(_push.get_prefs("user_1"))
+    assert again["quiet_hours_tz"] is None
+    assert again["quiet_hours_start_hour"] == 22
+
+
+def test_set_prefs_rejects_bad_quiet_hours(store: _Store) -> None:
+    with pytest.raises(ValueError):
+        _run(_push.set_prefs(clerk_user_id="user_1", quiet_hours_start_hour=99))
+    with pytest.raises(ValueError):
+        _run(_push.set_prefs(clerk_user_id="user_1", quiet_hours_tz="Not/A_Zone"))
+
+
+def test_tokens_for_pref_skips_users_in_quiet_hours(
+    store: _Store, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    _run(_push.register_token(clerk_user_id="user_1", expo_token=VALID_TOKEN, platform="ios"))
+    _run(_push.register_token(clerk_user_id="user_2", expo_token=VALID_TOKEN_2, platform="android"))
+    _run(_push.set_prefs(
+        clerk_user_id="user_1",
+        quiet_hours_start_hour=22,
+        quiet_hours_end_hour=7,
+        quiet_hours_tz="America/New_York",
+    ))
+
+    fixed = datetime(2026, 1, 5, 23, 0, tzinfo=ZoneInfo("America/New_York"))
+
+    real_is_in = _push.is_in_quiet_hours
+
+    def _faked(start: Any, end: Any, tz: Any, *, now: Any = None) -> bool:
+        return real_is_in(start, end, tz, now=fixed)
+
+    monkeypatch.setattr(_push, "is_in_quiet_hours", _faked)
+
+    lt = _run(_push._tokens_for_pref("notify_live_trade"))
+    # user_1 is muted at 23:00 NY, user_2 still receives.
+    assert lt == [VALID_TOKEN_2]
 
 
 def test_send_to_tokens_drops_unregistered_devices(

@@ -1,6 +1,13 @@
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import React from "react";
-import { ActivityIndicator, StyleSheet, Switch, Text, View } from "react-native";
+import {
+  ActivityIndicator,
+  Pressable,
+  StyleSheet,
+  Switch,
+  Text,
+  View,
+} from "react-native";
 
 import { Card, SectionHeader } from "@/components/Card";
 import { useColors } from "@/hooks/useColors";
@@ -12,12 +19,41 @@ type PrefsBody = {
   email_trade_confirmation: boolean;
   digest_partials: boolean;
 };
+type QuietHours = {
+  quiet_hours_start_hour: number | null;
+  quiet_hours_end_hour: number | null;
+  quiet_hours_tz: string | null;
+};
 type PrefsResponse = {
-  prefs: PrefsBody & Record<string, unknown>;
+  prefs: PrefsBody & QuietHours & Record<string, unknown>;
   tier?: string;
   elite_unlocked?: boolean;
   elite_only_toggles?: string[];
 };
+
+type QuietHoursPatch = {
+  quiet_hours_start_hour?: number | null;
+  quiet_hours_start_hour_present?: boolean;
+  quiet_hours_end_hour?: number | null;
+  quiet_hours_end_hour_present?: boolean;
+  quiet_hours_tz?: string | null;
+  quiet_hours_tz_present?: boolean;
+};
+
+function detectDeviceTz(): string {
+  try {
+    return Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
+  } catch {
+    return "UTC";
+  }
+}
+
+function formatHour(h: number): string {
+  const hh = ((h % 24) + 24) % 24;
+  const suffix = hh < 12 ? "AM" : "PM";
+  const display = hh === 0 ? 12 : hh > 12 ? hh - 12 : hh;
+  return `${display} ${suffix}`;
+}
 
 export function NotificationPrefs(): React.ReactElement {
   const colors = useColors();
@@ -29,7 +65,7 @@ export function NotificationPrefs(): React.ReactElement {
   });
 
   const mutation = useMutation({
-    mutationFn: (patch: Partial<PrefsBody>) =>
+    mutationFn: (patch: Partial<PrefsBody> & QuietHoursPatch) =>
       apiFetch<PrefsResponse>("/api/me/notification-prefs", {
         method: "PUT",
         body: patch,
@@ -47,7 +83,73 @@ export function NotificationPrefs(): React.ReactElement {
     digest_partials:
       (prefs.data?.prefs?.digest_partials as boolean | undefined) ?? false,
   };
+  const quiet: QuietHours = {
+    quiet_hours_start_hour:
+      (prefs.data?.prefs?.quiet_hours_start_hour as number | null | undefined) ?? null,
+    quiet_hours_end_hour:
+      (prefs.data?.prefs?.quiet_hours_end_hour as number | null | undefined) ?? null,
+    quiet_hours_tz:
+      (prefs.data?.prefs?.quiet_hours_tz as string | null | undefined) ?? null,
+  };
+  const quietEnabled =
+    quiet.quiet_hours_start_hour !== null &&
+    quiet.quiet_hours_end_hour !== null &&
+    !!quiet.quiet_hours_tz &&
+    quiet.quiet_hours_start_hour !== quiet.quiet_hours_end_hour;
   const busy = prefs.isLoading || mutation.isPending;
+
+  const enableQuietHours = (on: boolean) => {
+    if (on) {
+      // Default to 10pm -> 7am in the device's timezone. If the saved
+      // hours collapse to a zero-length range (start == end) — which
+      // would re-enter the disabled state — fall back to the defaults
+      // so users can always recover.
+      const savedStart = quiet.quiet_hours_start_hour;
+      const savedEnd = quiet.quiet_hours_end_hour;
+      const usableSaved =
+        savedStart !== null && savedEnd !== null && savedStart !== savedEnd;
+      mutation.mutate({
+        quiet_hours_start_hour: usableSaved ? savedStart : 22,
+        quiet_hours_start_hour_present: true,
+        quiet_hours_end_hour: usableSaved ? savedEnd : 7,
+        quiet_hours_end_hour_present: true,
+        quiet_hours_tz: quiet.quiet_hours_tz ?? detectDeviceTz(),
+        quiet_hours_tz_present: true,
+      });
+    } else {
+      // Disable by clearing the timezone — keeps the saved start/end
+      // values around so re-enabling restores them.
+      mutation.mutate({
+        quiet_hours_tz: null,
+        quiet_hours_tz_present: true,
+      });
+    }
+  };
+
+  const bumpHour = (which: "start" | "end", delta: number) => {
+    const cur = which === "start"
+      ? (quiet.quiet_hours_start_hour ?? 22)
+      : (quiet.quiet_hours_end_hour ?? 7);
+    const next = ((cur + delta) % 24 + 24) % 24;
+    if (which === "start") {
+      mutation.mutate({
+        quiet_hours_start_hour: next,
+        quiet_hours_start_hour_present: true,
+      });
+    } else {
+      mutation.mutate({
+        quiet_hours_end_hour: next,
+        quiet_hours_end_hour_present: true,
+      });
+    }
+  };
+
+  const useDeviceTz = () => {
+    mutation.mutate({
+      quiet_hours_tz: detectDeviceTz(),
+      quiet_hours_tz_present: true,
+    });
+  };
 
   return (
     <View>
@@ -88,10 +190,115 @@ export function NotificationPrefs(): React.ReactElement {
           onChange={(v) => mutation.mutate({ digest_partials: v })}
           colors={colors}
         />
+        <View style={[styles.divider, { backgroundColor: colors.border }]} />
+        <Row
+          label="Quiet hours"
+          hint={
+            quietEnabled
+              ? `Mute pushes ${formatHour(quiet.quiet_hours_start_hour!)} – ${formatHour(quiet.quiet_hours_end_hour!)} (${quiet.quiet_hours_tz}). Email alerts are unaffected.`
+              : "Mute live-trade and halt pushes during a daily window. Email alerts are unaffected."
+          }
+          value={quietEnabled}
+          disabled={busy}
+          onChange={enableQuietHours}
+          colors={colors}
+        />
+        {quietEnabled ? (
+          <View style={styles.quietBlock}>
+            <HourPicker
+              label="Start"
+              hour={quiet.quiet_hours_start_hour!}
+              disabled={busy}
+              onUp={() => bumpHour("start", 1)}
+              onDown={() => bumpHour("start", -1)}
+              colors={colors}
+            />
+            <HourPicker
+              label="End"
+              hour={quiet.quiet_hours_end_hour!}
+              disabled={busy}
+              onUp={() => bumpHour("end", 1)}
+              onDown={() => bumpHour("end", -1)}
+              colors={colors}
+            />
+            <View style={styles.tzRow}>
+              <View style={{ flex: 1 }}>
+                <Text style={[styles.label, { color: colors.foreground }]}>
+                  Time zone
+                </Text>
+                <Text style={[styles.hint, { color: colors.mutedForeground }]}>
+                  {quiet.quiet_hours_tz}
+                </Text>
+              </View>
+              <Pressable
+                disabled={busy}
+                onPress={useDeviceTz}
+                style={({ pressed }) => [
+                  styles.tzButton,
+                  {
+                    borderColor: colors.border,
+                    opacity: busy ? 0.5 : pressed ? 0.7 : 1,
+                  },
+                ]}
+              >
+                <Text style={[styles.tzButtonText, { color: colors.primary }]}>
+                  Use device
+                </Text>
+              </Pressable>
+            </View>
+          </View>
+        ) : null}
         {prefs.isLoading ? (
           <ActivityIndicator color={colors.primary} style={{ marginTop: 8 }} />
         ) : null}
       </Card>
+    </View>
+  );
+}
+
+function HourPicker({
+  label,
+  hour,
+  disabled,
+  onUp,
+  onDown,
+  colors,
+}: {
+  label: string;
+  hour: number;
+  disabled: boolean;
+  onUp: () => void;
+  onDown: () => void;
+  colors: ReturnType<typeof useColors>;
+}): React.ReactElement {
+  return (
+    <View style={styles.hourRow}>
+      <Text style={[styles.label, { color: colors.foreground, flex: 1 }]}>
+        {label}
+      </Text>
+      <Pressable
+        disabled={disabled}
+        onPress={onDown}
+        style={({ pressed }) => [
+          styles.stepButton,
+          { borderColor: colors.border, opacity: disabled ? 0.4 : pressed ? 0.6 : 1 },
+        ]}
+      >
+        <Text style={[styles.stepText, { color: colors.foreground }]}>−</Text>
+      </Pressable>
+      <Text style={[styles.hourValue, { color: colors.foreground }]}>
+        {formatHour(hour)}
+      </Text>
+      <Pressable
+        disabled={disabled}
+        onPress={onUp}
+        style={({ pressed }) => [
+          styles.stepButton,
+          { borderColor: colors.border, opacity: disabled ? 0.4 : pressed ? 0.6 : 1 },
+        ]}
+      >
+        <Text style={[styles.stepText, { color: colors.foreground }]}>+</Text>
+      </Pressable>
     </View>
   );
 }
@@ -132,4 +339,34 @@ const styles = StyleSheet.create({
   label: { fontSize: 14, fontFamily: "Inter_600SemiBold" },
   hint: { fontSize: 11, fontFamily: "Inter_400Regular", marginTop: 2 },
   divider: { height: StyleSheet.hairlineWidth, marginVertical: 4 },
+  quietBlock: { paddingTop: 4, paddingBottom: 4, gap: 8 },
+  hourRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    paddingVertical: 4,
+    gap: 8,
+  },
+  stepButton: {
+    width: 32,
+    height: 32,
+    borderRadius: 6,
+    borderWidth: StyleSheet.hairlineWidth,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  stepText: { fontSize: 18, fontFamily: "Inter_600SemiBold" },
+  hourValue: {
+    minWidth: 64,
+    textAlign: "center",
+    fontSize: 14,
+    fontFamily: "Inter_600SemiBold",
+  },
+  tzRow: { flexDirection: "row", alignItems: "center", paddingVertical: 4 },
+  tzButton: {
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 6,
+    borderWidth: StyleSheet.hairlineWidth,
+  },
+  tzButtonText: { fontSize: 13, fontFamily: "Inter_600SemiBold" },
 });
