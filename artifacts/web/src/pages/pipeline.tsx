@@ -460,6 +460,47 @@ function formatSettlementLine(ev: Record<string, unknown>): import("react").Reac
 
 const PIPELINE_CACHE_KEY = "pipeline.recent-events.v1";
 const PIPELINE_CACHE_CYCLE_LIMIT = 50;
+// Hard caps on the persisted blob so a busy day can't push it past the
+// per-origin localStorage quota. Events are dropped oldest-cycle-first
+// until both caps are satisfied. Tuned to leave plenty of headroom under
+// the typical ~5MB browser quota even with other apps sharing storage.
+const PIPELINE_CACHE_MAX_EVENTS = 2000;
+const PIPELINE_CACHE_MAX_BYTES = 256 * 1024;
+
+interface PipelineCacheDiagnostics {
+  // Total number of events evicted from the persisted cache across the
+  // session because of either the event-count or byte-size cap.
+  droppedEvents: number;
+  // Number of times the writer had to evict at least one cycle to fit
+  // under the caps before persisting.
+  evictions: number;
+  // Bytes written on the most recent successful persist.
+  lastBytes: number;
+  // Events written on the most recent successful persist.
+  lastEventCount: number;
+  // Cycles written on the most recent successful persist.
+  lastCycleCount: number;
+  // Number of writes skipped entirely because the payload couldn't be
+  // trimmed under the caps (or localStorage threw). Kept separate from
+  // `evictions` so operators can spot total persistence failures.
+  writeSkipped: number;
+}
+
+const pipelineCacheDiagnostics: PipelineCacheDiagnostics = {
+  droppedEvents: 0,
+  evictions: 0,
+  lastBytes: 0,
+  lastEventCount: 0,
+  lastCycleCount: 0,
+  writeSkipped: 0,
+};
+
+if (typeof window !== "undefined") {
+  // Exposed on `window` so operators can inspect cache pressure from
+  // the browser devtools without wiring up a UI surface for it.
+  (window as unknown as Record<string, unknown>).__pipelineCacheDiagnostics =
+    pipelineCacheDiagnostics;
+}
 
 function loadCachedEvents(): Record<string, unknown>[] {
   if (typeof window === "undefined") return [];
@@ -473,12 +514,132 @@ function loadCachedEvents(): Record<string, unknown>[] {
   }
 }
 
-function saveCachedEvents(events: Record<string, unknown>[]): void {
+// Persist the given cycles (newest-first) capped by event count and
+// serialized byte size. Oldest cycles are evicted first; if a single
+// newest cycle still exceeds the caps it is persisted alone so the
+// page always retains some context.
+function byteLength(s: string): number {
+  if (typeof TextEncoder !== "undefined") {
+    return new TextEncoder().encode(s).length;
+  }
+  // Fallback for environments without TextEncoder: count UTF-8 bytes
+  // manually so the byte-cap stays correct on multibyte payloads.
+  let n = 0;
+  for (let i = 0; i < s.length; i++) {
+    const c = s.charCodeAt(i);
+    if (c < 0x80) n += 1;
+    else if (c < 0x800) n += 2;
+    else if (c >= 0xd800 && c <= 0xdbff) {
+      n += 4;
+      i += 1;
+    } else n += 3;
+  }
+  return n;
+}
+
+function saveCachedCycles(cyclesNewestFirst: CycleGroup[]): void {
   if (typeof window === "undefined") return;
+  // Retain the newest contiguous prefix that fits under the event cap.
+  // Strictly oldest-first eviction — never skip a middle cycle to keep
+  // older ones.
+  const kept: CycleGroup[] = [];
+  let totalEvents = 0;
+  let droppedEvents = 0;
+  let evicted = false;
+  // Always seed with the newest cycle (if any). Even when that single
+  // cycle blows the event cap on its own, we still want to retain it
+  // and trim its events later — otherwise a high-volume cycle would
+  // wipe out all persisted context.
+  if (cyclesNewestFirst.length > 0) {
+    const head = cyclesNewestFirst[0];
+    kept.push(head);
+    totalEvents += head.events.length;
+  }
+  for (let i = 1; i < cyclesNewestFirst.length; i++) {
+    const g = cyclesNewestFirst[i];
+    const evCount = g.events.length;
+    if (totalEvents + evCount > PIPELINE_CACHE_MAX_EVENTS) {
+      break;
+    }
+    kept.push(g);
+    totalEvents += evCount;
+  }
+  // Tally everything past the kept prefix as dropped.
+  for (let i = kept.length; i < cyclesNewestFirst.length; i++) {
+    droppedEvents += cyclesNewestFirst[i].events.length;
+    evicted = true;
+  }
+
+  // Replay events oldest-first so a future merge re-groups identically.
+  const buildEvents = (groups: CycleGroup[]): Record<string, unknown>[] => {
+    const out: Record<string, unknown>[] = [];
+    for (let i = groups.length - 1; i >= 0; i--) out.push(...groups[i].events);
+    return out;
+  };
+
+  let events = buildEvents(kept);
+  let serialized = JSON.stringify(events);
+  let bytes = byteLength(serialized);
+  // If we're still over the byte cap, drop oldest cycles one at a time
+  // until we fit.
+  while (bytes > PIPELINE_CACHE_MAX_BYTES && kept.length > 1) {
+    const removed = kept.pop();
+    if (removed) {
+      droppedEvents += removed.events.length;
+      evicted = true;
+    }
+    events = buildEvents(kept);
+    serialized = JSON.stringify(events);
+    bytes = byteLength(serialized);
+  }
+
+  // Edge case: a single newest cycle is itself larger than the caps.
+  // Trim its oldest events until both event and byte caps are satisfied
+  // so the persisted blob is always bounded, even if it costs us some
+  // intra-cycle history.
+  if (
+    kept.length === 1 &&
+    (events.length > PIPELINE_CACHE_MAX_EVENTS ||
+      bytes > PIPELINE_CACHE_MAX_BYTES)
+  ) {
+    if (events.length > PIPELINE_CACHE_MAX_EVENTS) {
+      const drop = events.length - PIPELINE_CACHE_MAX_EVENTS;
+      droppedEvents += drop;
+      evicted = true;
+      events = events.slice(drop);
+      serialized = JSON.stringify(events);
+      bytes = byteLength(serialized);
+    }
+    while (bytes > PIPELINE_CACHE_MAX_BYTES && events.length > 1) {
+      events = events.slice(1);
+      droppedEvents += 1;
+      evicted = true;
+      serialized = JSON.stringify(events);
+      bytes = byteLength(serialized);
+    }
+  }
+
+  // If even a single event is still over the byte cap, skip the write
+  // so we never push an oversized payload into localStorage.
+  const writeSkipped =
+    bytes > PIPELINE_CACHE_MAX_BYTES || events.length > PIPELINE_CACHE_MAX_EVENTS;
+
   try {
-    window.localStorage.setItem(PIPELINE_CACHE_KEY, JSON.stringify(events));
+    if (writeSkipped) {
+      pipelineCacheDiagnostics.droppedEvents += droppedEvents + events.length;
+      pipelineCacheDiagnostics.evictions += 1;
+      pipelineCacheDiagnostics.writeSkipped += 1;
+      return;
+    }
+    window.localStorage.setItem(PIPELINE_CACHE_KEY, serialized);
+    pipelineCacheDiagnostics.droppedEvents += droppedEvents;
+    if (evicted) pipelineCacheDiagnostics.evictions += 1;
+    pipelineCacheDiagnostics.lastBytes = bytes;
+    pipelineCacheDiagnostics.lastEventCount = events.length;
+    pipelineCacheDiagnostics.lastCycleCount = kept.length;
   } catch {
     // quota exceeded or storage disabled — non-fatal.
+    pipelineCacheDiagnostics.writeSkipped += 1;
   }
 }
 
@@ -572,18 +733,13 @@ export default function PipelinePage() {
 
   // Persist the most recent cycles back to localStorage so the next
   // page load has immediate context. Capped at PIPELINE_CACHE_CYCLE_LIMIT
-  // cycles (newest first in `groups`) to bound storage growth.
+  // cycles, PIPELINE_CACHE_MAX_EVENTS total events, and
+  // PIPELINE_CACHE_MAX_BYTES serialized bytes (oldest cycles evicted
+  // first) to bound storage growth on busy days.
   useEffect(() => {
     if (groups.length === 0) return;
     const top = groups.slice(0, PIPELINE_CACHE_CYCLE_LIMIT);
-    const events: Record<string, unknown>[] = [];
-    // Replay events in their original arrival order (oldest cycle first,
-    // and within a cycle in event order) so a future merge re-groups
-    // them identically.
-    for (let i = top.length - 1; i >= 0; i--) {
-      events.push(...top[i].events);
-    }
-    saveCachedEvents(events);
+    saveCachedCycles(top);
   }, [groups]);
   const titleResolver = useMarketTitleResolver();
   // Tie the swarm transcript to the most recent in-flight candidate by
@@ -787,7 +943,7 @@ export default function PipelinePage() {
             onClick={() => {
               setSnapshot([]);
               setCachedEvents([]);
-              saveCachedEvents([]);
+              saveCachedCycles([]);
               ws.clear();
             }}
             className="border border-border px-2 py-1 hover:text-primary hover:border-primary"
