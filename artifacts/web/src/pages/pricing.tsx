@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Link, useSearch } from "wouter";
+import { Link, useSearch, useLocation } from "wouter";
 import { useAuth, SignInButton } from "@clerk/react";
 import {
   ApiError,
@@ -12,6 +12,7 @@ import { PublicFooter, PublicNav } from "@/components/public/public-nav";
 export default function PricingPage() {
   const { isSignedIn } = useAuth();
   const search = useSearch();
+  const [, setLocation] = useLocation();
   const autoCheckoutPriceId = useMemo(() => {
     const params = new URLSearchParams(search);
     return params.get("checkout");
@@ -20,6 +21,34 @@ export default function PricingPage() {
   const [interval, setInterval] = useState<"month" | "year">("month");
   const [actionTier, setActionTier] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
+  const [autoCheckoutError, setAutoCheckoutError] = useState<string | null>(
+    null,
+  );
+
+  const dismissAutoCheckout = () => {
+    autoCheckoutFired.current = false;
+    setAutoCheckoutError(null);
+    setActionError(null);
+    setLocation("/pricing");
+  };
+
+  const retryAutoCheckout = async () => {
+    if (!autoCheckoutPriceId || !isSignedIn) return;
+    const target = catalog?.tiers.find(
+      (t) =>
+        t.monthly?.price_id === autoCheckoutPriceId ||
+        t.annual?.price_id === autoCheckoutPriceId,
+    );
+    if (!target) {
+      setAutoCheckoutError(
+        "That pricing link is no longer valid. Pick a tier below to continue.",
+      );
+      return;
+    }
+    setAutoCheckoutError(null);
+    setActionError(null);
+    await startCheckout(target.id, autoCheckoutPriceId);
+  };
 
   const pricingQuery = useGetBillingPricing();
   const catalog = pricingQuery.data ?? null;
@@ -52,7 +81,12 @@ export default function PricingPage() {
         window.location.href = res.url;
         return;
       }
-      setActionError("Stripe did not return a checkout URL.");
+      const noUrlMsg = "Stripe did not return a checkout URL.";
+      if (autoCheckoutPriceId === priceId) {
+        setAutoCheckoutError(noUrlMsg);
+      } else {
+        setActionError(noUrlMsg);
+      }
     } catch (e) {
       const msg =
         e instanceof ApiError
@@ -60,7 +94,11 @@ export default function PricingPage() {
           : e instanceof Error
             ? e.message
             : String(e);
-      setActionError(msg);
+      if (autoCheckoutPriceId === priceId) {
+        setAutoCheckoutError(msg);
+      } else {
+        setActionError(msg);
+      }
     } finally {
       setActionTier(null);
     }
@@ -77,7 +115,13 @@ export default function PricingPage() {
         t.monthly?.price_id === autoCheckoutPriceId ||
         t.annual?.price_id === autoCheckoutPriceId,
     );
-    if (!target) return;
+    if (!target) {
+      autoCheckoutFired.current = true;
+      setAutoCheckoutError(
+        "That pricing link is no longer valid. Pick a tier below to continue.",
+      );
+      return;
+    }
     autoCheckoutFired.current = true;
     if (target.annual?.price_id === autoCheckoutPriceId) {
       setInterval("year");
@@ -103,6 +147,11 @@ export default function PricingPage() {
     }
     await startCheckout(tier.id, slot.price_id);
   };
+
+  const showCheckoutSplash =
+    !!autoCheckoutPriceId && isSignedIn && !autoCheckoutError;
+  const showCheckoutErrorSplash =
+    !!autoCheckoutPriceId && isSignedIn && !!autoCheckoutError;
 
   const priceLabel = (tier: PricingTier) => {
     const amount = interval === "month" ? tier.monthly_usd : tier.annual_usd;
@@ -146,6 +195,104 @@ export default function PricingPage() {
       </header>
 
       <div className="max-w-6xl mx-auto px-4 md:px-8 pt-12 pb-20">
+        {showCheckoutSplash ? (
+          <div
+            className="max-w-md mx-auto text-center py-16"
+            data-testid="splash-checkout-redirect"
+          >
+            <div className="inline-flex items-center justify-center w-16 h-16 rounded-full bg-primary/10 border border-primary/30 mb-6">
+              <svg
+                className="w-8 h-8 text-primary animate-spin"
+                xmlns="http://www.w3.org/2000/svg"
+                fill="none"
+                viewBox="0 0 24 24"
+                aria-hidden
+              >
+                <circle
+                  className="opacity-25"
+                  cx="12"
+                  cy="12"
+                  r="10"
+                  stroke="currentColor"
+                  strokeWidth="4"
+                />
+                <path
+                  className="opacity-75"
+                  fill="currentColor"
+                  d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z"
+                />
+              </svg>
+            </div>
+            <h2 className="text-2xl font-extrabold tracking-tight">
+              Redirecting to{" "}
+              <span className="text-gradient-brand">Stripe Checkout</span>…
+            </h2>
+            <p className="text-muted-foreground text-sm mt-3">
+              Hang tight — we're handing you off to our secure payment partner
+              to finish your sign-up.
+            </p>
+            <button
+              type="button"
+              onClick={dismissAutoCheckout}
+              className="mt-8 text-xs uppercase tracking-widest text-muted-foreground hover:text-primary transition-colors"
+              data-testid="button-cancel-redirect"
+            >
+              Cancel and pick a different tier
+            </button>
+          </div>
+        ) : showCheckoutErrorSplash ? (
+          <div
+            className="max-w-md mx-auto text-center py-16"
+            data-testid="splash-checkout-error"
+          >
+            <div className="inline-flex items-center justify-center w-16 h-16 rounded-full bg-destructive/10 border border-destructive/40 text-destructive mb-6">
+              <svg
+                className="w-8 h-8"
+                xmlns="http://www.w3.org/2000/svg"
+                fill="none"
+                viewBox="0 0 24 24"
+                stroke="currentColor"
+                aria-hidden
+              >
+                <path
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  strokeWidth={2}
+                  d="M12 9v2m0 4h.01M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"
+                />
+              </svg>
+            </div>
+            <h2 className="text-2xl font-extrabold tracking-tight">
+              We couldn't start your checkout
+            </h2>
+            <p
+              className="text-muted-foreground text-sm mt-3"
+              data-testid="text-checkout-error-message"
+            >
+              {autoCheckoutError}
+            </p>
+            <div className="mt-8 flex flex-col sm:flex-row gap-3 justify-center">
+              <button
+                type="button"
+                onClick={retryAutoCheckout}
+                disabled={actionTier !== null}
+                className="inline-flex items-center justify-center rounded-full bg-primary text-primary-foreground px-5 py-3 text-sm font-semibold hover:opacity-90 transition-opacity glow-primary disabled:opacity-60"
+                data-testid="button-retry-checkout"
+              >
+                {actionTier !== null ? "Retrying…" : "Try again"}
+              </button>
+              <button
+                type="button"
+                onClick={dismissAutoCheckout}
+                className="inline-flex items-center justify-center rounded-full border border-border px-5 py-3 text-sm font-semibold text-foreground hover:border-primary/60 hover:text-primary transition-colors"
+                data-testid="button-pick-different-tier"
+              >
+                Pick a different tier
+              </button>
+            </div>
+          </div>
+        ) : (
+        <>
         <div className="flex items-center justify-center mb-10">
           <div
             className="inline-flex rounded-full border border-border bg-card/60 p-1"
@@ -300,6 +447,8 @@ export default function PricingPage() {
             Stripe is not yet fully configured — checkout will be unavailable
             until the operator adds the secret key.
           </p>
+        )}
+        </>
         )}
       </div>
 
