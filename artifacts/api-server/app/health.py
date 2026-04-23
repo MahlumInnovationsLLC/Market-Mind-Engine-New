@@ -467,6 +467,134 @@ def _probe_orderbook_guard() -> dict:
     )
 
 
+async def _probe_crypto_freshness() -> dict:
+    """Per-symbol freshness check for the `crypto_ohlcv` bar table.
+
+    The generic feed snapshot tells operators that the crypto poller
+    *ran*; this card tells them whether the *bars actually landed*. We
+    read MAX(ts) per (symbol, granularity) and compare each to the
+    granularity's expected cadence:
+
+      * ``ok``       — newest bar within ``max(seconds * 3, 120s)``
+      * ``degraded`` — within ``max(seconds * 10, 600s)``
+      * ``down``     — older than that, or no bars at all
+
+    Card status is the worst per-pair status. Returns ``unconfigured``
+    when neither crypto provider key is set (the feeds themselves are
+    skipped in that case so there's nothing to check).
+    """
+    from .feeds import crypto as crypto_feeds  # local import to avoid cycle
+
+    coinapi_key = os.environ.get("COINAPI_API_KEY") or os.environ.get("COINAPI_KEY")
+    coingecko_key = os.environ.get("COINGECKO_API_KEY")
+    if not (coinapi_key or coingecko_key):
+        return _card(
+            key="crypto_feed_freshness",
+            label="Crypto feed freshness",
+            category="passive",
+            status="unconfigured",
+            detail="COINAPI_API_KEY / COINGECKO_API_KEY not set",
+        )
+
+    expected: list[tuple[str, str, int]] = []
+    for sym in crypto_feeds.DEFAULT_SYMBOLS:
+        for gran, meta in crypto_feeds.GRANULARITIES.items():
+            expected.append((sym, gran, int(meta["seconds"])))
+
+    try:
+        rows = await asyncio.wait_for(
+            db.fetch(
+                "SELECT symbol, granularity, MAX(ts) AS max_ts "
+                "FROM crypto_ohlcv "
+                "WHERE symbol = ANY($1::text[]) "
+                "  AND granularity = ANY($2::text[]) "
+                "GROUP BY symbol, granularity",
+                list({s for s, _, _ in expected}),
+                list({g for _, g, _ in expected}),
+            ),
+            timeout=5.0,
+        )
+    except Exception as e:
+        error_log("crypto_feed_freshness", f"{type(e).__name__}: {e}")
+        return _card(
+            key="crypto_feed_freshness",
+            label="Crypto feed freshness",
+            category="passive",
+            status="down",
+            detail=f"query failed: {type(e).__name__}: {e}"[:240],
+        )
+
+    now = time.time()
+    latest: dict[tuple[str, str], float] = {}
+    for r in rows or []:
+        ts = _coerce_ts(r["max_ts"])
+        if ts is None:
+            continue
+        latest[(str(r["symbol"]), str(r["granularity"]))] = ts
+
+    pair_states: list[dict] = []
+    worst = "ok"
+    bad_summaries: list[str] = []
+    for sym, gran, seconds in expected:
+        max_ts = latest.get((sym, gran))
+        yellow = max(seconds * 3, 120)
+        red = max(seconds * 10, 600)
+        if max_ts is None:
+            pair_status = "down"
+            age_seconds: float | None = None
+            note = "no bars"
+        else:
+            age_seconds = max(0.0, now - max_ts)
+            if age_seconds <= yellow:
+                pair_status = "ok"
+            elif age_seconds <= red:
+                pair_status = "degraded"
+            else:
+                pair_status = "down"
+            note = f"{age_seconds:.0f}s old"
+        pair_states.append({
+            "symbol": sym,
+            "granularity": gran,
+            "expected_seconds": seconds,
+            "max_ts": _iso(max_ts) if max_ts else None,
+            "age_seconds": round(age_seconds, 1) if age_seconds is not None else None,
+            "yellow_threshold_seconds": yellow,
+            "red_threshold_seconds": red,
+            "status": pair_status,
+        })
+        if pair_status == "down":
+            worst = "down"
+            bad_summaries.append(f"{sym}/{gran} {note}")
+        elif pair_status == "degraded" and worst != "down":
+            worst = "degraded"
+            bad_summaries.append(f"{sym}/{gran} {note}")
+
+    total = len(expected)
+    fresh = sum(1 for p in pair_states if p["status"] == "ok")
+    if worst == "ok":
+        detail = f"{fresh}/{total} (symbol, granularity) pair(s) fresh"
+    else:
+        detail = (
+            f"{fresh}/{total} fresh | "
+            + "; ".join(bad_summaries[:6])
+            + ("; …" if len(bad_summaries) > 6 else "")
+        )
+        error_log("crypto_feed_freshness", detail[:240])
+
+    return _card(
+        key="crypto_feed_freshness",
+        label="Crypto feed freshness",
+        category="passive",
+        status=worst,
+        detail=detail,
+        extras={
+            "pairs": pair_states,
+            "fresh_count": fresh,
+            "total_count": total,
+        },
+    )
+
+
 def _probe_kill_switch() -> dict:
     state = kalshi_lifecycle.kill_switch_state()
     halted = bool(state.get("halted"))
@@ -984,6 +1112,7 @@ async def _build_snapshot() -> _Snapshot:
         _probe_postgres(),
         _probe_kalshi(),
         _probe_storage(),
+        _probe_crypto_freshness(),
         return_exceptions=False,
     )
     passive = [
