@@ -2095,6 +2095,125 @@ async def get_recent_bankroll_events(
     }
 
 
+async def get_nfl_exposure() -> dict[str, Any]:
+    """NFL per-league + per-game + Sunday-window exposure with cap headroom.
+
+    Sources its numbers from the orchestrator's
+    :func:`app.orchestrator.cycle._open_position_aggregates` so the
+    dashboard panel is guaranteed to show the same buckets the risk gates
+    are about to enforce, and pulls cap percentages straight from
+    :data:`app.sports.leagues.LEAGUE_CONFIGS` so a knob change in code
+    flows through without a UI rebuild.
+
+    Each bucket carries:
+
+    * ``open_usd`` — current open notional landing in this bucket
+    * ``cap_pct`` / ``cap_usd`` — configured cap (None when no cap)
+    * ``headroom_usd`` — ``max(0, cap_usd - open_usd)``
+    * ``utilization`` — ``open_usd / cap_usd`` (None when no cap)
+    * ``warn`` — True iff utilization >= 0.80 (the operator threshold the
+      gate's "approaching the cap" warning fires on)
+
+    The per-matchup list is sorted heaviest-first so the operator sees
+    the matchup most likely to block the next bet at the top.
+    """
+    from .orchestrator.cycle import (
+        _open_position_aggregates,
+        _latest_bankroll,
+    )
+    from .sports.leagues import get_league_config
+
+    league = "NFL"
+    cfg = get_league_config(league)
+    try:
+        bankroll = await _latest_bankroll()
+    except Exception as e:
+        log.warning("nfl exposure bankroll read failed: %s", e)
+        bankroll = None
+    try:
+        (
+            _open_n,
+            _open_notional,
+            _per_vertical,
+            per_league,
+            per_matchup,
+            per_sunday,
+            _per_event,
+        ) = await _open_position_aggregates()
+    except Exception as e:
+        log.warning("nfl exposure aggregate read failed: %s", e)
+        per_league, per_matchup, per_sunday = {}, {}, {}
+
+    league_open = float(per_league.get(league, 0.0))
+    sunday_open = float(per_sunday.get(league, 0.0))
+    matchups: list[tuple[str, float]] = []
+    prefix = f"{league}:"
+    for k, v in per_matchup.items():
+        if k.startswith(prefix):
+            matchups.append((k[len(prefix):], float(v)))
+    matchups.sort(key=lambda r: -r[1])
+
+    def _bucket(open_usd: float, cap_pct: float | None) -> dict[str, Any]:
+        if cap_pct is None:
+            return {
+                "open_usd": open_usd,
+                "cap_pct": None,
+                "cap_usd": None,
+                "headroom_usd": None,
+                "utilization": None,
+                "warn": False,
+            }
+        if bankroll is None or bankroll <= 0:
+            return {
+                "open_usd": open_usd,
+                "cap_pct": cap_pct,
+                "cap_usd": None,
+                "headroom_usd": None,
+                "utilization": None,
+                "warn": False,
+            }
+        cap_usd = float(bankroll) * float(cap_pct)
+        util = open_usd / cap_usd if cap_usd > 0 else None
+        return {
+            "open_usd": open_usd,
+            "cap_pct": cap_pct,
+            "cap_usd": cap_usd,
+            "headroom_usd": max(0.0, cap_usd - open_usd),
+            "utilization": util,
+            "warn": util is not None and util >= 0.80,
+        }
+
+    per_league_bucket = _bucket(
+        league_open, cfg.allocation_pct if cfg else None
+    )
+    sunday_bucket = _bucket(
+        sunday_open, cfg.sunday_window_cap_pct if cfg else None
+    )
+    per_game_cap_pct = cfg.per_game_cap_pct if cfg else None
+    per_matchup_buckets: list[dict[str, Any]] = []
+    for matchup, open_usd in matchups:
+        b = _bucket(open_usd, per_game_cap_pct)
+        b["matchup"] = matchup
+        per_matchup_buckets.append(b)
+
+    return {
+        "league": league,
+        "bankroll_usd": bankroll,
+        "warn_threshold": 0.80,
+        "per_league": per_league_bucket,
+        "sunday_window": sunday_bucket,
+        "per_matchup": per_matchup_buckets,
+        # Surface the raw aggregates too so a roundtrip test can prove
+        # the panel's buckets were derived from `_open_position_aggregates`
+        # rather than re-queried with a different SQL.
+        "raw": {
+            "per_league_usd": float(per_league.get(league, 0.0)),
+            "per_sunday_window_usd": float(per_sunday.get(league, 0.0)),
+            "per_matchup_usd": {m: float(v) for m, v in matchups},
+        },
+    }
+
+
 def redact_swarm_debate_transcripts(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Drop the per-persona reasoning + moderator narrative from each item
     and stamp ``redacted: True`` so the frontend can show an upsell.

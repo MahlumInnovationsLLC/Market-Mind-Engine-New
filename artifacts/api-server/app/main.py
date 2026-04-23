@@ -3605,6 +3605,20 @@ async def dashboard_search(
     return await dashboard.search_global(q, limit)
 
 
+@app.get("/api/dashboard/nfl-exposure")
+async def dashboard_nfl_exposure(
+    _: object = Depends(require_approved_user),
+) -> dict[str, object]:
+    """NFL per-league + per-game + Sunday-window exposure with cap headroom.
+
+    Reads the same `_open_position_aggregates` snapshot the trading
+    cycle uses, so the operator dashboard can see how close the next
+    bet is to tripping the per-league (5%), per-game (1.5%), or Sunday
+    window (3%) sub-caps before it submits.
+    """
+    return await dashboard.get_nfl_exposure()
+
+
 @app.get("/api/dashboard/calibration/per-league")
 async def dashboard_calibration_per_league(
     _: object = Depends(require_approved_user),

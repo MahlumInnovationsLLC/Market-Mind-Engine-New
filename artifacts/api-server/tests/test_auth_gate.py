@@ -117,6 +117,8 @@ PROTECTED_ROUTES: tuple[str, ...] = (
     "/api/research/directives",
     # Task #155 — per-league calibration panel on the operator dashboard.
     "/api/dashboard/calibration/per-league",
+    # Task #208 — NFL per-league + Sunday-window exposure panel.
+    "/api/dashboard/nfl-exposure",
     # Per-source weather freshness badge — operator dashboard only.
     "/api/weather/freshness",
 )
