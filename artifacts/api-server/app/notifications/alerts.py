@@ -707,6 +707,11 @@ def halt(
             _push.push_halt(reason=reason)
         except Exception as e:  # pragma: no cover — push must not break alerting
             log.warning("halt push dispatch failed: %s", e)
+        try:
+            from ..telegram import notify as _tg_notify
+            _tg_notify.broadcast_in_background(f"{subject}\n\n{body}")
+        except Exception as e:  # pragma: no cover
+            log.warning("halt telegram broadcast failed: %s", e)
     return result
 
 
@@ -779,6 +784,11 @@ def daily_loss_halt(
             )
         except Exception as e:  # pragma: no cover — push must not break alerting
             log.warning("daily_loss_halt push dispatch failed: %s", e)
+        try:
+            from ..telegram import notify as _tg_notify
+            _tg_notify.broadcast_in_background(f"{subject}\n\n{body}")
+        except Exception as e:  # pragma: no cover
+            log.warning("daily_loss_halt telegram broadcast failed: %s", e)
     return result
 
 
@@ -808,7 +818,14 @@ def emergency_stop(
         )
         + "\n"
     )
-    return _dispatch(subject, body, tag="emergency_stop", dry_run=dry_run)
+    result = _dispatch(subject, body, tag="emergency_stop", dry_run=dry_run)
+    if not dry_run:
+        try:
+            from ..telegram import notify as _tg_notify
+            _tg_notify.broadcast_in_background(f"{subject}\n\n{body}")
+        except Exception as e:  # pragma: no cover
+            log.warning("emergency_stop telegram broadcast failed: %s", e)
+    return result
 
 
 # ---------------------------------------------------------------------------

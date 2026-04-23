@@ -168,6 +168,28 @@ async def touch_seen(telegram_user_id: int) -> None:
         log.debug("touch_seen failed: %s", e)
 
 
+async def set_notify_push(clerk_user_id: str, enabled: bool) -> bool:
+    """Per-binding opt-out for proactive Telegram pings (task #186).
+
+    Returns True when a row was updated. Returns False when no binding
+    exists for ``clerk_user_id`` so callers can surface a useful error
+    instead of silently swallowing the toggle.
+    """
+    res = await db.execute(
+        """
+        UPDATE telegram_bindings
+           SET notify_push = $2,
+               updated_at = now()
+         WHERE clerk_user_id = $1
+        """,
+        clerk_user_id, bool(enabled),
+    )
+    try:
+        return int(res.rsplit(" ", 1)[-1]) > 0
+    except Exception:
+        return False
+
+
 async def unbind(clerk_user_id: str) -> bool:
     res = await db.execute(
         "DELETE FROM telegram_bindings WHERE clerk_user_id = $1",

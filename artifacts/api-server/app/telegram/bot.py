@@ -235,6 +235,21 @@ async def _handle_update(client: httpx.AsyncClient, update: dict[str, Any]) -> N
             client, chat_id,
             "Pending /estop cancelled." if dropped else "No pending /estop to cancel.",
         )
+    elif cmd == "/mute":
+        ok = await bindings.set_notify_push(binding["clerk_user_id"], False)
+        await _send(
+            client, chat_id,
+            "Proactive halt / emergency-stop pings muted for this chat. "
+            "Re-enable with /unmute."
+            if ok else "Could not mute push for this binding.",
+        )
+    elif cmd == "/unmute":
+        ok = await bindings.set_notify_push(binding["clerk_user_id"], True)
+        await _send(
+            client, chat_id,
+            "Proactive halt / emergency-stop pings re-enabled for this chat."
+            if ok else "Could not enable push for this binding.",
+        )
     elif cmd == "/unlink":
         ok = await bindings.unbind(binding["clerk_user_id"])
         await _send(
@@ -395,6 +410,8 @@ def _help_text() -> str:
         "  /estop [why] — start a confirm-protected emergency stop (admin)\n"
         "  /confirm CODE— confirm a pending /estop within 60s\n"
         "  /cancel      — abort a pending /estop\n"
+        "  /mute        — silence proactive halt / emergency-stop pings\n"
+        "  /unmute      — re-enable proactive pings\n"
         "  /whoami      — show this chat's binding\n"
         "  /unlink      — remove this chat's binding\n"
         "  /help        — this message"
