@@ -196,6 +196,30 @@ def test_legacy_call_without_vertical_resolves_pre_backfill_rows(monkeypatch):
     assert abs(val - 0.90) < 1e-6
 
 
+def test_per_league_90_day_filter_with_mixed_freshness(monkeypatch):
+    """Task #137: in a single fetch the 90-day filter must apply
+    *per-league*.  League A has both fresh + stale rows -> recent wins.
+    League B has only stale rows -> all-time fallback wins.  A bug that
+    applied the filter dataset-wide would either drop B entirely or
+    use stale data for A."""
+    _patch_rows(
+        monkeypatch,
+        [
+            # League A — recent and stale, recent should win.
+            _row("quant", "NFL", "moneyline", brier=0.10, recent=True),
+            _row("quant", "NFL", "moneyline", brier=0.40, recent=False),
+            # League B — only stale, must still surface via all-time.
+            _row("quant", "NBA", "moneyline", brier=0.30, recent=False),
+        ],
+    )
+    nfl_w = asyncio.run(w.get_persona_weight("quant", "NFL", "moneyline"))
+    nba_w = asyncio.run(w.get_persona_weight("quant", "NBA", "moneyline"))
+    # NFL took the recent row (1 - 0.10 = 0.90), NOT the stale 0.60.
+    assert abs(nfl_w - 0.90) < 1e-6
+    # NBA had no recent row -> falls back to the all-time row (1 - 0.30 = 0.70).
+    assert abs(nba_w - 0.70) < 1e-6
+
+
 def test_legacy_call_without_vertical_does_not_see_scoped_rows(monkeypatch):
     # Conversely, an un-keyed call must NOT pick up rows that have
     # been written with a vertical (post-0005-backfill data) — that
