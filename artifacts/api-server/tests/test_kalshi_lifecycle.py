@@ -157,6 +157,81 @@ def test_force_paper_overrides_live_mode(monkeypatch, _reset_lifecycle):
 
 
 # ---------------------------------------------------------------------------
+# Operator override (Elite live-execute toggle): system_settings.risk.trading_mode
+# beats the env var when ``force_paper`` isn't explicitly passed. We patch the
+# DB-backed resolver so the resolution is deterministic without Postgres.
+# ---------------------------------------------------------------------------
+
+def _patch_trading_mode_override(monkeypatch, db_mode: str | None, env_mode: str = "paper"):
+    """Stub ``app.risk.trading_mode.resolve_trading_mode`` to mirror what the
+    real helper would return for the given DB row + env combination."""
+    from app.risk import trading_mode as _tm
+
+    async def _fake_resolve(env_default=None):
+        if db_mode is not None:
+            return db_mode
+        return (env_default or env_mode).lower()
+
+    monkeypatch.setattr(_tm, "resolve_trading_mode", _fake_resolve)
+    monkeypatch.setattr(lifecycle, "get_settings", lambda: _make_settings(env_mode))
+
+
+def test_operator_override_live_routes_to_real_exchange(monkeypatch, _reset_lifecycle):
+    """Override = 'live' + force_paper=None -> paper=False (real order path)."""
+    _patch_trading_mode_override(monkeypatch, db_mode="live", env_mode="paper")
+
+    placed: list[Any] = []
+
+    class _FakeClient:
+        def __init__(self, *_, **__):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_):
+            return False
+
+        async def submit_order(self, payload):
+            placed.append(payload)
+            return {"order": {"order_id": "EX-1", "status": "resting"}}
+
+    monkeypatch.setattr(lifecycle.kalshi_client, "KalshiClient", _FakeClient)
+
+    req = lifecycle.OrderRequest(
+        market_ticker="X-1", side="yes", action="buy", count=1,
+        limit_price_cents=33, client_order_id="live-1",
+    )
+    record, _ = _run(_collect_during(lifecycle.submit_order(req)))
+    assert record.paper is False, "live override must produce a real (non-paper) order"
+    assert placed, "expected the live exchange client to be invoked"
+
+
+def test_operator_override_paper_keeps_paper(monkeypatch, _reset_lifecycle):
+    """Override = 'paper' + force_paper=None -> paper=True even if env is live."""
+    _patch_trading_mode_override(monkeypatch, db_mode="paper", env_mode="live")
+    req = lifecycle.OrderRequest(
+        market_ticker="X-1", side="yes", action="buy", count=2,
+        limit_price_cents=44, client_order_id="paper-3",
+    )
+    record, _ = _run(_collect_during(lifecycle.submit_order(req)))
+    assert record.paper is True
+    assert record.state == "filled"
+
+
+def test_operator_override_absent_falls_back_to_env_paper(monkeypatch, _reset_lifecycle):
+    """No override row + env=paper + force_paper=None -> paper=True."""
+    _patch_trading_mode_override(monkeypatch, db_mode=None, env_mode="paper")
+    req = lifecycle.OrderRequest(
+        market_ticker="X-1", side="yes", action="buy", count=1,
+        limit_price_cents=12, client_order_id="paper-4",
+    )
+    record, _ = _run(_collect_during(lifecycle.submit_order(req)))
+    assert record.paper is True
+    assert record.state == "filled"
+
+
+# ---------------------------------------------------------------------------
 # Kill switch
 # ---------------------------------------------------------------------------
 

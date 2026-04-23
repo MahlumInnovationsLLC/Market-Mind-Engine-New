@@ -323,3 +323,112 @@ def test_attach_ws_fill_handler_drains_bus(reset):
 
     _run(_scenario())
     assert lifecycle._resting.get("cli-1") is None
+
+
+# ---------------------------------------------------------------------------
+# Operator override (Elite live-execute toggle): mirrors the Kalshi coverage
+# in test_kalshi_lifecycle.py to lock the Polymarket force_paper=None path
+# against system_settings.risk.trading_mode.
+# ---------------------------------------------------------------------------
+
+def _make_settings_for_override(trading_mode: str = "paper") -> SimpleNamespace:
+    return SimpleNamespace(
+        polymarket_api_base_url="https://clob.polymarket.com",
+        polymarket_api_key="apik",
+        polymarket_api_secret="apis",
+        polymarket_passphrase="ph",
+        trading_mode=trading_mode,
+    )
+
+
+def _patch_polymarket_override(monkeypatch, db_mode: str | None, env_mode: str = "paper"):
+    from app.risk import trading_mode as _tm
+
+    async def _fake_resolve(env_default=None):
+        if db_mode is not None:
+            return db_mode
+        return (env_default or env_mode).lower()
+
+    monkeypatch.setattr(_tm, "resolve_trading_mode", _fake_resolve)
+    monkeypatch.setattr(lifecycle, "get_settings", lambda: _make_settings_for_override(env_mode))
+
+
+def _override_reset(monkeypatch):
+    """Local mini-fixture: reset state + stub DB writes for the override tests
+    without pulling in the WS-fill specific fixture above."""
+    lifecycle._resting.clear()
+    lifecycle._resting_lock = asyncio.Lock()
+    bus._lock = asyncio.Lock()
+    bus._subs.clear()
+    written: list[dict[str, Any]] = []
+
+    async def _fake_write_lifecycle(**kwargs):
+        written.append(kwargs)
+        return len(written)
+
+    monkeypatch.setattr(lifecycle, "_write_lifecycle", _fake_write_lifecycle)
+    return written
+
+
+def test_polymarket_operator_override_paper_keeps_paper(monkeypatch):
+    _override_reset(monkeypatch)
+    _patch_polymarket_override(monkeypatch, db_mode="paper", env_mode="live")
+    req = lifecycle.OrderRequest(
+        market_id="0xCOND", token_id="t1", side="yes", action="buy",
+        count=2, limit_price_cents=44, client_order_id="poly-paper-1",
+    )
+    record = _run(lifecycle.submit_order(req))
+    assert record.paper is True
+    assert record.state == "filled"
+
+
+def test_polymarket_operator_override_live_routes_to_real_exchange(monkeypatch):
+    _override_reset(monkeypatch)
+    _patch_polymarket_override(monkeypatch, db_mode="live", env_mode="paper")
+
+    # Stub L1 signing creds + the signed payload helper so the live path
+    # doesn't require POLYMARKET_PRIVATE_KEY in the test env.
+    monkeypatch.setattr(lifecycle.polymarket_signer, "have_signing_creds", lambda: True)
+    monkeypatch.setattr(
+        lifecycle.OrderRequest, "to_polymarket_payload",
+        lambda self, *, settings=None: {"order": {"clientOrderId": self.client_order_id}},
+    )
+
+    placed: list[Any] = []
+
+    class _FakeClient:
+        def __init__(self, *_, **__):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_):
+            return False
+
+        async def submit_order(self, payload):
+            placed.append(payload)
+            return {"order": {"orderID": "EX-POLY-1", "status": "resting"}}
+
+    monkeypatch.setattr(lifecycle.polymarket_client, "PolymarketClient", _FakeClient)
+
+    req = lifecycle.OrderRequest(
+        market_id="0xCOND", token_id="t1", side="yes", action="buy",
+        count=1, limit_price_cents=33, client_order_id="poly-live-1",
+    )
+    record = _run(lifecycle.submit_order(req))
+    assert record.paper is False, "live override must produce a real (non-paper) order"
+    assert placed, "expected the live polymarket client to be invoked"
+    assert record.exchange_order_id == "EX-POLY-1"
+
+
+def test_polymarket_operator_override_absent_falls_back_to_env_paper(monkeypatch):
+    _override_reset(monkeypatch)
+    _patch_polymarket_override(monkeypatch, db_mode=None, env_mode="paper")
+    req = lifecycle.OrderRequest(
+        market_id="0xCOND", token_id="t1", side="yes", action="buy",
+        count=1, limit_price_cents=12, client_order_id="poly-paper-2",
+    )
+    record = _run(lifecycle.submit_order(req))
+    assert record.paper is True
+    assert record.state == "filled"

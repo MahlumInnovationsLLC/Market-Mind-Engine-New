@@ -201,10 +201,18 @@ async def submit_order(req: OrderRequest, *, force_paper: bool | None = None) ->
     """Submit an order through the Polymarket lifecycle.
 
     `force_paper=True` always paper-trades. `force_paper=None` defers to
-    `AXIOM_TRADING_MODE` (paper unless explicitly set to "live").
+    the operator override in ``system_settings.risk.trading_mode`` (the
+    Elite live-execute toggle), falling back to ``AXIOM_TRADING_MODE``.
     """
     s = get_settings()
-    paper = True if force_paper is True else (s.trading_mode != "live") if force_paper is None else False
+    if force_paper is True:
+        paper = True
+    elif force_paper is False:
+        paper = False
+    else:
+        from ..risk.trading_mode import resolve_trading_mode
+        mode = await resolve_trading_mode(env_default=s.trading_mode)
+        paper = mode != "live"
 
     if _kill.halted:
         await _record(req, paper=paper, state="rejected", price=req.limit_price_cents or 0,
