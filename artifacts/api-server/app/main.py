@@ -4967,6 +4967,20 @@ async def ws_orderbook(ws: WebSocket, ticker: str) -> None:
         await kalshi_bus.unsubscribe(q)
 
 
+@app.get("/api/weather/freshness")
+async def weather_freshness(
+    _: object = Depends(require_approved_user),
+) -> dict[str, object]:
+    """Per-city × per-source freshness snapshot for the operator
+    Weather page.  Surfaces the latest observation timestamp for each
+    source (open-meteo / nws / tomorrow.io / accuweather / hrrr) plus
+    a fresh / stale / missing badge classification, and — for HRRR —
+    the NOMADS run cycle (e.g. ``"12Z"``) we last pulled.
+    """
+    from .feeds.weather_payload import build_freshness_summary
+    return await build_freshness_summary()
+
+
 @app.websocket("/api/ws/temperature/{city}")
 async def ws_temperature(ws: WebSocket, city: str) -> None:
     """Per-city weather stream.  Polls the latest open-meteo /

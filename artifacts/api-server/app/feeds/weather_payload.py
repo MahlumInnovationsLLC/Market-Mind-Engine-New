@@ -60,6 +60,149 @@ def _td(seconds: float):
     return timedelta(seconds=float(seconds))
 
 
+async def build_freshness_summary(
+    *,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    """Return a per-city × per-source freshness snapshot for the
+    operator Weather page.
+
+    Unlike :func:`build_weather_payload`, this *does not* drop stale
+    sources — it surfaces each source's latest observation timestamp
+    plus a ``status`` ("fresh" / "stale" / "missing") so operators can
+    see at a glance which feeds are dragging behind.  For HRRR it also
+    surfaces the NOMADS run cycle (e.g. ``"12Z"``) and run timestamp so
+    operators can confirm we're trading off the most recent published
+    HRRR cycle.
+    """
+    # Local import — avoids a circular at module load (weather.py
+    # imports from .scheduler which imports from .registry; the
+    # payload module is loaded earlier in the boot order).
+    from .weather import _selected_cities
+
+    now = now or datetime.now(timezone.utc)
+
+    cities_out: list[dict[str, Any]] = []
+    for city in _selected_cities():
+        sources: dict[str, Any] = {}
+        for src in ("open-meteo", "nws", "tomorrow.io"):
+            sources[src] = await _source_freshness_observation(city.code, src, now)
+        sources["accuweather"] = await _source_freshness_minutecast(city.code, now)
+        sources["hrrr"] = await _source_freshness_hrrr(city.code, now)
+        cities_out.append({
+            "code": city.code,
+            "name": city.name,
+            "sources": sources,
+        })
+
+    return {
+        "as_of": now.isoformat(timespec="seconds"),
+        "freshness_windows_s": {k: int(v) for k, v in _FRESHNESS_S.items()},
+        "cities": cities_out,
+    }
+
+
+def _classify(observed_at: Any, source: str, now: datetime) -> str:
+    if observed_at is None:
+        return "missing"
+    return "fresh" if _is_fresh(observed_at, source, now=now) else "stale"
+
+
+async def _source_freshness_observation(
+    city_code: str, source: str, now: datetime,
+) -> dict[str, Any]:
+    try:
+        row = await db.fetchrow(
+            """
+            SELECT observed_at
+            FROM weather_observations
+            WHERE city_code = $1 AND source = $2
+            ORDER BY observed_at DESC
+            LIMIT 1
+            """,
+            city_code, source,
+        )
+    except Exception as e:
+        log.debug("freshness obs fetch failed (%s/%s): %s", city_code, source, e)
+        row = None
+    observed_at = row["observed_at"] if row else None
+    return {
+        "observed_at": _iso(observed_at),
+        "status": _classify(observed_at, source, now),
+        "max_age_s": int(_FRESHNESS_S.get(source, 0)),
+    }
+
+
+async def _source_freshness_minutecast(
+    city_code: str, now: datetime,
+) -> dict[str, Any]:
+    try:
+        row = await db.fetchrow(
+            """
+            SELECT fetched_at
+            FROM weather_minutecast
+            WHERE city_code = $1
+            ORDER BY fetched_at DESC
+            LIMIT 1
+            """,
+            city_code,
+        )
+    except Exception as e:
+        log.debug("freshness accu fetch failed (%s): %s", city_code, e)
+        row = None
+    observed_at = row["fetched_at"] if row else None
+    return {
+        "observed_at": _iso(observed_at),
+        "status": _classify(observed_at, "accuweather", now),
+        "max_age_s": int(_FRESHNESS_S.get("accuweather", 0)),
+    }
+
+
+async def _source_freshness_hrrr(
+    city_code: str, now: datetime,
+) -> dict[str, Any]:
+    today = now.date()
+    try:
+        row = await db.fetchrow(
+            """
+            SELECT fetched_at, hrrr_run_time, hrrr_hourly
+            FROM weather_hrrr_forecasts
+            WHERE city_code = $1 AND forecast_date = $2
+            ORDER BY fetched_at DESC
+            LIMIT 1
+            """,
+            city_code, today,
+        )
+    except Exception as e:
+        log.debug("freshness hrrr fetch failed (%s): %s", city_code, e)
+        row = None
+    fetched_at = row["fetched_at"] if row else None
+    out: dict[str, Any] = {
+        "observed_at": _iso(fetched_at),
+        "status": _classify(fetched_at, "hrrr", now),
+        "max_age_s": int(_FRESHNESS_S.get("hrrr", 0)),
+        "run_cycle": None,
+        "run_time": None,
+    }
+    if row is not None:
+        if row["hrrr_run_time"] is not None:
+            out["run_time"] = _iso(row["hrrr_run_time"])
+        body = _decode_jsonb(row["hrrr_hourly"])
+        if isinstance(body, Mapping):
+            nomads = body.get("nomads")
+            if isinstance(nomads, Mapping):
+                cycle = nomads.get("cycle")
+                if cycle is not None:
+                    # Normalise to the "12Z" badge format operators expect.
+                    s = str(cycle).strip().upper()
+                    if s.isdigit():
+                        s = f"{int(s):02d}Z"
+                    elif not s.endswith("Z"):
+                        s = f"{s}Z"
+                    out["run_cycle"] = s
+    return out
+
+
 async def build_weather_payload(
     city_code: str,
     *,
