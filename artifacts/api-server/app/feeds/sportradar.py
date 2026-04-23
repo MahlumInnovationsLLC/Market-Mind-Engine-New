@@ -183,7 +183,55 @@ async def _get_json(provider: str, url: str, api_key: str) -> dict[str, Any] | N
 # ---------------------------------------------------------------------------
 
 
-_INJURY_PATHS = {
+# ---------------------------------------------------------------------------
+# Soccer-extended (task #211): injury / roster / live-state endpoints share
+# a different URL family than the NA leagues.  The soccer-extended /v4 API
+# is keyed by ``sr:tournament:<id>`` (per competition) and ``sr:season:<id>``
+# (per season).  Roster + injury endpoints require a season id which we
+# discover at runtime from ``tournaments/{tid}/info.json``.  We cache the
+# resolved season id for the process lifetime since soccer seasons turn
+# over only a couple of times per year.
+# ---------------------------------------------------------------------------
+
+_SOCCER_TOURNAMENTS: dict[str, str] = {
+    "epl":    "sr:tournament:17",
+    "laliga": "sr:tournament:8",
+    "seriea": "sr:tournament:23",
+    "bundes": "sr:tournament:35",
+    "ligue1": "sr:tournament:34",
+    "mls":    "sr:tournament:242",
+    "ucl":    "sr:tournament:7",
+}
+
+_SOCCER_SET = frozenset(_SOCCER_TOURNAMENTS)
+
+_SOCCER_TOURNAMENT_INFO_TPL = (
+    "https://api.sportradar.us/soccer-extended/trial/v4/en/"
+    "tournaments/{tid}/info.json"
+)
+_SOCCER_SEASON_COMPETITORS_TPL = (
+    "https://api.sportradar.us/soccer-extended/trial/v4/en/"
+    "seasons/{season_id}/competitors.json"
+)
+_SOCCER_SEASON_MISSING_TPL = (
+    "https://api.sportradar.us/soccer-extended/trial/v4/en/"
+    "seasons/{season_id}/missing_players.json"
+)
+_SOCCER_COMPETITOR_PROFILE_TPL = (
+    "https://api.sportradar.us/soccer-extended/trial/v4/en/"
+    "competitors/{team_id}/profile.json"
+)
+_SOCCER_DAILY_SCHEDULE_TPL = (
+    "https://api.sportradar.us/soccer-extended/trial/v4/en/"
+    "schedules/{y}-{m:02d}-{d:02d}/schedule.json?tournament={tid}"
+)
+
+# Process-level cache: tournament_id -> season_id.  Refreshed lazily if a
+# downstream call returns 404 (season turned over).
+_SOCCER_SEASON_CACHE: dict[str, str] = {}
+
+
+_INJURY_PATHS: dict[str, str] = {
     "nba":   "https://api.sportradar.us/nba/trial/v8/en/league/injuries.json",
     "nhl":   "https://api.sportradar.us/nhl/trial/v7/en/league/injuries.json",
     "mlb":   "https://api.sportradar.us/mlb/trial/v7/en/league/injuries.json",
@@ -191,6 +239,11 @@ _INJURY_PATHS = {
     "nfl":   "https://api.sportradar.us/nfl/official/trial/v7/en/league/injuries.json",
     "ncaaf": "https://api.sportradar.us/ncaafb/trial/v1/en/league/injuries.json",
 }
+# Soccer "injury" endpoint requires runtime season id; we record the
+# tournament-info URL here so existing `has_injury_path` checks succeed and
+# the actual two-step fetch is performed in `_poll_soccer_injuries`.
+for _code, _tid in _SOCCER_TOURNAMENTS.items():
+    _INJURY_PATHS[_code] = _SOCCER_TOURNAMENT_INFO_TPL.format(tid=_tid)
 
 
 def _flatten_injuries(payload: dict[str, Any]) -> list[dict[str, Any]]:
@@ -235,6 +288,8 @@ async def _poll_injuries(sport: str) -> int:
     api_key = _api_key_for(sport)
     if not api_key:
         raise RuntimeError(f"SPORTRADAR_{sport.upper()}_KEY not set")
+    if sport in _SOCCER_SET:
+        return await _poll_soccer_injuries(sport, api_key)
     url = _INJURY_PATHS.get(sport)
     if not url:
         return 0
@@ -349,7 +404,7 @@ async def cache_schedule_rows(
 # ---------------------------------------------------------------------------
 
 
-_ROSTER_PATHS = {
+_ROSTER_PATHS: dict[str, str] = {
     "nba":   "https://api.sportradar.us/nba/trial/v8/en/league/hierarchy.json",
     "nhl":   "https://api.sportradar.us/nhl/trial/v7/en/league/hierarchy.json",
     "mlb":   "https://api.sportradar.us/mlb/trial/v7/en/league/hierarchy.json",
@@ -357,11 +412,15 @@ _ROSTER_PATHS = {
     "nfl":   "https://api.sportradar.us/nfl/official/trial/v7/en/league/hierarchy.json",
     "ncaaf": "https://api.sportradar.us/ncaafb/trial/v1/en/league/hierarchy.json",
 }
+# Soccer rosters require a runtime season-id lookup; record the
+# tournament-info URL so existing `has_roster_path` checks succeed.
+for _code, _tid in _SOCCER_TOURNAMENTS.items():
+    _ROSTER_PATHS[_code] = _SOCCER_TOURNAMENT_INFO_TPL.format(tid=_tid)
 
 # Per-team roster: tail-appended per team_id; some leagues nest the
 # players directly inside the hierarchy payload, so the per-team call is
 # only used as a fallback when the hierarchy has empty `players` lists.
-_TEAM_PROFILE_PATHS = {
+_TEAM_PROFILE_PATHS: dict[str, str] = {
     "nba":   "https://api.sportradar.us/nba/trial/v8/en/teams/{team_id}/profile.json",
     "nhl":   "https://api.sportradar.us/nhl/trial/v7/en/teams/{team_id}/profile.json",
     "mlb":   "https://api.sportradar.us/mlb/trial/v7/en/teams/{team_id}/profile.json",
@@ -369,6 +428,264 @@ _TEAM_PROFILE_PATHS = {
     "nfl":   "https://api.sportradar.us/nfl/official/trial/v7/en/teams/{team_id}/full_roster.json",
     "ncaaf": "https://api.sportradar.us/ncaafb/trial/v1/en/teams/{team_id}/profile.json",
 }
+for _code in _SOCCER_TOURNAMENTS:
+    _TEAM_PROFILE_PATHS[_code] = _SOCCER_COMPETITOR_PROFILE_TPL
+
+
+# ---------------------------------------------------------------------------
+# Soccer-extended helpers
+# ---------------------------------------------------------------------------
+
+
+async def _resolve_soccer_season_id(
+    sport: str, api_key: str, *, force: bool = False
+) -> str | None:
+    """Return the active season id for a soccer competition, caching it
+    for the process lifetime.  Returns None if Sportradar can't tell us.
+    """
+    tid = _SOCCER_TOURNAMENTS.get(sport)
+    if not tid:
+        return None
+    if not force:
+        cached = _SOCCER_SEASON_CACHE.get(tid)
+        if cached:
+            return cached
+    info = await _get_json(
+        f"sportradar:{sport}:tournament_info",
+        _SOCCER_TOURNAMENT_INFO_TPL.format(tid=tid),
+        api_key,
+    )
+    if not info:
+        return None
+    # Soccer-extended /v4 returns either {"season": {...}} (active
+    # season) or {"seasons": [...]} (list).  Prefer the explicit
+    # `season` block when present.
+    season = info.get("season") if isinstance(info.get("season"), dict) else None
+    season_id = (season or {}).get("id")
+    if not season_id:
+        seasons = info.get("seasons") or []
+        # Pick the most recent season whose start_date is in the past
+        # and end_date in the future, falling back to the last entry.
+        if isinstance(seasons, list) and seasons:
+            now_iso = datetime.now(tz=timezone.utc).isoformat()
+            active = [
+                s for s in seasons
+                if isinstance(s, dict)
+                and str(s.get("start_date") or "") <= now_iso
+                and str(s.get("end_date") or "9999") >= now_iso
+            ]
+            chosen = active[-1] if active else seasons[-1]
+            if isinstance(chosen, dict):
+                season_id = chosen.get("id")
+    if not season_id:
+        return None
+    _SOCCER_SEASON_CACHE[tid] = str(season_id)
+    return _SOCCER_SEASON_CACHE[tid]
+
+
+def _flatten_soccer_injuries(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    """Soccer-extended `seasons/{season_id}/missing_players.json` payload:
+
+        {"competitors": [
+            {"id": "sr:competitor:1", "name": "Arsenal",
+             "players": [{
+                "id": "sr:player:1", "name": "Bukayo Saka",
+                "type": "type",  # "missing", "doubtful"
+                "status": "missing",
+                "reason": "knee injury",
+                "start_date": "2026-04-01"}]}]}
+    """
+    out: list[dict[str, Any]] = []
+    for team in payload.get("competitors") or []:
+        if not isinstance(team, dict):
+            continue
+        team_id = str(team.get("id") or "")
+        team_name = team.get("name") or ""
+        for player in team.get("players") or team.get("missing_players") or []:
+            pid = str(player.get("id") or "")
+            if not pid:
+                continue
+            out.append({
+                "player_id": pid,
+                "player_name": player.get("name") or player.get("full_name") or "",
+                "team_id": team_id,
+                "team_name": team_name,
+                "position": player.get("type") or player.get("position") or "",
+                "status": player.get("status") or player.get("type") or "missing",
+                "description": (
+                    player.get("reason")
+                    or player.get("description")
+                    or player.get("desc")
+                    or ""
+                ),
+                "updated_at": (
+                    player.get("start_date")
+                    or player.get("update_date")
+                ),
+            })
+    return out
+
+
+def _flatten_soccer_competitor_profile(
+    profile: dict[str, Any],
+) -> tuple[str, str, list[dict[str, Any]]]:
+    """Pull (team_id, team_name, players[]) out of a soccer-extended
+    competitor profile payload."""
+    competitor = profile.get("competitor") or {}
+    team_id = str(competitor.get("id") or "")
+    team_name = competitor.get("name") or competitor.get("short_name") or ""
+    players = profile.get("players") or competitor.get("players") or []
+    return team_id, team_name, [p for p in players if isinstance(p, dict)]
+
+
+async def _poll_soccer_rosters(sport: str, api_key: str) -> int:
+    """Two-step soccer roster fetch: season competitors -> per-team profile."""
+    season_id = await _resolve_soccer_season_id(sport, api_key)
+    if not season_id:
+        log.info("sportradar %s rosters: no season id available yet", sport)
+        return 0
+    season_payload = await _get_json(
+        f"sportradar:{sport}:rosters",
+        _SOCCER_SEASON_COMPETITORS_TPL.format(season_id=season_id),
+        api_key,
+    )
+    if not season_payload:
+        return 0
+    competitors = (
+        season_payload.get("season_competitors")
+        or season_payload.get("competitors")
+        or []
+    )
+    league = _SPORTRADAR_LEAGUE[sport]
+    rows: list[tuple] = []
+    teams_with_players = 0
+    for team in competitors:
+        if not isinstance(team, dict):
+            continue
+        tid = str(team.get("id") or "")
+        if not tid:
+            continue
+        try:
+            profile = await _get_json(
+                f"sportradar:{sport}:roster:{tid}",
+                _SOCCER_COMPETITOR_PROFILE_TPL.format(team_id=tid),
+                api_key,
+            )
+        except Exception as e:  # noqa: BLE001
+            log.warning(
+                "sportradar %s competitor %s profile fetch failed: %s",
+                sport, tid, e,
+            )
+            continue
+        if not profile:
+            continue
+        cid, cname, players = _flatten_soccer_competitor_profile(profile)
+        team_id = cid or tid
+        team_name = cname or team.get("name") or ""
+        if players:
+            teams_with_players += 1
+        for player in players:
+            pid = str(player.get("id") or "")
+            if not pid:
+                continue
+            rows.append((
+                league,
+                team_id,
+                team_name,
+                pid,
+                player.get("name") or player.get("full_name") or "",
+                player.get("type") or player.get("position") or "",
+                str(player.get("jersey_number") or player.get("jersey") or ""),
+                player.get("status") or "",
+                str(player.get("height") or ""),
+                str(player.get("weight") or ""),
+            ))
+    log.info(
+        "sportradar %s soccer rosters: %d competitors, %d with players, %d player rows",
+        sport, len(competitors), teams_with_players, len(rows),
+    )
+    if not rows:
+        return 0
+    try:
+        async with db.acquire() as conn, conn.transaction():
+            await conn.executemany(
+                """
+                INSERT INTO sportradar_rosters
+                  (league, team_id, team_name, player_id, player_name,
+                   position, jersey, status, height, weight, updated_at)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW())
+                ON CONFLICT (league, team_id, player_id) DO UPDATE SET
+                  team_name   = EXCLUDED.team_name,
+                  player_name = EXCLUDED.player_name,
+                  position    = EXCLUDED.position,
+                  jersey      = EXCLUDED.jersey,
+                  status      = EXCLUDED.status,
+                  height      = EXCLUDED.height,
+                  weight      = EXCLUDED.weight,
+                  updated_at  = NOW()
+                """,
+                rows,
+            )
+    except Exception as e:
+        log.warning("sportradar %s soccer rosters upsert failed: %s", sport, e)
+        raise
+    return len(rows)
+
+
+async def _poll_soccer_injuries(sport: str, api_key: str) -> int:
+    """Fetch league-wide missing-player list for a soccer competition."""
+    season_id = await _resolve_soccer_season_id(sport, api_key)
+    if not season_id:
+        return 0
+    payload = await _get_json(
+        f"sportradar:{sport}:injuries",
+        _SOCCER_SEASON_MISSING_TPL.format(season_id=season_id),
+        api_key,
+    )
+    if not payload:
+        return 0
+    rows = _flatten_soccer_injuries(payload)
+    if not rows:
+        return 0
+    league = _SPORTRADAR_LEAGUE[sport]
+    db_rows = [
+        (
+            league,
+            r["player_id"],
+            r["player_name"],
+            r["team_id"],
+            r["team_name"],
+            r["position"],
+            r["status"],
+            r["description"],
+            _parse_ts(r["updated_at"]),
+        )
+        for r in rows
+    ]
+    try:
+        async with db.acquire() as conn, conn.transaction():
+            await conn.executemany(
+                """
+                INSERT INTO sportradar_injuries
+                  (league, player_id, player_name, team_id, team_name,
+                   position, status, description, updated_at, fetched_at)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW())
+                ON CONFLICT (league, player_id) DO UPDATE SET
+                  player_name = EXCLUDED.player_name,
+                  team_id     = EXCLUDED.team_id,
+                  team_name   = EXCLUDED.team_name,
+                  position    = EXCLUDED.position,
+                  status      = EXCLUDED.status,
+                  description = EXCLUDED.description,
+                  updated_at  = EXCLUDED.updated_at,
+                  fetched_at  = NOW()
+                """,
+                db_rows,
+            )
+    except Exception as e:
+        log.warning("sportradar %s soccer injuries upsert failed: %s", sport, e)
+        raise
+    return len(db_rows)
 
 
 def _walk_teams(payload: dict[str, Any]) -> list[dict[str, Any]]:
@@ -406,6 +723,8 @@ async def _poll_rosters(sport: str) -> int:
     api_key = _api_key_for(sport)
     if not api_key:
         raise RuntimeError(f"SPORTRADAR_{sport.upper()}_KEY not set")
+    if sport in _SOCCER_SET:
+        return await _poll_soccer_rosters(sport, api_key)
     url = _ROSTER_PATHS.get(sport)
     if not url:
         return 0
@@ -504,7 +823,7 @@ async def _poll_rosters(sport: str) -> int:
 # ---------------------------------------------------------------------------
 
 
-_DAILY_SCHEDULE_PATHS = {
+_DAILY_SCHEDULE_PATHS: dict[str, str] = {
     "nba":   "https://api.sportradar.us/nba/trial/v8/en/games/{y}/{m:02d}/{d:02d}/schedule.json",
     "nhl":   "https://api.sportradar.us/nhl/trial/v7/en/games/{y}/{m:02d}/{d:02d}/schedule.json",
     "mlb":   "https://api.sportradar.us/mlb/trial/v7/en/games/{y}/{m:02d}/{d:02d}/schedule.json",
@@ -512,19 +831,24 @@ _DAILY_SCHEDULE_PATHS = {
     # NFL has no daily endpoint — current_week covers any in-progress game.
     "nfl":   "https://api.sportradar.us/nfl/official/trial/v7/en/games/current_week/schedule.json",
     "ncaaf": "https://api.sportradar.us/ncaafb/trial/v1/en/games/{y}/{m:02d}/{d:02d}/schedule.json",
-    # Soccer leagues use the soccer-extended /v4 API which has a
-    # different (competition-keyed) payload shape than the NA-league
-    # endpoints above.  Rather than registering live-state pollers
-    # that would mis-attribute events across competitions, soccer
-    # live/roster/injury feeds are intentionally registered DISABLED
-    # with a clear `skipped_reason` until the soccer-extended payload
-    # parser ships (follow-up task #211).  Schedules themselves are
-    # pulled via the dedicated `_SPORTRADAR_SCHEDULE_PATHS` map in
-    # `app/feeds/odds_api.py`, which has the soccer-extended URLs
-    # and a soccer-aware normalizer.
 }
+# Soccer live state: hit the per-competition daily schedule (already
+# scoped by ``tournament=`` query param) and parse the soccer-extended
+# {"schedules": [{"sport_event": {...}, "sport_event_status": {...}}]}
+# envelope.  Sportradar updates `sport_event_status.match_status` /
+# `clock` in near-real time on this endpoint, so a single 60s poll per
+# league mirrors what the NA leagues get out of their schedule call.
+for _code, _tid in _SOCCER_TOURNAMENTS.items():
+    _DAILY_SCHEDULE_PATHS[_code] = _SOCCER_DAILY_SCHEDULE_TPL.replace("{tid}", _tid)
 
 _LIVE_STATUSES = {"inprogress", "halftime", "delayed", "scheduled.live"}
+# Soccer-extended uses different status / match_status enums; treat any
+# of these as "live enough to persist".
+_SOCCER_LIVE_STATUSES = {
+    "live", "started", "1st_half", "2nd_half", "halftime", "pause",
+    "extra_time", "penalties", "interrupted", "suspended", "delayed",
+    "awaiting_extra_time", "awaiting_penalties",
+}
 
 
 def _today_url(sport: str) -> str:
@@ -548,6 +872,64 @@ def _extract_games(payload: dict[str, Any]) -> list[dict[str, Any]]:
     return []
 
 
+def _extract_soccer_live_rows(
+    league: str, payload: dict[str, Any],
+) -> list[tuple]:
+    """Walk a soccer-extended schedule payload and produce live-state
+    rows.  Soccer-extended wraps each match as
+    ``{"sport_event": {...}, "sport_event_status": {...}}`` under either
+    ``schedules`` (per-day endpoint) or ``sport_events`` (live endpoint).
+    """
+    import json as _json
+    entries = (
+        payload.get("schedules")
+        or payload.get("sport_events")
+        or []
+    )
+    rows: list[tuple] = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        ev = entry.get("sport_event") or entry
+        if not isinstance(ev, dict):
+            continue
+        st = entry.get("sport_event_status") or {}
+        status = str(st.get("status") or "").lower()
+        match_status = str(st.get("match_status") or "").lower()
+        # Persist any match that's currently live or finished today
+        # (so post-match scores show up in operator views) — matches
+        # whose status is just "not_started" / "scheduled" are skipped
+        # to keep the table small.
+        is_live = (
+            status in _SOCCER_LIVE_STATUSES
+            or match_status in _SOCCER_LIVE_STATUSES
+            or status in {"closed", "ended", "complete", "finished"}
+        )
+        if not is_live:
+            continue
+        gid = str(ev.get("id") or "")
+        if not gid:
+            continue
+        home_score = st.get("home_score")
+        away_score = st.get("away_score")
+        period = str(match_status or st.get("period") or "")
+        clock = str(st.get("clock") or st.get("match_time") or "")
+        scheduled = _parse_ts(ev.get("start_time") or ev.get("scheduled"))
+        merged = {**ev, "sport_event_status": st}
+        rows.append((
+            league,
+            gid,
+            status or match_status or "live",
+            int(home_score) if home_score is not None else None,
+            int(away_score) if away_score is not None else None,
+            period,
+            clock,
+            scheduled,
+            _json.dumps(merged, default=str),
+        ))
+    return rows
+
+
 async def _poll_live_state(sport: str) -> int:
     api_key = _api_key_for(sport)
     if not api_key:
@@ -556,11 +938,45 @@ async def _poll_live_state(sport: str) -> int:
     payload = await _get_json(f"sportradar:{sport}:live", url, api_key)
     if not payload:
         return 0
+
+    league = _SPORTRADAR_LEAGUE[sport]
+
+    # Soccer-extended payloads are shaped completely differently from
+    # the NA-league daily schedule (sport_event + sport_event_status),
+    # so route them through the soccer-aware row builder.
+    if sport in _SOCCER_SET:
+        rows = _extract_soccer_live_rows(league, payload)
+        if not rows:
+            return 0
+        try:
+            async with db.acquire() as conn, conn.transaction():
+                await conn.executemany(
+                    """
+                    INSERT INTO sportradar_live_state
+                      (league, game_id, status, home_score, away_score,
+                       period, clock, scheduled, payload, fetched_at)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, NOW())
+                    ON CONFLICT (league, game_id) DO UPDATE SET
+                      status     = EXCLUDED.status,
+                      home_score = EXCLUDED.home_score,
+                      away_score = EXCLUDED.away_score,
+                      period     = EXCLUDED.period,
+                      clock      = EXCLUDED.clock,
+                      scheduled  = EXCLUDED.scheduled,
+                      payload    = EXCLUDED.payload,
+                      fetched_at = NOW()
+                    """,
+                    rows,
+                )
+        except Exception as e:
+            log.warning("sportradar %s soccer live-state upsert failed: %s", sport, e)
+            raise
+        return len(rows)
+
     games = _extract_games(payload)
     if not games:
         return 0
 
-    league = _SPORTRADAR_LEAGUE[sport]
     rows: list[tuple] = []
     import json as _json
     for g in games:
@@ -653,12 +1069,14 @@ def register_sportradar_extra_feeds() -> None:
     Idempotent: if any feed name is already in the registry we skip — this
     lets the function be called from both lifespan and tests without
     raising "already registered".  Each sport that ships with rosters /
-    injuries / live-state path templates contributes 3 feeds.  Soccer
-    leagues (task #196) only ship the daily schedule today and so are
-    registered with the three extra feeds *disabled* with a clear
-    `skipped_reason` — wiring the soccer endpoints is tracked under a
-    separate follow-up task.  Schedules themselves are registered
-    alongside The Odds API in `odds_api.register_odds_feeds`.
+    injuries / live-state path templates contributes 3 feeds.  As of
+    task #211 all 7 soccer competitions added under task #196 (EPL,
+    LALIGA, SERIEA, BUNDES, LIGUE1, MLS, UCL) have their soccer-extended
+    endpoints wired and register as enabled when an API key is present.
+    Sports without path templates yet (combat / individual sports added
+    under task #197) still register *disabled* with a clear
+    `skipped_reason`.  Schedules themselves are registered alongside The
+    Odds API in `odds_api.register_odds_feeds`.
     """
     for sport in SPORTRADAR_SPORTS:
         api_key = _api_key_for(sport)

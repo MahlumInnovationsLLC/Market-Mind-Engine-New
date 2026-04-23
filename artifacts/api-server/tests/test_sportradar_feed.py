@@ -79,6 +79,15 @@ def test_register_extra_feeds_enabled_with_global_key(monkeypatch):
     disabled_feeds = [s for s in snap if not s["enabled"]]
     assert enabled_feeds, "expected at least the NA leagues to be enabled"
     assert all(s["skipped_reason"] is None for s in enabled_feeds)
+    # Task #211: soccer endpoints are now wired alongside the NA leagues,
+    # so every soccer feed must be enabled (with no skipped_reason) when
+    # the global key is set.  Other not-yet-wired sports (combat /
+    # individual) may still register as disabled with a clear reason.
+    enabled_names = {s["name"] for s in enabled_feeds}
+    for sport in ("epl", "laliga", "seriea", "bundes", "ligue1", "mls", "ucl"):
+        assert f"sportradar_{sport}_rosters" in enabled_names
+        assert f"sportradar_{sport}_injuries" in enabled_names
+        assert f"sportradar_{sport}_live" in enabled_names
     for s in disabled_feeds:
         assert s["skipped_reason"] and "endpoint not wired" in s["skipped_reason"]
 
@@ -370,6 +379,352 @@ def test_walk_teams_handles_nested_hierarchy():
     assert len(teams) == 1
     assert teams[0]["id"] == "t1"
     assert len(teams[0]["players"]) == 2
+
+
+# ---------------------------------------------------------------------------
+# Soccer-extended fixtures (task #211)
+# ---------------------------------------------------------------------------
+
+
+SOCCER_LEAGUES = ("epl", "laliga", "seriea", "bundes", "ligue1", "mls", "ucl")
+
+
+def _soccer_tournament_info_fixture(season_id: str = "sr:season:118689") -> dict:
+    return {
+        "season": {
+            "id": season_id,
+            "name": "2025/26",
+            "start_date": "2025-08-01",
+            "end_date": "2026-05-31",
+        },
+        "tournament": {"id": "sr:tournament:17", "name": "Premier League"},
+    }
+
+
+def _soccer_competitors_fixture() -> dict:
+    return {
+        "season_competitors": [
+            {"id": "sr:competitor:1", "name": "Arsenal"},
+            {"id": "sr:competitor:2", "name": "Chelsea"},
+        ]
+    }
+
+
+def _soccer_competitor_profile_fixture(team_id: str, team_name: str) -> dict:
+    return {
+        "competitor": {"id": team_id, "name": team_name, "country": "England"},
+        "players": [
+            {
+                "id": f"{team_id}:p1",
+                "name": "Striker One",
+                "type": "forward",
+                "jersey_number": 9,
+                "height": 185,
+                "weight": 78,
+            },
+            {
+                "id": f"{team_id}:p2",
+                "name": "Keeper One",
+                "type": "goalkeeper",
+                "jersey_number": 1,
+            },
+            # No id -> skipped silently.
+            {"name": "ghost"},
+        ],
+    }
+
+
+def _soccer_missing_players_fixture() -> dict:
+    return {
+        "competitors": [
+            {
+                "id": "sr:competitor:1",
+                "name": "Arsenal",
+                "players": [
+                    {
+                        "id": "sr:player:101",
+                        "name": "Bukayo Saka",
+                        "type": "missing",
+                        "status": "out",
+                        "reason": "knee injury",
+                        "start_date": "2026-04-01",
+                    },
+                    {
+                        "id": "sr:player:102",
+                        "name": "Martin Odegaard",
+                        "type": "doubtful",
+                        "status": "questionable",
+                        "reason": "ankle",
+                    },
+                ],
+            },
+            {
+                "id": "sr:competitor:2",
+                "name": "Chelsea",
+                "players": [
+                    {
+                        "id": "sr:player:201",
+                        "name": "Cole Palmer",
+                        "status": "out",
+                        "reason": "groin",
+                    }
+                ],
+            },
+        ]
+    }
+
+
+def _soccer_live_schedule_fixture() -> dict:
+    return {
+        "schedules": [
+            {
+                "sport_event": {
+                    "id": "sr:sport_event:111",
+                    "start_time": "2026-04-23T19:00:00+00:00",
+                    "tournament": {"id": "sr:tournament:17", "name": "Premier League"},
+                    "competitors": [
+                        {"id": "sr:competitor:1", "name": "Arsenal", "qualifier": "home"},
+                        {"id": "sr:competitor:2", "name": "Chelsea", "qualifier": "away"},
+                    ],
+                },
+                "sport_event_status": {
+                    "status": "live",
+                    "match_status": "1st_half",
+                    "home_score": 1,
+                    "away_score": 0,
+                    "clock": "23:45",
+                },
+            },
+            {
+                "sport_event": {
+                    "id": "sr:sport_event:222",
+                    "start_time": "2026-04-23T16:00:00+00:00",
+                    "competitors": [
+                        {"name": "A", "qualifier": "home"},
+                        {"name": "B", "qualifier": "away"},
+                    ],
+                },
+                "sport_event_status": {
+                    "status": "closed",
+                    "match_status": "ended",
+                    "home_score": 2,
+                    "away_score": 2,
+                },
+            },
+            {
+                # Skipped: not yet started.
+                "sport_event": {"id": "sr:sport_event:333"},
+                "sport_event_status": {"status": "not_started"},
+            },
+        ]
+    }
+
+
+class _CapturingDB:
+    """Stand-in for `app.feeds.sportradar.db` that records every batch
+    of rows handed to executemany so tests can assert on them."""
+
+    def __init__(self) -> None:
+        self.batches: list[list[tuple]] = []
+
+    def acquire(self):
+        outer = self
+
+        class _Conn:
+            def transaction(self):
+                class _Tx:
+                    async def __aenter__(self_inner):
+                        return None
+
+                    async def __aexit__(self_inner, *a):
+                        return None
+
+                return _Tx()
+
+            async def executemany(self_inner, sql, rows):
+                outer.batches.append(list(rows))
+
+        class _Pool:
+            async def __aenter__(self_inner):
+                return _Conn()
+
+            async def __aexit__(self_inner, *a):
+                return None
+
+        return _Pool()
+
+
+def _install_soccer_http(monkeypatch, *, info, competitors, profile_by_id, missing, live):
+    async def fake_get(name, url, key):
+        if "/tournaments/" in url and "/info.json" in url:
+            return info
+        if "/competitors.json" in url:
+            return competitors
+        if "/missing_players.json" in url:
+            return missing
+        if "/competitors/" in url and "/profile.json" in url:
+            for tid, prof in profile_by_id.items():
+                if f"/competitors/{tid}/" in url:
+                    return prof
+            return None
+        if "/schedules/" in url and "schedule.json" in url:
+            return live
+        return None
+
+    monkeypatch.setattr(sportradar, "_get_json", fake_get)
+
+
+@pytest.fixture(autouse=True)
+def _clear_soccer_season_cache():
+    sportradar._SOCCER_SEASON_CACHE.clear()
+    yield
+    sportradar._SOCCER_SEASON_CACHE.clear()
+
+
+def test_soccer_endpoints_registered_in_path_dicts():
+    # All seven soccer leagues must be present in each of the three URL
+    # maps so the registration loop and the `has_*_path` checks succeed.
+    for sport in SOCCER_LEAGUES:
+        assert sport in sportradar._INJURY_PATHS, sport
+        assert sport in sportradar._ROSTER_PATHS, sport
+        assert sport in sportradar._TEAM_PROFILE_PATHS, sport
+        assert sport in sportradar._DAILY_SCHEDULE_PATHS, sport
+        assert "soccer-extended" in sportradar._INJURY_PATHS[sport]
+        assert "soccer-extended" in sportradar._ROSTER_PATHS[sport]
+        assert "soccer-extended" in sportradar._TEAM_PROFILE_PATHS[sport]
+        assert "soccer-extended" in sportradar._DAILY_SCHEDULE_PATHS[sport]
+
+
+def test_flatten_soccer_injuries_handles_missing_players_payload():
+    rows = sportradar._flatten_soccer_injuries(_soccer_missing_players_fixture())
+    assert len(rows) == 3
+    by_id = {r["player_id"]: r for r in rows}
+    saka = by_id["sr:player:101"]
+    assert saka["team_id"] == "sr:competitor:1"
+    assert saka["team_name"] == "Arsenal"
+    assert saka["status"] == "out"
+    assert "knee" in saka["description"]
+    assert by_id["sr:player:201"]["team_name"] == "Chelsea"
+
+
+def test_flatten_soccer_injuries_empty_safe():
+    assert sportradar._flatten_soccer_injuries({}) == []
+    assert sportradar._flatten_soccer_injuries({"competitors": []}) == []
+
+
+def test_flatten_soccer_competitor_profile_pulls_team_and_players():
+    prof = _soccer_competitor_profile_fixture("sr:competitor:1", "Arsenal")
+    tid, name, players = sportradar._flatten_soccer_competitor_profile(prof)
+    assert tid == "sr:competitor:1"
+    assert name == "Arsenal"
+    assert len(players) == 3  # un-id'd entries are filtered later in the poller
+
+
+def test_extract_soccer_live_rows_filters_to_live_or_finished():
+    rows = sportradar._extract_soccer_live_rows("EPL", _soccer_live_schedule_fixture())
+    # 2 live/closed entries kept, the not_started one is dropped.
+    assert len(rows) == 2
+    by_id = {r[1]: r for r in rows}
+    live = by_id["sr:sport_event:111"]
+    # (league, gid, status, home_score, away_score, period, clock, scheduled, payload)
+    assert live[0] == "EPL"
+    assert live[2] == "live"
+    assert live[3] == 1 and live[4] == 0
+    assert live[5] == "1st_half"
+    assert live[6] == "23:45"
+    closed = by_id["sr:sport_event:222"]
+    assert closed[2] == "closed"
+    assert closed[3] == 2 and closed[4] == 2
+
+
+@pytest.mark.parametrize("sport", SOCCER_LEAGUES)
+def test_poll_soccer_injuries_writes_nonzero_rows(monkeypatch, sport):
+    import asyncio
+    monkeypatch.setenv("SPORTRADAR_API_KEY", "k")
+    _install_soccer_http(
+        monkeypatch,
+        info=_soccer_tournament_info_fixture(),
+        competitors=_soccer_competitors_fixture(),
+        profile_by_id={},
+        missing=_soccer_missing_players_fixture(),
+        live=_soccer_live_schedule_fixture(),
+    )
+    fake_db = _CapturingDB()
+    monkeypatch.setattr(sportradar, "db", fake_db)
+
+    n = asyncio.run(sportradar._poll_injuries(sport))
+    assert n == 3, f"{sport}: expected 3 missing-player rows"
+    assert fake_db.batches and len(fake_db.batches[0]) == 3
+    league = sportradar._SPORTRADAR_LEAGUE[sport]
+    assert all(row[0] == league for row in fake_db.batches[0])
+
+
+@pytest.mark.parametrize("sport", SOCCER_LEAGUES)
+def test_poll_soccer_rosters_writes_nonzero_rows(monkeypatch, sport):
+    import asyncio
+    monkeypatch.setenv("SPORTRADAR_API_KEY", "k")
+    profile_by_id = {
+        "sr:competitor:1": _soccer_competitor_profile_fixture("sr:competitor:1", "Arsenal"),
+        "sr:competitor:2": _soccer_competitor_profile_fixture("sr:competitor:2", "Chelsea"),
+    }
+    _install_soccer_http(
+        monkeypatch,
+        info=_soccer_tournament_info_fixture(),
+        competitors=_soccer_competitors_fixture(),
+        profile_by_id=profile_by_id,
+        missing=_soccer_missing_players_fixture(),
+        live=_soccer_live_schedule_fixture(),
+    )
+    fake_db = _CapturingDB()
+    monkeypatch.setattr(sportradar, "db", fake_db)
+
+    n = asyncio.run(sportradar._poll_rosters(sport))
+    # 2 teams × 2 valid players each (the un-id'd "ghost" entry is filtered).
+    assert n == 4, f"{sport}: expected 4 player rows from 2 teams"
+    assert fake_db.batches and len(fake_db.batches[0]) == 4
+    league = sportradar._SPORTRADAR_LEAGUE[sport]
+    assert all(row[0] == league for row in fake_db.batches[0])
+    teams = {row[1] for row in fake_db.batches[0]}
+    assert teams == {"sr:competitor:1", "sr:competitor:2"}
+
+
+@pytest.mark.parametrize("sport", SOCCER_LEAGUES)
+def test_poll_soccer_live_state_writes_nonzero_rows(monkeypatch, sport):
+    import asyncio
+    monkeypatch.setenv("SPORTRADAR_API_KEY", "k")
+    _install_soccer_http(
+        monkeypatch,
+        info=_soccer_tournament_info_fixture(),
+        competitors=_soccer_competitors_fixture(),
+        profile_by_id={},
+        missing=_soccer_missing_players_fixture(),
+        live=_soccer_live_schedule_fixture(),
+    )
+    fake_db = _CapturingDB()
+    monkeypatch.setattr(sportradar, "db", fake_db)
+
+    n = asyncio.run(sportradar._poll_live_state(sport))
+    assert n == 2, f"{sport}: expected 2 live/closed rows"
+    assert fake_db.batches and len(fake_db.batches[0]) == 2
+    league = sportradar._SPORTRADAR_LEAGUE[sport]
+    assert all(row[0] == league for row in fake_db.batches[0])
+
+
+def test_resolve_soccer_season_id_caches_per_tournament(monkeypatch):
+    import asyncio
+    calls: list[str] = []
+
+    async def fake_get(name, url, key):
+        calls.append(url)
+        return _soccer_tournament_info_fixture(season_id="sr:season:abc")
+
+    monkeypatch.setattr(sportradar, "_get_json", fake_get)
+    sid1 = asyncio.run(sportradar._resolve_soccer_season_id("epl", "k"))
+    sid2 = asyncio.run(sportradar._resolve_soccer_season_id("epl", "k"))
+    assert sid1 == "sr:season:abc"
+    assert sid2 == "sr:season:abc"
+    # Cached after first lookup.
+    assert len(calls) == 1
 
 
 def test_api_key_for_prefers_per_sport(monkeypatch):
