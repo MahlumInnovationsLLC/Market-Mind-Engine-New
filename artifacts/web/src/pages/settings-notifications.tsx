@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { Link, Redirect } from "wouter";
 import { useAuth } from "@clerk/react";
-import { apiFetch, ApiError } from "@/lib/api";
+import { apiFetch, ApiError, formatErrorMessage } from "@/lib/api";
 
 export default function SettingsNotificationsPage() {
   // /settings/notifications now lives inside the unified /system page
@@ -147,7 +147,7 @@ export function NotificationPrefsPanel() {
       })
       .catch((e: unknown) => {
         if (cancelled) return;
-        setError(e instanceof Error ? e.message : String(e));
+        setError(formatErrorMessage(e));
         setLoading(false);
       });
     return () => {
@@ -168,12 +168,12 @@ export function NotificationPrefsPanel() {
       setPhone(next.prefs.sms_phone_number ?? "");
       setSavedAt(Date.now());
     } catch (e) {
-      const msg =
+      const msg = formatErrorMessage(
+        e,
         e instanceof ApiError && typeof e.body === "object" && e.body !== null
           ? `Save failed (HTTP ${e.status})`
-          : e instanceof Error
-            ? e.message
-            : String(e);
+          : undefined,
+      );
       setError(msg);
     } finally {
       setSaving(false);

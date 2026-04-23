@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { useAdminEmergencyStop } from "@workspace/api-client-react";
+import { formatErrorMessage } from "@/lib/api";
 
 /**
  * Operator "kill all" control.
@@ -34,11 +35,14 @@ export default function EmergencyStop() {
         });
       },
       onError: (err: unknown) => {
-        const msg =
-          err && typeof err === "object" && "message" in err
-            ? String((err as { message: string }).message)
-            : "emergency-stop failed";
-        setError(msg);
+        setError(
+          formatErrorMessage(
+            err,
+            err && typeof err === "object" && "message" in err
+              ? undefined
+              : "emergency-stop failed",
+          ),
+        );
       },
     },
   });

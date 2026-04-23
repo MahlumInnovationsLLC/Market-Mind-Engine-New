@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { Redirect } from "wouter";
 import { useAuth } from "@clerk/react";
-import { apiFetch, ApiError } from "@/lib/api";
+import { apiFetch, ApiError, formatErrorMessage } from "@/lib/api";
 
 export default function HealthPage() {
   // /health has been folded into the unified /system page (Health tab).
@@ -187,11 +187,10 @@ export function HealthPanel() {
         }
       }
       setReadinessError(
-        e instanceof ApiError
-          ? `HTTP ${e.status} :: ${e.message}`
-          : e instanceof Error
-            ? e.message
-            : String(e),
+        formatErrorMessage(
+          e,
+          e instanceof ApiError ? `HTTP ${e.status} :: ${e.message}` : undefined,
+        ),
       );
     }
   }
@@ -217,12 +216,10 @@ export function HealthPanel() {
       setModelAlerts(m);
       setError(null);
     } catch (e: unknown) {
-      const msg =
-        e instanceof ApiError
-          ? `HTTP ${e.status} :: ${e.message}`
-          : e instanceof Error
-            ? e.message
-            : String(e);
+      const msg = formatErrorMessage(
+        e,
+        e instanceof ApiError ? `HTTP ${e.status} :: ${e.message}` : undefined,
+      );
       setError(msg);
     }
   }
@@ -251,11 +248,10 @@ export function HealthPanel() {
       setModelAlerts(m);
     } catch (e: unknown) {
       setAlertError(
-        e instanceof ApiError
-          ? `HTTP ${e.status} :: ${e.message}`
-          : e instanceof Error
-            ? e.message
-            : String(e),
+        formatErrorMessage(
+          e,
+          e instanceof ApiError ? `HTTP ${e.status} :: ${e.message}` : undefined,
+        ),
       );
     } finally {
       setAlertBusy(null);
@@ -274,7 +270,7 @@ export function HealthPanel() {
       setTestResult(res);
     } catch (e: unknown) {
       setTestResult({
-        error: e instanceof Error ? e.message : String(e),
+        error: formatErrorMessage(e),
       });
     } finally {
       setTesting(null);

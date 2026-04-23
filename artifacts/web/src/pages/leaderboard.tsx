@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { Link } from "wouter";
 import { PublicNav, PublicFooter } from "@/components/public/public-nav";
-import { apiFetch } from "@/lib/api";
+import { apiFetch, formatErrorMessage } from "@/lib/api";
 
 interface PublicStats {
   realized_pnl: number | null;
@@ -112,7 +112,7 @@ export default function LeaderboardPage() {
       .catch((e) => {
         if (cancel) return;
         setSignals([]);
-        setError(e instanceof Error ? e.message : String(e));
+        setError(formatErrorMessage(e));
       });
     return () => {
       cancel = true;

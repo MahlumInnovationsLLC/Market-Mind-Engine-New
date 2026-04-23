@@ -8,6 +8,7 @@ import {
   useAdminAutoResearchRun,
   type AutoResearchFeature,
 } from "@workspace/api-client-react";
+import { formatErrorMessage } from "@/lib/api";
 import { GlassCard } from "@/components/ui/glass-card";
 import { SectionHeader } from "@/components/ui/section-header";
 
@@ -160,9 +161,7 @@ export default function AutoResearchPanel({ isAdmin }: { isAdmin: boolean }) {
         },
         onError: (err) => {
           setPendingName(null);
-          setErrorMsg(
-            err instanceof Error ? err.message : "Decision failed",
-          );
+          setErrorMsg(formatErrorMessage(err, err instanceof Error ? undefined : "Decision failed"));
         },
       },
     );
@@ -179,7 +178,7 @@ export default function AutoResearchPanel({ isAdmin }: { isAdmin: boolean }) {
         queryClient.invalidateQueries({ queryKey });
       },
       onError: (err) => {
-        setErrorMsg(err instanceof Error ? err.message : "Run failed");
+        setErrorMsg(formatErrorMessage(err, err instanceof Error ? undefined : "Run failed"));
       },
     });
   };

@@ -265,6 +265,13 @@ export class ApiError<T = unknown> extends Error {
   readonly response: Response;
   readonly method: string;
   readonly url: string;
+  /**
+   * Correlation id echoed by the server in the `x-request-id` response
+   * header, or `null` if the server didn't stamp one.  Surfacing this in
+   * error UIs lets support paste the id into log search and find the
+   * full backend trace immediately.
+   */
+  readonly requestId: string | null;
 
   constructor(
     response: Response,
@@ -281,6 +288,7 @@ export class ApiError<T = unknown> extends Error {
     this.response = response;
     this.method = requestInfo.method;
     this.url = response.url || requestInfo.url;
+    this.requestId = response.headers.get(REQUEST_ID_HEADER);
   }
 }
 

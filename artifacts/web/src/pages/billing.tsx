@@ -13,6 +13,7 @@ import {
   useCreateBillingPortalSession,
   useGetMySubscription,
 } from "@workspace/api-client-react";
+import { formatErrorMessage } from "@/lib/api";
 import { useQueryClient } from "@tanstack/react-query";
 
 const TIER_COPY: Record<UserSubscription["tier"], string> = {
@@ -66,9 +67,7 @@ export default function BillingPage() {
   const sub = subQuery.data ?? null;
   const loading = subQuery.isLoading;
   const fetchError = subQuery.error
-    ? subQuery.error instanceof Error
-      ? subQuery.error.message
-      : String(subQuery.error)
+    ? formatErrorMessage(subQuery.error)
     : null;
 
   const portalMutation = useCreateBillingPortalSession();
@@ -85,11 +84,10 @@ export default function BillingPage() {
       }
     } catch (e) {
       setError(
-        e instanceof ApiError
-          ? `Portal failed (HTTP ${e.status})`
-          : e instanceof Error
-            ? e.message
-            : String(e),
+        formatErrorMessage(
+          e,
+          e instanceof ApiError ? `Portal failed (HTTP ${e.status})` : undefined,
+        ),
       );
     }
   };

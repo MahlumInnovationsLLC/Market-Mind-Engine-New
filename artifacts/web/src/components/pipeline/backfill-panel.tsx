@@ -4,7 +4,7 @@ import {
   getGetMyAccessQueryKey,
   useGetMyAccess,
 } from "@workspace/api-client-react";
-import { ApiError, apiFetch } from "@/lib/api";
+import { ApiError, apiFetch, formatErrorMessage } from "@/lib/api";
 
 interface BackfillStatus {
   state: "idle" | "running" | "completed" | "failed" | string;
@@ -77,7 +77,7 @@ export default function BackfillPanel() {
       setStatus(next);
       setStatusError(null);
     } catch (e) {
-      setStatusError(e instanceof Error ? e.message : String(e));
+      setStatusError(formatErrorMessage(e));
     }
   }, [getToken, isSignedIn]);
 
@@ -122,10 +122,12 @@ export default function BackfillPanel() {
       }, 500);
     } catch (e) {
       if (e instanceof ApiError && e.status === 409) {
-        setStartError("A backfill is already running.");
+        setStartError(
+          formatErrorMessage(e, "A backfill is already running."),
+        );
         fetchStatus();
       } else {
-        setStartError(e instanceof Error ? e.message : String(e));
+        setStartError(formatErrorMessage(e));
       }
     } finally {
       setStarting(false);

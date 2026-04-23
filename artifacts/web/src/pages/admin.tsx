@@ -2750,7 +2750,9 @@ export function LeadsPanel() {
       if (token) headers.set("authorization", `Bearer ${token}`);
       const res = await fetch(url, { headers });
       if (!res.ok) {
-        throw new Error(`HTTP ${res.status} ${res.statusText}`);
+        const id = res.headers.get(REQUEST_ID_HEADER);
+        const base = `HTTP ${res.status} ${res.statusText}`;
+        throw new Error(id ? `${base} (Reference: ${id})` : base);
       }
       const blob = await res.blob();
       const dispo = res.headers.get("content-disposition") ?? "";

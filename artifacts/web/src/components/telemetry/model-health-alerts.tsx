@@ -6,6 +6,7 @@ import {
   useAcknowledgeModelHealthAlert,
 } from "@workspace/api-client-react";
 import { useWebSocket } from "@/hooks/use-websocket";
+import { formatErrorMessage } from "@/lib/api";
 
 function severityClass(severity: string | null | undefined): string {
   switch ((severity ?? "").toLowerCase()) {
@@ -127,11 +128,14 @@ export default function ModelHealthAlerts() {
           },
           onError: (err: unknown) => {
             setPendingId(null);
-            const msg =
-              err && typeof err === "object" && "message" in err
-                ? String((err as { message?: string }).message)
-                : "ack failed";
-            setErrorMsg(msg);
+            setErrorMsg(
+              formatErrorMessage(
+                err,
+                err && typeof err === "object" && "message" in err
+                  ? undefined
+                  : "ack failed",
+              ),
+            );
           },
         },
       );

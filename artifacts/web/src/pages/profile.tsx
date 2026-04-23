@@ -2,7 +2,7 @@ import { useMemo, useState } from "react";
 import { Link, useLocation } from "wouter";
 import { useAuth, useClerk, useUser } from "@clerk/react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { apiFetch } from "@/lib/api";
+import { apiFetch, formatErrorMessage } from "@/lib/api";
 import {
   ApiError,
   UserSubscriptionTier,
@@ -111,11 +111,10 @@ export default function ProfilePage() {
       }
     } catch (e) {
       setPortalError(
-        e instanceof ApiError
-          ? `Portal failed (HTTP ${e.status})`
-          : e instanceof Error
-            ? e.message
-            : String(e),
+        formatErrorMessage(
+          e,
+          e instanceof ApiError ? `Portal failed (HTTP ${e.status})` : undefined,
+        ),
       );
     }
   };

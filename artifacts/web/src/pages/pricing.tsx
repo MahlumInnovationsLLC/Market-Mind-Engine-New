@@ -7,6 +7,7 @@ import {
   useGetBillingPricing,
   useCreateBillingCheckoutSession,
 } from "@workspace/api-client-react";
+import { formatErrorMessage } from "@/lib/api";
 import { PublicFooter, PublicNav } from "@/components/public/public-nav";
 import {
   getPendingCheckoutPriceId,
@@ -61,9 +62,7 @@ export default function PricingPage() {
   const pricingQuery = useGetBillingPricing();
   const catalog = pricingQuery.data ?? null;
   const loadError = pricingQuery.error
-    ? pricingQuery.error instanceof Error
-      ? pricingQuery.error.message
-      : String(pricingQuery.error)
+    ? formatErrorMessage(pricingQuery.error)
     : null;
 
   const checkoutMutation = useCreateBillingCheckoutSession();
@@ -102,12 +101,10 @@ export default function PricingPage() {
         setActionError(noUrlMsg);
       }
     } catch (e) {
-      const msg =
-        e instanceof ApiError
-          ? `Checkout failed (HTTP ${e.status})`
-          : e instanceof Error
-            ? e.message
-            : String(e);
+      const msg = formatErrorMessage(
+        e,
+        e instanceof ApiError ? `Checkout failed (HTTP ${e.status})` : undefined,
+      );
       if (autoCheckoutPriceId === priceId) {
         setAutoCheckoutError(msg);
       } else {

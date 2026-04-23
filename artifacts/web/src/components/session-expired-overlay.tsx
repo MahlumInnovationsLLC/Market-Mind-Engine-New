@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { useClerk } from "@clerk/react";
+import { formatErrorMessage } from "@/lib/api";
 
 interface SessionExpiredOverlayProps {
   onDismiss: () => void;
@@ -23,9 +24,12 @@ export default function SessionExpiredOverlay({
       // Keep the overlay visible so the user is not stranded with a
       // half-broken dashboard if the sign-out request itself fails.
       setSignOutError(
-        err instanceof Error
-          ? err.message
-          : "Could not sign out. Please try again.",
+        formatErrorMessage(
+          err,
+          err instanceof Error
+            ? undefined
+            : "Could not sign out. Please try again.",
+        ),
       );
     } finally {
       setSigningOut(false);

@@ -33,11 +33,76 @@ export const REQUEST_ID_HEADER = "x-request-id";
 export class ApiError extends Error {
   status: number;
   body: unknown;
-  constructor(message: string, status: number, body: unknown) {
+  /**
+   * Correlation id echoed by the server in the `x-request-id` response
+   * header.  Surface this in error UIs so support can paste it into log
+   * search and find the full backend trace immediately.
+   */
+  requestId: string | null;
+  constructor(
+    message: string,
+    status: number,
+    body: unknown,
+    requestId: string | null = null,
+  ) {
     super(message);
     this.status = status;
     this.body = body;
+    this.requestId = requestId;
   }
+}
+
+/**
+ * Pull the `x-request-id` correlation id off any error that carries one.
+ * Works with the local `ApiError` above and the generated client's
+ * `ApiError` (which exposes the response `headers`).
+ */
+export function getErrorRequestId(err: unknown): string | null {
+  if (err instanceof ApiError) {
+    return err.requestId;
+  }
+  if (err && typeof err === "object") {
+    const direct = (err as { requestId?: unknown }).requestId;
+    if (typeof direct === "string" && direct !== "") return direct;
+    const headers = (err as { headers?: unknown }).headers;
+    if (
+      headers &&
+      typeof (headers as { get?: unknown }).get === "function"
+    ) {
+      const id = (headers as { get: (name: string) => string | null }).get(
+        REQUEST_ID_HEADER,
+      );
+      if (id && id !== "") return id;
+    }
+  }
+  return null;
+}
+
+/**
+ * Render an error as a short string suitable for inline error UI / toasts,
+ * appending `(Reference: <id>)` when the underlying response carried an
+ * `x-request-id` header so the operator can copy the id into log search.
+ *
+ * `baseOverride` lets callers substitute a more user-friendly summary
+ * (e.g. `"Portal failed (HTTP 500)"`) instead of the raw `Error.message`
+ * — the reference id is still appended on top.
+ */
+export function formatErrorMessage(
+  err: unknown,
+  baseOverride?: string,
+): string {
+  let base: string;
+  if (typeof baseOverride === "string" && baseOverride !== "") {
+    base = baseOverride;
+  } else if (err instanceof Error) {
+    base = err.message;
+  } else if (err == null) {
+    base = "Request failed";
+  } else {
+    base = String(err);
+  }
+  const id = getErrorRequestId(err);
+  return id ? `${base} (Reference: ${id})` : base;
 }
 
 export type AuthTokenGetter = () => Promise<string | null | undefined>;
@@ -86,6 +151,7 @@ export async function apiFetch<T = unknown>(
       `HTTP ${res.status} ${res.statusText} :: ${path}`,
       res.status,
       parsed,
+      res.headers.get(REQUEST_ID_HEADER),
     );
   }
   return parsed as T;

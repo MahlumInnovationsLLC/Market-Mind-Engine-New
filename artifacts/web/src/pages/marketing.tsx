@@ -1,6 +1,6 @@
 import { lazy, Suspense, useEffect, useMemo, useState } from "react";
 import { Link } from "wouter";
-import { apiFetch } from "@/lib/api";
+import { apiFetch, formatErrorMessage } from "@/lib/api";
 import { hasClerkSession } from "@/lib/clerk-session";
 import { PublicFooter, PublicNav } from "@/components/public/public-nav";
 
@@ -146,7 +146,7 @@ export default function MarketingPage() {
       })
       .catch((e) => {
         if (cancel) return;
-        setCurveError(e instanceof Error ? e.message : String(e));
+        setCurveError(formatErrorMessage(e));
       })
       .finally(() => {
         if (!cancel) setCurveLoading(false);
@@ -179,7 +179,7 @@ export default function MarketingPage() {
       .catch((e) => {
         if (!cancel) {
           setSignals([]);
-          setSignalsError(e instanceof Error ? e.message : String(e));
+          setSignalsError(formatErrorMessage(e));
         }
       });
     return () => {
@@ -209,10 +209,10 @@ export default function MarketingPage() {
       });
       setLeadEmail("");
     } catch (e) {
-      const msg =
-        e instanceof Error
-          ? e.message
-          : "Couldn't submit right now. Please try again.";
+      const msg = formatErrorMessage(
+        e,
+        e instanceof Error ? undefined : "Couldn't submit right now. Please try again.",
+      );
       setLeadStatus({ kind: "error", message: msg });
     } finally {
       setLeadSubmitting(false);

@@ -157,6 +157,46 @@ describe("customFetch silent token refresh", () => {
     expect(sent.get("x-request-id")).toBe("caller-supplied-rid");
   });
 
+  it("exposes the response x-request-id correlation header on ApiError", async () => {
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse(
+        500,
+        { detail: "boom" },
+        {
+          statusText: "Internal Server Error",
+          headers: { "x-request-id": "abc123def456" },
+        },
+      ),
+    );
+
+    let captured: ApiError | null = null;
+    try {
+      await customFetch("https://api.test/resource");
+    } catch (err) {
+      captured = err as ApiError;
+    }
+
+    expect(captured).toBeInstanceOf(ApiError);
+    expect(captured?.requestId).toBe("abc123def456");
+    expect(captured?.headers.get("x-request-id")).toBe("abc123def456");
+  });
+
+  it("leaves ApiError.requestId null when the server omits the header", async () => {
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse(500, { detail: "boom" }, { statusText: "Internal Server Error" }),
+    );
+
+    let captured: ApiError | null = null;
+    try {
+      await customFetch("https://api.test/resource");
+    } catch (err) {
+      captured = err as ApiError;
+    }
+
+    expect(captured).toBeInstanceOf(ApiError);
+    expect(captured?.requestId).toBeNull();
+  });
+
   it("never retries more than once even if the refreshed request also returns 401", async () => {
     const getter = vi.fn(async () => "token");
     setAuthTokenGetter(getter);
