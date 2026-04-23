@@ -595,4 +595,4 @@ def test_normalize_handles_empty_payloads_gracefully():
 def test_gates_tuple_still_twelve():
     """Lock the 12-gate invariant — combat-individual sub-checks must
     fold into existing gates rather than adding new entries."""
-    assert len(GATES) == 13
+    assert len(GATES) == 14

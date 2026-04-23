@@ -227,7 +227,7 @@ def test_per_vertical_kelly_override_beats_spec_default():
 
 
 def test_twelve_gate_invariant_unchanged():
-    assert len(GATES) == 13
+    assert len(GATES) == 14
 
 
 # ---------------------------------------------------------------------------

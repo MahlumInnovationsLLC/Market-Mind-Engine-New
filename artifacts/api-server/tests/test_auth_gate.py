@@ -90,6 +90,7 @@ PROTECTED_ROUTES: tuple[str, ...] = (
     "/api/dashboard/runtime-settings",
     "/api/admin/risk-knobs",
     "/api/admin/vertical-visibility",
+    "/api/admin/verticals/halts",
     "/api/dashboard/verticals",
     "/api/dashboard/vertical-visibility",
     "/api/admin/models",
@@ -138,6 +139,9 @@ PROTECTED_POST_ROUTES: tuple[str, ...] = (
     "/api/admin/models/mirror/push",
     "/api/admin/autoresearch/features/{name}/decision",
     "/api/admin/autoresearch/run",
+    # Task #271 — per-vertical halt/resume toggles.
+    "/api/admin/verticals/{vertical}/halt",
+    "/api/admin/verticals/{vertical}/resume",
     # Task #245 — research-directives admin gating + drift rollback workflow.
     "/api/research/directives/{directive_id}/decision",
 )
