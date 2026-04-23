@@ -14,6 +14,7 @@ export interface AdminAccessRequest {
   is_admin: boolean;
   first_seen_at?: string | null;
   last_seen_at?: string | null;
+  denied_at?: string | null;
   activity_count: number;
   clerk_created_at?: string | null;
   clerk_last_sign_in_at?: string | null;

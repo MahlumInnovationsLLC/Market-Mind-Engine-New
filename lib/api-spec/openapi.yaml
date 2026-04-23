@@ -428,11 +428,23 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/AdminAccessRequestList" }
 
+  /admin/access-requests/denied:
+    get:
+      operationId: adminListDeniedAccessRequests
+      tags: [admin]
+      summary: Users an operator previously denied (most recent first)
+      responses:
+        "200":
+          description: Denied access requests
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AdminAccessRequestList" }
+
   /admin/access-requests/{clerk_user_id}:
     post:
       operationId: adminDecideAccessRequest
       tags: [admin]
-      summary: Approve or deny a pending access request
+      summary: Approve, deny, or re-invite (undeny) an access request
       parameters:
         - in: path
           name: clerk_user_id
@@ -1781,6 +1793,7 @@ components:
         is_admin: { type: boolean }
         first_seen_at: { type: string, nullable: true }
         last_seen_at: { type: string, nullable: true }
+        denied_at: { type: string, nullable: true }
         activity_count: { type: integer }
         clerk_created_at: { type: string, nullable: true }
         clerk_last_sign_in_at: { type: string, nullable: true }
@@ -1799,7 +1812,7 @@ components:
       properties:
         decision:
           type: string
-          enum: [approve, deny]
+          enum: [approve, deny, undeny]
       required: [decision]
 
     AdminAccessRequestResult:

@@ -1117,7 +1117,7 @@ async def admin_set_user_admin(
 
 
 class AdminAccessRequestDecision(BaseModel):
-    decision: str = Field(..., pattern="^(approve|deny)$")
+    decision: str = Field(..., pattern="^(approve|deny|undeny)$")
 
 
 @app.get("/api/admin/access-requests")
@@ -1128,6 +1128,16 @@ async def admin_list_access_requests(
     explicitly denied. Drives the operator-console "Access requests" panel.
     """
     return {"items": await admin_module.list_pending_access_requests()}
+
+
+@app.get("/api/admin/access-requests/denied")
+async def admin_list_denied_access_requests(
+    actor: AuthedUser = Depends(require_admin),
+) -> dict[str, object]:
+    """Users an operator previously denied. Drives the "Denied" sub-list
+    in the operator console so a denial can be undone (re-invite).
+    """
+    return {"items": await admin_module.list_denied_access_requests()}
 
 
 @app.post("/api/admin/access-requests/{clerk_user_id}")
@@ -1144,6 +1154,12 @@ async def admin_decide_access_request(
                 actor_email=actor_email,
                 target_user_id=clerk_user_id,
                 approved=True,
+            )
+        if body.decision == "undeny":
+            return await admin_module.clear_denied(
+                actor_user_id=actor.user_id,
+                actor_email=actor_email,
+                target_user_id=clerk_user_id,
             )
         return await admin_module.set_denied(
             actor_user_id=actor.user_id,

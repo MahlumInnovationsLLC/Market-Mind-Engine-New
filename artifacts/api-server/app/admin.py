@@ -518,6 +518,98 @@ async def set_denied(
     }
 
 
+async def clear_denied(
+    *,
+    actor_user_id: str,
+    actor_email: str | None,
+    target_user_id: str,
+) -> dict[str, Any]:
+    """Undo a previous deny so the user reappears in the pending list.
+
+    Records an audit log entry (``action = "clear_denied"``) and leaves
+    ``approved`` / ``is_admin`` alone; the operator must still explicitly
+    approve from the pending panel.
+    """
+    await ensure_schema()
+    before_row = await _ensure_target_row(target_user_id)
+    before_denied = bool(before_row.get("denied_at")) if before_row else False
+    try:
+        async with db.acquire() as c:
+            row = await c.fetchrow(
+                """
+                UPDATE app_users SET denied_at = NULL
+                WHERE clerk_user_id = $1
+                RETURNING *
+                """,
+                target_user_id,
+            )
+    except Exception as e:
+        log.warning("clear_denied update failed for %s: %s", target_user_id, e)
+        row = None
+    after_row = dict(row) if row is not None else (before_row or {})
+    target_email = after_row.get("email") if after_row else None
+    try:
+        async with db.acquire() as c:
+            await c.execute(
+                """
+                INSERT INTO admin_audit_log (
+                    actor_user_id, actor_email,
+                    target_user_id, target_email,
+                    action, before_value, after_value
+                ) VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7::jsonb)
+                """,
+                actor_user_id,
+                actor_email,
+                target_user_id,
+                target_email,
+                "clear_denied",
+                f'{{"denied": {str(before_denied).lower()}}}',
+                '{"denied": false}',
+            )
+    except Exception as e:
+        log.warning("audit log insert (clear_denied) failed: %s", e)
+    return {
+        "clerk_user_id": target_user_id,
+        "approved": bool(after_row.get("approved")),
+        "is_admin": bool(after_row.get("is_admin")),
+        "denied": False,
+    }
+
+
+async def list_denied_access_requests() -> list[dict[str, Any]]:
+    """Users who were previously denied by an operator. Most-recent
+    denial first. Re-invite (``clear_denied``) brings them back into
+    the pending requests panel."""
+    await ensure_schema()
+    try:
+        async with db.acquire() as c:
+            rows = await c.fetch(
+                """
+                SELECT
+                  clerk_user_id,
+                  email,
+                  display_name,
+                  approved,
+                  is_admin,
+                  to_char(first_seen_at, 'YYYY-MM-DD"T"HH24:MI:SSZ') AS first_seen_at,
+                  to_char(last_seen_at,  'YYYY-MM-DD"T"HH24:MI:SSZ') AS last_seen_at,
+                  to_char(denied_at,     'YYYY-MM-DD"T"HH24:MI:SSZ') AS denied_at,
+                  activity_count,
+                  to_char(clerk_created_at, 'YYYY-MM-DD"T"HH24:MI:SSZ')      AS clerk_created_at,
+                  to_char(clerk_last_sign_in_at, 'YYYY-MM-DD"T"HH24:MI:SSZ') AS clerk_last_sign_in_at
+                FROM app_users
+                WHERE denied_at IS NOT NULL
+                  AND approved = false
+                  AND is_admin = false
+                ORDER BY denied_at DESC NULLS LAST
+                """
+            )
+            return [dict(r) for r in rows]
+    except Exception as e:
+        log.warning("list_denied_access_requests failed: %s", e)
+        return []
+
+
 async def list_pending_access_requests() -> list[dict[str, Any]]:
     """Users who have signed in but are still waiting for an operator
     to approve them. Denied users drop out — re-signing in or a manual

@@ -3,11 +3,13 @@ import {
   AdminAccessRequest,
   getAdminGetAuditLogQueryKey,
   getAdminListAccessRequestsQueryKey,
+  getAdminListDeniedAccessRequestsQueryKey,
   getAdminListUsersQueryKey,
   useAdminDecideAccessRequest,
   useAdminListAccessRequests,
+  useAdminListDeniedAccessRequests,
 } from "@workspace/api-client-react";
-import { UserCheck } from "lucide-react";
+import { UserCheck, UserX } from "lucide-react";
 
 export default function AccessRequests() {
   const qc = useQueryClient();
@@ -17,9 +19,22 @@ export default function AccessRequests() {
       refetchInterval: 30_000,
     },
   });
+  const {
+    data: deniedData,
+    isLoading: deniedLoading,
+    isError: deniedError,
+  } = useAdminListDeniedAccessRequests({
+    query: {
+      queryKey: getAdminListDeniedAccessRequestsQueryKey(),
+      refetchInterval: 30_000,
+    },
+  });
 
   const refresh = () => {
     qc.invalidateQueries({ queryKey: getAdminListAccessRequestsQueryKey() });
+    qc.invalidateQueries({
+      queryKey: getAdminListDeniedAccessRequestsQueryKey(),
+    });
     qc.invalidateQueries({ queryKey: getAdminListUsersQueryKey() });
     qc.invalidateQueries({ queryKey: getAdminGetAuditLogQueryKey() });
   };
@@ -28,6 +43,7 @@ export default function AccessRequests() {
   });
 
   const items: AdminAccessRequest[] = data?.items ?? [];
+  const denied: AdminAccessRequest[] = deniedData?.items ?? [];
 
   return (
     <div className="border border-border bg-card" data-testid="panel-access-requests">
@@ -113,6 +129,104 @@ export default function AccessRequests() {
                       className="flex-1 border border-destructive text-destructive hover:bg-destructive/10 px-2 py-1 text-[10px] uppercase tracking-widest disabled:opacity-50"
                     >
                       Deny
+                    </button>
+                  </div>
+                </li>
+              );
+            })}
+          </ul>
+        )}
+      </div>
+
+      <div
+        className="border-t border-border p-2 px-3 flex justify-between items-center bg-muted/20"
+        data-testid="panel-access-denied-header"
+      >
+        <h2 className="text-xs uppercase tracking-wider font-bold text-muted-foreground flex items-center gap-2">
+          <UserX className="w-3 h-3" /> DENIED
+        </h2>
+        <span
+          className={denied.length > 0 ? "text-destructive" : "text-muted-foreground"}
+          data-testid="text-access-denied-count"
+        >
+          {denied.length}
+        </span>
+      </div>
+      <div className="p-3 text-xs">
+        {deniedLoading ? (
+          <div className="text-muted-foreground">Loading…</div>
+        ) : deniedError ? (
+          <div className="text-destructive">ERR_DENIED_LOAD</div>
+        ) : denied.length === 0 ? (
+          <div
+            className="text-muted-foreground"
+            data-testid="text-no-access-denied"
+          >
+            No denied users.
+          </div>
+        ) : (
+          <ul className="space-y-2">
+            {denied.map((u) => {
+              const id = u.clerk_user_id;
+              const onReinvite = () => {
+                if (
+                  !window.confirm(
+                    `Re-invite ${u.email ?? id}? They will reappear in pending requests.`,
+                  )
+                )
+                  return;
+                decide.mutate({
+                  clerkUserId: id,
+                  data: { decision: "undeny" },
+                });
+              };
+              const onApprove = () => {
+                if (
+                  !window.confirm(
+                    `Approve ${u.email ?? id} for operator access?`,
+                  )
+                )
+                  return;
+                decide.mutate({
+                  clerkUserId: id,
+                  data: { decision: "approve" },
+                });
+              };
+              return (
+                <li
+                  key={id}
+                  className="border border-border p-2 flex flex-col gap-1"
+                  data-testid={`row-access-denied-${id}`}
+                >
+                  <div className="text-foreground truncate" title={u.email ?? id}>
+                    {u.email ?? "(no email)"}
+                  </div>
+                  <div className="text-[10px] text-muted-foreground truncate">
+                    {u.display_name ?? id}
+                  </div>
+                  <div className="text-[10px] text-muted-foreground">
+                    {u.denied_at
+                      ? `denied ${u.denied_at.slice(0, 19).replace("T", " ")}`
+                      : "denied"}
+                  </div>
+                  <div className="flex gap-1 mt-1">
+                    <button
+                      type="button"
+                      onClick={onReinvite}
+                      disabled={decide.isPending}
+                      data-testid={`button-access-reinvite-${id}`}
+                      className="flex-1 border border-border text-foreground hover:bg-muted/40 px-2 py-1 text-[10px] uppercase tracking-widest disabled:opacity-50"
+                    >
+                      Re-invite
+                    </button>
+                    <button
+                      type="button"
+                      onClick={onApprove}
+                      disabled={decide.isPending}
+                      data-testid={`button-access-denied-approve-${id}`}
+                      className="flex-1 border border-success text-success hover:bg-success/10 px-2 py-1 text-[10px] uppercase tracking-widest disabled:opacity-50"
+                    >
+                      Approve
                     </button>
                   </div>
                 </li>

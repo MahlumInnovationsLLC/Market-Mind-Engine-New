@@ -12,4 +12,5 @@ export type AdminAccessRequestDecisionDecision =
 export const AdminAccessRequestDecisionDecision = {
   approve: "approve",
   deny: "deny",
+  undeny: "undeny",
 } as const;

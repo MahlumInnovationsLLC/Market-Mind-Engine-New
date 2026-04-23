@@ -2301,7 +2301,87 @@ export function useAdminListAccessRequests<
 }
 
 /**
- * @summary Approve or deny a pending access request
+ * @summary Users an operator previously denied (most recent first)
+ */
+export const getAdminListDeniedAccessRequestsUrl = () => {
+  return `/api/admin/access-requests/denied`;
+};
+
+export const adminListDeniedAccessRequests = async (
+  options?: RequestInit,
+): Promise<AdminAccessRequestList> => {
+  return customFetch<AdminAccessRequestList>(
+    getAdminListDeniedAccessRequestsUrl(),
+    {
+      ...options,
+      method: "GET",
+    },
+  );
+};
+
+export const getAdminListDeniedAccessRequestsQueryKey = () => {
+  return [`/api/admin/access-requests/denied`] as const;
+};
+
+export const getAdminListDeniedAccessRequestsQueryOptions = <
+  TData = Awaited<ReturnType<typeof adminListDeniedAccessRequests>>,
+  TError = ErrorType<unknown>,
+>(options?: {
+  query?: UseQueryOptions<
+    Awaited<ReturnType<typeof adminListDeniedAccessRequests>>,
+    TError,
+    TData
+  >;
+  request?: SecondParameter<typeof customFetch>;
+}) => {
+  const { query: queryOptions, request: requestOptions } = options ?? {};
+
+  const queryKey =
+    queryOptions?.queryKey ?? getAdminListDeniedAccessRequestsQueryKey();
+
+  const queryFn: QueryFunction<
+    Awaited<ReturnType<typeof adminListDeniedAccessRequests>>
+  > = ({ signal }) =>
+    adminListDeniedAccessRequests({ signal, ...requestOptions });
+
+  return { queryKey, queryFn, ...queryOptions } as UseQueryOptions<
+    Awaited<ReturnType<typeof adminListDeniedAccessRequests>>,
+    TError,
+    TData
+  > & { queryKey: QueryKey };
+};
+
+export type AdminListDeniedAccessRequestsQueryResult = NonNullable<
+  Awaited<ReturnType<typeof adminListDeniedAccessRequests>>
+>;
+export type AdminListDeniedAccessRequestsQueryError = ErrorType<unknown>;
+
+/**
+ * @summary Users an operator previously denied (most recent first)
+ */
+
+export function useAdminListDeniedAccessRequests<
+  TData = Awaited<ReturnType<typeof adminListDeniedAccessRequests>>,
+  TError = ErrorType<unknown>,
+>(options?: {
+  query?: UseQueryOptions<
+    Awaited<ReturnType<typeof adminListDeniedAccessRequests>>,
+    TError,
+    TData
+  >;
+  request?: SecondParameter<typeof customFetch>;
+}): UseQueryResult<TData, TError> & { queryKey: QueryKey } {
+  const queryOptions = getAdminListDeniedAccessRequestsQueryOptions(options);
+
+  const query = useQuery(queryOptions) as UseQueryResult<TData, TError> & {
+    queryKey: QueryKey;
+  };
+
+  return { ...query, queryKey: queryOptions.queryKey };
+}
+
+/**
+ * @summary Approve, deny, or re-invite (undeny) an access request
  */
 export const getAdminDecideAccessRequestUrl = (clerkUserId: string) => {
   return `/api/admin/access-requests/${clerkUserId}`;
@@ -2369,7 +2449,7 @@ export type AdminDecideAccessRequestMutationBody =
 export type AdminDecideAccessRequestMutationError = ErrorType<unknown>;
 
 /**
- * @summary Approve or deny a pending access request
+ * @summary Approve, deny, or re-invite (undeny) an access request
  */
 export const useAdminDecideAccessRequest = <
   TError = ErrorType<unknown>,

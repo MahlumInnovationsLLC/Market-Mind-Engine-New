@@ -144,6 +144,11 @@ class FakeConn:
             row = self.store.users.setdefault(uid, {"clerk_user_id": uid})
             row["is_admin"] = value
             return row
+        if q.startswith("UPDATE APP_USERS SET DENIED_AT = NULL"):
+            uid = args[0]
+            row = self.store.users.setdefault(uid, {"clerk_user_id": uid})
+            row["denied_at"] = None
+            return row
         if q.startswith("UPDATE APP_USERS SET DENIED_AT"):
             uid = args[0]
             row = self.store.users.setdefault(uid, {"clerk_user_id": uid})
@@ -152,10 +157,42 @@ class FakeConn:
         return None
 
     async def fetch(self, query: str, *args: Any) -> list[dict[str, Any]]:
+        q = " ".join(query.split()).upper()
+        if "FROM APP_USERS" in q and "DENIED_AT IS NOT NULL" in q:
+            matched = [
+                u
+                for u in self.store.users.values()
+                if u.get("denied_at")
+                and not u.get("approved")
+                and not u.get("is_admin")
+            ]
+            matched.sort(key=lambda u: u.get("denied_at") or "", reverse=True)
+            return [
+                {
+                    "clerk_user_id": u["clerk_user_id"],
+                    "email": u.get("email"),
+                    "display_name": u.get("display_name"),
+                    "approved": bool(u.get("approved")),
+                    "is_admin": bool(u.get("is_admin")),
+                    "first_seen_at": None,
+                    "last_seen_at": None,
+                    "denied_at": u.get("denied_at"),
+                    "activity_count": int(u.get("activity_count") or 0),
+                    "clerk_created_at": None,
+                    "clerk_last_sign_in_at": None,
+                }
+                for u in matched
+            ]
         return []
 
     async def execute(self, query: str, *args: Any) -> str:
         q = " ".join(query.split()).upper()
+        if q.startswith("UPDATE APP_USERS SET DENIED_AT = NULL"):
+            uid = args[0]
+            row = self.store.users.get(uid)
+            if row is not None:
+                row["denied_at"] = None
+            return "OK"
         if q.startswith("INSERT INTO ADMIN_AUDIT_LOG"):
             self.store.audit.append(
                 {
@@ -426,3 +463,118 @@ def test_admin_can_demote(
 
     mirror = [c for c in FakeAsyncClient.patch_calls if TARGET_UID in c["url"]]
     assert mirror[-1]["json"] == {"public_metadata": {"admin": False}}
+
+
+def test_list_denied_access_requests(
+    client: TestClient, store: FakeStore, _keypair
+) -> None:
+    """The denied sub-list returns users with denied_at set."""
+    store.add_user(ADMIN_UID, email="boss@example.com", approved=True, is_admin=True)
+    store.add_user(TARGET_UID, email="t@example.com", approved=False, is_admin=False)
+    store.users[TARGET_UID]["denied_at"] = "2026-04-23T00:00:00Z"
+    store.add_user("user_pending_1", email="p@example.com")
+    token = _mint(_keypair, sub=ADMIN_UID)
+
+    r = client.get(
+        "/api/admin/access-requests/denied",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert r.status_code == 200, r.text
+    items = r.json()["items"]
+    ids = [it["clerk_user_id"] for it in items]
+    assert TARGET_UID in ids
+    assert "user_pending_1" not in ids
+
+
+def test_admin_can_undeny_and_audit_log_written(
+    client: TestClient, store: FakeStore, _keypair
+) -> None:
+    """Re-invite (undeny) clears denied_at and writes an audit row."""
+    store.add_user(ADMIN_UID, email="boss@example.com", approved=True, is_admin=True)
+    store.add_user(TARGET_UID, email="t@example.com", approved=False, is_admin=False)
+    store.users[TARGET_UID]["denied_at"] = "2026-04-23T00:00:00Z"
+    token = _mint(_keypair, sub=ADMIN_UID)
+
+    r = client.post(
+        f"/api/admin/access-requests/{TARGET_UID}",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"decision": "undeny"},
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["denied"] is False
+    assert body["clerk_user_id"] == TARGET_UID
+    assert store.users[TARGET_UID]["denied_at"] is None
+
+    rows = [a for a in store.audit if a["action"] == "clear_denied"]
+    assert len(rows) == 1
+    assert rows[0]["actor_user_id"] == ADMIN_UID
+    assert rows[0]["target_user_id"] == TARGET_UID
+    assert "false" in rows[0]["after_value"]
+
+
+def test_decide_invalid_decision_rejected(
+    client: TestClient, store: FakeStore, _keypair
+) -> None:
+    store.add_user(ADMIN_UID, email="boss@example.com", approved=True, is_admin=True)
+    store.add_user(TARGET_UID, email="t@example.com")
+    token = _mint(_keypair, sub=ADMIN_UID)
+
+    r = client.post(
+        f"/api/admin/access-requests/{TARGET_UID}",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"decision": "wat"},
+    )
+    assert r.status_code == 422, r.text
+
+
+def test_denied_list_sorted_most_recent_first(
+    client: TestClient, store: FakeStore, _keypair
+) -> None:
+    """The list_denied SQL uses ORDER BY denied_at DESC; verify the
+    response preserves that order even when the fake store iteration
+    order differs."""
+    store.add_user(ADMIN_UID, email="boss@example.com", approved=True, is_admin=True)
+    store.add_user("user_old", email="old@example.com")
+    store.add_user("user_new", email="new@example.com")
+    # Insert "newer" first to prove ordering doesn't depend on insertion order.
+    store.users["user_new"]["denied_at"] = "2026-04-23T12:00:00Z"
+    store.users["user_old"]["denied_at"] = "2026-01-01T00:00:00Z"
+    token = _mint(_keypair, sub=ADMIN_UID)
+
+    r = client.get(
+        "/api/admin/access-requests/denied",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert r.status_code == 200, r.text
+    items = r.json()["items"]
+    ids_with_denied = [
+        (it["clerk_user_id"], it.get("denied_at")) for it in items
+    ]
+    # Both expected rows present.
+    ids = [t[0] for t in ids_with_denied]
+    assert "user_new" in ids and "user_old" in ids
+    # Most recent first.
+    assert ids.index("user_new") < ids.index("user_old")
+
+
+def test_approve_from_denied_list_clears_denial(
+    client: TestClient, store: FakeStore, _keypair
+) -> None:
+    """Approving a denied user via the decision endpoint must also
+    clear their denied_at so they don't linger in the denied list."""
+    store.add_user(ADMIN_UID, email="boss@example.com", approved=True, is_admin=True)
+    store.add_user(TARGET_UID, email="t@example.com", approved=False, is_admin=False)
+    store.users[TARGET_UID]["denied_at"] = "2026-04-23T00:00:00Z"
+    token = _mint(_keypair, sub=ADMIN_UID)
+
+    r = client.post(
+        f"/api/admin/access-requests/{TARGET_UID}",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"decision": "approve"},
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["approved"] is True
+    assert store.users[TARGET_UID]["approved"] is True
+    assert store.users[TARGET_UID]["denied_at"] is None

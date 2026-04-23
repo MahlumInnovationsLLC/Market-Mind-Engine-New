@@ -813,6 +813,7 @@ export const AdminListAccessRequestsResponse = zod.object({
       is_admin: zod.boolean(),
       first_seen_at: zod.string().nullish(),
       last_seen_at: zod.string().nullish(),
+      denied_at: zod.string().nullish(),
       activity_count: zod.number(),
       clerk_created_at: zod.string().nullish(),
       clerk_last_sign_in_at: zod.string().nullish(),
@@ -821,14 +822,35 @@ export const AdminListAccessRequestsResponse = zod.object({
 });
 
 /**
- * @summary Approve or deny a pending access request
+ * @summary Users an operator previously denied (most recent first)
+ */
+export const AdminListDeniedAccessRequestsResponse = zod.object({
+  items: zod.array(
+    zod.object({
+      clerk_user_id: zod.string(),
+      email: zod.string().nullish(),
+      display_name: zod.string().nullish(),
+      approved: zod.boolean(),
+      is_admin: zod.boolean(),
+      first_seen_at: zod.string().nullish(),
+      last_seen_at: zod.string().nullish(),
+      denied_at: zod.string().nullish(),
+      activity_count: zod.number(),
+      clerk_created_at: zod.string().nullish(),
+      clerk_last_sign_in_at: zod.string().nullish(),
+    }),
+  ),
+});
+
+/**
+ * @summary Approve, deny, or re-invite (undeny) an access request
  */
 export const AdminDecideAccessRequestParams = zod.object({
   clerk_user_id: zod.coerce.string(),
 });
 
 export const AdminDecideAccessRequestBody = zod.object({
-  decision: zod.enum(["approve", "deny"]),
+  decision: zod.enum(["approve", "deny", "undeny"]),
 });
 
 export const AdminDecideAccessRequestResponse = zod.object({
