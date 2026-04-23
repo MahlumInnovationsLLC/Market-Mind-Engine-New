@@ -29,6 +29,7 @@ from . import (
     free_tier,
     github_mirror,
     health,
+    margin_regressor,
     migrations as db_migrations,
     models_loader,
     predictor,
@@ -389,6 +390,16 @@ async def lifespan(_: FastAPI):
         await calibrators.load_all()
     except Exception as e:
         log.warning("per-league calibrator bootstrap failed: %s", e)
+
+    # Load any previously-fitted per-league margin/total regressors so
+    # spread/total markets immediately use fitted coefficients instead
+    # of the cold-start textbook SDs.  Failures are non-fatal — the
+    # registry simply stays empty until the next settlement-loop refit
+    # lands a fresh fit.
+    try:
+        await margin_regressor.load_all()
+    except Exception as e:
+        log.warning("margin regressor bootstrap failed: %s", e)
 
     # Per-vertical retrained calibrator listener (task #88).  The
     # online-learning worker writes fresh isotonic snapshots tagged
@@ -2094,6 +2105,38 @@ async def admin_autoresearch_run(
         "insufficient_samples": result.insufficient_samples,
         "errors": result.errors,
     }
+
+
+# ---------------------------------------------------------------------------
+# Margin-regressor status (admin-only)
+# ---------------------------------------------------------------------------
+
+
+@app.get("/api/admin/margin-regressor/status")
+async def admin_margin_regressor_status(
+    actor: AuthedUser = Depends(require_admin),
+) -> dict[str, object]:
+    """Per-league fit status for the spread/total margin regressors.
+
+    Surfaces ``n_train``, ``last_fit_at`` (ISO-8601 UTC) and the
+    persisted residual SDs for each supported league so the operator
+    can confirm the settlement-loop refit job is actually keeping the
+    in-process registry warm — and how stale each league's coefficients
+    are if it has stopped landing fits.
+    """
+    return margin_regressor.status()
+
+
+@app.post("/api/admin/margin-regressor/refit")
+async def admin_margin_regressor_refit(
+    min_games: int = 50,
+    actor: AuthedUser = Depends(require_admin),
+) -> dict[str, object]:
+    """Trigger one synchronous refit pass.  Mirrors the settlement-loop
+    refit but lets an operator force a fresh fit (after a backfill,
+    after a model swap, etc.) without waiting for the next cycle."""
+    summary = await margin_regressor.refit_all_leagues(min_games=min_games)
+    return summary.as_dict()
 
 
 # ---------------------------------------------------------------------------

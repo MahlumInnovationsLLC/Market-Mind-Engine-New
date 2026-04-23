@@ -104,6 +104,7 @@ PROTECTED_ROUTES: tuple[str, ...] = (
     "/api/admin/models",
     "/api/admin/models/mirror/status",
     "/api/admin/autoresearch/features",
+    "/api/admin/margin-regressor/status",
     # Task #245 — operator-only calibration & research dashboards.
     "/api/calibration/snapshots",
     "/api/research/directives",
@@ -158,6 +159,7 @@ PROTECTED_MUTATING_ENDPOINTS: tuple[tuple[str, str], ...] = (
     ("POST", "/api/admin/models/mirror/push"),
     ("POST", "/api/admin/autoresearch/features/{name}/decision"),
     ("POST", "/api/admin/autoresearch/run"),
+    ("POST", "/api/admin/margin-regressor/refit"),
     # Task #271 — per-vertical halt/resume toggles.
     ("POST", "/api/admin/verticals/{vertical}/halt"),
     ("POST", "/api/admin/verticals/{vertical}/resume"),

@@ -321,12 +321,15 @@ def fit_regressor(
 
 
 _REGISTRY: dict[str, LeagueScoreRegressor] = {}
+_LAST_FIT_AT: dict[str, str] = {}  # ISO-8601 UTC timestamps, keyed by league
 _REGISTRY_LOCK = Lock()
 
 
-def register_regressor(reg: LeagueScoreRegressor) -> None:
+def register_regressor(reg: LeagueScoreRegressor, *, fit_at: str | None = None) -> None:
     with _REGISTRY_LOCK:
         _REGISTRY[reg.league] = reg
+        if fit_at:
+            _LAST_FIT_AT[reg.league] = fit_at
 
 
 def get_regressor(league: str | None) -> LeagueScoreRegressor | None:
@@ -350,6 +353,32 @@ def reset_registry() -> None:
     """Test hook — wipe in-process state between cases."""
     with _REGISTRY_LOCK:
         _REGISTRY.clear()
+        _LAST_FIT_AT.clear()
+
+
+def status() -> dict[str, Any]:
+    """Per-league fit status for the admin dashboard.
+
+    Always returns one entry per supported league so a stale league
+    (no fit yet) shows up as ``fitted=false`` rather than being
+    omitted entirely.
+    """
+    out: dict[str, Any] = {}
+    with _REGISTRY_LOCK:
+        regs = dict(_REGISTRY)
+        fits = dict(_LAST_FIT_AT)
+    for league in sorted(SUPPORTED_LEAGUES):
+        reg = regs.get(league)
+        out[league] = {
+            "league": league,
+            "fitted": bool(reg and reg.is_fitted()),
+            "n_train": int(reg.n_train) if reg else 0,
+            "margin_sd": float(reg.margin_sd) if reg else _DEFAULT_MARGIN_SD.get(league, 12.0),
+            "total_sd": float(reg.total_sd) if reg else _DEFAULT_TOTAL_SD.get(league, 12.0),
+            "last_fit_at": fits.get(league),
+            "feature_names": list(reg.feature_names) if reg else list(FEATURE_NAMES),
+        }
+    return {"leagues": out, "supported": sorted(SUPPORTED_LEAGUES)}
 
 
 # ---------------------------------------------------------------------------
@@ -744,6 +773,11 @@ async def refit_all_leagues(
     Skips a league when fewer than `min_games` finished rows are
     available — the cold-start defaults are safer than a tiny fit.
     Designed to be called periodically by the settlement scheduler.
+
+    Each successful fit is persisted to the ``calibration_snapshots``
+    table (sub_category ``margin_regressor:LEAGUE``) so a process
+    restart picks up the fitted coefficients via ``load_all()`` rather
+    than dropping back to the textbook fallback SDs.
     """
     import time as _time
     from datetime import datetime, timezone
@@ -764,7 +798,15 @@ async def refit_all_leagues(
         except Exception as e:
             summary.skipped[league] = f"fit_failed: {type(e).__name__}: {e}"
             continue
-        register_regressor(reg)
+        fit_at = datetime.now(timezone.utc).isoformat()
+        register_regressor(reg, fit_at=fit_at)
+        # Best-effort persistence — a DB blip must not abort the refit
+        # cycle; the in-process registry is already updated above so
+        # the live cycle picks up the new coefficients regardless.
+        try:
+            await _persist_fit(reg, fit_at=fit_at)
+        except Exception as e:  # pragma: no cover — defensive
+            log.warning("margin_regressor persist failed for %s: %s", league, e)
         summary.fitted[league] = reg.n_train
     summary.completed_at = datetime.now(timezone.utc).isoformat()
     summary.duration_seconds = _time.perf_counter() - t0
@@ -773,6 +815,184 @@ async def refit_all_leagues(
         summary.fitted, summary.skipped, summary.duration_seconds,
     )
     return summary
+
+
+# ---------------------------------------------------------------------------
+# Persistence (calibration_snapshots)
+# ---------------------------------------------------------------------------
+
+
+# We piggy-back on the existing `calibration_snapshots` table — same
+# pattern used by `app/calibrators.py` for per-league probability
+# calibrators — so we don't have to ship a new migration just for
+# four small JSON blobs.  The `sub_category` namespace keeps the
+# margin-regressor rows from colliding with the per-league
+# calibrator rows (`per_league:NBA` vs `margin_regressor:NBA`).
+_SNAPSHOT_VERTICAL = "sports"
+_SUB_CATEGORY_PREFIX = "margin_regressor:"
+
+
+def _serialize(reg: LeagueScoreRegressor, *, fit_at: str) -> dict[str, Any]:
+    return {
+        "type": "margin_regressor",
+        "fit_at": fit_at,
+        "n_train": int(reg.n_train),
+        "margin_coef": [float(c) for c in reg.margin_coef],
+        "total_coef": [float(c) for c in reg.total_coef],
+        "margin_sd": float(reg.margin_sd),
+        "total_sd": float(reg.total_sd),
+        "feature_names": list(reg.feature_names),
+    }
+
+
+def _deserialize(league: str, blob: Any) -> LeagueScoreRegressor | None:
+    """Rehydrate a persisted regressor.  Returns None on malformed input
+    so a corrupt snapshot can't take down the loader."""
+    import json as _json
+
+    if isinstance(blob, str):
+        try:
+            blob = _json.loads(blob)
+        except Exception:
+            return None
+    if not isinstance(blob, Mapping):
+        return None
+    if str(blob.get("type") or "").lower() != "margin_regressor":
+        return None
+    try:
+        margin_coef = [float(c) for c in (blob.get("margin_coef") or [])]
+        total_coef = [float(c) for c in (blob.get("total_coef") or [])]
+        margin_sd = float(blob.get("margin_sd") or _DEFAULT_MARGIN_SD.get(league, 12.0))
+        total_sd = float(blob.get("total_sd") or _DEFAULT_TOTAL_SD.get(league, 12.0))
+        n_train = int(blob.get("n_train") or 0)
+    except (TypeError, ValueError):
+        return None
+    if not margin_coef or not total_coef:
+        return None
+    return LeagueScoreRegressor(
+        league=league,
+        margin_coef=margin_coef,
+        total_coef=total_coef,
+        margin_sd=margin_sd,
+        total_sd=total_sd,
+        n_train=n_train,
+    )
+
+
+async def _persist_fit(reg: LeagueScoreRegressor, *, fit_at: str) -> int | None:
+    """Append one ``calibration_snapshots`` row carrying the fit blob."""
+    from . import db
+    import json as _json
+
+    state = _serialize(reg, fit_at=fit_at)
+    sub_cat = f"{_SUB_CATEGORY_PREFIX}{reg.league}"
+    try:
+        snap_id = await db.fetchval(
+            """
+            INSERT INTO calibration_snapshots
+                (vertical, sub_category, ece, mce, brier_score, reliability,
+                 resolution, sample_count, calibrator_state, drift_status, config)
+            VALUES ($1, $2, NULL, NULL, NULL, NULL, NULL, $3,
+                    $4::jsonb,
+                    jsonb_build_object('status', 'fitted',
+                                       'kind', 'margin_regressor'),
+                    jsonb_build_object('source', 'margin_regressor_refit',
+                                       'feature_names', $5::jsonb))
+            RETURNING id
+            """,
+            _SNAPSHOT_VERTICAL,
+            sub_cat,
+            int(reg.n_train),
+            _json.dumps(state),
+            _json.dumps(list(reg.feature_names)),
+        )
+        return int(snap_id) if snap_id is not None else None
+    except Exception as e:
+        log.warning("margin_regressor snapshot insert failed for %s: %s",
+                    reg.league, e)
+        return None
+
+
+async def load_all() -> dict[str, str]:
+    """Load the most-recent persisted fit per league into the registry.
+
+    Idempotent — callers may invoke this at startup and again after a
+    fresh refit to pick up the new coefficients.  Failures are
+    swallowed and logged so a flaky DB at boot can't block the API
+    server from coming up; the registry simply stays empty and the
+    cold-start defaults take over.
+
+    Returns ``{league: fit_at}`` for every league that successfully
+    hydrated, mostly so tests + admin tooling can assert what landed.
+    """
+    from . import db
+
+    loaded: dict[str, str] = {}
+    try:
+        rows = await db.fetch(
+            """
+            SELECT DISTINCT ON (sub_category)
+                   sub_category,
+                   calibrator_state,
+                   sample_count,
+                   created_at
+              FROM calibration_snapshots
+             WHERE vertical = $1
+               AND sub_category LIKE $2
+               AND calibrator_state IS NOT NULL
+               AND calibrator_state::text <> '{}'
+               AND COALESCE(drift_status->>'status', '') <> 'rolled_back'
+             ORDER BY sub_category, created_at DESC
+            """,
+            _SNAPSHOT_VERTICAL,
+            f"{_SUB_CATEGORY_PREFIX}%",
+        )
+    except Exception as e:
+        log.warning("margin_regressor load_all skipped: %s", e)
+        return loaded
+
+    for r in rows:
+        sub = str(r["sub_category"] or "")
+        if not sub.startswith(_SUB_CATEGORY_PREFIX):
+            continue
+        league = sub[len(_SUB_CATEGORY_PREFIX):].strip().upper()
+        if league not in SUPPORTED_LEAGUES:
+            continue
+        reg = _deserialize(league, r["calibrator_state"])
+        if reg is None:
+            continue
+        # Prefer the snapshot's serialized fit_at; fall back to
+        # created_at so even legacy rows surface a usable timestamp.
+        fit_at: str | None = None
+        try:
+            blob = r["calibrator_state"]
+            if isinstance(blob, str):
+                import json as _json
+                blob = _json.loads(blob)
+            if isinstance(blob, Mapping):
+                v = blob.get("fit_at")
+                if isinstance(v, str) and v.strip():
+                    fit_at = v.strip()
+        except Exception:
+            fit_at = None
+        if fit_at is None:
+            created = r["created_at"]
+            try:
+                fit_at = (
+                    created.isoformat() if hasattr(created, "isoformat")
+                    else str(created)
+                )
+            except Exception:
+                fit_at = None
+        register_regressor(reg, fit_at=fit_at)
+        if fit_at:
+            loaded[league] = fit_at
+    log.info(
+        "margin_regressor load_all: loaded %d/%d leagues (%s)",
+        len(loaded), len(SUPPORTED_LEAGUES),
+        ",".join(sorted(loaded.keys())) or "(none)",
+    )
+    return loaded
 
 
 # ---------------------------------------------------------------------------
@@ -869,6 +1089,8 @@ __all__ = [
     "register_regressor",
     "get_regressor",
     "reset_registry",
+    "status",
+    "load_all",
     "adjust_probability",
     "backtest_spread",
     "load_training_games",

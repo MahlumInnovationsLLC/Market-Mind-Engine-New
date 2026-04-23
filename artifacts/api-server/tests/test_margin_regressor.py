@@ -629,3 +629,216 @@ def test_backtest_result_as_dict_round_keys():
     }
     assert d["league"] == "NBA"
     assert d["n_train"] + d["n_test"] == 400
+
+
+# ---------------------------------------------------------------------------
+# Persistence + status (calibration_snapshots round-trip)
+# ---------------------------------------------------------------------------
+
+
+class _PersistFakeDB:
+    """Fake DB that mirrors what `_persist_fit` and `load_all` need:
+    captures `fetchval` INSERTs and replays them on `fetch` SELECTs so
+    the snapshot the refit job writes is the snapshot the load job
+    reads back.  Mirrors the asyncpg shape (rows are dict-like)."""
+
+    def __init__(self):
+        self.snapshots: list[dict] = []
+        self.queue: list[list[dict]] = []
+        self.fetchrow_queue: list[dict | None] = []
+        self.calls: list[tuple[str, tuple]] = []
+        self._next_id = 1
+
+    async def fetch(self, sql, *args):
+        self.calls.append((sql, args))
+        # Synthesize the load_all SELECT from snapshots we've recorded
+        # so test bodies don't have to hand-curate the query response.
+        q = " ".join(sql.split())
+        if (
+            "FROM calibration_snapshots" in q
+            and "DISTINCT ON (sub_category)" in q
+            and "margin_regressor:" in (args[1] if len(args) > 1 else "")
+        ):
+            by_sub: dict[str, dict] = {}
+            for r in self.snapshots:
+                cur = by_sub.get(r["sub_category"])
+                if cur is None or r["created_at"] > cur["created_at"]:
+                    by_sub[r["sub_category"]] = r
+            return [
+                {
+                    "sub_category": r["sub_category"],
+                    "calibrator_state": r["calibrator_state"],
+                    "sample_count": r["sample_count"],
+                    "created_at": r["created_at"],
+                }
+                for r in sorted(by_sub.values(), key=lambda x: x["sub_category"])
+            ]
+        if not self.queue:
+            return []
+        return self.queue.pop(0)
+
+    async def fetchrow(self, sql, *args):
+        self.calls.append((sql, args))
+        if not self.fetchrow_queue:
+            return None
+        return self.fetchrow_queue.pop(0)
+
+    async def fetchval(self, sql, *args):
+        self.calls.append((sql, args))
+        q = " ".join(sql.split())
+        if "INSERT INTO calibration_snapshots" in q and "RETURNING id" in q:
+            new_id = self._next_id
+            self._next_id += 1
+            self.snapshots.append({
+                "id": new_id,
+                "sub_category": args[1],
+                "calibrator_state": args[3],
+                "sample_count": args[2],
+                "created_at": new_id,  # monotonically increasing
+            })
+            return new_id
+        return None
+
+
+@pytest.fixture
+def persist_db(monkeypatch):
+    fake = _PersistFakeDB()
+    from app import db as real_db
+    monkeypatch.setattr(real_db, "fetch", fake.fetch)
+    monkeypatch.setattr(real_db, "fetchrow", fake.fetchrow)
+    monkeypatch.setattr(real_db, "fetchval", fake.fetchval)
+    margin_regressor.reset_registry()
+    return fake
+
+
+def test_status_lists_every_supported_league_unfitted():
+    margin_regressor.reset_registry()
+    s = margin_regressor.status()
+    assert set(s["supported"]) == margin_regressor.SUPPORTED_LEAGUES
+    for league in margin_regressor.SUPPORTED_LEAGUES:
+        entry = s["leagues"][league]
+        assert entry["fitted"] is False
+        assert entry["n_train"] == 0
+        assert entry["last_fit_at"] is None
+        # The textbook fallback SDs are surfaced even when no fit lands
+        # so the operator can see what we're trading against.
+        assert entry["margin_sd"] > 0
+        assert entry["total_sd"] > 0
+
+
+def test_register_regressor_records_fit_at_and_status_surfaces_it():
+    margin_regressor.reset_registry()
+    reg = margin_regressor.LeagueScoreRegressor(
+        league="NBA", margin_coef=[0.0, 0.05, 0.0, 0.0],
+        total_coef=[225.0, 0.0, 0.0, 0.0],
+        margin_sd=10.0, total_sd=18.0, n_train=400,
+    )
+    margin_regressor.register_regressor(reg, fit_at="2026-04-23T00:00:00+00:00")
+    s = margin_regressor.status()
+    nba = s["leagues"]["NBA"]
+    assert nba["fitted"] is True
+    assert nba["n_train"] == 400
+    assert nba["last_fit_at"] == "2026-04-23T00:00:00+00:00"
+    assert nba["margin_sd"] == 10.0
+
+
+def test_refit_persists_and_load_all_rehydrates_after_restart(monkeypatch, persist_db):
+    """End-to-end: refit_all_leagues writes snapshots -> wipe registry
+    (simulating a process restart) -> load_all rehydrates the same
+    fitted regressor from the DB."""
+    async def _fake_load(league, *, limit=None):
+        if league == "NBA":
+            return _real_shape_game_rows(n=400, league="NBA")
+        return []
+
+    monkeypatch.setattr(margin_regressor, "load_training_games", _fake_load)
+
+    async def _inner():
+        summary = await margin_regressor.refit_all_leagues(min_games=50)
+        assert summary.fitted.get("NBA") == 400
+        # We persisted exactly one snapshot for NBA.
+        nba_snaps = [
+            s for s in persist_db.snapshots if s["sub_category"] == "margin_regressor:NBA"
+        ]
+        assert len(nba_snaps) == 1
+
+        # Capture the live coefficients before we wipe.
+        before = margin_regressor.get_regressor("NBA")
+        assert before is not None and before.is_fitted()
+        before_coef = list(before.margin_coef)
+        before_n = before.n_train
+        before_status = margin_regressor.status()["leagues"]["NBA"]
+        assert before_status["last_fit_at"] is not None
+
+        # Simulate process restart.
+        margin_regressor.reset_registry()
+        cleared = margin_regressor.status()["leagues"]["NBA"]
+        assert cleared["fitted"] is False
+        assert cleared["last_fit_at"] is None
+
+        # load_all() pulls the snapshot back into the registry.
+        loaded = await margin_regressor.load_all()
+        assert "NBA" in loaded
+        after = margin_regressor.get_regressor("NBA")
+        assert after is not None and after.is_fitted()
+        assert after.n_train == before_n
+        assert after.margin_coef == pytest.approx(before_coef)
+        # And the status endpoint surfaces the rehydrated last_fit_at.
+        after_status = margin_regressor.status()["leagues"]["NBA"]
+        assert after_status["fitted"] is True
+        assert after_status["last_fit_at"] is not None
+
+    import asyncio as _asyncio
+    _asyncio.run(_inner())
+
+
+def test_load_all_swallows_db_failure(monkeypatch):
+    """A flaky DB at boot must not raise — load_all should log and
+    return an empty mapping so the API server still comes up."""
+    margin_regressor.reset_registry()
+    from app import db as real_db
+
+    async def _boom(*a, **kw):
+        raise RuntimeError("connection refused")
+
+    monkeypatch.setattr(real_db, "fetch", _boom)
+
+    async def _inner():
+        loaded = await margin_regressor.load_all()
+        assert loaded == {}
+        # Registry stays empty + cold-start defaults still surface.
+        s = margin_regressor.status()
+        assert all(not v["fitted"] for v in s["leagues"].values())
+
+    import asyncio as _asyncio
+    _asyncio.run(_inner())
+
+
+def test_refit_continues_when_persistence_fails(monkeypatch):
+    """A DB blip on the snapshot insert must not abort the refit cycle —
+    the in-process registry should still be updated so the live trading
+    cycle picks up the new coefficients."""
+    margin_regressor.reset_registry()
+    from app import db as real_db
+
+    async def _fake_load(league, *, limit=None):
+        if league == "NBA":
+            return _real_shape_game_rows(n=400, league="NBA")
+        return []
+
+    async def _boom(*a, **kw):
+        raise RuntimeError("snapshot insert exploded")
+
+    monkeypatch.setattr(margin_regressor, "load_training_games", _fake_load)
+    monkeypatch.setattr(real_db, "fetchval", _boom)
+
+    async def _inner():
+        summary = await margin_regressor.refit_all_leagues(min_games=50)
+        # Fit was still recorded in the in-process registry even though
+        # the persistence step blew up.
+        assert summary.fitted.get("NBA") == 400
+        reg = margin_regressor.get_regressor("NBA")
+        assert reg is not None and reg.is_fitted()
+
+    import asyncio as _asyncio
+    _asyncio.run(_inner())
