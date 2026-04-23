@@ -10,16 +10,55 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any, Mapping
+from typing import Any, Iterable, Mapping
 
 from .builders import decode_context, track_elo_inputs
 from .registry import BuildContext, registry
 
 
 # Names + count are derived from the live registry so a future column
-# add/remove only needs to touch ``builders.py``.
+# add/remove only needs to touch ``builders.py``. These reflect the
+# *built-in* (non-shadow) production columns; promoted UW candidates
+# extend the live vector at runtime — see :func:`set_promoted_names`.
 FEATURE_NAMES: tuple[str, ...] = registry.names()
 FEATURE_COUNT: int = len(FEATURE_NAMES)
+
+
+# Process-wide promoted set. Loaded at boot from
+# ``autoresearch_features WHERE status = 'production'`` so a candidate
+# that an operator promoted is reflected in the live vector once a
+# matching retrained model artifact has been published. Empty by
+# default so test runs and cold installs see the original 32-column
+# layout without any DB dependency.
+_promoted_names: frozenset[str] = frozenset()
+
+
+def set_promoted_names(names: Iterable[str]) -> None:
+    """Replace the in-process promoted-feature set.
+
+    Called by the API startup hook after reading the
+    ``autoresearch_features`` table, and by the admin promote/demote
+    endpoints so a flip takes effect on the next prediction without
+    a process restart. Any name not registered as a shadow spec is
+    silently ignored — the registry stays the source of truth.
+    """
+    global _promoted_names
+    valid = {s.name for s in registry.shadow_specs()}
+    _promoted_names = frozenset(n for n in names if n in valid)
+
+
+def get_promoted_names() -> frozenset[str]:
+    """Currently-active promoted set (read-only view)."""
+    return _promoted_names
+
+
+def production_names() -> tuple[str, ...]:
+    """Live column order: built-ins + currently-promoted shadow specs."""
+    return registry.production_names(_promoted_names)
+
+
+def production_count() -> int:
+    return len(production_names())
 
 
 @dataclass(frozen=True)
@@ -71,13 +110,15 @@ def build_vector(
         candidate=candidate, ctx=ctx, now=now, overrides=overrides,
     )
     values: list[float] = []
+    promoted = _promoted_names
     # Walk every registered spec — production AND shadow — so AutoResearch
-    # shadow candidates are computed each cycle (training-row collection)
-    # but only non-shadow values land in the model's positional vector.
+    # shadow candidates are computed each cycle (training-row collection).
+    # Built-in specs always land in the vector; shadow specs only land
+    # when promoted (status='production' in autoresearch_features).
     for spec in registry.all_specs():
         v = float(spec.compute(bc))
         bc.computed[spec.name] = v
-        if not spec.shadow:
+        if (not spec.shadow) or (spec.name in promoted):
             values.append(v)
 
     # Pseudo-feature: pull Elo-style internal signals onto ``present``
@@ -86,9 +127,12 @@ def build_vector(
     # candidate via this map.
     track_elo_inputs(bc)
 
-    assert len(values) == FEATURE_COUNT, (
-        f"feature builder produced {len(values)} values, expected {FEATURE_COUNT}"
+    names = registry.production_names(promoted)
+    assert len(values) == len(names), (
+        f"feature builder produced {len(values)} values, "
+        f"expected {len(names)} (built-in {FEATURE_COUNT} + "
+        f"promoted {len(promoted)})"
     )
     return FeatureVector(
-        names=FEATURE_NAMES, values=values, present=dict(bc.present),
+        names=names, values=values, present=dict(bc.present),
     )

@@ -155,6 +155,24 @@ async def lifespan(_: FastAPI):
     except Exception as e:
         log.error("alembic migrations failed: %s", e)
         ready_gate.mark_check("migrations", ok=False, detail=f"{type(e).__name__}: {e}")
+    # Hydrate the in-process promoted-feature set from
+    # ``autoresearch_features``. Promoted UW candidates are opted back
+    # into the live feature vector so a freshly retrained model with
+    # the expanded column layout actually sees them. Best-effort: if
+    # the DB read fails we serve the built-in 32-column layout.
+    try:
+        from .autoresearch import feature_bridge as _ar_bridge
+        from .autoresearch import store as _ar_store
+        from .features import vector as _features_vector
+        promoted_rows = await _ar_store.list_candidates(status="production")
+        registered = _ar_bridge.register_candidates(promoted_rows)
+        _features_vector.set_promoted_names(registered)
+        log.info(
+            "feature registry promoted set hydrated: %d names",
+            len(registered),
+        )
+    except Exception as e:
+        log.warning("promoted feature hydration failed: %s", e)
     # Register + start the external data feed pollers.  Feeds with missing
     # API keys register themselves as `enabled=false` so they show up in
     # /api/feeds/status with a clear skipped_reason but never poll.
@@ -2352,6 +2370,20 @@ async def admin_autoresearch_decide(
             )
     except Exception as e:
         log.warning("autoresearch audit log write failed: %s", e)
+    # Refresh the in-process promoted set so the live feature vector
+    # reflects this decision on the very next prediction. The matching
+    # retrain (which actually teaches the model to use the new column)
+    # is a separate offline step — see docs/retrain_runbook.md.
+    try:
+        from .autoresearch import feature_bridge as _ar_bridge
+        from .features import vector as _features_vector
+        promoted_rows = await autoresearch.store.list_candidates(
+            status="production"
+        )
+        registered = _ar_bridge.register_candidates(promoted_rows)
+        _features_vector.set_promoted_names(registered)
+    except Exception as e:
+        log.warning("promoted set refresh after status change failed: %s", e)
     return after
 
 

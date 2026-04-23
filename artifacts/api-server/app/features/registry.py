@@ -19,7 +19,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Callable, Mapping
+from typing import Any, Callable, Iterable, Mapping
 
 
 @dataclass
@@ -121,6 +121,32 @@ class FeatureRegistry:
     def shadow_specs(self) -> tuple[FeatureSpec, ...]:
         return tuple(s for s in self._specs if s.shadow)
 
+    def production_specs(
+        self, promoted: Iterable[str] | None = None
+    ) -> tuple[FeatureSpec, ...]:
+        """Specs that should appear in the live feature vector.
+
+        Built-in (non-shadow) specs are always included; shadow specs
+        whose ``name`` is in ``promoted`` are opted back in. ``promoted``
+        is normally :func:`app.autoresearch.store.list_promoted_names`
+        — the set of ``autoresearch_features`` rows whose ``status`` is
+        ``'production'`` after an operator promotion. Order is the
+        registry's declared order (so a retrain run with the same
+        promoted set produces a column layout the live builder will
+        match positionally).
+        """
+        promoted_set = set(promoted or ())
+        return tuple(
+            s for s in self._specs
+            if (not s.shadow) or (s.name in promoted_set)
+        )
+
+    def production_names(
+        self, promoted: Iterable[str] | None = None
+    ) -> tuple[str, ...]:
+        """Names of :meth:`production_specs` in column order."""
+        return tuple(s.name for s in self.production_specs(promoted))
+
     def names(self) -> tuple[str, ...]:
         """Production-only names (column order of the live feature vector)."""
         return tuple(s.name for s in self._specs if not s.shadow)
@@ -165,13 +191,16 @@ class FeatureRegistry:
         ctx: Mapping[str, Any],
         now: datetime,
         overrides: Mapping[str, Any],
+        promoted: Iterable[str] | None = None,
     ) -> tuple[list[float], dict[str, float]]:
         """Run every registered transform in order, returning the vector.
 
         Returns ``(values, present)`` — ``values`` aligned positionally
-        with :meth:`names`, ``present`` is the diagnostic map of raw
-        inputs that were actually supplied (vs defaulted away).
+        with :meth:`production_names` (which collapses to :meth:`names`
+        when ``promoted`` is empty). ``present`` is the diagnostic map
+        of raw inputs that were actually supplied (vs defaulted away).
         """
+        promoted_set = set(promoted or ())
         bc = BuildContext(
             candidate=candidate,
             ctx=ctx,
@@ -182,12 +211,14 @@ class FeatureRegistry:
         # Walk every registered spec — production AND shadow — so derived
         # production features can read upstream shadow values from
         # ``bc.computed`` if needed, and so AutoResearch shadow rows are
-        # collected each cycle. Only non-shadow values are appended to
-        # the output vector to keep the predictor's column count stable.
+        # collected each cycle. Shadow specs only contribute to the
+        # output vector when promoted by an operator (status='production'
+        # in autoresearch_features); otherwise the predictor's column
+        # count stays stable.
         for spec in self._specs:
             v = float(spec.compute(bc))
             bc.computed[spec.name] = v
-            if not spec.shadow:
+            if (not spec.shadow) or (spec.name in promoted_set):
                 values.append(v)
         return values, dict(bc.present)
 

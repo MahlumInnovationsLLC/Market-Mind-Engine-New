@@ -92,6 +92,53 @@ async def upsert_metrics(
         return None
 
 
+async def list_promoted_names() -> list[str]:
+    """Names of every candidate currently flipped to ``status='production'``.
+
+    Used at API boot (and after admin promote/demote) to opt promoted
+    UW candidates back into the live feature vector — see
+    :func:`app.features.vector.set_promoted_names`. Empty list on any
+    DB failure so the trading loop keeps running with the built-in
+    feature set.
+    """
+    try:
+        async with db.acquire() as c:
+            rows = await c.fetch(
+                "SELECT name FROM autoresearch_features WHERE status = 'production'"
+            )
+            return [str(r["name"]) for r in rows if r["name"]]
+    except Exception as e:
+        log.warning("autoresearch list_promoted_names failed: %s", e)
+        return []
+
+
+def list_promoted_names_sync(dsn: str | None = None) -> list[str]:
+    """Sync sibling of :func:`list_promoted_names` for offline scripts.
+
+    The retrain CLI runs outside the FastAPI event loop and does not
+    want to spin up the asyncpg pool. We use the stdlib ``psycopg``
+    sync driver (already a transitive dep via Alembic) so the script
+    can read the promoted list with a single short-lived connection.
+    """
+    import os
+    import psycopg  # type: ignore
+
+    dsn = dsn or os.environ.get("DATABASE_URL") or os.environ.get("AXIOM_DATABASE_URL")
+    if not dsn:
+        log.warning("list_promoted_names_sync: no DATABASE_URL set")
+        return []
+    try:
+        with psycopg.connect(dsn) as conn:  # type: ignore[attr-defined]
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT name FROM autoresearch_features WHERE status = 'production'"
+                )
+                return [str(r[0]) for r in cur.fetchall() if r and r[0]]
+    except Exception as e:
+        log.warning("list_promoted_names_sync failed: %s", e)
+        return []
+
+
 async def list_candidates(
     *, status: str | None = None, vertical: str | None = None
 ) -> list[dict[str, Any]]:
