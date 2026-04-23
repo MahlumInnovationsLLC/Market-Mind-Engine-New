@@ -1,12 +1,40 @@
-import { createContext, useContext, useEffect, useMemo, useRef, useState } from "react";
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 import { useAuth } from "@clerk/react";
 import { getMarketTitle } from "@workspace/api-client-react";
 import { useWebSocket } from "@/hooks/use-websocket";
+import {
+  usePipelineSocket,
+  usePipelineSubscription,
+} from "@/components/realtime/websocket-provider";
 import WsStatusIndicator from "@/components/ws-status-indicator";
 import { apiFetch } from "@/lib/api";
 import SwarmTranscript, { useSwarmTranscript } from "@/components/swarm-transcript";
 import PipelineFlowchart from "@/components/pipeline/pipeline-flowchart";
 import ConsoleTail from "@/components/pipeline/console-tail";
+
+/**
+ * Pipeline-page-local rolling buffer of pipeline-WS frames. The
+ * underlying socket is the shared one mounted by `<WebSocketProvider>`
+ * in the app shell — we deliberately do NOT open a second `useWebSocket`
+ * here. This hook layers a 500-frame ring buffer + clear() on top of
+ * `usePipelineSubscription` so the page can hydrate its cycles list
+ * the same way it used to.
+ */
+function usePipelineEventBuffer(bufferSize = 500): {
+  events: Record<string, unknown>[];
+  clear: () => void;
+} {
+  const [events, setEvents] = useState<Record<string, unknown>[]>([]);
+  usePipelineSubscription((event) => {
+    setEvents((prev) => {
+      const next = prev.length >= bufferSize ? prev.slice(1) : prev.slice();
+      next.push(event);
+      return next;
+    });
+  });
+  const clear = useCallback(() => setEvents([]), []);
+  return { events, clear };
+}
 
 type TitleMap = Record<string, string | null>;
 
@@ -453,7 +481,29 @@ function saveCachedEvents(events: Record<string, unknown>[]): void {
 
 export default function PipelinePage() {
   const { getToken, isSignedIn } = useAuth();
-  const ws = useWebSocket({ path: "/api/ws/pipeline", bufferSize: 500 });
+  // Pull connection state from the shared shell-level pipeline socket
+  // and layer a page-local 500-frame buffer on top via subscription —
+  // never open a second `/api/ws/pipeline` connection from this page.
+  const sharedPipeline = usePipelineSocket();
+  const pipelineBuffer = usePipelineEventBuffer(500);
+  const ws = useMemo(
+    () => ({
+      status: sharedPipeline.status,
+      reconnectIn: sharedPipeline.reconnectIn,
+      closeCode: sharedPipeline.closeCode,
+      reconnectNow: sharedPipeline.reconnectNow,
+      events: pipelineBuffer.events,
+      clear: pipelineBuffer.clear,
+    }),
+    [
+      sharedPipeline.status,
+      sharedPipeline.reconnectIn,
+      sharedPipeline.closeCode,
+      sharedPipeline.reconnectNow,
+      pipelineBuffer.events,
+      pipelineBuffer.clear,
+    ],
+  );
   const swarm = useSwarmTranscript();
   const settlement = useWebSocket({ path: "/api/ws/settlement", bufferSize: 200 });
 

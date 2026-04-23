@@ -46,8 +46,16 @@ function backoffMs(attempt: number, unauthorized: boolean): number {
 
 function buildWsUrl(path: string, token: string | null): string | null {
   if (!DOMAIN) return null;
-  const proto = DOMAIN.startsWith("https") ? "wss" : "ws";
-  const host = DOMAIN.replace(/^https?:\/\//, "").replace(/\/$/, "");
+  // EXPO_PUBLIC_DOMAIN can come in three forms in this monorepo:
+  //   - bare host:        "<id>.replit.dev"      (REPLIT_DEV_DOMAIN)
+  //   - http origin:      "http://localhost:5000"
+  //   - https origin:     "https://app.example.com"
+  // `apiFetch` treats a bare host as HTTPS, so we mirror that here:
+  // anything that isn't an explicit `http://` URL is upgraded to wss
+  // so we don't accidentally open insecure sockets in production.
+  const isExplicitHttp = /^http:\/\//i.test(DOMAIN);
+  const proto = isExplicitHttp ? "ws" : "wss";
+  const host = DOMAIN.replace(/^https?:\/\//i, "").replace(/\/$/, "");
   const cleanPath = path.startsWith("/") ? path : `/${path}`;
   const url = `${proto}://${host}${cleanPath}`;
   return token ? `${url}?token=${encodeURIComponent(token)}` : url;
