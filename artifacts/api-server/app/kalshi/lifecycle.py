@@ -944,7 +944,7 @@ async def _send_trade_confirmation_from_snapshot(snap: dict[str, Any]) -> None:
     if not wants_email:
         return
     if not email:
-        log.info(
+        log.warning(
             "trade_confirmation: user=%s has no email on file; skipping",
             user_id,
         )

@@ -355,6 +355,113 @@ def test_handle_ws_fill_returns_promptly_despite_slow_enrichment(
     assert len(_confirmations(harness)) == 1
 
 
+def test_trade_confirmation_skips_when_email_missing(
+    harness: _Harness, caplog: pytest.LogCaptureFixture
+) -> None:
+    """User exists (opted in) but has no email on file -> skip with
+    a warning log; no send attempted."""
+    import logging as _logging
+
+    harness.users["user_42"] = {"email": None}
+
+    async def go() -> None:
+        rec = _mk_record(count=5)
+        with caplog.at_level(_logging.WARNING, logger="app.kalshi.lifecycle"):
+            await _feed_fill(rec, count=5, price=42, trade_id="f1")
+
+    asyncio.run(go())
+    assert _confirmations(harness) == []
+    assert any(
+        "has no email on file" in rec.message for rec in caplog.records
+    ), [r.message for r in caplog.records]
+
+
+def test_trade_confirmation_postmark_failure_is_non_fatal(
+    harness: _Harness, monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A Postmark 5xx-equivalent exception during send must be logged
+    and swallowed without breaking subsequent fills."""
+    import logging as _logging
+
+    harness.users["user_42"] = {"email": "trader@example.com"}
+
+    from app.notifications import postmark as _pm
+    call_count = {"n": 0}
+
+    async def _flaky_send(**kwargs: Any) -> list[dict[str, Any]]:
+        call_count["n"] += 1
+        if call_count["n"] == 1:
+            raise RuntimeError("postmark 500: server error")
+        harness.sent.append(kwargs)
+        return [{"MessageID": "ok"}]
+
+    monkeypatch.setattr(_pm, "send", _flaky_send)
+
+    async def go() -> None:
+        with caplog.at_level(_logging.WARNING, logger="app.notifications.alerts"):
+            rec1 = _mk_record(count=5)
+            await _feed_fill(rec1, count=5, price=42, trade_id="f1")
+            # Different order -> next send succeeds; the first failure
+            # must not have poisoned anything.
+            rec2 = _mk_record(count=5)
+            rec2.request.client_order_id = "coid_user_42_b"
+            rec2.order_id = "ord_user_42_b"
+            await _feed_fill(rec2, count=5, price=42, trade_id="f2")
+
+    asyncio.run(go())
+    # First send raised; second succeeded.
+    assert call_count["n"] == 2
+    assert len(_confirmations(harness)) == 1
+    assert any(
+        "trade_confirmation send failed" in rec.message
+        for rec in caplog.records
+    ), [r.message for r in caplog.records]
+
+
+def test_render_trade_confirmation_html_snapshot() -> None:
+    """Stable HTML snapshot: guards against accidental template
+    regressions (layout, fields, dashboard link). Not a full DOM diff
+    — we assert the important invariants a user would notice."""
+    from app.notifications.alerts import _render_trade_confirmation_html
+
+    html = _render_trade_confirmation_html(
+        market_title="Will Bitcoin close above $50,000 on Dec 12?",
+        market_ticker="KXBTC-24DEC12-50000",
+        side="yes", action="buy",
+        contracts=30,
+        avg_price_cents=42,
+        total_cost_cents=1260,
+        current_position=30,
+        dashboard_url="https://example.com/positions",
+        vertical="crypto",
+        order_id="ord_42",
+        fill_id="fill_99",
+        timestamp_iso="2026-04-23T12:00:00Z",
+        partial=False,
+        digest=False,
+        fills_summed=None,
+    )
+    # Core visible fields.
+    assert "Will Bitcoin close above $50,000 on Dec 12?" in html
+    assert "KXBTC-24DEC12-50000" in html
+    assert "BUY" in html or "Buy" in html or "buy" in html.lower()
+    assert "YES" in html or "Yes" in html or "yes" in html.lower()
+    assert "30" in html  # contracts / position
+    # Price rendered in cents or dollars (either is fine — we just
+    # guard against the field being dropped entirely).
+    assert ("42" in html) or ("0.42" in html) or ("$12.60" in html)
+    # Total cost somewhere.
+    assert ("1260" in html) or ("12.60" in html)
+    # Dashboard link.
+    assert 'href="https://example.com/positions"' in html
+    # Timestamp surfaced.
+    assert "2026-04-23" in html
+    # HTML shell.
+    assert "<html" in html.lower()
+    assert "</html>" in html.lower()
+
+
 def test_trade_confirmation_per_fill_default(harness: _Harness) -> None:
     harness.users["user_42"] = {
         "email": "trader@example.com",
