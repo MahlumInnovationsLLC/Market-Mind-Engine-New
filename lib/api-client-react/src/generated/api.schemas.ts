@@ -273,6 +273,28 @@ export interface TradingCycleList {
   items: TradingCycle[];
 }
 
+export interface OverFilledOrder {
+  order_id: string;
+  market_id?: string | null;
+  market_title?: string | null;
+  side?: string | null;
+  vertical?: string | null;
+  /** Contracts the GTC order asked for (== positions.filled_count once capped). */
+  requested_count: number;
+  /** Total contracts Kalshi actually delivered across all partial fills. */
+  filled_count: number;
+  /** filled_count - requested_count; contracts the lifecycle dropped to avoid double-count. */
+  discarded_count: number;
+  last_fill_at?: string | null;
+}
+
+export interface OverFilledOrdersToday {
+  /** UTC calendar day the count is scoped to (YYYY-MM-DD). */
+  date_utc: string;
+  count: number;
+  items: OverFilledOrder[];
+}
+
 export type SwarmDebateAnalystVerdicts =
   | { [key: string]: unknown }[]
   | { [key: string]: unknown }

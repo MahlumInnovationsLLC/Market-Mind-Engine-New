@@ -9,6 +9,7 @@ import EquityCharts from "@/components/dashboard/equity-charts";
 import HighlightsPanel from "@/components/dashboard/highlights-panel";
 import KpiSummaryBar from "@/components/dashboard/kpi-summary-bar";
 import OperatorControls from "@/components/dashboard/operator-controls";
+import OverFilledOrdersBadge from "@/components/dashboard/over-filled-orders-badge";
 import { PeriodProvider, PeriodStrip } from "@/components/dashboard/period-context";
 import PipelineTracker from "@/components/dashboard/pipeline-tracker";
 import TradeStatsPanel from "@/components/dashboard/trade-stats-panel";
@@ -91,6 +92,7 @@ export default function Dashboard() {
           </div>
           <div className="flex flex-wrap items-center gap-3">
             <ActiveModelBadge />
+            <OverFilledOrdersBadge />
             <PeriodStrip />
           </div>
         </header>

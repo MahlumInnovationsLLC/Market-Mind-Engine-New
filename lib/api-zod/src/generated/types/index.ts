@@ -71,6 +71,8 @@ export * from "./orchestratorCycleResult";
 export * from "./orchestratorRunCycleRequest";
 export * from "./orchestratorStatus";
 export * from "./orchestratorStatusLastCycle";
+export * from "./overFilledOrder";
+export * from "./overFilledOrdersToday";
 export * from "./pitBucket";
 export * from "./portalSessionResult";
 export * from "./postgresHealth";

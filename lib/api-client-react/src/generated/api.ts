@@ -58,6 +58,7 @@ import type {
   OrchestratorCycleResult,
   OrchestratorRunCycleRequest,
   OrchestratorStatus,
+  OverFilledOrdersToday,
   PortalSessionResult,
   PricingCatalog,
   SearchAllParams,
@@ -1005,6 +1006,82 @@ export function useGetRecentCycles<
   },
 ): UseQueryResult<TData, TError> & { queryKey: QueryKey } {
   const queryOptions = getGetRecentCyclesQueryOptions(params, options);
+
+  const query = useQuery(queryOptions) as UseQueryResult<TData, TError> & {
+    queryKey: QueryKey;
+  };
+
+  return { ...query, queryKey: queryOptions.queryKey };
+}
+
+/**
+ * @summary GTC orders Kalshi over-filled in the current UTC day
+ */
+export const getGetOverFilledOrdersTodayUrl = () => {
+  return `/api/dashboard/over-filled-orders-today`;
+};
+
+export const getOverFilledOrdersToday = async (
+  options?: RequestInit,
+): Promise<OverFilledOrdersToday> => {
+  return customFetch<OverFilledOrdersToday>(getGetOverFilledOrdersTodayUrl(), {
+    ...options,
+    method: "GET",
+  });
+};
+
+export const getGetOverFilledOrdersTodayQueryKey = () => {
+  return [`/api/dashboard/over-filled-orders-today`] as const;
+};
+
+export const getGetOverFilledOrdersTodayQueryOptions = <
+  TData = Awaited<ReturnType<typeof getOverFilledOrdersToday>>,
+  TError = ErrorType<unknown>,
+>(options?: {
+  query?: UseQueryOptions<
+    Awaited<ReturnType<typeof getOverFilledOrdersToday>>,
+    TError,
+    TData
+  >;
+  request?: SecondParameter<typeof customFetch>;
+}) => {
+  const { query: queryOptions, request: requestOptions } = options ?? {};
+
+  const queryKey =
+    queryOptions?.queryKey ?? getGetOverFilledOrdersTodayQueryKey();
+
+  const queryFn: QueryFunction<
+    Awaited<ReturnType<typeof getOverFilledOrdersToday>>
+  > = ({ signal }) => getOverFilledOrdersToday({ signal, ...requestOptions });
+
+  return { queryKey, queryFn, ...queryOptions } as UseQueryOptions<
+    Awaited<ReturnType<typeof getOverFilledOrdersToday>>,
+    TError,
+    TData
+  > & { queryKey: QueryKey };
+};
+
+export type GetOverFilledOrdersTodayQueryResult = NonNullable<
+  Awaited<ReturnType<typeof getOverFilledOrdersToday>>
+>;
+export type GetOverFilledOrdersTodayQueryError = ErrorType<unknown>;
+
+/**
+ * @summary GTC orders Kalshi over-filled in the current UTC day
+ */
+
+export function useGetOverFilledOrdersToday<
+  TData = Awaited<ReturnType<typeof getOverFilledOrdersToday>>,
+  TError = ErrorType<unknown>,
+>(options?: {
+  query?: UseQueryOptions<
+    Awaited<ReturnType<typeof getOverFilledOrdersToday>>,
+    TError,
+    TData
+  >;
+  request?: SecondParameter<typeof customFetch>;
+}): UseQueryResult<TData, TError> & { queryKey: QueryKey } {
+  const queryOptions = getGetOverFilledOrdersTodayQueryOptions(options);
 
   const query = useQuery(queryOptions) as UseQueryResult<TData, TError> & {
     queryKey: QueryKey;

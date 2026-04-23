@@ -186,6 +186,18 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/TradingCycleList" }
 
+  /dashboard/over-filled-orders-today:
+    get:
+      operationId: getOverFilledOrdersToday
+      tags: [dashboard]
+      summary: GTC orders Kalshi over-filled in the current UTC day
+      responses:
+        "200":
+          description: Today's over-filled GTC orders
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/OverFilledOrdersToday" }
+
   /dashboard/recent-debates:
     get:
       operationId: getRecentDebates
@@ -1073,6 +1085,36 @@ components:
           type: array
           items: { $ref: "#/components/schemas/TradingCycle" }
       required: [items]
+
+    OverFilledOrder:
+      type: object
+      properties:
+        order_id: { type: string }
+        market_id: { type: string, nullable: true }
+        market_title: { type: string, nullable: true }
+        side: { type: string, nullable: true }
+        vertical: { type: string, nullable: true }
+        requested_count:
+          type: integer
+          description: Contracts the GTC order asked for (== positions.filled_count once capped).
+        filled_count:
+          type: integer
+          description: Total contracts Kalshi actually delivered across all partial fills.
+        discarded_count:
+          type: integer
+          description: filled_count - requested_count; contracts the lifecycle dropped to avoid double-count.
+        last_fill_at: { type: string, nullable: true }
+      required: [order_id, requested_count, filled_count, discarded_count]
+
+    OverFilledOrdersToday:
+      type: object
+      properties:
+        date_utc: { type: string, description: "UTC calendar day the count is scoped to (YYYY-MM-DD)." }
+        count: { type: integer }
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/OverFilledOrder" }
+      required: [date_utc, count, items]
 
     SwarmDebate:
       type: object

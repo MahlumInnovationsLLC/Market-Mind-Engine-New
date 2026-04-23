@@ -1551,6 +1551,66 @@ async def get_verticals_overview(days: int = 7) -> dict[str, Any]:
     }
 
 
+async def get_over_filled_orders_today() -> dict[str, Any]:
+    """GTC orders that Kalshi over-filled in the current UTC day.
+
+    Task #103 caps the rolled-up ``positions.quantity`` at the order's
+    requested size and stamps ``positions.over_filled = TRUE`` whenever
+    Kalshi delivers more contracts than the GTC asked for; this helper
+    surfaces those rows so the operator console can flag reconciliation
+    discrepancies at a glance.
+
+    The "discarded" count is derived by joining ``order_fills`` (the
+    immutable per-fill ledger) and subtracting the requested size from
+    the sum of all fill ``count`` values for that order.  ``today`` is a
+    UTC calendar day bounded by the most recent ``order_fills.received_at``
+    so the badge always matches what the operator just saw in the logs.
+
+    Returns ``{date_utc, count, items}``; on any DB failure the count is
+    ``0`` and ``items`` is ``[]`` so the dashboard renders cleanly
+    instead of erroring.
+    """
+    today_utc = datetime.now(tz=timezone.utc).date().isoformat()
+    try:
+        rows = await db.fetch(
+            """
+            SELECT p.order_id,
+                   p.market_id,
+                   p.side,
+                   p.vertical,
+                   p.filled_count                                   AS requested_count,
+                   coalesce(sum(f.count), 0)::int                   AS filled_count,
+                   greatest(coalesce(sum(f.count), 0) - p.filled_count, 0)::int
+                                                                    AS discarded_count,
+                   to_char(max(f.received_at), 'YYYY-MM-DD"T"HH24:MI:SSZ') AS last_fill_at
+              FROM positions p
+              JOIN order_fills f ON f.order_id = p.order_id
+             WHERE p.over_filled = TRUE
+               AND p.order_id IS NOT NULL
+             GROUP BY p.order_id, p.market_id, p.side, p.vertical, p.filled_count
+            HAVING max(f.received_at) >= date_trunc('day', now() AT TIME ZONE 'UTC')
+             ORDER BY max(f.received_at) DESC
+            """
+        )
+        items = [dict(r) for r in rows]
+    except Exception as e:
+        log.warning("over_filled_orders_today failed: %s", e)
+        return {"date_utc": today_utc, "count": 0, "items": []}
+
+    missing = {row["market_id"] for row in items if row.get("market_id")}
+    titles: dict[str, str] = {}
+    if missing:
+        try:
+            titles = await resolve_market_titles(missing)
+        except Exception as e:
+            log.warning("over_filled_orders title resolve failed: %s", e)
+    for row in items:
+        mid = row.get("market_id")
+        row["market_title"] = titles.get(mid) if mid else None
+
+    return {"date_utc": today_utc, "count": len(items), "items": items}
+
+
 def redact_swarm_debate_transcripts(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Drop the per-persona reasoning + moderator narrative from each item
     and stamp ``redacted: True`` so the frontend can show an upsell.

@@ -400,6 +400,41 @@ export const GetRecentCyclesResponse = zod.object({
 });
 
 /**
+ * @summary GTC orders Kalshi over-filled in the current UTC day
+ */
+export const GetOverFilledOrdersTodayResponse = zod.object({
+  date_utc: zod
+    .string()
+    .describe("UTC calendar day the count is scoped to (YYYY-MM-DD)."),
+  count: zod.number(),
+  items: zod.array(
+    zod.object({
+      order_id: zod.string(),
+      market_id: zod.string().nullish(),
+      market_title: zod.string().nullish(),
+      side: zod.string().nullish(),
+      vertical: zod.string().nullish(),
+      requested_count: zod
+        .number()
+        .describe(
+          "Contracts the GTC order asked for (== positions.filled_count once capped).",
+        ),
+      filled_count: zod
+        .number()
+        .describe(
+          "Total contracts Kalshi actually delivered across all partial fills.",
+        ),
+      discarded_count: zod
+        .number()
+        .describe(
+          "filled_count - requested_count; contracts the lifecycle dropped to avoid double-count.",
+        ),
+      last_fill_at: zod.string().nullish(),
+    }),
+  ),
+});
+
+/**
  * @summary Most recent 6-persona swarm debates
  */
 export const getRecentDebatesQueryLimitDefault = 10;

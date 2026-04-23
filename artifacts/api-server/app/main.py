@@ -3438,6 +3438,20 @@ async def dashboard_uw_signals(
     }
 
 
+@app.get("/api/dashboard/over-filled-orders-today")
+async def dashboard_over_filled_orders_today(
+    _: object = Depends(require_approved_user),
+) -> dict[str, object]:
+    """GTC orders Kalshi over-filled in the current UTC day.
+
+    Backed by ``positions.over_filled = TRUE`` (set by
+    :mod:`app.kalshi.lifecycle`) joined with the immutable
+    ``order_fills`` ledger so the operator console can flag
+    reconciliation discrepancies at a glance.
+    """
+    return await dashboard.get_over_filled_orders_today()
+
+
 @app.get("/api/dashboard/recent-debates")
 async def dashboard_recent_debates(
     limit: int = 10,
