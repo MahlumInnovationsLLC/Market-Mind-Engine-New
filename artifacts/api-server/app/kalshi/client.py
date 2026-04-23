@@ -178,6 +178,43 @@ class KalshiClient:
     async def get_order(self, order_id: str) -> dict[str, Any]:
         return await self._request("GET", f"/portfolio/orders/{order_id}")
 
+    async def list_fills(
+        self,
+        *,
+        min_ts: int | None = None,
+        limit: int = 200,
+        ticker: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Pull recent fills from `/portfolio/fills`.
+
+        Kalshi paginates fills with a `cursor` token. We follow it until
+        either the page has no `cursor` or we've collected `limit` rows
+        (whichever comes first). `min_ts` is the unix-epoch second cutoff
+        — only fills at-or-after it are returned. Returns the raw fill
+        dicts so the reconciler can inspect every field Kalshi adds in
+        the future without needing client changes.
+        """
+        out: list[dict[str, Any]] = []
+        params: dict[str, Any] = {"limit": min(200, max(1, int(limit)))}
+        if min_ts is not None:
+            params["min_ts"] = int(min_ts)
+        if ticker:
+            params["ticker"] = ticker
+        cursor: str | None = None
+        # Cap at 5 pages so a misconfigured `min_ts` can't page forever.
+        for _ in range(5):
+            if cursor:
+                params["cursor"] = cursor
+            data = await self._request("GET", "/portfolio/fills", params=params)
+            page = (data or {}).get("fills") or []
+            out.extend([row for row in page if isinstance(row, dict)])
+            if len(out) >= limit:
+                return out[:limit]
+            cursor = (data or {}).get("cursor")
+            if not cursor:
+                break
+        return out
+
 
 async def health_probe() -> dict[str, Any]:
     """Cheap unauthenticated check: hit `/exchange/status` with our key.

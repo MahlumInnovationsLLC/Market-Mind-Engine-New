@@ -304,6 +304,17 @@ async def lifespan(_: FastAPI):
     except Exception as e:
         log.warning("bankroll sync start failed: %s", e)
 
+    # Continuous Kalshi position + fill reconciler. Periodically pulls
+    # /portfolio/positions and /portfolio/fills, diffs against our local
+    # DB, raises model_health_alerts on drift > tolerance, and back-fills
+    # any fills the WS missed. Disabled in paper mode and when Kalshi
+    # creds are absent. Per cutover task #266.
+    try:
+        from .kalshi import reconciler as _kalshi_reconciler
+        await _kalshi_reconciler.start()
+    except Exception as e:
+        log.warning("kalshi reconciler start failed: %s", e)
+
     # AutoResearch — nightly UW-signal mining job. Discovered candidates
     # land in `autoresearch_features` with status='shadow' for an admin
     # to promote (see /api/admin/autoresearch/*). Disabled by setting
@@ -397,6 +408,11 @@ async def lifespan(_: FastAPI):
             await _bankroll_sync.stop()
         except Exception as e:
             log.warning("bankroll sync stop error: %s", e)
+        try:
+            from .kalshi import reconciler as _kalshi_reconciler
+            await _kalshi_reconciler.stop()
+        except Exception as e:
+            log.warning("kalshi reconciler stop error: %s", e)
         try:
             await feed_scheduler.stop()
         except Exception as e:

@@ -269,6 +269,70 @@ def _probe_kalshi_ws() -> dict:
     )
 
 
+def _probe_kalshi_reconciler() -> dict:
+    """Surface the Kalshi position+fill reconciler's last-tick state.
+
+    `unconfigured` when paper mode / missing creds (the loop is a no-op).
+    `degraded` when the loop is supposed to be running but the last tick
+    raised an error or surfaced unexpected drift / unknown fills.
+    """
+    from .kalshi import reconciler as kalshi_reconciler  # local import to avoid cycle
+    s = kalshi_reconciler.state()
+    settings = get_settings()
+    creds = bool(settings.kalshi_api_key_id and settings.kalshi_private_key)
+    env_killed = (os.environ.get("AXIOM_RECONCILER_ENABLED", "1") or "").strip() == "0"
+    if env_killed or not creds or (settings.trading_mode or "").lower() == "paper":
+        return _card(
+            key="kalshi_reconciler",
+            label="Kalshi reconciler",
+            category="passive",
+            status="unconfigured",
+            detail=(
+                "disabled via AXIOM_RECONCILER_ENABLED=0"
+                if env_killed
+                else "disabled (paper mode or no creds)"
+            ),
+            extras=s,
+        )
+    running = bool(s.get("running"))
+    last_err = s.get("last_error")
+    last_tick = s.get("last_tick_at")
+    drift = int(s.get("last_drift_count") or 0)
+    unknown = int(s.get("last_unknown_fills") or 0)
+    age = (time.time() - float(last_tick)) if last_tick else None
+    interval = float(s.get("interval_seconds") or 60.0)
+    if not running:
+        status, detail = "down", "reconciler not running"
+    elif last_err:
+        status = "degraded"
+        detail = f"last tick error: {last_err}"[:240]
+    elif age is not None and age > max(interval * 3, 180):
+        status = "degraded"
+        detail = f"stale: last tick {age:.0f}s ago"
+    elif drift > 0 or unknown > 0:
+        status = "degraded"
+        detail = (
+            f"last tick raised drift={drift}, unknown_fills={unknown} "
+            f"(replayed={s.get('last_missed_fills') or 0})"
+        )
+    else:
+        status = "ok"
+        detail = (
+            f"last tick {age:.0f}s ago | replayed={s.get('total_replayed_fills') or 0} "
+            f"| drift_alerts={s.get('total_drift_alerts') or 0}"
+            if age is not None
+            else "started; awaiting first tick"
+        )
+    return _card(
+        key="kalshi_reconciler",
+        label="Kalshi reconciler",
+        category="passive",
+        status=status,
+        detail=detail,
+        extras=s,
+    )
+
+
 def _probe_kill_switch() -> dict:
     state = kalshi_lifecycle.kill_switch_state()
     halted = bool(state.get("halted"))
@@ -687,6 +751,7 @@ async def _build_snapshot() -> _Snapshot:
         _probe_models(),
         _probe_calibration(),
         _probe_ws_subscribers(),
+        _probe_kalshi_reconciler(),
         *_probe_feeds(),
     ]
     config = _probe_config()
