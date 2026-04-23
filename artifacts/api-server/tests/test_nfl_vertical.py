@@ -279,7 +279,7 @@ def test_gate_per_vertical_cap_unknown_league_skips_sub_checks():
 def test_gate_count_invariant_preserved():
     """Spec requires exactly 12 gates — adding NFL sub-checks must not
     change that."""
-    assert len(GATES) == 12
+    assert len(GATES) == 13
 
 
 # ---------------------------------------------------------------------------

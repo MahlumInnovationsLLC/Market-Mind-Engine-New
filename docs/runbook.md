@@ -122,6 +122,67 @@ returns to `mode=paper` (or `live`) instead of `HALTED`.
 
 ---
 
+## 3b. Daily-loss kill switch
+
+The `gate_daily_loss` risk gate watches today's realized + unrealized
+P&L and auto-halts trading when either of two caps is breached:
+
+- `AXIOM_DAILY_LOSS_HALT_USD` — absolute dollar cap (e.g. `500`).
+- `AXIOM_DAILY_LOSS_HALT_PCT` — percent of **start-of-day** bankroll
+  (e.g. `2.5` = 2.5%). The denominator is the last `bankroll_events`
+  row before today (UTC).
+
+Either / both / neither may be set. When neither is configured the
+gate is a no-op and logs a warning on every cycle so operators know
+the safety net is unarmed.
+
+### Operator override (preferred)
+
+Set per-deployment via `system_settings` so thresholds survive a
+redeploy and take effect on the next cycle (no restart):
+
+```sql
+INSERT INTO system_settings (key, value, updated_at)
+VALUES ('risk.daily_loss_halt_usd', '500', now())
+ON CONFLICT (key) DO UPDATE SET value = excluded.value, updated_at = now();
+
+INSERT INTO system_settings (key, value, updated_at)
+VALUES ('risk.daily_loss_halt_pct', '2.5', now())
+ON CONFLICT (key) DO UPDATE SET value = excluded.value, updated_at = now();
+```
+
+Overrides beat env vars; delete the row (or set the value to `0`) to
+fall back to the env var.
+
+### What happens when it trips
+
+1. `system_settings.risk.trading_mode` is flipped to `halt` (same end
+   state as a manual EMERGENCY STOP — `gate_kill_switch` will keep
+   rejecting candidates until an operator re-arms).
+2. The in-process `exchange_kill_switch.halt()` is tripped so the
+   current cycle stops submitting orders immediately.
+3. One `daily-loss-halt` operator email is dispatched (deduped by UTC
+   date — a burst of tripping candidates only fires one alert).
+
+### Re-enable trading (operator action)
+
+Once you've acknowledged the loss and decided to resume:
+
+1. Confirm the snapshot on `/system → controls` shows what you expect.
+2. Flip the runtime mode back to `paper` (safer) or `live`:
+   ```sql
+   UPDATE system_settings SET value = 'paper', updated_at = now()
+    WHERE key = 'risk.trading_mode';
+   ```
+3. Clear the in-process kill switch via `POST /api/kalshi/resume`
+   (Clerk auth required). A cycle later the dashboard card flips
+   from `TRIPPED` back to `ARMED`.
+
+The gate does **not** auto-untrip on P&L recovery — re-enable is
+always an explicit operator action.
+
+---
+
 ## 4. Read the pipeline log
 
 The orchestrator emits one event per stage of every candidate. They

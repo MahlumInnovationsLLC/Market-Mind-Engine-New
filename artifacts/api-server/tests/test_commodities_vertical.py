@@ -210,7 +210,7 @@ def test_baseline_stack_directionality_above_vs_below():
 
 
 def test_twelve_gate_invariant_unchanged():
-    assert len(GATES) == 12
+    assert len(GATES) == 13
 
 
 def _commodities_ctx(**overrides) -> RiskContext:

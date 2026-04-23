@@ -45,11 +45,12 @@ log = logging.getLogger("axiom.notifications.alerts")
 
 
 _TAG_TO_USER_PREF: dict[str, str] = {
-    "daily-summary":   "email_daily_summary",
-    "drift":           "email_drift",
-    "halt":            "email_halt",
-    "live-trade":      "email_live_trade",
-    "weekly-roundup":  "email_weekly_roundup",
+    "daily-summary":    "email_daily_summary",
+    "daily-loss-halt":  "email_halt",
+    "drift":            "email_drift",
+    "halt":             "email_halt",
+    "live-trade":       "email_live_trade",
+    "weekly-roundup":   "email_weekly_roundup",
 }
 
 
@@ -344,6 +345,65 @@ def halt(
         except Exception as e:  # pragma: no cover — push must not break alerting
             log.warning("halt push dispatch failed: %s", e)
     return result
+
+
+# ---------------------------------------------------------------------------
+# Daily-loss kill switch tripped
+# ---------------------------------------------------------------------------
+
+
+def daily_loss_halt(
+    *,
+    date_utc: str,
+    loss_usd: float,
+    realized_pnl_usd: float,
+    unrealized_pnl_usd: float,
+    threshold_usd: float | None,
+    threshold_pct: float | None,
+    threshold_pct_usd: float | None,
+    start_of_day_bankroll_usd: float | None,
+    reason: str | None = None,
+    dry_run: bool = False,
+) -> dict[str, Any]:
+    """Operator alert for the daily-loss auto-halt.
+
+    Raised by :mod:`app.risk.daily_loss` when today's realized +
+    unrealized P&L draws down past either the absolute or percent cap.
+    Once tripped, only an operator can re-enable trading — the gate
+    never auto-untrips on P&L recovery.
+    """
+    def _fmt(v: float | None, pre: str = "$") -> str:
+        if v is None:
+            return "(n/a)"
+        return f"{pre}{v:,.2f}"
+
+    subject = (
+        f"[axiom][HALT] Daily loss cap breached :: -${loss_usd:,.2f} on {date_utc}"
+    )
+    rows: list[tuple[str, Any]] = [
+        ("date_utc", date_utc),
+        ("loss", _fmt(-loss_usd) if loss_usd else "$0.00"),
+        ("realized_pnl", _fmt(realized_pnl_usd)),
+        ("unrealized_pnl", _fmt(unrealized_pnl_usd)),
+        ("threshold_abs", _fmt(threshold_usd)),
+        (
+            "threshold_pct",
+            "(n/a)"
+            if threshold_pct is None
+            else f"{threshold_pct:.2f}% ({_fmt(threshold_pct_usd)})",
+        ),
+        ("start_of_day_bankroll", _fmt(start_of_day_bankroll_usd)),
+        ("reason", reason or "(unspecified)"),
+        ("at", _utc_now_iso()),
+    ]
+    body = (
+        "The daily-loss kill switch tripped. Live order placement is now "
+        "blocked until an operator re-enables trading from "
+        "/system -> controls.\n\n"
+        + _format_lines(rows)
+        + "\n"
+    )
+    return _dispatch(subject, body, tag="daily-loss-halt", dry_run=dry_run)
 
 
 # ---------------------------------------------------------------------------

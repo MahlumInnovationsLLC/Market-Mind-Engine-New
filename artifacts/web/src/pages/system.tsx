@@ -1,9 +1,12 @@
 import { useEffect, useMemo, useState } from "react";
 import { Link } from "wouter";
+import { useAuth } from "@clerk/react";
+import { useQuery } from "@tanstack/react-query";
 import {
   getGetMyAccessQueryKey,
   useGetMyAccess,
 } from "@workspace/api-client-react";
+import { apiFetch } from "@/lib/api";
 import { GlassCard } from "@/components/ui/glass-card";
 import { TabBar, useTabState, type TabDef } from "@/components/shell/tab-bar";
 import { HealthPanel } from "@/pages/health";
@@ -132,6 +135,13 @@ export default function SystemPage() {
               <LiveExecuteToggle />
               <EmergencyStop />
             </div>
+          </GlassCard>
+
+          <GlassCard tone="solid" padding="md">
+            <div className="mb-3 text-[11px] font-semibold uppercase tracking-[0.18em] text-accent-cyan/80">
+              Daily-loss cap
+            </div>
+            <DailyLossPanel />
           </GlassCard>
 
           <GlassCard tone="solid" padding="md">
@@ -341,6 +351,204 @@ function ThemePickerPanel() {
           );
         })}
       </div>
+    </div>
+  );
+}
+
+type DailyLossSnapshot = {
+  date_utc: string;
+  realized_pnl_usd: number;
+  unrealized_pnl_usd: number;
+  net_pnl_usd: number;
+  start_of_day_bankroll_usd: number | null;
+  threshold_usd: number | null;
+  threshold_pct: number | null;
+  threshold_pct_usd: number | null;
+  loss_usd: number;
+  tripped: boolean;
+  tripped_reason: string | null;
+  used_pct_abs: number | null;
+  used_pct_pct: number | null;
+  used_pct_max: number | null;
+  configured: boolean;
+};
+
+function fmtUsd(v: number | null | undefined): string {
+  if (v === null || v === undefined || Number.isNaN(v)) return "—";
+  const sign = v < 0 ? "-" : "";
+  return `${sign}$${Math.abs(v).toLocaleString(undefined, {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  })}`;
+}
+
+function DailyLossPanel() {
+  const { getToken, isSignedIn } = useAuth();
+  const tokenFn = useMemo(
+    () => () => getToken().then((t) => t ?? null),
+    [getToken],
+  );
+  const { data, isLoading, error } = useQuery<DailyLossSnapshot>({
+    queryKey: ["system", "daily-loss"],
+    queryFn: () =>
+      apiFetch<DailyLossSnapshot>("/api/risk/daily-loss", {
+        getToken: tokenFn,
+      }),
+    enabled: !!isSignedIn,
+    refetchInterval: 30_000,
+  });
+
+  if (isLoading) {
+    return <div className="h-10 animate-pulse bg-muted/30" />;
+  }
+  if (error || !data) {
+    return (
+      <div className="text-loss text-xs" data-testid="daily-loss-error">
+        Failed to load daily-loss snapshot.
+      </div>
+    );
+  }
+
+  const usedPct = data.used_pct_max ?? 0;
+  const barWidth = Math.max(0, Math.min(100, usedPct));
+  const barTone = data.tripped
+    ? "bg-loss"
+    : usedPct >= 75
+      ? "bg-accent-warning"
+      : "bg-accent-cyan";
+
+  const stateLabel = !data.configured
+    ? "UNCONFIGURED"
+    : data.tripped
+      ? "TRIPPED"
+      : "ARMED";
+  const stateClass = !data.configured
+    ? "border-border text-muted-foreground"
+    : data.tripped
+      ? "border-loss/60 bg-loss/10 text-loss"
+      : "border-accent-cyan/40 text-accent-cyan";
+
+  return (
+    <div className="space-y-3" data-testid="panel-daily-loss">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <p className="text-[11px] text-muted-foreground leading-snug">
+          Auto-halts trading when today&apos;s realized + unrealized P&amp;L
+          breaches the absolute dollar or % of start-of-day bankroll cap.
+          Tripping flips <code>risk.trading_mode</code> to <code>halt</code>;
+          an operator re-enables from the runtime mode panel.
+        </p>
+        <span
+          className={`text-[10px] uppercase border px-2 py-0.5 ${stateClass}`}
+          data-testid="daily-loss-state"
+        >
+          {stateLabel}
+        </span>
+      </div>
+
+      <div className="grid grid-cols-2 gap-3 text-[11px] md:grid-cols-4">
+        <div>
+          <div className="text-muted-foreground uppercase tracking-wider">
+            Today (UTC)
+          </div>
+          <div
+            className="font-mono text-sm"
+            data-testid="daily-loss-date"
+          >
+            {data.date_utc}
+          </div>
+        </div>
+        <div>
+          <div className="text-muted-foreground uppercase tracking-wider">
+            Net P&amp;L
+          </div>
+          <div
+            className={`font-mono text-sm ${
+              data.net_pnl_usd < 0 ? "text-loss" : "text-accent-cyan"
+            }`}
+            data-testid="daily-loss-net"
+          >
+            {fmtUsd(data.net_pnl_usd)}
+          </div>
+          <div className="text-[10px] text-muted-foreground">
+            realized {fmtUsd(data.realized_pnl_usd)} · unrealized{" "}
+            {fmtUsd(data.unrealized_pnl_usd)}
+          </div>
+        </div>
+        <div>
+          <div className="text-muted-foreground uppercase tracking-wider">
+            Absolute cap
+          </div>
+          <div
+            className="font-mono text-sm"
+            data-testid="daily-loss-threshold-abs"
+          >
+            {data.threshold_usd === null ? "—" : fmtUsd(data.threshold_usd)}
+          </div>
+          {data.used_pct_abs !== null && (
+            <div className="text-[10px] text-muted-foreground">
+              used {data.used_pct_abs.toFixed(1)}%
+            </div>
+          )}
+        </div>
+        <div>
+          <div className="text-muted-foreground uppercase tracking-wider">
+            Percent cap
+          </div>
+          <div
+            className="font-mono text-sm"
+            data-testid="daily-loss-threshold-pct"
+          >
+            {data.threshold_pct === null
+              ? "—"
+              : `${data.threshold_pct.toFixed(2)}%`}
+          </div>
+          {data.threshold_pct_usd !== null && (
+            <div className="text-[10px] text-muted-foreground">
+              ≈ {fmtUsd(data.threshold_pct_usd)} · bankroll{" "}
+              {fmtUsd(data.start_of_day_bankroll_usd)}
+            </div>
+          )}
+        </div>
+      </div>
+
+      {data.configured && (
+        <div>
+          <div className="flex items-center justify-between text-[10px] uppercase tracking-wider text-muted-foreground">
+            <span>Loss budget used</span>
+            <span data-testid="daily-loss-used-pct">
+              {data.used_pct_max === null
+                ? "—"
+                : `${data.used_pct_max.toFixed(1)}%`}
+            </span>
+          </div>
+          <div className="mt-1 h-1.5 w-full bg-muted/30">
+            <div
+              className={`h-1.5 ${barTone} transition-[width]`}
+              style={{ width: `${barWidth}%` }}
+              data-testid="daily-loss-bar"
+            />
+          </div>
+        </div>
+      )}
+
+      {data.tripped && data.tripped_reason && (
+        <div
+          className="border border-loss/60 bg-loss/10 p-2 text-[11px] text-loss"
+          data-testid="daily-loss-reason"
+        >
+          {data.tripped_reason}
+        </div>
+      )}
+
+      {!data.configured && (
+        <div className="text-[11px] text-muted-foreground">
+          No thresholds configured — set{" "}
+          <code>AXIOM_DAILY_LOSS_HALT_USD</code> and/or{" "}
+          <code>AXIOM_DAILY_LOSS_HALT_PCT</code> (or operator overrides{" "}
+          <code>risk.daily_loss_halt_usd</code> /{" "}
+          <code>risk.daily_loss_halt_pct</code>) to arm the cap.
+        </div>
+      )}
     </div>
   );
 }

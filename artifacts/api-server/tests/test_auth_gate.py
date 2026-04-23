@@ -73,6 +73,7 @@ PROTECTED_ROUTES: tuple[str, ...] = (
     "/api/kalshi/kill-switch",
     "/api/admin/access-requests",
     "/api/orchestrator/live-execute",
+    "/api/risk/daily-loss",
     "/api/market-title/{ticker}",
     "/api/polymarket/balance",
     "/api/polymarket/positions",

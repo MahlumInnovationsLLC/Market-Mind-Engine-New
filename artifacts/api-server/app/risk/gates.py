@@ -161,6 +161,67 @@ async def gate_kill_switch(ctx: RiskContext) -> GateResult:
     return GateResult("kill_switch", True, "", {"trading_mode": mode})
 
 
+async def gate_daily_loss(ctx: RiskContext) -> GateResult:
+    """Auto-halt when today's realized + unrealized P&L draws down past
+    the configured caps.
+
+    Two independent thresholds:
+
+    * ``AXIOM_DAILY_LOSS_HALT_USD`` — absolute dollar cap.
+    * ``AXIOM_DAILY_LOSS_HALT_PCT`` — percent of start-of-day bankroll.
+
+    Either (or both) may be unset; when neither is configured the gate
+    is a no-op with a warning so the operator knows the safety net
+    isn't wired. Once tripped the gate flips
+    ``system_settings.risk.trading_mode = 'halt'`` (the same end state
+    an operator EMERGENCY STOP lands on) so the kill-switch gate keeps
+    rejecting candidates without a process restart; only an operator
+    can re-enable trading.
+
+    Operator overrides (``daily_loss_halt_usd`` /
+    ``daily_loss_halt_pct``) take precedence over the env vars — the
+    same pattern the rest of the risk knobs use.
+    """
+    from . import daily_loss as _dl
+    try:
+        snap = await _dl.compute_snapshot(ctx.operator_overrides)
+    except Exception as e:
+        log.warning("daily_loss snapshot failed (degraded): %s", e)
+        return GateResult("daily_loss", True, "snapshot degraded", {"error": str(e)})
+    details: dict[str, Any] = {
+        "date_utc": snap.date_utc,
+        "loss_usd": snap.loss_usd,
+        "net_pnl_usd": snap.net_pnl_usd,
+        "realized_pnl_usd": snap.realized_pnl_usd,
+        "unrealized_pnl_usd": snap.unrealized_pnl_usd,
+        "threshold_usd": snap.threshold_usd,
+        "threshold_pct": snap.threshold_pct,
+        "threshold_pct_usd": snap.threshold_pct_usd,
+        "start_of_day_bankroll_usd": snap.start_of_day_bankroll_usd,
+    }
+    if snap.threshold_usd is None and snap.threshold_pct is None:
+        log.warning(
+            "gate_daily_loss configured but no thresholds set "
+            "(AXIOM_DAILY_LOSS_HALT_USD / _PCT) — gate is a no-op"
+        )
+        return GateResult("daily_loss", True, "no thresholds configured", details)
+    if not snap.tripped:
+        return GateResult("daily_loss", True, "", details)
+    # Tripped — run the halt side-effect (idempotent within the day)
+    # and reject the candidate.  apply_halt() takes care of dedupe so a
+    # burst of candidates during the tripping cycle only fires one alert.
+    try:
+        await _dl.apply_halt(snap)
+    except Exception as e:
+        log.warning("daily_loss apply_halt failed: %s", e)
+    return GateResult(
+        "daily_loss",
+        False,
+        snap.tripped_reason or "daily loss cap breached",
+        details,
+    )
+
+
 async def gate_market_cooldown(ctx: RiskContext) -> GateResult:
     """`watchdog_market_cooldowns` — exchange or risk has muted this market.
 
@@ -884,6 +945,7 @@ async def gate_duplicate_trade(ctx: RiskContext) -> GateResult:
 GateFn = Callable[[RiskContext], Awaitable[GateResult]]
 GATES: tuple[tuple[str, GateFn], ...] = (
     ("kill_switch", gate_kill_switch),
+    ("daily_loss", gate_daily_loss),
     ("market_cooldown", gate_market_cooldown),
     ("swarm_approval", gate_swarm_approval),
     ("min_edge", gate_min_edge),
@@ -896,7 +958,7 @@ GATES: tuple[tuple[str, GateFn], ...] = (
     ("max_concurrent_positions", gate_max_concurrent_positions),
     ("duplicate_trade", gate_duplicate_trade),
 )
-assert len(GATES) == 12, "exactly 12 gates required by spec"
+assert len(GATES) == 13, "13 gates: 12 original + daily_loss (task #268)"
 
 
 async def run_all_gates(

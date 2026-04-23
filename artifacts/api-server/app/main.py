@@ -3110,6 +3110,51 @@ def _live_execute_payload(
     }
 
 
+@app.get("/api/risk/daily-loss")
+async def risk_daily_loss_state(
+    user: AuthedUser = Depends(require_auth),
+) -> dict[str, object]:
+    """Current daily-loss snapshot + thresholds.
+
+    Drives the Daily-Loss card on ``/system -> controls``. Readable by
+    every signed-in user so the dashboard can render today's position
+    against the caps; the actual trip + halt side-effect is owned by
+    the ``gate_daily_loss`` risk gate, not this endpoint.
+    """
+    from .risk import daily_loss as _dl
+    from .orchestrator.cycle import _load_operator_overrides
+    try:
+        overrides = await _load_operator_overrides()
+    except Exception:
+        overrides = {}
+    snap = await _dl.compute_snapshot(overrides)
+    used_pct_abs: float | None = None
+    if snap.threshold_usd is not None and snap.threshold_usd > 0:
+        used_pct_abs = round(
+            100.0 * max(0.0, snap.loss_usd) / snap.threshold_usd, 2
+        )
+    used_pct_pct: float | None = None
+    if snap.threshold_pct_usd is not None and snap.threshold_pct_usd > 0:
+        used_pct_pct = round(
+            100.0 * max(0.0, snap.loss_usd) / snap.threshold_pct_usd, 2
+        )
+    # Most-restrictive budget used so the UI can show a single gauge.
+    used_pct_max: float | None = None
+    for v in (used_pct_abs, used_pct_pct):
+        if v is None:
+            continue
+        used_pct_max = v if used_pct_max is None else max(used_pct_max, v)
+    return {
+        **snap.to_dict(),
+        "used_pct_abs": used_pct_abs,
+        "used_pct_pct": used_pct_pct,
+        "used_pct_max": used_pct_max,
+        "configured": bool(
+            snap.threshold_usd is not None or snap.threshold_pct is not None
+        ),
+    }
+
+
 @app.get("/api/orchestrator/live-execute")
 async def orchestrator_live_execute_state(
     user: AuthedUser = Depends(require_auth),
