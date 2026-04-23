@@ -116,12 +116,69 @@ async def get_trading_halted() -> bool:
     return (v or "").strip().lower() == "true"
 
 
-async def set_aggression_mode(mode: str, *, actor_user_id: str | None) -> str:
+AGGRESSION_REVERT_KEY = "aggression_mode_revert"
+
+
+def _normalize_revert_at(revert_at: Any) -> "datetime | None":
+    from datetime import datetime, timezone
+
+    if revert_at is None:
+        return None
+    if isinstance(revert_at, datetime):
+        dt = revert_at
+    elif isinstance(revert_at, str):
+        s = revert_at.strip()
+        if not s:
+            return None
+        # Accept trailing "Z" (Python <3.11 fromisoformat doesn't).
+        if s.endswith("Z"):
+            s = s[:-1] + "+00:00"
+        try:
+            dt = datetime.fromisoformat(s)
+        except ValueError as e:
+            raise ValueError(f"invalid revert_at timestamp: {revert_at!r}") from e
+    else:
+        raise ValueError(f"invalid revert_at type: {type(revert_at).__name__}")
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    now = datetime.now(timezone.utc)
+    if dt <= now:
+        raise ValueError("revert_at must be in the future")
+    return dt
+
+
+async def set_aggression_mode(
+    mode: str,
+    *,
+    actor_user_id: str | None,
+    actor_email: str | None = None,
+    reason: str | None = None,
+    revert_at: Any = None,
+    revert_to_mode: str | None = None,
+) -> str:
     raw = (mode or "").strip().lower()
     if raw not in VALID_MODES:
         raise ValueError(
             f"invalid aggression_mode {mode!r}; expected one of {list(VALID_MODES)}"
         )
+    cleaned_reason = (reason or "").strip()[:500] or None
+
+    # Validate optional schedule before any DB write so a partial failure
+    # can't leave us with a new mode + a bad revert row.
+    revert_dt = _normalize_revert_at(revert_at)
+    revert_target: str | None = None
+    if revert_dt is not None:
+        revert_target = (revert_to_mode or DEFAULT_MODE).strip().lower()
+        if revert_target not in VALID_MODES:
+            raise ValueError(
+                f"invalid revert_to_mode {revert_to_mode!r}; expected one of {list(VALID_MODES)}"
+            )
+        if revert_target == raw:
+            raise ValueError("revert_to_mode must differ from the new mode")
+
+    before_mode = await get_aggression_mode()
+    before_revert = await get_pending_revert()
+
     await ensure_schema()
     async with db.acquire() as c:
         await c.execute(
@@ -136,7 +193,279 @@ async def set_aggression_mode(mode: str, *, actor_user_id: str | None) -> str:
             raw,
             actor_user_id,
         )
+        # Manual change always supersedes a pending revert: clear it
+        # first, then write the new schedule (if any) below.  This keeps
+        # things idempotent — flipping the mode by hand cancels the
+        # auto-revert the operator no longer wants.
+        await c.execute(
+            "DELETE FROM runtime_settings WHERE key = $1",
+            AGGRESSION_REVERT_KEY,
+        )
+
+    new_revert: dict[str, Any] | None = None
+    if revert_dt is not None and revert_target is not None:
+        import json as _json
+
+        new_revert = {
+            "at": revert_dt.isoformat(),
+            "target": revert_target,
+            "from_mode": raw,
+            "by_user_id": actor_user_id,
+            "by_email": actor_email,
+            "reason": cleaned_reason,
+        }
+        async with db.acquire() as c:
+            await c.execute(
+                """
+                INSERT INTO runtime_settings (key, value, updated_at, updated_by)
+                VALUES ($1, $2, now(), $3)
+                ON CONFLICT (key) DO UPDATE SET
+                    value      = EXCLUDED.value,
+                    updated_at = now(),
+                    updated_by = EXCLUDED.updated_by
+                """,
+                AGGRESSION_REVERT_KEY,
+                _json.dumps(new_revert),
+                actor_user_id,
+            )
+
+    # Audit row — surfaces in the existing admin audit panel and
+    # backs the "last 5 mode changes" list on the runtime panel.
+    try:
+        import json as _json
+
+        before_payload: dict[str, Any] = {"mode": before_mode}
+        if before_revert is not None:
+            before_payload["pending_revert"] = before_revert
+        after_payload: dict[str, Any] = {"mode": raw}
+        if cleaned_reason:
+            after_payload["reason"] = cleaned_reason
+        if new_revert is not None:
+            after_payload["pending_revert"] = new_revert
+        async with db.acquire() as c:
+            await c.execute(
+                """
+                INSERT INTO admin_audit_log (
+                    actor_user_id, actor_email,
+                    target_user_id, target_email,
+                    action, before_value, after_value
+                ) VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7::jsonb)
+                """,
+                actor_user_id or "system",
+                actor_email,
+                "system",
+                None,
+                "set_aggression_mode",
+                _json.dumps(before_payload),
+                _json.dumps(after_payload),
+            )
+    except Exception as e:
+        log.warning("audit log insert (aggression mode) failed: %s", e)
     return raw
+
+
+async def get_pending_revert() -> dict[str, Any] | None:
+    """Return the scheduled auto-revert (if any), or ``None``."""
+    await ensure_schema()
+    try:
+        v = await db.fetchval(
+            "SELECT value FROM runtime_settings WHERE key = $1",
+            AGGRESSION_REVERT_KEY,
+        )
+    except Exception as e:
+        log.debug("get_pending_revert read failed: %s", e)
+        return None
+    if not v:
+        return None
+    import json as _json
+
+    try:
+        parsed = _json.loads(v)
+    except Exception:
+        return None
+    if not isinstance(parsed, dict):
+        return None
+    target = (parsed.get("target") or "").strip().lower()
+    if target not in VALID_MODES:
+        return None
+    return parsed
+
+
+async def cancel_pending_revert(
+    *, actor_user_id: str | None, actor_email: str | None
+) -> dict[str, Any] | None:
+    """Cancel an outstanding scheduled revert.  Returns the cancelled
+    payload (or ``None`` if there was nothing scheduled)."""
+    existing = await get_pending_revert()
+    if existing is None:
+        return None
+    async with db.acquire() as c:
+        await c.execute(
+            "DELETE FROM runtime_settings WHERE key = $1",
+            AGGRESSION_REVERT_KEY,
+        )
+    try:
+        import json as _json
+
+        async with db.acquire() as c:
+            await c.execute(
+                """
+                INSERT INTO admin_audit_log (
+                    actor_user_id, actor_email,
+                    target_user_id, target_email,
+                    action, before_value, after_value
+                ) VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7::jsonb)
+                """,
+                actor_user_id or "system",
+                actor_email,
+                "system",
+                None,
+                "cancel_aggression_mode_revert",
+                _json.dumps({"pending_revert": existing}),
+                _json.dumps({"pending_revert": None}),
+            )
+    except Exception as e:
+        log.warning("audit log insert (cancel revert) failed: %s", e)
+    return existing
+
+
+async def apply_due_revert() -> dict[str, Any] | None:
+    """If the pending revert is past due, flip the mode now and clear
+    the schedule.  Returns the applied revert payload (or ``None``).
+
+    Called from :func:`get_state` so the dashboard / orchestrator both
+    observe the new mode without a separate scheduler process.
+    """
+    pending = await get_pending_revert()
+    if pending is None:
+        return None
+    from datetime import datetime, timezone
+
+    raw_at = pending.get("at") or ""
+    s = str(raw_at)
+    if s.endswith("Z"):
+        s = s[:-1] + "+00:00"
+    try:
+        due = datetime.fromisoformat(s)
+    except Exception:
+        # Garbled row — drop it so it doesn't block forever.
+        async with db.acquire() as c:
+            await c.execute(
+                "DELETE FROM runtime_settings WHERE key = $1",
+                AGGRESSION_REVERT_KEY,
+            )
+        return None
+    if due.tzinfo is None:
+        due = due.replace(tzinfo=timezone.utc)
+    if due > datetime.now(timezone.utc):
+        return None
+
+    target = (pending.get("target") or DEFAULT_MODE).strip().lower()
+    if target not in VALID_MODES:
+        target = DEFAULT_MODE
+    before_mode = await get_aggression_mode()
+
+    async with db.acquire() as c:
+        await c.execute(
+            """
+            INSERT INTO runtime_settings (key, value, updated_at, updated_by)
+            VALUES ('aggression_mode', $1, now(), $2)
+            ON CONFLICT (key) DO UPDATE SET
+                value      = EXCLUDED.value,
+                updated_at = now(),
+                updated_by = EXCLUDED.updated_by
+            """,
+            target,
+            "scheduler",
+        )
+        await c.execute(
+            "DELETE FROM runtime_settings WHERE key = $1",
+            AGGRESSION_REVERT_KEY,
+        )
+
+    try:
+        import json as _json
+
+        async with db.acquire() as c:
+            await c.execute(
+                """
+                INSERT INTO admin_audit_log (
+                    actor_user_id, actor_email,
+                    target_user_id, target_email,
+                    action, before_value, after_value
+                ) VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7::jsonb)
+                """,
+                "scheduler",
+                None,
+                "system",
+                None,
+                "set_aggression_mode",
+                _json.dumps({"mode": before_mode, "pending_revert": pending}),
+                _json.dumps(
+                    {
+                        "mode": target,
+                        "reason": "scheduled auto-revert",
+                        "scheduled_by_user_id": pending.get("by_user_id"),
+                        "scheduled_by_email": pending.get("by_email"),
+                    }
+                ),
+            )
+    except Exception as e:
+        log.warning("audit log insert (auto-revert) failed: %s", e)
+    return pending
+
+
+async def get_aggression_mode_history(limit: int = 5) -> list[dict[str, Any]]:
+    """Recent ``set_aggression_mode`` audit rows (most recent first).
+
+    Surfaces in the admin runtime panel as "last N mode changes" with
+    timestamp, operator, and reason.
+    """
+    limit = max(1, min(50, int(limit)))
+    try:
+        rows = await db.fetch(
+            """
+            SELECT actor_user_id,
+                   actor_email,
+                   before_value,
+                   after_value,
+                   to_char(created_at, 'YYYY-MM-DD"T"HH24:MI:SSZ') AS created_at
+              FROM admin_audit_log
+             WHERE action = 'set_aggression_mode'
+             ORDER BY created_at DESC
+             LIMIT $1
+            """,
+            limit,
+        )
+    except Exception as e:
+        log.debug("aggression mode history read failed: %s", e)
+        return []
+    import json as _json
+
+    out: list[dict[str, Any]] = []
+    for r in rows:
+        before_raw = r["before_value"]
+        after_raw = r["after_value"]
+        try:
+            before = _json.loads(before_raw) if isinstance(before_raw, str) else (before_raw or {})
+        except Exception:
+            before = {}
+        try:
+            after = _json.loads(after_raw) if isinstance(after_raw, str) else (after_raw or {})
+        except Exception:
+            after = {}
+        out.append(
+            {
+                "at": r["created_at"],
+                "actor_user_id": r["actor_user_id"],
+                "actor_email": r["actor_email"],
+                "from_mode": (before or {}).get("mode"),
+                "to_mode": (after or {}).get("mode"),
+                "reason": (after or {}).get("reason"),
+                "scheduled_revert": (after or {}).get("pending_revert"),
+            }
+        )
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -745,6 +1074,12 @@ async def get_state() -> dict[str, Any]:
     cycle.
     """
     await ensure_schema()
+    # Apply any due scheduled revert before reporting state so the
+    # dashboard, orchestrator, and audit log all see the same mode.
+    try:
+        await apply_due_revert()
+    except Exception as e:
+        log.debug("apply_due_revert failed (best-effort): %s", e)
     mode = await get_aggression_mode()
     updated_at: str | None = None
     updated_by: str | None = None
@@ -763,6 +1098,8 @@ async def get_state() -> dict[str, Any]:
     except Exception as e:
         log.debug("runtime_settings meta read failed: %s", e)
     trading_halted = await get_trading_halted()
+    history = await get_aggression_mode_history(limit=5)
+    pending_revert = await get_pending_revert()
     return {
         "aggression_mode": mode,
         "trading_halted": trading_halted,
@@ -770,4 +1107,6 @@ async def get_state() -> dict[str, Any]:
         "available_modes": list(VALID_MODES),
         "updated_at": updated_at,
         "updated_by": updated_by,
+        "history": history,
+        "pending_revert": pending_revert,
     }

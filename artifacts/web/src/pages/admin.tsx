@@ -188,6 +188,25 @@ export function UserManagementPanel() {
   );
 }
 
+type AggressionPendingRevert = {
+  at: string;
+  target: string;
+  from_mode?: string | null;
+  by_user_id?: string | null;
+  by_email?: string | null;
+  reason?: string | null;
+};
+
+type AggressionHistoryEntry = {
+  at: string | null;
+  actor_user_id: string | null;
+  actor_email: string | null;
+  from_mode: string | null;
+  to_mode: string | null;
+  reason: string | null;
+  scheduled_revert: AggressionPendingRevert | null;
+};
+
 type RuntimeSettings = {
   aggression_mode: string;
   thresholds: {
@@ -199,6 +218,8 @@ type RuntimeSettings = {
   available_modes: string[];
   updated_at: string | null;
   updated_by: string | null;
+  history?: AggressionHistoryEntry[];
+  pending_revert?: AggressionPendingRevert | null;
 };
 
 export function RuntimePanel() {
@@ -209,6 +230,10 @@ export function RuntimePanel() {
   );
   const queryClient = useQueryClient();
   const queryKey = ["admin", "runtime-settings"] as const;
+  const [reason, setReason] = useState("");
+  const [scheduleEnabled, setScheduleEnabled] = useState(false);
+  const [revertAt, setRevertAt] = useState("");
+  const [revertTo, setRevertTo] = useState("balanced");
 
   const { data, isLoading, error } = useQuery<RuntimeSettings>({
     queryKey,
@@ -217,13 +242,44 @@ export function RuntimePanel() {
         getToken: tokenFn,
       }),
     enabled: !!isSignedIn,
+    refetchInterval: 30_000,
   });
 
   const mutation = useMutation({
-    mutationFn: (mode: string) =>
-      apiFetch<RuntimeSettings>("/api/admin/runtime-settings", {
+    mutationFn: (mode: string) => {
+      const body: Record<string, unknown> = { aggression_mode: mode };
+      const trimmed = reason.trim();
+      if (trimmed) body.reason = trimmed;
+      if (scheduleEnabled && revertAt) {
+        // datetime-local omits a timezone — interpret in browser local
+        // time and forward as ISO so the API stores UTC.
+        const dt = new Date(revertAt);
+        if (!Number.isNaN(dt.getTime())) {
+          body.revert_at = dt.toISOString();
+          body.revert_to_mode = revertTo;
+        }
+      }
+      return apiFetch<RuntimeSettings>("/api/admin/runtime-settings", {
         method: "POST",
-        body: { aggression_mode: mode },
+        body,
+        getToken: tokenFn,
+      });
+    },
+    onSuccess: (next) => {
+      queryClient.setQueryData(queryKey, next);
+      queryClient.invalidateQueries({
+        queryKey: ["dashboard", "runtime-settings"],
+      });
+      setReason("");
+      setScheduleEnabled(false);
+      setRevertAt("");
+    },
+  });
+
+  const cancelRevert = useMutation({
+    mutationFn: () =>
+      apiFetch<RuntimeSettings>("/api/admin/runtime-settings/revert", {
+        method: "DELETE",
         getToken: tokenFn,
       }),
     onSuccess: (next) => {
@@ -279,9 +335,107 @@ export function RuntimePanel() {
                   );
                 })}
               </div>
+              <div className="space-y-2 border-t border-border pt-3">
+                <label
+                  htmlFor="aggression-reason"
+                  className="block text-[10px] uppercase tracking-widest text-muted-foreground"
+                >
+                  Reason (optional)
+                </label>
+                <textarea
+                  id="aggression-reason"
+                  data-testid="input-aggression-reason"
+                  value={reason}
+                  onChange={(e) => setReason(e.target.value)}
+                  maxLength={500}
+                  rows={2}
+                  placeholder="e.g. NFL primetime — tighten bias for the next 4 hours"
+                  className="w-full bg-background border border-border p-2 text-xs font-mono"
+                />
+                <div className="flex flex-wrap items-center gap-3 text-xs">
+                  <label className="inline-flex items-center gap-1.5 text-muted-foreground uppercase tracking-widest text-[10px]">
+                    <input
+                      type="checkbox"
+                      checked={scheduleEnabled}
+                      onChange={(e) => setScheduleEnabled(e.target.checked)}
+                      data-testid="checkbox-schedule-revert"
+                    />
+                    Schedule auto-revert
+                  </label>
+                  {scheduleEnabled ? (
+                    <>
+                      <input
+                        type="datetime-local"
+                        value={revertAt}
+                        onChange={(e) => setRevertAt(e.target.value)}
+                        data-testid="input-revert-at"
+                        className="bg-background border border-border px-2 py-1 text-xs font-mono"
+                      />
+                      <select
+                        value={revertTo}
+                        onChange={(e) => setRevertTo(e.target.value)}
+                        data-testid="select-revert-to"
+                        className="bg-background border border-border px-2 py-1 text-xs uppercase tracking-widest"
+                      >
+                        {data.available_modes.map((m) => (
+                          <option key={m} value={m}>
+                            {m}
+                          </option>
+                        ))}
+                      </select>
+                    </>
+                  ) : null}
+                </div>
+                <p className="text-[10px] text-muted-foreground normal-case tracking-normal">
+                  The reason and schedule attach to the next mode change you
+                  pick above; click a mode to apply.
+                </p>
+              </div>
               {mutation.isError ? (
-                <div className="text-loss text-xs">
+                <div
+                  className="text-loss text-xs"
+                  data-testid="text-aggression-error"
+                >
                   Failed to update aggression mode.
+                </div>
+              ) : null}
+              {data.pending_revert ? (
+                <div
+                  className="border border-warn/50 bg-warn/5 p-3 text-xs space-y-1"
+                  data-testid="panel-pending-revert"
+                >
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="uppercase tracking-widest text-warn text-[10px] font-bold">
+                      Scheduled auto-revert
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => cancelRevert.mutate()}
+                      disabled={cancelRevert.isPending}
+                      data-testid="button-cancel-revert"
+                      className="border border-border px-2 py-0.5 text-[10px] uppercase tracking-widest hover:border-foreground"
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                  <div className="text-muted-foreground normal-case tracking-normal">
+                    Reverting to{" "}
+                    <span className="text-foreground uppercase">
+                      {data.pending_revert.target}
+                    </span>{" "}
+                    at{" "}
+                    <span className="text-foreground font-mono">
+                      {data.pending_revert.at}
+                    </span>
+                    {data.pending_revert.by_email
+                      ? ` (set by ${data.pending_revert.by_email})`
+                      : null}
+                  </div>
+                  {data.pending_revert.reason ? (
+                    <div className="text-muted-foreground normal-case tracking-normal italic">
+                      “{data.pending_revert.reason}”
+                    </div>
+                  ) : null}
                 </div>
               ) : null}
               <div className="grid grid-cols-2 md:grid-cols-4 gap-3 border-t border-border pt-4 text-xs">
@@ -308,6 +462,61 @@ export function RuntimePanel() {
                   {data.updated_by ? ` by ${data.updated_by}` : ""}
                 </div>
               ) : null}
+              <div
+                className="border-t border-border pt-3"
+                data-testid="panel-aggression-history"
+              >
+                <h3 className="text-[10px] uppercase tracking-widest text-muted-foreground mb-2">
+                  Recent mode changes
+                </h3>
+                {data.history && data.history.length > 0 ? (
+                  <ul className="space-y-2">
+                    {data.history.map((h, idx) => (
+                      <li
+                        key={`${h.at ?? idx}-${idx}`}
+                        className="text-xs border border-border/60 bg-background/40 p-2"
+                        data-testid={`row-aggression-history-${idx}`}
+                      >
+                        <div className="flex flex-wrap items-baseline justify-between gap-2">
+                          <div className="font-mono text-[11px]">
+                            <span className="text-muted-foreground uppercase">
+                              {h.from_mode ?? "—"}
+                            </span>
+                            <span className="mx-1 text-muted-foreground">→</span>
+                            <span className="text-primary uppercase">
+                              {h.to_mode ?? "—"}
+                            </span>
+                          </div>
+                          <div className="text-[10px] uppercase tracking-widest text-muted-foreground font-mono">
+                            {h.at ?? "—"}
+                          </div>
+                        </div>
+                        <div className="text-[10px] text-muted-foreground mt-1 normal-case tracking-normal">
+                          by {h.actor_email ?? h.actor_user_id ?? "system"}
+                        </div>
+                        {h.reason ? (
+                          <div className="text-xs text-foreground mt-1 normal-case tracking-normal italic">
+                            “{h.reason}”
+                          </div>
+                        ) : null}
+                        {h.scheduled_revert ? (
+                          <div className="text-[10px] text-warn mt-1 normal-case tracking-normal">
+                            Scheduled revert to{" "}
+                            {h.scheduled_revert.target.toUpperCase()} at{" "}
+                            <span className="font-mono">
+                              {h.scheduled_revert.at}
+                            </span>
+                          </div>
+                        ) : null}
+                      </li>
+                    ))}
+                  </ul>
+                ) : (
+                  <div className="text-xs text-muted-foreground normal-case tracking-normal">
+                    No changes recorded yet.
+                  </div>
+                )}
+              </div>
             </div>
           ) : null}
         </div>

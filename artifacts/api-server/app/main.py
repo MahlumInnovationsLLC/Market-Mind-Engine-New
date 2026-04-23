@@ -1299,6 +1299,16 @@ class AdminSetAggressionModeRequest(BaseModel):
     aggression_mode: str = Field(
         ..., pattern="^(conservative|balanced|aggressive)$"
     )
+    # Optional free-form note recorded alongside the audit row so the
+    # runtime panel can surface *why* operators flipped the mode.
+    reason: str | None = Field(default=None, max_length=500)
+    # Optional auto-revert: if `revert_at` is set we schedule the system
+    # to flip back to `revert_to_mode` (default: balanced) at that
+    # timestamp.  The next call to `get_state()` applies due reverts.
+    revert_at: str | None = None
+    revert_to_mode: str | None = Field(
+        default=None, pattern="^(conservative|balanced|aggressive)$"
+    )
 
 
 @app.get("/api/admin/runtime-settings")
@@ -1317,13 +1327,35 @@ async def admin_set_runtime_settings(
     """Switch the global aggression mode.  The change is picked up on
     the next orchestrator cycle (no restart required) and immediately
     retunes the moderator/gatekeeper bias plus min-edge / Kelly defaults.
+
+    An optional ``reason`` note + ``revert_at`` schedule are recorded so
+    the runtime panel can show *why* the mode was changed and auto-flip
+    back to ``revert_to_mode`` (default Balanced) when the window ends.
     """
+    actor_email = (await check_approval(actor))[1]
     try:
         await runtime_settings_mod.set_aggression_mode(
-            body.aggression_mode, actor_user_id=actor.user_id
+            body.aggression_mode,
+            actor_user_id=actor.user_id,
+            actor_email=actor_email,
+            reason=body.reason,
+            revert_at=body.revert_at,
+            revert_to_mode=body.revert_to_mode,
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    return await runtime_settings_mod.get_state()
+
+
+@app.delete("/api/admin/runtime-settings/revert")
+async def admin_cancel_aggression_revert(
+    actor: AuthedUser = Depends(require_admin),
+) -> dict[str, object]:
+    """Cancel a pending scheduled aggression-mode auto-revert."""
+    actor_email = (await check_approval(actor))[1]
+    await runtime_settings_mod.cancel_pending_revert(
+        actor_user_id=actor.user_id, actor_email=actor_email
+    )
     return await runtime_settings_mod.get_state()
 
 
