@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -57,6 +58,8 @@ class VerticalRetrainResult:
     snapshot_id: int | None = None
     error: str | None = None
     knot_count: int = 0
+    rolled_back: bool = False
+    rollback_id: int | None = None
 
 
 @dataclass
@@ -67,8 +70,16 @@ class RetrainCycleResult:
     verticals_examined: int = 0
     verticals_retrained: int = 0
     rows_processed: int = 0
+    rollbacks: int = 0
     details: list[VerticalRetrainResult] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
+
+
+# Tolerance band: refits whose post-fit Brier exceeds the pre-fit
+# raw Brier by *more* than this much trip the rollback path. Tiny
+# (< ROLLBACK_TOLERANCE) regressions are noise from sampling and
+# isotonic's monotone constraint and are allowed through.
+ROLLBACK_TOLERANCE = 1e-4
 
 
 # ---------------------------------------------------------------------------
@@ -194,6 +205,95 @@ def _fit_isotonic(probs: list[float], outcomes: list[int]) -> dict[str, Any]:
     }
 
 
+async def _write_rollback(
+    vertical: str,
+    snapshot_id: int | None,
+    state: dict[str, Any],
+    triggered_by: str,
+) -> int | None:
+    """Persist a `model_rollback_log` row and raise a matching
+    `model_health_alerts` row so the operator dashboard surfaces it.
+
+    Best-effort: any DB failure is logged and the function returns
+    `None`.  We never raise from the rollback path because the parent
+    retrain cycle must continue processing the remaining verticals.
+    """
+    pinned = os.environ.get("AXIOM_MODEL_VERSION") or None
+    brier_before = state.get("brier_before")
+    brier_after = state.get("brier_after")
+    reason = (
+        f"retrain Brier worsened: before={brier_before:.4f} "
+        f"after={brier_after:.4f}"
+        if isinstance(brier_before, (int, float))
+        and isinstance(brier_after, (int, float))
+        else "retrain Brier worsened"
+    )
+    try:
+        rollback_id = await db.fetchval(
+            """
+            INSERT INTO model_rollback_log
+                (vertical, snapshot_id, brier_before, brier_after,
+                 pinned_version, reason, details)
+            VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb)
+            RETURNING id
+            """,
+            vertical,
+            snapshot_id,
+            float(brier_before) if brier_before is not None else None,
+            float(brier_after) if brier_after is not None else None,
+            pinned,
+            reason,
+            json.dumps({
+                "triggered_by": triggered_by,
+                "knot_count": len(state.get("x") or []),
+                "n": int(state.get("n") or 0),
+            }),
+        )
+    except Exception as e:
+        log.warning("rollback log insert failed for %s: %s", vertical, e)
+        return None
+
+    # Raise a matching health alert so /system → health flips red.
+    try:
+        await db.execute(
+            """
+            INSERT INTO model_health_alerts
+                (vertical, alert_type, severity, metric_name,
+                 metric_value, threshold, message, acknowledged)
+            VALUES ($1, 'retrain_rollback', 'warning', 'brier_score',
+                    $2, $3, $4, false)
+            """,
+            vertical,
+            float(brier_after) if brier_after is not None else None,
+            float(brier_before) if brier_before is not None else None,
+            reason,
+        )
+    except Exception as e:
+        log.warning("rollback alert insert failed for %s: %s", vertical, e)
+
+    # Tag the snapshot so the calibrator-loader skips it.
+    if snapshot_id is not None:
+        try:
+            await db.execute(
+                """
+                UPDATE calibration_snapshots
+                   SET drift_status = jsonb_set(
+                       coalesce(drift_status, '{}'::jsonb),
+                       '{status}',
+                       to_jsonb('rolled_back'::text),
+                       true
+                   )
+                 WHERE id = $1
+                """,
+                snapshot_id,
+            )
+        except Exception as e:
+            log.warning("snapshot drift_status update failed for %s: %s",
+                        vertical, e)
+
+    return int(rollback_id) if rollback_id is not None else None
+
+
 async def _write_snapshot(
     vertical: str, n: int, state: dict[str, Any], triggered_by: str
 ) -> int | None:
@@ -312,24 +412,64 @@ async def run_retrain_cycle() -> RetrainCycleResult:
             continue
 
         snap_id = await _write_snapshot(vertical, len(rows), state, triggered_by)
-        # Only mark rows processed once the snapshot landed — this keeps
-        # the next cycle re-trying on transient DB errors instead of
-        # silently losing the training signal.
-        if snap_id is not None:
+
+        # Drift-rollback gate: if the freshly-fitted calibrator scored a
+        # *worse* Brier on its own training data than the raw model did
+        # (beyond a tiny noise tolerance), the refit is a regression —
+        # don't promote, write a rollback log, raise an alert, and
+        # leave the buffer rows un-processed so the next cycle gets
+        # another shot with a (hopefully larger) sample.
+        brier_before = state.get("brier_before")
+        brier_after = state.get("brier_after")
+        rolled_back = False
+        rollback_id: int | None = None
+        if (
+            isinstance(brier_before, (int, float))
+            and isinstance(brier_after, (int, float))
+            and brier_after > brier_before + ROLLBACK_TOLERANCE
+        ):
+            rollback_id = await _write_rollback(
+                vertical, snap_id, state, triggered_by
+            )
+            rolled_back = rollback_id is not None
+            cr.rollbacks += 1 if rolled_back else 0
+            await _publish({
+                "type": "retrain_rolled_back",
+                "vertical": vertical,
+                "brier_before": float(brier_before),
+                "brier_after": float(brier_after),
+                "snapshot_id": snap_id,
+                "rollback_id": rollback_id,
+                "triggered_by": triggered_by,
+                "pinned_version": os.environ.get("AXIOM_MODEL_VERSION"),
+            })
+        # Only mark rows processed once the snapshot landed AND the
+        # refit was not rolled back. A rolled-back refit leaves the
+        # rows un-processed so the next cycle re-tries with a larger
+        # sample. Transient DB errors on snapshot insert similarly
+        # leave the buffer untouched.
+        if snap_id is not None and not rolled_back:
             await _mark_processed(ids)
             cr.rows_processed += len(ids)
             cr.verticals_retrained += 1
 
         result = VerticalRetrainResult(
             vertical=vertical,
-            rows_consumed=len(ids) if snap_id is not None else 0,
+            rows_consumed=(
+                len(ids) if snap_id is not None and not rolled_back else 0
+            ),
             triggered_by=triggered_by,
-            refit=snap_id is not None,
-            brier_before=state.get("brier_before"),
-            brier_after=state.get("brier_after"),
+            refit=snap_id is not None and not rolled_back,
+            brier_before=brier_before,
+            brier_after=brier_after,
             snapshot_id=snap_id,
             knot_count=len(state.get("x") or []),
-            error=None if snap_id is not None else "snapshot insert failed",
+            rolled_back=rolled_back,
+            rollback_id=rollback_id,
+            error=(
+                None if snap_id is not None
+                else "snapshot insert failed"
+            ),
         )
         cr.details.append(result)
         await _publish({
@@ -341,7 +481,9 @@ async def run_retrain_cycle() -> RetrainCycleResult:
             "brier_after": result.brier_after,
             "snapshot_id": snap_id,
             "knot_count": result.knot_count,
-            "ok": snap_id is not None,
+            "rolled_back": rolled_back,
+            "rollback_id": rollback_id,
+            "ok": snap_id is not None and not rolled_back,
         })
 
     cr.duration_seconds = round(time.perf_counter() - started, 3)
@@ -354,6 +496,7 @@ async def run_retrain_cycle() -> RetrainCycleResult:
         "verticals_examined": cr.verticals_examined,
         "verticals_retrained": cr.verticals_retrained,
         "rows_processed": cr.rows_processed,
+        "rollbacks": cr.rollbacks,
         "errors": cr.errors,
     })
     return cr

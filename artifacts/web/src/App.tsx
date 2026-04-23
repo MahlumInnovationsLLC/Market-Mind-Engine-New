@@ -53,6 +53,8 @@ const TradeDetailPage = lazy(() => import("@/pages/trade-detail"));
 const TradingPage = lazy(() => import("@/pages/trading"));
 const PositionsPage = lazy(() => import("@/pages/positions"));
 const IntelligencePage = lazy(() => import("@/pages/intelligence"));
+const CalibrationPage = lazy(() => import("@/pages/calibration"));
+const ResearchPage = lazy(() => import("@/pages/research"));
 const SystemPage = lazy(() => import("@/pages/system"));
 const ProfilePage = lazy(() => import("@/pages/profile"));
 
@@ -271,6 +273,8 @@ function AuthedShell() {
           <Route path="/trading" component={TradingPage} />
           <Route path="/positions" component={PositionsPage} />
           <Route path="/intelligence" component={IntelligencePage} />
+          <Route path="/calibration" component={CalibrationPage} />
+          <Route path="/research" component={ResearchPage} />
           <Route path="/system" component={SystemPage} />
           <Route path="/profile" component={ProfilePage} />
           <Route path="/trade/:ref" component={TradeDetailPage} />

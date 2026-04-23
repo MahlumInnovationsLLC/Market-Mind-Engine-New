@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 
@@ -3912,4 +3913,638 @@ async def models_inventory(_: object = Depends(require_approved_user)) -> dict[s
             {"name": e.name, "size": e.size, "updated_at": e.updated_at}
             for e in cutover if not e.is_folder
         ],
+    }
+
+
+# ---------------------------------------------------------------------------
+# Per-channel WebSocket split (task #245 step 4)
+# ---------------------------------------------------------------------------
+#
+# These endpoints are thin filters on top of the shared
+# `pipeline_event_hub` + `settlement_event_hub` + `kalshi_bus` hubs.
+# Each one subscribes once, then forwards only the event types its
+# channel cares about.  A buggy or stuck client on any one channel
+# can't impact the multiplexer or its sibling channels — the bounded
+# subscriber queue + slow-subscriber-drop policy in the hubs takes
+# care of that.
+#
+# We keep `/api/ws/pipeline` as the multiplexer for backwards compat;
+# everything below is purely additive.
+
+
+_POSITIONS_TYPES = frozenset({
+    "candidate_complete",   # placed = true means a position changed
+    "trade_settled",        # closes / partial closes a position
+})
+_TRADES_TYPES = frozenset({
+    "candidate_complete",
+    "trade_settled",
+    "market_settle_complete",
+})
+_ALERTS_TYPES = frozenset({
+    "cycle_halted",
+    "market_settle_error",
+    "retrain_rolled_back",
+    "retrain_failed",
+})
+
+
+async def _filtered_ws(
+    ws: WebSocket,
+    *,
+    hub_subscribe,
+    hub_unsubscribe,
+    keep: callable,
+    label: str,
+) -> None:
+    """Generic filtered WebSocket loop used by the per-channel splits.
+
+    ``hub_subscribe`` returns an asyncio.Queue (sync or coroutine);
+    ``hub_unsubscribe`` releases it.  ``keep`` is a predicate over
+    each event dict — only matching events are forwarded to the
+    client.
+    """
+    from .auth import ws_authenticate
+
+    user = await ws_authenticate(ws)
+    if user is None and auth_configured():
+        return
+    sub = hub_subscribe()
+    if asyncio.iscoroutine(sub):
+        q = await sub
+    else:
+        q = sub
+    try:
+        while True:
+            event = await q.get()
+            try:
+                if keep(event):
+                    await ws.send_json(event)
+            except Exception as e:
+                log.debug("ws/%s filter/send failed: %s", label, e)
+    except WebSocketDisconnect:
+        pass
+    except Exception as e:
+        log.warning("ws/%s send failed: %s", label, e)
+    finally:
+        try:
+            res = hub_unsubscribe(q)
+            if asyncio.iscoroutine(res):
+                await res
+        except Exception:
+            pass
+
+
+@app.websocket("/api/ws/positions")
+async def ws_positions(ws: WebSocket) -> None:
+    """Filtered stream of position-affecting events (placed orders +
+    settled trades).  Subscribes to the pipeline + settlement hubs
+    and forwards only the relevant event types.
+    """
+    from .auth import ws_authenticate
+
+    user = await ws_authenticate(ws)
+    if user is None and auth_configured():
+        return
+    p_q = pipeline_event_hub.subscribe()
+    s_q = settlement_event_hub.subscribe()
+    try:
+        async def _drain(q, types):
+            while True:
+                ev = await q.get()
+                t = ev.get("type")
+                if isinstance(t, str) and t in types:
+                    placed = ev.get("placed")
+                    if t == "candidate_complete" and placed is False:
+                        continue
+                    await ws.send_json(ev)
+
+        await asyncio.gather(
+            _drain(p_q, _POSITIONS_TYPES),
+            _drain(s_q, _POSITIONS_TYPES),
+        )
+    except WebSocketDisconnect:
+        pass
+    except Exception as e:
+        log.warning("ws/positions error: %s", e)
+    finally:
+        pipeline_event_hub.unsubscribe(p_q)
+        settlement_event_hub.unsubscribe(s_q)
+
+
+@app.websocket("/api/ws/trades")
+async def ws_trades(ws: WebSocket) -> None:
+    """Filtered stream of trade lifecycle events: placed, settled,
+    market resolved.  Mirror of /ws/positions with a wider filter.
+    """
+    from .auth import ws_authenticate
+
+    user = await ws_authenticate(ws)
+    if user is None and auth_configured():
+        return
+    p_q = pipeline_event_hub.subscribe()
+    s_q = settlement_event_hub.subscribe()
+    try:
+        async def _drain(q):
+            while True:
+                ev = await q.get()
+                t = ev.get("type")
+                if isinstance(t, str) and t in _TRADES_TYPES:
+                    await ws.send_json(ev)
+
+        await asyncio.gather(_drain(p_q), _drain(s_q))
+    except WebSocketDisconnect:
+        pass
+    except Exception as e:
+        log.warning("ws/trades error: %s", e)
+    finally:
+        pipeline_event_hub.unsubscribe(p_q)
+        settlement_event_hub.unsubscribe(s_q)
+
+
+@app.websocket("/api/ws/alerts")
+async def ws_alerts(ws: WebSocket) -> None:
+    """Filtered stream of operator-facing alerts: kill-switch trips,
+    settlement errors, drift rollbacks.  Sub-Pro tier OK so any
+    signed-in user can tail their own alerts page.
+    """
+    from .auth import ws_authenticate
+
+    user = await ws_authenticate(ws)
+    if user is None and auth_configured():
+        return
+    p_q = pipeline_event_hub.subscribe()
+    s_q = settlement_event_hub.subscribe()
+    try:
+        async def _drain(q):
+            while True:
+                ev = await q.get()
+                t = ev.get("type")
+                if isinstance(t, str) and t in _ALERTS_TYPES:
+                    await ws.send_json(ev)
+
+        await asyncio.gather(_drain(p_q), _drain(s_q))
+    except WebSocketDisconnect:
+        pass
+    except Exception as e:
+        log.warning("ws/alerts error: %s", e)
+    finally:
+        pipeline_event_hub.unsubscribe(p_q)
+        settlement_event_hub.unsubscribe(s_q)
+
+
+@app.websocket("/api/ws/orderbook/{ticker}")
+async def ws_orderbook(ws: WebSocket, ticker: str) -> None:
+    """Per-ticker orderbook stream.  Subscribes to the in-process
+    Kalshi event bus and forwards only orderbook deltas for the
+    requested ticker.  Auth identical to /ws/kalshi.
+    """
+    from .auth import ws_authenticate
+
+    user = await ws_authenticate(ws)
+    if user is None and auth_configured():
+        return
+    target = (ticker or "").strip().upper()
+    if not target:
+        try:
+            await ws.send_json({"type": "error", "error": "missing ticker"})
+        except Exception:
+            pass
+        await ws.close(code=4400)
+        return
+    q = await kalshi_bus.subscribe()
+    try:
+        while True:
+            msg = await q.get()
+            mt = msg.get("type") if isinstance(msg, dict) else None
+            if mt not in {"orderbook_snapshot", "orderbook_delta", "orderbook"}:
+                continue
+            mticker = (
+                msg.get("market_ticker") or msg.get("ticker") or ""
+            ).upper()
+            if mticker == target:
+                await ws.send_json(msg)
+    except WebSocketDisconnect:
+        pass
+    except Exception as e:
+        log.warning("ws/orderbook error: %s", e)
+    finally:
+        await kalshi_bus.unsubscribe(q)
+
+
+@app.websocket("/api/ws/temperature/{city}")
+async def ws_temperature(ws: WebSocket, city: str) -> None:
+    """Per-city weather stream.  Polls the latest open-meteo /
+    NWS / HRRR row for the requested city every 30s and pushes the
+    delta when any field changes.  This is intentionally a polling
+    loop on the WS thread rather than a hub fanout — the underlying
+    feed schedulers run at 5-minute cadence so a higher rate would
+    just be re-sending the same row.
+    """
+    from .auth import ws_authenticate
+
+    user = await ws_authenticate(ws)
+    if user is None and auth_configured():
+        return
+    city_code = (city or "").strip().upper()
+    if not city_code:
+        await ws.close(code=4400)
+        return
+    last_payload: dict | None = None
+    try:
+        while True:
+            try:
+                # `weather_open_meteo` is a feed-registry name, not a
+                # table; the actual rows live in `weather_observations`
+                # (temperature) joined to `weather_extended` (wind /
+                # precipitation / cloud cover etc).  Pull the most
+                # recent observation for the requested city across all
+                # sources and join the matching extended row by source +
+                # observed_at when available.
+                row = await db.fetchrow(
+                    """
+                    SELECT  o.city_code,
+                            o.observed_at,
+                            o.temperature_f,
+                            o.source,
+                            x.wind_mph,
+                            x.precip_1hr_in AS precip_in,
+                            x.cloud_cover_pct,
+                            x.humidity_pct
+                      FROM  weather_observations o
+                       LEFT JOIN weather_extended x
+                              ON x.city_code   = o.city_code
+                             AND x.source      = o.source
+                             AND x.observed_at = o.observed_at
+                     WHERE  o.city_code = $1
+                     ORDER BY o.observed_at DESC
+                     LIMIT  1
+                    """,
+                    city_code,
+                )
+            except Exception as e:
+                log.debug("ws/temperature db read failed: %s", e)
+                row = None
+            payload = (
+                {
+                    "type": "temperature",
+                    "city": city_code,
+                    "observed_at": (
+                        row["observed_at"].isoformat()
+                        if row and row.get("observed_at") else None
+                    ),
+                    "temperature_f": (
+                        float(row["temperature_f"])
+                        if row and row.get("temperature_f") is not None else None
+                    ),
+                    "wind_mph": (
+                        float(row["wind_mph"])
+                        if row and row.get("wind_mph") is not None else None
+                    ),
+                    "precip_in": (
+                        float(row["precip_in"])
+                        if row and row.get("precip_in") is not None else None
+                    ),
+                    "conditions": row.get("conditions") if row else None,
+                }
+                if row
+                else {"type": "temperature", "city": city_code, "status": "no_data"}
+            )
+            if payload != last_payload:
+                await ws.send_json(payload)
+                last_payload = payload
+            await asyncio.sleep(30.0)
+    except WebSocketDisconnect:
+        pass
+    except Exception as e:
+        log.warning("ws/temperature error: %s", e)
+
+
+# ---------------------------------------------------------------------------
+# Clerk webhook (task #245 step 5)
+# ---------------------------------------------------------------------------
+
+
+@app.post("/api/webhooks/clerk")
+async def webhooks_clerk(request: Request) -> dict[str, object]:
+    """Clerk webhook receiver.  Verifies the Svix signature and keeps
+    `app_users` in sync with profile changes (`user.updated`,
+    `user.deleted`) so the user does not have to log out and back in
+    for an email/name change to be reflected in the operator console.
+
+    The webhook secret is `CLERK_WEBHOOK_SECRET`.  When unset, this
+    endpoint refuses with 503 — same posture as the Stripe webhook —
+    so an unconfigured deployment can't be tricked by a forged event.
+    """
+    secret = os.environ.get("CLERK_WEBHOOK_SECRET")
+    if not secret:
+        raise HTTPException(status_code=503, detail="clerk webhook not configured")
+
+    raw = await request.body()
+    headers = {
+        "svix-id": request.headers.get("svix-id") or "",
+        "svix-timestamp": request.headers.get("svix-timestamp") or "",
+        "svix-signature": request.headers.get("svix-signature") or "",
+    }
+    if not all(headers.values()):
+        raise HTTPException(status_code=400, detail="missing svix headers")
+
+    # Manual Svix HMAC-SHA256 verification.  Avoids adding the `svix`
+    # package to the runtime — Svix's signature scheme is a stable
+    # contract: secret is `whsec_<base64>`; signed content is
+    # `${id}.${timestamp}.${raw_body}`; signature header carries one
+    # or more space-separated `v1,<base64sig>` values.
+    import base64 as _b64
+    import hashlib
+    import hmac as _hmac
+
+    sec = secret
+    if sec.startswith("whsec_"):
+        sec = sec[len("whsec_"):]
+    try:
+        secret_bytes = _b64.b64decode(sec)
+    except Exception:
+        log.error("CLERK_WEBHOOK_SECRET malformed (not base64)")
+        raise HTTPException(status_code=503, detail="webhook secret malformed")
+    # Reject obviously stale events to defeat replay attacks.
+    try:
+        ts = int(headers["svix-timestamp"])
+    except Exception:
+        raise HTTPException(status_code=400, detail="invalid svix-timestamp")
+    if abs(time.time() - ts) > 5 * 60:
+        raise HTTPException(status_code=400, detail="svix-timestamp out of window")
+    # Concatenate raw bytes — Svix signs the original request body, so a
+    # UTF-8 round-trip on `raw` would corrupt the signature for any payload
+    # containing multi-byte characters (e.g. emoji in a display name).
+    signed_payload = (
+        headers["svix-id"].encode("ascii")
+        + b"."
+        + str(ts).encode("ascii")
+        + b"."
+        + raw
+    )
+    expected = _b64.b64encode(
+        _hmac.new(secret_bytes, signed_payload, hashlib.sha256).digest()
+    ).decode()
+    presented = [
+        s.split(",", 1)[1]
+        for s in headers["svix-signature"].split(" ")
+        if s.startswith("v1,")
+    ]
+    if not any(_hmac.compare_digest(expected, p) for p in presented):
+        log.warning("clerk webhook signature mismatch")
+        raise HTTPException(status_code=401, detail="invalid signature")
+    try:
+        import json as _json
+        evt = _json.loads(raw)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"bad json: {e}")
+
+    event_type = (evt.get("type") if isinstance(evt, dict) else "") or ""
+    data = (evt.get("data") if isinstance(evt, dict) else {}) or {}
+    user_id = data.get("id") if isinstance(data, dict) else None
+    if not isinstance(user_id, str) or not user_id:
+        return {"ok": True, "ignored": True, "reason": "no user id"}
+
+    if event_type == "user.deleted":
+        try:
+            await db.execute(
+                "UPDATE app_users SET approved = false, is_admin = false, "
+                "updated_at = now() WHERE clerk_user_id = $1",
+                user_id,
+            )
+        except Exception as e:
+            log.warning("clerk webhook delete failed: %s", e)
+        return {"ok": True, "type": event_type, "user_id": user_id}
+
+    if event_type in {"user.created", "user.updated"}:
+        primary_id = data.get("primary_email_address_id")
+        addresses = data.get("email_addresses") or []
+        email: str | None = None
+        if isinstance(addresses, list):
+            for entry in addresses:
+                if not isinstance(entry, dict):
+                    continue
+                if entry.get("id") == primary_id or email is None:
+                    v = entry.get("email_address")
+                    if isinstance(v, str) and v.strip():
+                        email = v.strip().lower()
+                        if entry.get("id") == primary_id:
+                            break
+        first = (data.get("first_name") or "").strip()
+        last = (data.get("last_name") or "").strip()
+        name: str | None = (first + " " + last).strip() or None
+        if not name:
+            uname = data.get("username")
+            if isinstance(uname, str) and uname.strip():
+                name = uname.strip()
+        try:
+            await admin_module.upsert_seen_user(user_id, email, name)
+        except Exception as e:
+            log.warning("clerk webhook upsert failed: %s", e)
+        # Invalidate the per-user Clerk cache so the next /api/me/access
+        # call sees the fresh email/name without waiting for the 60s TTL.
+        try:
+            from .auth import _user_cache
+            _user_cache.pop(user_id, None)
+        except Exception:
+            pass
+        return {"ok": True, "type": event_type, "user_id": user_id, "email": email}
+
+    return {"ok": True, "type": event_type, "ignored": True}
+
+
+# ---------------------------------------------------------------------------
+# Calibration + Research dashboards (task #245 steps 6 + 7)
+# ---------------------------------------------------------------------------
+
+
+@app.get("/api/calibration/snapshots")
+async def calibration_snapshots(
+    vertical: str | None = None,
+    limit: int = 50,
+    _: object = Depends(require_auth),
+) -> dict[str, object]:
+    """Recent calibration snapshots from the settlement loop.
+
+    Optional ``vertical`` filter narrows the result set.  Each row
+    carries the post-calibration Brier, ECE/MCE proxies, sample
+    count, drift_status, and the isotonic knot points (so the page
+    can render a reliability diagram client-side).
+    """
+    n = max(1, min(200, int(limit)))
+    try:
+        if vertical:
+            rows = await db.fetch(
+                """
+                SELECT id, vertical, sub_category, ece, mce, brier_score,
+                       reliability, resolution, sample_count,
+                       calibrator_state, drift_status, config, created_at
+                  FROM calibration_snapshots
+                 WHERE vertical = $1
+                 ORDER BY created_at DESC
+                 LIMIT $2
+                """,
+                vertical, n,
+            )
+        else:
+            rows = await db.fetch(
+                """
+                SELECT id, vertical, sub_category, ece, mce, brier_score,
+                       reliability, resolution, sample_count,
+                       calibrator_state, drift_status, config, created_at
+                  FROM calibration_snapshots
+                 ORDER BY created_at DESC
+                 LIMIT $1
+                """,
+                n,
+            )
+    except Exception as e:
+        log.warning("calibration snapshots query failed: %s", e)
+        return {"items": [], "count": 0, "error": str(e)[:240]}
+    out: list[dict[str, object]] = []
+    for r in rows:
+        out.append({
+            "id": int(r["id"]),
+            "vertical": r["vertical"],
+            "sub_category": r["sub_category"],
+            "ece": float(r["ece"]) if r["ece"] is not None else None,
+            "mce": float(r["mce"]) if r["mce"] is not None else None,
+            "brier_score": (
+                float(r["brier_score"]) if r["brier_score"] is not None else None
+            ),
+            "sample_count": int(r["sample_count"] or 0),
+            "drift_status": r["drift_status"],
+            "calibrator_state": r["calibrator_state"],
+            "config": r["config"],
+            "created_at": (
+                r["created_at"].isoformat() if r["created_at"] else None
+            ),
+        })
+    return {"items": out, "count": len(out)}
+
+
+@app.get("/api/research/directives")
+async def research_directives_list(
+    status: str | None = None,
+    limit: int = 100,
+    _: object = Depends(require_auth),
+) -> dict[str, object]:
+    """List research directives (open / investigating / resolved /
+    dismissed).  Default returns the most-recent ``limit`` rows
+    regardless of status; pass ``?status=open`` for the queue view.
+    """
+    n = max(1, min(500, int(limit)))
+    try:
+        if status:
+            rows = await db.fetch(
+                """
+                SELECT id, vertical, title, hypothesis, evidence,
+                       status, priority, source, created_at,
+                       updated_at, resolved_at, resolution_note
+                  FROM research_directives
+                 WHERE status = $1
+                 ORDER BY created_at DESC
+                 LIMIT $2
+                """,
+                status, n,
+            )
+        else:
+            rows = await db.fetch(
+                """
+                SELECT id, vertical, title, hypothesis, evidence,
+                       status, priority, source, created_at,
+                       updated_at, resolved_at, resolution_note
+                  FROM research_directives
+                 ORDER BY created_at DESC
+                 LIMIT $1
+                """,
+                n,
+            )
+    except Exception as e:
+        log.warning("research directives query failed: %s", e)
+        return {"items": [], "count": 0, "error": str(e)[:240]}
+    return {
+        "items": [
+            {
+                "id": int(r["id"]),
+                "vertical": r["vertical"],
+                "title": r["title"],
+                "hypothesis": r["hypothesis"],
+                "evidence": r["evidence"],
+                "status": r["status"],
+                "priority": r["priority"],
+                "source": r["source"],
+                "created_at": (
+                    r["created_at"].isoformat() if r["created_at"] else None
+                ),
+                "updated_at": (
+                    r["updated_at"].isoformat() if r["updated_at"] else None
+                ),
+                "resolved_at": (
+                    r["resolved_at"].isoformat() if r["resolved_at"] else None
+                ),
+                "resolution_note": r["resolution_note"],
+            }
+            for r in rows
+        ],
+        "count": len(rows),
+    }
+
+
+class ResearchDirectiveDecisionRequest(BaseModel):
+    decision: str = Field(..., min_length=1)
+    note: str | None = Field(None, max_length=2000)
+
+
+@app.post("/api/research/directives/{directive_id}/decision")
+async def research_directives_decide(
+    directive_id: int,
+    body: ResearchDirectiveDecisionRequest,
+    actor: AuthedUser = Depends(require_admin),
+) -> dict[str, object]:
+    """Operator decision on a research directive.
+
+    ``decision`` is one of ``investigating``, ``resolved``, ``dismissed``,
+    ``reopen``.  ``note`` is captured in ``resolution_note`` for the
+    terminal states; ignored for ``investigating`` / ``reopen``.
+    """
+    decision = (body.decision or "").strip().lower()
+    if decision not in {"investigating", "resolved", "dismissed", "reopen"}:
+        raise HTTPException(status_code=422, detail=f"unknown decision: {decision}")
+    next_status = {
+        "investigating": "investigating",
+        "resolved": "resolved",
+        "dismissed": "dismissed",
+        "reopen": "open",
+    }[decision]
+    is_terminal = decision in {"resolved", "dismissed"}
+    try:
+        row = await db.fetchrow(
+            """
+            UPDATE research_directives
+               SET status = $1,
+                   updated_at = now(),
+                   resolved_at = CASE WHEN $2 THEN now() ELSE NULL END,
+                   resolution_note = CASE WHEN $2 THEN $3 ELSE NULL END
+             WHERE id = $4
+             RETURNING id, status, updated_at
+            """,
+            next_status, is_terminal, body.note, directive_id,
+        )
+    except Exception as e:
+        log.exception("research directive decision failed")
+        raise HTTPException(status_code=502, detail=str(e))
+    if row is None:
+        raise HTTPException(status_code=404, detail="directive not found")
+    log.info(
+        "research directive %s -> %s by %s", directive_id, next_status, actor.user_id,
+    )
+    return {
+        "ok": True,
+        "id": int(row["id"]),
+        "status": row["status"],
+        "updated_at": (
+            row["updated_at"].isoformat() if row["updated_at"] else None
+        ),
     }

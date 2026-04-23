@@ -143,6 +143,36 @@ as a fallback.
 - `GET /models/inventory` — multi-part archive listing under storage `exports/` — approved-only
 - `GET /admin/access-requests` — pending sign-ups awaiting operator approval — admin-only
 - `POST /admin/access-requests/{clerk_user_id}` — approve or deny in one click — admin-only
+- `GET /calibration/snapshots?vertical=` — calibration history rows for the
+  `/calibration` operator page — approved-only
+- `GET /research/directives` — open auto-research directives feeding the
+  `/research` operator page — approved-only
+- `POST /research/directives/{id}/decision` — approve / reject directive — admin-only
+- `POST /webhooks/clerk` — Clerk → app_users sync, svix-signature verified
+  (manual HMAC-SHA256, 5-minute replay window). Subscribes to
+  `user.created`/`user.updated`/`user.deleted` and busts the in-process user
+  cache in `app/auth.py`. Configure with `CLERK_WEBHOOK_SECRET` (whsec_…).
+- WebSockets — per-channel split (Task #245): `/ws/positions`, `/ws/trades`,
+  `/ws/alerts`, `/ws/orderbook/{ticker}`, `/ws/temperature/{city}`. Each
+  filters the shared pipeline/settlement/Kalshi event hubs by event type so
+  the web shell can subscribe surgically instead of consuming the firehose.
+
+## Drift auto-rollback (Task #245)
+
+`app/settlement/retrain.py` enforces a hard guard around every retrain:
+if the post-train Brier exceeds the pre-train Brier by more than
+`ROLLBACK_TOLERANCE` (1e-4), the run inserts a `model_rollback_log` row,
+raises a `model_health_alerts` entry of type `retrain_rollback`, tags the
+training snapshot's `drift_status.status` as `rolled_back`, and leaves the
+buffer rows un-acked so the next retrain batch retries instead of
+silently shipping a worse model. The rollback log + alert give operators
+the audit trail required by `docs/runbook.md` §6.
+
+## Operator runbook
+
+`docs/runbook.md` is the on-call reference for Axiom-Predict — paper↔live
+toggling, Kalshi key rotation, emergency-stop, pipeline-log reading,
+manual model promotion, and drift-rollback recovery.
 
 ## Subscription tiers
 

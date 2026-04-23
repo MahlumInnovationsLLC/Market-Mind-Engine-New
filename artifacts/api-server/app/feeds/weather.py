@@ -540,6 +540,97 @@ def _m_to_mi(x: Any) -> float | None:
     return v * 0.000621371 if v is not None else None
 
 
+# ---------------------------------------------------------------------------
+# Tomorrow.io (free tier, key required) — current observations.
+# ---------------------------------------------------------------------------
+
+
+async def _poll_tomorrow_io() -> int:
+    """Poll Tomorrow.io's /weather/realtime endpoint for each tracked
+    city and append the reading into ``weather_observations`` +
+    ``weather_extended`` so the existing dashboards / predictors pick
+    it up alongside the open-meteo + NWS rows.
+
+    Tomorrow.io's free tier is 25 calls/hour/key per the published
+    rate limits; we cadence at 30 minutes (configured in
+    ``register_weather_feeds``) so the pollers across N cities still
+    fit comfortably under quota for N ≤ 12.
+    """
+    key = os.environ.get("TOMORROW_IO_API_KEY")
+    if not key:
+        raise RuntimeError("TOMORROW_IO_API_KEY not set")
+    written = 0
+    timeout = httpx.Timeout(10.0, connect=5.0)
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        for city in _selected_cities():
+            try:
+                r = await client.get(
+                    "https://api.tomorrow.io/v4/weather/realtime",
+                    params={
+                        "location": f"{city.lat},{city.lon}",
+                        "units": "imperial",
+                        "apikey": key,
+                    },
+                )
+            except httpx.HTTPError as e:
+                log.warning("tomorrow.io fetch failed for %s: %s", city.code, e)
+                continue
+            _check_429(r, "tomorrow.io")
+            if r.status_code >= 400:
+                log.warning(
+                    "tomorrow.io %s -> HTTP %s: %s",
+                    city.code, r.status_code, r.text[:120],
+                )
+                continue
+            try:
+                payload = r.json() or {}
+            except Exception:
+                continue
+            values = (
+                ((payload.get("data") or {}).get("values")) or {}
+            ) if isinstance(payload, dict) else {}
+            if not values:
+                continue
+            t = values.get("temperature")
+            try:
+                async with db.acquire() as conn, conn.transaction():
+                    await conn.execute(
+                        """
+                        INSERT INTO weather_observations
+                          (city_code, temperature_f, observed_at, source)
+                        VALUES ($1, $2, NOW(), 'tomorrow.io')
+                        """,
+                        city.code,
+                        float(t) if t is not None else None,
+                    )
+                    await conn.execute(
+                        """
+                        INSERT INTO weather_extended
+                          (city_code, source, observed_at, wind_mph, humidity_pct,
+                           uv_index, dewpoint_f, pressure_in, visibility_mi,
+                           cloud_cover_pct, precip_1hr_in, wind_gust_mph,
+                           created_at)
+                        VALUES ($1, 'tomorrow.io', NOW(), $2, $3, $4, $5, $6,
+                                $7, $8, $9, $10, NOW())
+                        """,
+                        city.code,
+                        _f(values.get("windSpeed")),
+                        _f(values.get("humidity")),
+                        _f(values.get("uvIndex")),
+                        _f(values.get("dewPoint")),
+                        # Tomorrow.io reports pressureSurfaceLevel in inHg in imperial mode
+                        _f(values.get("pressureSurfaceLevel")),
+                        _f(values.get("visibility")),
+                        _f(values.get("cloudCover")),
+                        _f(values.get("precipitationIntensity")),
+                        _f(values.get("windGust")),
+                    )
+                    written += 2
+            except Exception as e:
+                log.warning("tomorrow.io persist for %s failed: %s", city.code, e)
+    return written
+
+
 def register_weather_feeds() -> None:
     if registry.status_of("weather_open_meteo"):
         return  # already registered
@@ -569,4 +660,12 @@ def register_weather_feeds() -> None:
         poll=_poll_accuweather_minutecast,
         enabled=bool(accu_key),
         skipped_reason=None if accu_key else "ACCUWEATHER_API_KEY not set",
+    ))
+    tio_key = os.environ.get("TOMORROW_IO_API_KEY")
+    registry.register(Feed(
+        name="weather_tomorrow_io",
+        cadence_seconds=30 * 60.0,
+        poll=_poll_tomorrow_io,
+        enabled=bool(tio_key),
+        skipped_reason=None if tio_key else "TOMORROW_IO_API_KEY not set",
     ))

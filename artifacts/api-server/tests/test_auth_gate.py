@@ -93,6 +93,9 @@ PROTECTED_ROUTES: tuple[str, ...] = (
     "/api/admin/models",
     "/api/admin/models/mirror/status",
     "/api/admin/autoresearch/features",
+    # Task #245 — operator-only calibration & research dashboards.
+    "/api/calibration/snapshots",
+    "/api/research/directives",
 )
 
 # Mutating endpoints — auth-protected but only accept POST.  We don't
@@ -133,6 +136,8 @@ PROTECTED_POST_ROUTES: tuple[str, ...] = (
     "/api/admin/models/mirror/push",
     "/api/admin/autoresearch/features/{name}/decision",
     "/api/admin/autoresearch/run",
+    # Task #245 — research-directives admin gating + drift rollback workflow.
+    "/api/research/directives/{directive_id}/decision",
 )
 
 # Liveness probes — must answer 200 with no auth (parameterized below).
@@ -167,6 +172,15 @@ OTHER_PUBLIC_ROUTES: tuple[str, ...] = (
     "/api/ws/kalshi",
     "/api/ws/llm-logs",
     "/api/ws/pipeline",
+    # Task #245 — per-channel WS split + Clerk webhook.  WebSockets
+    # auth via `?token=` inside the handler; Clerk webhook auth via
+    # svix-signature HMAC, not Bearer tokens.
+    "/api/ws/positions",
+    "/api/ws/trades",
+    "/api/ws/alerts",
+    "/api/ws/orderbook/{ticker}",
+    "/api/ws/temperature/{city}",
+    "/api/webhooks/clerk",
     "/api/ws/settlement",
     "/api/ws/polymarket",
     # Postmark bounce webhook authenticates via shared-secret in body.
