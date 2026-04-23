@@ -114,77 +114,75 @@ async def _settle_one_trade(
     except Exception as e:
         return {"trade_id": tid, "ok": False, "error": f"trade update: {e}"}
 
-    # Post-mortem (idempotent on trade_id)
+    # Post-mortem (idempotent on trade_id — relies on the
+    # `trade_postmortems_trade_id_key` unique constraint so concurrent
+    # settlement re-runs collapse silently instead of racing the
+    # pre-check and emitting duplicate-key warnings).
     try:
-        existing = await db.fetchval(
-            "SELECT id FROM trade_postmortems WHERE trade_id = $1 LIMIT 1",
-            trade.get("trade_id") or str(tid),
-        )
-        if existing is None:
-            await db.execute(
-                """
-                INSERT INTO trade_postmortems (
-                    trade_id, market_id, league, market_type, vertical,
-                    error_category, predicted_prob, actual_outcome, model_edge,
-                    pnl, hour_of_day, day_of_week, severity, details
-                ) VALUES (
-                    $1, $2, $3, $4, $5,
-                    $6, $7, $8, $9,
-                    $10, $11, $12, $13, $14::jsonb
-                )
-                """,
-                trade.get("trade_id") or str(tid),
-                trade.get("market_id"),
-                trade.get("league"),
-                (trade.get("metadata") or {}).get("market_type") if isinstance(trade.get("metadata"), dict) else None,
-                trade.get("vertical"),
-                "win" if pnl > 0 else ("loss" if pnl < 0 else "flat"),
-                trade.get("model_prob"),
-                outcome_yes,
-                trade.get("model_edge") or trade.get("edge"),
-                pnl,
-                datetime.now(timezone.utc).hour,
-                datetime.now(timezone.utc).weekday(),
-                abs(pnl),
-                json.dumps({
-                    "settle_price": settle_price,
-                    "side": trade.get("side"),
-                    "quantity": float(trade.get("quantity") or 0),
-                    "price": float(trade.get("price") or 0),
-                    "exchange": trade.get("exchange"),
-                    "trading_mode": trade.get("trading_mode"),
-                }),
+        await db.execute(
+            """
+            INSERT INTO trade_postmortems (
+                trade_id, market_id, league, market_type, vertical,
+                error_category, predicted_prob, actual_outcome, model_edge,
+                pnl, hour_of_day, day_of_week, severity, details
+            ) VALUES (
+                $1, $2, $3, $4, $5,
+                $6, $7, $8, $9,
+                $10, $11, $12, $13, $14::jsonb
             )
+            ON CONFLICT ON CONSTRAINT trade_postmortems_trade_id_key DO NOTHING
+            """,
+            trade.get("trade_id") or str(tid),
+            trade.get("market_id"),
+            trade.get("league"),
+            (trade.get("metadata") or {}).get("market_type") if isinstance(trade.get("metadata"), dict) else None,
+            trade.get("vertical"),
+            "win" if pnl > 0 else ("loss" if pnl < 0 else "flat"),
+            trade.get("model_prob"),
+            outcome_yes,
+            trade.get("model_edge") or trade.get("edge"),
+            pnl,
+            datetime.now(timezone.utc).hour,
+            datetime.now(timezone.utc).weekday(),
+            abs(pnl),
+            json.dumps({
+                "settle_price": settle_price,
+                "side": trade.get("side"),
+                "quantity": float(trade.get("quantity") or 0),
+                "price": float(trade.get("price") or 0),
+                "exchange": trade.get("exchange"),
+                "trading_mode": trade.get("trading_mode"),
+            }),
+        )
     except Exception as e:
         log.warning("postmortem insert failed for trade %s: %s", tid, e)
 
-    # Online learning buffer (idempotent on trade_id)
+    # Online learning buffer (idempotent on trade_id — relies on the
+    # `online_learning_buffer_pkey` unique constraint so settlement
+    # re-runs no longer race the pre-check and emit duplicate-key
+    # warnings for the same trade).
     try:
-        existing_olb = await db.fetchval(
-            "SELECT id FROM online_learning_buffer WHERE trade_id = $1 LIMIT 1",
-            trade.get("trade_id") or str(tid),
-        )
-        if existing_olb is None:
-            await db.execute(
-                """
-                INSERT INTO online_learning_buffer (
-                    trade_id, market_id, league, vertical, actual_outcome,
-                    predicted_prob, edge_at_entry, pnl, has_full_features, processed
-                ) VALUES (
-                    $1, $2, $3, $4, $5,
-                    $6, $7, $8, $9, false
-                )
-                """,
-                trade.get("trade_id") or str(tid),
-                trade.get("market_id"),
-                trade.get("league"),
-                trade.get("vertical"),
-                outcome_yes,
-                trade.get("model_prob"),
-                trade.get("model_edge") or trade.get("edge"),
-                pnl,
-                trade.get("model_prob") is not None,
+        await db.execute(
+            """
+            INSERT INTO online_learning_buffer (
+                trade_id, market_id, league, vertical, actual_outcome,
+                predicted_prob, edge_at_entry, pnl, has_full_features, processed
+            ) VALUES (
+                $1, $2, $3, $4, $5,
+                $6, $7, $8, $9, false
             )
+            ON CONFLICT ON CONSTRAINT online_learning_buffer_pkey DO NOTHING
+            """,
+            trade.get("trade_id") or str(tid),
+            trade.get("market_id"),
+            trade.get("league"),
+            trade.get("vertical"),
+            outcome_yes,
+            trade.get("model_prob"),
+            trade.get("model_edge") or trade.get("edge"),
+            pnl,
+            trade.get("model_prob") is not None,
+        )
     except Exception as e:
         log.warning("online_learning_buffer insert failed for trade %s: %s", tid, e)
 
