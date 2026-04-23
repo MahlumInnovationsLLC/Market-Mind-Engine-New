@@ -143,6 +143,14 @@ class Settings:
     # AXIOM_MODEL_CACHE_MAX_BYTES (bytes).
     model_cache_max_bytes: int
 
+    # ed25519 public key (base64-encoded raw 32 bytes) used to verify the
+    # detached signature on `models_manifest.json`. The matching private
+    # key is held offline by the model build pipeline -- a leaked
+    # storage-write key alone is therefore not enough to substitute a
+    # tampered manifest. When unset the loader still verifies sha256s
+    # but logs a warning that signature enforcement is disabled.
+    manifest_public_key: str | None
+
     # Telegram concierge bot. When unset the long-poll loop stays asleep
     # (dev / CI default). Per task #111.
     telegram_bot_token: str | None
@@ -275,6 +283,7 @@ def get_settings() -> Settings:
         ),
         model_cache_dir=resolve_model_cache_dir(),
         model_cache_max_bytes=resolve_model_cache_max_bytes(),
+        manifest_public_key=(os.environ.get("AXIOM_MANIFEST_PUBLIC_KEY") or "").strip() or None,
         telegram_bot_token=(os.environ.get("TELEGRAM_BOT_TOKEN") or "").strip() or None,
         port=int(os.environ.get("PORT", "8080")),
         cors_origins=cors_origins,

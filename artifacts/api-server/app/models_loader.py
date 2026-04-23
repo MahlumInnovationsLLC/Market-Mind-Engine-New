@@ -38,7 +38,11 @@ from pathlib import Path
 from typing import Any
 
 from . import storage
-from .config import resolve_model_cache_dir, resolve_model_cache_max_bytes
+from .config import (
+    get_settings,
+    resolve_model_cache_dir,
+    resolve_model_cache_max_bytes,
+)
 
 
 log = logging.getLogger(__name__)
@@ -60,6 +64,12 @@ SOURCE_ARCHIVE = CACHE_ROOT / "source.tar"
 # or any sha256 fails to match. Path is relative to the storage bucket.
 MANIFEST_REMOTE_PATH = "exports/models_manifest.json"
 MANIFEST_LOCAL = CACHE_ROOT / "models_manifest.json"
+# Detached ed25519 signature over the exact bytes of the manifest JSON.
+# Verified against `Settings.manifest_public_key` -- a leaked storage
+# key alone is not enough to swap the manifest because the attacker
+# also needs the offline signing key.
+MANIFEST_SIG_REMOTE_PATH = "exports/models_manifest.json.sig"
+MANIFEST_SIG_LOCAL = CACHE_ROOT / "models_manifest.json.sig"
 
 _PREDICTOR_EXTS = {
     ".pkl", ".joblib", ".pt", ".pth", ".onnx",
@@ -328,12 +338,115 @@ async def _ensure_one(
     return info
 
 
-async def _download_manifest() -> dict[str, Any]:
-    """Fetch the authoritative manifest from the bucket, parse, and validate.
+class ManifestSignatureError(RuntimeError):
+    """Raised when the detached ed25519 signature on the manifest does
+    not verify against the configured public key. Distinct from sha
+    mismatches so `/api/health.models` can surface a "signature_invalid"
+    reason and the operator can tell tampering apart from corruption."""
+
+
+def _load_manifest_public_key():
+    """Decode `Settings.manifest_public_key` into an Ed25519PublicKey, or
+    return None if the operator has not configured one. Accepts the raw
+    32-byte ed25519 public key encoded as base64 (the format printed by
+    `scripts/build_models_manifest.py --gen-key`)."""
+    try:
+        cfg = get_settings()
+    except Exception:
+        return None
+    raw_b64 = cfg.manifest_public_key
+    if not raw_b64:
+        return None
+    import base64
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import (
+        Ed25519PublicKey,
+    )
+    try:
+        raw = base64.b64decode(raw_b64, validate=True)
+    except Exception as e:
+        raise RuntimeError(
+            f"AXIOM_MANIFEST_PUBLIC_KEY is not valid base64: {e}"
+        ) from e
+    if len(raw) != 32:
+        raise RuntimeError(
+            "AXIOM_MANIFEST_PUBLIC_KEY must decode to 32 raw ed25519 bytes "
+            f"(got {len(raw)})"
+        )
+    return Ed25519PublicKey.from_public_bytes(raw)
+
+
+async def _verify_manifest_signature(payload: bytes) -> str:
+    """Download the detached signature for the manifest and verify it.
+
+    Returns one of:
+      * "ok"        -- signature verified against the configured pubkey
+      * "skipped"   -- no public key configured (warning logged)
+
+    Raises `ManifestSignatureError` on any failure to fetch, decode, or
+    verify the signature when a public key IS configured. The exception
+    message is what surfaces in `/api/health.models` so an operator can
+    immediately tell signature failure apart from sha mismatch.
+    """
+    pubkey = _load_manifest_public_key()
+    if pubkey is None:
+        log.warning(
+            "[models_loader] manifest signature verification SKIPPED — "
+            "AXIOM_MANIFEST_PUBLIC_KEY is not set; a leaked storage key "
+            "could substitute the manifest. Set the public key to enforce."
+        )
+        return "skipped"
+
+    if MANIFEST_SIG_LOCAL.exists():
+        try:
+            MANIFEST_SIG_LOCAL.unlink()
+        except OSError:
+            pass
+    try:
+        await storage.download_to_path(
+            MANIFEST_SIG_REMOTE_PATH, MANIFEST_SIG_LOCAL, force=True
+        )
+    except Exception as e:
+        raise ManifestSignatureError(
+            f"signature invalid: failed to download {MANIFEST_SIG_REMOTE_PATH}: {e}"
+        ) from e
+
+    import base64
+    from cryptography.exceptions import InvalidSignature
+
+    raw_sig_b64 = MANIFEST_SIG_LOCAL.read_bytes().strip()
+    try:
+        sig = base64.b64decode(raw_sig_b64, validate=True)
+    except Exception as e:
+        raise ManifestSignatureError(
+            f"signature invalid: signature file is not base64: {e}"
+        ) from e
+    if len(sig) != 64:
+        raise ManifestSignatureError(
+            f"signature invalid: expected 64-byte ed25519 signature, got {len(sig)}"
+        )
+    try:
+        pubkey.verify(sig, payload)
+    except InvalidSignature as e:
+        raise ManifestSignatureError(
+            "signature invalid: ed25519 verification failed; manifest may "
+            "have been tampered with via the storage bucket"
+        ) from e
+    log.info("[models_loader] manifest signature OK (ed25519)")
+    return "ok"
+
+
+async def _download_manifest() -> tuple[dict[str, Any], str]:
+    """Fetch the authoritative manifest from the bucket, parse, validate,
+    and verify the detached signature.
 
     The manifest must be a JSON object with a `predictors` mapping where
     each entry has at least an expected `sha256`. Optional per-entry
     fields: `version` (semantic tag) and `required` (bool, default True).
+
+    Returns `(parsed_manifest, signature_status)` where signature_status
+    is one of: "ok" | "skipped" (no public key configured). On signature
+    failure raises `ManifestSignatureError` so the loader can surface a
+    distinct reason vs. sha mismatch.
     """
     CACHE_ROOT.mkdir(parents=True, exist_ok=True)
     if MANIFEST_LOCAL.exists():
@@ -343,9 +456,15 @@ async def _download_manifest() -> dict[str, Any]:
             pass
     log.info("[models_loader] fetching manifest %s", MANIFEST_REMOTE_PATH)
     await storage.download_to_path(MANIFEST_REMOTE_PATH, MANIFEST_LOCAL, force=True)
-    raw = MANIFEST_LOCAL.read_text(encoding="utf-8")
+    payload = MANIFEST_LOCAL.read_bytes()
+
+    # Verify the detached signature over the EXACT bytes pulled from
+    # storage before we trust any of the parsed fields. Any tampering
+    # -- even reformatting whitespace -- breaks the signature.
+    sig_status = await _verify_manifest_signature(payload)
+
     try:
-        data = json.loads(raw)
+        data = json.loads(payload.decode("utf-8"))
     except json.JSONDecodeError as e:
         raise RuntimeError(f"models manifest is not valid JSON: {e}") from e
     if not isinstance(data, dict) or not isinstance(data.get("predictors"), dict):
@@ -363,7 +482,7 @@ async def _download_manifest() -> dict[str, Any]:
                 f"manifest entry {name!r} has malformed sha256 ({sha!r})"
             )
         meta["sha256"] = sha
-    return data
+    return data, sig_status
 
 
 def _verify_against_manifest(
@@ -505,20 +624,47 @@ async def ensure_artifacts(*, force: bool = False) -> ModelsState:
             # BEFORE marking ready. Any required-predictor mismatch or
             # missing file aborts readiness so we never trade against a
             # corrupt or partial set.
-            manifest = await _download_manifest()
+            try:
+                manifest, sig_status = await _download_manifest()
+            except ManifestSignatureError as e:
+                # Distinct surfacing in /api/health.models so an operator
+                # can tell tampering ("signature invalid") apart from a
+                # corrupt-cache sha mismatch.
+                _state.manifest_check = {
+                    "ok": False,
+                    "reason": "signature_invalid",
+                    "checked_at": time.time(),
+                    "signature": "invalid",
+                    "error": str(e),
+                    "missing": [],
+                    "mismatch": [],
+                    "unexpected": [],
+                }
+                raise
             _state.manifest = {
                 "version": manifest.get("version"),
                 "generated_at": manifest.get("generated_at"),
                 "predictor_count": len(manifest.get("predictors", {}) or {}),
+                "signature": sig_status,
             }
             check = _verify_against_manifest(predictors, manifest)
+            check["signature"] = sig_status
             _state.manifest_check = check
             if not check["ok"]:
                 missing_names = [m["name"] for m in check["missing"]]
                 mismatch_names = [m["name"] for m in check["mismatch"]]
                 bad = missing_names + mismatch_names
+                # Distinguish the two failure modes so /api/health.models
+                # can surface a precise reason and the operator alert
+                # carries actionable context.
+                reason = "sha_mismatch" if mismatch_names else "missing_required"
+                check["reason"] = reason
+                detail = (
+                    "sha mismatch" if reason == "sha_mismatch"
+                    else "required predictor missing"
+                )
                 err = RuntimeError(
-                    "manifest verification failed: "
+                    f"manifest verification failed ({detail}): "
                     f"missing={len(check['missing'])} "
                     f"mismatch={len(check['mismatch'])} "
                     f"files={bad}"
@@ -534,10 +680,11 @@ async def ensure_artifacts(*, force: bool = False) -> ModelsState:
                 )
                 raise err
             log.info(
-                "[models_loader] manifest OK matched=%d/%d unexpected=%d",
+                "[models_loader] manifest OK matched=%d/%d unexpected=%d signature=%s",
                 check["matched_count"],
                 check["manifest_predictor_count"],
                 len(check["unexpected"]),
+                sig_status,
             )
 
             # Mark catalog ready before smoke-loading so load_predictor
