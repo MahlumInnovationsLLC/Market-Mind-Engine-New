@@ -141,6 +141,44 @@ class RiskContext:
 # ---------------------------------------------------------------------------
 
 
+async def gate_vertical_halted(ctx: RiskContext) -> GateResult:
+    """Reject candidates from an operator-halted vertical (Task #271).
+
+    Per-vertical halts live in ``system_settings`` under the key
+    ``risk.vertical_halted.<name>`` so the orchestrator's per-cycle
+    ``_load_operator_overrides`` pre-fetches them; the gate only looks
+    at ``ctx.operator_overrides`` — no extra DB round-trip.
+
+    A truthy value means halted (the value itself is a JSON blob with
+    who halted it + when, not used here — it's surfaced on the operator
+    console instead).
+    """
+    vertical = (ctx.vertical or "").strip().lower()
+    if not vertical:
+        return GateResult("vertical_halted", True, "no vertical on candidate", {})
+    flag = ctx.operator_overrides.get(f"vertical_halted.{vertical}")
+    if flag:
+        details: dict[str, Any] = {"vertical": vertical}
+        # Best-effort decode of the attribution blob for the pipeline event.
+        if isinstance(flag, str):
+            try:
+                import json as _json
+                meta = _json.loads(flag)
+                if isinstance(meta, dict):
+                    for k in ("by_email", "by_user_id", "at", "reason"):
+                        if k in meta:
+                            details[k] = meta[k]
+            except Exception:
+                pass
+        return GateResult(
+            "vertical_halted",
+            False,
+            f"vertical '{vertical}' is halted",
+            details,
+        )
+    return GateResult("vertical_halted", True, "", {"vertical": vertical})
+
+
 async def gate_kill_switch(ctx: RiskContext) -> GateResult:
     """Global trading_mode != 'halt'.  AXIOM_TRADING_MODE env or
     operator_overrides['trading_mode'] both honored — operator override
@@ -947,6 +985,7 @@ GateFn = Callable[[RiskContext], Awaitable[GateResult]]
 GATES: tuple[tuple[str, GateFn], ...] = (
     ("kill_switch", gate_kill_switch),
     ("daily_loss", gate_daily_loss),
+    ("vertical_halted", gate_vertical_halted),
     ("market_cooldown", gate_market_cooldown),
     ("swarm_approval", gate_swarm_approval),
     ("min_edge", gate_min_edge),
@@ -959,7 +998,9 @@ GATES: tuple[tuple[str, GateFn], ...] = (
     ("max_concurrent_positions", gate_max_concurrent_positions),
     ("duplicate_trade", gate_duplicate_trade),
 )
-assert len(GATES) == 13, "13 gates: 12 original + daily_loss (task #268)"
+assert len(GATES) == 14, (
+    "14 gates: 12 original + daily_loss (task #268) + vertical_halted (task #271)"
+)
 
 
 async def run_all_gates(

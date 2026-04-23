@@ -1851,3 +1851,215 @@ export function RcWebhookPanel() {
     </main>
   );
 }
+
+// ---------------------------------------------------------------------------
+// Per-vertical halt toggle (Task #271)
+//
+// Sits alongside Vertical visibility on /system → controls. A halt writes
+// to system_settings (risk.vertical_halted.<name>), cancels every resting
+// Kalshi order attached to the vertical, and is picked up by the risk-gate
+// chain on the very next cycle (no restart required). Resume clears the
+// row. Both actions audit-log.
+// ---------------------------------------------------------------------------
+
+type VerticalHaltsPayload = {
+  halts: Record<
+    string,
+    {
+      by_user_id?: string | null;
+      by_email?: string | null;
+      at?: string | null;
+      reason?: string | null;
+    }
+  >;
+};
+
+type HaltCancelSummary = {
+  scanned: number;
+  matched: number;
+  cancelled: number;
+  failed: number;
+};
+
+export function VerticalHaltsPanel() {
+  const { getToken, isSignedIn } = useAuth();
+  const qc = useQueryClient();
+  const tokenFn = useMemo(
+    () => () => getToken().then((t) => t ?? null),
+    [getToken],
+  );
+
+  const overview = useGetVerticalsOverview(
+    { days: 7 },
+    {
+      query: {
+        queryKey: getGetVerticalsOverviewQueryKey({ days: 7 }),
+        staleTime: 30_000,
+      },
+    },
+  );
+
+  const haltsQuery = useQuery<VerticalHaltsPayload>({
+    queryKey: ["admin", "vertical-halts"],
+    queryFn: () =>
+      apiFetch<VerticalHaltsPayload>("/api/admin/verticals/halts", {
+        getToken: tokenFn,
+      }),
+    enabled: !!isSignedIn,
+    refetchInterval: 30_000,
+    placeholderData: (prev) => prev,
+  });
+
+  const [lastCancel, setLastCancel] = useState<
+    { vertical: string; summary: HaltCancelSummary } | null
+  >(null);
+
+  const haltMutation = useMutation({
+    mutationFn: async (vertical: string) =>
+      apiFetch<{ resting_orders: HaltCancelSummary; changed: boolean }>(
+        `/api/admin/verticals/${encodeURIComponent(vertical)}/halt`,
+        {
+          method: "POST",
+          getToken: tokenFn,
+          body: JSON.stringify({ reason: null }),
+          headers: { "Content-Type": "application/json" },
+        },
+      ),
+    onSuccess: (result, vertical) => {
+      setLastCancel({ vertical, summary: result.resting_orders });
+      qc.invalidateQueries({ queryKey: ["admin", "vertical-halts"] });
+    },
+  });
+
+  const resumeMutation = useMutation({
+    mutationFn: async (vertical: string) =>
+      apiFetch<{ changed: boolean }>(
+        `/api/admin/verticals/${encodeURIComponent(vertical)}/resume`,
+        { method: "POST", getToken: tokenFn },
+      ),
+    onSuccess: () => {
+      setLastCancel(null);
+      qc.invalidateQueries({ queryKey: ["admin", "vertical-halts"] });
+    },
+  });
+
+  const busyVertical =
+    (haltMutation.isPending && (haltMutation.variables as string | undefined)) ||
+    (resumeMutation.isPending && (resumeMutation.variables as string | undefined)) ||
+    null;
+
+  const halts = haltsQuery.data?.halts ?? {};
+  const rows = overview.data?.verticals ?? [];
+
+  return (
+    <main data-testid="panel-vertical-halts">
+      <p className="text-xs text-muted-foreground mb-3 normal-case tracking-normal">
+        Halting a vertical stops the risk-gate chain from approving its
+        candidates on the next cycle and immediately cancels every
+        resting Kalshi order attached to it. The rest of the portfolio
+        keeps trading. Every change writes to <code>admin_audit_log</code>.
+      </p>
+
+      {(overview.isLoading || haltsQuery.isLoading) && !haltsQuery.data ? (
+        <div className="text-xs text-muted-foreground uppercase tracking-widest">
+          Loading…
+        </div>
+      ) : null}
+
+      <table className="w-full text-xs">
+        <thead className="text-muted-foreground uppercase tracking-widest">
+          <tr>
+            <th className="text-left p-2">Vertical</th>
+            <th className="text-left p-2">State</th>
+            <th className="text-left p-2">Halted by</th>
+            <th className="text-left p-2">Halted at</th>
+            <th className="text-left p-2 w-32">Action</th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((entry) => {
+            const meta = halts[entry.vertical];
+            const isHalted = !!meta;
+            const busy = busyVertical === entry.vertical;
+            return (
+              <tr
+                key={entry.vertical}
+                className="border-t border-border"
+                data-testid={`row-vertical-halt-${entry.vertical}`}
+              >
+                <td className="p-2 uppercase font-bold text-primary">
+                  {entry.vertical}
+                </td>
+                <td className="p-2">
+                  <span
+                    className={`px-2 py-0.5 border text-[10px] uppercase tracking-widest ${
+                      isHalted
+                        ? "border-destructive text-destructive"
+                        : "border-emerald-500/60 text-emerald-500"
+                    }`}
+                    data-testid={`state-vertical-halt-${entry.vertical}`}
+                  >
+                    {isHalted ? "Halted" : "Live"}
+                  </span>
+                </td>
+                <td className="p-2 text-muted-foreground">
+                  {meta?.by_email ?? meta?.by_user_id ?? "—"}
+                </td>
+                <td className="p-2 text-muted-foreground">
+                  {meta?.at ? _fmtRelative(meta.at) : "—"}
+                </td>
+                <td className="p-2">
+                  {isHalted ? (
+                    <button
+                      type="button"
+                      disabled={busy}
+                      onClick={() => resumeMutation.mutate(entry.vertical)}
+                      className="px-2 py-0.5 border border-emerald-500/60 text-emerald-500 text-[10px] uppercase tracking-widest hover:bg-emerald-500/10 disabled:opacity-50"
+                      data-testid={`button-resume-${entry.vertical}`}
+                    >
+                      {busy ? "…" : "Resume"}
+                    </button>
+                  ) : (
+                    <button
+                      type="button"
+                      disabled={busy}
+                      onClick={() => haltMutation.mutate(entry.vertical)}
+                      className="px-2 py-0.5 border border-destructive text-destructive text-[10px] uppercase tracking-widest hover:bg-destructive/10 disabled:opacity-50"
+                      data-testid={`button-halt-${entry.vertical}`}
+                    >
+                      {busy ? "…" : "Halt"}
+                    </button>
+                  )}
+                </td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+
+      {lastCancel ? (
+        <div
+          className="mt-3 text-[11px] text-muted-foreground"
+          data-testid="text-vertical-halt-cancel-summary"
+        >
+          Halted <span className="text-primary">{lastCancel.vertical}</span> —
+          cancelled {lastCancel.summary.cancelled}/{lastCancel.summary.matched}{" "}
+          resting orders
+          {lastCancel.summary.failed > 0
+            ? ` (${lastCancel.summary.failed} cancel failures)`
+            : ""}
+          .
+        </div>
+      ) : null}
+
+      {haltMutation.isError || resumeMutation.isError ? (
+        <div className="mt-3 text-xs text-destructive">
+          {(
+            (haltMutation.error as Error) ??
+            (resumeMutation.error as Error)
+          )?.message ?? "Toggle failed."}
+        </div>
+      ) : null}
+    </main>
+  );
+}

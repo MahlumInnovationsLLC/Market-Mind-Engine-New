@@ -539,6 +539,204 @@ async def set_vertical_visibility(
     return after
 
 
+# ---------------------------------------------------------------------------
+# Per-vertical halt toggle — Task #271
+#
+# Halting a single vertical is distinct from the global kill switch: the rest
+# of the portfolio keeps trading while the affected vertical sits out. We
+# piggyback on ``system_settings`` with keys of the form
+# ``risk.vertical_halted.<name>`` so the orchestrator's existing
+# ``_load_operator_overrides`` (which strips the ``risk.`` prefix) surfaces
+# the flag to ``gate_vertical_halted`` as ``operator_overrides['vertical_halted.<name>']``
+# without a second DB round-trip per candidate.
+#
+# The value is a JSON blob carrying the actor + timestamp so the operator
+# console can show who halted what, when. Presence of the row = halted;
+# absence = live. Every transition writes an ``admin_audit_log`` row.
+# ---------------------------------------------------------------------------
+
+
+VERTICAL_HALT_KEY_PREFIX = "risk.vertical_halted."
+
+
+def _vertical_halt_key(vertical: str) -> str:
+    return f"{VERTICAL_HALT_KEY_PREFIX}{vertical}"
+
+
+def _require_known_vertical(vertical: str) -> str:
+    v = (vertical or "").strip().lower()
+    if not v:
+        raise ValueError("vertical must be a non-empty string")
+    from . import verticals as _vertical_registry
+
+    known = {s.name for s in _vertical_registry.all_specs()}
+    if v not in known:
+        raise ValueError(f"unknown vertical: {vertical!r}")
+    return v
+
+
+async def get_vertical_halts() -> dict[str, dict[str, Any]]:
+    """Return ``{vertical: {"by_user_id":..., "by_email":..., "at":...}}``.
+
+    Best-effort: a read failure returns an empty dict so the orchestrator
+    and dashboard never crash on a sick ``system_settings`` table.
+    """
+    await _ensure_system_settings_schema()
+    out: dict[str, dict[str, Any]] = {}
+    try:
+        rows = await db.fetch(
+            "SELECT key, value FROM system_settings WHERE key LIKE $1",
+            f"{VERTICAL_HALT_KEY_PREFIX}%",
+        )
+    except Exception as e:
+        log.debug("vertical halts read failed (best-effort): %s", e)
+        return out
+    import json as _json
+
+    for r in rows:
+        key = r["key"] or ""
+        if not key.startswith(VERTICAL_HALT_KEY_PREFIX):
+            continue
+        name = key[len(VERTICAL_HALT_KEY_PREFIX):]
+        raw = r["value"]
+        meta: dict[str, Any] = {}
+        if isinstance(raw, str) and raw:
+            try:
+                parsed = _json.loads(raw)
+                if isinstance(parsed, dict):
+                    meta = parsed
+            except Exception:
+                meta = {}
+        out[name] = meta
+    return out
+
+
+async def is_vertical_halted(vertical: str) -> bool:
+    halts = await get_vertical_halts()
+    return (vertical or "").strip().lower() in halts
+
+
+async def set_vertical_halted(
+    vertical: str,
+    *,
+    actor_user_id: str,
+    actor_email: str | None,
+    reason: str | None = None,
+) -> tuple[dict[str, Any], bool]:
+    """Mark ``vertical`` halted.
+
+    Returns ``(meta, changed)`` — ``changed`` is ``False`` on a no-op
+    double-halt so callers can skip the resting-order cancel sweep and
+    the duplicate audit-log row.
+    """
+    name = _require_known_vertical(vertical)
+    await _ensure_system_settings_schema()
+
+    before = await get_vertical_halts()
+    if name in before:
+        # Idempotent double-halt: return existing meta, report no change.
+        return before[name], False
+
+    from datetime import datetime, timezone
+    import json as _json
+
+    meta: dict[str, Any] = {
+        "by_user_id": actor_user_id,
+        "by_email": actor_email,
+        "at": datetime.now(timezone.utc).isoformat(),
+    }
+    if reason:
+        meta["reason"] = str(reason)[:500]
+
+    async with db.acquire() as c:
+        await c.execute(
+            """
+            INSERT INTO system_settings (key, value, updated_at)
+            VALUES ($1, $2, now())
+            ON CONFLICT (key) DO UPDATE SET
+              value = EXCLUDED.value,
+              updated_at = EXCLUDED.updated_at
+            """,
+            _vertical_halt_key(name),
+            _json.dumps(meta),
+        )
+
+    after = await get_vertical_halts()
+    try:
+        async with db.acquire() as c:
+            await c.execute(
+                """
+                INSERT INTO admin_audit_log (
+                    actor_user_id, actor_email,
+                    target_user_id, target_email,
+                    action, before_value, after_value
+                ) VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7::jsonb)
+                """,
+                actor_user_id,
+                actor_email,
+                "system",
+                None,
+                "halt_vertical",
+                _json.dumps({"vertical": name, "halted": name in before}),
+                _json.dumps({"vertical": name, "halted": True, "meta": meta}),
+            )
+    except Exception as e:
+        log.warning("audit log insert (halt_vertical) failed: %s", e)
+    _ = after  # referenced for side-effect readability
+    return meta, True
+
+
+async def clear_vertical_halt(
+    vertical: str,
+    *,
+    actor_user_id: str,
+    actor_email: str | None,
+) -> tuple[dict[str, Any] | None, bool]:
+    """Resume ``vertical``.
+
+    Returns ``(previous_meta_or_None, changed)`` — ``changed`` is
+    ``False`` when the vertical wasn't halted (idempotent resume).
+    """
+    name = _require_known_vertical(vertical)
+    await _ensure_system_settings_schema()
+
+    before = await get_vertical_halts()
+    if name not in before:
+        return None, False
+
+    prev_meta = before[name]
+
+    async with db.acquire() as c:
+        await c.execute(
+            "DELETE FROM system_settings WHERE key = $1",
+            _vertical_halt_key(name),
+        )
+
+    import json as _json
+
+    try:
+        async with db.acquire() as c:
+            await c.execute(
+                """
+                INSERT INTO admin_audit_log (
+                    actor_user_id, actor_email,
+                    target_user_id, target_email,
+                    action, before_value, after_value
+                ) VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7::jsonb)
+                """,
+                actor_user_id,
+                actor_email,
+                "system",
+                None,
+                "resume_vertical",
+                _json.dumps({"vertical": name, "halted": True, "meta": prev_meta}),
+                _json.dumps({"vertical": name, "halted": False}),
+            )
+    except Exception as e:
+        log.warning("audit log insert (resume_vertical) failed: %s", e)
+    return prev_meta, True
+
+
 async def get_state() -> dict[str, Any]:
     """Snapshot of the active mode + its derived gate defaults.
 

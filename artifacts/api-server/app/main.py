@@ -2895,6 +2895,141 @@ async def admin_get_vertical_visibility(
     return await runtime_settings_mod.get_vertical_visibility()
 
 
+# ---------------------------------------------------------------------------
+# Per-vertical halt toggle (Task #271). Surface on the operator console so
+# a single bad vertical can be sat out without an EMERGENCY STOP (which
+# halts everything) or a manual SQL edit on ``system_settings``.
+# ---------------------------------------------------------------------------
+
+
+class AdminHaltVerticalRequest(BaseModel):
+    reason: str | None = Field(
+        default=None,
+        description="Optional free-text reason surfaced in audit log and pipeline events.",
+    )
+
+
+async def _cancel_resting_for_vertical(vertical: str) -> dict[str, int]:
+    """Cancel every resting Kalshi order attached to ``vertical``.
+
+    Mirrors the cycle-start stale sweep (task #270) — filter by
+    ``rec.request.vertical`` so a halt of one vertical can never cancel
+    another's resting orders. Cancel failures are swallowed so a single
+    rejected cancel doesn't prevent the halt from taking effect; the
+    counts are returned for the audit trail.
+    """
+    try:
+        resting = await kalshi_lifecycle.list_resting_orders()
+    except Exception as e:
+        log.warning("halt_vertical: list_resting_orders failed: %s", e)
+        return {"scanned": 0, "matched": 0, "cancelled": 0, "failed": 0}
+
+    matched = [
+        r for r in resting
+        if (getattr(r.request, "vertical", None) or "").strip().lower() == vertical
+    ]
+    cancelled = 0
+    failed = 0
+    for rec in matched:
+        try:
+            await kalshi_lifecycle.cancel_order(rec.order_id)
+            cancelled += 1
+        except Exception as e:
+            failed += 1
+            log.warning(
+                "halt_vertical cancel failed for %s (%s): %s",
+                rec.order_id, vertical, e,
+            )
+    return {
+        "scanned": len(resting),
+        "matched": len(matched),
+        "cancelled": cancelled,
+        "failed": failed,
+    }
+
+
+@app.get("/api/admin/verticals/halts")
+async def admin_get_vertical_halts(
+    _: AuthedUser = Depends(require_admin),
+) -> dict[str, object]:
+    """Operator-console view of which verticals are currently halted."""
+    halts = await runtime_settings_mod.get_vertical_halts()
+    return {"halts": halts}
+
+
+@app.post("/api/admin/verticals/{vertical}/halt")
+async def admin_halt_vertical(
+    vertical: str,
+    body: AdminHaltVerticalRequest | None = None,
+    actor: AuthedUser = Depends(require_admin),
+) -> dict[str, object]:
+    """Halt a single vertical.
+
+    Persists the halt to ``system_settings`` (so the risk-gate chain
+    rejects on the next cycle), cancels every resting Kalshi order
+    attached to this vertical, and writes an ``admin_audit_log`` row.
+    Idempotent — a double-halt returns ``changed=False`` and does not
+    re-fire the cancel sweep or the audit row.
+    """
+    actor_email: str | None = None
+    try:
+        actor_email = (await check_approval(actor))[1]
+    except Exception:
+        pass
+    reason = body.reason if body else None
+    try:
+        meta, changed = await runtime_settings_mod.set_vertical_halted(
+            vertical,
+            actor_user_id=actor.user_id,
+            actor_email=actor_email,
+            reason=reason,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    cancel_summary: dict[str, int] = {
+        "scanned": 0, "matched": 0, "cancelled": 0, "failed": 0,
+    }
+    if changed:
+        cancel_summary = await _cancel_resting_for_vertical(
+            vertical.strip().lower()
+        )
+    return {
+        "vertical": vertical.strip().lower(),
+        "halted": True,
+        "changed": changed,
+        "meta": meta,
+        "resting_orders": cancel_summary,
+    }
+
+
+@app.post("/api/admin/verticals/{vertical}/resume")
+async def admin_resume_vertical(
+    vertical: str,
+    actor: AuthedUser = Depends(require_admin),
+) -> dict[str, object]:
+    """Resume a single vertical. Idempotent — no-op when already live."""
+    actor_email: str | None = None
+    try:
+        actor_email = (await check_approval(actor))[1]
+    except Exception:
+        pass
+    try:
+        prev_meta, changed = await runtime_settings_mod.clear_vertical_halt(
+            vertical,
+            actor_user_id=actor.user_id,
+            actor_email=actor_email,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {
+        "vertical": vertical.strip().lower(),
+        "halted": False,
+        "changed": changed,
+        "previous_meta": prev_meta,
+    }
+
+
 @app.get("/api/dashboard/recent-cycles")
 async def dashboard_recent_cycles(
     limit: int = 10, _: object = Depends(require_approved_user)

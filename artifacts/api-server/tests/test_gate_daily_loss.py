@@ -391,7 +391,7 @@ def test_gates_registry_includes_daily_loss():
     names = [name for (name, _fn) in _gates.GATES]
     assert names[0] == "kill_switch"
     assert names[1] == "daily_loss"
-    assert len(_gates.GATES) == 13
+    assert len(_gates.GATES) == 14
 
 
 def test_snapshot_green_day_reports_zero_loss(monkeypatch):

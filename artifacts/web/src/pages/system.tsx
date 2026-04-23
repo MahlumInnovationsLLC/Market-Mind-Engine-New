@@ -20,6 +20,7 @@ import {
   RuntimePanel,
   TriggerCyclePanel,
   UserManagementPanel,
+  VerticalHaltsPanel,
   VerticalVisibilityPanel,
 } from "@/pages/admin";
 import LiveExecuteToggle from "@/components/telemetry/live-execute-toggle";
@@ -150,6 +151,13 @@ export default function SystemPage() {
               Runtime mode
             </div>
             <RuntimePanel />
+          </GlassCard>
+
+          <GlassCard tone="solid" padding="md">
+            <div className="mb-3 text-[11px] font-semibold uppercase tracking-[0.18em] text-accent-cyan/80">
+              Vertical halts
+            </div>
+            <VerticalHaltsPanel />
           </GlassCard>
 
           <GlassCard tone="solid" padding="md">
