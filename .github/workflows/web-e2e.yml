@@ -344,3 +344,183 @@ jobs:
               await github.rest.issues.createComment({
                 owner, repo, issue_number: prNumber, body });
             }
+
+  mobile-playwright:
+    name: Playwright (mobile operator journey)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    env:
+      CI: "true"
+      # Expo dev server (Metro web export) — Playwright drives this
+      # port directly. Kept distinct from the web job's WEB_PORT so
+      # the two jobs could in theory run on the same runner.
+      MOBILE_PORT: "5000"
+      # API server (FastAPI) — must match what the mobile app talks to.
+      API_PORT: "8080"
+      # Where the mobile Playwright config points its browser.
+      E2E_MOBILE_BASE_URL: "http://localhost:5000"
+
+      # Clerk dev-instance credentials. Same passwordless dev keys as
+      # the web job — Clerk's testing helper mints the sign-in ticket,
+      # no real password required. EXPO_PUBLIC_CLERK_PUBLISHABLE_KEY
+      # is what `@clerk/expo` reads inside the bundle.
+      CLERK_PUBLISHABLE_KEY: ${{ secrets.E2E_CLERK_PUBLISHABLE_KEY }}
+      CLERK_SECRET_KEY: ${{ secrets.E2E_CLERK_SECRET_KEY }}
+      EXPO_PUBLIC_CLERK_PUBLISHABLE_KEY: ${{ secrets.E2E_CLERK_PUBLISHABLE_KEY }}
+
+      # Same operator account the web job uses so the auth-gated
+      # mobile dashboard test doesn't self-skip.
+      E2E_CLERK_USER_EMAIL: ${{ secrets.E2E_CLERK_USER_EMAIL }}
+      E2E_CLERK_USER_PASSWORD: ${{ secrets.E2E_CLERK_USER_PASSWORD }}
+
+      # Tells the mobile bundle where the API lives. `lib/api.ts`
+      # consumes EXPO_PUBLIC_DOMAIN as a bare host and prepends the
+      # scheme. Auth-gated tests skip themselves if the dashboard
+      # never renders (e.g. unapproved user), so the public smoke
+      # test still runs even when these aren't reachable.
+      EXPO_PUBLIC_DOMAIN: "localhost:8080"
+
+      # Backend secrets the API server needs to come up + serve auth-
+      # gated dashboard data. Auth-gated tests skip themselves if the
+      # dashboard never renders, so the public smoke test still works
+      # without them.
+      SUPABASE_DB_PASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
+      SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+      OPERATOR_ALLOWED_EMAILS: ${{ secrets.OPERATOR_ALLOWED_EMAILS }}
+      OPERATOR_ADMIN_EMAILS: ${{ secrets.OPERATOR_ADMIN_EMAILS }}
+      AXIOM_CORS_ORIGINS: "*"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node 24
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          run_install: false
+
+      - name: Cache pnpm store
+        uses: actions/cache@v4
+        with:
+          path: ~/.local/share/pnpm/store
+          key: ${{ runner.os }}-pnpm-${{ hashFiles('pnpm-lock.yaml') }}
+          restore-keys: ${{ runner.os }}-pnpm-
+
+      - name: Install JS deps
+        run: pnpm install --frozen-lockfile
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install Python deps (FastAPI + asyncpg + …)
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e .
+
+      - name: Cache Playwright browsers
+        uses: actions/cache@v4
+        id: playwright-cache
+        with:
+          path: ~/.cache/ms-playwright
+          key: ${{ runner.os }}-playwright-${{ hashFiles('pnpm-lock.yaml') }}
+          restore-keys: ${{ runner.os }}-playwright-
+
+      - name: Install Playwright browsers (+ system libs)
+        run: pnpm --filter @workspace/mobile exec playwright install --with-deps chromium
+
+      - name: Start API server (background)
+        if: env.SUPABASE_DB_PASSWORD != ''
+        run: |
+          PORT=${API_PORT} \
+            python -m uvicorn app.main:app \
+              --app-dir artifacts/api-server \
+              --host 0.0.0.0 --port ${API_PORT} \
+              > /tmp/api-server.log 2>&1 &
+          echo "API_PID=$!" >> "$GITHUB_ENV"
+
+      - name: Wait for API readiness
+        if: env.SUPABASE_DB_PASSWORD != ''
+        run: |
+          for i in $(seq 1 60); do
+            if curl -fsS "http://127.0.0.1:${API_PORT}/api/healthz" >/dev/null 2>&1; then
+              echo "API is up after ${i}s"; exit 0
+            fi
+            sleep 1
+          done
+          echo "::error::API server did not become ready in 60s"
+          tail -n 200 /tmp/api-server.log || true
+          exit 1
+
+      - name: Start Expo dev server (background)
+        # The mobile artifact's `dev` script depends on Replit-only
+        # env vars (REPLIT_DEV_DOMAIN / REPLIT_EXPO_DEV_DOMAIN) that
+        # don't exist on a GitHub runner, so we invoke `expo start`
+        # directly with just the bits it needs for the web export.
+        run: |
+          pnpm --filter @workspace/mobile exec expo start \
+              --localhost --port ${MOBILE_PORT} \
+              > /tmp/expo.log 2>&1 &
+          echo "EXPO_PID=$!" >> "$GITHUB_ENV"
+
+      - name: Wait for Expo dev server readiness
+        run: |
+          # Metro exposes /status as a liveness probe once the
+          # dev server is accepting requests; the web bundle is
+          # built lazily on first request, so the Playwright tests
+          # tolerate the cold-start.
+          for i in $(seq 1 120); do
+            if curl -fsS "http://127.0.0.1:${MOBILE_PORT}/status" >/dev/null 2>&1; then
+              echo "Expo is up after ${i}s"; exit 0
+            fi
+            sleep 1
+          done
+          echo "::error::Expo dev server did not become ready in 120s"
+          tail -n 200 /tmp/expo.log || true
+          exit 1
+
+      - name: Run mobile Playwright suite
+        run: pnpm --filter @workspace/mobile run test:e2e
+
+      - name: Stop background services
+        if: always()
+        run: |
+          [ -n "${EXPO_PID:-}" ] && kill "${EXPO_PID}" 2>/dev/null || true
+          [ -n "${API_PID:-}" ] && kill "${API_PID}" 2>/dev/null || true
+
+      - name: Upload Playwright HTML report
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mobile-playwright-report
+          path: artifacts/mobile/playwright-report
+          if-no-files-found: ignore
+          retention-days: 14
+
+      - name: Upload Playwright traces / screenshots / videos
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mobile-playwright-test-results
+          path: artifacts/mobile/test-results
+          if-no-files-found: ignore
+          retention-days: 14
+
+      - name: Upload server logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mobile-server-logs
+          path: |
+            /tmp/api-server.log
+            /tmp/expo.log
+          if-no-files-found: ignore
+          retention-days: 7
