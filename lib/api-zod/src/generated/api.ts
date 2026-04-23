@@ -505,6 +505,52 @@ export const GetSlippageGuardRejectsResponse = zod.object({
 });
 
 /**
+ * @summary Recent bankroll_events rows + current live balance + sync freshness
+ */
+export const getRecentBankrollEventsQueryLimitDefault = 200;
+export const getRecentBankrollEventsQueryLimitMax = 500;
+
+export const GetRecentBankrollEventsQueryParams = zod.object({
+  limit: zod.coerce
+    .number()
+    .min(1)
+    .max(getRecentBankrollEventsQueryLimitMax)
+    .default(getRecentBankrollEventsQueryLimitDefault),
+});
+
+export const GetRecentBankrollEventsResponse = zod.object({
+  exchange: zod.string(),
+  current_balance_cents: zod.number().nullish(),
+  last_event_at: zod.string().nullish(),
+  items: zod
+    .array(
+      zod.object({
+        id: zod.number(),
+        occurred_at: zod.string().nullish(),
+        exchange: zod.string(),
+        reason: zod
+          .string()
+          .describe(
+            "Stable token: exchange_sync, fill, deposit, withdrawal, manual_adjustment.",
+          ),
+        delta_cents: zod.number(),
+        balance_cents: zod.number(),
+      }),
+    )
+    .describe(
+      "Chronological — oldest first — so callers can sparkline directly.",
+    ),
+  sync: zod.object({
+    running: zod.boolean(),
+    started_at: zod.number().nullish().describe("Unix timestamp (seconds)."),
+    last_tick_at: zod.number().nullish().describe("Unix timestamp (seconds)."),
+    last_error: zod.string().nullish(),
+    last_balance_cents: zod.number().nullish(),
+    interval_seconds: zod.number(),
+  }),
+});
+
+/**
  * @summary Most recent 6-persona swarm debates
  */
 export const getRecentDebatesQueryLimitDefault = 10;

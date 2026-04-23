@@ -220,6 +220,22 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/SlippageGuardRejectList" }
 
+  /dashboard/bankroll/recent:
+    get:
+      operationId: getRecentBankrollEvents
+      tags: [dashboard]
+      summary: Recent bankroll_events rows + current live balance + sync freshness
+      parameters:
+        - in: query
+          name: limit
+          schema: { type: integer, minimum: 1, maximum: 500, default: 200 }
+      responses:
+        "200":
+          description: Bankroll feed
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/BankrollRecent" }
+
   /dashboard/recent-debates:
     get:
       operationId: getRecentDebates
@@ -1199,6 +1215,43 @@ components:
           items: { $ref: "#/components/schemas/SlippageGuardReject" }
         cycle_id: { type: integer, nullable: true }
       required: [items]
+
+    BankrollEvent:
+      type: object
+      properties:
+        id: { type: integer }
+        occurred_at: { type: string, nullable: true }
+        exchange: { type: string }
+        reason:
+          type: string
+          description: "Stable token: exchange_sync, fill, deposit, withdrawal, manual_adjustment."
+        delta_cents: { type: integer }
+        balance_cents: { type: integer }
+      required: [id, exchange, reason, delta_cents, balance_cents]
+
+    BankrollSyncState:
+      type: object
+      properties:
+        running: { type: boolean }
+        started_at: { type: number, nullable: true, description: "Unix timestamp (seconds)." }
+        last_tick_at: { type: number, nullable: true, description: "Unix timestamp (seconds)." }
+        last_error: { type: string, nullable: true }
+        last_balance_cents: { type: integer, nullable: true }
+        interval_seconds: { type: number }
+      required: [running, interval_seconds]
+
+    BankrollRecent:
+      type: object
+      properties:
+        exchange: { type: string }
+        current_balance_cents: { type: integer, nullable: true }
+        last_event_at: { type: string, nullable: true }
+        items:
+          type: array
+          description: Chronological — oldest first — so callers can sparkline directly.
+          items: { $ref: "#/components/schemas/BankrollEvent" }
+        sync: { $ref: "#/components/schemas/BankrollSyncState" }
+      required: [exchange, items, sync]
 
     SwarmDebate:
       type: object

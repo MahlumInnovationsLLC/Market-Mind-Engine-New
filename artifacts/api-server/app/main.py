@@ -3668,6 +3668,27 @@ async def dashboard_over_filled_orders_today(
     return await dashboard.get_over_filled_orders_today()
 
 
+@app.get("/api/dashboard/bankroll/recent")
+async def dashboard_bankroll_recent(
+    limit: int = 200,
+    _: object = Depends(require_approved_user),
+) -> dict[str, object]:
+    """Recent ``bankroll_events`` rows + the current live balance + the
+    Kalshi balance-sync freshness indicator.
+
+    The continuous Kalshi balance sync (see ``app.bankroll_sync``) writes
+    a row every time the live exchange balance moves; this endpoint
+    surfaces that feed so the operator dashboard can render a live
+    balance tile, a 24h delta sparkline, and a fresh / stale indicator
+    for the underlying sync loop.
+    """
+    from . import bankroll_sync as _bankroll_sync
+
+    feed = await dashboard.get_recent_bankroll_events(limit=int(limit))
+    sync_state = _bankroll_sync.state()
+    return {**feed, "sync": sync_state}
+
+
 @app.get("/api/dashboard/recent-debates")
 async def dashboard_recent_debates(
     limit: int = 10,

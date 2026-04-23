@@ -334,6 +334,36 @@ export interface SlippageGuardRejectList {
   cycle_id?: number | null;
 }
 
+export interface BankrollEvent {
+  id: number;
+  occurred_at?: string | null;
+  exchange: string;
+  /** Stable token: exchange_sync, fill, deposit, withdrawal, manual_adjustment. */
+  reason: string;
+  delta_cents: number;
+  balance_cents: number;
+}
+
+export interface BankrollSyncState {
+  running: boolean;
+  /** Unix timestamp (seconds). */
+  started_at?: number | null;
+  /** Unix timestamp (seconds). */
+  last_tick_at?: number | null;
+  last_error?: string | null;
+  last_balance_cents?: number | null;
+  interval_seconds: number;
+}
+
+export interface BankrollRecent {
+  exchange: string;
+  current_balance_cents?: number | null;
+  last_event_at?: string | null;
+  /** Chronological — oldest first — so callers can sparkline directly. */
+  items: BankrollEvent[];
+  sync: BankrollSyncState;
+}
+
 export type SwarmDebateAnalystVerdicts =
   | { [key: string]: unknown }[]
   | { [key: string]: unknown }
@@ -1042,6 +1072,14 @@ export type GetSlippageGuardRejectsParams = {
    * @maximum 168
    */
   since_hours?: number;
+  /**
+   * @minimum 1
+   * @maximum 500
+   */
+  limit?: number;
+};
+
+export type GetRecentBankrollEventsParams = {
   /**
    * @minimum 1
    * @maximum 500

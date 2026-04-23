@@ -1901,6 +1901,7 @@ async def get_over_filled_orders_today() -> dict[str, Any]:
     return {"date_utc": today_utc, "count": len(items), "items": items}
 
 
+<<<<<<< HEAD
 async def get_per_league_calibration() -> dict[str, Any]:
     """Most-recent per-league calibrator snapshots for the dashboard.
 
@@ -2034,6 +2035,64 @@ async def get_per_league_calibration() -> dict[str, Any]:
         "items": items,
         "supported": list(_calibrators.SUPPORTED_LEAGUES),
         "fitted_count": sum(1 for it in items if it["type"] is not None),
+    }
+
+
+async def get_recent_bankroll_events(
+    limit: int = 200,
+    *,
+    exchange: str = "kalshi",
+) -> dict[str, Any]:
+    """Recent rows from ``bankroll_events`` plus the current balance.
+
+    The continuous Kalshi balance sync (see ``app.bankroll_sync``) writes
+    a row every time the live exchange balance moves; this helper hands
+    that feed to the operator dashboard so the equity sparkline and the
+    "live balance" tile both come from the same authoritative table.
+
+    Returns ``{exchange, current_balance_cents, items, last_event_at}``;
+    on any DB failure ``items`` is ``[]`` and ``current_balance_cents``
+    is ``None`` so the dashboard renders cleanly instead of erroring.
+    """
+    limit = max(1, min(int(limit), 500))
+    try:
+        rows = await db.fetch(
+            """
+            SELECT id,
+                   to_char(occurred_at, 'YYYY-MM-DD"T"HH24:MI:SSZ') AS occurred_at,
+                   exchange,
+                   reason,
+                   delta_cents,
+                   balance_cents
+              FROM bankroll_events
+             WHERE exchange = $1
+             ORDER BY id DESC
+             LIMIT $2
+            """,
+            exchange, limit,
+        )
+        items = [dict(r) for r in rows]
+    except Exception as e:
+        log.warning("recent_bankroll_events failed: %s", e)
+        return {
+            "exchange": exchange,
+            "current_balance_cents": None,
+            "last_event_at": None,
+            "items": [],
+        }
+
+    # Items are returned newest-first; the current balance is just the
+    # most recent row's running balance.
+    current = items[0]["balance_cents"] if items else None
+    last_at = items[0]["occurred_at"] if items else None
+    # Reverse so the dashboard sparkline can iterate chronologically
+    # without re-sorting.
+    items.reverse()
+    return {
+        "exchange": exchange,
+        "current_balance_cents": int(current) if current is not None else None,
+        "last_event_at": last_at,
+        "items": items,
     }
 
 

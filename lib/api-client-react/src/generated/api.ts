@@ -36,12 +36,14 @@ import type {
   AutoResearchFeature,
   AutoResearchFeatureList,
   AutoResearchRunResult,
+  BankrollRecent,
   CheckoutSessionRequest,
   CheckoutSessionResult,
   DashboardOverview,
   EmergencyStopRequest,
   EmergencyStopResult,
   FullHealth,
+  GetRecentBankrollEventsParams,
   GetRecentCyclesParams,
   GetRecentDebatesParams,
   GetRecentTradesParams,
@@ -1192,6 +1194,109 @@ export function useGetSlippageGuardRejects<
   },
 ): UseQueryResult<TData, TError> & { queryKey: QueryKey } {
   const queryOptions = getGetSlippageGuardRejectsQueryOptions(params, options);
+
+  const query = useQuery(queryOptions) as UseQueryResult<TData, TError> & {
+    queryKey: QueryKey;
+  };
+
+  return { ...query, queryKey: queryOptions.queryKey };
+}
+
+/**
+ * @summary Recent bankroll_events rows + current live balance + sync freshness
+ */
+export const getGetRecentBankrollEventsUrl = (
+  params?: GetRecentBankrollEventsParams,
+) => {
+  const normalizedParams = new URLSearchParams();
+
+  Object.entries(params || {}).forEach(([key, value]) => {
+    if (value !== undefined) {
+      normalizedParams.append(key, value === null ? "null" : value.toString());
+    }
+  });
+
+  const stringifiedParams = normalizedParams.toString();
+
+  return stringifiedParams.length > 0
+    ? `/api/dashboard/bankroll/recent?${stringifiedParams}`
+    : `/api/dashboard/bankroll/recent`;
+};
+
+export const getRecentBankrollEvents = async (
+  params?: GetRecentBankrollEventsParams,
+  options?: RequestInit,
+): Promise<BankrollRecent> => {
+  return customFetch<BankrollRecent>(getGetRecentBankrollEventsUrl(params), {
+    ...options,
+    method: "GET",
+  });
+};
+
+export const getGetRecentBankrollEventsQueryKey = (
+  params?: GetRecentBankrollEventsParams,
+) => {
+  return [
+    `/api/dashboard/bankroll/recent`,
+    ...(params ? [params] : []),
+  ] as const;
+};
+
+export const getGetRecentBankrollEventsQueryOptions = <
+  TData = Awaited<ReturnType<typeof getRecentBankrollEvents>>,
+  TError = ErrorType<unknown>,
+>(
+  params?: GetRecentBankrollEventsParams,
+  options?: {
+    query?: UseQueryOptions<
+      Awaited<ReturnType<typeof getRecentBankrollEvents>>,
+      TError,
+      TData
+    >;
+    request?: SecondParameter<typeof customFetch>;
+  },
+) => {
+  const { query: queryOptions, request: requestOptions } = options ?? {};
+
+  const queryKey =
+    queryOptions?.queryKey ?? getGetRecentBankrollEventsQueryKey(params);
+
+  const queryFn: QueryFunction<
+    Awaited<ReturnType<typeof getRecentBankrollEvents>>
+  > = ({ signal }) =>
+    getRecentBankrollEvents(params, { signal, ...requestOptions });
+
+  return { queryKey, queryFn, ...queryOptions } as UseQueryOptions<
+    Awaited<ReturnType<typeof getRecentBankrollEvents>>,
+    TError,
+    TData
+  > & { queryKey: QueryKey };
+};
+
+export type GetRecentBankrollEventsQueryResult = NonNullable<
+  Awaited<ReturnType<typeof getRecentBankrollEvents>>
+>;
+export type GetRecentBankrollEventsQueryError = ErrorType<unknown>;
+
+/**
+ * @summary Recent bankroll_events rows + current live balance + sync freshness
+ */
+
+export function useGetRecentBankrollEvents<
+  TData = Awaited<ReturnType<typeof getRecentBankrollEvents>>,
+  TError = ErrorType<unknown>,
+>(
+  params?: GetRecentBankrollEventsParams,
+  options?: {
+    query?: UseQueryOptions<
+      Awaited<ReturnType<typeof getRecentBankrollEvents>>,
+      TError,
+      TData
+    >;
+    request?: SecondParameter<typeof customFetch>;
+  },
+): UseQueryResult<TData, TError> & { queryKey: QueryKey } {
+  const queryOptions = getGetRecentBankrollEventsQueryOptions(params, options);
 
   const query = useQuery(queryOptions) as UseQueryResult<TData, TError> & {
     queryKey: QueryKey;

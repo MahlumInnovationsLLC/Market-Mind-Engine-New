@@ -5,6 +5,7 @@ import {
   useGetMyAccess,
 } from "@workspace/api-client-react";
 import ActivePositions from "@/components/dashboard/active-positions";
+import BankrollPanel from "@/components/dashboard/bankroll-panel";
 import EquityCharts from "@/components/dashboard/equity-charts";
 import HighlightsPanel from "@/components/dashboard/highlights-panel";
 import KpiSummaryBar from "@/components/dashboard/kpi-summary-bar";
@@ -105,6 +106,8 @@ export default function Dashboard() {
         <VerticalPicker isAdmin={isAdmin} />
 
         <EquityCharts />
+
+        <BankrollPanel />
 
         <div className="grid grid-cols-1 gap-4 xl:grid-cols-3">
           <div className="xl:col-span-2">
