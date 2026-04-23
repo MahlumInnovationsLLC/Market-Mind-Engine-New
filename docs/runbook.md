@@ -439,7 +439,8 @@ can wait it out.
    tripped during the outage, decide whether to resume (§3b) or keep
    it halted.
 4. Reconcile Kalshi positions against our local state. The
-   reconciler background loop runs every 5 minutes in live mode
+   reconciler background loop runs on a `AXIOM_RECONCILER_INTERVAL_SECS`
+   cadence (default **60 s**, minimum 10 s) in live mode
    (`kalshi/reconciler.py`, started from the lifespan hook). There
    is no manual trigger endpoint; wait one reconciler tick and then
    check `model_health_alerts` for rows of type
@@ -447,8 +448,7 @@ can wait it out.
    `/system → health → Alerts` — treat it as a trade-by-trade audit,
    not a "fix it now" alarm.
 
-   If you need to force a reconcile (e.g. during a post-incident
-   sanity check and you can't wait 5 minutes), restart the API
+   If you need to force a reconcile immediately, restart the API
    workflow — the reconciler runs once on startup before entering
    its interval loop.
 5. Only after the health card is green for a full cycle should you
@@ -525,7 +525,7 @@ but the trading loop itself is unaffected.
   `clerk jwks fetch failed` / `clerk user lookup failed` — the JWKS
   cache is 5 minutes, so symptoms lag the upstream outage by up to
   that window.
-- `/api/me/access` returns `503` with `auth provider unreachable`.
+- `/api/me/access` starts returning `401` once the JWKS cache (5 min) expires and the backend can no longer verify tokens. While the cache is still warm, individual calls may succeed intermittently — do not rely on a single green response to declare the incident over.
 - Status page: <https://status.clerk.com/>.
 
 ### What still works while Clerk is down
@@ -793,8 +793,10 @@ earned it.
     - `OPERATOR_ALERT_EMAILS` includes the on-call rotation.
     - `TELEGRAM_BOT_TOKEN` is set and bindings in
       `user_telegram_bindings` cover the on-call rotation.
-    - `/api/notifications/status` shows every channel `ok` within
-      the last hour.
+    - `/api/notifications/status` shows the Postmark send status
+      and recent-sends tail healthy within the last hour (the endpoint
+      does not aggregate Telegram — test that channel separately by
+      pinging the concierge bot).
 
 ### Abort criteria (any phase)
 
