@@ -1096,6 +1096,70 @@ function formatKnob(value: number | null | undefined, unit: RiskKnob["unit"]) {
   return String(value);
 }
 
+type RiskKnobHistoryEntry = {
+  at: string | null;
+  actor_user_id: string | null;
+  actor_email: string | null;
+  before: number | null;
+  after: number | null;
+};
+
+type RiskKnobHistoryResponse = {
+  history: Record<string, RiskKnobHistoryEntry[]>;
+};
+
+function KnobHistoryList({
+  knobKey,
+  unit,
+  entries,
+  loading,
+}: {
+  knobKey: string;
+  unit: RiskKnob["unit"];
+  entries: RiskKnobHistoryEntry[];
+  loading: boolean;
+}) {
+  return (
+    <div
+      className="mt-3 border-t border-border/60 pt-2"
+      data-testid={`knob-history-${knobKey}`}
+    >
+      <div className="text-[10px] uppercase tracking-widest text-muted-foreground mb-1">
+        Recent changes
+      </div>
+      {loading ? (
+        <div className="h-4 w-32 animate-pulse bg-muted/30" />
+      ) : entries.length === 0 ? (
+        <div className="text-[10px] text-muted-foreground normal-case tracking-normal">
+          No recorded changes yet.
+        </div>
+      ) : (
+        <ul className="space-y-1">
+          {entries.map((h, idx) => (
+            <li
+              key={`${h.at ?? idx}-${idx}`}
+              className="flex flex-wrap items-baseline gap-x-2 text-[11px] font-mono"
+              data-testid={`knob-history-${knobKey}-row-${idx}`}
+            >
+              <span className="text-muted-foreground">{h.at ?? "—"}</span>
+              <span className="text-muted-foreground">
+                {formatKnob(h.before ?? null, unit)}
+              </span>
+              <span className="text-muted-foreground">→</span>
+              <span className="text-primary">
+                {formatKnob(h.after ?? null, unit)}
+              </span>
+              <span className="text-muted-foreground normal-case tracking-normal">
+                by {h.actor_email ?? h.actor_user_id ?? "system"}
+              </span>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+
 export function RiskKnobsPanel() {
   const { getToken, isSignedIn } = useAuth();
   const tokenFn = useMemo(
@@ -1104,12 +1168,24 @@ export function RiskKnobsPanel() {
   );
   const queryClient = useQueryClient();
   const queryKey = ["admin", "risk-knobs"] as const;
+  const historyKey = ["admin", "risk-knobs", "history"] as const;
 
   const { data, isLoading, error } = useQuery<RiskKnobState>({
     queryKey,
     queryFn: () =>
       apiFetch<RiskKnobState>("/api/admin/risk-knobs", { getToken: tokenFn }),
     enabled: !!isSignedIn,
+  });
+
+  const historyQuery = useQuery<RiskKnobHistoryResponse>({
+    queryKey: historyKey,
+    queryFn: () =>
+      apiFetch<RiskKnobHistoryResponse>(
+        "/api/admin/risk-knobs/history?per_knob_limit=10",
+        { getToken: tokenFn },
+      ),
+    enabled: !!isSignedIn,
+    refetchInterval: 60_000,
   });
 
   // Local draft of slider positions so the UI stays responsive while
@@ -1136,6 +1212,7 @@ export function RiskKnobsPanel() {
       }),
     onSuccess: (next) => {
       queryClient.setQueryData(queryKey, next);
+      queryClient.invalidateQueries({ queryKey: historyKey });
       setDraft({});
     },
   });
@@ -1149,6 +1226,7 @@ export function RiskKnobsPanel() {
       }),
     onSuccess: (next) => {
       queryClient.setQueryData(queryKey, next);
+      queryClient.invalidateQueries({ queryKey: historyKey });
       setDraft((d) => {
         const out = { ...d };
         return out;
@@ -1273,6 +1351,12 @@ export function RiskKnobsPanel() {
                       </button>
                     ) : null}
                   </div>
+                  <KnobHistoryList
+                    knobKey={knob.key}
+                    unit={knob.unit}
+                    entries={historyQuery.data?.history?.[knob.key] ?? []}
+                    loading={historyQuery.isLoading}
+                  />
                 </div>
               );
             })}

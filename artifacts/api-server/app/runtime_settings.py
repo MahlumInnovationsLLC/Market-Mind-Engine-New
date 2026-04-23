@@ -719,6 +719,78 @@ async def get_risk_knob_state() -> dict[str, Any]:
     }
 
 
+async def get_risk_knob_history(
+    *,
+    per_knob_limit: int = 10,
+    scan_limit: int = 200,
+) -> dict[str, list[dict[str, Any]]]:
+    """Per-knob mutation history derived from ``admin_audit_log``.
+
+    Each ``set_risk_knob`` row stores the *full* override dict before
+    and after the change. We diff per knob and return the last
+    ``per_knob_limit`` mutations for each known knob (newest first).
+    Knobs with no recorded change return an empty list.
+    """
+    history: dict[str, list[dict[str, Any]]] = {k: [] for k in RISK_KNOB_KEYS}
+    try:
+        rows = await db.fetch(
+            """
+            SELECT
+              actor_user_id,
+              actor_email,
+              before_value,
+              after_value,
+              to_char(created_at, 'YYYY-MM-DD"T"HH24:MI:SSZ') AS at
+            FROM admin_audit_log
+            WHERE action = 'set_risk_knob'
+            ORDER BY created_at DESC
+            LIMIT $1
+            """,
+            int(scan_limit),
+        )
+    except Exception as e:
+        log.debug("risk knob history read failed: %s", e)
+        return history
+
+    import json as _json
+
+    def _as_dict(v: Any) -> dict[str, Any]:
+        if v is None:
+            return {}
+        if isinstance(v, dict):
+            return v
+        if isinstance(v, str):
+            try:
+                d = _json.loads(v)
+                return d if isinstance(d, dict) else {}
+            except Exception:
+                return {}
+        return {}
+
+    for r in rows:
+        before = _as_dict(r["before_value"])
+        after = _as_dict(r["after_value"])
+        keys = (set(before.keys()) | set(after.keys())) & set(RISK_KNOB_KEYS)
+        for key in keys:
+            b = before.get(key)
+            a = after.get(key)
+            if b == a:
+                continue
+            bucket = history[key]
+            if len(bucket) >= per_knob_limit:
+                continue
+            bucket.append(
+                {
+                    "at": r["at"],
+                    "actor_user_id": r["actor_user_id"],
+                    "actor_email": r["actor_email"],
+                    "before": b,
+                    "after": a,
+                }
+            )
+    return history
+
+
 # ---------------------------------------------------------------------------
 # Per-vertical visibility (admin pin / hide) — Task #204
 #

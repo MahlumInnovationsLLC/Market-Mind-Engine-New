@@ -99,6 +99,7 @@ PROTECTED_ROUTES: tuple[str, ...] = (
     "/api/dashboard/elections/markets/{ticker}/arb",
     "/api/dashboard/runtime-settings",
     "/api/admin/risk-knobs",
+    "/api/admin/risk-knobs/history",
     "/api/admin/vertical-visibility",
     "/api/admin/verticals/halts",
     "/api/dashboard/verticals",

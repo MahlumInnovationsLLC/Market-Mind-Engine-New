@@ -2189,6 +2189,22 @@ async def admin_get_risk_knobs(
     return await runtime_settings_mod.get_risk_knob_state()
 
 
+@app.get("/api/admin/risk-knobs/history")
+async def admin_get_risk_knobs_history(
+    per_knob_limit: int = Query(10, ge=1, le=50),
+    actor: AuthedUser = Depends(require_admin),
+) -> dict[str, object]:
+    """Per-knob mutation history sourced from ``admin_audit_log`` rows
+    with ``action='set_risk_knob'``.  Returned shape:
+    ``{"history": {knob_key: [{at, actor_user_id, actor_email, before, after}, ...]}}``
+    Knobs with no recorded change come back as empty lists.
+    """
+    history = await runtime_settings_mod.get_risk_knob_history(
+        per_knob_limit=per_knob_limit,
+    )
+    return {"history": history}
+
+
 @app.post("/api/admin/risk-knobs")
 async def admin_set_risk_knobs(
     body: AdminSetRiskKnobsRequest,
