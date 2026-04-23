@@ -159,6 +159,19 @@ export interface PitBucket {
   count: number;
 }
 
+export interface VerticalDailyPoint {
+  /** UTC calendar date (YYYY-MM-DD). */
+  date: string;
+  daily_pnl: number;
+  /** Running sum of daily_pnl over the window. */
+  cumulative_pnl: number;
+  trades: number;
+  /** Mean Brier of trades settled on this day; null when none settled. */
+  brier?: number | null;
+  /** Settled trades contributing to brier on this day. */
+  n_settled: number;
+}
+
 export interface VerticalPerformanceEntry {
   vertical: string;
   trades: number;
@@ -170,6 +183,8 @@ export interface VerticalPerformanceEntry {
   brier?: number | null;
   calibration: CalibrationBucket[];
   pit: PitBucket[];
+  /** Per-day cumulative P&L and daily Brier over the rolling window, in chronological order. */
+  daily: VerticalDailyPoint[];
 }
 
 export interface VerticalPerformance {

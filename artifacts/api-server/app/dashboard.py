@@ -1266,7 +1266,10 @@ async def get_vertical_performance(days: int = 30) -> dict[str, Any]:
             "calibration": [],
             "pit": [],
         }
-        # Aggregate trade stats over the rolling window.
+        # Aggregate trade stats over the rolling window.  We use the
+        # same UTC calendar-day lower bound as the daily series below
+        # so the headline P&L matches the final point of the cumulative
+        # sparkline.
         try:
             agg = await db.fetchrow(
                 """
@@ -1279,7 +1282,7 @@ async def get_vertical_performance(days: int = 30) -> dict[str, Any]:
                                                                         AS win_rate
                   FROM trades
                  WHERE vertical = $1
-                   AND executed_at >= now() - ($2::int || ' days')::interval
+                   AND executed_at >= ((now() at time zone 'utc')::date - ($2::int - 1))
                 """,
                 vertical, days,
             )
@@ -1324,7 +1327,7 @@ async def get_vertical_performance(days: int = 30) -> dict[str, Any]:
                     JOIN trade_postmortems pm
                       ON pm.trade_id = coalesce(t.trade_id, t.id::text)
                    WHERE t.vertical = $1
-                     AND t.executed_at >= now() - ($2::int || ' days')::interval
+                     AND t.executed_at >= ((now() at time zone 'utc')::date - ($2::int - 1))
                      AND t.model_prob IS NOT NULL
                      AND pm.actual_outcome IS NOT NULL
                 ), aligned AS (
@@ -1401,6 +1404,86 @@ async def get_vertical_performance(days: int = 30) -> dict[str, Any]:
             })
         entry["calibration"] = calibration
         entry["pit"] = pit
+
+        # Daily series (cumulative P&L + daily Brier) over the rolling
+        # window so the front-end can render trend sparklines under the
+        # headline P&L number.  Days with no activity are still emitted
+        # so the line stays continuous; brier is null on days with no
+        # settled trades.
+        daily: list[dict[str, Any]] = []
+        try:
+            drows = await db.fetch(
+                """
+                WITH bounds AS (
+                  SELECT ((now() at time zone 'utc')::date - ($2::int - 1)) AS start_d,
+                         (now() at time zone 'utc')::date                   AS end_d
+                ),
+                calendar AS (
+                  SELECT generate_series(b.start_d, b.end_d, interval '1 day')::date AS d
+                  FROM bounds b
+                ),
+                window_trades AS (
+                  SELECT date_trunc('day', t.executed_at)::date AS d,
+                         coalesce(t.pnl, 0)::float              AS pnl
+                    FROM trades t, bounds b
+                   WHERE t.vertical = $1
+                     AND t.executed_at >= b.start_d
+                ),
+                daily_pnl AS (
+                  SELECT d, sum(pnl)::float AS daily_pnl, count(*)::int AS trades
+                    FROM window_trades
+                   GROUP BY d
+                ),
+                settled AS (
+                  SELECT date_trunc('day', t.executed_at)::date AS d,
+                         CASE WHEN lower(coalesce(t.side, '')) IN ('no','n','sell')
+                              THEN 1.0 - t.model_prob::float
+                              ELSE t.model_prob::float END                       AS p_side,
+                         CASE WHEN lower(coalesce(t.side, '')) IN ('no','n','sell')
+                              THEN 1 - pm.actual_outcome::int
+                              ELSE pm.actual_outcome::int END                    AS y_side
+                    FROM trades t
+                    JOIN trade_postmortems pm
+                      ON pm.trade_id = coalesce(t.trade_id, t.id::text), bounds b
+                   WHERE t.vertical = $1
+                     AND t.executed_at >= b.start_d
+                     AND t.model_prob IS NOT NULL
+                     AND pm.actual_outcome IS NOT NULL
+                ),
+                daily_brier AS (
+                  SELECT d,
+                         avg(power(p_side - y_side, 2))::float AS brier,
+                         count(*)::int                          AS n_settled
+                    FROM settled
+                   GROUP BY d
+                )
+                SELECT to_char(c.d, 'YYYY-MM-DD')                              AS date,
+                       coalesce(dp.daily_pnl, 0)::float                        AS daily_pnl,
+                       sum(coalesce(dp.daily_pnl, 0)) OVER (
+                           ORDER BY c.d ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+                       )::float                                                AS cumulative_pnl,
+                       coalesce(dp.trades, 0)::int                             AS trades,
+                       db.brier                                                AS brier,
+                       coalesce(db.n_settled, 0)::int                          AS n_settled
+                  FROM calendar c
+                  LEFT JOIN daily_pnl   dp ON dp.d = c.d
+                  LEFT JOIN daily_brier db ON db.d = c.d
+                 ORDER BY c.d ASC
+                """,
+                vertical, days,
+            )
+            for r in drows:
+                daily.append({
+                    "date": r["date"],
+                    "daily_pnl": float(r["daily_pnl"] or 0.0),
+                    "cumulative_pnl": float(r["cumulative_pnl"] or 0.0),
+                    "trades": int(r["trades"] or 0),
+                    "brier": float(r["brier"]) if r["brier"] is not None else None,
+                    "n_settled": int(r["n_settled"] or 0),
+                })
+        except Exception as e:
+            log.warning("vertical_perf daily %s: %s", vertical, e)
+        entry["daily"] = daily
         out.append(entry)
 
     return {"days": days, "verticals": out}

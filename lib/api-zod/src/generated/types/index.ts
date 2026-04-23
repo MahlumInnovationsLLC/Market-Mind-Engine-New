@@ -125,6 +125,7 @@ export * from "./tradingCycle";
 export * from "./tradingCycleList";
 export * from "./userSubscription";
 export * from "./userSubscriptionTier";
+export * from "./verticalDailyPoint";
 export * from "./verticalLastCycle";
 export * from "./verticalPerformance";
 export * from "./verticalPerformanceEntry";

@@ -940,6 +940,17 @@ components:
         count: { type: integer }
       required: [bucket, bucket_low, bucket_high, count]
 
+    VerticalDailyPoint:
+      type: object
+      properties:
+        date: { type: string, description: "UTC calendar date (YYYY-MM-DD)." }
+        daily_pnl: { type: number }
+        cumulative_pnl: { type: number, description: "Running sum of daily_pnl over the window." }
+        trades: { type: integer }
+        brier: { type: number, nullable: true, description: "Mean Brier of trades settled on this day; null when none settled." }
+        n_settled: { type: integer, description: "Settled trades contributing to brier on this day." }
+      required: [date, daily_pnl, cumulative_pnl, trades, n_settled]
+
     VerticalPerformanceEntry:
       type: object
       properties:
@@ -956,7 +967,11 @@ components:
         pit:
           type: array
           items: { $ref: "#/components/schemas/PitBucket" }
-      required: [vertical, trades, wins, losses, pnl, calibration, pit]
+        daily:
+          type: array
+          description: "Per-day cumulative P&L and daily Brier over the rolling window, in chronological order."
+          items: { $ref: "#/components/schemas/VerticalDailyPoint" }
+      required: [vertical, trades, wins, losses, pnl, calibration, pit, daily]
 
     VerticalPerformance:
       type: object

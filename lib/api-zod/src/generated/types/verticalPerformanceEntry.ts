@@ -7,6 +7,7 @@
  */
 import type { CalibrationBucket } from "./calibrationBucket";
 import type { PitBucket } from "./pitBucket";
+import type { VerticalDailyPoint } from "./verticalDailyPoint";
 
 export interface VerticalPerformanceEntry {
   vertical: string;
@@ -19,4 +20,6 @@ export interface VerticalPerformanceEntry {
   brier?: number | null;
   calibration: CalibrationBucket[];
   pit: PitBucket[];
+  /** Per-day cumulative P&L and daily Brier over the rolling window, in chronological order. */
+  daily: VerticalDailyPoint[];
 }

@@ -366,6 +366,29 @@ export const GetVerticalPerformanceResponse = zod.object({
           count: zod.number(),
         }),
       ),
+      daily: zod
+        .array(
+          zod.object({
+            date: zod.string().describe("UTC calendar date (YYYY-MM-DD)."),
+            daily_pnl: zod.number(),
+            cumulative_pnl: zod
+              .number()
+              .describe("Running sum of daily_pnl over the window."),
+            trades: zod.number(),
+            brier: zod
+              .number()
+              .nullish()
+              .describe(
+                "Mean Brier of trades settled on this day; null when none settled.",
+              ),
+            n_settled: zod
+              .number()
+              .describe("Settled trades contributing to brier on this day."),
+          }),
+        )
+        .describe(
+          "Per-day cumulative P&L and daily Brier over the rolling window, in chronological order.",
+        ),
     }),
   ),
 });

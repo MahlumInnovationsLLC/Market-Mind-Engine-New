@@ -19,6 +19,7 @@ import {
 import type {
   CalibrationBucket,
   PitBucket,
+  VerticalDailyPoint,
   VerticalPerformanceEntry,
 } from "@workspace/api-client-react";
 
@@ -45,6 +46,89 @@ function fmtNum(n: number | null | undefined, digits = 3): string {
   return n.toFixed(digits);
 }
 
+function Sparkline({
+  vertical,
+  metric,
+  data,
+  dataKey,
+  stroke,
+  formatValue,
+}: {
+  vertical: string;
+  metric: "pnl" | "brier";
+  data: VerticalDailyPoint[];
+  dataKey: "cumulative_pnl" | "brier";
+  stroke: string;
+  formatValue: (n: number | null | undefined) => string;
+}) {
+  const series = useMemo(
+    () =>
+      data.map((d) => ({
+        date: d.date,
+        cumulative_pnl: d.cumulative_pnl,
+        brier: d.brier,
+      })),
+    [data],
+  );
+  // For P&L, render as long as we have any points so a flat-zero
+  // (break-even) curve still shows up. Brier requires at least one
+  // settled-day value so an all-null series stays in the empty state.
+  const hasData =
+    dataKey === "cumulative_pnl"
+      ? series.length > 0
+      : series.some((d) => d.brier !== null && d.brier !== undefined);
+  return (
+    <div
+      className="h-[60px]"
+      data-testid={`sparkline-${metric}-${vertical}`}
+    >
+      {hasData ? (
+        <ResponsiveContainer width="100%" height="100%">
+          <LineChart
+            data={series}
+            margin={{ top: 4, right: 2, bottom: 0, left: 2 }}
+          >
+            <YAxis hide domain={["auto", "auto"]} />
+            <XAxis hide dataKey="date" />
+            {dataKey === "cumulative_pnl" ? (
+              <ReferenceLine
+                y={0}
+                stroke="hsl(var(--muted-foreground))"
+                strokeDasharray="2 2"
+              />
+            ) : null}
+            <Tooltip
+              contentStyle={{
+                background: "hsl(var(--card))",
+                border: "1px solid hsl(var(--border))",
+                fontSize: 11,
+              }}
+              formatter={(v) => [
+                formatValue(typeof v === "number" ? v : null),
+                metric.toUpperCase(),
+              ]}
+              labelFormatter={(v) => String(v)}
+            />
+            <Line
+              type="monotone"
+              dataKey={dataKey}
+              stroke={stroke}
+              strokeWidth={1.5}
+              dot={false}
+              connectNulls={false}
+              isAnimationActive={false}
+            />
+          </LineChart>
+        </ResponsiveContainer>
+      ) : (
+        <div className="h-full flex items-center justify-center text-[10px] uppercase tracking-widest text-muted-foreground">
+          NO_DATA
+        </div>
+      )}
+    </div>
+  );
+}
+
 function VerticalCard({ entry }: { entry: VerticalPerformanceEntry }) {
   const isLoss = entry.pnl < 0;
   const isWin = entry.pnl > 0;
@@ -63,12 +147,42 @@ function VerticalCard({ entry }: { entry: VerticalPerformanceEntry }) {
         </span>
       </div>
       <div
-        className={`text-2xl font-bold mb-2 ${
+        className={`text-2xl font-bold ${
           isLoss ? "text-loss" : isWin ? "text-win" : "text-foreground"
         }`}
         data-testid={`text-vertical-pnl-${entry.vertical}`}
       >
         {fmtCurrency(entry.pnl)}
+      </div>
+      <div className="mb-2">
+        <div className="flex items-center justify-between text-[9px] uppercase tracking-widest text-muted-foreground mt-1 mb-0.5">
+          <span>CUM PNL</span>
+        </div>
+        <Sparkline
+          vertical={entry.vertical}
+          metric="pnl"
+          data={entry.daily ?? []}
+          dataKey="cumulative_pnl"
+          stroke={
+            isLoss
+              ? "hsl(var(--loss))"
+              : isWin
+                ? "hsl(var(--win))"
+                : "hsl(var(--primary))"
+          }
+          formatValue={fmtCurrency}
+        />
+        <div className="flex items-center justify-between text-[9px] uppercase tracking-widest text-muted-foreground mt-1 mb-0.5">
+          <span>DAILY BRIER</span>
+        </div>
+        <Sparkline
+          vertical={entry.vertical}
+          metric="brier"
+          data={entry.daily ?? []}
+          dataKey="brier"
+          stroke="hsl(var(--primary))"
+          formatValue={(n) => fmtNum(n ?? null)}
+        />
       </div>
       <div className="grid grid-cols-3 gap-2 text-[11px]">
         <div>
