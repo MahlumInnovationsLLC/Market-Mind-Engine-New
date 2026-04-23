@@ -400,4 +400,17 @@ Live Kalshi trading loop, 6-persona LLM swarm debate engine, 12-gate risk system
 Stripe billing, Clerk auth, Expo mobile app, RevenueCat, source-archive bootstrap from
 Storage. See `.local/tasks/axiom-predict-mvp.md` for the full multi-week plan.
 
+## RevenueCat (mobile in-app subscriptions)
+
+The webhook entitlement-plumbing path is locked down by
+`artifacts/api-server/tests/test_rc_billing.py` — INITIAL_PURCHASE,
+RENEWAL, PRODUCT_CHANGE upgrade, CANCELLATION (with grace), EXPIRATION,
+BILLING_ISSUE, TRANSFER (sign-out/sign-in restore surrogate), idempotent
+replay, auth-header gating, and an end-to-end check through
+`/api/me/subscription`. Genuine on-device sandbox purchase / restore
+flows can only be exercised on TestFlight + Google Play Internal
+Testing — see `artifacts/mobile/docs/REVENUECAT_SANDBOX_QA.md` for the
+manual checklist that must run on every release touching billing or the
+mobile entitlement code.
+
 See the `pnpm-workspace` skill for workspace structure, TypeScript setup, and package details.
