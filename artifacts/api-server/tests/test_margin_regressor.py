@@ -619,6 +619,159 @@ def test_end_to_end_real_shape_backtest_beats_baseline(monkeypatch):
     import asyncio as _asyncio
     _asyncio.run(_inner())
 
+# ---------------------------------------------------------------------------
+# Per-league blend-weight tuning
+# ---------------------------------------------------------------------------
+
+
+def test_get_blend_weight_returns_per_league_default():
+    margin_regressor.reset_registry()
+    # Each supported league has its own cold-start default — they must
+    # differ so we know it isn't the legacy flat-0.5 sneaking through.
+    weights = {
+        lg: margin_regressor.get_blend_weight(lg)
+        for lg in margin_regressor.SUPPORTED_LEAGUES
+    }
+    assert len(set(weights.values())) > 1
+    # Unknown / blank leagues fall back to 0.5 so callers never crash.
+    assert margin_regressor.get_blend_weight(None) == 0.5
+    assert margin_regressor.get_blend_weight("PGA") == 0.5
+
+
+def test_register_blend_weight_overrides_default_and_clamps():
+    margin_regressor.reset_registry()
+    margin_regressor.register_blend_weight("NBA", 0.42)
+    assert margin_regressor.get_blend_weight("NBA") == 0.42
+    # Out-of-range weights are clamped — `adjust_probability()` must
+    # never see a weight outside [0, 1].
+    margin_regressor.register_blend_weight("NBA", 1.7)
+    assert margin_regressor.get_blend_weight("NBA") == 1.0
+    margin_regressor.register_blend_weight("NBA", -0.4)
+    assert margin_regressor.get_blend_weight("NBA") == 0.0
+    # reset_registry wipes both regressors and weights.
+    margin_regressor.reset_registry()
+    assert margin_regressor.get_blend_weight("NBA") == \
+        margin_regressor._DEFAULT_BLEND_WEIGHT_BY_LEAGUE["NBA"]
+
+
+def test_adjust_probability_uses_per_league_weight_when_unspecified():
+    _seed_nba_regressor()
+    margin_regressor.register_blend_weight("NBA", 0.8)
+    cand = {
+        "league": "NBA", "market_type": "Spread",
+        "spread_line": -3.5, "side": "home",
+        "game_context": {"elo_diff": 200.0},
+    }
+    out = margin_regressor.adjust_probability(0.5, cand)  # no blend_weight
+    assert out is not None
+    assert out["blend_weight"] == pytest.approx(0.8)
+    # Blended math reflects the league weight, not 0.5.
+    assert out["blended"] == pytest.approx(
+        0.2 * 0.5 + 0.8 * out["regressor_prob"]
+    )
+
+
+def test_adjust_probability_explicit_weight_still_wins():
+    _seed_nba_regressor()
+    margin_regressor.register_blend_weight("NBA", 0.8)
+    cand = {
+        "league": "NBA", "market_type": "Spread",
+        "spread_line": -3.5, "side": "home",
+        "game_context": {"elo_diff": 200.0},
+    }
+    out = margin_regressor.adjust_probability(0.5, cand, blend_weight=0.1)
+    assert out is not None
+    assert out["blend_weight"] == pytest.approx(0.1)
+
+
+def test_tune_blend_weight_picks_minimum_brier_on_synthetic_data():
+    games = _synthesize_games(600, league="NBA",
+                              margin_per_elo_pt=0.05, sigma=10.0, seed=7)
+    tune = margin_regressor.tune_blend_weight("NBA", games)
+    assert tune is not None
+    # The chosen weight must indeed be the argmin of the swept grid.
+    assert tune.weight in tune.grid
+    assert min(tune.grid_brier) == pytest.approx(tune.blended_brier)
+    # The tuned blend must beat the flat baseline on this signal-rich
+    # data — that's the whole reason we're tuning.
+    assert tune.blended_brier <= tune.baseline_brier
+    # On flat-baseline data with a real elo→margin signal the tuner
+    # should land well above 0 (regressor adds value) and at most 1.
+    assert 0.0 <= tune.weight <= 1.0
+    assert tune.weight > 0.0
+
+
+def test_tune_blend_weight_skips_rows_with_missing_lines_or_scores():
+    """`load_training_games()` LEFT-JOINs spread lines and may return
+    rows with `spread_line=None` (or non-numeric scores).  The tuner
+    must filter them out instead of aborting the whole league's tune,
+    otherwise refit_all_leagues silently falls back to defaults forever
+    on any league that has even one bad row."""
+    good = _synthesize_games(400, league="NBA",
+                             margin_per_elo_pt=0.05, sigma=10.0, seed=33)
+    # Inject a few representative bad rows in random spots.
+    bad_rows = [
+        {**good[0], "spread_line": None},
+        {**good[1], "spread_line": "n/a"},
+        {**good[2], "home_score": None},
+    ]
+    mixed = good + bad_rows
+    tune = margin_regressor.tune_blend_weight("NBA", mixed)
+    assert tune is not None
+    assert 0.0 <= tune.weight <= 1.0
+
+
+def test_tune_blend_weight_returns_none_on_too_few_games():
+    assert margin_regressor.tune_blend_weight("NBA", []) is None
+    assert margin_regressor.tune_blend_weight(
+        "NBA", [{"home_score": 1, "away_score": 0, "spread_line": 0}],
+    ) is None
+
+
+def test_tune_blend_weight_picks_different_weights_per_league():
+    """High-noise league (NFL-style σ) should land on a *lower* weight
+    than the same regressor with a clean signal — that's the entire
+    motivation for tuning per league instead of a flat 50/50."""
+    clean = _synthesize_games(600, league="MLB",
+                              margin_per_elo_pt=0.012, sigma=2.5, seed=21)
+    noisy = _synthesize_games(600, league="NFL",
+                              margin_per_elo_pt=0.06, sigma=20.0, seed=21)
+    t_clean = margin_regressor.tune_blend_weight("MLB", clean)
+    t_noisy = margin_regressor.tune_blend_weight("NFL", noisy)
+    assert t_clean is not None and t_noisy is not None
+    # The clean-signal league should trust the regressor at least as
+    # much as the noisy-signal league.  (Strict > would be fragile to
+    # grid resolution; >= is the meaningful invariant.)
+    assert t_clean.weight >= t_noisy.weight
+
+
+def test_refit_all_leagues_registers_tuned_blend_weights(monkeypatch):
+    async def _inner():
+        margin_regressor.reset_registry()
+
+        async def _fake_load(league, *, limit=None):
+            if league == "NBA":
+                return _real_shape_game_rows(n=400, league="NBA",
+                                             beta=0.05, sigma=10.0)
+            return []
+
+        monkeypatch.setattr(margin_regressor, "load_training_games", _fake_load)
+        summary = await margin_regressor.refit_all_leagues(min_games=50)
+        d = summary.as_dict()
+        # NBA was fitted AND its blend weight was tuned + recorded.
+        assert d["fitted"]["NBA"] == 400
+        assert "NBA" in d["blend_weights"]
+        tuned = d["blend_weights"]["NBA"]
+        assert 0.0 <= tuned <= 1.0
+        # And `get_blend_weight()` now returns the tuned value (not the
+        # cold-start default), proving the wire-up reaches the live
+        # `adjust_probability()` path.
+        assert margin_regressor.get_blend_weight("NBA") == pytest.approx(tuned)
+
+    import asyncio as _asyncio
+    _asyncio.run(_inner())
+
+
 def test_backtest_result_as_dict_round_keys():
     games = _synthesize_games(400, seed=5)
     res = margin_regressor.backtest_spread("NBA", games)

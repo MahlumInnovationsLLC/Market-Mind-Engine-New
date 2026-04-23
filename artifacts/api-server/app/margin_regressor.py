@@ -28,9 +28,14 @@ Design notes
   meta-model — the API here is designed to make that swap a one-liner.
 * Pure numpy — no extra dependency on top of what predictor.py already
   pulls in.  Closed-form ridge regression keeps the math obvious.
-* The blend weight defaults to 0.5 (equal trust in baseline + margin
-  prob) but is configurable so the operator can dial it up once the
-  backtest shows the regressor is reliably beating the binary baseline.
+* The blend weight is tuned *per league* by sweeping candidate weights
+  through `backtest_spread()` and picking the one that minimises
+  holdout Brier.  Different leagues have very different signal-to-noise
+  ratios — NFL with 17 games per team behaves nothing like a fully-fit
+  MLB regressor with 162 — so a flat 50/50 leaves accuracy on the table
+  either way.  The tuned weight is refreshed alongside the periodic
+  refit and stored in an in-process registry; callers fall through to
+  per-league defaults when nothing has been tuned yet.
 """
 from __future__ import annotations
 
@@ -69,6 +74,28 @@ _DEFAULT_TOTAL_SD: dict[str, float] = {
     "MLB": 4.2,
     "NHL": 2.6,
 }
+
+
+# Per-league cold-start blend weights used by `adjust_probability()` when
+# nothing has been tuned yet.  Picked qualitatively from games-per-season
+# / regressor-fit-quality:  MLB has 2,430 games a year so its regressor
+# is the most trustworthy and gets the highest weight; NFL only 272 so
+# we lean more on the binary baseline; NBA / NHL sit in between.  These
+# are *defaults* — `tune_blend_weight()` overrides them after each refit.
+_DEFAULT_BLEND_WEIGHT_BY_LEAGUE: dict[str, float] = {
+    "NBA": 0.55,
+    "NFL": 0.35,
+    "MLB": 0.65,
+    "NHL": 0.50,
+}
+
+
+# Candidate weights swept by `tune_blend_weight()`.  An 11-point grid
+# from 0.0 → 1.0 is plenty given the residual noise on Brier and keeps
+# the tune cheap (a backtest pass per weight, all on the same fitted
+# regressor).  Including the endpoints lets the tuner say "ignore the
+# regressor" or "drop the baseline" when the data demands it.
+_BLEND_WEIGHT_GRID: tuple[float, ...] = tuple(round(0.1 * i, 2) for i in range(11))
 
 
 def _norm_cdf(x: float) -> float:
@@ -322,6 +349,7 @@ def fit_regressor(
 
 _REGISTRY: dict[str, LeagueScoreRegressor] = {}
 _LAST_FIT_AT: dict[str, str] = {}  # ISO-8601 UTC timestamps, keyed by league
+_BLEND_WEIGHTS: dict[str, float] = {}
 _REGISTRY_LOCK = Lock()
 
 
@@ -349,11 +377,44 @@ def get_regressor(league: str | None) -> LeagueScoreRegressor | None:
     return reg
 
 
+def register_blend_weight(league: str, weight: float) -> None:
+    """Pin the blend weight `adjust_probability()` should use for `league`.
+
+    Clamped to [0, 1] so a misbehaving tuner can never produce an
+    out-of-range probability downstream.
+    """
+    if not league:
+        return
+    w = max(0.0, min(1.0, float(weight)))
+    with _REGISTRY_LOCK:
+        _BLEND_WEIGHTS[league] = w
+
+
+def get_blend_weight(league: str | None) -> float:
+    """Return the configured blend weight for `league`.
+
+    Resolution order:
+      1. Tuned weight from the in-process registry (set by
+         `tune_blend_weight()` / `refit_all_leagues()`).
+      2. The per-league cold-start default.
+      3. 0.5 as a final fallback for unknown leagues — same behaviour
+         as the historical flat-50/50 blend.
+    """
+    if not league:
+        return 0.5
+    with _REGISTRY_LOCK:
+        w = _BLEND_WEIGHTS.get(league)
+    if w is None:
+        w = _DEFAULT_BLEND_WEIGHT_BY_LEAGUE.get(league, 0.5)
+    return max(0.0, min(1.0, float(w)))
+
+
 def reset_registry() -> None:
     """Test hook — wipe in-process state between cases."""
     with _REGISTRY_LOCK:
         _REGISTRY.clear()
         _LAST_FIT_AT.clear()
+        _BLEND_WEIGHTS.clear()
 
 
 def status() -> dict[str, Any]:
@@ -367,6 +428,7 @@ def status() -> dict[str, Any]:
     with _REGISTRY_LOCK:
         regs = dict(_REGISTRY)
         fits = dict(_LAST_FIT_AT)
+        weights = dict(_BLEND_WEIGHTS)
     for league in sorted(SUPPORTED_LEAGUES):
         reg = regs.get(league)
         out[league] = {
@@ -376,6 +438,9 @@ def status() -> dict[str, Any]:
             "margin_sd": float(reg.margin_sd) if reg else _DEFAULT_MARGIN_SD.get(league, 12.0),
             "total_sd": float(reg.total_sd) if reg else _DEFAULT_TOTAL_SD.get(league, 12.0),
             "last_fit_at": fits.get(league),
+            "blend_weight": float(
+                weights.get(league, _DEFAULT_BLEND_WEIGHT_BY_LEAGUE.get(league, 0.5))
+            ),
             "feature_names": list(reg.feature_names) if reg else list(FEATURE_NAMES),
         }
     return {"leagues": out, "supported": sorted(SUPPORTED_LEAGUES)}
@@ -390,7 +455,7 @@ def adjust_probability(
     baseline_prob: float,
     candidate: Mapping[str, Any],
     *,
-    blend_weight: float = 0.5,
+    blend_weight: float | None = None,
 ) -> dict[str, Any] | None:
     """Blend a margin/total probability into the binary baseline.
 
@@ -400,7 +465,10 @@ def adjust_probability(
     with the returned `blended` field.
 
     `blend_weight` is the weight on the regressor probability — 0 is
-    "ignore the regressor", 1 is "trust only the regressor".
+    "ignore the regressor", 1 is "trust only the regressor".  When
+    omitted the per-league tuned weight (or its cold-start default)
+    is looked up via `get_blend_weight()`, so different leagues no
+    longer share a single flat 50/50 blend.
     """
     league = (candidate.get("league") or "").strip()
     market_type = (candidate.get("market_type") or "").strip()
@@ -439,7 +507,10 @@ def adjust_probability(
         regressor_prob = reg.total_to_over_prob(total, total_line=line, side=side)
         expected = total
 
-    w = max(0.0, min(1.0, float(blend_weight)))
+    if blend_weight is None:
+        w = get_blend_weight(league)
+    else:
+        w = max(0.0, min(1.0, float(blend_weight)))
     blended = (1.0 - w) * float(baseline_prob) + w * float(regressor_prob)
     blended = max(0.0, min(1.0, blended))
     return {
@@ -580,6 +651,115 @@ def backtest_spread(
         baseline_brier=base_sq / n_test,
         blended_brier=blend_sq / n_test,
         regressor_brier=reg_sq / n_test,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Blend-weight tuning  (per-league, picks the Brier-minimising weight)
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class BlendWeightTuneResult:
+    """Outcome of a per-league blend-weight sweep."""
+
+    league: str
+    weight: float
+    blended_brier: float
+    baseline_brier: float
+    regressor_brier: float
+    n_test: int
+    grid: tuple[float, ...] = field(default_factory=tuple)
+    grid_brier: tuple[float, ...] = field(default_factory=tuple)
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "league": self.league,
+            "weight": round(self.weight, 4),
+            "blended_brier": round(self.blended_brier, 6),
+            "baseline_brier": round(self.baseline_brier, 6),
+            "regressor_brier": round(self.regressor_brier, 6),
+            "n_test": self.n_test,
+            "grid": list(self.grid),
+            "grid_brier": [round(b, 6) for b in self.grid_brier],
+        }
+
+
+def tune_blend_weight(
+    league: str,
+    games: Sequence[Mapping[str, Any]],
+    *,
+    train_frac: float = 0.7,
+    grid: Sequence[float] = _BLEND_WEIGHT_GRID,
+    baseline_fn: Any = None,
+) -> BlendWeightTuneResult | None:
+    """Pick the blend weight that minimises holdout Brier for `league`.
+
+    Sweeps `grid` through `backtest_spread()` and returns the weight
+    with the lowest blended Brier on the chronological holdout split.
+    Returns None when there isn't enough data to backtest — callers
+    should fall back to `_DEFAULT_BLEND_WEIGHT_BY_LEAGUE`.
+
+    `baseline_fn` defaults to a flat 0.5 inside `backtest_spread()`,
+    which is the same comparison `BacktestResult.baseline_brier`
+    documents.  Tuning against the production binary baseline would
+    require running the meta-model over every historical game; we
+    keep the cheaper "beat 0.5" formulation here and rely on the
+    fact that the optimal *blend* weight is largely determined by
+    the regressor's own residual variance, not the baseline's mean.
+    """
+    # `load_training_games()` LEFT-JOINs spread/total lines, so it can
+    # legitimately hand us rows with `spread_line=None` or non-numeric
+    # scores.  `backtest_spread()` would raise on those — sanitize once
+    # up front rather than aborting the entire league's tune on a single
+    # bad row.
+    clean: list[Mapping[str, Any]] = []
+    for g in games:
+        try:
+            float(g["home_score"])
+            float(g["away_score"])
+            sl = g.get("spread_line")
+            if sl is None:
+                continue
+            float(sl)
+        except (KeyError, TypeError, ValueError):
+            continue
+        clean.append(g)
+    if len(clean) < 4:
+        return None
+    candidate_weights = [
+        max(0.0, min(1.0, float(w))) for w in grid
+    ] or [0.5]
+
+    best: BacktestResult | None = None
+    best_w: float = candidate_weights[0]
+    grid_brier: list[float] = []
+    for w in candidate_weights:
+        try:
+            res = backtest_spread(
+                league, clean,
+                train_frac=train_frac,
+                blend_weight=w,
+                baseline_fn=baseline_fn,
+            )
+        except (ValueError, TypeError, KeyError) as e:
+            log.debug("tune_blend_weight(%s) backtest failed at w=%s: %s",
+                      league, w, e)
+            return None
+        grid_brier.append(res.blended_brier)
+        if best is None or res.blended_brier < best.blended_brier:
+            best = res
+            best_w = w
+    assert best is not None  # candidate_weights is non-empty
+    return BlendWeightTuneResult(
+        league=league,
+        weight=best_w,
+        blended_brier=best.blended_brier,
+        baseline_brier=best.baseline_brier,
+        regressor_brier=best.regressor_brier,
+        n_test=best.n_test,
+        grid=tuple(candidate_weights),
+        grid_brier=tuple(grid_brier),
     )
 
 
@@ -751,6 +931,7 @@ INITIAL_RATING_FALLBACK = 1500.0
 class RefitSummary:
     fitted: dict[str, int] = field(default_factory=dict)
     skipped: dict[str, str] = field(default_factory=dict)
+    blend_weights: dict[str, float] = field(default_factory=dict)
     started_at: str = ""
     completed_at: str = ""
     duration_seconds: float = 0.0
@@ -759,6 +940,9 @@ class RefitSummary:
         return {
             "fitted": dict(self.fitted),
             "skipped": dict(self.skipped),
+            "blend_weights": {
+                k: round(v, 4) for k, v in self.blend_weights.items()
+            },
             "started_at": self.started_at,
             "completed_at": self.completed_at,
             "duration_seconds": round(self.duration_seconds, 3),
@@ -808,11 +992,33 @@ async def refit_all_leagues(
         except Exception as e:  # pragma: no cover — defensive
             log.warning("margin_regressor persist failed for %s: %s", league, e)
         summary.fitted[league] = reg.n_train
+        # Now that the regressor is fitted, sweep candidate blend
+        # weights through the same training games and pin the one
+        # that minimises holdout Brier.  Failures here only fall
+        # back to the per-league default — never block the refit.
+        try:
+            tune = tune_blend_weight(league, games)
+        except Exception as e:  # pragma: no cover — defensive
+            log.warning("blend-weight tune failed for %s: %s", league, e)
+            tune = None
+        if tune is not None:
+            register_blend_weight(league, tune.weight)
+            summary.blend_weights[league] = tune.weight
+        else:
+            # Tuning was a no-op (e.g. not enough valid rows after the
+            # spread-line filter).  Explicitly register the cold-start
+            # default so a stale tuned weight from a prior refit doesn't
+            # silently keep driving live inference while the summary
+            # reports the default.
+            default_w = _DEFAULT_BLEND_WEIGHT_BY_LEAGUE.get(league, 0.5)
+            register_blend_weight(league, default_w)
+            summary.blend_weights[league] = default_w
     summary.completed_at = datetime.now(timezone.utc).isoformat()
     summary.duration_seconds = _time.perf_counter() - t0
     log.info(
-        "margin_regressor refit: fitted=%s skipped=%s duration=%.2fs",
-        summary.fitted, summary.skipped, summary.duration_seconds,
+        "margin_regressor refit: fitted=%s skipped=%s blend_weights=%s duration=%.2fs",
+        summary.fitted, summary.skipped, summary.blend_weights,
+        summary.duration_seconds,
     )
     return summary
 
@@ -1083,16 +1289,20 @@ __all__ = [
     "FEATURE_NAMES",
     "LeagueScoreRegressor",
     "BacktestResult",
+    "BlendWeightTuneResult",
     "RefitSummary",
     "extract_features",
     "fit_regressor",
     "register_regressor",
     "get_regressor",
+    "register_blend_weight",
+    "get_blend_weight",
     "reset_registry",
     "status",
     "load_all",
     "adjust_probability",
     "backtest_spread",
+    "tune_blend_weight",
     "load_training_games",
     "refit_all_leagues",
     "attach_lines_to_candidate",
