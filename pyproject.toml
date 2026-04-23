@@ -27,4 +27,5 @@ dependencies = [
     "stripe>=15.0.1",
     "alembic>=1.13",
     "psycopg[binary]>=3.2",
+    "eth-account>=0.10.0",
 ]

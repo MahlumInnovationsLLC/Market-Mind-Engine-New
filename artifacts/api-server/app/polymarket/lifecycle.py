@@ -23,6 +23,7 @@ from ..config import get_settings
 from ..exchange_kill_switch import _kill, kill_switch_state  # noqa: F401 — re-exported via __init__
 from .bus import bus
 from . import client as polymarket_client
+from . import signer as polymarket_signer
 
 log = logging.getLogger(__name__)
 
@@ -50,15 +51,33 @@ class OrderRequest:
     vertical: str = "sports"
     context: dict[str, Any] = field(default_factory=dict)
 
-    def to_polymarket_payload(self) -> dict[str, Any]:
-        """Return the *unsigned* skeleton of a Polymarket order body.
+    def to_polymarket_payload(self, *, settings: Any = None) -> dict[str, Any]:
+        """Return the Polymarket order body for ``POST /order``.
 
-        L1 (EIP-712) signing is the caller's responsibility; this method
-        only assembles the fields that don't require a wallet signature.
+        When wallet credentials (``POLYMARKET_PRIVATE_KEY``) are
+        configured, this returns the fully L1-signed envelope shaped
+        ``{"order": {...}, "owner": <api_key>, "orderType": ...}``
+        ready for submission. Otherwise it returns an unsigned
+        skeleton — useful for paper-mode introspection and tests.
         """
         if self.type == "limit" and self.limit_price_cents is None:
             raise ValueError("limit_price_cents required for limit orders")
         price_decimal = (self.limit_price_cents or 50) / 100.0
+
+        s = settings or get_settings()
+        if polymarket_signer.have_signing_creds():
+            return polymarket_signer.build_signed_order(
+                action=self.action,
+                token_id=self.token_id,
+                size_shares=int(self.count),
+                price_decimal=price_decimal,
+                time_in_force=self.time_in_force,
+                api_key=s.polymarket_api_key or "",
+                settings=s,
+            )
+
+        # Unsigned skeleton (paper / preview only — the CLOB will reject
+        # this if it ever reaches the wire).
         side_str = "BUY" if self.action == "buy" else "SELL"
         return {
             "tokenID": self.token_id,
@@ -67,7 +86,7 @@ class OrderRequest:
             "side": side_str,
             "orderType": (
                 "GTC" if self.time_in_force == "GTC"
-                else "IOC" if self.time_in_force == "IOC"
+                else "FAK" if self.time_in_force == "IOC"
                 else "FOK"
             ),
             "clientOrderId": self.client_order_id,
@@ -230,9 +249,19 @@ async def submit_order(req: OrderRequest, *, force_paper: bool | None = None) ->
         return record
 
     # ---- live path ------------------------------------------------------
+    if not polymarket_signer.have_signing_creds():
+        await _record(req, paper=False, state="rejected", price=req.limit_price_cents or 0,
+                      extra={"reason": "missing_l1_signer",
+                             "hint": "set POLYMARKET_PRIVATE_KEY"})
+        await _emit({"event": "rejected", "order": record.to_dict(),
+                     "error": "POLYMARKET_PRIVATE_KEY not configured"})
+        raise OrderRejected(
+            "live Polymarket order requires POLYMARKET_PRIVATE_KEY for L1 signing"
+        )
     try:
+        signed_payload = req.to_polymarket_payload(settings=s)
         async with polymarket_client.PolymarketClient(settings=s) as c:
-            ack = await c.submit_order(req.to_polymarket_payload())
+            ack = await c.submit_order(signed_payload)
     except Exception as e:
         record.state = "rejected"
         await _record(req, paper=False, state="rejected", price=req.limit_price_cents or 0,

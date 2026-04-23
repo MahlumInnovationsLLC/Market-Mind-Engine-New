@@ -25,6 +25,16 @@ showing real production telemetry.
 - `SUPABASE_SERVICE_ROLE_KEY` (or `SUPABASE_SECRET_KEY`) — Storage service key
 - `OPENAI_APY_KEY` (typo intentional — user's existing secret name) or `OPENAI_API_KEY`
 - `ANTHROPIC_API_KEY`, `KALSHI_API_KEY_ID`, `KALSHI_API_PRIVATE_KEY` — for follow-up tasks
+- `POLYMARKET_API_KEY`, `POLYMARKET_API_SECRET`, `POLYMARKET_API_PASSPHRASE`,
+  `POLYMARKET_WALLET_ADDRESS` — L2 (HMAC) credentials for the CLOB REST client.
+- `POLYMARKET_PRIVATE_KEY` — EOA hex private key used to EIP-712 sign live
+  orders. Without it, `AXIOM_TRADING_MODE=live` Polymarket orders are rejected
+  with `reason=missing_l1_signer` (paper-mode is unaffected). Optional:
+  `POLYMARKET_FUNDER_ADDRESS` (defaults to `POLYMARKET_WALLET_ADDRESS`),
+  `POLYMARKET_SIGNATURE_TYPE` (`0` EOA / `1` proxy / `2` Gnosis Safe; default
+  `0`), `POLYMARKET_CHAIN_ID` (default `137`),
+  `POLYMARKET_EXCHANGE_ADDRESS` (default mainnet CTFExchange), and
+  `POLYMARKET_FEE_RATE_BPS` (default `0`).
 - `CLERK_PUBLISHABLE_KEY`, `CLERK_SECRET_KEY`, `VITE_CLERK_PUBLISHABLE_KEY` —
   auto-provisioned by the Replit Auth pane. The FastAPI server uses the publishable
   key to discover the Clerk frontend-API host and verifies every incoming session
