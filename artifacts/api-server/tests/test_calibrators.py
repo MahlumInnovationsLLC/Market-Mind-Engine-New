@@ -285,3 +285,152 @@ def test_predict_bypasses_calibration_without_league():
     assert out.probability == pytest.approx(0.7)
     assert out.raw["calibration"]["applied"] is False
     assert "uncalibrated_probability" not in out.raw
+
+
+# ---------------------------------------------------------------------------
+# Settlement scheduler integration: nightly per-league refit gate
+# ---------------------------------------------------------------------------
+
+
+class _StubSchedulerSettings:
+    """Minimal stand-in for `app.config.Settings` — the settlement
+    scheduler only reads these two fields out of the frozen dataclass."""
+
+    def __init__(self, interval: float) -> None:
+        self.settlement_enabled = True
+        self.settlement_interval_seconds = interval
+
+
+def _stub_cycle_result():
+    from app.settlement.pipeline import CycleResult
+
+    return CycleResult(
+        started_at="2026-01-01T00:00:00+00:00",
+        completed_at="2026-01-01T00:00:00+00:00",
+        duration_seconds=0.0,
+    )
+
+
+def _stub_retrain_result():
+    from app.settlement.retrain import RetrainCycleResult
+
+    return RetrainCycleResult(
+        started_at="2026-01-01T00:00:00+00:00",
+        completed_at="2026-01-01T00:00:00+00:00",
+    )
+
+
+def _stub_margin_summary():
+    from app import margin_regressor
+
+    return margin_regressor.RefitSummary(
+        started_at="2026-01-01T00:00:00+00:00",
+        completed_at="2026-01-01T00:00:00+00:00",
+    )
+
+
+def test_settlement_scheduler_drives_per_league_calibrator_refit_then_gates(
+    monkeypatch,
+):
+    """One scheduler iteration runs `calibrators.maybe_refit()` and a
+    second iteration immediately after is suppressed by the 24h gate;
+    the per-cycle `status()['last_cycle']['calibrators']` payload
+    reflects the refit summary and then `None`."""
+    import sys
+
+    from app import calibrators as calibrators_mod, margin_regressor
+    from app.settlement.scheduler import _SettlementScheduler
+
+    # `app.settlement.__init__` rebinds the submodule name `scheduler`
+    # to the singleton instance, so the import-as form picks up the
+    # instance, not the module.  Pull the actual module out of
+    # `sys.modules` so monkeypatching `run_cycle` etc. lands on it.
+    sched_mod = sys.modules["app.settlement.scheduler"]
+
+    calibrators_mod.invalidate()
+
+    # Capture self._last as observed *before* each iteration body runs,
+    # by hooking the first dependency the loop calls (`run_cycle`).
+    # That gives us a snapshot of the previous iteration's status
+    # payload — exactly what /settlement/status would have served.
+    sched = _SettlementScheduler()
+    last_cycles_observed: list[dict[str, Any]] = []
+    refit_call_count = {"n": 0}
+
+    async def fake_run_cycle():
+        last_cycles_observed.append(dict(sched._last))
+        return _stub_cycle_result()
+
+    async def fake_run_retrain_cycle():
+        return _stub_retrain_result()
+
+    async def fake_refit_all_leagues():
+        return _stub_margin_summary()
+
+    refit_marker = {"source": "stub_refit_all", "leagues": [], "fitted": 0}
+
+    async def fake_refit_all():
+        # Real `refit_all` does this at the end; reproduce it so the
+        # real `maybe_refit` gate logic gates the next iteration.
+        refit_call_count["n"] += 1
+        calibrators_mod._state.last_refit_at = time.time()
+        calibrators_mod._state.last_refit_summary = dict(refit_marker)
+        return dict(refit_marker)
+
+    monkeypatch.setattr(sched_mod, "run_cycle", fake_run_cycle)
+    monkeypatch.setattr(sched_mod, "run_retrain_cycle", fake_run_retrain_cycle)
+    monkeypatch.setattr(
+        margin_regressor, "refit_all_leagues", fake_refit_all_leagues
+    )
+    # Stub the underlying `refit_all` so the real `maybe_refit` runs
+    # (and therefore the real 24h gate is what we're exercising).
+    monkeypatch.setattr(calibrators_mod, "refit_all", fake_refit_all)
+    monkeypatch.setattr(
+        sched_mod, "get_settings", lambda: _StubSchedulerSettings(0.01)
+    )
+
+    async def _drive():
+        await sched.start()
+        try:
+            # Wait until at least three `run_cycle` calls have happened:
+            # iteration 1 (snapshot empty), iteration 2 (snapshot iter-1),
+            # iteration 3 (snapshot iter-2).  That gives us status
+            # payloads for both the refit-runs and refit-gated cycles.
+            for _ in range(500):
+                if len(last_cycles_observed) >= 3:
+                    break
+                await asyncio.sleep(0.01)
+        finally:
+            await sched.stop()
+
+    asyncio.run(_drive())
+
+    # The 24h gate on `maybe_refit()` must have fired exactly once
+    # across multiple iterations — the refit runs on the first cycle
+    # (state.last_refit_at is None) and is suppressed on every
+    # subsequent cycle within REFIT_INTERVAL_SECONDS.
+    assert refit_call_count["n"] == 1, (
+        f"expected exactly one refit across multiple cycles, "
+        f"got {refit_call_count['n']}"
+    )
+    assert calibrators_mod.REFIT_INTERVAL_SECONDS >= 24 * 3600
+
+    # last_cycles_observed[0] is the empty pre-iteration-1 snapshot.
+    assert last_cycles_observed[0] == {}
+
+    # last_cycles_observed[1] is iteration 1's status payload — the
+    # refit summary must be present.
+    iter1_status = last_cycles_observed[1]
+    assert "calibrators" in iter1_status
+    assert iter1_status["calibrators"] == refit_marker
+
+    # last_cycles_observed[2] is iteration 2's status payload — the
+    # gate suppressed the refit so the field is exactly `None`.
+    iter2_status = last_cycles_observed[2]
+    assert "calibrators" in iter2_status
+    assert iter2_status["calibrators"] is None
+
+    # The live `scheduler.status()` payload reflects the most recent
+    # cycle: refit suppressed, calibrators field is None.
+    final_status = sched.status()["last_cycle"]
+    assert final_status["calibrators"] is None
