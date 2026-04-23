@@ -26,6 +26,7 @@ job.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 from datetime import datetime
@@ -71,6 +72,31 @@ CREATE TABLE IF NOT EXISTS user_notification_prefs (
 -- previous "everyone gets every email" behaviour for the standard
 -- summaries; the live-trade firehose is opt-in because it is noisy
 -- and gated behind the Elite tier.
+-- Per-user log of every push we *attempted to deliver* (task #133).
+-- One row per recipient per dispatch so the mobile app can show an
+-- in-app history beyond what the OS notification tray retains. We
+-- only record entries for users with at least one registered device,
+-- since logging "would-have-been-sent" rows for desktop-only users
+-- would just create unread clutter on devices that never see them.
+CREATE TABLE IF NOT EXISTS mobile_notification_log (
+    id              bigserial PRIMARY KEY,
+    clerk_user_id   text NOT NULL,
+    type            text NOT NULL,
+    title           text NOT NULL,
+    body            text NOT NULL,
+    deep_link       text,
+    data            jsonb NOT NULL DEFAULT '{}'::jsonb,
+    created_at      timestamptz NOT NULL DEFAULT now(),
+    read_at         timestamptz
+);
+
+CREATE INDEX IF NOT EXISTS mobile_notification_log_user_idx
+    ON mobile_notification_log (clerk_user_id, created_at DESC);
+
+CREATE INDEX IF NOT EXISTS mobile_notification_log_unread_idx
+    ON mobile_notification_log (clerk_user_id)
+    WHERE read_at IS NULL;
+
 ALTER TABLE user_notification_prefs
     ADD COLUMN IF NOT EXISTS email_daily_summary       boolean NOT NULL DEFAULT true,
     ADD COLUMN IF NOT EXISTS email_drift               boolean NOT NULL DEFAULT true,
@@ -718,9 +744,191 @@ async def _dispatch_for_alert(
     tokens = await _tokens_for_pref(pref_column)
     if not tokens:
         return {"sent": 0, "ok": 0, "errors": [], "no_recipients": True}
+    # Persist a per-user history row for every recipient *before* the
+    # network roundtrip — even if Expo rejects the batch, the user
+    # should still see the event in the in-app feed.
+    await _record_dispatch_for_pref(
+        pref_column,
+        type_=str(data.get("type") or pref_column),
+        title=title,
+        body=body,
+        deep_link=str(data.get("deep_link") or "") or None,
+        data=data,
+    )
     return await send_to_tokens(
         tokens, title=title, body=body, data=data, channel_id=channel_id,
     )
+
+
+# ---------------------------------------------------------------------------
+# In-app notification history (task #133)
+# ---------------------------------------------------------------------------
+
+
+# Cap log size per user so a runaway dispatcher can't grow the table
+# without bound. We keep ~3x the page size shown in the mobile app.
+_LOG_RETAIN_PER_USER = 200
+
+
+async def _record_dispatch_for_pref(
+    pref_column: str,
+    *,
+    type_: str,
+    title: str,
+    body: str,
+    deep_link: str | None,
+    data: dict[str, Any],
+) -> None:
+    """Insert one log row per opted-in user with a registered device.
+
+    Mirrors the recipient set used by `_tokens_for_pref` (DISTINCT on
+    user) so the in-app feed matches what was actually pushed.
+    """
+    if pref_column not in ("notify_live_trade", "notify_halt"):
+        return
+    sql_users = (
+        "SELECT DISTINCT t.clerk_user_id FROM expo_push_tokens t "
+        "LEFT JOIN user_notification_prefs p "
+        "  ON p.clerk_user_id = t.clerk_user_id "
+        f"WHERE COALESCE(p.{pref_column}, true) = true"
+    )
+    try:
+        rows = await db.fetch(sql_users)
+    except Exception as e:
+        log.warning("notification_log user lookup failed: %s", e)
+        return
+    if not rows:
+        return
+    payload = json.dumps(data or {}, default=str)
+    args_list = [
+        (str(r["clerk_user_id"]), type_, title, body, deep_link, payload)
+        for r in rows
+    ]
+    try:
+        await db.executemany(
+            "INSERT INTO mobile_notification_log "
+            "(clerk_user_id, type, title, body, deep_link, data) "
+            "VALUES ($1, $2, $3, $4, $5, $6::jsonb)",
+            args_list,
+        )
+    except Exception as e:
+        log.warning("notification_log insert failed: %s", e)
+        return
+    # Trim per-user history; cheap to do inline because each user only
+    # ever has at most _LOG_RETAIN_PER_USER + 1 rows after this insert.
+    user_ids = list({a[0] for a in args_list})
+    try:
+        await db.execute(
+            """
+            DELETE FROM mobile_notification_log
+             WHERE clerk_user_id = ANY($1::text[])
+               AND id NOT IN (
+                 SELECT id FROM (
+                   SELECT id, row_number() OVER (
+                            PARTITION BY clerk_user_id
+                            ORDER BY created_at DESC, id DESC
+                          ) AS rn
+                     FROM mobile_notification_log
+                    WHERE clerk_user_id = ANY($1::text[])
+                 ) ranked
+                 WHERE rn <= $2
+               )
+            """,
+            user_ids, _LOG_RETAIN_PER_USER,
+        )
+    except Exception as e:
+        log.warning("notification_log trim failed: %s", e)
+
+
+async def list_notifications(
+    clerk_user_id: str, *, limit: int = 50,
+) -> list[dict[str, Any]]:
+    await ensure_schema()
+    limit = max(1, min(int(limit or 50), 200))
+    try:
+        rows = await db.fetch(
+            """
+            SELECT id, type, title, body, deep_link, data,
+                   created_at, read_at
+              FROM mobile_notification_log
+             WHERE clerk_user_id = $1
+             ORDER BY created_at DESC, id DESC
+             LIMIT $2
+            """,
+            clerk_user_id, limit,
+        )
+    except Exception as e:
+        log.warning("list_notifications failed for %s: %s", clerk_user_id, e)
+        return []
+    out: list[dict[str, Any]] = []
+    for r in rows:
+        raw = r.get("data")
+        if isinstance(raw, str):
+            try:
+                payload: Any = json.loads(raw)
+            except Exception:
+                payload = {}
+        else:
+            payload = raw or {}
+        out.append(
+            {
+                "id": int(r["id"]),
+                "type": r["type"],
+                "title": r["title"],
+                "body": r["body"],
+                "deep_link": r.get("deep_link"),
+                "data": payload,
+                "created_at": r["created_at"],
+                "read_at": r.get("read_at"),
+            }
+        )
+    return out
+
+
+async def unread_notification_count(clerk_user_id: str) -> int:
+    await ensure_schema()
+    try:
+        v = await db.fetchval(
+            "SELECT count(*) FROM mobile_notification_log "
+            "WHERE clerk_user_id = $1 AND read_at IS NULL",
+            clerk_user_id,
+        )
+        return int(v or 0)
+    except Exception as e:
+        log.warning("unread_notification_count failed for %s: %s", clerk_user_id, e)
+        return 0
+
+
+async def mark_notifications_read(
+    clerk_user_id: str, *, ids: list[int] | None = None,
+) -> int:
+    """Mark notifications as read. If `ids` is None, marks all unread."""
+    await ensure_schema()
+    try:
+        if ids:
+            clean = [int(i) for i in ids if i is not None]
+            if not clean:
+                return 0
+            res = await db.execute(
+                "UPDATE mobile_notification_log SET read_at = now() "
+                "WHERE clerk_user_id = $1 AND id = ANY($2::bigint[]) "
+                "  AND read_at IS NULL",
+                clerk_user_id, clean,
+            )
+        else:
+            res = await db.execute(
+                "UPDATE mobile_notification_log SET read_at = now() "
+                "WHERE clerk_user_id = $1 AND read_at IS NULL",
+                clerk_user_id,
+            )
+    except Exception as e:
+        log.warning("mark_notifications_read failed for %s: %s", clerk_user_id, e)
+        return 0
+    # asyncpg returns "UPDATE N"
+    try:
+        return int(str(res).split()[-1])
+    except Exception:
+        return 0
 
 
 def push_live_trade(

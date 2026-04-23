@@ -1014,6 +1014,37 @@ async def _notification_prefs_payload(user: AuthedUser) -> dict[str, object]:
     }
 
 
+class MarkReadRequest(BaseModel):
+    ids: list[int] | None = None
+
+
+@app.get("/api/me/notifications")
+async def me_notifications(
+    limit: int = 50,
+    user: AuthedUser = Depends(require_auth),
+) -> dict[str, object]:
+    """Per-user history of mobile push notifications (task #133).
+
+    Returns the most recent ``limit`` (capped at 200) entries plus the
+    current unread count so the mobile tab can render a badge without a
+    second roundtrip.
+    """
+    items = await notif_push.list_notifications(user.user_id, limit=limit)
+    unread = await notif_push.unread_notification_count(user.user_id)
+    return {"items": items, "unread_count": unread}
+
+
+@app.post("/api/me/notifications/read")
+async def me_notifications_mark_read(
+    body: MarkReadRequest | None = None,
+    user: AuthedUser = Depends(require_auth),
+) -> dict[str, object]:
+    ids = body.ids if body else None
+    updated = await notif_push.mark_notifications_read(user.user_id, ids=ids)
+    unread = await notif_push.unread_notification_count(user.user_id)
+    return {"ok": True, "updated": updated, "unread_count": unread}
+
+
 @app.get("/api/me/notification-prefs")
 async def me_get_notification_prefs(
     user: AuthedUser = Depends(require_auth),

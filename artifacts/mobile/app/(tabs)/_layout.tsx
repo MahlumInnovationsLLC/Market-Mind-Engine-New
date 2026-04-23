@@ -21,6 +21,16 @@ export default function TabsLayout() {
     enabled: isLoaded && isSignedIn,
   });
   const isAdmin = access.data?.is_admin === true;
+  // Poll the unread notification count so the bell tab shows a badge
+  // even when the user is on another screen. Cheap query (single COUNT).
+  const notifications = useQuery({
+    queryKey: ["me", "notifications"],
+    queryFn: () =>
+      apiFetch<{ unread_count: number }>("/api/me/notifications?limit=50"),
+    enabled: isLoaded && isSignedIn,
+    refetchInterval: 30_000,
+  });
+  const unread = notifications.data?.unread_count ?? 0;
   const colorScheme = useColorScheme();
   const isDark = colorScheme !== "light";
   const isIOS = Platform.OS === "ios";
@@ -133,6 +143,24 @@ export default function TabsLayout() {
           tabBarIcon: ({ color }) => (
             <Feather name="search" size={20} color={color} />
           ),
+        }}
+      />
+
+      <Tabs.Screen
+        name="notifications"
+        options={{
+          title: "ALERTS",
+          tabBarLabel: "Alerts",
+          tabBarIcon: ({ color }) => (
+            <Feather name="bell" size={20} color={color} />
+          ),
+          tabBarBadge: unread > 0 ? (unread > 99 ? "99+" : unread) : undefined,
+          tabBarBadgeStyle: {
+            backgroundColor: colors.destructive,
+            color: "#fff",
+            fontSize: 10,
+            fontFamily: "Inter_700Bold",
+          },
         }}
       />
 
