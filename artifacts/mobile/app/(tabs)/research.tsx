@@ -1,7 +1,9 @@
 import { useQuery } from "@tanstack/react-query";
+import { useRouter } from "expo-router";
 import React from "react";
 import {
   ActivityIndicator,
+  Pressable,
   RefreshControl,
   ScrollView,
   StyleSheet,
@@ -25,6 +27,7 @@ type Debate = {
   approved?: boolean | null;
   recommended_action?: string | null;
   created_at?: string | null;
+  redacted?: boolean | null;
 };
 
 type UwSignal = {
@@ -73,6 +76,7 @@ function isToday(iso: string | null | undefined): boolean {
 export default function ResearchScreen() {
   const colors = useColors();
   const insets = useSafeAreaInsets();
+  const router = useRouter();
 
   const debates = useQuery({
     queryKey: ["dashboard", "recent-debates", "research"],
@@ -174,43 +178,56 @@ export default function ResearchScreen() {
         </Card>
       ) : (
         debateList.map((d) => (
-          <Card key={`d-${d.id}`} style={styles.card}>
-            <View style={styles.rowHead}>
-              <Text
-                style={[styles.title, { color: colors.foreground }]}
-                numberOfLines={1}
-              >
-                {d.matchup ?? `#${d.id}`}
-              </Text>
-              <Text
-                style={[
-                  styles.badge,
-                  {
-                    color: d.approved ? colors.success : colors.mutedForeground,
-                    borderColor: d.approved ? colors.success : colors.border,
-                  },
-                ]}
-              >
-                {d.approved ? "APPROVED" : "REJECTED"}
-              </Text>
-            </View>
-            <View style={styles.statsRow}>
-              <Text style={[styles.stat, { color: colors.mutedForeground }]}>
-                {(d.league ?? "—").toUpperCase()} ·{" "}
-                {(d.market_type ?? "—").toUpperCase()}
-              </Text>
-              <Text style={[styles.stat, { color: colors.primary }]}>
-                p={(d.consensus_probability ?? 0).toFixed(2)}
-              </Text>
-              <Text style={[styles.stat, { color: colors.mutedForeground }]}>
-                agree {((d.agreement_rate ?? 0) * 100).toFixed(0)}%
-              </Text>
-            </View>
-            <Text style={[styles.time, { color: colors.mutedForeground }]}>
-              {(d.recommended_action ?? "").toUpperCase()} ·{" "}
-              {fmtRel(d.created_at)}
-            </Text>
-          </Card>
+          <Pressable
+            key={`d-${d.id}`}
+            onPress={() => router.push(`/research/${d.id}` as never)}
+            testID={`debate-card-${d.id}`}
+            accessibilityRole="button"
+            accessibilityLabel={`Open debate transcript for ${d.matchup ?? d.id}`}
+          >
+            <Card style={styles.card}>
+              <View style={styles.rowHead}>
+                <Text
+                  style={[styles.title, { color: colors.foreground }]}
+                  numberOfLines={1}
+                >
+                  {d.matchup ?? `#${d.id}`}
+                </Text>
+                <Text
+                  style={[
+                    styles.badge,
+                    {
+                      color: d.approved ? colors.success : colors.mutedForeground,
+                      borderColor: d.approved ? colors.success : colors.border,
+                    },
+                  ]}
+                >
+                  {d.approved ? "APPROVED" : "REJECTED"}
+                </Text>
+              </View>
+              <View style={styles.statsRow}>
+                <Text style={[styles.stat, { color: colors.mutedForeground }]}>
+                  {(d.league ?? "—").toUpperCase()} ·{" "}
+                  {(d.market_type ?? "—").toUpperCase()}
+                </Text>
+                <Text style={[styles.stat, { color: colors.primary }]}>
+                  p={(d.consensus_probability ?? 0).toFixed(2)}
+                </Text>
+                <Text style={[styles.stat, { color: colors.mutedForeground }]}>
+                  agree {((d.agreement_rate ?? 0) * 100).toFixed(0)}%
+                </Text>
+              </View>
+              <View style={styles.rowHead}>
+                <Text style={[styles.time, { color: colors.mutedForeground }]}>
+                  {(d.recommended_action ?? "").toUpperCase()} ·{" "}
+                  {fmtRel(d.created_at)}
+                </Text>
+                <Text style={[styles.time, { color: colors.primary }]}>
+                  TAP FOR TRANSCRIPT ›
+                </Text>
+              </View>
+            </Card>
+          </Pressable>
         ))
       )}
 
