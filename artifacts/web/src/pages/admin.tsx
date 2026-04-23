@@ -45,6 +45,20 @@ export function UserManagementPanel() {
 
   const items: AdminUser[] = usersQuery.data?.items ?? [];
 
+  const stats = useMemo(() => {
+    let total = 0;
+    let pending = 0;
+    let operators = 0;
+    let admins = 0;
+    for (const u of items) {
+      total += 1;
+      if (!u.approved) pending += 1;
+      if (u.approved && !u.is_admin) operators += 1;
+      if (u.is_admin) admins += 1;
+    }
+    return { total, pending, operators, admins };
+  }, [items]);
+
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
     return items.filter((u) => {
@@ -67,6 +81,32 @@ export function UserManagementPanel() {
       data-testid="panel-user-management"
     >
       <section className="lg:col-span-8 space-y-3">
+        <div
+          className="grid grid-cols-2 sm:grid-cols-4 gap-2"
+          data-testid="admin-stats-strip"
+        >
+          <StatTile
+            label="Total users"
+            value={stats.total}
+            testId="stat-total-users"
+          />
+          <StatTile
+            label="Pending"
+            value={stats.pending}
+            testId="stat-pending-approvals"
+            tone={stats.pending > 0 ? "warn" : "default"}
+          />
+          <StatTile
+            label="Operators"
+            value={stats.operators}
+            testId="stat-active-operators"
+          />
+          <StatTile
+            label="Admins"
+            value={stats.admins}
+            testId="stat-admins"
+          />
+        </div>
         <div className="flex flex-wrap items-center gap-2 text-xs uppercase tracking-widest">
           {(["all", "pending", "approved", "admin"] as const).map((f) => (
             <button
@@ -273,6 +313,32 @@ export function RuntimePanel() {
         </div>
       </section>
     </main>
+  );
+}
+
+function StatTile({
+  label,
+  value,
+  testId,
+  tone = "default",
+}: {
+  label: string;
+  value: number;
+  testId: string;
+  tone?: "default" | "warn";
+}) {
+  const valueClass =
+    tone === "warn" && value > 0 ? "text-destructive" : "text-foreground";
+  return (
+    <div
+      className="border border-border bg-card px-3 py-2"
+      data-testid={testId}
+    >
+      <div className="text-[10px] uppercase tracking-widest text-muted-foreground">
+        {label}
+      </div>
+      <div className={`text-2xl font-bold ${valueClass}`}>{value}</div>
+    </div>
   );
 }
 
