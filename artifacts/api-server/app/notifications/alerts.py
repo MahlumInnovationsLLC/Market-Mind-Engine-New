@@ -403,7 +403,20 @@ def daily_loss_halt(
         + _format_lines(rows)
         + "\n"
     )
-    return _dispatch(subject, body, tag="daily-loss-halt", dry_run=dry_run)
+    result = _dispatch(subject, body, tag="daily-loss-halt", dry_run=dry_run)
+    # Parity with alerts.halt(): fan out to the halt push channel so
+    # operators get the same cross-channel notification as any other
+    # halt-class incident.  Push failures must never break the email
+    # dispatch contract.
+    if not dry_run:
+        try:
+            from . import push as _push
+            _push.push_halt(
+                reason=reason or f"daily-loss cap breached (-${loss_usd:,.2f})"
+            )
+        except Exception as e:  # pragma: no cover — push must not break alerting
+            log.warning("daily_loss_halt push dispatch failed: %s", e)
+    return result
 
 
 # ---------------------------------------------------------------------------

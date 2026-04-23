@@ -235,6 +235,50 @@ def test_operator_resume_while_tripped_rehalts_without_double_alert(monkeypatch)
     assert len(p.alerts) == 1
 
 
+def test_daily_loss_halt_fans_out_to_push_channel(monkeypatch):
+    """Parity with alerts.halt(): daily-loss halt must fan out to the
+    same push-halt broadcast channel as any other halt-class incident,
+    not just email."""
+    from app.notifications import alerts as _alerts
+    calls: list[dict] = []
+
+    def _spy_push_halt(*, reason):
+        calls.append({"reason": reason})
+
+    with patch("app.notifications.push.push_halt", _spy_push_halt):
+        _alerts.daily_loss_halt(
+            date_utc="2026-04-23",
+            loss_usd=500.0,
+            realized_pnl_usd=-500.0,
+            unrealized_pnl_usd=0.0,
+            threshold_usd=100.0,
+            threshold_pct=None,
+            threshold_pct_usd=None,
+            start_of_day_bankroll_usd=1000.0,
+            reason="absolute cap $100 breached by -$500.00",
+            dry_run=True,  # dispatch path is dry, push path still runs
+        )
+    # dry_run=True must NOT fire push (parity with alerts.halt()).
+    assert calls == []
+
+    with patch("app.notifications.push.push_halt", _spy_push_halt), \
+         patch("app.notifications.alerts._dispatch", lambda *a, **k: {"ok": True}):
+        _alerts.daily_loss_halt(
+            date_utc="2026-04-23",
+            loss_usd=500.0,
+            realized_pnl_usd=-500.0,
+            unrealized_pnl_usd=0.0,
+            threshold_usd=100.0,
+            threshold_pct=None,
+            threshold_pct_usd=None,
+            start_of_day_bankroll_usd=1000.0,
+            reason="absolute cap $100 breached by -$500.00",
+            dry_run=False,
+        )
+    assert len(calls) == 1
+    assert "daily" in calls[0]["reason"].lower() or "cap" in calls[0]["reason"].lower()
+
+
 def test_dedupe_key_uses_utc_date_not_local(monkeypatch):
     """Dedupe must key on UTC calendar date regardless of the configured
     trading-day timezone, so an operator in America/New_York doesn't
