@@ -9,6 +9,7 @@ This is the minimum viable backend that:
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import time
@@ -3542,20 +3543,21 @@ class SettlementSettleMarketRequest(BaseModel):
     settle_price: float | None = Field(None, ge=0.0, le=100.0)
 
 
-_RECENT_SETTLEMENTS_BUF: list[dict[str, object]] = []
-_RECENT_SETTLEMENTS_MAX = 25
+_RECENT_SETTLEMENTS_LIMIT = 10
 
 
 async def _settlement_recent_tap() -> None:
-    """Long-lived subscriber on the settlement event hub that records
-    `market_settle_complete` events for the dashboard polling fallback.
-    Restarted on lifespan; cancellation is the normal exit."""
+    """Long-lived subscriber on the settlement event hub that persists
+    `market_settle_complete` events to the `settlement_events` table so
+    the dashboard's recent-settlements panel survives API restarts and
+    is consistent across replicas.  Restarted on lifespan; cancellation
+    is the normal exit."""
     q = settlement_event_hub.subscribe(label="recent-tap")
     try:
         while True:
             ev = await q.get()
             if isinstance(ev, dict) and ev.get("type") == "market_settle_complete":
-                _record_recent_settlement(ev)
+                await _record_recent_settlement(ev)
     except asyncio.CancelledError:
         raise
     except Exception as e:  # pragma: no cover
@@ -3564,13 +3566,78 @@ async def _settlement_recent_tap() -> None:
         settlement_event_hub.unsubscribe(q)
 
 
-def _record_recent_settlement(event: dict[str, object]) -> None:
-    """Cache the last N market_settle_complete events so the dashboard can
-    show recent settlements after a page reload (the WS only delivers
-    events that happen while connected)."""
-    _RECENT_SETTLEMENTS_BUF.append(event)
-    if len(_RECENT_SETTLEMENTS_BUF) > _RECENT_SETTLEMENTS_MAX:
-        del _RECENT_SETTLEMENTS_BUF[: len(_RECENT_SETTLEMENTS_BUF) - _RECENT_SETTLEMENTS_MAX]
+async def _record_recent_settlement(event: dict[str, object]) -> None:
+    """Persist a market_settle_complete event so the dashboard can show
+    recent settlements after a page reload or API restart.  Stores the
+    full event payload as JSONB plus a few hot columns for indexing /
+    debugging.  Failures are logged but do not propagate — the WS feed
+    still delivers the live event."""
+    try:
+        verticals = event.get("verticals")
+        if not isinstance(verticals, list):
+            verticals = None
+        else:
+            verticals = [str(v) for v in verticals]
+        outcome = event.get("outcome_yes")
+        outcome_int = int(outcome) if isinstance(outcome, (int, float)) else None
+        trades = event.get("trades_settled")
+        trades_int = int(trades) if isinstance(trades, (int, float)) else None
+        alerts = event.get("alerts_raised")
+        alerts_int = int(alerts) if isinstance(alerts, (int, float)) else None
+        market_id = event.get("market_id")
+        market_str = str(market_id) if market_id is not None else None
+        await db.execute(
+            """
+            INSERT INTO settlement_events (
+                event_type, market_id, outcome_yes, trades_settled,
+                alerts_raised, verticals, payload
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb)
+            """,
+            str(event.get("type") or "market_settle_complete"),
+            market_str,
+            outcome_int,
+            trades_int,
+            alerts_int,
+            verticals,
+            json.dumps(event, default=str),
+        )
+    except Exception as e:  # pragma: no cover
+        log.warning("settlement event persist failed: %s", e)
+
+
+async def _load_recent_settlements(limit: int = _RECENT_SETTLEMENTS_LIMIT) -> list[dict[str, object]]:
+    """Load the most recent persisted market_settle_complete events for
+    the dashboard polling fallback.  Returns most-recent-first so the UI
+    matches the previous in-memory buffer ordering."""
+    try:
+        rows = await db.fetch(
+            """
+            SELECT recorded_at, payload
+              FROM settlement_events
+             WHERE event_type = 'market_settle_complete'
+             ORDER BY recorded_at DESC
+             LIMIT $1
+            """,
+            int(limit),
+        )
+    except Exception as e:  # pragma: no cover
+        log.warning("settlement recent load failed: %s", e)
+        return []
+    out: list[dict[str, object]] = []
+    for r in rows:
+        raw = r["payload"]
+        if isinstance(raw, str):
+            try:
+                ev = json.loads(raw)
+            except Exception:
+                continue
+        elif isinstance(raw, dict):
+            ev = dict(raw)
+        else:
+            continue
+        ev.setdefault("recorded_at", r["recorded_at"].isoformat() if r["recorded_at"] else None)
+        out.append(ev)
+    return out
 
 
 async def _settlement_today_summary() -> dict[str, object]:
@@ -3625,7 +3692,7 @@ async def settlement_status(_: object = Depends(require_auth)) -> dict[str, obje
     fallback when the live socket drops or the page is fresh."""
     base = settlement_scheduler.status()
     base["today"] = await _settlement_today_summary()
-    base["recent_settlements"] = list(reversed(_RECENT_SETTLEMENTS_BUF[-10:]))
+    base["recent_settlements"] = await _load_recent_settlements()
     return base
 
 
