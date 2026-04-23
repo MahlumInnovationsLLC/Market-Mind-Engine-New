@@ -2,8 +2,10 @@
 
 Persists a mirror of every authenticated Clerk user we have seen
 (`app_users`) plus an audit log of approval / admin role changes
-(`admin_audit_log`).  The tables are created on startup via
-:func:`ensure_schema`.
+(`admin_audit_log`).  Both tables are owned by the Alembic baseline
+migration (``0001_baseline``) and are created up-front during startup
+before any request is served — there is no longer a request-time
+``CREATE TABLE`` fallback.
 
 The admin model layers on top of the existing approval gate:
 
@@ -32,66 +34,6 @@ from . import db
 
 
 log = logging.getLogger("axiom.admin")
-
-
-# ---------------------------------------------------------------------------
-# Schema bootstrap
-# ---------------------------------------------------------------------------
-
-
-_SCHEMA_SQL = """
-CREATE TABLE IF NOT EXISTS app_users (
-    clerk_user_id   text PRIMARY KEY,
-    email           text,
-    display_name    text,
-    approved        boolean NOT NULL DEFAULT false,
-    is_admin        boolean NOT NULL DEFAULT false,
-    first_seen_at   timestamptz NOT NULL DEFAULT now(),
-    last_seen_at    timestamptz NOT NULL DEFAULT now(),
-    activity_count  integer NOT NULL DEFAULT 0,
-    clerk_created_at      timestamptz,
-    clerk_last_sign_in_at timestamptz,
-    clerk_synced_at       timestamptz
-);
-
-ALTER TABLE app_users ADD COLUMN IF NOT EXISTS clerk_created_at      timestamptz;
-ALTER TABLE app_users ADD COLUMN IF NOT EXISTS clerk_last_sign_in_at timestamptz;
-ALTER TABLE app_users ADD COLUMN IF NOT EXISTS clerk_synced_at       timestamptz;
-ALTER TABLE app_users ADD COLUMN IF NOT EXISTS denied_at             timestamptz;
-
-CREATE INDEX IF NOT EXISTS app_users_email_idx ON app_users (lower(email));
-
-CREATE TABLE IF NOT EXISTS admin_audit_log (
-    id              bigserial PRIMARY KEY,
-    actor_user_id   text NOT NULL,
-    actor_email     text,
-    target_user_id  text NOT NULL,
-    target_email    text,
-    action          text NOT NULL,
-    before_value    jsonb,
-    after_value     jsonb,
-    created_at      timestamptz NOT NULL DEFAULT now()
-);
-
-CREATE INDEX IF NOT EXISTS admin_audit_log_target_idx
-    ON admin_audit_log (target_user_id, created_at DESC);
-"""
-
-
-_SCHEMA_READY = False
-
-
-async def ensure_schema() -> None:
-    """Historically created the admin tables on first request.
-
-    The schema is now owned by the Alembic baseline migration
-    (``0001_baseline``) which runs in the FastAPI lifespan before any
-    request is served. This function is kept as a no-op to preserve the
-    call sites in case a future change wants to reintroduce a
-    fallback path; calling it is cheap and never touches the DB.
-    """
-    global _SCHEMA_READY
-    _SCHEMA_READY = True
 
 
 # ---------------------------------------------------------------------------
@@ -126,7 +68,6 @@ async def upsert_seen_user(
     unavailable — callers must tolerate this since auth must keep
     working even with a degraded DB).
     """
-    await ensure_schema()
     bootstrap = _is_bootstrap_admin(email)
     try:
         async with db.acquire() as c:
@@ -176,7 +117,6 @@ async def get_user_row(clerk_user_id: str) -> dict[str, Any] | None:
 
 
 async def list_users() -> list[dict[str, Any]]:
-    await ensure_schema()
     try:
         async with db.acquire() as c:
             rows = await c.fetch(
@@ -290,7 +230,6 @@ def _from_clerk_ts(v: Any):
 
 
 async def get_user_detail(clerk_user_id: str) -> dict[str, Any] | None:
-    await ensure_schema()
     row = await get_user_row(clerk_user_id)
     if row is None:
         return None
@@ -468,7 +407,6 @@ async def set_denied(
     out of the operator's pending-requests panel. Records an audit row
     so the action shows up in the admin audit log.
     """
-    await ensure_schema()
     before_row = await _ensure_target_row(target_user_id)
     if before_row and before_row.get("is_admin"):
         raise AdminInvariantError(
@@ -530,7 +468,6 @@ async def clear_denied(
     ``approved`` / ``is_admin`` alone; the operator must still explicitly
     approve from the pending panel.
     """
-    await ensure_schema()
     before_row = await _ensure_target_row(target_user_id)
     before_denied = bool(before_row.get("denied_at")) if before_row else False
     try:
@@ -580,7 +517,6 @@ async def list_denied_access_requests() -> list[dict[str, Any]]:
     """Users who were previously denied by an operator. Most-recent
     denial first. Re-invite (``clear_denied``) brings them back into
     the pending requests panel."""
-    await ensure_schema()
     try:
         async with db.acquire() as c:
             rows = await c.fetch(
@@ -614,7 +550,6 @@ async def list_pending_access_requests() -> list[dict[str, Any]]:
     """Users who have signed in but are still waiting for an operator
     to approve them. Denied users drop out — re-signing in or a manual
     DB clear of ``denied_at`` brings them back."""
-    await ensure_schema()
     try:
         async with db.acquire() as c:
             rows = await c.fetch(
@@ -671,7 +606,6 @@ async def _set_flag(
     action: str,
     clerk_metadata_key: str,
 ) -> dict[str, Any]:
-    await ensure_schema()
     before_row = await _ensure_target_row(target_user_id)
     before_value = bool(before_row.get(column)) if before_row else False
     # Promoting to admin implicitly approves; demoting from admin keeps
@@ -766,7 +700,6 @@ async def list_audit_log_actions() -> list[str]:
 
     Used by the admin console to populate the action-filter dropdown.
     """
-    await ensure_schema()
     try:
         async with db.acquire() as c:
             rows = await c.fetch(
@@ -793,7 +726,6 @@ async def list_audit_log(
     by whatever the operator types in. ``action`` is an exact match on
     the ``action`` column (the UI offers a dropdown of known values).
     """
-    await ensure_schema()
     where: list[str] = []
     params: list[Any] = [limit, offset]
 

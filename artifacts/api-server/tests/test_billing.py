@@ -305,9 +305,8 @@ class _FakeConn:
 def fake_db(monkeypatch) -> _FakeDB:
     """Replace ``billing.db`` IO with the in-memory fake.
 
-    ``billing.ensure_schema`` is a no-op here — the fake doesn't need a
-    schema — but we still let it run once so the cached ``_schema_ready``
-    flag matches the production code path on every test.
+    The Stripe schema is owned by the Alembic baseline migration, so the
+    in-memory fake does not need to bootstrap any tables itself.
     """
     db_obj = _FakeDB()
 
@@ -321,10 +320,6 @@ def fake_db(monkeypatch) -> _FakeDB:
 
     monkeypatch.setattr(billing.db, "acquire", _fake_acquire)
     monkeypatch.setattr(billing.db, "fetchrow", _fake_fetchrow)
-
-    # Reset the module-level "schema already created" flag so each test
-    # exercises ``ensure_schema`` against the fresh fake.
-    billing._schema_ready = False
 
     # Make sure no real Stripe key leaks in from the host env.
     monkeypatch.setenv("STRIPE_SECRET_KEY", "sk_test_dummy")

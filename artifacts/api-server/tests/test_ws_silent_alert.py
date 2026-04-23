@@ -37,11 +37,6 @@ def fake_pipe(monkeypatch: pytest.MonkeyPatch) -> _FakeDedupe:
     fake = _FakeDedupe()
     monkeypatch.setattr(_db, "fetchrow", fake.fetchrow)
 
-    async def _noop_ensure() -> None:
-        return None
-
-    monkeypatch.setattr(_alerts, "_ensure_dedupe_table", _noop_ensure)
-
     def _fake_dispatch(subject: str, text_body: str, *, tag: str, dry_run: bool):
         fake.dispatched.append({"subject": subject, "body": text_body, "tag": tag})
         return {"tag": tag, "dispatched": True}

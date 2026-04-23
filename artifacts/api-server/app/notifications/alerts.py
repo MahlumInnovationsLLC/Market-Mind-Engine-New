@@ -70,10 +70,6 @@ _TAG_TO_USER_PREF: dict[str, str] = {
 # ---------------------------------------------------------------------------
 
 
-_dedupe_table_ready = False
-_dedupe_lock = asyncio.Lock()
-
-
 # In-memory counter of how many alert dispatches were dropped by the
 # dedupe layer, keyed by `alert_type`.  Resets on process restart —
 # exposed via `/api/notifications/status` so operators can tell
@@ -89,12 +85,6 @@ def suppression_counts() -> dict[str, int]:
 def reset_suppression_counts() -> None:
     """Test helper — wipe the in-memory counter."""
     _suppression_counts.clear()
-
-
-async def _ensure_dedupe_table() -> None:
-    """Schema is now owned by the Alembic baseline migration; no-op."""
-    global _dedupe_table_ready
-    _dedupe_table_ready = True
 
 
 def _compose_key(alert_type: str, dedupe_key: str) -> str:
@@ -117,7 +107,6 @@ async def dedupe_or_skip(
     halt/drift alert.
     """
     full_key = _compose_key(alert_type, dedupe_key)
-    await _ensure_dedupe_table()
     from .. import db
     try:
         row = await db.fetchrow(

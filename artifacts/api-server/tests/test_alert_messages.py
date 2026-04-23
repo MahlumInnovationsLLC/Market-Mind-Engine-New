@@ -417,11 +417,6 @@ class _FakeDedupeStore:
 def dedupe_store(monkeypatch: pytest.MonkeyPatch) -> _FakeDedupeStore:
     store = _FakeDedupeStore()
     monkeypatch.setattr(_db, "fetchrow", store.fetchrow)
-
-    async def _noop_ensure() -> None:
-        return None
-
-    monkeypatch.setattr(_alerts, "_ensure_dedupe_table", _noop_ensure)
     _alerts.reset_suppression_counts()
     return store
 

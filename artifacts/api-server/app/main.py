@@ -2629,14 +2629,6 @@ async def health_errors(
     }
 
 
-_ALERT_SCHEMA_READY = True  # owned by Alembic baseline migration
-
-
-async def _ensure_alert_schema() -> None:
-    """Schema is now owned by the Alembic baseline migration; no-op."""
-    return None
-
-
 @app.get("/api/health/model-alerts")
 async def list_model_health_alerts(
     ack: bool = False,
@@ -2650,7 +2642,6 @@ async def list_model_health_alerts(
     `ack=true` returns the full recent log including acknowledged + snoozed
     rows for audit purposes.
     """
-    await _ensure_alert_schema()
     lim = max(1, min(500, int(limit)))
     pool = await db.get_pool()
     if ack:
@@ -2758,7 +2749,6 @@ async def ack_model_health_alert(
     acknowledged.  With `snooze_minutes`, the alert is hidden from the
     open list until that many minutes have elapsed.
     """
-    await _ensure_alert_schema()
     _, email = await check_approval(user)
     operator = email or user.user_id
     snooze_minutes = body.snooze_minutes if body is not None else None

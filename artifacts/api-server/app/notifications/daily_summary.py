@@ -67,11 +67,6 @@ _DEDUPE_GC_RETAIN_DAYS = 7
 _DEDUPE_KEY = "daily_pnl_summary"
 
 
-async def _ensure_dedupe_table() -> None:
-    """Schema is now owned by the Alembic baseline migration; no-op."""
-    return None
-
-
 async def _get_last_sent_date() -> str | None:
     try:
         row = await db.fetchrow(
@@ -458,7 +453,6 @@ async def start() -> None:
         return
     if _task and not _task.done():
         return
-    await _ensure_dedupe_table()
     _stop.clear()
     _task = asyncio.create_task(_loop(), name="daily-summary")
 

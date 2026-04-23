@@ -13,22 +13,11 @@ Sources of suppression:
 """
 from __future__ import annotations
 
-import asyncio
 import logging
 from typing import Any
 
 
 log = logging.getLogger("axiom.notifications.suppression")
-
-
-_table_ready = False
-_lock = asyncio.Lock()
-
-
-async def ensure_table() -> None:
-    """Schema is now owned by the Alembic baseline migration; no-op."""
-    global _table_ready
-    _table_ready = True
 
 
 def _norm(email: str) -> str:
@@ -38,7 +27,6 @@ def _norm(email: str) -> str:
 async def is_suppressed(email: str) -> bool:
     if not email:
         return False
-    await ensure_table()
     from .. import db
     try:
         row = await db.fetchval(
@@ -56,7 +44,6 @@ async def is_suppressed(email: str) -> bool:
 async def suppress(email: str, reason: str, detail: str | None = None) -> bool:
     if not email:
         return False
-    await ensure_table()
     from .. import db
     try:
         await db.execute(
@@ -80,7 +67,6 @@ async def suppress(email: str, reason: str, detail: str | None = None) -> bool:
 async def unsuppress(email: str) -> bool:
     if not email:
         return False
-    await ensure_table()
     from .. import db
     try:
         await db.execute(
@@ -94,7 +80,6 @@ async def unsuppress(email: str) -> bool:
 
 
 async def list_recent(limit: int = 100) -> list[dict[str, Any]]:
-    await ensure_table()
     from .. import db
     try:
         rows = await db.fetch(

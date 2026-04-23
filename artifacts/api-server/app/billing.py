@@ -126,22 +126,6 @@ def _resolve_price(price_id: str) -> PriceConfig | None:
 
 
 # ---------------------------------------------------------------------------
-# Database schema bootstrap (idempotent)
-# ---------------------------------------------------------------------------
-
-
-_SCHEMA_LOCK = asyncio.Lock()
-_schema_ready = False
-
-
-async def ensure_schema() -> None:
-    """Schema is now owned by the Alembic baseline migration; this is a
-    no-op kept for call-site compatibility with the rest of the app."""
-    global _schema_ready
-    _schema_ready = True
-
-
-# ---------------------------------------------------------------------------
 # Tier resolution
 # ---------------------------------------------------------------------------
 
@@ -194,7 +178,6 @@ async def get_user_subscription(user: AuthedUser) -> UserSubscription:
     Founder bypass is checked first so the founder/operator console
     works even if the ``subscriptions`` table is empty.
     """
-    await ensure_schema()
     email = await _resolve_email(user)
     is_founder = bool(email and email in _founder_emails())
 
@@ -309,7 +292,6 @@ async def _ensure_customer(user: AuthedUser, sub: UserSubscription) -> str:
     """
     if sub.stripe_customer_id:
         return sub.stripe_customer_id
-    await ensure_schema()
     async with db.acquire() as conn:
         async with conn.transaction():
             # Ensure a row exists so SELECT FOR UPDATE can lock it.
@@ -528,7 +510,6 @@ def public_pricing_catalog() -> dict[str, Any]:
 
 async def _is_duplicate_event(event_id: str) -> bool:
     """Return True if this event id has already been successfully processed."""
-    await ensure_schema()
     try:
         async with db.acquire() as conn:
             row = await conn.fetchval(
@@ -549,7 +530,6 @@ async def _mark_event_processed(
     On unique-violation we silently no-op (a parallel webhook won the
     race and processed the same event).
     """
-    await ensure_schema()
     try:
         async with db.acquire() as conn:
             await conn.execute(
@@ -648,7 +628,6 @@ async def _apply_subscription(sub_obj: dict[str, Any]) -> None:
     else:
         tier = TIER_FREE
 
-    await ensure_schema()
     # Resolve the prior state so we can fire transition-based alerts
     # (tier change, will-cancel, cancelled) without spamming on every
     # webhook redelivery.  Read before the upsert so the comparison is
@@ -889,7 +868,6 @@ async def _apply_invoice(invoice: dict[str, Any], paid: bool) -> None:
     if not (sub_id or customer_id):
         return
     new_status = "active" if paid else "past_due"
-    await ensure_schema()
     async with db.acquire() as conn:
         if sub_id:
             await conn.execute(

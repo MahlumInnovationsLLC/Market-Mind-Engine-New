@@ -127,3 +127,27 @@ into the same Elo tables. It's disabled by default — opt in with:
 When disabled the feed still appears in `/api/feeds/status` with
 `skipped_reason="AXIOM_TEAM_ELO_AUTOSEED not set"` so operators can see
 the gap.
+
+## Database migrations (Alembic)
+
+All schema is owned by Alembic revisions under `migrations/versions/`.
+The FastAPI lifespan runs `alembic upgrade head` on startup (see
+`app/migrations.py`) before any request is served, so request-time
+`CREATE TABLE` / `ALTER TABLE` patterns are not allowed.
+
+To add a new schema change:
+
+1. Create a new revision file `migrations/versions/NNNN_<short_slug>.py`,
+   numbered after the current head (`alembic heads` to check).
+2. Set `revision = "NNNN_<slug>"` and `down_revision = "<previous head>"`.
+3. Put the DDL in an `upgrade()` function — prefer `op.execute(...)` with
+   plain SQL using `IF (NOT) EXISTS` guards so the migration is safe to
+   re-run against environments where part of the schema already exists.
+4. Leave `downgrade()` raising `NotImplementedError` unless the change
+   is intentionally reversible (matches the project policy on
+   destructive down-migrations).
+5. Run `pytest` — the migration will be applied to the test DB on the
+   next boot of the app.
+
+Do **not** introduce new `ensure_schema` / `ensure_table` helpers in the
+app code; the lazy-DDL pattern was retired in task #134.

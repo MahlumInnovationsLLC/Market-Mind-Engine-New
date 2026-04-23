@@ -29,16 +29,6 @@ from . import postmark
 log = logging.getLogger("axiom.notifications.churn")
 
 
-_table_ready = False
-_lock = asyncio.Lock()
-
-
-async def ensure_table() -> None:
-    """Schema is now owned by the Alembic baseline migration; no-op."""
-    global _table_ready
-    _table_ready = True
-
-
 async def record(
     *,
     event_type: str,
@@ -48,7 +38,6 @@ async def record(
     email_sent: bool = False,
     skipped_reason: str | None = None,
 ) -> None:
-    await ensure_table()
     from .. import db
     try:
         await db.execute(
@@ -75,7 +64,6 @@ async def record(
 
 async def collect_digest(hours: int = 24) -> dict[str, Any]:
     """Aggregate the last `hours` of churn events."""
-    await ensure_table()
     from .. import db
     out: dict[str, Any] = {
         "window_hours": hours,
@@ -271,7 +259,6 @@ async def start() -> None:
         return
     if _task and not _task.done():
         return
-    await ensure_table()
     _stop.clear()
     _task = asyncio.create_task(_loop(), name="churn-digest")
 

@@ -41,8 +41,6 @@ _ENTITLEMENT_ELITE = "elite"
 
 _PROVIDER = "revenuecat"
 
-_schema_ready = False
-
 
 # ---------------------------------------------------------------------------
 # Delivery audit + alert thresholds (task #252)
@@ -192,12 +190,6 @@ async def _maybe_alert_failure_spike() -> None:
         )
     except Exception as e:  # pragma: no cover — alerting must not break the webhook
         log.warning("rc webhook failure alert dispatch failed: %s", e)
-
-
-async def ensure_schema() -> None:
-    """Schema is now owned by the Alembic baseline migration; no-op."""
-    global _schema_ready
-    _schema_ready = True
 
 
 def _ms_to_dt(ms: Any) -> datetime | None:
@@ -376,8 +368,6 @@ async def _apply_event(event: dict[str, Any]) -> None:
         else (_ENTITLEMENT_PRO if _ENTITLEMENT_PRO in entitlement_ids else None)
     )
 
-    await ensure_schema()
-    await billing.ensure_schema()
     async with db.acquire() as conn:
         # 1. Raw mirror
         await conn.execute(

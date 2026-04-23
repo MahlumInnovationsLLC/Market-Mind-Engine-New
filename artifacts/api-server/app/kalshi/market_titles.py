@@ -32,24 +32,6 @@ log = logging.getLogger(__name__)
 
 _HOT_CACHE: dict[str, str] = {}
 _HOT_LOCK = asyncio.Lock()
-_SCHEMA_READY = False
-_SCHEMA_LOCK = asyncio.Lock()
-
-_SCHEMA_SQL = """
-CREATE TABLE IF NOT EXISTS market_title_cache (
-    ticker      text PRIMARY KEY,
-    title       text NOT NULL,
-    fetched_at  timestamptz NOT NULL DEFAULT now()
-);
-
-ALTER TABLE trades ADD COLUMN IF NOT EXISTS market_title text;
-"""
-
-
-async def ensure_schema() -> None:
-    """Schema is now owned by the Alembic baseline migration; no-op."""
-    global _SCHEMA_READY
-    _SCHEMA_READY = True
 
 
 def _clean_tickers(tickers: Iterable[str]) -> list[str]:
@@ -161,7 +143,6 @@ async def resolve_titles(tickers: Iterable[str]) -> dict[str, str]:
     if not missing:
         return out
 
-    await ensure_schema()
     db_hits = await _load_from_db(missing)
     for t, title in db_hits.items():
         out[t] = title

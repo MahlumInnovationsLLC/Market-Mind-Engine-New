@@ -78,11 +78,11 @@ class _Harness:
 def harness(monkeypatch: pytest.MonkeyPatch) -> _Harness:
     h = _Harness()
 
-    # Schema bootstraps — no real DB.
+    # push.ensure_schema is still real DDL bootstrap; stub it so the
+    # in-memory test harness doesn't try to talk to a real database.
     async def _noop_ensure() -> None:
         return None
 
-    monkeypatch.setattr(_alerts, "_ensure_dedupe_table", _noop_ensure)
     monkeypatch.setattr(_push, "ensure_schema", _noop_ensure)
 
     monkeypatch.setattr(_db, "fetchrow", h.fetchrow)

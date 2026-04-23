@@ -4,8 +4,7 @@ These verify that a webhook re-delivery, settlement re-run, fill
 re-broadcast, or process restart does NOT cause the same operator
 email to fire twice within the configured TTL window.
 
-The asyncpg pool is never opened — `app.notifications.alerts._ensure_dedupe_table`
-is monkey-patched to a no-op and `app.db.fetchrow` is replaced with a
+The asyncpg pool is never opened — `app.db.fetchrow` is replaced with a
 small in-memory implementation that mimics the
 `INSERT ... ON CONFLICT ... WHERE expires_at <= now()` semantics.
 """
@@ -56,11 +55,6 @@ def fake_store(monkeypatch: pytest.MonkeyPatch) -> _FakeDedupeStore:
     store = _FakeDedupeStore()
     monkeypatch.setattr(_db, "fetchrow", store.fake_fetchrow)
     monkeypatch.setattr(_db, "execute", store.fake_execute)
-
-    async def _noop_ensure() -> None:
-        return None
-
-    monkeypatch.setattr(_alerts, "_ensure_dedupe_table", _noop_ensure)
 
     # Capture every dispatch (instead of actually queueing email).
     def _fake_dispatch(subject: str, text_body: str, *, tag: str, dry_run: bool):
@@ -361,10 +355,6 @@ def test_gc_expired_dedupe_drops_only_expired_rows(
             return len(rows)
         raise AssertionError(f"unexpected query: {query}")
 
-    async def _noop_ensure() -> None:
-        return None
-
-    monkeypatch.setattr(_alerts, "_ensure_dedupe_table", _noop_ensure)
     monkeypatch.setattr(_db, "fetchval", fake_fetchval)
 
     out = asyncio.run(_alerts.gc_expired_dedupe(older_than_days=7))
@@ -391,10 +381,6 @@ def test_dedupe_fails_open_on_db_error(monkeypatch: pytest.MonkeyPatch) -> None:
     async def boom(*_a: Any, **_kw: Any) -> Any:
         raise RuntimeError("db gone")
 
-    async def _noop_ensure() -> None:
-        return None
-
-    monkeypatch.setattr(_alerts, "_ensure_dedupe_table", _noop_ensure)
     monkeypatch.setattr(_db, "fetchrow", boom)
 
     async def go() -> None:
