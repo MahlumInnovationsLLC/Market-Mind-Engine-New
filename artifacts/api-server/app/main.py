@@ -188,6 +188,11 @@ async def lifespan(_: FastAPI):
         except Exception as e:
             log.warning("sportradar extra feed registration failed: %s", e)
         try:
+            from .feeds.team_elo_seed import register_team_elo_seed_feed
+            register_team_elo_seed_feed()
+        except Exception as e:
+            log.warning("team_elo_seed feed registration failed: %s", e)
+        try:
             register_unusual_whales_feeds()
         except Exception as e:
             log.warning("unusual_whales feed registration failed: %s", e)

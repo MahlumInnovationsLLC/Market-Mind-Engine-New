@@ -75,3 +75,55 @@ events on the bus, and prints the resulting record. Kalshi is never called.
    it even when downstream auth is broken.
 
 Resume with `POST /api/kalshi/resume` (token-gated).
+
+## Seed team Elo ratings from 5 years of history
+
+`app.elo` ships with `seed_from_history()` which replays a chronological
+stream of finished games into `team_elo` / `team_elo_history`. Until that
+runs, every team starts at the default 1500 and `get_team_features()`
+returns identical numbers for both sides — i.e. the Elo signal is noise.
+
+`scripts/seed_team_elo.py` is the one-shot loader. It accepts any
+combination of input sources, de-duplicates them by `(league, game_id)`,
+sorts chronologically, and replays through `seed_from_history`. Re-runs
+are safe — duplicates are short-circuited by the unique index on
+`team_elo_history`.
+
+```bash
+cd artifacts/api-server
+
+# Primary path: 5 years of operator-supplied results
+python scripts/seed_team_elo.py --csv historical_games.csv
+
+# Top-up from finished rows already cached locally in `games`
+python scripts/seed_team_elo.py --from-db
+
+# Top-up from The Odds API /scores (free tier returns up to 3 days;
+# paid plans extend the window — pass any --days value)
+python scripts/seed_team_elo.py --from-the-odds-api --days 3
+```
+
+CSV columns (header required):
+`league,home_team,away_team,home_score,away_score,game_id,played_at`.
+Use league codes that match the K-factor table (`NBA`, `NFL`, `NHL`,
+`MLB`, `NCAAB`, `MLS`, `EPL`, `LALIGA`, `SERIEA`, `BUNDES`, `LIGUE1`,
+`UCL`, or generic `Soccer`).
+
+After the script exits, `team_elo` and `team_elo_history` are populated
+and `app.elo.get_team_features()` returns non-default ratings.
+
+### Recurring top-up
+
+`app/feeds/team_elo_seed.py` registers a `team_elo_seed` feed in the
+scheduler that replays newly-finished rows from the local `games` table
+into the same Elo tables. It's disabled by default — opt in with:
+
+| Var | Default | Purpose |
+| --- | --- | --- |
+| `AXIOM_TEAM_ELO_AUTOSEED` | unset | Set to `1` to enable the periodic top-up. |
+| `AXIOM_TEAM_ELO_AUTOSEED_CADENCE` | `86400` | Seconds between runs (min 60). |
+| `AXIOM_TEAM_ELO_AUTOSEED_HOURS` | `48` | Look-back window for `games.scheduled_start`. |
+
+When disabled the feed still appears in `/api/feeds/status` with
+`skipped_reason="AXIOM_TEAM_ELO_AUTOSEED not set"` so operators can see
+the gap.
