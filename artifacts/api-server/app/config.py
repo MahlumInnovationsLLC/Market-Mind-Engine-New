@@ -160,6 +160,23 @@ class Settings:
     # (dev / CI default). Per task #111.
     telegram_bot_token: str | None
 
+    # LLM provider fallback-rate spike alert (task #145). The swarm
+    # transparently fails over from each persona's primary provider to
+    # its configured backup; a sustained outage on one provider would
+    # otherwise be invisible because debates still complete on the
+    # backup. The monitor periodically reads the `fallback_used` /
+    # `primary_provider` flags written into `llm_predictions.metadata`
+    # and raises an operator alert when the per-provider fallback rate
+    # crosses `_threshold_pct` over the trailing `_window_minutes`.
+    # `_min_samples` guards against false positives from a single
+    # transient blip; `_interval_seconds` is the check cadence; and
+    # `_enabled` lets ops mute the monitor without redeploying.
+    llm_fallback_alert_enabled: bool
+    llm_fallback_alert_threshold_pct: float
+    llm_fallback_alert_window_minutes: int
+    llm_fallback_alert_min_samples: int
+    llm_fallback_alert_interval_seconds: int
+
     # Server
     port: int
 
@@ -298,6 +315,21 @@ def get_settings() -> Settings:
         model_cache_max_bytes=resolve_model_cache_max_bytes(),
         manifest_public_key=(os.environ.get("AXIOM_MANIFEST_PUBLIC_KEY") or "").strip() or None,
         telegram_bot_token=(os.environ.get("TELEGRAM_BOT_TOKEN") or "").strip() or None,
+        llm_fallback_alert_enabled=_truthy(
+            os.environ.get("AXIOM_LLM_FALLBACK_ALERT_ENABLED"), default=True
+        ),
+        llm_fallback_alert_threshold_pct=max(
+            0.0, float(os.environ.get("AXIOM_LLM_FALLBACK_ALERT_THRESHOLD_PCT") or "25")
+        ),
+        llm_fallback_alert_window_minutes=max(
+            1, int(os.environ.get("AXIOM_LLM_FALLBACK_ALERT_WINDOW_MINUTES") or "15")
+        ),
+        llm_fallback_alert_min_samples=max(
+            1, int(os.environ.get("AXIOM_LLM_FALLBACK_ALERT_MIN_SAMPLES") or "8")
+        ),
+        llm_fallback_alert_interval_seconds=max(
+            10, int(os.environ.get("AXIOM_LLM_FALLBACK_ALERT_INTERVAL_SECONDS") or "120")
+        ),
         port=int(os.environ.get("PORT", "8080")),
         cors_origins=cors_origins,
     )

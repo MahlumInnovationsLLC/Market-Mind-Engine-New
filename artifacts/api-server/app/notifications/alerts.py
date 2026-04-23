@@ -1039,6 +1039,66 @@ def rc_webhook_silence(
 
 
 # ---------------------------------------------------------------------------
+# LLM provider fallback-rate spike (task #145)
+# ---------------------------------------------------------------------------
+
+
+def provider_fallback_spike(
+    *,
+    provider: str,
+    fallback_rate: float,
+    threshold: float,
+    fallback_count: int,
+    sample_count: int,
+    window_minutes: int,
+    sample_reasons: list[str] | None = None,
+    dry_run: bool = False,
+) -> dict[str, Any]:
+    """Operator alert: one LLM provider's fallback rate has spiked.
+
+    Fired by the swarm fallback-rate monitor when, over the trailing
+    `window_minutes`, more than `threshold` fraction of persona calls
+    whose primary provider == `provider` had to fall back to the backup.
+    Caller is responsible for dedupe (use `dedupe_or_skip` keyed on
+    `provider` with a TTL >= window so we don't page once per debate).
+    """
+    pct = fallback_rate * 100.0
+    threshold_pct = threshold * 100.0
+    subject = (
+        f"[axiom][LLM-FALLBACK] {provider} fallback rate {pct:.1f}% "
+        f"(>{threshold_pct:.0f}% over {window_minutes}m)"
+    )
+    reasons_block = ""
+    if sample_reasons:
+        reasons_block = "\nRecent fallback reasons:\n" + "".join(
+            f"  - {r}\n" for r in sample_reasons[:5]
+        )
+    body = (
+        f"The swarm has been failing over from {provider} to its backup "
+        "provider on a sustained basis. Debates are still completing "
+        "(transparently, on the backup), so this would otherwise be "
+        "invisible. Investigate provider health, rate limits, and "
+        "credentials before the bias / cost impact compounds.\n\n"
+        + _format_lines(
+            [
+                ("provider", provider),
+                ("fallback_rate", f"{pct:.2f}%"),
+                ("threshold", f"{threshold_pct:.2f}%"),
+                ("fallback_calls", fallback_count),
+                ("total_calls", sample_count),
+                ("window_minutes", window_minutes),
+                ("at", _utc_now_iso()),
+            ]
+        )
+        + "\n"
+        + reasons_block
+    )
+    return _dispatch(
+        subject, body, tag="llm-fallback-spike", dry_run=dry_run
+    )
+
+
+# ---------------------------------------------------------------------------
 # Pending teammate approval
 # ---------------------------------------------------------------------------
 

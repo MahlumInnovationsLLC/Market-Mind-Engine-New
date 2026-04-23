@@ -322,6 +322,15 @@ async def lifespan(_: FastAPI):
         await rc_billing.start()
     except Exception as e:
         log.warning("rc webhook silence loop start failed: %s", e)
+    # Per-provider LLM fallback-rate spike monitor (task #145). Reads
+    # `fallback_used` / `primary_provider` from `llm_predictions.metadata`
+    # and pages when either provider's fallback rate exceeds the
+    # configured threshold over the trailing window.
+    try:
+        from .swarm import fallback_monitor as _fallback_monitor
+        await _fallback_monitor.start()
+    except Exception as e:
+        log.warning("LLM fallback monitor start failed: %s", e)
     try:
         await notif_churn.start()
     except Exception as e:
@@ -445,6 +454,11 @@ async def lifespan(_: FastAPI):
             await rc_billing.stop()
         except Exception as e:
             log.warning("rc webhook silence loop stop error: %s", e)
+        try:
+            from .swarm import fallback_monitor as _fallback_monitor
+            await _fallback_monitor.stop()
+        except Exception as e:
+            log.warning("LLM fallback monitor stop error: %s", e)
         try:
             await notif_churn.stop()
         except Exception as e:
