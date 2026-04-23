@@ -12,6 +12,7 @@ import SwarmTranscript, { useSwarmTranscript } from "@/components/swarm-transcri
 import PipelineFlowchart from "@/components/pipeline/pipeline-flowchart";
 import ConsoleTail from "@/components/pipeline/console-tail";
 import TradeTrainTicker from "@/components/pipeline/trade-train-ticker";
+import BackfillPanel from "@/components/pipeline/backfill-panel";
 
 /**
  * Pipeline-page-local rolling buffer of pipeline-WS frames. The
@@ -647,6 +648,8 @@ export default function PipelinePage() {
       <TradeTrainTicker />
 
       <PipelineFlowchart />
+
+      <BackfillPanel />
 
       <div className="flex items-center justify-between text-[10px] uppercase tracking-widest text-muted-foreground">
         <span>
