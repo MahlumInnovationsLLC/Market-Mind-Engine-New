@@ -46,7 +46,64 @@ log = logging.getLogger(__name__)
 
 Side = Literal["yes", "no"]
 Action = Literal["buy", "sell"]
-EventType = Literal["submitted", "resting", "filled", "canceled", "rejected", "settled"]
+EventType = Literal[
+    "submitted", "resting", "filled", "canceled", "rejected", "settled",
+    "submit_failed",
+]
+
+
+# --- submit-recovery counters (surfaced on /api/health/snapshot) ---------
+#
+# A live ``POST /portfolio/orders`` is intentionally single-shot so we never
+# risk a double-submit. But a network timeout / 5xx leaves the order in an
+# unknown state. The recovery path (see ``submit_order``) asks Kalshi for
+# the order by ``client_order_id`` and applies venue truth locally. These
+# counters give operators a read on how often that path fires and how
+# often it actually recovers a real order.
+_submit_recovery: dict[str, int | str | float | None] = {
+    "attempts": 0,              # recovery path entered
+    "recovered_total": 0,       # venue had the order (resting / filled / canceled)
+    "recovered_resting": 0,
+    "recovered_filled": 0,
+    "recovered_canceled": 0,
+    "not_found": 0,             # venue did not accept the order
+    "lookup_failed": 0,         # lookup itself raised — safe retry next cycle
+    "last_attempt_at": None,
+    "last_outcome": None,       # str
+    "last_error": None,         # str
+}
+
+
+def submit_recovery_state() -> dict[str, Any]:
+    """JSON-safe copy of the submit-recovery counters for health snapshots."""
+    return dict(_submit_recovery)
+
+
+def _reset_submit_recovery_state() -> None:
+    """Test helper — clears every counter."""
+    _submit_recovery.update(
+        {
+            "attempts": 0,
+            "recovered_total": 0,
+            "recovered_resting": 0,
+            "recovered_filled": 0,
+            "recovered_canceled": 0,
+            "not_found": 0,
+            "lookup_failed": 0,
+            "last_attempt_at": None,
+            "last_outcome": None,
+            "last_error": None,
+        }
+    )
+
+
+# HTTP statuses that make the submit POST outcome ambiguous (venue may
+# have accepted the order or may not have). 408 = client timeout, 429 =
+# rate limit (transport-level retry is safe because the first request
+# may never have reached the matching engine), 5xx = server trouble.
+# status == 0 is our synthetic "network error" mapping from
+# KalshiAPIError when httpx raises before a response arrives.
+_RECOVERABLE_SUBMIT_STATUSES = frozenset({0, 408, 429, 500, 502, 503, 504})
 
 
 __all__ = [
@@ -330,6 +387,23 @@ async def submit_order(req: OrderRequest, *, force_paper: bool | None = None) ->
         async with kalshi_client.KalshiClient(settings=s) as c:
             ack = await c.submit_order(req.to_kalshi_payload())
     except Exception as e:
+        # Distinguish "venue definitely rejected us" (terminal 4xx) from
+        # "we don't know whether the venue accepted the order"
+        # (timeout / 5xx / transport error). The latter is recoverable
+        # via ``client_order_id`` lookup; the former is terminal.
+        if _is_recoverable_submit_error(e):
+            rec_state = await _attempt_submit_recovery(req, record, exc=e, settings=s)
+            if rec_state is not None:
+                return rec_state
+            # Fell through: venue does not have the order, OR the
+            # lookup itself failed. The `submit_failed` row has already
+            # been recorded and emitted by the helper; raise so the
+            # caller knows to treat this as a retry-next-cycle outcome
+            # rather than a permanent rejection.
+            raise OrderRejected(
+                f"Kalshi submit unresolved ({type(e).__name__}: {e}) — "
+                "venue has no record of this client_order_id"
+            ) from e
         record.state = "rejected"
         await _record(req, paper=False, state="rejected", price=req.limit_price_cents or 0,
                       extra={"reason": "exchange_reject", "error": str(e)[:500]})
@@ -345,6 +419,205 @@ async def submit_order(req: OrderRequest, *, force_paper: bool | None = None) ->
     await _record(req, paper=False, state="resting", price=req.limit_price_cents or 0,
                   extra={"exchange_order_id": record.exchange_order_id, "ack": order_obj})
     await _emit({"event": "resting", "order": record.to_dict()})
+    return record
+
+
+def _is_recoverable_submit_error(exc: BaseException) -> bool:
+    """True when a submit-POST failure leaves the venue state ambiguous.
+
+    KalshiAPIError with a status in ``_RECOVERABLE_SUBMIT_STATUSES`` is
+    the main case. Anything else is treated as terminal (4xx, auth
+    errors, programming errors) — those definitely did not result in an
+    accepted order at the venue.
+    """
+    from . import client as _kc  # local import to avoid cycle at module load
+    if isinstance(exc, _kc.KalshiAPIError):
+        return int(getattr(exc, "status", -1) or 0) in _RECOVERABLE_SUBMIT_STATUSES
+    return False
+
+
+async def _attempt_submit_recovery(
+    req: OrderRequest,
+    record: OrderRecord,
+    *,
+    exc: BaseException,
+    settings,
+) -> OrderRecord | None:
+    """Resolve an ambiguous submit POST via ``client_order_id`` lookup.
+
+    Returns the updated :class:`OrderRecord` when venue truth could be
+    applied locally (order is resting / filled / canceled). Returns
+    ``None`` when the order is not at the venue OR when the lookup
+    itself failed — the caller should raise ``OrderRejected`` so the
+    next cycle tries afresh. In either terminal case a
+    ``submit_failed`` lifecycle row has been recorded and emitted
+    before we return.
+    """
+    import time as _time
+    _submit_recovery["attempts"] = int(_submit_recovery["attempts"]) + 1  # type: ignore[arg-type]
+    _submit_recovery["last_attempt_at"] = _time.time()
+    err_str = f"{type(exc).__name__}: {exc}"[:300]
+
+    # Record the ambiguous POST outcome up front — regardless of what
+    # the lookup returns, operators should see the timeout / 5xx in the
+    # lifecycle audit trail.
+    await _record(
+        req, paper=False, state="submit_failed",
+        price=req.limit_price_cents or 0,
+        extra={"reason": "submit_ambiguous", "error": err_str},
+    )
+    await _emit({
+        "event": "submit_failed",
+        "order": record.to_dict(),
+        "error": err_str,
+    })
+
+    try:
+        async with kalshi_client.KalshiClient(settings=settings) as c:
+            result = await c.get_order_by_client_id(req.client_order_id)
+    except Exception as lookup_exc:  # noqa: BLE001 — counted + retried next cycle
+        _submit_recovery["lookup_failed"] = int(_submit_recovery["lookup_failed"]) + 1  # type: ignore[arg-type]
+        _submit_recovery["last_outcome"] = "lookup_failed"
+        _submit_recovery["last_error"] = f"{type(lookup_exc).__name__}: {lookup_exc}"[:300]
+        log.warning(
+            "submit recovery lookup failed for %s: %s",
+            req.client_order_id, lookup_exc,
+        )
+        return None
+
+    if not result.get("found"):
+        _submit_recovery["not_found"] = int(_submit_recovery["not_found"]) + 1  # type: ignore[arg-type]
+        _submit_recovery["last_outcome"] = "not_found"
+        _submit_recovery["last_error"] = err_str
+        log.warning(
+            "submit recovery: venue has no order for client_order_id=%s "
+            "(original error: %s)",
+            req.client_order_id, err_str,
+        )
+        return None
+
+    order = result.get("order") or {}
+    exchange_order_id = order.get("order_id") or order.get("id")
+    # Kalshi order statuses: resting, executed, canceled. Some responses
+    # nest under `order.status` as a string; others flatten. Be liberal.
+    venue_status = str(
+        order.get("status") or order.get("order_status") or ""
+    ).lower()
+
+    # Defensive: a "found" result without either an exchange id or a
+    # known status is not something we can safely promote. Treat the
+    # shape as malformed and fall back to not_found semantics so the
+    # caller retries on the next cycle instead of inventing local state.
+    _known_statuses = {
+        "resting", "open", "new",
+        "executed", "filled", "trade_done",
+        "canceled", "cancelled",
+    }
+    if not exchange_order_id and venue_status not in _known_statuses:
+        _submit_recovery["not_found"] = int(_submit_recovery["not_found"]) + 1  # type: ignore[arg-type]
+        _submit_recovery["last_outcome"] = "not_found_malformed"
+        _submit_recovery["last_error"] = (
+            f"malformed venue order: missing exchange id and unknown status "
+            f"{venue_status!r}"
+        )
+        log.warning(
+            "submit recovery: malformed venue order for %s: %r",
+            req.client_order_id, order,
+        )
+        return None
+    record.exchange_order_id = exchange_order_id
+
+    if venue_status in ("canceled", "cancelled"):
+        record.state = "canceled"
+        _submit_recovery["recovered_canceled"] = int(_submit_recovery["recovered_canceled"]) + 1  # type: ignore[arg-type]
+        _submit_recovery["recovered_total"] = int(_submit_recovery["recovered_total"]) + 1  # type: ignore[arg-type]
+        _submit_recovery["last_outcome"] = "recovered_canceled"
+        await _record(
+            req, paper=False, state="canceled",
+            price=req.limit_price_cents or 0,
+            extra={
+                "reason": "submit_recovered",
+                "exchange_order_id": exchange_order_id,
+                "venue_status": venue_status,
+                "original_error": err_str,
+            },
+        )
+        await _emit({"event": "canceled", "order": record.to_dict()})
+        log.info(
+            "submit recovery: client_order_id=%s -> canceled at venue",
+            req.client_order_id,
+        )
+        return record
+
+    if venue_status in ("executed", "filled", "trade_done"):
+        # Venue says the order is already done. We don't have individual
+        # fill detail here — the reconciler / WS replay will back-fill
+        # price and count via the idempotent order_fills table. Record a
+        # filled lifecycle row as the marker.
+        record.state = "filled"
+        # Prefer any price/count the venue volunteered (Kalshi sometimes
+        # includes `filled_count` and a weighted avg); otherwise fall
+        # back to the order's original limit so downstream observability
+        # has a non-zero number until the reconciler catches up.
+        filled_count = int(
+            order.get("filled_count")
+            or order.get("executed_count")
+            or req.count
+        )
+        avg_price = (
+            order.get("avg_fill_price")
+            or order.get("average_price")
+            or req.limit_price_cents
+            or 0
+        )
+        record.filled_count = filled_count
+        record.avg_fill_price_cents = int(avg_price or 0)
+        _submit_recovery["recovered_filled"] = int(_submit_recovery["recovered_filled"]) + 1  # type: ignore[arg-type]
+        _submit_recovery["recovered_total"] = int(_submit_recovery["recovered_total"]) + 1  # type: ignore[arg-type]
+        _submit_recovery["last_outcome"] = "recovered_filled"
+        await _record(
+            req, paper=False, state="filled",
+            price=int(avg_price or 0),
+            extra={
+                "reason": "submit_recovered",
+                "exchange_order_id": exchange_order_id,
+                "venue_status": venue_status,
+                "filled_count": filled_count,
+                "original_error": err_str,
+                "note": "fill detail will be back-filled by reconciler",
+            },
+        )
+        await _emit({"event": "filled", "order": record.to_dict()})
+        log.info(
+            "submit recovery: client_order_id=%s -> filled at venue (count=%d)",
+            req.client_order_id, filled_count,
+        )
+        return record
+
+    # Default: treat as resting (includes "resting", "open", "new", or
+    # any unrecognised-but-non-terminal state). Promote to the local
+    # resting book so cancel / fill routing works normally.
+    record.state = "resting"
+    async with _resting_lock:
+        _resting[record.order_id] = record
+    _submit_recovery["recovered_resting"] = int(_submit_recovery["recovered_resting"]) + 1  # type: ignore[arg-type]
+    _submit_recovery["recovered_total"] = int(_submit_recovery["recovered_total"]) + 1  # type: ignore[arg-type]
+    _submit_recovery["last_outcome"] = "recovered_resting"
+    await _record(
+        req, paper=False, state="resting",
+        price=req.limit_price_cents or 0,
+        extra={
+            "reason": "submit_recovered",
+            "exchange_order_id": exchange_order_id,
+            "venue_status": venue_status or "resting",
+            "original_error": err_str,
+        },
+    )
+    await _emit({"event": "resting", "order": record.to_dict()})
+    log.info(
+        "submit recovery: client_order_id=%s -> resting at venue (exo=%s)",
+        req.client_order_id, exchange_order_id,
+    )
     return record
 
 

@@ -333,6 +333,50 @@ def _probe_kalshi_reconciler() -> dict:
     )
 
 
+def _probe_submit_recovery() -> dict:
+    """Surface the order-submit recovery path (client_order_id lookup).
+
+    The submit POST is single-shot by design. When it returns a timeout
+    or 5xx we follow up with ``GET /portfolio/orders?client_order_id=``
+    to learn the venue's truth. The counters below tell operators how
+    often that path fires and whether it actually recovers real orders.
+
+    Status policy: ``ok`` when there have been no recent lookup
+    failures. ``degraded`` when the last recovery attempt ended in
+    ``lookup_failed`` (the *lookup itself* errored) because that means
+    the next cycle is flying a bit blind.
+    """
+    s = kalshi_lifecycle.submit_recovery_state()
+    attempts = int(s.get("attempts") or 0)
+    total = int(s.get("recovered_total") or 0)
+    not_found = int(s.get("not_found") or 0)
+    lookup_failed = int(s.get("lookup_failed") or 0)
+    last_outcome = s.get("last_outcome")
+    if attempts == 0:
+        status = "ok"
+        detail = "no submit-POST timeouts observed"
+    elif last_outcome == "lookup_failed":
+        status = "degraded"
+        detail = (
+            f"last lookup failed: {(s.get('last_error') or '')[:160]} "
+            f"(attempts={attempts}, recovered={total}, not_found={not_found})"
+        )
+    else:
+        status = "ok"
+        detail = (
+            f"attempts={attempts} recovered={total} not_found={not_found} "
+            f"lookup_failed={lookup_failed} last={last_outcome}"
+        )
+    return _card(
+        key="order_submit_recovery",
+        label="Order submit recovery",
+        category="passive",
+        status=status,
+        detail=detail,
+        extras={**s, "order_submit_recovered": total},
+    )
+
+
 def _probe_kill_switch() -> dict:
     state = kalshi_lifecycle.kill_switch_state()
     halted = bool(state.get("halted"))
@@ -752,6 +796,7 @@ async def _build_snapshot() -> _Snapshot:
         _probe_calibration(),
         _probe_ws_subscribers(),
         _probe_kalshi_reconciler(),
+        _probe_submit_recovery(),
         *_probe_feeds(),
     ]
     config = _probe_config()

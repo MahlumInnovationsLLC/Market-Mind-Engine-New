@@ -178,6 +178,55 @@ class KalshiClient:
     async def get_order(self, order_id: str) -> dict[str, Any]:
         return await self._request("GET", f"/portfolio/orders/{order_id}")
 
+    async def get_order_by_client_id(
+        self, client_order_id: str
+    ) -> dict[str, Any]:
+        """Look up an order by its caller-supplied ``client_order_id``.
+
+        Used by the submit-recovery path: when ``POST /portfolio/orders``
+        returns a timeout / 5xx, we don't know whether the venue accepted
+        the order. Every submit attaches a UUID ``client_order_id``, so
+        we can ask Kalshi "do you have an order with this id?" and apply
+        the venue's truth locally.
+
+        Returns ``{"found": bool, "order": dict|None}``. Never raises
+        the "not found" case — that's a normal outcome. Other HTTP
+        errors (auth, 5xx on the lookup itself, network) DO propagate
+        as :class:`KalshiAPIError` so the caller can decide to retry
+        next cycle vs. give up.
+
+        Kalshi's ``GET /portfolio/orders`` accepts a ``client_order_id``
+        query param and returns a list filtered to that id (0 or 1
+        matches). The shape is ``{"orders": [...]}``; older responses
+        wrap the single order in ``{"order": {...}}`` — handle both.
+        Uses the shared GET retry, so transient 5xx/network errors on
+        the lookup itself are retried before surfacing.
+        """
+        if not client_order_id:
+            return {"found": False, "order": None}
+        data = await self._request(
+            "GET",
+            "/portfolio/orders",
+            params={"client_order_id": client_order_id, "limit": 1},
+        )
+        body = data or {}
+        # Prefer the plural "orders" list; fall back to a singular key.
+        rows = body.get("orders")
+        if not isinstance(rows, list):
+            single = body.get("order") or body
+            rows = [single] if isinstance(single, dict) and single.get("order_id") else []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            # Strict match only: never promote an unrelated order, even if
+            # the venue returns a single row for some other reason. If the
+            # row doesn't carry our client_order_id we say "not found" and
+            # let the submit retry on the next cycle.
+            row_coid = row.get("client_order_id") or row.get("clientOrderId")
+            if row_coid == client_order_id:
+                return {"found": True, "order": row}
+        return {"found": False, "order": None}
+
     async def list_fills(
         self,
         *,
