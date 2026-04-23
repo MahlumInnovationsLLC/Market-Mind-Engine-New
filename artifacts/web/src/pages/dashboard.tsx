@@ -23,6 +23,7 @@ import RecentTrades from "@/components/telemetry/recent-trades";
 import TradingCycles from "@/components/telemetry/trading-cycles";
 import SwarmAnalysts from "@/components/telemetry/swarm-analysts";
 import SwarmPersonasToday from "@/components/telemetry/swarm-personas-today";
+import SwarmFallbacksToday from "@/components/telemetry/swarm-fallbacks-today";
 import SwarmDebates from "@/components/telemetry/swarm-debates";
 import VerticalPicker from "@/components/telemetry/vertical-picker";
 import ActiveModelBadge from "@/components/telemetry/active-model-badge";
@@ -185,6 +186,15 @@ export default function Dashboard() {
             <SwarmPersonasToday />
           </GlassCard>
         </div>
+
+        <GlassCard tone="solid" padding="md" data-testid="card-swarm-fallbacks-today">
+          <SectionHeader
+            eyebrow="SWARM"
+            title="Provider fallbacks today"
+            subtitle="Per-persona count of cross-provider LLM fallbacks (UTC). A spike means a primary model is failing."
+          />
+          <SwarmFallbacksToday />
+        </GlassCard>
 
         <OperatorControls isAdmin={isAdmin} />
       </div>

@@ -3150,6 +3150,20 @@ async def dashboard_swarm_personas_today(
     return await dashboard.get_swarm_personas_today()
 
 
+@app.get("/api/dashboard/swarm-fallbacks-today")
+async def dashboard_swarm_fallbacks_today(
+    _: object = Depends(require_approved_user),
+) -> dict[str, object]:
+    """Per-persona count of cross-provider LLM fallbacks today (UTC).
+
+    Operators use this to spot a primary provider that is silently
+    degrading: if a single persona's daily fallback count spikes, its
+    configured model is failing more often than usual even though the
+    swarm still produced an answer via the configured backup.
+    """
+    return await dashboard.get_swarm_fallbacks_today()
+
+
 @app.get("/api/market-title/{ticker}")
 async def market_title_lookup(
     ticker: str,

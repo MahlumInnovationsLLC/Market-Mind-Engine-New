@@ -403,6 +403,66 @@ def test_dashboard_swarm_personas_today_uses_shared_aggregator(
     assert out["items"][0]["persona_id"] == "sharp_edge"
 
 
+def test_dashboard_swarm_fallbacks_today_aggregates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The fallback panel surfaces a per-persona count + the most-recent
+    primary/fallback model + reason so operators can see at a glance
+    which configured providers are degrading."""
+    from app import dashboard
+
+    debates = [
+        {
+            "analyst_verdicts": [
+                {
+                    "persona": "sharp_edge",
+                    "provider": "anthropic",
+                    "model": "claude-sonnet",
+                    "primary_provider": "openai",
+                    "primary_model": "gpt-5",
+                    "fallback_used": True,
+                    "fallback_reason": "RateLimitError: 429",
+                },
+                {"persona": "risk_guardian", "fallback_used": False},
+            ],
+        },
+        {
+            # JSON-string form must also be parsed.
+            "analyst_verdicts": (
+                '[{"persona": "sharp_edge", "provider": "anthropic",'
+                ' "model": "claude-sonnet", "primary_provider": "openai",'
+                ' "primary_model": "gpt-5", "fallback_used": true,'
+                ' "fallback_reason": "ServerError: 503"}]'
+            ),
+        },
+    ]
+    fake = _FakeDB({"FROM swarm_debates": debates})
+    monkeypatch.setattr(dashboard, "db", fake)
+
+    out = _run(dashboard.get_swarm_fallbacks_today("2026-04-21"))
+    assert out["date_utc"] == "2026-04-21"
+    assert len(out["items"]) == 1
+    row = out["items"][0]
+    assert row["persona_id"] == "sharp_edge"
+    assert row["fallbacks"] == 2
+    assert row["primary_provider"] == "openai"
+    assert row["primary_model"] == "gpt-5"
+    assert row["fallback_provider"] == "anthropic"
+    assert row["fallback_model"] == "claude-sonnet"
+    # Most-recent reason wins (the JSON-string row is processed last).
+    assert row["last_reason"] == "ServerError: 503"
+
+
+def test_dashboard_swarm_fallbacks_today_no_events(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app import dashboard
+
+    monkeypatch.setattr(dashboard, "db", _FakeDB({"FROM swarm_debates": []}))
+    out = _run(dashboard.get_swarm_fallbacks_today("2026-04-21"))
+    assert out == {"date_utc": "2026-04-21", "items": []}
+
+
 def test_dashboard_swarm_personas_today_empty(monkeypatch: pytest.MonkeyPatch) -> None:
     from app import dashboard
 

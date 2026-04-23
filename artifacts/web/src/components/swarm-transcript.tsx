@@ -28,6 +28,13 @@ type PersonaState = {
     latency_ms: number | null;
     error: string | null;
   } | null;
+  fallback: {
+    fromProvider: string | null;
+    fromModel: string | null;
+    toProvider: string | null;
+    toModel: string | null;
+    reason: string | null;
+  } | null;
 };
 
 type DebateState = {
@@ -184,6 +191,7 @@ class SwarmTranscriptStore {
         text: "",
         status: "streaming",
         verdict: null,
+        fallback: null,
       };
       d.personas.set(persona, p);
       d.personaOrder.push(persona);
@@ -238,6 +246,26 @@ class SwarmTranscriptStore {
       p.text = p.text + text;
       // Surgical: only notify the persona's <pre>, not the parent.
       this.notifyPersonaText(debateId, persona, p.text);
+      return;
+    }
+
+    if (type === "persona_fallback") {
+      const persona = (raw["persona"] as string) ?? "?";
+      const p = this.ensurePersona(d, persona);
+      const fromObj = (raw["from"] as Record<string, unknown>) ?? {};
+      const toObj = (raw["to"] as Record<string, unknown>) ?? {};
+      p.fallback = {
+        fromProvider: typeof fromObj["provider"] === "string" ? (fromObj["provider"] as string) : null,
+        fromModel: typeof fromObj["model"] === "string" ? (fromObj["model"] as string) : null,
+        toProvider: typeof toObj["provider"] === "string" ? (toObj["provider"] as string) : null,
+        toModel: typeof toObj["model"] === "string" ? (toObj["model"] as string) : null,
+        reason: typeof raw["reason"] === "string" ? (raw["reason"] as string) : null,
+      };
+      // Surface the substitute model in the persona header right away.
+      if (p.fallback.toProvider) p.provider = p.fallback.toProvider;
+      if (p.fallback.toModel) p.model = p.fallback.toModel;
+      d.version += 1;
+      this.notifyDebate(debateId);
       return;
     }
 
@@ -371,7 +399,7 @@ function PersonaBlock({
     const d = store.getDebate(debateId);
     const p = d?.personas.get(persona);
     if (!p) return "0|||";
-    return `${d?.version ?? 0}|${p.status}|${p.verdict?.lean ?? ""}|${p.verdict?.probability ?? ""}|${p.display ?? ""}|${p.model ?? ""}`;
+    return `${d?.version ?? 0}|${p.status}|${p.verdict?.lean ?? ""}|${p.verdict?.probability ?? ""}|${p.display ?? ""}|${p.model ?? ""}|${p.fallback ? "fb" : ""}`;
   }, [store, debateId, persona]);
   useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
 
@@ -405,6 +433,15 @@ function PersonaBlock({
           )}
         </div>
         <div className="flex items-center gap-2 shrink-0">
+          {p?.fallback && (
+            <span
+              className="border border-warning/60 text-warning px-1 py-px text-[9px] tracking-widest"
+              data-testid={`persona-fallback-badge-${persona}`}
+              title={`Primary ${p.fallback.fromProvider ?? "?"}/${p.fallback.fromModel ?? "?"} failed; answered by ${p.fallback.toProvider ?? "?"}/${p.fallback.toModel ?? "?"}.${p.fallback.reason ? ` Reason: ${p.fallback.reason}` : ""}`}
+            >
+              FALLBACK
+            </span>
+          )}
           {lean && <span className={leanTone(lean)}>{lean}</span>}
           {typeof prob === "number" && (
             <span className="text-muted-foreground">{(prob * 100).toFixed(0)}%</span>

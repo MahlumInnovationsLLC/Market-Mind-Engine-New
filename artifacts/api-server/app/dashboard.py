@@ -5,6 +5,7 @@ doesn't take down the whole response.
 """
 from __future__ import annotations
 
+import json
 import logging
 from typing import Any
 
@@ -171,6 +172,81 @@ async def get_swarm_personas_today(date_utc: str | None = None) -> dict[str, Any
     except Exception as e:
         log.warning("swarm_personas_today failed: %s", e)
         items = []
+    return {"date_utc": date_utc, "items": items}
+
+
+async def get_swarm_fallbacks_today(date_utc: str | None = None) -> dict[str, Any]:
+    """Per-persona count of cross-provider fallbacks for ``date_utc``.
+
+    Walks today's ``swarm_debates.analyst_verdicts`` JSON and counts the
+    rows where ``fallback_used`` is true.  Each entry in the returned
+    ``items`` list also carries the most-recent ``primary_provider`` /
+    ``primary_model`` and an example ``last_reason`` string so operators
+    can see *why* the swap happened without opening a debate.
+
+    Returns ``{"date_utc": ..., "items": [...]}`` ordered by count desc.
+    Errors are swallowed and surface as an empty list — the rest of the
+    operator dashboard must not break when this query fails.
+    """
+    from datetime import datetime, timezone
+
+    if not date_utc:
+        date_utc = datetime.now(tz=timezone.utc).date().isoformat()
+    agg: dict[str, dict[str, Any]] = {}
+    try:
+        rows = await db.fetch(
+            """
+            SELECT analyst_verdicts
+              FROM swarm_debates
+             WHERE date_trunc('day', created_at AT TIME ZONE 'UTC') = $1::date
+            """,
+            date_utc,
+        )
+        for r in rows:
+            verdicts = r["analyst_verdicts"]
+            if isinstance(verdicts, str):
+                try:
+                    verdicts = json.loads(verdicts)
+                except Exception:
+                    continue
+            if not isinstance(verdicts, list):
+                continue
+            for v in verdicts:
+                if not isinstance(v, dict):
+                    continue
+                if not v.get("fallback_used"):
+                    continue
+                pid = v.get("persona") or v.get("analyst_id") or "?"
+                slot = agg.setdefault(
+                    pid,
+                    {
+                        "persona_id": pid,
+                        "fallbacks": 0,
+                        "primary_provider": v.get("primary_provider"),
+                        "primary_model": v.get("primary_model"),
+                        "fallback_provider": v.get("provider"),
+                        "fallback_model": v.get("model"),
+                        "last_reason": v.get("fallback_reason"),
+                    },
+                )
+                slot["fallbacks"] += 1
+                # Keep latest non-null fields.
+                for k_in, k_out in (
+                    ("primary_provider", "primary_provider"),
+                    ("primary_model", "primary_model"),
+                    ("provider", "fallback_provider"),
+                    ("model", "fallback_model"),
+                    ("fallback_reason", "last_reason"),
+                ):
+                    val = v.get(k_in)
+                    if val:
+                        slot[k_out] = val
+    except Exception as e:
+        log.warning("swarm_fallbacks_today failed: %s", e)
+        return {"date_utc": date_utc, "items": []}
+    items = sorted(
+        agg.values(), key=lambda r: (-int(r["fallbacks"]), r["persona_id"])
+    )
     return {"date_utc": date_utc, "items": items}
 
 

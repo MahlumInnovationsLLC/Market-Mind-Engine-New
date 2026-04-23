@@ -20,6 +20,36 @@ function fmtLatency(ms: number | null | undefined): string {
   return `${(ms / 1000).toFixed(1)}s`;
 }
 
+type FallbackDetail = {
+  persona: string;
+  fromProvider: string | null;
+  fromModel: string | null;
+  toProvider: string | null;
+  toModel: string | null;
+  reason: string | null;
+};
+
+function extractFallbacks(
+  verdicts: unknown,
+): FallbackDetail[] {
+  if (!Array.isArray(verdicts)) return [];
+  const out: FallbackDetail[] = [];
+  for (const raw of verdicts) {
+    if (!raw || typeof raw !== "object") continue;
+    const v = raw as Record<string, unknown>;
+    if (!v.fallback_used) continue;
+    out.push({
+      persona: typeof v.persona === "string" ? v.persona : "?",
+      fromProvider: typeof v.primary_provider === "string" ? v.primary_provider : null,
+      fromModel: typeof v.primary_model === "string" ? v.primary_model : null,
+      toProvider: typeof v.provider === "string" ? v.provider : null,
+      toModel: typeof v.model === "string" ? v.model : null,
+      reason: typeof v.fallback_reason === "string" ? v.fallback_reason : null,
+    });
+  }
+  return out;
+}
+
 function fmtTime(s: string | null | undefined): string {
   if (!s) return "—";
   return new Date(s).toLocaleTimeString([], {
@@ -76,6 +106,15 @@ export default function SwarmDebates() {
           <div className="p-4 text-center text-muted-foreground text-xs">NO_DEBATES_FOUND</div>
         ) : (
           items.map((d) => {
+            const fallbacks = extractFallbacks(d.analyst_verdicts);
+            const fallbackTitle = fallbacks.length
+              ? fallbacks
+                  .map(
+                    (f) =>
+                      `${f.persona}: ${f.fromProvider ?? "?"}/${f.fromModel ?? "?"} → ${f.toProvider ?? "?"}/${f.toModel ?? "?"}${f.reason ? ` (${f.reason})` : ""}`,
+                  )
+                  .join("\n")
+              : "";
             const verdict = (d.recommended_action ?? "").toUpperCase();
             const verdictClass =
               verdict === "PASS"
@@ -100,10 +139,21 @@ export default function SwarmDebates() {
                       {d.league ?? "—"} · {d.market_type ?? "—"} · {fmtTime(d.created_at)}
                     </div>
                   </div>
-                  <div
-                    className={`text-[10px] uppercase border px-2 py-0.5 ${verdictClass} ${d.approved ? "" : "opacity-70"}`}
-                  >
-                    {verdict || "—"}
+                  <div className="flex items-center gap-1 shrink-0">
+                    {fallbacks.length > 0 && (
+                      <span
+                        className="text-[9px] uppercase border border-warning/60 text-warning px-1 py-0.5 tracking-widest"
+                        data-testid={`debate-fallback-badge-${d.id}`}
+                        title={fallbackTitle}
+                      >
+                        FALLBACK · {fallbacks.length}
+                      </span>
+                    )}
+                    <div
+                      className={`text-[10px] uppercase border px-2 py-0.5 ${verdictClass} ${d.approved ? "" : "opacity-70"}`}
+                    >
+                      {verdict || "—"}
+                    </div>
                   </div>
                 </div>
                 {d.redacted ? (
