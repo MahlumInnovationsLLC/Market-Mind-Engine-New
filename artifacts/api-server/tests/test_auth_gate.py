@@ -204,7 +204,11 @@ OTHER_PUBLIC_ROUTES: tuple[str, ...] = (
     "/api/webhooks/clerk",
     "/api/ws/settlement",
     "/api/ws/polymarket",
-    # Postmark bounce webhook authenticates via shared-secret in body.
+    # Postmark bounce webhook authenticates via HTTP Basic auth using
+    # POSTMARK_WEBHOOK_USER / POSTMARK_WEBHOOK_PASSWORD (Postmark
+    # forwards credentials embedded in the configured webhook URL),
+    # not Bearer tokens. Dedicated coverage lives in
+    # test_postmark_webhook_auth below.
     "/api/notifications/postmark-webhook",
     # One-click unsubscribe link uses an HMAC-signed token in the URL.
     "/api/notifications/unsubscribe",
@@ -477,6 +481,88 @@ def test_protected_mutating_endpoints_reject_token_signed_by_wrong_key(
 # handler may still 5xx because Postgres/Supabase aren't reachable in tests,
 # which is fine — what we care about is that we are no longer getting 401).
 # ---------------------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------------
+# Postmark bounce webhook — public to Bearer-token auth, but locked down
+# behind HTTP Basic auth keyed off POSTMARK_WEBHOOK_USER / _PASSWORD.
+# Forged events would let an attacker silently suppress real customer
+# email deliveries, so this is gated explicitly.
+# ---------------------------------------------------------------------------
+
+
+_POSTMARK_PATH = "/api/notifications/postmark-webhook"
+_POSTMARK_USER = "pm-test-user"
+_POSTMARK_PASS = "pm-test-pass"
+_POSTMARK_PAYLOAD = {"RecordType": "Bounce", "Email": "x@example.com"}
+
+
+def _basic(user: str, password: str) -> str:
+    import base64
+
+    raw = f"{user}:{password}".encode("utf-8")
+    return "Basic " + base64.b64encode(raw).decode("ascii")
+
+
+@pytest.fixture
+def _postmark_creds(monkeypatch):
+    monkeypatch.setenv("POSTMARK_WEBHOOK_USER", _POSTMARK_USER)
+    monkeypatch.setenv("POSTMARK_WEBHOOK_PASSWORD", _POSTMARK_PASS)
+    yield
+
+
+def test_postmark_webhook_refuses_when_unconfigured(client, monkeypatch):
+    monkeypatch.delenv("POSTMARK_WEBHOOK_USER", raising=False)
+    monkeypatch.delenv("POSTMARK_WEBHOOK_PASSWORD", raising=False)
+    resp = client.post(_POSTMARK_PATH, json=_POSTMARK_PAYLOAD)
+    assert resp.status_code == 503, resp.text
+
+
+@pytest.mark.parametrize(
+    "header_value",
+    [
+        None,                         # missing entirely
+        "",                           # empty
+        "Bearer abc.def.ghi",         # wrong scheme
+        "Basic",                      # no credentials
+        "Basic !!!not-base64!!!",     # malformed encoding
+        _basic("wrong-user", _POSTMARK_PASS),
+        _basic(_POSTMARK_USER, "wrong-pass"),
+        _basic("", ""),
+    ],
+)
+def test_postmark_webhook_rejects_bad_auth(client, _postmark_creds, header_value):
+    headers = {} if header_value is None else {"Authorization": header_value}
+    resp = client.post(_POSTMARK_PATH, json=_POSTMARK_PAYLOAD, headers=headers)
+    assert resp.status_code == 401, (
+        f"expected 401 but got {resp.status_code}: {resp.text[:300]}"
+    )
+
+
+def test_postmark_webhook_accepts_valid_basic_auth(client, _postmark_creds, monkeypatch):
+    """Valid credentials get past the auth gate and reach the handler.
+
+    We stub the suppression apply call so the test never touches the DB —
+    the assertion we care about is that valid Basic auth is no longer 401.
+    """
+    from app import main as main_module
+
+    async def _ok(payload):  # noqa: ANN001
+        return {"ok": True, "applied": True, "echo": payload}
+
+    monkeypatch.setattr(
+        main_module.notif_suppression, "apply_postmark_event", _ok
+    )
+
+    resp = client.post(
+        _POSTMARK_PATH,
+        json=_POSTMARK_PAYLOAD,
+        headers={"Authorization": _basic(_POSTMARK_USER, _POSTMARK_PASS)},
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body.get("ok") is True
+    assert body.get("applied") is True
 
 
 def test_valid_token_passes_auth_gate(client, legit_keypair):

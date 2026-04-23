@@ -2574,11 +2574,37 @@ async def notifications_status(
 async def notifications_postmark_webhook(request: Request) -> dict[str, object]:
     """Receive bounce / complaint / subscription-change events from Postmark.
 
-    Public (Postmark posts unauthenticated) but each event must
-    include the standard ``RecordType`` field — we ignore anything
-    else.  Adds matching addresses to the suppression list so future
-    user-facing sends are skipped automatically.
+    Authenticated via HTTP Basic auth.  Postmark supports embedding
+    ``user:pass`` in the configured webhook URL and forwards them as a
+    standard ``Authorization: Basic <b64>`` header on every delivery.
+    The expected credentials live in ``POSTMARK_WEBHOOK_USER`` and
+    ``POSTMARK_WEBHOOK_PASSWORD``; when either is unset the endpoint
+    refuses with 503 — same posture as the Stripe and Clerk webhooks
+    — so an unconfigured deployment can't be tricked by forged events.
     """
+    import base64 as _b64
+    import hmac as _hmac
+
+    expected_user = os.environ.get("POSTMARK_WEBHOOK_USER")
+    expected_pass = os.environ.get("POSTMARK_WEBHOOK_PASSWORD")
+    if not expected_user or not expected_pass:
+        raise HTTPException(status_code=503, detail="postmark webhook not configured")
+
+    auth_header = request.headers.get("authorization") or ""
+    scheme, _, encoded = auth_header.partition(" ")
+    if scheme.lower() != "basic" or not encoded:
+        raise HTTPException(status_code=401, detail="missing basic auth")
+    try:
+        decoded = _b64.b64decode(encoded.strip(), validate=True).decode("utf-8")
+    except Exception:
+        raise HTTPException(status_code=401, detail="invalid basic auth")
+    user, _, password = decoded.partition(":")
+    if not (
+        _hmac.compare_digest(user, expected_user)
+        and _hmac.compare_digest(password, expected_pass)
+    ):
+        raise HTTPException(status_code=401, detail="invalid basic auth")
+
     try:
         payload = await request.json()
     except Exception:
