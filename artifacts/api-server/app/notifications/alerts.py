@@ -1049,7 +1049,17 @@ def daily_pnl_summary(
             )
     body += _render_by_vertical(by_vertical, fmt_cents)
     body += _render_by_persona(by_persona)
-    return _dispatch(subject, body, tag="daily-summary", dry_run=dry_run)
+    html_body = _render_daily_pnl_summary_html(
+        date_utc=date_utc,
+        summary_rows=rows,
+        top_movers=top_movers,
+        by_vertical=by_vertical,
+        by_persona=by_persona,
+        fmt_cents=fmt_cents,
+    )
+    return _dispatch(
+        subject, body, tag="daily-summary", dry_run=dry_run, html_body=html_body
+    )
 
 
 def _render_by_vertical(
@@ -1110,6 +1120,219 @@ def _render_by_persona(rows: list[dict[str, Any]] | None) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Daily P&L summary — HTML rendering
+# ---------------------------------------------------------------------------
+
+
+def _html_escape(s: Any) -> str:
+    import html as _html
+    return _html.escape(str(s), quote=True)
+
+
+_HTML_MONO = (
+    "font-family:'SFMono-Regular',Menlo,Consolas,'Liberation Mono',monospace;"
+)
+_HTML_SANS = (
+    "font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Inter,Arial,sans-serif;"
+)
+_TH_STYLE = (
+    "padding:6px 10px;text-align:left;font-size:11px;text-transform:uppercase;"
+    "letter-spacing:0.06em;color:#6B7280;border-bottom:1px solid #E5E7EB;"
+    "background:#F9FAFB;"
+)
+_TD_STYLE = (
+    "padding:6px 10px;font-size:13px;color:#111827;"
+    "border-bottom:1px solid #F3F4F6;"
+)
+
+
+def _html_table(
+    headers: list[tuple[str, str]],  # (label, align: "left"|"right")
+    rows: list[list[str]],
+    *,
+    mono: bool = True,
+) -> str:
+    head_cells = "".join(
+        f'<th style="{_TH_STYLE}text-align:{align};">{_html_escape(label)}</th>'
+        for label, align in headers
+    )
+    body_cells = []
+    for row in rows:
+        cells = []
+        for (_, align), value in zip(headers, row):
+            cells.append(
+                f'<td style="{_TD_STYLE}text-align:{align};'
+                f'{_HTML_MONO if mono else ""}">{value}</td>'
+            )
+        body_cells.append(f"<tr>{''.join(cells)}</tr>")
+    return (
+        '<table cellpadding="0" cellspacing="0" '
+        'style="border-collapse:collapse;width:100%;'
+        'border:1px solid #E5E7EB;border-radius:6px;overflow:hidden;">'
+        f"<thead><tr>{head_cells}</tr></thead>"
+        f"<tbody>{''.join(body_cells)}</tbody>"
+        "</table>"
+    )
+
+
+def _render_by_vertical_html(
+    rows: list[dict[str, Any]] | None,
+    fmt_cents,
+) -> str:
+    title = '<h3 style="margin:24px 0 8px 0;font-size:14px;color:#111827;">By vertical</h3>'
+    if not rows:
+        return (
+            title
+            + '<p style="margin:0;color:#6B7280;font-size:13px;font-style:italic;">'
+              "No settled trades by vertical today.</p>"
+        )
+    headers = [
+        ("Vertical", "left"),
+        ("Trades", "right"),
+        ("W/L", "right"),
+        ("PnL", "right"),
+        ("Win%", "right"),
+        ("Edge", "right"),
+        ("Brier", "right"),
+    ]
+    body_rows = []
+    for r in rows:
+        wl = f"{int(r.get('wins') or 0)}/{int(r.get('losses') or 0)}"
+        brier = r.get("brier")
+        brier_s = f"{brier:.3f}" if isinstance(brier, (int, float)) else "—"
+        pnl_c = int(r.get("pnl_cents") or 0)
+        pnl_color = "#047857" if pnl_c >= 0 else "#B91C1C"
+        body_rows.append([
+            _html_escape(r.get("vertical") or "?"),
+            _html_escape(int(r.get("trades") or 0)),
+            _html_escape(wl),
+            f'<span style="color:{pnl_color};">{_html_escape(fmt_cents(pnl_c))}</span>',
+            _html_escape(f"{float(r.get('win_rate_pct') or 0.0):.1f}%"),
+            _html_escape(f"{float(r.get('avg_edge') or 0.0):+.3f}"),
+            _html_escape(brier_s),
+        ])
+    return title + _html_table(headers, body_rows)
+
+
+def _render_by_persona_html(rows: list[dict[str, Any]] | None) -> str:
+    title = (
+        '<h3 style="margin:24px 0 8px 0;font-size:14px;color:#111827;">'
+        "By persona</h3>"
+        '<p style="margin:0 0 8px 0;color:#6B7280;font-size:12px;">'
+        "Debates opened today that have since settled.</p>"
+    )
+    if not rows:
+        return (
+            title
+            + '<p style="margin:0;color:#6B7280;font-size:13px;font-style:italic;">'
+              "No settled swarm debates from today.</p>"
+        )
+    headers = [
+        ("Persona", "left"),
+        ("Debates", "right"),
+        ("Brier", "right"),
+        ("Acc%", "right"),
+        ("Conf", "right"),
+        ("Leans (Y/N/PASS)", "right"),
+    ]
+    body_rows = []
+    for r in rows:
+        conf = r.get("avg_confidence")
+        conf_s = f"{conf:.2f}" if isinstance(conf, (int, float)) else "—"
+        leans = (
+            f"{int(r.get('lean_yes') or 0)}/"
+            f"{int(r.get('lean_no') or 0)}/"
+            f"{int(r.get('lean_pass') or 0)}"
+        )
+        body_rows.append([
+            _html_escape(r.get("persona_id") or "?"),
+            _html_escape(int(r.get("debates") or 0)),
+            _html_escape(f"{float(r.get('brier') or 0.0):.3f}"),
+            _html_escape(f"{float(r.get('accuracy_pct') or 0.0):.1f}"),
+            _html_escape(conf_s),
+            _html_escape(leans),
+        ])
+    return title + _html_table(headers, body_rows)
+
+
+def _render_daily_pnl_summary_html(
+    *,
+    date_utc: str,
+    summary_rows: list[tuple[str, Any]],
+    top_movers: list[dict[str, Any]] | None,
+    by_vertical: list[dict[str, Any]] | None,
+    by_persona: list[dict[str, Any]] | None,
+    fmt_cents,
+) -> str:
+    overview_headers = [("Metric", "left"), ("Value", "right")]
+    overview_rows = []
+    for k, v in summary_rows:
+        if k in ("realized_pnl", "unrealized_pnl") and isinstance(v, str):
+            color = "#047857" if v.startswith("+") else "#B91C1C"
+            value_html = f'<span style="color:{color};">{_html_escape(v)}</span>'
+        else:
+            value_html = _html_escape(v)
+        overview_rows.append([_html_escape(k), value_html])
+    overview_html = _html_table(overview_headers, overview_rows)
+
+    movers_html = ""
+    if top_movers:
+        mover_headers = [
+            ("Market", "left"),
+            ("Realized", "right"),
+            ("Position", "right"),
+        ]
+        mover_rows = []
+        for m in top_movers[:10]:
+            pnl_c = int(m.get("realized_pnl_cents") or 0)
+            color = "#047857" if pnl_c >= 0 else "#B91C1C"
+            mover_rows.append([
+                _html_escape(m.get("market_ticker", "?")),
+                f'<span style="color:{color};">{_html_escape(fmt_cents(pnl_c))}</span>',
+                _html_escape(m.get("position", "?")),
+            ])
+        movers_html = (
+            '<h3 style="margin:24px 0 8px 0;font-size:14px;color:#111827;">'
+            "Top position movers</h3>"
+            + _html_table(mover_headers, mover_rows)
+        )
+
+    by_vertical_html = _render_by_vertical_html(by_vertical, fmt_cents)
+    by_persona_html = _render_by_persona_html(by_persona)
+
+    return f"""<!DOCTYPE html>
+<html>
+<body style="margin:0;padding:0;background:#F9FAFB;{_HTML_SANS}">
+  <table width="100%" cellpadding="0" cellspacing="0" style="background:#F9FAFB;padding:24px 0;">
+    <tr><td align="center">
+      <table width="640" cellpadding="0" cellspacing="0" style="background:#FFFFFF;border:1px solid #E5E7EB;border-radius:8px;overflow:hidden;max-width:640px;width:100%;">
+        <tr>
+          <td style="background:#111827;color:#F9FAFB;padding:20px 24px;">
+            <div style="font-size:11px;letter-spacing:0.16em;text-transform:uppercase;color:#9CA3AF;">Axiom Predict</div>
+            <div style="font-size:20px;font-weight:700;margin-top:4px;">Daily summary &middot; {_html_escape(date_utc)}</div>
+          </td>
+        </tr>
+        <tr>
+          <td style="padding:20px 24px;">
+            {overview_html}
+            {movers_html}
+            {by_vertical_html}
+            {by_persona_html}
+          </td>
+        </tr>
+        <tr>
+          <td style="padding:12px 24px 20px 24px;border-top:1px solid #E5E7EB;color:#6B7280;font-size:11px;line-height:1.5;">
+            Sent automatically once per UTC day. A plain-text copy is included for clients that don't render HTML.
+          </td>
+        </tr>
+      </table>
+    </td></tr>
+  </table>
+</body>
+</html>"""
+
+
+# ---------------------------------------------------------------------------
 # Dispatch helper
 # ---------------------------------------------------------------------------
 
@@ -1120,6 +1343,7 @@ def _dispatch(
     *,
     tag: str,
     dry_run: bool,
+    html_body: str | None = None,
 ) -> dict[str, Any]:
     if dry_run:
         log.info("alert dry_run subject=%r tag=%s", subject, tag)
@@ -1128,12 +1352,17 @@ def _dispatch(
             "tag": tag,
             "subject": subject,
             "body_preview": text_body[:4000],
+            "html_preview": (html_body[:32000] if html_body else None),
             "would_send_to": postmark.alert_recipients(),
             "user_pref_column": _TAG_TO_USER_PREF.get(tag),
             "configured": postmark.is_configured(),
         }
-    postmark.send_in_background(subject=subject, text_body=text_body, tag=tag)
-    _schedule_user_email_fanout(subject=subject, text_body=text_body, tag=tag)
+    postmark.send_in_background(
+        subject=subject, text_body=text_body, html_body=html_body, tag=tag
+    )
+    _schedule_user_email_fanout(
+        subject=subject, text_body=text_body, tag=tag, html_body=html_body
+    )
     return {
         "dry_run": False,
         "tag": tag,
@@ -1146,7 +1375,7 @@ def _dispatch(
 
 
 def _schedule_user_email_fanout(
-    *, subject: str, text_body: str, tag: str
+    *, subject: str, text_body: str, tag: str, html_body: str | None = None
 ) -> None:
     """Send a copy of the alert to each end-user who's opted in for
     this alert type.
@@ -1177,6 +1406,7 @@ def _schedule_user_email_fanout(
             await postmark.send(
                 subject=subject,
                 text_body=text_body,
+                html_body=html_body,
                 to=targets,
                 tag=tag,
             )

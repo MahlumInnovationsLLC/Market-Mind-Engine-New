@@ -164,6 +164,85 @@ def test_renders_handles_non_numeric_brier_and_confidence() -> None:
     assert "  -  " in body
 
 
+def test_renders_html_body_with_semantic_tables() -> None:
+    res = alerts.daily_pnl_summary(
+        **{
+            **_BASE_KW,
+            "by_vertical": [
+                {
+                    "vertical": "sports",
+                    "trades": 2,
+                    "wins": 1,
+                    "losses": 1,
+                    "pnl_cents": 250,
+                    "win_rate_pct": 50.0,
+                    "avg_edge": 0.02,
+                    "brier": 0.21,
+                },
+            ],
+            "by_persona": [
+                {
+                    "persona_id": "sharp_edge",
+                    "debates": 1,
+                    "brier": 0.18,
+                    "accuracy_pct": 100.0,
+                    "avg_confidence": 0.7,
+                    "lean_yes": 1,
+                    "lean_no": 0,
+                    "lean_pass": 0,
+                },
+            ],
+            "top_movers": [
+                {"market_ticker": "KXNFL-FOO", "realized_pnl_cents": 500, "position": 3},
+            ],
+        }
+    )
+    html = res["html_preview"]
+    assert html is not None
+    assert "<!DOCTYPE html>" in html
+    assert "<table" in html
+    # All three section headers render in HTML.
+    assert "Daily summary" in html and "2026-04-21" in html
+    assert "By vertical" in html
+    assert "By persona" in html
+    assert "Top position movers" in html
+    # Row data flows through.
+    assert "sports" in html and "sharp_edge" in html and "KXNFL-FOO" in html
+    # Plain-text body still produced for fallback.
+    assert "By vertical:" in res["body_preview"]
+
+
+def test_html_body_degrades_when_sections_empty() -> None:
+    res = alerts.daily_pnl_summary(**{**_BASE_KW, "by_vertical": [], "by_persona": []})
+    html = res["html_preview"]
+    assert html is not None
+    assert "No settled trades by vertical today." in html
+    assert "No settled swarm debates from today." in html
+
+
+def test_html_body_escapes_user_content() -> None:
+    res = alerts.daily_pnl_summary(
+        **{
+            **_BASE_KW,
+            "by_vertical": [
+                {
+                    "vertical": "<script>x</script>",
+                    "trades": 1,
+                    "wins": 1,
+                    "losses": 0,
+                    "pnl_cents": 100,
+                    "win_rate_pct": 100.0,
+                    "avg_edge": 0.01,
+                    "brier": 0.10,
+                },
+            ],
+        }
+    )
+    html = res["html_preview"]
+    assert "<script>x</script>" not in html
+    assert "&lt;script&gt;x&lt;/script&gt;" in html
+
+
 def test_subject_unchanged_by_new_sections() -> None:
     res = alerts.daily_pnl_summary(
         **{**_BASE_KW, "by_vertical": [], "by_persona": []}
