@@ -627,18 +627,48 @@ async def settle_market(
 
     settled: list[dict[str, Any]] = []
     verticals: set[str] = set()
+    # Aggregate position-level P&L across every trade row that resolved
+    # this market so we can fire a single settlement push per position
+    # (task #132) instead of one per partial fill.
+    position_pnl = 0.0
+    position_vertical: str | None = None
+    any_trade_settled = False
     for t in trades:
         td = dict(t)
         res = await _settle_one_trade(td, outcome_yes, settle_price)
         settled.append(res)
         if td.get("vertical"):
             verticals.add(td["vertical"])
+            if position_vertical is None:
+                position_vertical = td["vertical"]
+        if res.get("ok"):
+            any_trade_settled = True
+            try:
+                position_pnl += float(res.get("pnl") or 0.0)
+            except (TypeError, ValueError):
+                pass
         await _publish({
             "type": "trade_settled",
             "market_id": market_id,
             "trade_id": td["id"],
             **{k: v for k, v in res.items() if k != "trade_id"},
         })
+
+    # Mobile push: one notification per resolved position, carrying the
+    # aggregated realized P&L. Best-effort — settlement must never fail
+    # because the push channel is degraded.
+    if any_trade_settled:
+        try:
+            from ..notifications import push as _push
+            _push.push_settlement(
+                market_ticker=market_id,
+                vertical=position_vertical,
+                pnl=position_pnl,
+                outcome_yes=outcome_yes,
+            )
+        except Exception as e:
+            log.warning("settlement push dispatch failed for market %s: %s",
+                        market_id, e)
 
     await _close_position(market_id, outcome_yes)
     persona_touched = await _update_personas_for_market(market_id, outcome_yes)

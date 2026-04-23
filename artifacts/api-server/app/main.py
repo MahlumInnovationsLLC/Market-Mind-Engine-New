@@ -931,6 +931,8 @@ class NotificationPrefsRequest(BaseModel):
     # Mobile push toggles (existing behaviour).
     notify_live_trade: bool | None = None
     notify_halt: bool | None = None
+    # Mobile push for position settlement (task #132).
+    notify_settlement: bool | None = None
     # Per-user email channel toggles (task #112).
     email_daily_summary: bool | None = None
     email_drift: bool | None = None

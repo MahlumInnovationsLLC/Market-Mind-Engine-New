@@ -16,6 +16,7 @@ import { apiFetch } from "@/lib/api";
 type PrefsBody = {
   notify_live_trade: boolean;
   notify_halt: boolean;
+  notify_settlement: boolean;
   email_trade_confirmation: boolean;
   digest_partials: boolean;
 };
@@ -78,6 +79,8 @@ export function NotificationPrefs(): React.ReactElement {
   const data: PrefsBody = {
     notify_live_trade: prefs.data?.prefs?.notify_live_trade ?? true,
     notify_halt: prefs.data?.prefs?.notify_halt ?? true,
+    notify_settlement:
+      (prefs.data?.prefs?.notify_settlement as boolean | undefined) ?? true,
     email_trade_confirmation:
       (prefs.data?.prefs?.email_trade_confirmation as boolean | undefined) ?? true,
     digest_partials:
@@ -170,6 +173,15 @@ export function NotificationPrefs(): React.ReactElement {
           value={data.notify_halt}
           disabled={busy}
           onChange={(v) => mutation.mutate({ notify_halt: v })}
+          colors={colors}
+        />
+        <View style={[styles.divider, { backgroundColor: colors.border }]} />
+        <Row
+          label="Position settlements"
+          hint="Push with realized P&L when a position resolves."
+          value={data.notify_settlement}
+          disabled={busy}
+          onChange={(v) => mutation.mutate({ notify_settlement: v })}
           colors={colors}
         />
         <View style={[styles.divider, { backgroundColor: colors.border }]} />

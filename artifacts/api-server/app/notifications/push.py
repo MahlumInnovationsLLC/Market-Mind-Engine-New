@@ -117,7 +117,11 @@ ALTER TABLE user_notification_prefs
     -- window wraps midnight (e.g. 22 → 7 = 10pm to 7am).
     ADD COLUMN IF NOT EXISTS quiet_hours_start_hour    smallint,
     ADD COLUMN IF NOT EXISTS quiet_hours_end_hour      smallint,
-    ADD COLUMN IF NOT EXISTS quiet_hours_tz            text;
+    ADD COLUMN IF NOT EXISTS quiet_hours_tz            text,
+    -- Mobile push for position settlement (task #132). Default on so the
+    -- natural follow-up to a live-trade fill push (the resolution) is
+    -- delivered without requiring users to opt in.
+    ADD COLUMN IF NOT EXISTS notify_settlement         boolean NOT NULL DEFAULT true;
 """
 
 
@@ -138,6 +142,7 @@ QUIET_HOURS_COLUMNS: dict[str, Any] = {
 PREF_COLUMNS: dict[str, bool] = {
     "notify_live_trade":       True,   # mobile push — live fill
     "notify_halt":             True,   # mobile push — kill switch
+    "notify_settlement":       True,   # mobile push — position settled
     "email_daily_summary":     True,
     "email_drift":             True,
     "email_halt":              True,
@@ -606,7 +611,7 @@ async def _tokens_for_pref(pref_column: str) -> list[str]:
     user-supplied IANA strings would crash the whole query if any one
     user has a malformed value.
     """
-    if pref_column not in ("notify_live_trade", "notify_halt"):
+    if pref_column not in ("notify_live_trade", "notify_halt", "notify_settlement"):
         raise ValueError(f"bad pref column {pref_column!r}")
     await ensure_schema()
     sql = (
@@ -784,7 +789,7 @@ async def _record_dispatch_for_pref(
     Mirrors the recipient set used by `_tokens_for_pref` (DISTINCT on
     user) so the in-app feed matches what was actually pushed.
     """
-    if pref_column not in ("notify_live_trade", "notify_halt"):
+    if pref_column not in ("notify_live_trade", "notify_halt", "notify_settlement"):
         return
     sql_users = (
         "SELECT DISTINCT t.clerk_user_id FROM expo_push_tokens t "
@@ -961,6 +966,47 @@ def push_live_trade(
     _schedule(_dispatch_for_alert(
         "notify_live_trade",
         title=title, body=body, data=data, channel_id="trades",
+    ))
+
+
+def push_settlement(
+    *,
+    market_ticker: str,
+    vertical: str | None,
+    pnl: float,
+    outcome_yes: int,
+) -> None:
+    """Fire-and-forget push fan-out for a position resolution.
+
+    Body carries realized P&L so the user doesn't have to open the app
+    to see the outcome. Tap deep-links into the positions screen so the
+    fuller breakdown is one hop away.
+    """
+    try:
+        pnl_f = float(pnl)
+    except (TypeError, ValueError):
+        pnl_f = 0.0
+    if pnl_f > 0:
+        title = "Position settled — won"
+        sign = "+"
+    elif pnl_f < 0:
+        title = "Position settled — lost"
+        sign = "-"
+    else:
+        title = "Position settled"
+        sign = ""
+    body = f"{market_ticker}: {sign}${abs(pnl_f):.2f} realized P&L"
+    data = {
+        "type": "settlement",
+        "market_ticker": market_ticker,
+        "vertical": vertical,
+        "pnl": pnl_f,
+        "outcome_yes": outcome_yes,
+        "deep_link": "/positions",
+    }
+    _schedule(_dispatch_for_alert(
+        "notify_settlement",
+        title=title, body=body, data=data, channel_id="settlement",
     ))
 
 

@@ -82,19 +82,36 @@ class _Store:
     async def fetch(self, query: str, *_args: Any) -> list[dict[str, Any]]:
         q = " ".join(query.split())
         if "FROM expo_push_tokens t" in q:
-            col = "notify_live_trade" if "notify_live_trade" in q else "notify_halt"
+            if "notify_live_trade" in q:
+                col = "notify_live_trade"
+            elif "notify_settlement" in q:
+                col = "notify_settlement"
+            else:
+                col = "notify_halt"
+            # Two shapes share the FROM clause: the per-token recipient
+            # query (returns expo_token rows + quiet-hours metadata) and
+            # the per-user notification-log query (returns DISTINCT
+            # clerk_user_id). Pick the projection from the SELECT list.
+            wants_users = "SELECT DISTINCT t.clerk_user_id" in q
             out: list[dict[str, Any]] = []
+            seen_users: set[str] = set()
             for tok, row in self.tokens.items():
                 pref = self.prefs.get(row["clerk_user_id"])
                 enabled = True if pref is None else bool(pref[col])
                 if not enabled:
                     continue
-                out.append({
-                    "expo_token": tok,
-                    "quiet_hours_start_hour": (pref or {}).get("quiet_hours_start_hour"),
-                    "quiet_hours_end_hour": (pref or {}).get("quiet_hours_end_hour"),
-                    "quiet_hours_tz": (pref or {}).get("quiet_hours_tz"),
-                })
+                if wants_users:
+                    if row["clerk_user_id"] in seen_users:
+                        continue
+                    seen_users.add(row["clerk_user_id"])
+                    out.append({"clerk_user_id": row["clerk_user_id"]})
+                else:
+                    out.append({
+                        "expo_token": tok,
+                        "quiet_hours_start_hour": (pref or {}).get("quiet_hours_start_hour"),
+                        "quiet_hours_end_hour": (pref or {}).get("quiet_hours_end_hour"),
+                        "quiet_hours_tz": (pref or {}).get("quiet_hours_tz"),
+                    })
             return out
         return []
 
@@ -364,3 +381,193 @@ def test_push_live_trade_and_halt_are_sync_safe(
         contracts=1, price_cents=50, vertical="sports",
     )
     _push.push_halt(reason="test")
+    _push.push_settlement(
+        market_ticker="X", vertical="sports", pnl=1.23, outcome_yes=1,
+    )
+    _push.push_settlement(
+        market_ticker="X", vertical="sports", pnl=-0.5, outcome_yes=0,
+    )
+
+
+def test_notification_prefs_endpoint_round_trips_notify_settlement(
+    store: _Store, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """PUT /api/me/notification-prefs must accept and persist
+    `notify_settlement` so the mobile UI's third toggle actually
+    controls delivery (not just gets silently dropped by Pydantic)."""
+    from fastapi.testclient import TestClient
+    from app import main as _main
+    from app.auth import require_auth, AuthedUser
+    from app import billing as _billing
+
+    user = AuthedUser(
+        user_id="user_settle", session_id=None,
+        claims={"sub": "user_settle", "email": "s@example.com"},
+    )
+
+    async def _fake_sub(_u):
+        return _billing.UserSubscription(
+            user_id="user_settle", email="s@example.com",
+            tier=_billing.TIER_PRO, status="active",
+            stripe_customer_id=None, stripe_subscription_id=None,
+            stripe_price_id=None, interval=None,
+            current_period_end=None, cancel_at_period_end=False,
+            is_founder=False,
+        )
+
+    monkeypatch.setattr(_billing, "get_user_subscription", _fake_sub)
+    _main.app.dependency_overrides[require_auth] = lambda: user
+    try:
+        client = TestClient(_main.app)
+        resp = client.put(
+            "/api/me/notification-prefs",
+            json={"notify_settlement": False},
+        )
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["prefs"]["notify_settlement"] is False
+        # And the bool round-trips back to true.
+        resp = client.put(
+            "/api/me/notification-prefs",
+            json={"notify_settlement": True},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["prefs"]["notify_settlement"] is True
+    finally:
+        _main.app.dependency_overrides.pop(require_auth, None)
+
+
+def test_settle_market_emits_one_push_with_aggregated_pnl(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A single position can be built from multiple trade fills; when
+    the underlying market settles we must fire exactly one push per
+    resolved position (not one per fill) and the body must carry the
+    summed realized P&L."""
+    from app.settlement import pipeline as _pipeline
+
+    # Stub every DB call settle_market touches. Two unsettled trades on
+    # the same market id, each with a known PnL → expect a single push
+    # carrying the sum.
+    trade_rows = [
+        {
+            "id": 1, "trade_id": "t1", "market_id": "MKT-1",
+            "vertical": "sports", "league": "NBA",
+            "side": "yes", "action": "buy",
+            "quantity": 10.0, "price": 0.40,
+            "model_prob": 0.6, "model_edge": 0.05, "edge": 0.05,
+            "exchange": "kalshi", "trading_mode": "live",
+            "metadata": {},
+        },
+        {
+            "id": 2, "trade_id": "t2", "market_id": "MKT-1",
+            "vertical": "sports", "league": "NBA",
+            "side": "yes", "action": "buy",
+            "quantity": 5.0, "price": 0.45,
+            "model_prob": 0.6, "model_edge": 0.05, "edge": 0.05,
+            "exchange": "kalshi", "trading_mode": "live",
+            "metadata": {},
+        },
+    ]
+
+    async def _fake_fetch(query: str, *args: Any) -> list[dict[str, Any]]:
+        if "FROM trades" in query and "settled_at IS NULL" in query:
+            return trade_rows
+        return []
+
+    async def _fake_fetchrow(*_a: Any, **_kw: Any) -> dict[str, Any] | None:
+        return None
+
+    async def _fake_fetchval(*_a: Any, **_kw: Any) -> Any:
+        return None
+
+    async def _fake_execute(*_a: Any, **_kw: Any) -> str:
+        return "OK"
+
+    monkeypatch.setattr(_pipeline.db, "fetch", _fake_fetch)
+    monkeypatch.setattr(_pipeline.db, "fetchrow", _fake_fetchrow)
+    monkeypatch.setattr(_pipeline.db, "fetchval", _fake_fetchval)
+    monkeypatch.setattr(_pipeline.db, "execute", _fake_execute)
+
+    # Capture push_settlement calls.
+    captured: list[dict[str, Any]] = []
+
+    def _spy(**kwargs: Any) -> None:
+        captured.append(kwargs)
+
+    from app.notifications import push as _push
+    monkeypatch.setattr(_push, "push_settlement", _spy)
+
+    asyncio.run(_pipeline.settle_market("MKT-1", outcome_yes=1, settle_price=1.0))
+
+    assert len(captured) == 1, f"expected exactly one push, got {len(captured)}"
+    call = captured[0]
+    assert call["market_ticker"] == "MKT-1"
+    assert call["vertical"] == "sports"
+    assert call["outcome_yes"] == 1
+    # YES wins; trade 1 cost 10*0.40 = 4, payout 10 → +6.0;
+    # trade 2 cost 5*0.45 = 2.25, payout 5 → +2.75. Sum = 8.75.
+    assert abs(call["pnl"] - 8.75) < 1e-6
+
+
+def test_push_settlement_dispatches_to_opted_in_tokens(
+    store: _Store, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Settlement push fans out to every device whose owner has the
+    `notify_settlement` toggle on (or no row, defaulting to true), and
+    skips users who explicitly opted out."""
+    _run(_push.register_token(
+        clerk_user_id="user_in", expo_token=VALID_TOKEN, platform="ios",
+    ))
+    _run(_push.register_token(
+        clerk_user_id="user_out", expo_token=VALID_TOKEN_2, platform="ios",
+    ))
+    _run(_push.set_prefs(clerk_user_id="user_out", notify_settlement=False))
+
+    tokens = _run(_push._tokens_for_pref("notify_settlement"))
+    assert tokens == [VALID_TOKEN]
+
+    captured: dict[str, Any] = {}
+
+    class _FakeResponse:
+        status_code = 200
+        text = "ok"
+
+        def json(self) -> dict[str, Any]:
+            return {"data": [{"status": "ok", "id": "x"}]}
+
+    class _FakeClient:
+        def __init__(self, *_a: Any, **_kw: Any) -> None:
+            pass
+
+        async def __aenter__(self) -> "_FakeClient":
+            return self
+
+        async def __aexit__(self, *_a: Any) -> None:
+            return None
+
+        async def post(self, url: str, **kw: Any) -> _FakeResponse:
+            captured["url"] = url
+            captured["json"] = kw.get("json")
+            return _FakeResponse()
+
+    monkeypatch.setattr(httpx, "AsyncClient", _FakeClient)
+    monkeypatch.setenv("AXIOM_PUSH_DISABLED", "0")
+
+    async def _go() -> None:
+        await _push._dispatch_for_alert(
+            "notify_settlement",
+            title="Position settled — won",
+            body="X: +$1.23 realized P&L",
+            data={"type": "settlement", "deep_link": "/positions"},
+            channel_id="settlement",
+        )
+
+    asyncio.run(_go())
+
+    msgs = captured["json"]
+    assert isinstance(msgs, list) and len(msgs) == 1
+    assert msgs[0]["to"] == VALID_TOKEN
+    assert msgs[0]["channelId"] == "settlement"
+    assert msgs[0]["data"]["deep_link"] == "/positions"
+    assert msgs[0]["data"]["type"] == "settlement"

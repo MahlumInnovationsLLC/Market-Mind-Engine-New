@@ -31,6 +31,12 @@ async function ensureAndroidChannels(): Promise<void> {
     sound: "default",
     vibrationPattern: [0, 500, 250, 500],
   });
+  await Notifications.setNotificationChannelAsync("settlement", {
+    name: "Position settlements",
+    importance: Notifications.AndroidImportance.HIGH,
+    sound: "default",
+    vibrationPattern: [0, 250, 250, 250],
+  });
 }
 
 async function getExpoPushToken(): Promise<string | null> {
@@ -97,6 +103,7 @@ export function deepLinkFromNotificationData(
   if (typeof link === "string" && link.startsWith("/")) return link;
   const type = data["type"];
   if (type === "live_trade") return "/positions";
+  if (type === "settlement") return "/positions";
   if (type === "halt") return "/pipeline";
   return null;
 }
