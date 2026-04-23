@@ -42,6 +42,8 @@ jobs:
         working-directory: artifacts/api-server
         run: |
           python -m pytest tests/ \
+            -n auto \
+            --dist loadfile \
             --junitxml=/tmp/pytest-junit.xml \
             --cov=app \
             --cov-report=xml:/tmp/pytest-coverage.xml \
