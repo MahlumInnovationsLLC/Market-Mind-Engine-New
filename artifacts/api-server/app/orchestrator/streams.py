@@ -6,14 +6,21 @@ import logging
 from collections import deque
 from typing import Any
 
+from ..ws_backpressure import (
+    DEFAULT_MAXSIZE,
+    DROP_OLDEST,
+    Subscription,
+)
+
 
 log = logging.getLogger(__name__)
 
 
 class _PipelineEventHub:
     """Bounded-queue fan-out hub.  Slow subscribers get dropped events
-    rather than blocking the producer; this is what keeps a stuck
-    websocket from stalling the orchestrator cycle.
+    (or a forced close, depending on the per-subscriber policy) rather
+    than blocking the producer; this is what keeps a stuck websocket
+    from stalling the orchestrator cycle.
 
     Also keeps a bounded ring buffer of recently-published events so a
     REST snapshot endpoint can hydrate the pipeline page on first mount
@@ -21,22 +28,34 @@ class _PipelineEventHub:
     monotonic ``_seq`` so the client can dedupe snapshot+stream.
     """
 
-    QUEUE_MAXSIZE = 256
+    QUEUE_MAXSIZE = DEFAULT_MAXSIZE
     BUFFER_MAXSIZE = 500
 
     def __init__(self) -> None:
-        self._subs: set[asyncio.Queue[dict[str, Any]]] = set()
+        self._subs: set[Subscription] = set()
         self._lock = asyncio.Lock()
         self._buffer: deque[dict[str, Any]] = deque(maxlen=self.BUFFER_MAXSIZE)
         self._seq: int = 0
 
-    def subscribe(self) -> asyncio.Queue[dict[str, Any]]:
-        q: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=self.QUEUE_MAXSIZE)
-        self._subs.add(q)
-        return q
+    def subscribe(
+        self,
+        *,
+        maxsize: int | None = None,
+        policy: str = DROP_OLDEST,
+        label: str = "pipeline",
+    ) -> Subscription:
+        sub = Subscription(
+            hub="pipeline",
+            label=label,
+            maxsize=maxsize or self.QUEUE_MAXSIZE,
+            policy=policy,
+        )
+        self._subs.add(sub)
+        return sub
 
-    def unsubscribe(self, q: asyncio.Queue[dict[str, Any]]) -> None:
-        self._subs.discard(q)
+    def unsubscribe(self, sub: Subscription) -> None:
+        self._subs.discard(sub)
+        sub.release()
 
     async def publish(self, event: dict[str, Any]) -> None:
         self._seq += 1
@@ -44,19 +63,8 @@ class _PipelineEventHub:
         self._buffer.append(event)
         if not self._subs:
             return
-        for q in list(self._subs):
-            try:
-                q.put_nowait(event)
-            except asyncio.QueueFull:
-                # drop one stale event to make room rather than block
-                try:
-                    _ = q.get_nowait()
-                except Exception:
-                    pass
-                try:
-                    q.put_nowait(event)
-                except Exception as e:
-                    log.warning("pipeline event drop: %s", e)
+        for sub in list(self._subs):
+            sub.offer(event)
 
     def recent_events(self, max_cycles: int = 5) -> list[dict[str, Any]]:
         """Return buffered events from the most recent ``max_cycles``
@@ -82,6 +90,10 @@ class _PipelineEventHub:
         if not seen:
             return []
         return [ev for ev in self._buffer if ev.get("cycle_id") in seen]
+
+    @property
+    def subscriber_count(self) -> int:
+        return len(self._subs)
 
 
 pipeline_event_hub = _PipelineEventHub()

@@ -2989,7 +2989,7 @@ async def ws_llm_logs(ws: WebSocket) -> None:
             # the convention used elsewhere for tier-gated WebSockets.
             await ws.close(code=4403, reason="pro_tier_required")
             return
-    q = llm_log_hub.subscribe()
+    q = llm_log_hub.subscribe(label="llm-logs")
     try:
         while True:
             event = await q.get()
@@ -3185,7 +3185,7 @@ async def ws_pipeline(ws: WebSocket) -> None:
     user = await ws_authenticate(ws)
     if user is None and auth_configured():
         return
-    q = pipeline_event_hub.subscribe()
+    q = pipeline_event_hub.subscribe(label="pipeline")
     try:
         while True:
             event = await q.get()
@@ -3217,7 +3217,7 @@ async def _settlement_recent_tap() -> None:
     """Long-lived subscriber on the settlement event hub that records
     `market_settle_complete` events for the dashboard polling fallback.
     Restarted on lifespan; cancellation is the normal exit."""
-    q = settlement_event_hub.subscribe()
+    q = settlement_event_hub.subscribe(label="recent-tap")
     try:
         while True:
             ev = await q.get()
@@ -3409,7 +3409,7 @@ async def ws_settlement(ws: WebSocket) -> None:
     user = await ws_authenticate(ws)
     if user is None and auth_configured():
         return
-    q = settlement_event_hub.subscribe()
+    q = settlement_event_hub.subscribe(label="settlement")
     try:
         while True:
             event = await q.get()
@@ -3588,7 +3588,7 @@ async def kalshi_event_stream(websocket: WebSocket):  # pragma: no cover - cover
     user = await ws_authenticate(websocket)
     if user is None and auth_configured():
         return
-    q = await kalshi_bus.subscribe()
+    q = await kalshi_bus.subscribe(label="kalshi-multiplex")
     try:
         while True:
             msg = await q.get()
@@ -3721,7 +3721,7 @@ async def polymarket_event_stream(websocket: WebSocket):  # pragma: no cover
     user = await ws_authenticate(websocket)
     if user is None and auth_configured():
         return
-    q = await polymarket_bus.bus.subscribe()
+    q = await polymarket_bus.bus.subscribe(label="polymarket-multiplex")
     try:
         while True:
             msg = await q.get()
@@ -4007,12 +4007,13 @@ async def ws_positions(ws: WebSocket) -> None:
     and forwards only the relevant event types.
     """
     from .auth import ws_authenticate
+    from .ws_backpressure import SubscriberOverflow, OVERFLOW_CLOSE_CODE, OVERFLOW_CLOSE_REASON
 
     user = await ws_authenticate(ws)
     if user is None and auth_configured():
         return
-    p_q = pipeline_event_hub.subscribe()
-    s_q = settlement_event_hub.subscribe()
+    p_q = pipeline_event_hub.subscribe(label="positions")
+    s_q = settlement_event_hub.subscribe(label="positions")
     try:
         async def _drain(q, types):
             while True:
@@ -4030,6 +4031,12 @@ async def ws_positions(ws: WebSocket) -> None:
         )
     except WebSocketDisconnect:
         pass
+    except SubscriberOverflow as e:
+        log.warning("ws/positions overflow: %s", e)
+        try:
+            await ws.close(code=OVERFLOW_CLOSE_CODE, reason=OVERFLOW_CLOSE_REASON)
+        except Exception:
+            pass
     except Exception as e:
         log.warning("ws/positions error: %s", e)
     finally:
@@ -4043,12 +4050,13 @@ async def ws_trades(ws: WebSocket) -> None:
     market resolved.  Mirror of /ws/positions with a wider filter.
     """
     from .auth import ws_authenticate
+    from .ws_backpressure import SubscriberOverflow, OVERFLOW_CLOSE_CODE, OVERFLOW_CLOSE_REASON
 
     user = await ws_authenticate(ws)
     if user is None and auth_configured():
         return
-    p_q = pipeline_event_hub.subscribe()
-    s_q = settlement_event_hub.subscribe()
+    p_q = pipeline_event_hub.subscribe(label="trades")
+    s_q = settlement_event_hub.subscribe(label="trades")
     try:
         async def _drain(q):
             while True:
@@ -4060,6 +4068,12 @@ async def ws_trades(ws: WebSocket) -> None:
         await asyncio.gather(_drain(p_q), _drain(s_q))
     except WebSocketDisconnect:
         pass
+    except SubscriberOverflow as e:
+        log.warning("ws/trades overflow: %s", e)
+        try:
+            await ws.close(code=OVERFLOW_CLOSE_CODE, reason=OVERFLOW_CLOSE_REASON)
+        except Exception:
+            pass
     except Exception as e:
         log.warning("ws/trades error: %s", e)
     finally:
@@ -4074,12 +4088,16 @@ async def ws_alerts(ws: WebSocket) -> None:
     signed-in user can tail their own alerts page.
     """
     from .auth import ws_authenticate
+    from .ws_backpressure import SubscriberOverflow, OVERFLOW_CLOSE_CODE, OVERFLOW_CLOSE_REASON
 
     user = await ws_authenticate(ws)
     if user is None and auth_configured():
         return
-    p_q = pipeline_event_hub.subscribe()
-    s_q = settlement_event_hub.subscribe()
+    # Alerts are low-rate but high-importance — close on overflow so a
+    # stuck operator dashboard stops silently dropping kill-switch
+    # notifications.
+    p_q = pipeline_event_hub.subscribe(label="alerts", policy="close")
+    s_q = settlement_event_hub.subscribe(label="alerts", policy="close")
     try:
         async def _drain(q):
             while True:
@@ -4091,6 +4109,12 @@ async def ws_alerts(ws: WebSocket) -> None:
         await asyncio.gather(_drain(p_q), _drain(s_q))
     except WebSocketDisconnect:
         pass
+    except SubscriberOverflow as e:
+        log.warning("ws/alerts overflow: %s", e)
+        try:
+            await ws.close(code=OVERFLOW_CLOSE_CODE, reason=OVERFLOW_CLOSE_REASON)
+        except Exception:
+            pass
     except Exception as e:
         log.warning("ws/alerts error: %s", e)
     finally:
@@ -4105,6 +4129,7 @@ async def ws_orderbook(ws: WebSocket, ticker: str) -> None:
     requested ticker.  Auth identical to /ws/kalshi.
     """
     from .auth import ws_authenticate
+    from .ws_backpressure import SubscriberOverflow, OVERFLOW_CLOSE_CODE, OVERFLOW_CLOSE_REASON
 
     user = await ws_authenticate(ws)
     if user is None and auth_configured():
@@ -4117,7 +4142,9 @@ async def ws_orderbook(ws: WebSocket, ticker: str) -> None:
             pass
         await ws.close(code=4400)
         return
-    q = await kalshi_bus.subscribe()
+    # Stale orderbook deltas are worse than no orderbook, so close on
+    # overflow rather than silently dropping the head.
+    q = await kalshi_bus.subscribe(label=f"orderbook:{target}", policy="close")
     try:
         while True:
             msg = await q.get()
@@ -4131,6 +4158,12 @@ async def ws_orderbook(ws: WebSocket, ticker: str) -> None:
                 await ws.send_json(msg)
     except WebSocketDisconnect:
         pass
+    except SubscriberOverflow as e:
+        log.warning("ws/orderbook overflow: %s", e)
+        try:
+            await ws.close(code=OVERFLOW_CLOSE_CODE, reason=OVERFLOW_CLOSE_REASON)
+        except Exception:
+            pass
     except Exception as e:
         log.warning("ws/orderbook error: %s", e)
     finally:

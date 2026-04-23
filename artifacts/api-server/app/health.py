@@ -464,6 +464,48 @@ def _probe_calibration() -> dict:
     )
 
 
+def _probe_ws_subscribers() -> dict:
+    """WebSocket subscriber backpressure card.
+
+    Surfaces per-connection queue depth + drop counts for every active
+    subscriber across the in-process fan-out hubs (pipeline,
+    settlement, kalshi, polymarket, llm-logs).  A subscriber pinned at
+    full depth or with non-zero drops is the smoking gun for a stuck
+    client.
+    """
+    from .ws_backpressure import registry_summary
+
+    snap = registry_summary()
+    subs = snap["subscribers"]
+    by_hub = snap["by_hub"]
+    total = snap["total_subscribers"]
+    overflowed = sum(1 for s in subs if s.get("overflowed"))
+    near_full = [
+        s for s in subs
+        if s.get("maxsize") and s["qsize"] >= 0.9 * s["maxsize"]
+    ]
+    if overflowed:
+        status = "degraded"
+        detail = f"{overflowed} subscriber(s) closed on overflow"
+    elif near_full:
+        status = "degraded"
+        detail = (
+            f"{len(near_full)} subscriber(s) >=90% full "
+            f"(largest={max(s['qsize'] for s in near_full)})"
+        )
+    else:
+        status = "ok"
+        detail = f"{total} active subscriber(s) across {len(by_hub)} hub(s)"
+    return _card(
+        key="ws_backpressure",
+        label="WebSocket subscribers",
+        category="passive",
+        status=status,
+        detail=detail,
+        extras=snap,
+    )
+
+
 def _probe_feeds() -> list[dict]:
     out: list[dict] = []
     for s in feed_registry.snapshot():
@@ -644,6 +686,7 @@ async def _build_snapshot() -> _Snapshot:
         _probe_settlement(),
         _probe_models(),
         _probe_calibration(),
+        _probe_ws_subscribers(),
         *_probe_feeds(),
     ]
     config = _probe_config()
