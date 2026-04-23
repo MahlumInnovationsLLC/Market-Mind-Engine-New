@@ -389,7 +389,10 @@ export default function VerticalPerformance() {
   const verticals = (data?.verticals ?? []).filter((v) => matches(v.vertical));
 
   return (
-    <div className="border border-border bg-card">
+    <div
+      className="border border-border bg-card"
+      data-testid="panel-vertical-performance"
+    >
       <div className="border-b border-border p-2 px-3 bg-muted/20 flex justify-between items-center">
         <h2 className="text-xs uppercase tracking-wider font-bold text-muted-foreground">
           VERTICAL_PERFORMANCE

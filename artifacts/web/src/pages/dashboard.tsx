@@ -26,6 +26,7 @@ import SwarmAnalysts from "@/components/telemetry/swarm-analysts";
 import SwarmPersonasToday from "@/components/telemetry/swarm-personas-today";
 import SwarmFallbacksToday from "@/components/telemetry/swarm-fallbacks-today";
 import SwarmDebates from "@/components/telemetry/swarm-debates";
+import VerticalPerformance from "@/components/telemetry/vertical-performance";
 import VerticalPicker from "@/components/telemetry/vertical-picker";
 import ActiveModelBadge from "@/components/telemetry/active-model-badge";
 
@@ -131,6 +132,8 @@ export default function Dashboard() {
         <VerticalCards />
 
         <PerLeagueCalibration />
+
+        <VerticalPerformance />
 
         <HighlightsPanel />
 
