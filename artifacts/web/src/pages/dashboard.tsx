@@ -10,6 +10,7 @@ import HighlightsPanel from "@/components/dashboard/highlights-panel";
 import KpiSummaryBar from "@/components/dashboard/kpi-summary-bar";
 import OperatorControls from "@/components/dashboard/operator-controls";
 import OverFilledOrdersBadge from "@/components/dashboard/over-filled-orders-badge";
+import PerLeagueCalibration from "@/components/dashboard/per-league-calibration";
 import { PeriodProvider, PeriodStrip } from "@/components/dashboard/period-context";
 import PipelineTracker from "@/components/dashboard/pipeline-tracker";
 import TradeStatsPanel from "@/components/dashboard/trade-stats-panel";
@@ -128,6 +129,8 @@ export default function Dashboard() {
         </div>
 
         <VerticalCards />
+
+        <PerLeagueCalibration />
 
         <HighlightsPanel />
 

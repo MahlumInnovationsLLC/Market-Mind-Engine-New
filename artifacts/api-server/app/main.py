@@ -3355,6 +3355,18 @@ async def dashboard_search(
     return await dashboard.search_global(q, limit)
 
 
+@app.get("/api/dashboard/calibration/per-league")
+async def dashboard_calibration_per_league(
+    _: object = Depends(require_approved_user),
+) -> dict[str, object]:
+    """Most-recent per-league probability calibrators for the operator
+    dashboard. Returns one entry per supported league with a sampled
+    raw→calibrated curve and the most recent Brier-before / Brier-after
+    pair carried in the snapshot's ``config`` JSONB.
+    """
+    return await dashboard.get_per_league_calibration()
+
+
 @app.get("/api/dashboard/vertical-performance")
 async def dashboard_vertical_performance(
     days: int = 30, _: object = Depends(require_approved_user)

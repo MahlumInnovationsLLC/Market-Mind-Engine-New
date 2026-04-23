@@ -494,7 +494,9 @@ async def _persist_calibrator(
                     jsonb_build_object('status', 'fitted',
                                        'kind', $7::text,
                                        'window_days', $8::int),
-                    jsonb_build_object('source', 'per_league_refit'))
+                    jsonb_build_object('source', 'per_league_refit',
+                                       'brier_before', $9::float,
+                                       'brier_after', $10::float))
             RETURNING id
             """,
             f"per_league:{league}",
@@ -505,6 +507,8 @@ async def _persist_calibrator(
             json.dumps(state),
             state.get("type") or "unknown",
             int(REFIT_WINDOW_DAYS),
+            float(brier_before) if brier_before is not None else None,
+            float(brier_after) if brier_after is not None else None,
         )
         return int(snap_id) if snap_id is not None else None
     except Exception as e:

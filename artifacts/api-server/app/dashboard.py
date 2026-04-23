@@ -1818,6 +1818,142 @@ async def get_over_filled_orders_today() -> dict[str, Any]:
     return {"date_utc": today_utc, "count": len(items), "items": items}
 
 
+async def get_per_league_calibration() -> dict[str, Any]:
+    """Most-recent per-league calibrator snapshots for the dashboard.
+
+    Reads ``calibration_snapshots`` rows where ``vertical='sports'`` and
+    ``sub_category LIKE 'per_league:%'``, picks the latest row per
+    league, and returns a small payload the operator dashboard can plot
+    directly: a sampled raw→calibrated curve plus the most recent
+    Brier-before / Brier-after pair carried in the row's ``config``
+    JSONB (written by ``calibrators._persist_calibrator``).
+    """
+    from . import calibrators as _calibrators
+
+    try:
+        rows = await db.fetch(
+            """
+            SELECT DISTINCT ON (sub_category)
+                   sub_category,
+                   sample_count,
+                   brier_score::float           AS brier_score,
+                   calibrator_state,
+                   config,
+                   drift_status,
+                   to_char(created_at, 'YYYY-MM-DD"T"HH24:MI:SSZ') AS fit_at
+              FROM calibration_snapshots
+             WHERE vertical = 'sports'
+               AND sub_category LIKE 'per_league:%'
+               AND calibrator_state IS NOT NULL
+               AND COALESCE(drift_status->>'status', '') <> 'rolled_back'
+             ORDER BY sub_category, created_at DESC
+            """
+        )
+    except Exception as e:
+        log.warning("per_league_calibration query failed: %s", e)
+        return {"items": [], "supported": list(_calibrators.SUPPORTED_LEAGUES),
+                "error": str(e)[:240]}
+
+    import json as _json
+
+    def _parse_jsonb(v: Any) -> dict[str, Any]:
+        if v is None:
+            return {}
+        if isinstance(v, dict):
+            return v
+        if isinstance(v, (str, bytes, bytearray)):
+            try:
+                parsed = _json.loads(v)
+                return parsed if isinstance(parsed, dict) else {}
+            except (ValueError, TypeError):
+                return {}
+        return {}
+
+    by_league: dict[str, dict[str, Any]] = {}
+    for r in rows:
+        sub = str(r["sub_category"] or "")
+        if not sub.startswith("per_league:"):
+            continue
+        league = sub.split(":", 1)[1].strip().upper()
+        if league not in _calibrators.SUPPORTED_LEAGUES:
+            continue
+        state = _parse_jsonb(r["calibrator_state"])
+        cfg = _parse_jsonb(r["config"])
+        kind = str(state.get("type") or "").lower()
+        if kind not in ("isotonic", "platt"):
+            continue
+
+        # Sample 21 evenly-spaced raw probabilities and run them through
+        # the same apply path the live trader uses, so the chart line is
+        # exactly what the production calibrator would emit.
+        steps = 21
+        curve: list[dict[str, float]] = []
+        for i in range(steps):
+            p_raw = i / (steps - 1)
+            try:
+                if kind == "isotonic":
+                    p_cal = _calibrators._apply_isotonic(p_raw, state)
+                else:
+                    p_cal = _calibrators._apply_platt(p_raw, state)
+            except Exception:
+                p_cal = p_raw
+            p_cal = max(0.0, min(1.0, float(p_cal)))
+            curve.append({"p_raw": round(p_raw, 4),
+                          "p_cal": round(p_cal, 6)})
+
+        brier_before = cfg.get("brier_before")
+        brier_after = cfg.get("brier_after")
+        if brier_after is None and r["brier_score"] is not None:
+            brier_after = float(r["brier_score"])
+
+        knots = None
+        if kind == "isotonic":
+            xs = state.get("x") or []
+            ys = state.get("y") or []
+            if isinstance(xs, list) and isinstance(ys, list) and len(xs) == len(ys):
+                knots = {
+                    "x": [float(v) for v in xs],
+                    "y": [float(v) for v in ys],
+                }
+
+        by_league[league] = {
+            "league": league,
+            "type": kind,
+            "sample_count": int(r["sample_count"] or 0),
+            "fit_at": r["fit_at"],
+            "brier_before": (
+                float(brier_before) if brier_before is not None else None
+            ),
+            "brier_after": (
+                float(brier_after) if brier_after is not None else None
+            ),
+            "curve": curve,
+            "knots": knots,
+        }
+
+    items: list[dict[str, Any]] = []
+    for lg in _calibrators.SUPPORTED_LEAGUES:
+        if lg in by_league:
+            items.append(by_league[lg])
+        else:
+            items.append({
+                "league": lg,
+                "type": None,
+                "sample_count": 0,
+                "fit_at": None,
+                "brier_before": None,
+                "brier_after": None,
+                "curve": [],
+                "knots": None,
+            })
+
+    return {
+        "items": items,
+        "supported": list(_calibrators.SUPPORTED_LEAGUES),
+        "fitted_count": sum(1 for it in items if it["type"] is not None),
+    }
+
+
 def redact_swarm_debate_transcripts(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Drop the per-persona reasoning + moderator narrative from each item
     and stamp ``redacted: True`` so the frontend can show an upsell.

@@ -111,6 +111,8 @@ PROTECTED_ROUTES: tuple[str, ...] = (
     # Task #245 — operator-only calibration & research dashboards.
     "/api/calibration/snapshots",
     "/api/research/directives",
+    # Task #155 — per-league calibration panel on the operator dashboard.
+    "/api/dashboard/calibration/per-league",
     # Per-source weather freshness badge — operator dashboard only.
     "/api/weather/freshness",
 )
