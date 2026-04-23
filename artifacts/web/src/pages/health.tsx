@@ -136,6 +136,7 @@ export function HealthPanel() {
   const [errors, setErrors] = useState<ErrorsResponse | null>(null);
   const [notif, setNotif] = useState<NotificationsStatus | null>(null);
   const [modelAlerts, setModelAlerts] = useState<ModelAlertsResponse | null>(null);
+  const [alertView, setAlertView] = useState<"open" | "all">("open");
   const [alertBusy, setAlertBusy] = useState<number | null>(null);
   const [alertError, setAlertError] = useState<string | null>(null);
   const [snoozeMinutes, setSnoozeMinutes] = useState<number>(60);
@@ -145,6 +146,11 @@ export function HealthPanel() {
   const [dryRun, setDryRun] = useState(true);
 
   const token = useMemo(() => () => getToken().then((t) => t ?? null), [getToken]);
+
+  const alertsPath = (view: "open" | "all") =>
+    view === "all"
+      ? "/api/health/model-alerts?ack=true"
+      : "/api/health/model-alerts?ack=false";
 
   async function refresh() {
     try {
@@ -156,7 +162,7 @@ export function HealthPanel() {
         apiFetch<NotificationsStatus>("/api/notifications/status", {
           getToken: token,
         }),
-        apiFetch<ModelAlertsResponse>("/api/health/model-alerts?ack=false", {
+        apiFetch<ModelAlertsResponse>(alertsPath(alertView), {
           getToken: token,
         }),
       ]);
@@ -182,7 +188,7 @@ export function HealthPanel() {
     const id = setInterval(refresh, 15_000);
     return () => clearInterval(id);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isSignedIn]);
+  }, [isSignedIn, alertView]);
 
   async function ackAlert(id: number, snoozeMinutes: number | null) {
     setAlertBusy(id);
@@ -194,7 +200,7 @@ export function HealthPanel() {
         getToken: token,
       });
       const m = await apiFetch<ModelAlertsResponse>(
-        "/api/health/model-alerts?ack=false",
+        alertsPath(alertView),
         { getToken: token },
       );
       setModelAlerts(m);
@@ -312,26 +318,63 @@ export function HealthPanel() {
         ))}
 
         <section className="space-y-3">
-          <div className="flex items-baseline justify-between">
+          <div className="flex items-baseline justify-between gap-3 flex-wrap">
             <h2 className="text-sm uppercase tracking-widest text-muted-foreground">
-              Open model drift alerts
+              {alertView === "all"
+                ? "Drift alerts (recent audit log)"
+                : "Open model drift alerts"}
               <span className="ml-2 text-[10px]">
                 ({modelAlerts?.count ?? 0})
               </span>
             </h2>
-            <div className="flex items-center gap-2 text-[10px] text-muted-foreground/70 uppercase tracking-widest">
-              <span>ack to clear · snooze hides for</span>
-              <select
-                value={snoozeMinutes}
-                onChange={(e) => setSnoozeMinutes(Number(e.target.value))}
-                data-testid="select-snooze-duration"
-                className="border border-border bg-card px-1 py-0.5 uppercase tracking-widest text-[10px]"
+            <div className="flex items-center gap-3 flex-wrap">
+              <div
+                className="inline-flex border border-border bg-card text-[10px] uppercase tracking-widest"
+                role="tablist"
+                aria-label="Drift alerts view"
+                data-testid="alert-view-toggle"
               >
-                <option value={15}>15m</option>
-                <option value={60}>1h</option>
-                <option value={240}>4h</option>
-                <option value={1440}>24h</option>
-              </select>
+                <button
+                  role="tab"
+                  aria-selected={alertView === "open"}
+                  onClick={() => setAlertView("open")}
+                  className={`px-2 py-1 ${
+                    alertView === "open"
+                      ? "bg-muted text-foreground"
+                      : "text-muted-foreground hover:bg-muted/40"
+                  }`}
+                  data-testid="alert-view-open"
+                >
+                  Open
+                </button>
+                <button
+                  role="tab"
+                  aria-selected={alertView === "all"}
+                  onClick={() => setAlertView("all")}
+                  className={`px-2 py-1 border-l border-border ${
+                    alertView === "all"
+                      ? "bg-muted text-foreground"
+                      : "text-muted-foreground hover:bg-muted/40"
+                  }`}
+                  data-testid="alert-view-all"
+                >
+                  All recent
+                </button>
+              </div>
+              <div className="flex items-center gap-2 text-[10px] text-muted-foreground/70 uppercase tracking-widest">
+                <span>ack to clear · snooze hides for</span>
+                <select
+                  value={snoozeMinutes}
+                  onChange={(e) => setSnoozeMinutes(Number(e.target.value))}
+                  data-testid="select-snooze-duration"
+                  className="border border-border bg-card px-1 py-0.5 uppercase tracking-widest text-[10px]"
+                >
+                  <option value={15}>15m</option>
+                  <option value={60}>1h</option>
+                  <option value={240}>4h</option>
+                  <option value={1440}>24h</option>
+                </select>
+              </div>
             </div>
           </div>
           {alertError && (
@@ -342,13 +385,16 @@ export function HealthPanel() {
           <div className="border border-border bg-card max-h-72 overflow-y-auto text-xs">
             {(modelAlerts?.items ?? []).length === 0 ? (
               <div className="p-3 text-muted-foreground">
-                no open drift alerts
+                {alertView === "all"
+                  ? "no recent drift alerts"
+                  : "no open drift alerts"}
               </div>
             ) : (
               <table className="w-full">
                 <thead className="text-[10px] uppercase tracking-widest text-muted-foreground">
                   <tr className="border-b border-border">
                     <th className="text-left p-2">sev</th>
+                    <th className="text-left p-2">status</th>
                     <th className="text-left p-2">vertical</th>
                     <th className="text-left p-2">metric</th>
                     <th className="text-left p-2">value</th>
@@ -359,60 +405,97 @@ export function HealthPanel() {
                   </tr>
                 </thead>
                 <tbody>
-                  {(modelAlerts?.items ?? []).map((a) => (
-                    <tr key={a.id} className="border-b border-border/40">
-                      <td className="p-2 align-top whitespace-nowrap">
-                        <span
-                          className={
-                            a.severity === "critical"
-                              ? "text-destructive uppercase tracking-widest"
-                              : "text-warning uppercase tracking-widest"
-                          }
-                        >
-                          {a.severity}
-                        </span>
-                      </td>
-                      <td className="p-2 align-top whitespace-nowrap">
-                        {a.vertical}
-                      </td>
-                      <td className="p-2 align-top whitespace-nowrap text-muted-foreground">
-                        {a.metric_name}
-                      </td>
-                      <td className="p-2 align-top whitespace-nowrap">
-                        {a.metric_value !== null
-                          ? a.metric_value.toFixed(3)
-                          : "—"}
-                      </td>
-                      <td className="p-2 align-top whitespace-nowrap text-muted-foreground">
-                        {a.threshold !== null ? a.threshold.toFixed(3) : "—"}
-                      </td>
-                      <td className="p-2 align-top whitespace-nowrap text-muted-foreground">
-                        {formatAge(a.age_seconds)}
-                      </td>
-                      <td className="p-2 align-top break-all">{a.message}</td>
-                      <td className="p-2 align-top text-right whitespace-nowrap">
-                        <div className="inline-flex gap-1">
-                          <button
-                            onClick={() => ackAlert(a.id, null)}
-                            disabled={alertBusy !== null}
-                            className="border border-border bg-card hover:bg-muted px-2 py-1 uppercase tracking-widest text-[10px] disabled:opacity-50"
+                  {(modelAlerts?.items ?? []).map((a) => {
+                    const snoozedActive =
+                      !a.acknowledged &&
+                      a.snooze_until !== null &&
+                      new Date(a.snooze_until).getTime() > Date.now();
+                    const isOpen = !a.acknowledged && !snoozedActive;
+                    return (
+                      <tr
+                        key={a.id}
+                        className="border-b border-border/40 align-top"
+                        data-testid={`alert-row-${a.id}`}
+                      >
+                        <td className="p-2 whitespace-nowrap">
+                          <span
+                            className={
+                              a.severity === "critical"
+                                ? "text-destructive uppercase tracking-widest"
+                                : "text-warning uppercase tracking-widest"
+                            }
                           >
-                            {alertBusy === a.id ? "…" : "Ack"}
-                          </button>
-                          <button
-                            onClick={() => ackAlert(a.id, snoozeMinutes)}
-                            disabled={alertBusy !== null}
-                            data-testid={`button-snooze-${a.id}`}
-                            className="border border-border bg-card hover:bg-muted px-2 py-1 uppercase tracking-widest text-[10px] disabled:opacity-50"
-                          >
-                            {alertBusy === a.id
-                              ? "…"
-                              : `Snooze ${formatSnoozeLabel(snoozeMinutes)}`}
-                          </button>
-                        </div>
-                      </td>
-                    </tr>
-                  ))}
+                            {a.severity}
+                          </span>
+                        </td>
+                        <td className="p-2 whitespace-nowrap text-[10px] uppercase tracking-widest">
+                          {a.acknowledged ? (
+                            <div className="text-success">
+                              <div>acked</div>
+                              <div className="text-muted-foreground normal-case tracking-normal">
+                                {a.acknowledged_by ?? "—"}
+                              </div>
+                              <div className="text-muted-foreground normal-case tracking-normal">
+                                {a.acknowledged_at ?? "—"}
+                              </div>
+                            </div>
+                          ) : snoozedActive ? (
+                            <div className="text-warning">
+                              <div>snoozed</div>
+                              <div className="text-muted-foreground normal-case tracking-normal">
+                                until {a.snooze_until}
+                              </div>
+                            </div>
+                          ) : (
+                            <span className="text-destructive">open</span>
+                          )}
+                        </td>
+                        <td className="p-2 whitespace-nowrap">{a.vertical}</td>
+                        <td className="p-2 whitespace-nowrap text-muted-foreground">
+                          {a.metric_name}
+                        </td>
+                        <td className="p-2 whitespace-nowrap">
+                          {a.metric_value !== null
+                            ? a.metric_value.toFixed(3)
+                            : "—"}
+                        </td>
+                        <td className="p-2 whitespace-nowrap text-muted-foreground">
+                          {a.threshold !== null ? a.threshold.toFixed(3) : "—"}
+                        </td>
+                        <td className="p-2 whitespace-nowrap text-muted-foreground">
+                          {formatAge(a.age_seconds)}
+                        </td>
+                        <td className="p-2 break-all">{a.message}</td>
+                        <td className="p-2 text-right whitespace-nowrap">
+                          {isOpen ? (
+                            <div className="inline-flex gap-1">
+                              <button
+                                onClick={() => ackAlert(a.id, null)}
+                                disabled={alertBusy !== null}
+                                className="border border-border bg-card hover:bg-muted px-2 py-1 uppercase tracking-widest text-[10px] disabled:opacity-50"
+                              >
+                                {alertBusy === a.id ? "…" : "Ack"}
+                              </button>
+                              <button
+                                onClick={() => ackAlert(a.id, snoozeMinutes)}
+                                disabled={alertBusy !== null}
+                                data-testid={`button-snooze-${a.id}`}
+                                className="border border-border bg-card hover:bg-muted px-2 py-1 uppercase tracking-widest text-[10px] disabled:opacity-50"
+                              >
+                                {alertBusy === a.id
+                                  ? "…"
+                                  : `Snooze ${formatSnoozeLabel(snoozeMinutes)}`}
+                              </button>
+                            </div>
+                          ) : (
+                            <span className="text-[10px] text-muted-foreground/60 uppercase tracking-widest">
+                              —
+                            </span>
+                          )}
+                        </td>
+                      </tr>
+                    );
+                  })}
                 </tbody>
               </table>
             )}
