@@ -23,14 +23,16 @@ export function StatTile({
   label,
   value,
   hint,
+  testID,
 }: {
   label: string;
   value: string;
   hint?: string;
+  testID?: string;
 }) {
   const colors = useColors();
   return (
-    <Card style={styles.tile}>
+    <Card style={styles.tile} testID={testID}>
       <Text style={[styles.tileLabel, { color: colors.mutedForeground }]}>
         {label}
       </Text>

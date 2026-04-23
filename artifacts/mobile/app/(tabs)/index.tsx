@@ -243,17 +243,25 @@ export default function DashboardScreen() {
       </View>
       <View style={styles.row}>
         <StatTile label="OPEN POSITIONS" value={String(openPositions)} />
-        <StatTile label="TRADES" value={String(tradesCount)} />
+        <StatTile
+          label="TRADES"
+          value={String(tradesCount)}
+          testID="card-recent-trades"
+        />
       </View>
 
       <SectionHeader>SWARM</SectionHeader>
       <View style={styles.row}>
         <StatTile label="DEBATES" value={String(counts.swarm_debates ?? 0)} />
-        <StatTile label="CYCLES" value={String(counts.trading_cycles ?? 0)} />
+        <StatTile
+          label="CYCLES"
+          value={String(counts.trading_cycles ?? 0)}
+          testID="card-trading-cycles"
+        />
       </View>
 
       <SectionHeader>HEARTBEAT</SectionHeader>
-      <Card>
+      <Card testID="card-health-snapshot">
         <View style={styles.kvRow}>
           <Text style={[styles.kvKey, { color: colors.mutedForeground }]}>LAST CYCLE</Text>
           <Text style={[styles.kvVal, { color: colors.foreground }]}>

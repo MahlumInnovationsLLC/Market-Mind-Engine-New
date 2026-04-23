@@ -282,6 +282,19 @@ Accessibility primitives shipped in #237:
   `OPERATOR_ALLOWED_EMAILS`, `OPERATOR_ADMIN_EMAILS`. Without them only
   the public-surface tests execute; auth-gated tests skip themselves
   rather than failing.
+
+- `pnpm --filter @workspace/mobile run test:e2e` — Playwright spec
+  (`artifacts/mobile/tests/operator-journey.spec.ts`) that drives the
+  Expo react-native-web export through sign-in → dashboard →
+  sign-out. Asserts the same `card-recent-trades`,
+  `card-trading-cycles`, and `card-health-snapshot` KPIs the web
+  operator-journey spec checks (react-native-web maps `testID` →
+  `data-testid`). Start the Expo server first
+  (`pnpm --filter @workspace/mobile run dev`, or `build` + `serve`)
+  and point the suite at it with
+  `E2E_MOBILE_BASE_URL=http://localhost:<port>`. Auth-gated tests
+  skip without `CLERK_PUBLISHABLE_KEY` / `CLERK_SECRET_KEY` /
+  `E2E_CLERK_USER_EMAIL`.
 - `pnpm --filter @workspace/db run push` — push DB schema changes (dev only)
 - API server: managed by the `artifacts/api-server: API Server` workflow (uvicorn on `$PORT`)
 - Web: managed by the `artifacts/web: web` workflow
