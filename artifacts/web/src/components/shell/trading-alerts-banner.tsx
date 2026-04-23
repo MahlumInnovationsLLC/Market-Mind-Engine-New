@@ -1,7 +1,8 @@
 import { useMemo } from "react";
 import { useAuth } from "@clerk/react";
 import { useQuery } from "@tanstack/react-query";
-import { ShieldAlert } from "lucide-react";
+import { Link } from "wouter";
+import { ArrowRight, ShieldAlert } from "lucide-react";
 import { apiFetch } from "@/lib/api";
 
 type RuntimeSettings = {
@@ -41,6 +42,14 @@ export function TradingAlertsBanner() {
           · {data.halt_reason}
         </span>
       ) : null}
+      <Link
+        href="/system?tab=controls"
+        className="ml-auto inline-flex items-center gap-1 px-2 py-0.5 rounded border border-loss/50 hover:bg-loss/20 hover:text-loss focus:outline-none focus:ring-1 focus:ring-loss/60 transition-colors"
+        data-testid="link-trading-halted-controls"
+      >
+        Open kill switch
+        <ArrowRight className="w-3 h-3" />
+      </Link>
     </div>
   );
 }

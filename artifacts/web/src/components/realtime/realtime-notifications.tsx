@@ -5,7 +5,27 @@ import {
   type ModelHealthAlert,
 } from "@workspace/api-client-react";
 import { toast } from "@/hooks/use-toast";
+import { ToastAction } from "@/components/ui/toast";
 import { usePipelineSubscription } from "./websocket-provider";
+
+/** Build a wouter-friendly click-through ToastAction. We intentionally
+ *  use full-page navigation (`window.location.assign`) instead of
+ *  `useLocation`'s setter because this bridge component is mounted
+ *  near the root and we don't want to capture a stale router instance
+ *  inside the long-lived `usePipelineSubscription` callback. */
+function viewAction(label: string, href: string, testId: string) {
+  return (
+    <ToastAction
+      altText={label}
+      data-testid={testId}
+      onClick={() => {
+        window.location.assign(href);
+      }}
+    >
+      {label}
+    </ToastAction>
+  );
+}
 
 const ALERTS_PARAMS = { ack: false, limit: 50 } as const;
 
@@ -89,6 +109,11 @@ export function RealtimeNotifications() {
         variant: severityVariant(a.severity),
         title: `${sev}${vert}`,
         description: a.message ?? a.alert_type ?? "Model health alert",
+        action: viewAction(
+          "View health",
+          "/system?tab=health",
+          "toast-action-view-health",
+        ),
       });
     }
   }, [alerts.data]);
@@ -143,9 +168,15 @@ export function RealtimeNotifications() {
       const qty = pickString(event, "qty", "quantity", "size");
       const px =
         pickString(event, "fill_price", "price", "limit_price") ?? "—";
+      const tradeRef = pickString(event, "trade_id", "order_id", "id");
       toast({
         title: `FILL · ${side || "TRADE"}`,
         description: `${ticker}${qty ? ` × ${qty}` : ""} @ ${px}`,
+        action: viewAction(
+          "View",
+          tradeRef ? `/trade/${encodeURIComponent(tradeRef)}` : "/trading",
+          "toast-action-view-fill",
+        ),
       });
       return;
     }
@@ -180,9 +211,18 @@ export function RealtimeNotifications() {
       const side = (pickString(placement, "side") ?? "").toUpperCase();
       const qty = pickString(placement, "qty", "quantity", "size");
       const px = pickString(placement, "limit_price", "price") ?? "—";
+      const placementRef =
+        pickString(placement, "trade_id", "order_id", "id") ?? null;
       toast({
         title: `ORDER PLACED · ${side || "TRADE"}`,
         description: `${ticker}${qty ? ` × ${qty}` : ""} @ ${px}`,
+        action: viewAction(
+          "View",
+          placementRef
+            ? `/trade/${encodeURIComponent(placementRef)}`
+            : "/pipeline",
+          "toast-action-view-placement",
+        ),
       });
     }
   });

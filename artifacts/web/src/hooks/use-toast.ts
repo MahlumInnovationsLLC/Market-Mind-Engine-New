@@ -5,8 +5,14 @@ import type {
   ToastProps,
 } from "@/components/ui/toast"
 
-const TOAST_LIMIT = 1
-const TOAST_REMOVE_DELAY = 1000000
+// Allow realtime alert + trade-fill toasts to stack top-right rather
+// than each new toast immediately replacing the previous one (the
+// shadcn template default of 1 was too restrictive for this app).
+const TOAST_LIMIT = 5
+// shadcn's default `1_000_000` is effectively "manual dismiss only";
+// we want realtime fills/alerts to auto-clear after a few seconds so
+// the stack stays manageable during heavy traffic.
+const TOAST_REMOVE_DELAY = 6000
 
 type ToasterToast = ToastProps & {
   id: string
