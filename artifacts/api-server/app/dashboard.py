@@ -383,6 +383,33 @@ async def insert_landing_lead(
     return int(row["id"])
 
 
+async def find_recent_lead_by_email(email: str, hours: int = 24) -> int | None:
+    """Return the id of a recent landing-lead row matching lower(email).
+
+    Used to suppress duplicate confirmation emails when the same address
+    submits the form repeatedly within `hours`.  Returns None if no row
+    matches or if the leads table doesn't exist yet.
+    """
+    await _ensure_leads_table()
+    try:
+        row = await db.fetchrow(
+            """
+            SELECT id
+              FROM landing_leads
+             WHERE lower(email) = lower($1)
+               AND created_at > now() - ($2 || ' hours')::interval
+             ORDER BY created_at DESC
+             LIMIT 1
+            """,
+            email,
+            str(int(hours)),
+        )
+    except Exception as e:
+        log.warning("find_recent_lead_by_email failed: %s", e)
+        return None
+    return int(row["id"]) if row else None
+
+
 async def mark_lead_confirmation_sent(lead_id: int) -> None:
     try:
         await db.execute(

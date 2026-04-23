@@ -713,6 +713,37 @@ class LandingLeadRequest(BaseModel):
     source: str | None = Field(default=None, max_length=80)
 
 
+# In-process per-IP rate limiter for the public lead-capture endpoint.
+# Maps ip_hash -> list of unix-timestamp floats of recent submissions.
+# Bounded by pruning to the last `_LEADS_RATE_WINDOW_S` seconds on every
+# call, so memory stays proportional to active submitters.
+_LEADS_RATE_LIMIT_PER_MIN = 5
+_LEADS_RATE_WINDOW_S = 60.0
+_LEADS_DEDUPE_HOURS = 24
+_leads_rate_buckets: dict[str, list[float]] = {}
+
+
+def _leads_rate_check(ip_hash: str | None) -> bool:
+    """Return True if the request is under the per-IP rate limit.
+
+    No-op (always allows) when we have no client IP to bucket by — we'd
+    rather let the request through than 429 every caller behind a proxy
+    that strips the source address.
+    """
+    if not ip_hash:
+        return True
+    now = time.time()
+    cutoff = now - _LEADS_RATE_WINDOW_S
+    bucket = _leads_rate_buckets.get(ip_hash, [])
+    bucket = [t for t in bucket if t > cutoff]
+    if len(bucket) >= _LEADS_RATE_LIMIT_PER_MIN:
+        _leads_rate_buckets[ip_hash] = bucket
+        return False
+    bucket.append(now)
+    _leads_rate_buckets[ip_hash] = bucket
+    return True
+
+
 @app.post("/api/public/leads")
 async def public_leads(body: LandingLeadRequest, request: Request) -> dict[str, object]:
     """Public — capture an early-access lead from the landing form.
@@ -721,6 +752,12 @@ async def public_leads(body: LandingLeadRequest, request: Request) -> dict[str, 
     email via Postmark (no-op if Postmark isn't configured).  Returns
     `{ok: true}` whether or not the email was delivered, so callers can
     keep their UX simple.
+
+    De-duplication: a submission whose lower(email) already appears in
+    `landing_leads` within the last 24 hours short-circuits — we return
+    `{ok: true, deduped: true}` without inserting a new row or
+    re-sending the confirmation email. Per-IP rate-limited to 5 per
+    minute (returns 429 over quota) to keep bots from spamming Postmark.
     """
     import hashlib
 
@@ -732,6 +769,27 @@ async def public_leads(body: LandingLeadRequest, request: Request) -> dict[str, 
     user_agent = request.headers.get("user-agent", "")[:500] or None
     client_host = request.client.host if request.client else ""
     ip_hash = hashlib.sha256(client_host.encode("utf-8")).hexdigest()[:32] if client_host else None
+
+    if not _leads_rate_check(ip_hash):
+        raise HTTPException(status_code=429, detail="too many requests")
+
+    # Skip the insert + Postmark send if this email already signed up
+    # within the dedupe window. Failures fall through to the normal
+    # insert path so a flaky lookup never costs us a real lead.
+    try:
+        existing_id = await dashboard.find_recent_lead_by_email(
+            email, hours=_LEADS_DEDUPE_HOURS
+        )
+    except Exception as e:
+        log.warning("lead dedupe lookup failed: %s", e)
+        existing_id = None
+    if existing_id is not None:
+        return {
+            "ok": True,
+            "lead_id": existing_id,
+            "confirmation_sent": False,
+            "deduped": True,
+        }
 
     try:
         lead_id = await dashboard.insert_landing_lead(
