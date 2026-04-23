@@ -23,6 +23,35 @@ SUPABASE_BUCKET = "axiom-predict-artifacts"
 _WORKSPACE_ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_MODEL_CACHE_DIR = _WORKSPACE_ROOT / ".cache" / "axiom-models"
 
+# Default budget for the on-disk model cache (reassembled archives +
+# extracted trees). The current production payload is ~1.2 GiB; 2 GiB
+# leaves headroom for one extra version while still firing a warning
+# well before the workspace volume fills. Override with
+# AXIOM_MODEL_CACHE_MAX_BYTES.
+DEFAULT_MODEL_CACHE_MAX_BYTES = 2 * (1 << 30)
+
+
+def resolve_model_cache_max_bytes() -> int:
+    """Resolve the model cache size budget from env/default.
+
+    Module-level (no Settings dependency) so `models_loader` can read
+    it at import time, mirroring `resolve_model_cache_dir`.
+    """
+    raw = os.environ.get("AXIOM_MODEL_CACHE_MAX_BYTES")
+    if raw is None or not raw.strip():
+        return DEFAULT_MODEL_CACHE_MAX_BYTES
+    try:
+        val = int(raw.strip())
+    except ValueError as e:
+        raise RuntimeError(
+            f"AXIOM_MODEL_CACHE_MAX_BYTES must be an integer (got {raw!r})"
+        ) from e
+    if val <= 0:
+        raise RuntimeError(
+            f"AXIOM_MODEL_CACHE_MAX_BYTES must be > 0 (got {val})"
+        )
+    return val
+
 
 def resolve_model_cache_dir() -> Path:
     """Resolve the model cache directory from env/default.
@@ -109,6 +138,10 @@ class Settings:
     # Model artifact cache (persistent across container restarts).
     # Populated from AXIOM_MODEL_CACHE_DIR or DEFAULT_MODEL_CACHE_DIR.
     model_cache_dir: Path
+    # Soft size budget for the cache. Boot warns when exceeded; surfaced
+    # via /api/health.models.disk_usage. Override with
+    # AXIOM_MODEL_CACHE_MAX_BYTES (bytes).
+    model_cache_max_bytes: int
 
     # Telegram concierge bot. When unset the long-poll loop stays asleep
     # (dev / CI default). Per task #111.
@@ -241,6 +274,7 @@ def get_settings() -> Settings:
             0.0, float(os.environ.get("AXIOM_SLIPPAGE_GUARD_MAX_EDGE_PCT") or "50")
         ),
         model_cache_dir=resolve_model_cache_dir(),
+        model_cache_max_bytes=resolve_model_cache_max_bytes(),
         telegram_bot_token=(os.environ.get("TELEGRAM_BOT_TOKEN") or "").strip() or None,
         port=int(os.environ.get("PORT", "8080")),
         cors_origins=cors_origins,

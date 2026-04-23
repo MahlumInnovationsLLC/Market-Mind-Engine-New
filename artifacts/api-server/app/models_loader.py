@@ -38,7 +38,7 @@ from pathlib import Path
 from typing import Any
 
 from . import storage
-from .config import resolve_model_cache_dir
+from .config import resolve_model_cache_dir, resolve_model_cache_max_bytes
 
 
 log = logging.getLogger(__name__)
@@ -48,6 +48,7 @@ log = logging.getLogger(__name__)
 _LEGACY_CACHE_ROOT = Path("/tmp/axiom-cache")
 
 CACHE_ROOT = resolve_model_cache_dir()
+CACHE_MAX_BYTES = resolve_model_cache_max_bytes()
 MODELS_DIR = CACHE_ROOT / "models"
 SOURCE_DIR = CACHE_ROOT / "source"
 MODELS_ARCHIVE = CACHE_ROOT / "models.tar"
@@ -440,6 +441,7 @@ async def ensure_artifacts(*, force: bool = False) -> ModelsState:
             )
             await asyncio.to_thread(_migrate_legacy_cache)
             await asyncio.to_thread(_prune_cache)
+            await asyncio.to_thread(_enforce_cache_budget)
             models_info = await _ensure_one(
                 "models", "models_part_", MODELS_ARCHIVE, MODELS_DIR
             )
@@ -448,6 +450,11 @@ async def ensure_artifacts(*, force: bool = False) -> ModelsState:
                 "source", "source_part_", SOURCE_ARCHIVE, SOURCE_DIR
             )
             _state.archives["source"] = source_info
+
+            # Re-check the budget post-extract so first-boot overages
+            # (download + untar pushed us over the limit) are surfaced
+            # in the same boot rather than waiting for the next reload.
+            await asyncio.to_thread(_enforce_cache_budget)
 
             predictors = await asyncio.to_thread(_scan_predictors, MODELS_DIR)
             _state.predictors = predictors
@@ -671,6 +678,82 @@ def _prune_cache() -> None:
         )
 
 
+def _cache_total_bytes() -> int:
+    """Sum on-disk size of every file under CACHE_ROOT."""
+    if not CACHE_ROOT.exists():
+        return 0
+    total, _ = _dir_size(CACHE_ROOT)
+    return total
+
+
+def _enforce_cache_budget() -> dict[str, Any]:
+    """Warn (and best-effort evict) when the cache exceeds its budget.
+
+    Called from `ensure_artifacts` after `_prune_cache`, so any orphan
+    chunks/tempfiles have already been removed. Anything still on disk
+    is canonical, so we don't delete the four expected entries — that
+    would just trigger a re-download loop. Instead we surface a loud
+    warning and let the operator decide whether to raise
+    AXIOM_MODEL_CACHE_MAX_BYTES or shrink the published archive.
+
+    If a future schema sneaks an unexpected entry past `_prune_cache`
+    (e.g. a new top-level file), we'll evict it oldest-first here to
+    pull usage back under budget.
+    """
+    total = _cache_total_bytes()
+    budget = CACHE_MAX_BYTES
+    if total <= budget:
+        return {"total_bytes": total, "budget_bytes": budget, "over_budget": False}
+
+    log.warning(
+        "[models_loader] cache size %.1f MiB exceeds budget %.1f MiB at %s "
+        "(set AXIOM_MODEL_CACHE_MAX_BYTES to raise the limit)",
+        total / (1 << 20),
+        budget / (1 << 20),
+        CACHE_ROOT,
+    )
+
+    # Oldest-first eviction of anything outside the canonical set.
+    # Sorted by mtime so the staleest leftover goes first.
+    candidates: list[tuple[float, Path]] = []
+    for entry in CACHE_ROOT.iterdir():
+        if entry.name in _EXPECTED_CACHE_ENTRIES:
+            continue
+        try:
+            candidates.append((entry.stat().st_mtime, entry))
+        except OSError:
+            continue
+    candidates.sort(key=lambda t: t[0])
+    evicted = 0
+    freed = 0
+    for _mtime, entry in candidates:
+        if total <= budget:
+            break
+        try:
+            if entry.is_file() or entry.is_symlink():
+                size = entry.stat().st_size if entry.is_file() else 0
+                entry.unlink()
+            else:
+                size, _ = _dir_size(entry)
+                shutil.rmtree(entry, ignore_errors=True)
+            evicted += 1
+            freed += size
+            total -= size
+        except OSError as e:
+            log.warning("[models_loader] budget evict %s failed: %s", entry, e)
+    if evicted:
+        log.warning(
+            "[models_loader] evicted %d non-canonical entries (%.1f MiB) to fit budget",
+            evicted, freed / (1 << 20),
+        )
+
+    return {
+        "total_bytes": _cache_total_bytes(),
+        "budget_bytes": budget,
+        "over_budget": _cache_total_bytes() > budget,
+    }
+
+
 def disk_usage_summary() -> dict[str, Any]:
     def file_size(p: Path) -> int:
         return p.stat().st_size if p.exists() and p.is_file() else 0
@@ -700,4 +783,6 @@ def disk_usage_summary() -> dict[str, Any]:
         "models_extracted_bytes": models_extracted_bytes,
         "source_extracted_bytes": source_extracted_bytes,
         "total_bytes": total_bytes,
+        "budget_bytes": CACHE_MAX_BYTES,
+        "over_budget": total_bytes > CACHE_MAX_BYTES,
     }
