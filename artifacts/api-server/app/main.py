@@ -46,6 +46,7 @@ from .notifications import (
     postmark as notif_postmark,
     push as notif_push,
     suppression as notif_suppression,
+    weekly_roundup as notif_weekly_roundup,
 )
 from .auth import (
     AuthedUser,
@@ -316,6 +317,10 @@ async def lifespan(_: FastAPI):
         await daily_summary.start()
     except Exception as e:
         log.warning("daily summary scheduler start failed: %s", e)
+    try:
+        await notif_weekly_roundup.start()
+    except Exception as e:
+        log.warning("weekly roundup scheduler start failed: %s", e)
     # RevenueCat webhook silence detector — fires an operator alert
     # when the mobile-IAP webhook stops delivering during business hours
     # (catches dashboard pause/resume + upstream outages). Per task #252.
@@ -480,6 +485,10 @@ async def lifespan(_: FastAPI):
             await daily_summary.stop()
         except Exception as e:
             log.warning("daily summary stop error: %s", e)
+        try:
+            await notif_weekly_roundup.stop()
+        except Exception as e:
+            log.warning("weekly roundup stop error: %s", e)
         try:
             await rc_billing.stop()
         except Exception as e:
