@@ -10,6 +10,7 @@ import SwarmAnalysts from "@/components/telemetry/swarm-analysts";
 import SwarmDebates from "@/components/telemetry/swarm-debates";
 import ModelInventory from "@/components/telemetry/model-inventory";
 import ModelHealthAlerts from "@/components/telemetry/model-health-alerts";
+import RecentRetrains from "@/components/telemetry/recent-retrains";
 import ActiveModelBadge from "@/components/telemetry/active-model-badge";
 import AutoResearchPanel from "@/components/intelligence/autoresearch-panel";
 import CalibrationPanel from "@/components/intelligence/calibration-panel";
@@ -131,6 +132,14 @@ function ModelsTab({ isAdmin }: { isAdmin: boolean }) {
           subtitle="Drift / staleness / inference errors raised by the settlement loop."
         />
         <ModelHealthAlerts />
+      </GlassCard>
+      <GlassCard tone="solid" padding="md" className="xl:col-span-2" data-testid="card-models-retrains">
+        <SectionHeader
+          eyebrow="AUTONOMY"
+          title="Recent retrains"
+          subtitle="Per-vertical isotonic refits with Brier delta, drift-alert vs. batch trigger, and rollback status."
+        />
+        <RecentRetrains />
       </GlassCard>
       <GlassCard tone="solid" padding="md" className="xl:col-span-2" data-testid="card-models-inventory">
         <SectionHeader

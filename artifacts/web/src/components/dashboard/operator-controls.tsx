@@ -5,6 +5,7 @@ import EmergencyStop from "@/components/telemetry/emergency-stop";
 import LiveExecuteToggle from "@/components/telemetry/live-execute-toggle";
 import RuntimeSettingsPanel from "@/components/telemetry/runtime-settings";
 import ModelHealthAlerts from "@/components/telemetry/model-health-alerts";
+import RecentRetrains from "@/components/telemetry/recent-retrains";
 
 /**
  * Collapsible card grouping the orchestrator + risk controls.
@@ -58,6 +59,9 @@ export default function OperatorControls({ isAdmin }: { isAdmin: boolean }) {
           <LiveExecuteToggle />
           <AccessRequests />
           <ModelHealthAlerts />
+          <div className="lg:col-span-2">
+            <RecentRetrains />
+          </div>
           <div className="lg:col-span-2">
             <RuntimeSettingsPanel />
           </div>

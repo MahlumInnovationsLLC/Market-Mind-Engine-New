@@ -13,6 +13,7 @@ import PipelineFlowchart from "@/components/pipeline/pipeline-flowchart";
 import ConsoleTail from "@/components/pipeline/console-tail";
 import TradeTrainTicker from "@/components/pipeline/trade-train-ticker";
 import BackfillPanel from "@/components/pipeline/backfill-panel";
+import RecentRetrains from "@/components/telemetry/recent-retrains";
 
 /**
  * Pipeline-page-local rolling buffer of pipeline-WS frames. The
@@ -829,6 +830,7 @@ export default function PipelinePage() {
             emptyText="No settlement events yet…"
             formatLine={formatSettlementLine}
           />
+          <RecentRetrains />
         </aside>
       </main>
 

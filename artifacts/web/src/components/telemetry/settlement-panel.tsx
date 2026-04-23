@@ -46,7 +46,8 @@ export default function SettlementPanel() {
         t === "market_settle_complete" ||
         t === "trade_settled" ||
         t === "cycle_complete" ||
-        t === "alerts_raised"
+        t === "alerts_raised" ||
+        t === "retrain_cycle_complete"
       ) {
         queryClient.invalidateQueries({ queryKey });
       }
