@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { lazy, Suspense, useEffect, useRef, useState } from "react";
 import {
   ClerkProvider,
   SignIn,
@@ -23,28 +23,59 @@ import {
   useGetMyAccess,
 } from "@workspace/api-client-react";
 import { TooltipProvider } from "@/components/ui/tooltip";
+import { Skeleton } from "@/components/ui/skeleton";
+// Eagerly loaded — these are tiny and live on hot paths (home,
+// approval gate, sign-in shell). Everything else is route-split via
+// React.lazy below so each top-level page lands in its own chunk.
 import NotFound from "@/pages/not-found";
-import Dashboard from "@/pages/dashboard";
-import PipelinePage from "@/pages/pipeline";
 import PendingApproval from "@/pages/pending-approval";
-import PricingPage from "@/pages/pricing";
-import BillingPage from "@/pages/billing";
-import HealthPage from "@/pages/health";
 import MarketingPage from "@/pages/marketing";
-import AboutPage from "@/pages/about";
-import LeaderboardPage from "@/pages/leaderboard";
-import AdminPage from "@/pages/admin";
-import VerticalsPage from "@/pages/verticals";
-import SettingsNotificationsPage from "@/pages/settings-notifications";
-import TradeDetailPage from "@/pages/trade-detail";
-import TradingPage from "@/pages/trading";
-import PositionsPage from "@/pages/positions";
-import IntelligencePage from "@/pages/intelligence";
-import SystemPage from "@/pages/system";
-import ProfilePage from "@/pages/profile";
 import SessionExpiredOverlay from "@/components/session-expired-overlay";
 import GlobalSearch from "@/components/global-search";
 import { AppShell } from "@/components/shell/app-shell";
+
+// Route-level code splitting. Each page becomes its own JS chunk so
+// the operator console's first paint is just the shell + dashboard,
+// not every admin/system/intelligence surface. PageFallback renders
+// while the chunk is being fetched.
+const Dashboard = lazy(() => import("@/pages/dashboard"));
+const PipelinePage = lazy(() => import("@/pages/pipeline"));
+const PricingPage = lazy(() => import("@/pages/pricing"));
+const HealthPage = lazy(() => import("@/pages/health"));
+const AboutPage = lazy(() => import("@/pages/about"));
+const LeaderboardPage = lazy(() => import("@/pages/leaderboard"));
+const AdminPage = lazy(() => import("@/pages/admin"));
+const VerticalsPage = lazy(() => import("@/pages/verticals"));
+const SettingsNotificationsPage = lazy(
+  () => import("@/pages/settings-notifications"),
+);
+const TradeDetailPage = lazy(() => import("@/pages/trade-detail"));
+const TradingPage = lazy(() => import("@/pages/trading"));
+const PositionsPage = lazy(() => import("@/pages/positions"));
+const IntelligencePage = lazy(() => import("@/pages/intelligence"));
+const SystemPage = lazy(() => import("@/pages/system"));
+const ProfilePage = lazy(() => import("@/pages/profile"));
+
+function PageFallback() {
+  return (
+    <div
+      className="space-y-4 font-mono"
+      data-testid="page-fallback"
+      aria-busy="true"
+      aria-live="polite"
+    >
+      <Skeleton className="h-8 w-64" />
+      <Skeleton className="h-32 w-full" />
+      <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-3">
+        <Skeleton className="h-40" />
+        <Skeleton className="h-40" />
+        <Skeleton className="h-40" />
+      </div>
+      <Skeleton className="h-64 w-full" />
+      <span className="sr-only">Loading page…</span>
+    </div>
+  );
+}
 
 const clerkPubKey = import.meta.env.VITE_CLERK_PUBLISHABLE_KEY;
 // Empty in dev, auto-set in prod by the platform.
@@ -232,24 +263,26 @@ function AuthedShell() {
 
   return (
     <AppShell isAdmin={isAdmin} operatorEmail={operatorEmail}>
-      <Switch>
-        <Route path="/app" component={Dashboard} />
-        <Route path="/pipeline" component={PipelinePage} />
-        <Route path="/verticals" component={VerticalsPage} />
-        <Route path="/trading" component={TradingPage} />
-        <Route path="/positions" component={PositionsPage} />
-        <Route path="/intelligence" component={IntelligencePage} />
-        <Route path="/system" component={SystemPage} />
-        <Route path="/profile" component={ProfilePage} />
-        <Route path="/trade/:ref" component={TradeDetailPage} />
-        <Route path="/admin">
-          {isAdmin ? <AdminPage /> : <AdminForbidden email={operatorEmail} />}
-        </Route>
-        <Route path="/billing/:rest*">
-          <Redirect to="/profile" />
-        </Route>
-        <Route component={NotFound} />
-      </Switch>
+      <Suspense fallback={<PageFallback />}>
+        <Switch>
+          <Route path="/app" component={Dashboard} />
+          <Route path="/pipeline" component={PipelinePage} />
+          <Route path="/verticals" component={VerticalsPage} />
+          <Route path="/trading" component={TradingPage} />
+          <Route path="/positions" component={PositionsPage} />
+          <Route path="/intelligence" component={IntelligencePage} />
+          <Route path="/system" component={SystemPage} />
+          <Route path="/profile" component={ProfilePage} />
+          <Route path="/trade/:ref" component={TradeDetailPage} />
+          <Route path="/admin">
+            {isAdmin ? <AdminPage /> : <AdminForbidden email={operatorEmail} />}
+          </Route>
+          <Route path="/billing/:rest*">
+            <Redirect to="/profile" />
+          </Route>
+          <Route component={NotFound} />
+        </Switch>
+      </Suspense>
     </AppShell>
   );
 }
@@ -370,6 +403,12 @@ function ClerkProviderWithRoutes() {
         <ClerkQueryClientCacheInvalidator />
         <SessionExpiredBridge onExpired={() => setSessionExpired(true)} />
         <TooltipProvider>
+          {/* Suspense boundary covers the public route switch as well —
+              several public routes (pricing, about, leaderboard, health,
+              settings/notifications) are React.lazy() and need a fallback
+              to render while their chunk is fetched. The authed shell
+              has its own inner Suspense around its child Switch. */}
+          <Suspense fallback={<PageFallback />}>
           <Switch>
             <Route path="/" component={HomeRoute} />
             <Route path="/pricing" component={PricingPage} />
@@ -397,6 +436,7 @@ function ClerkProviderWithRoutes() {
                 approval-gating and 404s. */}
             <Route component={AuthedShellRoute} />
           </Switch>
+          </Suspense>
           <Show when="signed-in">
             <GlobalSearch />
           </Show>

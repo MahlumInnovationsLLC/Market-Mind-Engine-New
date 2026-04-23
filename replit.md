@@ -165,6 +165,59 @@ recurring prices, (2) copy the `price_…` IDs into the four
 `checkout.session.completed`, `customer.subscription.{created,updated,deleted}`,
 `invoice.payment_{succeeded,failed}`.
 
+## Frontend information architecture (post Tasks #228–#237)
+
+The web operator console (`artifacts/web`) and Expo mobile app
+(`artifacts/mobile`) share the cyberpunk-finance design system from
+`FRONTEND_UI_REPORT_*.md`. The web shell mounts a single
+`AppShell` (sidebar + header + degraded/trading banners + global
+toaster + WebSocket provider) around every authenticated page.
+
+Authenticated routes are **lazy-loaded** via `React.lazy()` and
+wrapped in a `<Suspense fallback={<PageFallback />}>` boundary so each
+top-level page (`/app`, `/trading`, `/positions`, `/pipeline`,
+`/intelligence`, `/system`, `/profile`, `/admin`, `/trade/:ref`) ships
+its own JS chunk. Marketing, sign-in, pending-approval, and
+not-found stay eager.
+
+Top-level signed-in IA:
+
+- `/app` — operator dashboard (KPIs, swarm, recent trades, pipeline)
+- `/trading` — live trade ticket + feed
+- `/positions` — open + recently-closed positions
+- `/pipeline` — six-stage research→debate→execute pipeline (consumes
+  the shared `usePipelineSocket()` from `WebSocketProvider`)
+- `/intelligence` — verticals, models, swarm transcripts (Pro+)
+- `/system` — tabs `health` / `pipeline` / `controls` / `audit` /
+  `runtime-settings`; admin-only tabs render forbidden state for
+  non-admins instead of hiding them
+- `/profile` — account, plan, notifications, billing portal entry
+- `/admin` — user / access-request / vertical-toggle console
+  (admin-only; non-admins get a 403 panel)
+- `/trade/:ref` — single-trade deep-dive
+
+Realtime fan-out (Task #236) flows through one shared WebSocket per
+surface:
+
+- Web: `WebSocketProvider` mounts inside `AppShell`; pages call
+  `usePipelineSocket()` / `usePipelineSubscription()` /
+  `usePipelineEventBuffer()` instead of opening their own sockets.
+  `RealtimeNotifications` translates trade/alert/health events into
+  click-through toasts (capped at 5, 6 s, deduped via a 200-entry LRU
+  keyed only on server-issued ids — `trade_id`, `order_id`,
+  `_seq`).
+- Mobile: `lib/use-websocket.ts` uses a generation-guarded mount with
+  atomic detach/close so React-strict-mode double-mounts cannot leak
+  sockets; `buildWsUrl` defaults to `wss://` for bare hosts.
+
+Accessibility primitives shipped in #237:
+
+- AppShell renders an sr-only **Skip to main content** link as its
+  first focusable element (`data-testid="link-skip-to-content"`),
+  jumping to `<main id="main-content">`.
+- All page chunks render a `PageFallback` skeleton during lazy load
+  so first-paint never blanks the shell.
+
 ## Key Commands
 
 - `pnpm run typecheck` — full typecheck across all packages
