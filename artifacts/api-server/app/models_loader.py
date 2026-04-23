@@ -11,8 +11,10 @@ lock prevents duplicate downloads.
 
 Layout under `CACHE_ROOT` (default: `<workspace>/.cache/axiom-models`,
 override with `AXIOM_MODEL_CACHE_DIR`):
-    models.tar           reassembled trained-model archive
-    source.tar           reassembled source archive
+    models.tar           reassembled trained-model archive (dropped
+                         after a successful extract; opt out with
+                         AXIOM_KEEP_MODEL_TARS=1)
+    source.tar           reassembled source archive (same lifecycle)
     models/              extracted models tree
     source/              extracted source tree
 
@@ -25,6 +27,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import os
 import shutil
 import sys
 import tarfile
@@ -187,6 +190,22 @@ def _safe_extract_tar(tar_path: Path, dest: Path) -> None:
             tf.extractall(dest)
 
 
+def _should_keep_archive_after_extract() -> bool:
+    """Opt-out switch for tar-after-extract cleanup.
+
+    Default behaviour drops the reassembled `*.tar` once it has been
+    safely extracted: the extracted tree is the source of truth for the
+    rest of the loader, the tar is only needed on a cold rebuild (which
+    re-downloads anyway), and keeping it around doubles the persistent
+    cache footprint (~240 MiB for the two archives combined).
+
+    Set `AXIOM_KEEP_MODEL_TARS=1` (or true/yes/on) to keep the tars on
+    disk for debugging or out-of-band inspection.
+    """
+    val = (os.environ.get("AXIOM_KEEP_MODEL_TARS") or "").strip().lower()
+    return val in {"1", "true", "yes", "on"}
+
+
 async def _ensure_one(
     name: str, prefix: str, archive_dest: Path, extract_dest: Path
 ) -> ArchiveInfo:
@@ -197,17 +216,27 @@ async def _ensure_one(
     )
 
     needs_extract = (not extract_dest.exists()) or not any(extract_dest.iterdir())
-    needs_download = not archive_dest.exists()
+    # Only fetch the tar when we actually need to extract it. A warm
+    # cache (extract dir present) skips the download even if the tar was
+    # dropped after a previous successful extract.
+    needs_download = needs_extract and not archive_dest.exists()
 
     t0 = time.monotonic()
     if needs_download:
         log.info("[models_loader] reassembling %s -> %s", name, archive_dest)
         await storage.download_split_artifact(prefix, "exports", archive_dest)
-    else:
+    elif archive_dest.exists():
         log.info("[models_loader] %s archive already cached at %s", name, archive_dest)
         info.cached = True
+    else:
+        log.info(
+            "[models_loader] %s extract already cached, archive previously dropped",
+            name,
+        )
+        info.cached = True
     info.reassembly_seconds = round(time.monotonic() - t0, 2)
-    info.archive_bytes = archive_dest.stat().st_size
+    if archive_dest.exists():
+        info.archive_bytes = archive_dest.stat().st_size
     log.info(
         "[models_loader] %s archive size=%.1f MiB reassembly=%.2fs (cached=%s)",
         name,
@@ -223,6 +252,24 @@ async def _ensure_one(
         t1 = time.monotonic()
         await asyncio.to_thread(_safe_extract_tar, archive_dest, extract_dest)
         info.extract_seconds = round(time.monotonic() - t1, 2)
+        # Drop the reassembled tar now that the extracted tree is on
+        # disk — it's only re-read on a cold rebuild, which itself
+        # re-downloads from object storage. Opt out via env for
+        # debugging.
+        if not _should_keep_archive_after_extract() and archive_dest.exists():
+            try:
+                dropped = archive_dest.stat().st_size
+                archive_dest.unlink()
+                log.info(
+                    "[models_loader] dropped %s archive after extract (%.1f MiB freed)",
+                    name,
+                    dropped / (1 << 20),
+                )
+            except OSError as e:
+                log.warning(
+                    "[models_loader] failed to drop %s archive at %s: %s",
+                    name, archive_dest, e,
+                )
     else:
         log.info("[models_loader] %s already extracted, skipping untar", name)
 
