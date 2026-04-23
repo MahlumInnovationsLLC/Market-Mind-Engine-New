@@ -128,6 +128,76 @@ When disabled the feed still appears in `/api/feeds/status` with
 `skipped_reason="AXIOM_TEAM_ELO_AUTOSEED not set"` so operators can see
 the gap.
 
+## Hosted log search (request_id traces)
+
+Every log line is already JSON with a `request_id` field on stdout (see
+`app/observability.py`). To make those traces searchable from a saved
+query — paste a `request_id`, get the full top-to-bottom trace — set the
+shipper env vars and the API will forward each line to a hosted backend
+in batches via a non-blocking background thread. With no env vars set,
+no shipper is installed and no network calls happen.
+
+| Var | Default | Purpose |
+| --- | --- | --- |
+| `AXIOM_LOG_SHIPPER_URL` | unset | Intake URL. Setting it enables the shipper. |
+| `AXIOM_LOG_SHIPPER_TOKEN` | unset | Sent as `Authorization: Bearer <token>`. |
+| `AXIOM_LOG_SHIPPER_PROVIDER` | `betterstack` | `betterstack` (JSON array) or `loki` (Grafana Loki push). |
+| `AXIOM_LOG_SHIPPER_BATCH_SIZE` | `100` | Max records per HTTP POST. |
+| `AXIOM_LOG_SHIPPER_FLUSH_MS` | `2000` | Max ms a record waits before being flushed. |
+| `AXIOM_LOG_SHIPPER_QUEUE_MAX` | `10000` | In-process queue cap; overflow drops the oldest line. |
+| `AXIOM_LOG_SHIPPER_LABELS` | unset | `k=v,k=v` merged into every record (e.g. `service=axiom-api,env=prod`). |
+| `AXIOM_LOG_SHIPPER_LEVEL` | `INFO` | Per-shipper minimum level. |
+
+### Better Stack / Logtail
+
+```
+AXIOM_LOG_SHIPPER_URL=https://in.logs.betterstack.com
+AXIOM_LOG_SHIPPER_TOKEN=<source-token>
+AXIOM_LOG_SHIPPER_LABELS=service=axiom-api,env=prod
+```
+
+In Better Stack, save a query
+
+```
+json.request_id = "<paste id here>"
+```
+
+and pin it to your dashboard. Sort ascending by `dt` to read the trace
+top-to-bottom.
+
+### Grafana Loki
+
+```
+AXIOM_LOG_SHIPPER_URL=https://logs-prod-xxx.grafana.net/loki/api/v1/push
+AXIOM_LOG_SHIPPER_TOKEN=<api-token>
+AXIOM_LOG_SHIPPER_PROVIDER=loki
+AXIOM_LOG_SHIPPER_LABELS=service=axiom-api,env=prod
+```
+
+Loki streams are keyed by `request_id` so the saved query
+
+```logql
+{service="axiom-api", request_id="<paste id here>"} | json
+```
+
+returns one stream per trace. Pin it as a dashboard panel for the
+10-second support workflow.
+
+### Operator visibility
+
+`/api/health` includes a `log_shipper` block with `enabled`, `provider`,
+`sent`, `dropped_queue_full`, `failed_batches`, `last_error`, and
+`last_send_ts` so a misconfigured intake (bad token, dead host,
+saturated queue) is loud on the existing health dashboard instead of
+silently dropping traces.
+
+### Deployment
+
+In Replit Deployments, set the env vars above on the deployed app
+(Deployments tab → Secrets). The shipper auto-installs at startup
+the next time the deployment boots; no code change is needed when
+rotating the token or pointing at a different intake.
+
 ## Database migrations (Alembic)
 
 All schema is owned by Alembic revisions under `migrations/versions/`.

@@ -59,6 +59,7 @@ from .auth import (
 from .config import get_settings
 from .middleware import RequestIdMiddleware
 from .observability import configure_logging
+from .log_shipper import get_shipper_status
 from . import autoresearch
 from .feeds import registry as feed_registry, scheduler as feed_scheduler
 from .feeds.odds_api import register_odds_feeds
@@ -2644,6 +2645,11 @@ async def health_full(_: object = Depends(require_approved_user)) -> dict[str, o
         "url": settings.kalshi_ws_url,
     }
     out["kill_switch"] = kalshi_lifecycle.kill_switch_state()
+    # Hosted log search shipper — surfaces whether structured JSON logs
+    # are being forwarded to Better Stack / Loki / etc., plus any recent
+    # transport errors so an operator can fix a misconfigured intake
+    # before the trace history goes dark.
+    out["log_shipper"] = get_shipper_status()
     # Storage
     try:
         entries = await storage.list_path("", limit=5)

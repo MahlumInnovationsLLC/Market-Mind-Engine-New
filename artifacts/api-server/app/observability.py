@@ -19,6 +19,8 @@ from typing import Any
 
 import structlog
 
+from . import log_shipper
+
 # ---------------------------------------------------------------------------
 # Per-request context
 # ---------------------------------------------------------------------------
@@ -111,6 +113,15 @@ def configure_logging(level: int = logging.INFO) -> None:
         root.removeHandler(existing)
     root.addHandler(handler)
     root.setLevel(level)
+
+    # When AXIOM_LOG_SHIPPER_URL is set, also stream every JSON line to
+    # the configured hosted backend (Better Stack / Logtail / Loki /
+    # similar) so a request_id is searchable from a saved query.  No
+    # network calls happen unless the env var is present.
+    try:
+        log_shipper.install_from_env(formatter)
+    except Exception as e:  # pragma: no cover — defensive
+        logging.getLogger(__name__).warning("log shipper install failed: %s", e)
 
     # Quiet noisy uvicorn loggers — they would otherwise duplicate the access
     # log lines emitted by our middleware.
