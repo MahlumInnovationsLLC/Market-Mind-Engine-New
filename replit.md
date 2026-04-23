@@ -223,6 +223,12 @@ Accessibility primitives shipped in #237:
 - `pnpm run typecheck` — full typecheck across all packages
 - `pnpm run build` — typecheck + build all packages
 - `pnpm --filter @workspace/api-spec run codegen` — regenerate API hooks and Zod schemas from OpenAPI spec
+- `pnpm --filter @workspace/web run test:e2e` — Playwright operator + admin
+  e2e suite (`artifacts/web/tests/`). The public-surface tests run
+  unconditionally; auth-gated tests skip themselves unless
+  `E2E_CLERK_USER_EMAIL` / `_PASSWORD` (and optionally
+  `E2E_CLERK_ADMIN_EMAIL` / `_PASSWORD`) are set. Override the
+  target with `E2E_BASE_URL=https://…` to run against a deploy.
 - `pnpm --filter @workspace/db run push` — push DB schema changes (dev only)
 - API server: managed by the `artifacts/api-server: API Server` workflow (uvicorn on `$PORT`)
 - Web: managed by the `artifacts/web: web` workflow
