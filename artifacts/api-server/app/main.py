@@ -16,7 +16,7 @@ import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 
-from fastapi import Depends, FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
+from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
@@ -1235,6 +1235,75 @@ async def admin_get_audit_log_actions(
     actor: AuthedUser = Depends(require_admin),
 ) -> dict[str, object]:
     return {"items": await admin_module.list_audit_log_actions()}
+
+
+# ---------------------------------------------------------------------------
+# Early-access (landing) leads — admin browse + CSV export (task #125)
+# ---------------------------------------------------------------------------
+
+
+@app.get("/api/admin/landing-leads")
+async def admin_list_landing_leads(
+    interest: str | None = None,
+    since: str | None = None,
+    until: str | None = None,
+    search: str | None = None,
+    limit: int = 100,
+    offset: int = 0,
+    actor: AuthedUser = Depends(require_admin),
+) -> dict[str, object]:
+    """Paginated `landing_leads` rows for the admin "Early-access leads" page.
+
+    `interest` matches case-insensitively; pass `__none__` for rows
+    without an interest selected.  `since`/`until` are inclusive/exclusive
+    ISO timestamps (or `YYYY-MM-DD` — Postgres will coerce).  `search`
+    is a case-insensitive substring on `email`.
+    """
+    return await dashboard.list_landing_leads(
+        interest=interest,
+        since=since,
+        until=until,
+        search=search,
+        limit=int(limit),
+        offset=int(offset),
+    )
+
+
+@app.get("/api/admin/landing-leads/interests")
+async def admin_list_landing_lead_interests(
+    actor: AuthedUser = Depends(require_admin),
+) -> dict[str, object]:
+    """Distinct interest values currently in `landing_leads` (filter UI)."""
+    return {"items": await dashboard.list_landing_lead_interests()}
+
+
+@app.get("/api/admin/landing-leads.csv")
+async def admin_export_landing_leads_csv(
+    interest: str | None = None,
+    since: str | None = None,
+    until: str | None = None,
+    search: str | None = None,
+    limit: int = 10000,
+    actor: AuthedUser = Depends(require_admin),
+) -> Response:
+    """CSV export honouring the same filters as the JSON listing."""
+    csv_text = await dashboard.export_landing_leads_csv(
+        interest=interest,
+        since=since,
+        until=until,
+        search=search,
+        limit=int(limit),
+    )
+    stamp = datetime.now(tz=timezone.utc).strftime("%Y%m%d-%H%M%S")
+    filename = f"axiom-landing-leads-{stamp}.csv"
+    return Response(
+        content=csv_text,
+        media_type="text/csv; charset=utf-8",
+        headers={
+            "content-disposition": f'attachment; filename="{filename}"',
+            "cache-control": "no-store",
+        },
+    )
 
 
 # ---------------------------------------------------------------------------

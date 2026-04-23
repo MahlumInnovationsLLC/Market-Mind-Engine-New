@@ -2,7 +2,7 @@ import { useMemo, useState } from "react";
 import { Link, Redirect } from "wouter";
 import { useAuth } from "@clerk/react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { apiFetch } from "@/lib/api";
+import { apiFetch, REQUEST_ID_HEADER, newRequestId } from "@/lib/api";
 import {
   AdminAuditLogEntry,
   AdminUser,
@@ -2256,5 +2256,403 @@ export function VerticalHaltsPanel() {
         </div>
       ) : null}
     </main>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Early-access leads panel (task #125) — list + filter + CSV export
+// ---------------------------------------------------------------------------
+
+type LandingLead = {
+  id: number;
+  email: string;
+  interest: string | null;
+  source: string | null;
+  created_at: string | null;
+  confirmation_sent_at: string | null;
+};
+
+type LandingLeadsPage = {
+  items: LandingLead[];
+  total: number;
+  limit: number;
+  offset: number;
+};
+
+const LEADS_PAGE_SIZES = [25, 50, 100, 200] as const;
+const LEADS_INTEREST_NONE_SENTINEL = "__none__";
+
+export function LeadsPanel() {
+  const { getToken, isSignedIn } = useAuth();
+  const tokenFn = useMemo(
+    () => () => getToken().then((t) => t ?? null),
+    [getToken],
+  );
+
+  const [pageSize, setPageSize] = useState<number>(50);
+  const [page, setPage] = useState<number>(0);
+  const [interest, setInterest] = useState<string>("");
+  const [searchDraft, setSearchDraft] = useState("");
+  const [searchApplied, setSearchApplied] = useState("");
+  const [since, setSince] = useState("");
+  const [until, setUntil] = useState("");
+
+  const offset = page * pageSize;
+
+  // The until-date is inclusive in the UI ("on or before this day") but
+  // the API treats it as exclusive (`< until`), so push it forward by one
+  // day to capture the full UTC day the operator actually selected.
+  const untilExclusive = useMemo(() => {
+    if (!until) return "";
+    const d = new Date(`${until}T00:00:00Z`);
+    if (Number.isNaN(d.getTime())) return until;
+    d.setUTCDate(d.getUTCDate() + 1);
+    return d.toISOString().slice(0, 10);
+  }, [until]);
+
+  const buildQuery = (overrides: Record<string, string | number> = {}) => {
+    const qs = new URLSearchParams();
+    qs.set("limit", String(pageSize));
+    qs.set("offset", String(offset));
+    if (interest) qs.set("interest", interest);
+    if (searchApplied) qs.set("search", searchApplied);
+    if (since) qs.set("since", since);
+    if (untilExclusive) qs.set("until", untilExclusive);
+    for (const [k, v] of Object.entries(overrides)) qs.set(k, String(v));
+    return qs.toString();
+  };
+
+  const listQuery = useQuery<LandingLeadsPage>({
+    queryKey: [
+      "admin",
+      "landing-leads",
+      pageSize,
+      offset,
+      interest,
+      searchApplied,
+      since,
+      untilExclusive,
+    ],
+    queryFn: () =>
+      apiFetch<LandingLeadsPage>(
+        `/api/admin/landing-leads?${buildQuery()}`,
+        { getToken: tokenFn },
+      ),
+    enabled: !!isSignedIn,
+    refetchInterval: 30_000,
+    placeholderData: (prev) => prev,
+  });
+
+  type InterestList = { items: string[] };
+  const interestsQuery = useQuery<InterestList>({
+    queryKey: ["admin", "landing-leads", "interests"],
+    queryFn: () =>
+      apiFetch<InterestList>("/api/admin/landing-leads/interests", {
+        getToken: tokenFn,
+      }),
+    enabled: !!isSignedIn,
+    staleTime: 60_000,
+  });
+
+  const [downloading, setDownloading] = useState(false);
+  const [downloadError, setDownloadError] = useState<string | null>(null);
+  const onDownloadCsv = async () => {
+    setDownloading(true);
+    setDownloadError(null);
+    try {
+      const qs = new URLSearchParams();
+      if (interest) qs.set("interest", interest);
+      if (searchApplied) qs.set("search", searchApplied);
+      if (since) qs.set("since", since);
+      if (untilExclusive) qs.set("until", untilExclusive);
+      const url = `/api/admin/landing-leads.csv${qs.size > 0 ? `?${qs.toString()}` : ""}`;
+      const headers = new Headers({
+        accept: "text/csv",
+        [REQUEST_ID_HEADER]: newRequestId(),
+      });
+      const token = await tokenFn();
+      if (token) headers.set("authorization", `Bearer ${token}`);
+      const res = await fetch(url, { headers });
+      if (!res.ok) {
+        throw new Error(`HTTP ${res.status} ${res.statusText}`);
+      }
+      const blob = await res.blob();
+      const dispo = res.headers.get("content-disposition") ?? "";
+      const match = /filename="?([^";]+)"?/i.exec(dispo);
+      const filename = match?.[1] ?? "axiom-landing-leads.csv";
+      const objectUrl = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = objectUrl;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(objectUrl);
+    } catch (e) {
+      setDownloadError((e as Error)?.message ?? "Download failed.");
+    } finally {
+      setDownloading(false);
+    }
+  };
+
+  const items = listQuery.data?.items ?? [];
+  const total = listQuery.data?.total ?? 0;
+  const isLoading = listQuery.isLoading;
+  const isError = listQuery.isError;
+  const knownInterests = interestsQuery.data?.items ?? [];
+
+  const totalPages = total > 0 ? Math.max(1, Math.ceil(total / pageSize)) : 1;
+  const goPrev = () => setPage((p) => Math.max(0, p - 1));
+  const goNext = () => {
+    if (offset + items.length < total) setPage((p) => p + 1);
+  };
+  const onChangePageSize = (next: number) => {
+    setPageSize(next);
+    setPage(0);
+  };
+  const applySearch = () => {
+    setSearchApplied(searchDraft.trim());
+    setPage(0);
+  };
+  const clearFilters = () => {
+    setInterest("");
+    setSearchDraft("");
+    setSearchApplied("");
+    setSince("");
+    setUntil("");
+    setPage(0);
+  };
+
+  const rangeStart = items.length === 0 ? 0 : offset + 1;
+  const rangeEnd = offset + items.length;
+  const hasFilters = !!(interest || searchApplied || since || until);
+
+  return (
+    <div className="space-y-3" data-testid="panel-landing-leads">
+      <div className="flex flex-wrap items-end gap-2 text-[11px] uppercase tracking-widest text-muted-foreground border border-border bg-card p-2">
+        <label className="flex flex-col gap-1">
+          <span>Interest area</span>
+          <select
+            value={interest}
+            onChange={(e) => {
+              setInterest(e.target.value);
+              setPage(0);
+            }}
+            data-testid="select-leads-interest"
+            className="bg-input border border-border px-2 py-1 text-xs lowercase tracking-normal text-foreground min-w-[12rem]"
+          >
+            <option value="">all interests</option>
+            <option value={LEADS_INTEREST_NONE_SENTINEL}>
+              (none selected)
+            </option>
+            {knownInterests.map((iv) => (
+              <option key={iv} value={iv}>
+                {iv}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label className="flex flex-col gap-1">
+          <span>From</span>
+          <input
+            type="date"
+            value={since}
+            onChange={(e) => {
+              setSince(e.target.value);
+              setPage(0);
+            }}
+            data-testid="input-leads-since"
+            className="bg-input border border-border px-2 py-1 text-xs tracking-normal text-foreground"
+          />
+        </label>
+        <label className="flex flex-col gap-1">
+          <span>To</span>
+          <input
+            type="date"
+            value={until}
+            onChange={(e) => {
+              setUntil(e.target.value);
+              setPage(0);
+            }}
+            data-testid="input-leads-until"
+            className="bg-input border border-border px-2 py-1 text-xs tracking-normal text-foreground"
+          />
+        </label>
+        <label className="flex flex-col gap-1">
+          <span>Email contains</span>
+          <input
+            value={searchDraft}
+            onChange={(e) => setSearchDraft(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") applySearch();
+            }}
+            onBlur={() => {
+              if (searchDraft.trim() !== searchApplied) applySearch();
+            }}
+            placeholder="substring"
+            data-testid="input-leads-search"
+            className="bg-input border border-border px-2 py-1 text-xs lowercase tracking-normal w-56 max-w-full normal-case text-foreground"
+          />
+        </label>
+        <button
+          type="button"
+          onClick={clearFilters}
+          disabled={!hasFilters && !searchDraft}
+          data-testid="button-leads-clear-filters"
+          className="border border-border px-2 py-1 text-[11px] uppercase tracking-widest text-muted-foreground hover:text-foreground disabled:cursor-not-allowed disabled:opacity-40"
+        >
+          Clear
+        </button>
+        <button
+          type="button"
+          onClick={onDownloadCsv}
+          disabled={downloading || isLoading}
+          data-testid="button-leads-download-csv"
+          className="border border-primary px-2 py-1 text-[11px] uppercase tracking-widest text-primary hover:bg-primary/10 disabled:cursor-not-allowed disabled:opacity-40"
+        >
+          {downloading ? "Exporting…" : "Export CSV"}
+        </button>
+        {hasFilters ? (
+          <span
+            className="text-primary text-[10px] tracking-widest"
+            data-testid="text-leads-filter-active"
+          >
+            filters on
+          </span>
+        ) : null}
+      </div>
+      {downloadError ? (
+        <div
+          className="text-destructive text-xs"
+          data-testid="text-leads-download-error"
+        >
+          {downloadError}
+        </div>
+      ) : null}
+      <div className="flex flex-wrap items-center justify-between gap-2 text-[11px] uppercase tracking-widest text-muted-foreground">
+        <div data-testid="text-leads-range">
+          {isLoading && !listQuery.data
+            ? "Loading…"
+            : isError
+              ? "—"
+              : total === 0
+                ? "0 leads"
+                : `Showing ${rangeStart}–${rangeEnd} of ${total}`}
+        </div>
+        <div className="flex items-center gap-2">
+          <label className="flex items-center gap-1">
+            <span>Page size</span>
+            <select
+              value={pageSize}
+              onChange={(e) => onChangePageSize(Number(e.target.value))}
+              className="border border-border bg-card px-1 py-0.5 text-[11px] uppercase tracking-widest text-foreground"
+              data-testid="select-leads-page-size"
+            >
+              {LEADS_PAGE_SIZES.map((n) => (
+                <option key={n} value={n}>
+                  {n}
+                </option>
+              ))}
+            </select>
+          </label>
+          <button
+            type="button"
+            onClick={goPrev}
+            disabled={page === 0 || isLoading}
+            className="border border-border px-2 py-1 text-[11px] uppercase tracking-widest text-muted-foreground hover:text-foreground disabled:cursor-not-allowed disabled:opacity-40"
+            data-testid="button-leads-prev"
+          >
+            ← Prev
+          </button>
+          <button
+            type="button"
+            onClick={goNext}
+            disabled={offset + items.length >= total || isLoading}
+            className="border border-border px-2 py-1 text-[11px] uppercase tracking-widest text-muted-foreground hover:text-foreground disabled:cursor-not-allowed disabled:opacity-40"
+            data-testid="button-leads-next"
+          >
+            Next →
+          </button>
+          <span data-testid="text-leads-page">
+            page {page + 1} / {totalPages}
+          </span>
+        </div>
+      </div>
+      <div className="border border-border bg-card overflow-x-auto">
+        <table className="w-full text-xs">
+          <thead className="bg-muted/20 text-muted-foreground uppercase tracking-widest">
+            <tr>
+              <th className="text-left p-2">When</th>
+              <th className="text-left p-2">Email</th>
+              <th className="text-left p-2">Interest</th>
+              <th className="text-left p-2">Source</th>
+              <th className="text-left p-2">Confirmed</th>
+            </tr>
+          </thead>
+          <tbody>
+            {isLoading && !listQuery.data ? (
+              <tr>
+                <td
+                  colSpan={5}
+                  className="p-6 text-center text-muted-foreground"
+                >
+                  Loading…
+                </td>
+              </tr>
+            ) : isError ? (
+              <tr>
+                <td colSpan={5} className="p-6 text-center text-destructive">
+                  Failed to load leads.
+                </td>
+              </tr>
+            ) : items.length === 0 ? (
+              <tr>
+                <td
+                  colSpan={5}
+                  className="p-6 text-center text-muted-foreground"
+                >
+                  {hasFilters
+                    ? "No leads match the current filters."
+                    : "No leads yet."}
+                </td>
+              </tr>
+            ) : (
+              items.map((lead) => (
+                <tr
+                  key={lead.id}
+                  className="border-t border-border"
+                  data-testid={`row-lead-${lead.id}`}
+                >
+                  <td className="p-2 align-top text-muted-foreground">
+                    {lead.created_at?.replace("T", " ").replace("Z", "") ?? "—"}
+                  </td>
+                  <td
+                    className="p-2 align-top text-foreground"
+                    data-testid={`text-lead-email-${lead.id}`}
+                  >
+                    {lead.email}
+                  </td>
+                  <td className="p-2 align-top text-foreground">
+                    {lead.interest ?? (
+                      <span className="text-muted-foreground">—</span>
+                    )}
+                  </td>
+                  <td className="p-2 align-top text-muted-foreground">
+                    {lead.source ?? "—"}
+                  </td>
+                  <td className="p-2 align-top text-[10px] text-muted-foreground">
+                    {lead.confirmation_sent_at
+                      ? lead.confirmation_sent_at
+                          .replace("T", " ")
+                          .replace("Z", "")
+                      : "—"}
+                  </td>
+                </tr>
+              ))
+            )}
+          </tbody>
+        </table>
+      </div>
+    </div>
   );
 }

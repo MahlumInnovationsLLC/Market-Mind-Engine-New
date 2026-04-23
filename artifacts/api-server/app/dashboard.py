@@ -393,6 +393,179 @@ async def mark_lead_confirmation_sent(lead_id: int) -> None:
         log.warning("mark_lead_confirmation_sent failed for %s: %s", lead_id, e)
 
 
+def _build_landing_leads_filter(
+    *,
+    interest: str | None,
+    since: str | None,
+    until: str | None,
+    search: str | None,
+    start_index: int = 1,
+) -> tuple[str, list[Any]]:
+    """Compose the WHERE clause shared by the listing / count / CSV
+    endpoints.  Returns ``(sql, params)`` where ``sql`` either starts
+    with ``WHERE`` or is empty.
+
+    The interest filter accepts ``"__none__"`` as a sentinel for "no
+    interest area selected" — useful so an operator can find rows that
+    came in without picking a vertical.  Date bounds are inclusive on
+    the start and exclusive on the end (caller passes the next-day date
+    to capture the full UTC day).
+    """
+    clauses: list[str] = []
+    params: list[Any] = []
+    idx = start_index
+    if interest is not None:
+        if interest == "__none__":
+            clauses.append("interest IS NULL")
+        else:
+            clauses.append(f"lower(coalesce(interest, '')) = lower(${idx})")
+            params.append(interest)
+            idx += 1
+    if since:
+        clauses.append(f"created_at >= ${idx}::timestamptz")
+        params.append(since)
+        idx += 1
+    if until:
+        clauses.append(f"created_at < ${idx}::timestamptz")
+        params.append(until)
+        idx += 1
+    if search:
+        clauses.append(f"lower(email) LIKE ${idx}")
+        params.append(f"%{search.lower()}%")
+        idx += 1
+    if not clauses:
+        return "", params
+    return "WHERE " + " AND ".join(clauses), params
+
+
+async def list_landing_lead_interests() -> list[str]:
+    """Distinct, non-empty interest areas — drives the filter dropdown."""
+    await _ensure_leads_table()
+    try:
+        rows = await db.fetch(
+            """
+            SELECT DISTINCT interest
+              FROM landing_leads
+             WHERE interest IS NOT NULL AND length(trim(interest)) > 0
+             ORDER BY interest
+            """
+        )
+        return [r["interest"] for r in rows]
+    except Exception as e:
+        log.warning("list_landing_lead_interests failed: %s", e)
+        return []
+
+
+async def list_landing_leads(
+    *,
+    interest: str | None = None,
+    since: str | None = None,
+    until: str | None = None,
+    search: str | None = None,
+    limit: int = 100,
+    offset: int = 0,
+) -> dict[str, Any]:
+    """Paginated landing-lead rows for the admin console.
+
+    Returns ``{items, total, limit, offset}``.  ``items`` is sorted
+    most-recent-first.  All filter args are optional and combine with
+    AND.  Always returns a structured payload — on any database error
+    we surface an empty list with ``total=0`` so the UI can render
+    "no leads yet" instead of a hard failure.
+    """
+    await _ensure_leads_table()
+    limit = max(1, min(int(limit), 500))
+    offset = max(0, int(offset))
+    where, params = _build_landing_leads_filter(
+        interest=interest, since=since, until=until, search=search
+    )
+    next_idx = len(params) + 1
+    list_sql = f"""
+        SELECT id,
+               email,
+               interest,
+               source,
+               to_char(created_at, 'YYYY-MM-DD"T"HH24:MI:SSZ') AS created_at,
+               to_char(confirmation_sent_at, 'YYYY-MM-DD"T"HH24:MI:SSZ') AS confirmation_sent_at
+          FROM landing_leads
+        {where}
+         ORDER BY created_at DESC NULLS LAST
+         LIMIT ${next_idx} OFFSET ${next_idx + 1}
+    """
+    count_sql = f"SELECT count(*) FROM landing_leads {where}"
+    try:
+        rows = await db.fetch(list_sql, *params, limit, offset)
+        total = int(await db.fetchval(count_sql, *params) or 0)
+        return {
+            "items": [dict(r) for r in rows],
+            "total": total,
+            "limit": limit,
+            "offset": offset,
+        }
+    except Exception as e:
+        log.warning("list_landing_leads failed: %s", e)
+        return {"items": [], "total": 0, "limit": limit, "offset": offset}
+
+
+async def export_landing_leads_csv(
+    *,
+    interest: str | None = None,
+    since: str | None = None,
+    until: str | None = None,
+    search: str | None = None,
+    limit: int = 10000,
+) -> str:
+    """Render the (filtered) landing-lead list as CSV text.
+
+    Capped at ``limit`` rows so a hostile / accidental click can't pull
+    the whole table into memory.  Quoting is handled by the stdlib
+    :mod:`csv` module so embedded commas / quotes / newlines in user
+    input are escaped correctly.
+    """
+    await _ensure_leads_table()
+    import csv
+    import io
+
+    limit = max(1, min(int(limit), 50000))
+    where, params = _build_landing_leads_filter(
+        interest=interest, since=since, until=until, search=search
+    )
+    next_idx = len(params) + 1
+    sql = f"""
+        SELECT id,
+               email,
+               coalesce(interest, '')                                         AS interest,
+               coalesce(source, '')                                           AS source,
+               to_char(created_at, 'YYYY-MM-DD"T"HH24:MI:SSZ')                AS created_at,
+               coalesce(to_char(confirmation_sent_at, 'YYYY-MM-DD"T"HH24:MI:SSZ'), '') AS confirmation_sent_at
+          FROM landing_leads
+        {where}
+         ORDER BY created_at DESC NULLS LAST
+         LIMIT ${next_idx}
+    """
+    try:
+        rows = await db.fetch(sql, *params, limit)
+    except Exception as e:
+        log.warning("export_landing_leads_csv failed: %s", e)
+        rows = []
+
+    buf = io.StringIO()
+    writer = csv.writer(buf)
+    writer.writerow(["id", "email", "interest", "source", "created_at", "confirmation_sent_at"])
+    for r in rows:
+        writer.writerow(
+            [
+                r["id"],
+                r["email"],
+                r["interest"],
+                r["source"],
+                r["created_at"],
+                r["confirmation_sent_at"],
+            ]
+        )
+    return buf.getvalue()
+
+
 _ISO_DATE_RE = None  # lazily built
 
 

@@ -13,6 +13,7 @@ import { HealthPanel } from "@/pages/health";
 import { NotificationPrefsPanel } from "@/pages/settings-notifications";
 import {
   AuditLogPanel,
+  LeadsPanel,
   ModelsPanel,
   PersonasPanel,
   RcWebhookPanel,
@@ -27,7 +28,7 @@ import LiveExecuteToggle from "@/components/telemetry/live-execute-toggle";
 import EmergencyStop from "@/components/telemetry/emergency-stop";
 import AccessRequests from "@/components/telemetry/access-requests";
 
-const ALL_TABS = ["health", "controls", "risk", "settings", "audit", "users"] as const;
+const ALL_TABS = ["health", "controls", "risk", "settings", "audit", "users", "leads"] as const;
 type TabKey = (typeof ALL_TABS)[number];
 
 const TAB_DEFS: Record<TabKey, TabDef<TabKey> & { adminOnly: boolean; subtitle: string }> = {
@@ -66,6 +67,12 @@ const TAB_DEFS: Record<TabKey, TabDef<TabKey> & { adminOnly: boolean; subtitle: 
     label: "Users",
     adminOnly: true,
     subtitle: "Approve, promote, and inspect operator accounts.",
+  },
+  leads: {
+    key: "leads",
+    label: "Leads",
+    adminOnly: true,
+    subtitle: "Early-access landing-page sign-ups · filter by interest / date · CSV export.",
   },
 };
 
@@ -247,6 +254,14 @@ export default function SystemPage() {
         <div data-testid="panel-system-users">
           <GlassCard tone="solid" padding="md">
             <UserManagementPanel />
+          </GlassCard>
+        </div>
+      )}
+
+      {tab === "leads" && isAdmin && (
+        <div data-testid="panel-system-leads">
+          <GlassCard tone="solid" padding="md">
+            <LeadsPanel />
           </GlassCard>
         </div>
       )}
