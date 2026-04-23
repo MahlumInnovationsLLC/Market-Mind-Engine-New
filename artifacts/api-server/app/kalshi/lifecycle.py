@@ -247,6 +247,11 @@ class OrderRecord:
 _resting: dict[str, OrderRecord] = {}
 _resting_lock = asyncio.Lock()
 
+# client_order_ids that have passed the dedupe gate but have not yet
+# settled into `_resting` (or completed for paper). Guarded by
+# `_resting_lock` to keep the dedupe check + insert atomic.
+_in_flight: set[str] = set()
+
 
 async def list_resting_orders() -> list[OrderRecord]:
     async with _resting_lock:
@@ -414,6 +419,48 @@ async def submit_order(req: OrderRequest, *, force_paper: bool | None = None) ->
             f"slippage guard: {guard.get('detail') or 'rejected'}"
         )
 
+    # ---- in-process duplicate-client_order_id gate ----------------------
+    # A second submission re-using a client_order_id that's already resting
+    # (or in-flight on another task) would burn a signed REST call and get
+    # bounced by Kalshi with a 4xx. Catch it here so the rejection is fast,
+    # cheap, and shows up in the lifecycle audit trail before the wire.
+    async with _resting_lock:
+        if req.client_order_id in _resting or req.client_order_id in _in_flight:
+            duplicate = True
+        else:
+            _in_flight.add(req.client_order_id)
+            duplicate = False
+    if duplicate:
+        await _record(
+            req, paper=paper, state="rejected",
+            price=req.limit_price_cents or 0,
+            extra={"reason": "duplicate_client_order_id"},
+        )
+        await _emit({
+            "event": "rejected",
+            "order": {
+                "order_id": req.client_order_id,
+                "paper": paper,
+                "state": "rejected",
+                "request": {**asdict(req)},
+            },
+            "reason": "duplicate_client_order_id",
+        })
+        raise OrderRejected(
+            f"duplicate client_order_id: {req.client_order_id}"
+        )
+
+    try:
+        return await _submit_after_dedupe(req, paper=paper, settings=s)
+    finally:
+        async with _resting_lock:
+            _in_flight.discard(req.client_order_id)
+
+
+async def _submit_after_dedupe(
+    req: OrderRequest, *, paper: bool, settings,
+) -> OrderRecord:
+    s = settings
     record = OrderRecord(
         order_id=req.client_order_id,
         request=req,

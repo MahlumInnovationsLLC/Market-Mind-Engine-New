@@ -39,6 +39,7 @@ def _reset_lifecycle(monkeypatch):
     """Clear in-memory state and stub DB writes before every test."""
     # Drain the resting book.
     lifecycle._resting.clear()
+    lifecycle._in_flight.clear()
     # Reset the kill switch to a known clean state.
     lifecycle._kill._halted = False
     lifecycle._kill._reason = None
@@ -330,20 +331,20 @@ def test_live_sequence_id_collision_records_rejection(monkeypatch, _reset_lifecy
 
 
 def test_live_collision_against_in_memory_resting(monkeypatch, _reset_lifecycle):
-    """A second submission re-uses an already-resting client_order_id. The
-    current contract is that the in-memory book is keyed by ``order_id``, so
-    Kalshi's duplicate-detection is what enforces uniqueness — verify both
-    submissions wrote ``submitted`` rows but only one ``resting`` survives.
-    """
-    from app.kalshi import client as kc
+    """A second submission re-uses an already-resting client_order_id.
 
+    `submit_order` now catches the collision in-process — before signing any
+    REST call — and writes a `rejected` row with reason
+    `duplicate_client_order_id`. The KalshiClient must NOT be constructed
+    a second time.
+    """
     monkeypatch.setattr(lifecycle, "get_settings", lambda: _make_settings("live"))
 
-    # First submission: Kalshi accepts.
+    # Only the first submission should reach the wire. Provide exactly one
+    # client; iterator exhaustion would raise StopIteration if the dedupe
+    # gate let the second submission through.
     accept = _FakeKalshiClient(ack={"order": {"order_id": "exo-A"}})
-    # Second submission with the SAME client_order_id: Kalshi rejects.
-    reject = _FakeKalshiClient(raises=kc.KalshiAPIError(409, {"error": "dup"}))
-    seq = iter([accept, reject])
+    seq = iter([accept])
     monkeypatch.setattr(lifecycle.kalshi_client, "KalshiClient", lambda **kw: next(seq))
 
     req1 = lifecycle.OrderRequest(
@@ -358,12 +359,23 @@ def test_live_collision_against_in_memory_resting(monkeypatch, _reset_lifecycle)
     assert rec1.state == "resting"
     assert "coll-1" in lifecycle._resting
 
-    with pytest.raises(lifecycle.OrderRejected):
+    with pytest.raises(lifecycle.OrderRejected, match="duplicate client_order_id"):
         _run(lifecycle.submit_order(req2))
 
     # The first order remains resting; the rejected dup did not displace it.
     assert "coll-1" in lifecycle._resting
     assert lifecycle._resting["coll-1"].exchange_order_id == "exo-A"
+
+    # A `rejected` lifecycle row was written with the dedupe reason, and no
+    # second `submitted` row hit the audit trail (no wire call attempted).
+    rejects = [
+        w for w in _reset_lifecycle
+        if w["event_type"] == "rejected"
+        and (w.get("metadata") or {}).get("reason") == "duplicate_client_order_id"
+    ]
+    assert len(rejects) == 1
+    submitted = [w for w in _reset_lifecycle if w["event_type"] == "submitted"]
+    assert len(submitted) == 1
 
 
 # ---------------------------------------------------------------------------
