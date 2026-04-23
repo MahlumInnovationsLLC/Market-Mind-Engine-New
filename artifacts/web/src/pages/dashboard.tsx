@@ -19,6 +19,7 @@ import HealthSnapshot from "@/components/telemetry/health-snapshot";
 import RecentTrades from "@/components/telemetry/recent-trades";
 import TradingCycles from "@/components/telemetry/trading-cycles";
 import SwarmAnalysts from "@/components/telemetry/swarm-analysts";
+import SwarmPersonasToday from "@/components/telemetry/swarm-personas-today";
 import SwarmDebates from "@/components/telemetry/swarm-debates";
 import VerticalPicker from "@/components/telemetry/vertical-picker";
 import ActiveModelBadge from "@/components/telemetry/active-model-badge";
@@ -120,14 +121,24 @@ export default function Dashboard() {
           <SwarmDebates />
         </GlassCard>
 
-        <GlassCard tone="solid" padding="md" data-testid="card-swarm-analysts">
-          <SectionHeader
-            eyebrow="SWARM"
-            title="Analyst leaderboard"
-            subtitle="Per-persona Brier, calibration, and accuracy."
-          />
-          <SwarmAnalysts />
-        </GlassCard>
+        <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
+          <GlassCard tone="solid" padding="md" data-testid="card-swarm-analysts">
+            <SectionHeader
+              eyebrow="SWARM"
+              title="Analyst leaderboard"
+              subtitle="All-time per-persona Brier, calibration, and accuracy."
+            />
+            <SwarmAnalysts />
+          </GlassCard>
+          <GlassCard tone="solid" padding="md" data-testid="card-swarm-personas-today">
+            <SectionHeader
+              eyebrow="SWARM"
+              title="Personas today"
+              subtitle="Today's per-persona Brier, accuracy, and lean breakdown (UTC)."
+            />
+            <SwarmPersonasToday />
+          </GlassCard>
+        </div>
 
         <OperatorControls isAdmin={isAdmin} />
       </div>

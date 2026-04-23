@@ -105,6 +105,8 @@ export * from "./swarmDebateResult";
 export * from "./swarmDebateTranscript";
 export * from "./swarmPersona";
 export * from "./swarmPersonaList";
+export * from "./swarmPersonaToday";
+export * from "./swarmPersonaTodayList";
 export * from "./swarmPersonaVerdict";
 export * from "./trade";
 export * from "./tradeDetail";

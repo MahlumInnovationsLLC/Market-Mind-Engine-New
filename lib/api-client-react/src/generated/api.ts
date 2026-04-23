@@ -70,6 +70,7 @@ import type {
   SwarmDebateRequest,
   SwarmDebateResult,
   SwarmPersonaList,
+  SwarmPersonaTodayList,
   TradeDetail,
   TradeList,
   TradingCycleList,
@@ -547,6 +548,81 @@ export function useGetSwarmPersonas<
   request?: SecondParameter<typeof customFetch>;
 }): UseQueryResult<TData, TError> & { queryKey: QueryKey } {
   const queryOptions = getGetSwarmPersonasQueryOptions(options);
+
+  const query = useQuery(queryOptions) as UseQueryResult<TData, TError> & {
+    queryKey: QueryKey;
+  };
+
+  return { ...query, queryKey: queryOptions.queryKey };
+}
+
+/**
+ * @summary Today's per-persona Brier / accuracy / lean breakdown (UTC)
+ */
+export const getGetSwarmPersonasTodayUrl = () => {
+  return `/api/dashboard/swarm-personas-today`;
+};
+
+export const getSwarmPersonasToday = async (
+  options?: RequestInit,
+): Promise<SwarmPersonaTodayList> => {
+  return customFetch<SwarmPersonaTodayList>(getGetSwarmPersonasTodayUrl(), {
+    ...options,
+    method: "GET",
+  });
+};
+
+export const getGetSwarmPersonasTodayQueryKey = () => {
+  return [`/api/dashboard/swarm-personas-today`] as const;
+};
+
+export const getGetSwarmPersonasTodayQueryOptions = <
+  TData = Awaited<ReturnType<typeof getSwarmPersonasToday>>,
+  TError = ErrorType<unknown>,
+>(options?: {
+  query?: UseQueryOptions<
+    Awaited<ReturnType<typeof getSwarmPersonasToday>>,
+    TError,
+    TData
+  >;
+  request?: SecondParameter<typeof customFetch>;
+}) => {
+  const { query: queryOptions, request: requestOptions } = options ?? {};
+
+  const queryKey = queryOptions?.queryKey ?? getGetSwarmPersonasTodayQueryKey();
+
+  const queryFn: QueryFunction<
+    Awaited<ReturnType<typeof getSwarmPersonasToday>>
+  > = ({ signal }) => getSwarmPersonasToday({ signal, ...requestOptions });
+
+  return { queryKey, queryFn, ...queryOptions } as UseQueryOptions<
+    Awaited<ReturnType<typeof getSwarmPersonasToday>>,
+    TError,
+    TData
+  > & { queryKey: QueryKey };
+};
+
+export type GetSwarmPersonasTodayQueryResult = NonNullable<
+  Awaited<ReturnType<typeof getSwarmPersonasToday>>
+>;
+export type GetSwarmPersonasTodayQueryError = ErrorType<unknown>;
+
+/**
+ * @summary Today's per-persona Brier / accuracy / lean breakdown (UTC)
+ */
+
+export function useGetSwarmPersonasToday<
+  TData = Awaited<ReturnType<typeof getSwarmPersonasToday>>,
+  TError = ErrorType<unknown>,
+>(options?: {
+  query?: UseQueryOptions<
+    Awaited<ReturnType<typeof getSwarmPersonasToday>>,
+    TError,
+    TData
+  >;
+  request?: SecondParameter<typeof customFetch>;
+}): UseQueryResult<TData, TError> & { queryKey: QueryKey } {
+  const queryOptions = getGetSwarmPersonasTodayQueryOptions(options);
 
   const query = useQuery(queryOptions) as UseQueryResult<TData, TError> & {
     queryKey: QueryKey;

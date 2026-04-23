@@ -101,6 +101,18 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/SwarmPersonaList" }
 
+  /dashboard/swarm-personas-today:
+    get:
+      operationId: getSwarmPersonasToday
+      tags: [dashboard]
+      summary: Today's per-persona Brier / accuracy / lean breakdown (UTC)
+      responses:
+        "200":
+          description: Per-persona aggregate for today's settled debates
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SwarmPersonaTodayList" }
+
   /dashboard/trades/{trade_ref}:
     get:
       operationId: getTradeDetail
@@ -987,6 +999,28 @@ components:
           type: array
           items: { $ref: "#/components/schemas/SwarmPersona" }
       required: [items]
+
+    SwarmPersonaToday:
+      type: object
+      properties:
+        persona_id: { type: string }
+        debates: { type: integer }
+        brier: { type: number }
+        accuracy_pct: { type: number }
+        avg_confidence: { type: number, nullable: true }
+        lean_yes: { type: integer }
+        lean_no: { type: integer }
+        lean_pass: { type: integer }
+      required: [persona_id, debates, brier, accuracy_pct, lean_yes, lean_no, lean_pass]
+
+    SwarmPersonaTodayList:
+      type: object
+      properties:
+        date_utc: { type: string }
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/SwarmPersonaToday" }
+      required: [date_utc, items]
 
     TradingCycle:
       type: object

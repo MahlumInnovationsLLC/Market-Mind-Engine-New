@@ -217,6 +217,22 @@ export interface SwarmPersonaList {
   items: SwarmPersona[];
 }
 
+export interface SwarmPersonaToday {
+  persona_id: string;
+  debates: number;
+  brier: number;
+  accuracy_pct: number;
+  avg_confidence?: number | null;
+  lean_yes: number;
+  lean_no: number;
+  lean_pass: number;
+}
+
+export interface SwarmPersonaTodayList {
+  date_utc: string;
+  items: SwarmPersonaToday[];
+}
+
 export interface TradingCycle {
   id: number;
   vertical?: string | null;

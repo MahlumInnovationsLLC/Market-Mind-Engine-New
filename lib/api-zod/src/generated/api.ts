@@ -169,6 +169,25 @@ export const GetSwarmPersonasResponse = zod.object({
 });
 
 /**
+ * @summary Today's per-persona Brier / accuracy / lean breakdown (UTC)
+ */
+export const GetSwarmPersonasTodayResponse = zod.object({
+  date_utc: zod.string(),
+  items: zod.array(
+    zod.object({
+      persona_id: zod.string(),
+      debates: zod.number(),
+      brier: zod.number(),
+      accuracy_pct: zod.number(),
+      avg_confidence: zod.number().nullish(),
+      lean_yes: zod.number(),
+      lean_no: zod.number(),
+      lean_pass: zod.number(),
+    }),
+  ),
+});
+
+/**
  * @summary Single trade + market-price-vs-model-probability time series
  */
 export const getTradeDetailPathTradeRefMax = 200;

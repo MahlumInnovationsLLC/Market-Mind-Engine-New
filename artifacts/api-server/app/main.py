@@ -2752,6 +2752,19 @@ async def dashboard_swarm_personas(
     return {"items": await dashboard.get_swarm_personas()}
 
 
+@app.get("/api/dashboard/swarm-personas-today")
+async def dashboard_swarm_personas_today(
+    _: object = Depends(require_approved_user),
+) -> dict[str, object]:
+    """Today's per-persona aggregate (debates, Brier, accuracy, lean
+    breakdown) computed from settled `swarm_debates` rows.
+
+    Shares the same aggregator as the daily summary email so operators
+    can spot a misbehaving persona before the morning digest arrives.
+    """
+    return await dashboard.get_swarm_personas_today()
+
+
 @app.get("/api/market-title/{ticker}")
 async def market_title_lookup(
     ticker: str,

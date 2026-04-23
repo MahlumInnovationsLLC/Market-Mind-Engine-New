@@ -368,6 +368,49 @@ def test_collect_summary_aggregates_personas(monkeypatch: pytest.MonkeyPatch) ->
     assert summary["by_persona"][0]["persona_id"] == "sharp_edge"
 
 
+def test_dashboard_swarm_personas_today_uses_shared_aggregator(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The dashboard endpoint must surface the same per-persona numbers
+    the daily-summary email uses, so operators can spot a misbehaving
+    persona before the morning digest arrives."""
+    from app import dashboard
+
+    debates = [
+        {
+            "id": "d1",
+            "outcome": "WIN",
+            "analyst_verdicts": [
+                {"persona": "sharp_edge",    "probability": 0.80, "lean": "YES"},
+                {"persona": "risk_guardian", "probability": 0.40, "lean": "PASS"},
+            ],
+        },
+    ]
+    fake = _FakeDB({"FROM swarm_debates": debates})
+    monkeypatch.setattr(daily_summary, "db", fake)
+
+    out = _run(dashboard.get_swarm_personas_today("2026-04-21"))
+    assert out["date_utc"] == "2026-04-21"
+    by_id = {p["persona_id"]: p for p in out["items"]}
+    assert set(by_id) == {"sharp_edge", "risk_guardian"}
+    assert by_id["sharp_edge"]["debates"] == 1
+    # (0.80 - 1)^2 = 0.04
+    assert by_id["sharp_edge"]["brier"] == pytest.approx(0.04, abs=1e-4)
+    assert by_id["sharp_edge"]["accuracy_pct"] == 100.0
+    assert by_id["sharp_edge"]["lean_yes"] == 1
+    assert by_id["risk_guardian"]["lean_pass"] == 1
+    # Sort: lowest Brier first.
+    assert out["items"][0]["persona_id"] == "sharp_edge"
+
+
+def test_dashboard_swarm_personas_today_empty(monkeypatch: pytest.MonkeyPatch) -> None:
+    from app import dashboard
+
+    monkeypatch.setattr(daily_summary, "db", _FakeDB({}))
+    out = _run(dashboard.get_swarm_personas_today("2026-04-21"))
+    assert out == {"date_utc": "2026-04-21", "items": []}
+
+
 def test_collect_summary_degrades_when_no_rows(monkeypatch: pytest.MonkeyPatch) -> None:
     fake = _FakeDB({})
     monkeypatch.setattr(daily_summary, "db", fake)

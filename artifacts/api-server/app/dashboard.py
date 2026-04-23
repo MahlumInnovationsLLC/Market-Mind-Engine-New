@@ -151,6 +151,26 @@ async def get_swarm_personas() -> list[dict[str, Any]]:
         return []
 
 
+async def get_swarm_personas_today(date_utc: str | None = None) -> dict[str, Any]:
+    """Today's per-persona Brier / accuracy / lean breakdown.
+
+    Defaults `date_utc` to the current UTC date and delegates to the
+    shared aggregator in :mod:`app.notifications.daily_summary` so the
+    dashboard table can never disagree with the morning email.
+    """
+    from datetime import datetime, timezone
+    from .notifications.daily_summary import aggregate_persona_day
+
+    if not date_utc:
+        date_utc = datetime.now(tz=timezone.utc).date().isoformat()
+    try:
+        items = await aggregate_persona_day(date_utc)
+    except Exception as e:
+        log.warning("swarm_personas_today failed: %s", e)
+        items = []
+    return {"date_utc": date_utc, "items": items}
+
+
 async def get_recent_cycles(limit: int = 10) -> list[dict[str, Any]]:
     try:
         rows = await db.fetch(
