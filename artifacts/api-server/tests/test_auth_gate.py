@@ -151,6 +151,7 @@ PROTECTED_MUTATING_ENDPOINTS: tuple[tuple[str, str], ...] = (
     ("POST", "/api/admin/access-requests/{clerk_user_id}"),
     ("POST", "/api/admin/persona-toggles"),
     ("POST", "/api/admin/emergency-stop"),
+    ("POST", "/api/admin/rearm-trading"),
     ("POST", "/api/polymarket/paper-order"),
     ("POST", "/api/admin/runtime-settings"),
     ("DELETE", "/api/admin/runtime-settings/revert"),

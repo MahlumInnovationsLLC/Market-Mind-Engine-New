@@ -582,3 +582,134 @@ def test_admin_run_cycle_returns_payload_and_filtered_trace(
     # Trace must contain only the events tagged with our cycle_id.
     assert [ev["stage"] for ev in body["trace"]] == ["picks", "trade"]
     assert all(ev["cycle_id"] == 4242 for ev in body["trace"])
+
+
+# ---------------------------------------------------------------------------
+# /api/admin/rearm-trading
+# ---------------------------------------------------------------------------
+
+
+def test_rearm_trading_resets_mode_and_audits(
+    client: TestClient,
+    store: FakeStore,
+    _keypair,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """After an emergency stop persisted ``risk.trading_mode='halt'``,
+    POST /api/admin/rearm-trading must:
+
+      * Persist the chosen mode (``paper`` or ``live``) into
+        ``system_settings.risk.trading_mode``.
+      * Call :func:`kalshi_lifecycle.resume` to clear the in-memory
+        kill switch.
+      * Write one ``rearm_trading`` audit row capturing the previous
+        and new mode.
+    """
+    from app import main as app_main
+
+    store.add_admin(ADMIN_UID, email="boss@example.com")
+    store.system_settings["risk.trading_mode"] = "halt"
+    token = _mint(_keypair, sub=ADMIN_UID)
+
+    resume_calls: list[None] = []
+
+    def _fake_resume() -> dict[str, Any]:
+        resume_calls.append(None)
+        return {"halted": False}
+
+    monkeypatch.setattr(app_main.kalshi_lifecycle, "resume", _fake_resume)
+
+    r = client.post(
+        "/api/admin/rearm-trading",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"mode": "paper"},
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body == {
+        "ok": True,
+        "trading_mode": "paper",
+        "previous_mode": "halt",
+        "kill_switch": {"halted": False},
+    }
+
+    # Mode landed in system_settings, kill switch was cleared, audit
+    # row captured the transition.
+    assert store.system_settings["risk.trading_mode"] == "paper"
+    assert len(resume_calls) == 1
+    rearm_rows = [a for a in store.audit if a["action"] == "rearm_trading"]
+    assert len(rearm_rows) == 1
+    row = rearm_rows[0]
+    assert row["actor_user_id"] == ADMIN_UID
+    assert row["actor_email"] == "boss@example.com"
+    import json as _json
+    assert _json.loads(row["before_value"]) == {"trading_mode": "halt"}
+    assert _json.loads(row["after_value"]) == {"trading_mode": "paper"}
+
+
+def test_rearm_trading_to_live_persists(
+    client: TestClient,
+    store: FakeStore,
+    _keypair,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app import main as app_main
+
+    store.add_admin(ADMIN_UID)
+    store.system_settings["risk.trading_mode"] = "halt"
+    token = _mint(_keypair, sub=ADMIN_UID)
+
+    monkeypatch.setattr(
+        app_main.kalshi_lifecycle, "resume", lambda: {"halted": False}
+    )
+
+    r = client.post(
+        "/api/admin/rearm-trading",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"mode": "live"},
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["trading_mode"] == "live"
+    assert store.system_settings["risk.trading_mode"] == "live"
+
+
+def test_rearm_trading_rejects_invalid_mode(
+    client: TestClient, store: FakeStore, _keypair
+) -> None:
+    store.add_admin(ADMIN_UID)
+    token = _mint(_keypair, sub=ADMIN_UID)
+
+    r = client.post(
+        "/api/admin/rearm-trading",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"mode": "halt"},
+    )
+    # Pydantic regex rejection — must not write anything or call resume.
+    assert r.status_code == 422, r.text
+    assert "risk.trading_mode" not in store.system_settings
+    assert [a for a in store.audit if a["action"] == "rearm_trading"] == []
+
+
+def test_rearm_trading_requires_admin(
+    client: TestClient, store: FakeStore, _keypair
+) -> None:
+    """Non-admin signed-in caller must be rejected before any side effect."""
+    NON_ADMIN_UID = "user_not_admin_rearm"
+    store.users[NON_ADMIN_UID] = {
+        "clerk_user_id": NON_ADMIN_UID,
+        "email": "user@example.com",
+        "display_name": None,
+        "approved": True,
+        "is_admin": False,
+        "denied_at": None,
+    }
+    token = _mint(_keypair, sub=NON_ADMIN_UID)
+
+    r = client.post(
+        "/api/admin/rearm-trading",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"mode": "paper"},
+    )
+    assert r.status_code in (401, 403), r.text
+    assert "risk.trading_mode" not in store.system_settings
+    assert [a for a in store.audit if a["action"] == "rearm_trading"] == []

@@ -4462,6 +4462,101 @@ async def admin_emergency_stop(
     )
 
 
+class RearmTradingRequest(BaseModel):
+    mode: str = Field(..., pattern="^(paper|live)$")
+
+
+@app.post("/api/admin/rearm-trading")
+async def admin_rearm_trading(
+    body: RearmTradingRequest,
+    actor: AuthedUser = Depends(require_admin),
+) -> dict[str, object]:
+    """Clear an emergency-stop halt without an `UPDATE system_settings`.
+
+    The emergency-stop endpoint persists ``risk.trading_mode='halt'`` so
+    the cycle gate keeps refusing orders across restarts. The existing
+    live-execute toggle only flips between ``paper``/``live`` and
+    ``/api/kalshi/resume`` only resets the in-memory kill switch, so
+    today an admin would have to hand-edit ``system_settings`` to undo
+    a halt. This endpoint:
+
+      1. Writes ``risk.trading_mode`` to ``paper`` or ``live`` (the
+         operator's choice — they re-arm into whichever mode they want).
+      2. Calls :func:`kalshi_lifecycle.resume` so the in-memory kill
+         switch is also cleared.
+      3. Writes a single ``rearm_trading`` row to the admin audit log
+         capturing actor, previous mode, and new mode.
+    """
+    new_mode = body.mode.lower()
+    actor_email: str | None = None
+    try:
+        actor_email = (await check_approval(actor))[1]
+    except Exception:
+        pass
+
+    previous_mode: str | None
+    try:
+        prev_val = await db.fetchval(
+            "SELECT value FROM system_settings WHERE key = $1",
+            "risk.trading_mode",
+        )
+        previous_mode = str(prev_val).lower() if prev_val is not None else None
+    except Exception as e:
+        log.debug("rearm-trading: previous_mode read failed: %s", e)
+        previous_mode = None
+
+    try:
+        await db.execute(
+            """
+            INSERT INTO system_settings (key, value, updated_at)
+            VALUES ($1, $2, now())
+            ON CONFLICT (key) DO UPDATE
+              SET value = EXCLUDED.value,
+                  updated_at = EXCLUDED.updated_at
+            """,
+            "risk.trading_mode",
+            new_mode,
+        )
+    except Exception as e:
+        log.exception("rearm-trading: trading_mode persist failed")
+        raise HTTPException(status_code=502, detail=f"rearm write failed: {e}")
+
+    kill_state = kalshi_lifecycle.resume()
+
+    try:
+        await db.execute(
+            """
+            INSERT INTO admin_audit_log (
+                actor_user_id, actor_email,
+                target_user_id, target_email,
+                action, before_value, after_value
+            ) VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7::jsonb)
+            """,
+            actor.user_id,
+            actor_email,
+            "system",
+            None,
+            "rearm_trading",
+            json.dumps({"trading_mode": previous_mode}),
+            json.dumps({"trading_mode": new_mode}),
+        )
+    except Exception as e:
+        log.warning("rearm-trading: audit log insert failed: %s", e)
+
+    log.warning(
+        "REARM TRADING by %s (%s): %s -> %s",
+        actor_email or actor.user_id, actor.user_id,
+        previous_mode, new_mode,
+    )
+
+    return {
+        "ok": True,
+        "trading_mode": new_mode,
+        "previous_mode": previous_mode,
+        "kill_switch": kill_state,
+    }
+
+
 @app.post("/api/kalshi/halt")
 async def kalshi_halt(reason: str | None = None) -> dict[str, object]:
     """Trip the kill switch. Intentionally NO middleware deps — operators must

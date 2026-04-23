@@ -395,6 +395,31 @@ export interface EmergencyStopResult {
 }
 
 /**
+ * Mode to set risk.trading_mode to after clearing the halt
+ */
+export type RearmTradingRequestMode =
+  (typeof RearmTradingRequestMode)[keyof typeof RearmTradingRequestMode];
+
+export const RearmTradingRequestMode = {
+  paper: "paper",
+  live: "live",
+} as const;
+
+export interface RearmTradingRequest {
+  /** Mode to set risk.trading_mode to after clearing the halt */
+  mode: RearmTradingRequestMode;
+}
+
+export type RearmTradingResultKillSwitch = { [key: string]: unknown };
+
+export interface RearmTradingResult {
+  ok: boolean;
+  trading_mode: string;
+  previous_mode?: string | null;
+  kill_switch?: RearmTradingResultKillSwitch;
+}
+
+/**
  * One sample of (market price, model probability) at time t
  */
 export interface TradeDetailPoint {

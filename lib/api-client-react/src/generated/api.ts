@@ -62,6 +62,8 @@ import type {
   OverFilledOrdersToday,
   PortalSessionResult,
   PricingCatalog,
+  RearmTradingRequest,
+  RearmTradingResult,
   SearchAllParams,
   SearchResults,
   SettleMarketRequest,
@@ -2740,6 +2742,92 @@ export const useAdminEmergencyStop = <
   TContext
 > => {
   return useMutation(getAdminEmergencyStopMutationOptions(options));
+};
+
+/**
+ * @summary Clear an emergency-stop halt and reset trading_mode
+ */
+export const getAdminRearmTradingUrl = () => {
+  return `/api/admin/rearm-trading`;
+};
+
+export const adminRearmTrading = async (
+  rearmTradingRequest: RearmTradingRequest,
+  options?: RequestInit,
+): Promise<RearmTradingResult> => {
+  return customFetch<RearmTradingResult>(getAdminRearmTradingUrl(), {
+    ...options,
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...options?.headers },
+    body: JSON.stringify(rearmTradingRequest),
+  });
+};
+
+export const getAdminRearmTradingMutationOptions = <
+  TError = ErrorType<unknown>,
+  TContext = unknown,
+>(options?: {
+  mutation?: UseMutationOptions<
+    Awaited<ReturnType<typeof adminRearmTrading>>,
+    TError,
+    { data: BodyType<RearmTradingRequest> },
+    TContext
+  >;
+  request?: SecondParameter<typeof customFetch>;
+}): UseMutationOptions<
+  Awaited<ReturnType<typeof adminRearmTrading>>,
+  TError,
+  { data: BodyType<RearmTradingRequest> },
+  TContext
+> => {
+  const mutationKey = ["adminRearmTrading"];
+  const { mutation: mutationOptions, request: requestOptions } = options
+    ? options.mutation &&
+      "mutationKey" in options.mutation &&
+      options.mutation.mutationKey
+      ? options
+      : { ...options, mutation: { ...options.mutation, mutationKey } }
+    : { mutation: { mutationKey }, request: undefined };
+
+  const mutationFn: MutationFunction<
+    Awaited<ReturnType<typeof adminRearmTrading>>,
+    { data: BodyType<RearmTradingRequest> }
+  > = (props) => {
+    const { data } = props ?? {};
+
+    return adminRearmTrading(data, requestOptions);
+  };
+
+  return { mutationFn, ...mutationOptions };
+};
+
+export type AdminRearmTradingMutationResult = NonNullable<
+  Awaited<ReturnType<typeof adminRearmTrading>>
+>;
+export type AdminRearmTradingMutationBody = BodyType<RearmTradingRequest>;
+export type AdminRearmTradingMutationError = ErrorType<unknown>;
+
+/**
+ * @summary Clear an emergency-stop halt and reset trading_mode
+ */
+export const useAdminRearmTrading = <
+  TError = ErrorType<unknown>,
+  TContext = unknown,
+>(options?: {
+  mutation?: UseMutationOptions<
+    Awaited<ReturnType<typeof adminRearmTrading>>,
+    TError,
+    { data: BodyType<RearmTradingRequest> },
+    TContext
+  >;
+  request?: SecondParameter<typeof customFetch>;
+}): UseMutationResult<
+  Awaited<ReturnType<typeof adminRearmTrading>>,
+  TError,
+  { data: BodyType<RearmTradingRequest> },
+  TContext
+> => {
+  return useMutation(getAdminRearmTradingMutationOptions(options));
 };
 
 /**

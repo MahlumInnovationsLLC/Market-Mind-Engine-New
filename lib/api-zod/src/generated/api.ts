@@ -981,6 +981,22 @@ export const AdminEmergencyStopResponse = zod.object({
 });
 
 /**
+ * @summary Clear an emergency-stop halt and reset trading_mode
+ */
+export const AdminRearmTradingBody = zod.object({
+  mode: zod
+    .enum(["paper", "live"])
+    .describe("Mode to set risk.trading_mode to after clearing the halt"),
+});
+
+export const AdminRearmTradingResponse = zod.object({
+  ok: zod.boolean(),
+  trading_mode: zod.string(),
+  previous_mode: zod.string().nullish(),
+  kill_switch: zod.record(zod.string(), zod.unknown()).optional(),
+});
+
+/**
  * @summary Recent admin role / approval audit entries
  */
 export const adminGetAuditLogQueryLimitDefault = 100;

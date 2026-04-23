@@ -513,6 +513,23 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/EmergencyStopResult" }
 
+  /admin/rearm-trading:
+    post:
+      operationId: adminRearmTrading
+      tags: [admin]
+      summary: Clear an emergency-stop halt and reset trading_mode
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/RearmTradingRequest" }
+      responses:
+        "200":
+          description: Trading re-armed at the requested mode
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/RearmTradingResult" }
+
   /admin/audit-log:
     get:
       operationId: adminGetAuditLog
@@ -1261,6 +1278,26 @@ components:
           type: object
           additionalProperties: true
       required: [ok, canceled_orders, trading_mode]
+
+    RearmTradingRequest:
+      type: object
+      properties:
+        mode:
+          type: string
+          enum: [paper, live]
+          description: Mode to set risk.trading_mode to after clearing the halt
+      required: [mode]
+
+    RearmTradingResult:
+      type: object
+      properties:
+        ok: { type: boolean }
+        trading_mode: { type: string }
+        previous_mode: { type: string, nullable: true }
+        kill_switch:
+          type: object
+          additionalProperties: true
+      required: [ok, trading_mode]
 
     TradeDetailPoint:
       type: object
