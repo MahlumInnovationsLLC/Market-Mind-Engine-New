@@ -366,6 +366,16 @@ async def lifespan(_: FastAPI):
     except Exception as e:
         log.warning("bankroll sync start failed: %s", e)
 
+    # `order_fills` dedupe-table retention sweep. The table only needs
+    # rows around long enough to suppress WS-replay duplicates on
+    # reconnect (a few hours); without this loop it grows unboundedly.
+    # Per task #154.
+    try:
+        from . import order_fills_retention as _order_fills_retention
+        await _order_fills_retention.start()
+    except Exception as e:
+        log.warning("order_fills retention start failed: %s", e)
+
     # Continuous Kalshi position + fill reconciler. Periodically pulls
     # /portfolio/positions and /portfolio/fills, diffs against our local
     # DB, raises model_health_alerts on drift > tolerance, and back-fills
@@ -504,6 +514,11 @@ async def lifespan(_: FastAPI):
             await _bankroll_sync.stop()
         except Exception as e:
             log.warning("bankroll sync stop error: %s", e)
+        try:
+            from . import order_fills_retention as _order_fills_retention
+            await _order_fills_retention.stop()
+        except Exception as e:
+            log.warning("order_fills retention stop error: %s", e)
         try:
             from .kalshi import reconciler as _kalshi_reconciler
             await _kalshi_reconciler.stop()
