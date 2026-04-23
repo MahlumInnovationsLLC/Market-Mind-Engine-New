@@ -205,6 +205,14 @@ def test_dashboard_strip_preserves_legacy_order() -> None:
     assert strip.index("soccer") > strip.index("crypto"), (
         "soccer must come after the legacy three (insertion order)"
     )
+    # Task #215 promoted combat-individual onto the strip alongside
+    # soccer; both must appear after the legacy three.
+    assert "combat-individual" in strip, (
+        "combat-individual vertical should appear on the strip"
+    )
+    assert strip.index("combat-individual") > strip.index("crypto"), (
+        "combat-individual must come after the legacy three (insertion order)"
+    )
 
 
 def test_crypto_binary_routes_through_specialist_predictor_hook() -> None:
@@ -255,13 +263,16 @@ def test_register_new_vertical_then_unregister() -> None:
         assert verticals.league_filter("Commodities-Test") == ["OIL"]
         # Built-ins still intact.
         assert verticals.has("sports")
-        # Legacy strip is now ["sports","weather","crypto","soccer"]
-        # after task #196 promoted the soccer vertical.  The
-        # commodities-test fixture above explicitly opts out of the
-        # strip, so it must NOT appear here.
+        # Legacy strip is now
+        # ["sports","weather","crypto","soccer","combat-individual"]
+        # after tasks #196 / #215 promoted the soccer and
+        # combat-individual verticals.  The commodities-test fixture
+        # above explicitly opts out of the strip, so it must NOT
+        # appear here.
         strip = verticals.dashboard_strip_verticals()
         assert strip[:3] == ["sports", "weather", "crypto"]
         assert "soccer" in strip
+        assert "combat-individual" in strip
         assert "commodities-test" not in strip
     finally:
         verticals.REGISTRY.unregister("commodities-test")

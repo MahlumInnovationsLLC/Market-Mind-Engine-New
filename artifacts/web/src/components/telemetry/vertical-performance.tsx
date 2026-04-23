@@ -422,13 +422,18 @@ export default function VerticalPerformance() {
 
       <div className="p-3 space-y-3">
         {isLoading && verticals.length === 0 ? (
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-            <div className="h-28 bg-muted/10 animate-pulse" />
-            <div className="h-28 bg-muted/10 animate-pulse" />
-            <div className="h-28 bg-muted/10 animate-pulse" />
+          <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-3">
+            {[0, 1, 2, 3, 4].map((i) => (
+              <div key={i} className="h-28 bg-muted/10 animate-pulse" />
+            ))}
           </div>
         ) : (
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+          // Responsive strip: 1-up on mobile, 2-up on small, 3-up on
+          // tablet, 4-up on laptop, 5+ on wide desktops.  Task #215
+          // widened this from a fixed 3-column grid so the
+          // combat-individual tile can join sports / weather / crypto /
+          // soccer without forcing a horizontal scroll.
+          <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-3">
             {verticals.map((v) => (
               <VerticalCard key={v.vertical} entry={v} />
             ))}

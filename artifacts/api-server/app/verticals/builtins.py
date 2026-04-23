@@ -127,9 +127,9 @@ REGISTRY.register(VerticalSpec(
 # `sports` vertical because outcome shape (per-fighter / per-driver /
 # per-player N-way fields) breaks the home/away assumption baked into
 # the team-sport feature builder + persona prompts.  Operators select
-# via `AXIOM_ORCHESTRATOR_VERTICALS`; off the dashboard strip by
-# default so the existing 4-column strip layout doesn't shift until UI
-# work catches up.
+# via `AXIOM_ORCHESTRATOR_VERTICALS`.  Promoted onto the operator
+# dashboard strip in task #215 once the strip layout was widened to a
+# responsive grid (5+ columns at xl, 2-up on mobile).
 REGISTRY.register(VerticalSpec(
     name="combat-individual",
     leagues=("UFC", "ATP", "WTA", "F1", "PGA"),
@@ -140,6 +140,7 @@ REGISTRY.register(VerticalSpec(
     # `LeagueConfig.per_event_cap_pct`.
     kelly_multiplier=0.5,
     default_allocation_pct=0.10,
+    include_in_dashboard_strip=True,
     description=(
         "Combat & individual sports: UFC fight cards, ATP/WTA tennis "
         "tournaments (h2h + outright winner), F1 race + qualifying, "

@@ -50,10 +50,12 @@ def test_returns_three_verticals_with_empty_buckets(monkeypatch: pytest.MonkeyPa
     assert out["days"] == 7
     # Strip ordering follows the registry's insertion order; legacy
     # three first, then any verticals later promoted to the strip
-    # (task #196 promoted "soccer").
+    # (task #196 promoted "soccer", task #215 promoted
+    # "combat-individual").
     names = [v["vertical"] for v in out["verticals"]]
     assert names[:3] == ["sports", "weather", "crypto"]
     assert "soccer" in names
+    assert "combat-individual" in names
 
     for v in out["verticals"]:
         # Empty agg → defaults preserved.
@@ -126,6 +128,7 @@ def test_aggregates_and_buckets_populate(monkeypatch: pytest.MonkeyPatch) -> Non
     names = {v["vertical"] for v in out["verticals"]}
     assert {"sports", "weather", "crypto"}.issubset(names)
     assert "soccer" in names
+    assert "combat-individual" in names
 
 
 def test_clamps_days_to_valid_range(monkeypatch: pytest.MonkeyPatch) -> None:

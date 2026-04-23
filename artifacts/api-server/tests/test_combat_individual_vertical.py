@@ -47,9 +47,9 @@ def test_vertical_registry_has_combat_individual():
     assert spec is not None
     assert spec.persona_profile == "combat-individual"
     assert set(spec.leagues) == set(COMBAT_LEAGUES)
-    # Off the dashboard strip until the UI catches up — guards the
-    # legacy 4-column strip layout.
-    assert spec.include_in_dashboard_strip is False
+    # Promoted onto the operator dashboard strip in task #215 once the
+    # strip layout was widened to a responsive grid (5+ columns at xl).
+    assert spec.include_in_dashboard_strip is True
 
 
 def test_combat_individual_profile_has_five_personas():
