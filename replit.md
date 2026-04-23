@@ -185,8 +185,14 @@ Top-level signed-in IA:
 - `/app` — operator dashboard (KPIs, swarm, recent trades, pipeline)
 - `/trading` — live trade ticket + feed
 - `/positions` — open + recently-closed positions
-- `/pipeline` — six-stage research→debate→execute pipeline (consumes
-  the shared `usePipelineSocket()` from `WebSocketProvider`)
+- `/pipeline` — per-trade ticker (`<TradeTrainTicker />`) renders one
+  horizontal "train" of 15 stage chips per in-flight candidate
+  (predict → swarm → gatekeeper → 12 risk gates → place); chips pulse
+  amber while pending, flip green ✓ on pass, red ✗ on fail, and click
+  to open a side panel with the gate's full decision payload + a link
+  to `/trade/:ref`. Aggregate six-stage flowchart + console tail still
+  render below it. All consumes the shared `usePipelineSocket()` from
+  `WebSocketProvider` — no extra socket connections.
 - `/intelligence` — verticals, models, swarm transcripts (Pro+)
 - `/system` — tabs `health` / `pipeline` / `controls` / `audit` /
   `runtime-settings`; admin-only tabs render forbidden state for

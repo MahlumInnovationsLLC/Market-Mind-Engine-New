@@ -11,6 +11,7 @@ import { apiFetch } from "@/lib/api";
 import SwarmTranscript, { useSwarmTranscript } from "@/components/swarm-transcript";
 import PipelineFlowchart from "@/components/pipeline/pipeline-flowchart";
 import ConsoleTail from "@/components/pipeline/console-tail";
+import TradeTrainTicker from "@/components/pipeline/trade-train-ticker";
 
 /**
  * Pipeline-page-local rolling buffer of pipeline-WS frames. The
@@ -642,6 +643,8 @@ export default function PipelinePage() {
           />
         </div>
       </header>
+
+      <TradeTrainTicker />
 
       <PipelineFlowchart />
 
