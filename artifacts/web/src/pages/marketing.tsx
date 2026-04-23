@@ -696,15 +696,21 @@ export default function MarketingPage() {
                 target="_blank"
                 rel="noopener noreferrer"
                 aria-label="Download Axiom_Predict on the App Store"
-                className="flex items-center gap-3 border border-border bg-card px-4 py-3 hover:border-primary"
+                className="inline-flex items-center gap-3 rounded-xl border border-border bg-foreground text-background px-4 py-2.5 hover:border-primary transition-colors"
                 data-testid="link-app-store"
               >
-                <span aria-hidden="true" className="text-primary text-lg leading-none"></span>
-                <span className="flex flex-col leading-tight">
-                  <span className="text-[9px] uppercase tracking-widest text-muted-foreground">
+                <svg
+                  aria-hidden="true"
+                  viewBox="0 0 24 24"
+                  className="h-7 w-7 fill-current"
+                >
+                  <path d="M17.05 12.04c-.03-2.78 2.27-4.12 2.37-4.18-1.29-1.89-3.3-2.15-4.02-2.18-1.7-.17-3.34 1-4.21 1-.88 0-2.21-.98-3.64-.95-1.87.03-3.6 1.09-4.56 2.77-1.95 3.38-.5 8.36 1.4 11.1.93 1.34 2.03 2.85 3.47 2.79 1.4-.06 1.93-.9 3.62-.9 1.69 0 2.17.9 3.65.87 1.51-.03 2.46-1.36 3.38-2.71 1.07-1.55 1.51-3.06 1.53-3.14-.03-.01-2.93-1.13-2.96-4.47zM14.4 4.07c.78-.94 1.3-2.25 1.16-3.55-1.12.04-2.48.74-3.28 1.68-.72.83-1.35 2.15-1.18 3.43 1.25.1 2.52-.62 3.3-1.56z" />
+                </svg>
+                <span className="flex flex-col leading-tight text-left">
+                  <span className="text-[9px] uppercase tracking-widest opacity-70">
                     Download on the
                   </span>
-                  <span className="text-sm font-bold uppercase tracking-tight">
+                  <span className="text-base font-semibold tracking-tight -mt-0.5">
                     App Store
                   </span>
                 </span>
@@ -714,15 +720,36 @@ export default function MarketingPage() {
                 target="_blank"
                 rel="noopener noreferrer"
                 aria-label="Get Axiom_Predict on Google Play"
-                className="flex items-center gap-3 border border-border bg-card px-4 py-3 hover:border-primary"
+                className="inline-flex items-center gap-3 rounded-xl border border-border bg-foreground text-background px-4 py-2.5 hover:border-primary transition-colors"
                 data-testid="link-play-store"
               >
-                <span aria-hidden="true" className="text-primary text-lg leading-none">▶</span>
-                <span className="flex flex-col leading-tight">
-                  <span className="text-[9px] uppercase tracking-widest text-muted-foreground">
+                <svg
+                  aria-hidden="true"
+                  viewBox="0 0 24 24"
+                  className="h-7 w-7"
+                >
+                  <path
+                    d="M3.6 1.86c-.27.28-.43.71-.43 1.27v17.74c0 .56.16.99.43 1.27l.07.07L13.4 12.1v-.2L3.67 1.79l-.07.07z"
+                    fill="#00d2ff"
+                  />
+                  <path
+                    d="M16.7 15.4l-3.3-3.3v-.2l3.3-3.3.07.04 3.9 2.22c1.12.64 1.12 1.68 0 2.32l-3.9 2.22-.07.04z"
+                    fill="#ffd400"
+                  />
+                  <path
+                    d="M16.77 15.36L13.4 12 3.6 21.8c.37.39.97.44 1.66.05l11.51-6.5z"
+                    fill="#ff3b3b"
+                  />
+                  <path
+                    d="M16.77 8.64L5.26 2.15c-.69-.39-1.29-.34-1.66.05L13.4 12l3.37-3.36z"
+                    fill="#00c853"
+                  />
+                </svg>
+                <span className="flex flex-col leading-tight text-left">
+                  <span className="text-[9px] uppercase tracking-widest opacity-70">
                     Get it on
                   </span>
-                  <span className="text-sm font-bold uppercase tracking-tight">
+                  <span className="text-base font-semibold tracking-tight -mt-0.5">
                     Google Play
                   </span>
                 </span>
@@ -732,34 +759,22 @@ export default function MarketingPage() {
               Store listings pending review — links are placeholders.
             </p>
           </div>
-          <div className="border border-border bg-card p-6 font-mono text-xs space-y-2">
-            <div className="text-[10px] text-primary uppercase tracking-widest">
-              ::push_preview
-            </div>
-            <div className="border-l-2 border-primary pl-3">
-              <div className="text-foreground font-bold">
-                AXIOM :: live signal
-              </div>
-              <div className="text-muted-foreground">
-                KXPRES-2028-DEM @ 0.42 → +6.1% edge, gates 12/12 cleared.
-              </div>
-            </div>
-            <div className="border-l-2 border-warning pl-3">
-              <div className="text-foreground font-bold">
-                AXIOM :: settlement
-              </div>
-              <div className="text-muted-foreground">
-                FED-CUT-MAR settled YES — +$184.20 realized.
-              </div>
-            </div>
-            <div className="border-l-2 border-destructive pl-3">
-              <div className="text-foreground font-bold">
-                AXIOM :: drift alert
-              </div>
-              <div className="text-muted-foreground">
-                Politics vertical Brier drift &gt; 0.08 — review queue.
-              </div>
-            </div>
+          <div
+            className="flex items-end justify-center gap-4 md:gap-6"
+            data-testid="mobile-screenshots"
+          >
+            <PhoneFrame
+              src={`${import.meta.env.BASE_URL}app-screens/signin.jpg`}
+              alt="Axiom_Predict mobile operator sign-in screen"
+              className="hidden sm:block translate-y-4 rotate-[-3deg] opacity-90"
+              testId="phone-frame-signin"
+            />
+            <PhoneFrame
+              src={`${import.meta.env.BASE_URL}app-screens/request-access.jpg`}
+              alt="Axiom_Predict mobile request-access screen"
+              className="rotate-[2deg]"
+              testId="phone-frame-request-access"
+            />
           </div>
         </div>
       </section>
@@ -1105,6 +1120,33 @@ function relTime(d: Date): string {
   if (hr < 48) return `${hr}h ago`;
   const day = Math.floor(hr / 24);
   return `${day}d ago`;
+}
+
+function PhoneFrame({
+  src,
+  alt,
+  className,
+  testId,
+}: {
+  src: string;
+  alt: string;
+  className?: string;
+  testId?: string;
+}) {
+  return (
+    <div
+      className={`relative w-[160px] sm:w-[180px] md:w-[200px] aspect-[9/19.5] rounded-[2rem] border border-border bg-card p-2 shadow-2xl shadow-primary/10 ${className ?? ""}`}
+      data-testid={testId}
+    >
+      <div className="absolute left-1/2 top-2 z-10 h-4 w-20 -translate-x-1/2 rounded-b-xl bg-background/80" />
+      <img
+        src={src}
+        alt={alt}
+        loading="lazy"
+        className="h-full w-full rounded-[1.5rem] object-cover object-top"
+      />
+    </div>
+  );
 }
 
 function Faq({ q, a }: { q: string; a: string }) {
