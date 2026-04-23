@@ -121,75 +121,60 @@ def test_parse_hrrr_inventory_handles_garbage():
     assert weather._parse_hrrr_inventory("not a real line\n") == []
 
 
-def test_summarise_hrrr_uses_daily_when_present():
-    payload = {
-        "hourly": {
-            "time": ["2026-04-22T00:00", "2026-04-22T01:00"],
-            "temperature_2m": [55.0, 60.0],
-        },
-        "daily": {
-            "temperature_2m_max": [82.5],
-            "temperature_2m_min": [48.0],
-        },
+# Sample inventories for a synthetic cycle: F00 carries TMP only
+# (analysis); F03/F06 carry TMP + TMAX + TMIN (windowed forecasts).
+_F00_INV = "1:0:d=2026042212:TMP:2 m above ground:anl:\n"
+_FXX_INV = "\n".join([
+    "1:0:d=2026042212:TMP:2 m above ground:1 hour fcst:",
+    "2:1000:d=2026042212:TMAX:2 m above ground:0-1 hour max fcst:",
+    "3:2000:d=2026042212:TMIN:2 m above ground:0-1 hour min fcst:",
+    "4:3000:d=2026042212:DPT:2 m above ground:1 hour fcst:",
+])
+
+
+class _FakeResp:
+    def __init__(self, status_code: int, body: Any = None,
+                 text: str = "", content: bytes = b""):
+        self.status_code = status_code
+        self._body = body
+        self.text = text
+        self.content = content
+        self.headers: dict[str, str] = {}
+
+    def json(self):
+        return self._body
+
+
+def test_decode_grib2_point_kelvin_returns_none_on_empty_bytes():
+    assert weather._decode_grib2_point_kelvin(b"", 40.0, -74.0) is None
+
+
+def test_select_records_filters_by_var_and_level():
+    inventories = {
+        0: weather._parse_hrrr_inventory(_F00_INV),
+        3: weather._parse_hrrr_inventory(_FXX_INV),
     }
-    s = weather._summarise_hrrr(payload)
-    assert s["t2m_f"] == 55.0
-    assert s["tmax_f"] == 82.5
-    assert s["tmin_f"] == 48.0
-    assert len(s["samples"]) == 2
+    tmp_recs = weather._select_records(inventories, "TMP")
+    tmax_recs = weather._select_records(inventories, "TMAX")
+    tmin_recs = weather._select_records(inventories, "TMIN")
+    # F00 + F03 each have a TMP record at 2 m above ground.
+    assert sorted(fh for fh, _ in tmp_recs) == [0, 3]
+    # TMAX/TMIN only appear in the F03 inventory.
+    assert [fh for fh, _ in tmax_recs] == [3]
+    assert [fh for fh, _ in tmin_recs] == [3]
 
 
-def test_summarise_hrrr_falls_back_to_hourly_extremes():
-    payload = {
-        "hourly": {
-            "time": ["t0", "t1", "t2"],
-            "temperature_2m": [40.0, None, 75.0],
-        },
-        "daily": {},
-    }
-    s = weather._summarise_hrrr(payload)
-    assert s["t2m_f"] == 40.0
-    assert s["tmax_f"] == 75.0
-    assert s["tmin_f"] == 40.0
-    assert len(s["samples"]) == 2  # the None sample is filtered
-
-
-def test_summarise_hrrr_empty_returns_none():
-    assert weather._summarise_hrrr({}) is None
-    assert weather._summarise_hrrr({"hourly": {"time": [], "temperature_2m": []}}) is None
-
-
-def test_poll_hrrr_persists_one_row_per_city(monkeypatch):
-    """End-to-end: NOMADS inventory found, Open-Meteo decodes values,
-    weather_hrrr_forecasts row written for every selected city."""
+def test_poll_hrrr_decodes_grib2_and_persists(monkeypatch):
+    """End-to-end: NOMADS inventory found, GRIB2 byte ranges fetched,
+    eccodes decoder mocked, weather_hrrr_forecasts row written per city."""
 
     monkeypatch.setenv("AXIOM_WEATHER_CITIES", "NYC,MIA")
 
-    inventory_text = "1:0:d=2026042212:TMP:2 m above ground:anl:\n"
-    om_response = {
-        "hourly": {
-            "time": ["2026-04-22T00:00"],
-            "temperature_2m": [70.0],
-        },
-        "daily": {
-            "temperature_2m_max": [85.0],
-            "temperature_2m_min": [60.0],
-        },
-    }
-
-    class FakeResp:
-        def __init__(self, status_code: int, body: Any = None, text: str = ""):
-            self.status_code = status_code
-            self._body = body
-            self.text = text
-            self.headers: dict[str, str] = {}
-
-        def json(self):
-            return self._body
+    grib_calls: list[tuple[str, str]] = []  # (url, range header)
 
     class FakeClient:
         def __init__(self, *a, **k):
-            self.calls: list[str] = []
+            pass
 
         async def __aenter__(self):
             return self
@@ -197,15 +182,33 @@ def test_poll_hrrr_persists_one_row_per_city(monkeypatch):
         async def __aexit__(self, *a):
             return False
 
-        async def get(self, url, params=None):
-            self.calls.append(url)
-            if "nomads.ncep.noaa.gov" in url:
-                return FakeResp(200, text=inventory_text)
-            if "api.open-meteo.com" in url:
-                return FakeResp(200, body=om_response)
-            return FakeResp(404)
+        async def get(self, url, params=None, headers=None):
+            if url.endswith("wrfsfcf00.grib2.idx"):
+                return _FakeResp(200, text=_F00_INV)
+            if url.endswith(".grib2.idx"):
+                return _FakeResp(200, text=_FXX_INV)
+            if url.endswith(".grib2"):
+                # Range request for a GRIB2 message — return marker bytes.
+                grib_calls.append((url, (headers or {}).get("Range", "")))
+                # Encode the var name so the decoder stub knows what to return.
+                if "wrfsfcf00.grib2" in url:
+                    return _FakeResp(206, content=b"TMP")
+                # Forecast hour files: the byte_start tells us the var.
+                rng = (headers or {}).get("Range", "")
+                start = int(rng.split("=")[1].split("-")[0])
+                tag = {0: b"TMP", 1000: b"TMAX", 2000: b"TMIN"}.get(start, b"X")
+                return _FakeResp(206, content=tag)
+            return _FakeResp(404)
 
     monkeypatch.setattr(weather.httpx, "AsyncClient", FakeClient)
+
+    # Stub the GRIB2 decoder: TMP=294K (~70F), TMAX=303K (~85F), TMIN=289K (~60F).
+    kelvin_by_tag = {b"TMP": 294.2611, b"TMAX": 302.5944, b"TMIN": 288.7056}
+
+    def fake_decode(grib_bytes: bytes, lat: float, lon: float):
+        return kelvin_by_tag.get(grib_bytes)
+
+    monkeypatch.setattr(weather, "_decode_grib2_point_kelvin", fake_decode)
 
     captured: list[tuple] = []
 
@@ -218,39 +221,38 @@ def test_poll_hrrr_persists_one_row_per_city(monkeypatch):
     n = asyncio.run(weather._poll_hrrr())
     assert n == 2
     assert {row[0] for row in captured} == {"NYC", "MIA"}
-    # tmax_f from the daily block should be persisted as hrrr_high_f.
+
+    # We should have hit the GRIB2 file with Range headers (no full GETs).
+    assert grib_calls, "expected at least one GRIB2 Range request"
+    assert all(rng.startswith("bytes=") for _, rng in grib_calls)
+
     for row in captured:
-        assert row[2] == 85.0
         body = json.loads(row[3])
-        assert body["t2m_f"] == 70.0
-        assert body["tmax_f"] == 85.0
-        assert body["tmin_f"] == 60.0
+        # Decoder name reflects the new pipeline.
+        assert body["decoder"] == "nomads:grib2"
+        # T2M ~ 70F, TMAX ~ 85F, TMIN ~ 60F (within rounding).
+        assert round(body["t2m_f"], 1) == 70.0
+        assert round(body["tmax_f"], 1) == 85.0
+        assert round(body["tmin_f"], 1) == 60.0
+        # tmax_f propagated to hrrr_high_f column.
+        assert round(row[2], 1) == 85.0
+        # Provenance carries the cycle/inventory metadata.
         assert body["nomads"]["inventory_count"] >= 1
+        assert 0 in body["nomads"]["fhours"]
+        # Samples should include the TMP analysis + at least the
+        # forecast-hour TMAX/TMIN we decoded.
+        sample_vars = {s["var"] for s in body["samples"]}
+        assert {"TMP", "TMAX", "TMIN"}.issubset(sample_vars)
+        # hrrr_run_time argument (index 4) is set from the discovered cycle.
+        assert row[4] is not None
 
 
-def test_poll_hrrr_proceeds_without_nomads(monkeypatch):
-    """If NOMADS is unreachable we still write Open-Meteo values, just
-    without run-cycle provenance."""
+def test_poll_hrrr_skips_when_nomads_unreachable(monkeypatch):
+    """With Open-Meteo gone, an unreachable NOMADS means we cannot
+    decode anything — the poller writes nothing instead of inventing
+    data."""
 
     monkeypatch.setenv("AXIOM_WEATHER_CITIES", "NYC")
-
-    om_response = {
-        "hourly": {
-            "time": ["2026-04-22T00:00"],
-            "temperature_2m": [50.0],
-        },
-        "daily": {"temperature_2m_max": [70.0], "temperature_2m_min": [40.0]},
-    }
-
-    class FakeResp:
-        def __init__(self, status_code: int, body: Any = None, text: str = ""):
-            self.status_code = status_code
-            self._body = body
-            self.text = text
-            self.headers: dict[str, str] = {}
-
-        def json(self):
-            return self._body
 
     class FakeClient:
         def __init__(self, *a, **k):
@@ -262,14 +264,52 @@ def test_poll_hrrr_proceeds_without_nomads(monkeypatch):
         async def __aexit__(self, *a):
             return False
 
-        async def get(self, url, params=None):
-            if "nomads.ncep.noaa.gov" in url:
-                return FakeResp(404)
-            if "api.open-meteo.com" in url:
-                return FakeResp(200, body=om_response)
-            return FakeResp(404)
+        async def get(self, url, params=None, headers=None):
+            return _FakeResp(404)
 
     monkeypatch.setattr(weather.httpx, "AsyncClient", FakeClient)
+
+    called = False
+
+    async def fake_fetchval(sql, *args):
+        nonlocal called
+        called = True
+        return 1
+
+    monkeypatch.setattr(weather.db, "fetchval", fake_fetchval)
+
+    n = asyncio.run(weather._poll_hrrr())
+    assert n == 0
+    assert called is False
+
+
+def test_poll_hrrr_skips_city_when_tmp_undecodable(monkeypatch):
+    """If the GRIB2 decoder cannot produce a T2M value for a city, that
+    city's row is skipped instead of writing a half-populated payload."""
+
+    monkeypatch.setenv("AXIOM_WEATHER_CITIES", "NYC")
+
+    class FakeClient:
+        def __init__(self, *a, **k):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def get(self, url, params=None, headers=None):
+            if url.endswith(".grib2.idx"):
+                return _FakeResp(200, text=_F00_INV)
+            if url.endswith(".grib2"):
+                return _FakeResp(206, content=b"TMP")
+            return _FakeResp(404)
+
+    monkeypatch.setattr(weather.httpx, "AsyncClient", FakeClient)
+    monkeypatch.setattr(
+        weather, "_decode_grib2_point_kelvin", lambda *a, **k: None
+    )
 
     captured: list[tuple] = []
 
@@ -280,12 +320,8 @@ def test_poll_hrrr_proceeds_without_nomads(monkeypatch):
     monkeypatch.setattr(weather.db, "fetchval", fake_fetchval)
 
     n = asyncio.run(weather._poll_hrrr())
-    assert n == 1
-    body = json.loads(captured[0][3])
-    assert "nomads" not in body
-    # hrrr_run_time argument (5th positional, index 4) should be None
-    # so the SQL falls back to NOW().
-    assert captured[0][4] is None
+    assert n == 0
+    assert captured == []
 
 
 # ---------------------------------------------------------------------------

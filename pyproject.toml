@@ -28,4 +28,6 @@ dependencies = [
     "alembic>=1.13",
     "psycopg[binary]>=3.2",
     "eth-account>=0.10.0",
+    "eccodes>=2.46",
+    "eccodeslib>=2.46",
 ]

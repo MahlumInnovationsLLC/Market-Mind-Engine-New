@@ -111,6 +111,8 @@ PROTECTED_ROUTES: tuple[str, ...] = (
     # Task #245 — operator-only calibration & research dashboards.
     "/api/calibration/snapshots",
     "/api/research/directives",
+    # Per-source weather freshness badge — operator dashboard only.
+    "/api/weather/freshness",
 )
 
 # Mutating endpoints — auth-protected, accept POST / PUT / DELETE.  These
