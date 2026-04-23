@@ -7,6 +7,7 @@ import {
   usePipelineSubscription,
 } from "@/components/realtime/websocket-provider";
 import { useVerticalFilter } from "@/hooks/use-selected-verticals";
+import DelayedSignalsBanner from "@/components/delayed-signals-banner";
 
 function formatMoney(num: number | null | undefined): string {
   if (num === null || num === undefined) return "—";
@@ -55,9 +56,19 @@ export default function RecentTrades() {
   const allTrades = data?.items || [];
   const trades = allTrades.filter((t) => matches(t.vertical));
   const live = pipeline.status === "open";
+  // `delayed` / `delay_minutes` are emitted by the backend for free-tier
+  // callers and aren't yet part of the OpenAPI schema, so we read them
+  // through a structural cast rather than regen-ing the client.
+  const meta = data as { delayed?: boolean; delay_minutes?: number } | undefined;
 
   return (
     <div className="border border-border bg-card overflow-hidden flex flex-col h-[500px]">
+      {meta?.delayed ? (
+        <DelayedSignalsBanner
+          delayMinutes={meta.delay_minutes}
+          testId="banner-recent-trades-delayed"
+        />
+      ) : null}
       <div className="border-b border-border p-2 px-3 bg-muted/20 flex justify-between items-center shrink-0">
         <div className="flex items-center gap-2">
           <span

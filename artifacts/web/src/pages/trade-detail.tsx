@@ -1,4 +1,5 @@
-import { Link, useRoute } from "wouter";
+import { useState } from "react";
+import { Link, useLocation, useRoute } from "wouter";
 import {
   CartesianGrid,
   Legend,
@@ -11,9 +12,13 @@ import {
   YAxis,
 } from "recharts";
 import {
+  ApiError,
   getGetTradeDetailQueryKey,
   useGetTradeDetail,
 } from "@workspace/api-client-react";
+import UpgradeRequiredModal, {
+  type UpgradeRequiredPayload,
+} from "@/components/upgrade-required-modal";
 
 function fmtMoney(n: number | null | undefined): string {
   if (n === null || n === undefined) return "—";
@@ -50,16 +55,52 @@ function fmtTickTime(t: string): string {
   });
 }
 
+function extractUpgradePayload(err: unknown): UpgradeRequiredPayload | null {
+  if (!(err instanceof ApiError) || err.status !== 402) return null;
+  // Backend nests the payload under FastAPI's `detail` key.
+  const data = err.data as { detail?: unknown } | null | undefined;
+  const candidate =
+    data && typeof data === "object" && "detail" in data
+      ? (data as { detail: unknown }).detail
+      : data;
+  if (!candidate || typeof candidate !== "object") return null;
+  const c = candidate as Record<string, unknown>;
+  if (c.error !== "upgrade_required") return null;
+  return {
+    error: typeof c.error === "string" ? c.error : undefined,
+    reason: typeof c.reason === "string" ? c.reason : undefined,
+    limit: typeof c.limit === "number" ? c.limit : undefined,
+    viewed_today:
+      typeof c.viewed_today === "number" ? c.viewed_today : undefined,
+    market_id:
+      typeof c.market_id === "string" || c.market_id === null
+        ? (c.market_id as string | null)
+        : undefined,
+    resets_at: typeof c.resets_at === "string" ? c.resets_at : undefined,
+  };
+}
+
 export default function TradeDetailPage() {
   const [, params] = useRoute("/trade/:ref");
+  const [, setLocation] = useLocation();
   const ref = params?.ref ?? "";
   const { data, isLoading, isError, error } = useGetTradeDetail(ref, {
     query: {
       enabled: !!ref,
       staleTime: 30_000,
       queryKey: getGetTradeDetailQueryKey(ref),
+      retry: (failureCount, err) => {
+        // Never retry a 402 — the backend has explicitly refused
+        // until the user upgrades or the UTC day rolls over.
+        if (err instanceof ApiError && err.status === 402) return false;
+        return failureCount < 3;
+      },
     },
   });
+  const upgradePayload = extractUpgradePayload(error);
+  // Modal is open whenever the request 402'd. Closing it routes back to
+  // the dashboard — there's no detail to render behind it.
+  const [modalOpen, setModalOpen] = useState(true);
 
   if (!ref) {
     return <Empty message="Missing trade reference" />;
@@ -75,6 +116,30 @@ export default function TradeDetailPage() {
   }
   if (isError) {
     const status = (error as { status?: number } | null)?.status;
+    if (upgradePayload) {
+      return (
+        <Frame>
+          <div
+            className="border border-primary/40 bg-primary/5 p-6 text-sm text-foreground"
+            data-testid="text-upgrade-required"
+          >
+            <div className="text-[10px] uppercase tracking-widest text-primary mb-1">
+              UPGRADE REQUIRED
+            </div>
+            You've hit today's free-tier market evaluation limit. Upgrade
+            to Pro to keep exploring.
+          </div>
+          <UpgradeRequiredModal
+            open={modalOpen}
+            onOpenChange={(next) => {
+              setModalOpen(next);
+              if (!next) setLocation("/app");
+            }}
+            payload={upgradePayload}
+          />
+        </Frame>
+      );
+    }
     return (
       <Frame>
         <div className="border border-destructive/40 bg-destructive/5 p-6 text-sm text-destructive">

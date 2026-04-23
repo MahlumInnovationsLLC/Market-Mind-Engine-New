@@ -12,6 +12,7 @@ import {
 } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
+import DelayedSignalsBanner from "@/components/DelayedSignalsBanner";
 import { useColors } from "@/hooks/useColors";
 import { apiFetch } from "@/lib/api";
 
@@ -31,7 +32,13 @@ type Trade = {
   executed_at?: string | null;
 };
 
-type TradeList = { items: Trade[] };
+type TradeList = {
+  items: Trade[];
+  // Set by the backend for free-tier callers when the 15-minute signal
+  // delay has been applied. Pro+ responses omit (or set false).
+  delayed?: boolean;
+  delay_minutes?: number;
+};
 
 function fmtPrice(p: number | null | undefined): string {
   if (p === null || p === undefined) return "—";
@@ -128,12 +135,19 @@ export default function PositionsScreen() {
       data={filtered}
       keyExtractor={(t) => String(t.id)}
       ListHeaderComponent={
-        <ScrollView
-          horizontal
-          showsHorizontalScrollIndicator={false}
-          contentContainerStyle={styles.chipRow}
-          style={styles.chipScroller}
-        >
+        <View>
+          {data?.delayed ? (
+            <DelayedSignalsBanner
+              delayMinutes={data.delay_minutes}
+              testID="banner-positions-delayed"
+            />
+          ) : null}
+          <ScrollView
+            horizontal
+            showsHorizontalScrollIndicator={false}
+            contentContainerStyle={styles.chipRow}
+            style={styles.chipScroller}
+          >
           {FILTERS.map((f) => {
             const active = f.id === filter;
             return (
@@ -164,7 +178,8 @@ export default function PositionsScreen() {
               </Pressable>
             );
           })}
-        </ScrollView>
+          </ScrollView>
+        </View>
       }
       refreshControl={
         <RefreshControl

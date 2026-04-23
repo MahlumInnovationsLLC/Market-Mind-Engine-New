@@ -3,6 +3,7 @@ import { Link } from "wouter";
 import { useQueryClient } from "@tanstack/react-query";
 import { useGetRecentDebates, getGetRecentDebatesQueryKey } from "@workspace/api-client-react";
 import { useWebSocket } from "@/hooks/use-websocket";
+import DelayedSignalsBanner from "@/components/delayed-signals-banner";
 
 function fmtPct(n: number | null | undefined, digits = 0): string {
   if (n === null || n === undefined) return "—";
@@ -87,9 +88,19 @@ export default function SwarmDebates() {
 
   const items = data?.items ?? [];
   const live = llm.status === "open";
+  // `delayed` / `delay_minutes` are emitted by the backend for free-tier
+  // callers and aren't yet part of the OpenAPI schema; surface them via
+  // a structural cast.
+  const meta = data as { delayed?: boolean; delay_minutes?: number } | undefined;
 
   return (
     <div className="border border-border bg-card flex flex-col">
+      {meta?.delayed ? (
+        <DelayedSignalsBanner
+          delayMinutes={meta.delay_minutes}
+          testId="banner-recent-debates-delayed"
+        />
+      ) : null}
       <div className="border-b border-border p-2 px-3 bg-muted/20 flex justify-between items-center shrink-0">
         <div className="flex items-center gap-2">
           <span

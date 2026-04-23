@@ -11,6 +11,7 @@ import {
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
 import { Card, SectionHeader } from "@/components/Card";
+import DelayedSignalsBanner from "@/components/DelayedSignalsBanner";
 import { useColors } from "@/hooks/useColors";
 import { apiFetch } from "@/lib/api";
 
@@ -57,7 +58,12 @@ export default function PipelineScreen() {
   });
   const debates = useQuery({
     queryKey: ["dashboard", "recent-debates"],
-    queryFn: () => apiFetch<{ items: Debate[] }>("/api/dashboard/recent-debates?limit=10"),
+    queryFn: () =>
+      apiFetch<{
+        items: Debate[];
+        delayed?: boolean;
+        delay_minutes?: number;
+      }>("/api/dashboard/recent-debates?limit=10"),
     refetchInterval: 30_000,
   });
 
@@ -101,6 +107,12 @@ export default function PipelineScreen() {
         <RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={colors.primary} />
       }
     >
+      {debates.data?.delayed ? (
+        <DelayedSignalsBanner
+          delayMinutes={debates.data.delay_minutes}
+          testID="banner-pipeline-delayed"
+        />
+      ) : null}
       <SectionHeader>CYCLE PIPELINE</SectionHeader>
       <Card style={styles.pipelineCard}>
         <View style={styles.stageRow}>

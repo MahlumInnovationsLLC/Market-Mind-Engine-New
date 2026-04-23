@@ -11,6 +11,7 @@ import {
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
 import { Card, SectionHeader } from "@/components/Card";
+import DelayedSignalsBanner from "@/components/DelayedSignalsBanner";
 import { useColors } from "@/hooks/useColors";
 import { apiFetch } from "@/lib/api";
 
@@ -76,7 +77,11 @@ export default function ResearchScreen() {
   const debates = useQuery({
     queryKey: ["dashboard", "recent-debates", "research"],
     queryFn: () =>
-      apiFetch<{ items: Debate[] }>("/api/dashboard/recent-debates?limit=25"),
+      apiFetch<{
+        items: Debate[];
+        delayed?: boolean;
+        delay_minutes?: number;
+      }>("/api/dashboard/recent-debates?limit=25"),
     refetchInterval: 60_000,
   });
   const uw = useQuery({
@@ -154,6 +159,12 @@ export default function ResearchScreen() {
       }
       testID="research-scroll"
     >
+      {debates.data?.delayed ? (
+        <DelayedSignalsBanner
+          delayMinutes={debates.data.delay_minutes}
+          testID="banner-research-delayed"
+        />
+      ) : null}
       <SectionHeader>TODAY'S TOP AUTORESEARCH</SectionHeader>
       {debateList.length === 0 ? (
         <Card>
