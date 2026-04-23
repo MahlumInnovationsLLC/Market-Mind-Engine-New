@@ -361,9 +361,13 @@ orders with stale state — but you still have to drive the recovery.
 - `/system → health` shows the **Postgres** card as `error` with a
   `connection refused` / `timed out` / `server closed connection`
   detail string.
-- `/api/healthz` still returns `200` (liveness probe is DB-free), but
-  `/api/health` and `/api/health/ready` return `503` with
-  `checks.postgres.ok = false`.
+- `/api/healthz` still returns `200` (liveness probe is DB-free).
+- `/api/health` returns `200` with `status: "degraded"` and
+  `postgres.ok = false` in the body — the endpoint does not 5xx so
+  approved operators can still load the dashboard and see which
+  dependency is red.
+- `/api/health/ready` returns `503` while the readiness gate's
+  Postgres check is failing.
 - API workflow logs show
   `asyncpg.exceptions.ConnectionDoesNotExistError` or
   `alembic migrations failed` in a restart loop.
@@ -394,20 +398,36 @@ workflow.
 
 The cycle scheduler runs `run_cycle()` inside a `try/except` so a DB
 error never kills the loop; it logs `orchestrator cycle failed: …`
-and sleeps for the next cadence tick. The kill-switch gate
-(`gate_kill_switch`) reads `risk.trading_mode` from `system_settings`
-on **every** candidate — when the lookup raises it fail-closes to
-`halt`. Net effect while the DB is down:
+and sleeps for the next cadence tick. The override loader
+(`_load_operator_overrides`) that feeds the risk-gate chain is
+**best-effort** — when the `SELECT … FROM system_settings` raises it
+returns an empty dict and the gates fall back to env vars and
+defaults (most importantly `AXIOM_TRADING_MODE`, typically `paper`).
 
-- No new orders are submitted (gate is fail-closed).
+This is an important nuance for live deployments: a Postgres outage
+does **not** by itself flip the kill switch to halt. If
+`AXIOM_TRADING_MODE=live` and you had previously set
+`risk.trading_mode = 'halt'` via SQL, that halt is effectively lost
+until Postgres is back. Many gates further down the chain
+(bankroll-floor, daily-loss, open-position limits) do need DB reads
+and will raise during the outage, which causes their individual
+candidates to error out and the cycle to log a failure — so in
+practice very few candidates make it to placement — but do not rely
+on that as your kill switch.
+
+**Recommended action while Postgres is down:** pull the bareback
+halt (§3C, auth-free) if you are in `live` mode. In paper mode the
+worst case is a cycle that logs errors and places nothing, so you
+can wait it out.
+
 - Resting Kalshi orders stay where they are — the bus and the
   exchange state are unaffected by a Supabase outage.
-- Fills that arrive over the Kalshi WebSocket are buffered in-process
-  until the DB is back, then flushed to `orders` / `order_fills`.
-
-Do **nothing** during the outage except watch — the system is
-correctly parked. Pulling the global kill switch now just means
-extra work later to un-park.
+- Fills that arrive over the Kalshi WebSocket are written directly
+  to the DB by `_record_fill_idempotent` — if the DB write raises,
+  the error is logged and **the fill is dropped** (no in-process
+  buffer, no guaranteed replay). The reconciler loop below will
+  pick up any missed fills from `/portfolio/fills` once the DB is
+  back, which is how we stay consistent.
 
 ### Drain in-flight resting orders safely once Postgres is back
 
@@ -418,18 +438,19 @@ extra work later to un-park.
    card. If it is still showing `HALTED` because the daily-loss gate
    tripped during the outage, decide whether to resume (§3b) or keep
    it halted.
-4. Reconcile Kalshi positions against our local state — the
-   reconciler loop does this automatically every 5 minutes in live
-   mode, but you can force it with:
+4. Reconcile Kalshi positions against our local state. The
+   reconciler background loop runs every 5 minutes in live mode
+   (`kalshi/reconciler.py`, started from the lifespan hook). There
+   is no manual trigger endpoint; wait one reconciler tick and then
+   check `model_health_alerts` for rows of type
+   `kalshi_reconcile_drift`. Any drift row surfaces on
+   `/system → health → Alerts` — treat it as a trade-by-trade audit,
+   not a "fix it now" alarm.
 
-   ```bash
-   curl -X POST https://YOUR_HOST/api/kalshi/reconcile \
-     -H "Authorization: Bearer $CLERK_ADMIN_JWT"
-   ```
-
-   A non-zero `drift_count` in the response surfaces as a
-   `model_health_alerts` row of type `kalshi_reconcile_drift` — treat
-   that as a trade-by-trade audit, not a "fix it now" alarm.
+   If you need to force a reconcile (e.g. during a post-incident
+   sanity check and you can't wait 5 minutes), restart the API
+   workflow — the reconciler runs once on startup before entering
+   its interval loop.
 5. Only after the health card is green for a full cycle should you
    consider re-arming live trading (§10 step 7 if you were mid-cutover).
 
