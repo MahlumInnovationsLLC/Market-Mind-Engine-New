@@ -17,9 +17,11 @@ import {
 import {
   getGetMyAccessQueryKey,
   setAuthTokenGetter,
+  setSilentRefreshHandler,
   setUnauthorizedHandler,
   useGetMyAccess,
 } from "@workspace/api-client-react";
+import { toast } from "@/hooks/use-toast";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { Skeleton } from "@/components/ui/skeleton";
 import NotFound from "@/pages/not-found";
@@ -347,6 +349,50 @@ function ClerkQueryClientCacheInvalidator() {
   return null;
 }
 
+/**
+ * Surfaces a "Reconnecting…" toast while the API client is silently
+ * refreshing a stale Clerk JWT and retrying a 401'd request. The toast
+ * dismisses as soon as the retry succeeds, so a brief refresh pause
+ * isn't completely invisible to the operator. If the retry also 401s
+ * the SessionExpired overlay takes over, so we just dismiss the toast.
+ */
+function SilentRefreshToastBridge() {
+  useEffect(() => {
+    let activeToast: ReturnType<typeof toast> | null = null;
+    let pending = 0;
+
+    const dismiss = () => {
+      if (activeToast) {
+        activeToast.dismiss();
+        activeToast = null;
+      }
+    };
+
+    setSilentRefreshHandler(({ phase }) => {
+      if (phase === "start") {
+        pending += 1;
+        if (!activeToast) {
+          activeToast = toast({
+            title: "Reconnecting…",
+            description: "Refreshing your session, one moment.",
+            duration: 10_000,
+          });
+        }
+      } else {
+        pending = Math.max(0, pending - 1);
+        if (pending === 0) dismiss();
+      }
+    });
+
+    return () => {
+      setSilentRefreshHandler(null);
+      dismiss();
+    };
+  }, []);
+
+  return null;
+}
+
 function SessionExpiredBridge({
   onExpired,
 }: {
@@ -402,6 +448,7 @@ export default function ClerkApp() {
       <QueryClientProvider client={queryClient}>
         <ClerkApiTokenBridge />
         <ClerkQueryClientCacheInvalidator />
+        <SilentRefreshToastBridge />
         <SessionExpiredBridge onExpired={() => setSessionExpired(true)} />
         <TooltipProvider>
           {/* Suspense boundary covers the public route switch as well —

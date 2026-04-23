@@ -7,5 +7,11 @@ export {
   setBaseUrl,
   setAuthTokenGetter,
   setUnauthorizedHandler,
+  setSilentRefreshHandler,
 } from "./custom-fetch";
-export type { AuthTokenGetter, UnauthorizedHandler } from "./custom-fetch";
+export type {
+  AuthTokenGetter,
+  UnauthorizedHandler,
+  SilentRefreshHandler,
+  SilentRefreshPhase,
+} from "./custom-fetch";

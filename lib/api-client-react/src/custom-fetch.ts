@@ -25,6 +25,14 @@ export type UnauthorizedHandler = (info: {
   method: string;
 }) => void;
 
+export type SilentRefreshPhase = "start" | "success" | "failure";
+
+export type SilentRefreshHandler = (event: {
+  phase: SilentRefreshPhase;
+  url: string;
+  method: string;
+}) => void;
+
 const NO_BODY_STATUS = new Set([204, 205, 304]);
 const DEFAULT_JSON_ACCEPT = "application/json, application/problem+json";
 const REQUEST_ID_HEADER = "x-request-id";
@@ -51,6 +59,37 @@ function newRequestId(): string {
 let _baseUrl: string | null = null;
 let _authTokenGetter: AuthTokenGetter | null = null;
 let _unauthorizedHandler: UnauthorizedHandler | null = null;
+let _silentRefreshHandler: SilentRefreshHandler | null = null;
+
+/**
+ * Register a handler that is invoked around the silent token-refresh
+ * retry the client performs after a 401. Receives `phase: "start"` just
+ * before the refreshed retry is dispatched, then `phase: "success"` if
+ * the retry returns a non-401 response, or `phase: "failure"` if it
+ * 401s again (i.e. the session is genuinely expired).
+ *
+ * Lets the UI surface a "reconnecting…" indicator while the refresh is
+ * in flight so a brief pause doesn't look like a frozen request.
+ *
+ * Pass `null` to clear the handler. Handler errors are swallowed.
+ */
+export function setSilentRefreshHandler(
+  handler: SilentRefreshHandler | null,
+): void {
+  _silentRefreshHandler = handler;
+}
+
+function notifySilentRefresh(
+  phase: SilentRefreshPhase,
+  requestInfo: { method: string; url: string },
+): void {
+  if (!_silentRefreshHandler) return;
+  try {
+    _silentRefreshHandler({ phase, ...requestInfo });
+  } catch {
+    // Swallow handler errors so they don't mask the in-flight request.
+  }
+}
 
 /**
  * Register a handler that is invoked whenever any API request returns a
@@ -434,7 +473,12 @@ export async function customFetch<T = unknown>(
     } catch {
       // ignore
     }
+    notifySilentRefresh("start", requestInfo);
     response = await attempt(true);
+    notifySilentRefresh(
+      response.status === 401 ? "failure" : "success",
+      requestInfo,
+    );
   }
 
   if (!response.ok) {
