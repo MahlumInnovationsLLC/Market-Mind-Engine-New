@@ -199,10 +199,10 @@ def test_gate_tripped_by_percent_cap(monkeypatch):
     assert len(p.alerts) == 1
 
 
-def test_already_halted_skips_double_alert(monkeypatch):
+def test_already_halted_skips_state_change_and_alert(monkeypatch):
     """A gate evaluation while ``trading_mode`` is already ``halt`` must
-    not re-trip side-effects — apply_halt short-circuits so no second
-    persist or alert is fired even when the loss is still past the cap."""
+    not re-persist halt (no-op) and must not fire a duplicate alert —
+    the manual/kalshi halt alert already went out."""
     monkeypatch.setenv("AXIOM_DAILY_LOSS_HALT_USD", "100")
     with _Patcher(
         realized=-500.0, unrealized=0.0, bankroll=1000.0, trading_mode="halt"
@@ -215,23 +215,49 @@ def test_already_halted_skips_double_alert(monkeypatch):
     assert p.alerts == []
 
 
-def test_dedupe_suppresses_second_alert_same_day(monkeypatch):
-    """Two back-to-back tripping gate calls within the same UTC day must
-    fire the alert exactly once — dedupe_or_skip owns the key."""
+def test_operator_resume_while_tripped_rehalts_without_double_alert(monkeypatch):
+    """If an operator flips runtime mode back to paper/live while the
+    day's loss budget is still blown, the gate MUST force the mode
+    back to halt on the next evaluation — but dedupe keeps the alert
+    at one-per-UTC-day so the inbox doesn't get spammed."""
     monkeypatch.setenv("AXIOM_DAILY_LOSS_HALT_USD", "100")
     with _Patcher(realized=-500.0, unrealized=0.0, bankroll=1000.0) as p:
-        # First call — tripping causes persist_halt which flips trading_mode
-        # to "halt", so the second call short-circuits on the mode check
-        # rather than the dedupe key.  Instead, force trading_mode to stay
-        # "live" so the dedupe path is what suppresses the second alert.
-        async def _stay_live():
-            return "live"
-        with patch.object(_dl, "_current_trading_mode", _stay_live):
-            r1 = asyncio.run(_gates.gate_daily_loss(_make_ctx()))
-            _dl.invalidate_cache()
-            r2 = asyncio.run(_gates.gate_daily_loss(_make_ctx()))
+        # First call: tripped, mode flips to halt, first alert fires.
+        r1 = asyncio.run(_gates.gate_daily_loss(_make_ctx()))
+        _dl.invalidate_cache()
+        # Simulate operator re-arming paper while the loss is still breached.
+        p.trading_mode = "paper"
+        r2 = asyncio.run(_gates.gate_daily_loss(_make_ctx()))
     assert r1.passed is False and r2.passed is False
+    # State transition ran TWICE (first trip + re-halt after operator resume).
+    assert len(p.persist_calls) == 2
+    # But the alert fired ONCE — UTC-day dedupe suppresses the second one.
     assert len(p.alerts) == 1
+
+
+def test_dedupe_key_uses_utc_date_not_local(monkeypatch):
+    """Dedupe must key on UTC calendar date regardless of the configured
+    trading-day timezone, so an operator in America/New_York doesn't
+    get two alerts bridging the UTC midnight rollover."""
+    monkeypatch.setenv("AXIOM_DAILY_LOSS_HALT_USD", "100")
+    monkeypatch.setenv("AXIOM_DAILY_LOSS_TZ", "America/New_York")
+    captured: list[tuple] = []
+
+    async def _spy_dedupe(alert_type, dedupe_key, ttl_seconds=0):
+        captured.append((alert_type, dedupe_key, ttl_seconds))
+        return True
+
+    with _Patcher(realized=-500.0, unrealized=0.0, bankroll=1000.0) as p:
+        with patch(
+            "app.notifications.alerts.dedupe_or_skip", _spy_dedupe
+        ):
+            asyncio.run(_gates.gate_daily_loss(_make_ctx()))
+    # The dedupe key must be the UTC date, not the NY-local date.
+    from datetime import datetime as _dt, timezone as _tz
+    expected_utc_date = _dt.now(_tz.utc).date().isoformat()
+    assert captured, "dedupe_or_skip was never called"
+    assert captured[0][0] == "daily_loss_halt"
+    assert captured[0][1] == expected_utc_date
 
 
 def test_operator_override_beats_env(monkeypatch):

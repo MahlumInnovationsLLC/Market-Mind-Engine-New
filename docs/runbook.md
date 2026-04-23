@@ -154,6 +154,17 @@ with a warning — a mis-set boundary will never silently shift by
 hours. The System → Controls card renders "Today (&lt;tz&gt;)" so
 operators can see which zone is in effect at a glance.
 
+Note: the per-day alert dedupe key is always UTC-dated
+(`daily_loss_halt:<utc_date>`), independent of the display
+timezone. This keeps the "one operator alert per day" invariant
+stable across timezone configuration changes and prevents an
+operator in a non-UTC zone from receiving two alerts that bridge
+the UTC-midnight rollover. The halt **state transition**, however,
+always re-runs whenever the budget is blown and the runtime mode
+is not already `halt` — so if an operator manually flips back to
+`paper` or `live` while still underwater, the next gate evaluation
+immediately forces mode back to `halt` with no alert spam.
+
 ### Operator override (preferred)
 
 Set per-deployment via `system_settings` so thresholds survive a

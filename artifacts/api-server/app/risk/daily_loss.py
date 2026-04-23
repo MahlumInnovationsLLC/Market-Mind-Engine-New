@@ -334,40 +334,58 @@ async def _persist_halt() -> None:
 async def apply_halt(snap: DailyLossSnapshot) -> bool:
     """Idempotently trip the kill-switch for ``snap``.
 
-    Returns True when this caller performed the trip (wrote system_settings
-    and dispatched the alert), False when a prior trip within the same UTC
-    day already did it.  The ``daily_loss_halt:<utc_date>`` dedupe key
-    suppresses the second alert; callers that want the snapshot updated
-    should call :func:`invalidate_cache`.
+    The state transition (flipping ``risk.trading_mode`` to ``halt`` and
+    tripping the in-process exchange kill switch) ALWAYS runs whenever
+    the gate trips and the system is not already halted — including
+    when an operator has re-armed paper/live earlier the same day.
+    Only the operator alert is deduplicated, keyed on UTC date so a
+    trading-day-timezone override can never shift the dedupe window
+    off of calendar UTC.
+
+    Returns True when an alert was dispatched on this call, False when
+    the alert was suppressed (either because the system was already
+    halted, or the UTC-day dedupe key was already claimed).  Callers
+    that want the cached snapshot updated should call
+    :func:`invalidate_cache`.
     """
-    # Short-circuit when already halted — no alert, no write.
     current = await _current_trading_mode()
-    if current == "halt":
-        return False
-    # Claim the dedupe key; only the winner performs side effects.
-    dedupe_key = f"daily_loss_halt:{snap.date_local}"
+    # Always force back to halt when we're tripped and not already halted —
+    # this guards against an operator re-arming paper/live while the day's
+    # loss budget is still blown.
+    if current != "halt":
+        await _persist_halt()
+        # Trip the in-memory kill switch so this process stops submitting
+        # orders immediately, even before the next cycle re-reads the DB.
+        try:
+            from ..exchange_kill_switch import halt as _halt
+            _halt(snap.tripped_reason or "daily loss cap breached")
+        except Exception as e:
+            log.warning("daily_loss exchange_kill_switch trip failed: %s", e)
+
+    # Alert is deduped on a UTC-calendar-day key (NOT snap.date_local)
+    # so a non-UTC trading-day setting never drifts the dedupe window.
+    utc_date = datetime.now(timezone.utc).date().isoformat()
+    dedupe_key = f"daily_loss_halt:{utc_date}"
     try:
         ok = await notif_alerts.dedupe_or_skip(
-            "daily_loss_halt", snap.date_local, ttl_seconds=86400
+            "daily_loss_halt", utc_date, ttl_seconds=86400
         )
     except Exception as e:
         log.warning("daily_loss dedupe claim failed: %s", e)
         ok = True
     if not ok:
-        log.info("daily_loss halt suppressed by dedupe: %s", dedupe_key)
+        log.info("daily_loss alert suppressed by dedupe: %s", dedupe_key)
         return False
-    await _persist_halt()
-    # Trip the in-memory kill switch so this process stops submitting
-    # orders immediately, even before the next cycle re-reads the DB.
-    try:
-        from ..exchange_kill_switch import halt as _halt
-        _halt(snap.tripped_reason or "daily loss cap breached")
-    except Exception as e:
-        log.warning("daily_loss exchange_kill_switch trip failed: %s", e)
-    # Fire the operator alert via the standard notification path.
+    # Suppress a second alert-within-the-same-day for the case where the
+    # system was already halted when we arrived (we never dispatched the
+    # first alert on this path either).  The kalshi/emergency-stop flow
+    # fires its own `halt` alert — piling a daily-loss one on top would
+    # be noise.
+    if current == "halt":
+        return False
     try:
         notif_alerts.daily_loss_halt(
-            date_utc=snap.date_local,
+            date_utc=utc_date,
             loss_usd=snap.loss_usd,
             realized_pnl_usd=snap.realized_pnl_usd,
             unrealized_pnl_usd=snap.unrealized_pnl_usd,
