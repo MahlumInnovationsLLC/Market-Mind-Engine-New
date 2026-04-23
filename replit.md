@@ -264,6 +264,100 @@ unknown action) completes the debate with `approved=false`,
 health snapshot.  Tests in `tests/test_swarm_gatekeeper_failclosed.py`
 pin every branch of this contract.
 
+## Accessibility + bundle-size audit (Task #239 — 2026-04-23)
+
+Run with axe-core 4.11.3 (via `@axe-core/playwright`) against the local
+dev build (1280×720, headless Chromium). Reports per route are written
+to `artifacts/web/a11y-reports/<route>.json`; the spec lives at
+`artifacts/web/tests/a11y.spec.ts`. Re-run with:
+
+```
+PORT=… BASE_PATH=/ pnpm --filter @workspace/web dev   # serve
+E2E_BASE_URL=http://localhost:<port> \
+  pnpm --filter @workspace/web exec playwright test tests/a11y.spec.ts
+```
+
+### Axe findings — public routes (scanned)
+
+| Route          | total | serious/critical | notes                                             |
+|----------------|-------|------------------|---------------------------------------------------|
+| `/` marketing  | 3     | 0                | landmarks + viewport (see below)                  |
+| `/pricing`     | 4     | 1 serious        | `color-contrast` on `.opacity-60` "(save ~17%)"   |
+| `/about`       | 3     | 0                | landmarks + viewport                              |
+| `/leaderboard` | 3     | 0                | landmarks + viewport                              |
+| `/health`      | 4     | 1 serious        | `color-contrast` on the embedded NotFound h1/p    |
+| `/sign-in`     | 4     | 1 serious        | same NotFound color-contrast leak (see follow-up) |
+
+Recurring moderate findings on every public route:
+
+- `landmark-one-main` / `region` — public pages render directly under
+  `<body>` with no `<main>` landmark (only the authed `AppShell` wraps
+  content in `<main id="main-content">`). Wrapping the public pages
+  (marketing, pricing, about, leaderboard, health, sign-in) in a
+  `<main>` clears both rules in one move.
+- `meta-viewport` — `index.html` sets
+  `content="width=device-width, initial-scale=1.0, maximum-scale=1"`,
+  which axe flags as preventing user zoom (WCAG 1.4.4). Drop
+  `maximum-scale=1`.
+
+Serious findings to file/fix:
+
+- `color-contrast` on `/pricing` — the "(save ~17%)" annotation in
+  `src/pages/pricing.tsx` uses `opacity-60` against `#0a0e16`, giving a
+  3.8 : 1 ratio (needs 4.5 : 1). Either drop the opacity or pre-compute
+  a darker `text-muted-foreground` shade for that span.
+- `color-contrast` on `/health` and `/sign-in` — both routes are
+  rendering `src/pages/not-found.tsx` (which uses Tailwind's stock
+  light-theme `text-gray-900` / `text-gray-600` on the dark background,
+  ratios 1.03 : 1 and 2.43 : 1). Two bugs to file: (a) `not-found.tsx`
+  must use the dark-theme tokens (`text-foreground` /
+  `text-muted-foreground`), and (b) investigate why `/health` and
+  `/sign-in` fall through to NotFound at all in the audited build —
+  likely a Wouter base-path / Clerk-publishable-key edge case in the
+  dev environment that should not occur in production.
+
+### Axe findings — authed routes (scope limit)
+
+`/app`, `/trading`, `/positions`, `/system`, `/admin` were **not**
+scanned in this run because the audit harness has no Clerk test-user
+credentials in the workspace env (`E2E_CLERK_USER_EMAIL` /
+`_PASSWORD` are unset). Filed as a follow-up — once a Clerk testing
+user is provisioned, the same `tests/a11y.spec.ts` can be extended to
+sign in and rerun axe against each authed route. The shell-level
+primitives that all authed routes share (skip-to-content link,
+`<main id="main-content">`, sidebar landmarks) are exercised by the
+existing operator-journey e2e suite.
+
+### Bundle-size audit (`pnpm --filter @workspace/web run build`)
+
+Route-level code-splitting is healthy — every lazy route chunk is well
+under the ~250 KB gz budget:
+
+| Chunk                          | raw      | gzip      | budget |
+|--------------------------------|----------|-----------|--------|
+| `dashboard-*.js`               | 31.67 KB | 8.59 KB   | ✅     |
+| `pipeline-*.js`                | 30.69 KB | 8.73 KB   | ✅     |
+| `admin-*.js`                   | 34.06 KB | 7.60 KB   | ✅     |
+| `intelligence-*.js`            | 23.58 KB | 5.95 KB   | ✅     |
+| `system-*.js`                  | 7.66 KB  | 2.45 KB   | ✅     |
+| `trading-*.js`                 | 4.87 KB  | 2.07 KB   | ✅     |
+| `positions-*.js`               | 8.56 KB  | 3.19 KB   | ✅     |
+| `pricing-*.js`                 | 6.67 KB  | 2.40 KB   | ✅     |
+| `profile-*.js`                 | 11.66 KB | 3.30 KB   | ✅     |
+| `health-*.js`                  | 12.95 KB | 3.40 KB   | ✅     |
+| (other lazy chunks)            | < 12 KB  | < 5 KB ea | ✅     |
+| **shared entry `index-*.js`**  | 978.25 KB| **283.99 KB** | ⚠️ over |
+| `index-*.css`                  | 133.33 KB| 20.94 KB  | ✅     |
+
+The lazy split is doing its job — no individual route chunk exceeds
+~9 KB gz. The over-budget item is the shared entry bundle (React +
+React-DOM + Clerk + TanStack Query + Wouter + shared UI primitives)
+at 284 KB gz. That's outside the per-route budget the spec called
+out, but it's the dominant contributor to first-paint payload and
+worth a follow-up: split Clerk (`@clerk/react` + `@clerk/themes`) out
+of the entry chunk via `manualChunks`, or defer it behind the
+sign-in/up routes that actually need it.
+
 ## Follow-up scope (NOT in this slice)
 
 Live Kalshi trading loop, 6-persona LLM swarm debate engine, 12-gate risk system,
