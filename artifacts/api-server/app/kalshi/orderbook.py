@@ -217,6 +217,65 @@ class OrderbookCache:
         # received = last itself.
         return int(last), filled
 
+    async def fillable_within_price(
+        self,
+        ticker: str,
+        *,
+        action: str,
+        side: Side,
+        count: int,
+        worst_acceptable_price_cents: int,
+    ) -> int:
+        """How many of ``count`` contracts the book can absorb without
+        walking past ``worst_acceptable_price_cents`` (in taker units).
+
+        * BUY  — accept levels whose per-contract cost is ``<= ceiling``.
+        * SELL — accept levels whose per-contract proceeds are ``>= floor``.
+
+        Returns 0 when the cache has no book for the ticker, the requested
+        side is empty, or no level satisfies the price constraint. The
+        caller (slippage guard) uses this to decide whether a smaller
+        slice of the order would still respect the configured edge-erosion
+        threshold.
+        """
+        if side not in ("yes", "no") or count <= 0:
+            return 0
+        action = (action or "").lower()
+        if action not in ("buy", "sell"):
+            return 0
+        async with self._lock:
+            book = self._books.get(ticker)
+            if book is None:
+                return 0
+            if action == "buy":
+                level = dict(book["no" if side == "yes" else "yes"])
+                cross = True
+            else:
+                level = dict(book[side])
+                cross = False
+        ceiling = int(worst_acceptable_price_cents)
+        prices = sorted(level.keys(), reverse=True)
+        remaining = int(count)
+        filled = 0
+        for p in prices:
+            if cross:
+                # BUY taker pays (100 - p). Accept while taker_cost <= ceiling.
+                if (100 - int(p)) > ceiling:
+                    break
+            else:
+                # SELL taker receives p. Accept while p >= floor.
+                if int(p) < ceiling:
+                    break
+            avail = level[p]
+            take = min(avail, remaining)
+            if take <= 0:
+                continue
+            filled += take
+            remaining -= take
+            if remaining <= 0:
+                break
+        return filled
+
 
 # --- module-level singleton + bus consumer ---------------------------------
 

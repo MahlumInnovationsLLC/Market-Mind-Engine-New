@@ -242,48 +242,52 @@ def test_slippage_guard_passes_with_sufficient_depth(monkeypatch, _reset):
     assert states == ["submitted", "filled"]
 
 
-def test_slippage_guard_rejects_when_book_pushes_past_edge(monkeypatch, _reset):
+def test_slippage_guard_slices_buy_when_full_size_pushes_past_edge(monkeypatch, _reset):
     """4¢ model edge, BUY YES limit=40¢. The no-book has 1 contract at
-    60¢ (=> first 1 fills at 40¢) and the rest at 50¢ (=> 9 fills at 50¢).
-    Worst yes-price paid = 50¢ ⇒ 10¢ slippage = 250% of edge ⇒ rejected.
+    60¢ (=> 1 fills at 40¢, 0¢ slippage) and 100 at 50¢ (=> 50¢ each, 10¢
+    slip = 250% of edge). Slicing keeps only the 1 contract at 60¢.
     """
     monkeypatch.setattr(lifecycle, "get_settings", lambda: _settings(threshold_pct=50.0))
 
     async def go():
         await kalshi_orderbook.orderbook_cache.apply_snapshot(
-            "X-REJ",
+            "X-SLICE",
             yes=[[40, 1]],
             no=[[60, 1], [50, 100]],
         )
         req = lifecycle.OrderRequest(
-            market_ticker="X-REJ",
+            market_ticker="X-SLICE",
             side="yes",
             action="buy",
             count=10,
             limit_price_cents=40,
-            client_order_id="rej-1",
+            client_order_id="slice-1",
             context={"model_edge_cents": 4.0},
         )
         return await lifecycle.submit_order(req)
 
-    with pytest.raises(lifecycle.OrderRejected, match="slippage guard"):
-        _run(go())
-
+    rec = _run(go())
+    assert rec.state == "filled"
+    assert rec.filled_count == 1  # sliced from 10 → 1
     rejected = [w for w in _reset if w["event_type"] == "rejected"]
-    assert len(rejected) == 1
-    md = rejected[0]["metadata"]
-    assert md["reason"] == "slippage_guard"
-    assert md["worst_fill_price_cents"] == 50
-    assert md["limit_price_cents"] == 40
-    assert md["slippage_cents"] == 10
-    assert md["model_edge_cents"] == 4.0
-    assert md["edge_erased_pct"] > 50.0
-    assert md["filled_available"] == 10
+    assert rejected == []
+    submitted = [w for w in _reset if w["event_type"] == "submitted"]
+    assert len(submitted) == 1
+    slice_md = submitted[0]["metadata"]["context"]["sliced_by_slippage_guard"]
+    assert slice_md["original_count"] == 10
+    assert slice_md["sliced_count"] == 1
+    assert slice_md["limit_price_cents"] == 40
+    assert slice_md["sliced_slippage_cents"] == 0
+    assert slice_md["worst_acceptable_price_cents"] == 42  # 40 + 50% * 4¢
+    # The submitted row must record the SLICED count, so dashboards
+    # see "filled 1 of 10" rather than the original ask.
+    assert submitted[0]["contracts"] == 1
 
 
-def test_slippage_guard_rejects_sell_when_book_too_low(monkeypatch, _reset):
-    """SELL YES at limit 60¢. Yes-book bids: 60¢×1 then 40¢×100.
-    Worst received = 40¢ ⇒ 20¢ slippage ⇒ rejected.
+def test_slippage_guard_slices_sell_when_book_too_low(monkeypatch, _reset):
+    """SELL YES at limit 60¢. Yes-book bids: 60¢×1 then 40¢×100. Selling
+    all 10 walks down to 40¢ (20¢ slip = 400% of 5¢ edge), but slicing
+    to 1 contract clears at 60¢ exactly.
     """
     monkeypatch.setattr(lifecycle, "get_settings", lambda: _settings(threshold_pct=50.0))
 
@@ -293,21 +297,26 @@ def test_slippage_guard_rejects_sell_when_book_too_low(monkeypatch, _reset):
         )
         req = lifecycle.OrderRequest(
             market_ticker="X-SELL", side="yes", action="sell", count=10,
-            limit_price_cents=60, client_order_id="sell-rej-1",
+            limit_price_cents=60, client_order_id="sell-slice-1",
             context={"model_edge_cents": 5.0},
         )
         return await lifecycle.submit_order(req)
 
-    with pytest.raises(lifecycle.OrderRejected, match="slippage guard"):
-        _run(go())
-    md = [w for w in _reset if w["event_type"] == "rejected"][0]["metadata"]
-    assert md["worst_fill_price_cents"] == 40
-    assert md["limit_price_cents"] == 60
-    assert md["slippage_cents"] == 20
+    rec = _run(go())
+    assert rec.state == "filled"
+    assert rec.filled_count == 1
+    submitted = [w for w in _reset if w["event_type"] == "submitted"]
+    slice_md = submitted[0]["metadata"]["context"]["sliced_by_slippage_guard"]
+    assert slice_md["original_count"] == 10
+    assert slice_md["sliced_count"] == 1
+    assert slice_md["worst_acceptable_price_cents"] == 58  # 60 - 50% * 5¢ → ceil(57.5)
+    assert slice_md["sliced_slippage_cents"] == 0
 
 
-def test_slippage_guard_rejects_when_book_lacks_depth(monkeypatch, _reset):
-    """Book covers only 3 of the 10 requested contracts: liquidity reject."""
+def test_slippage_guard_slices_when_book_lacks_depth(monkeypatch, _reset):
+    """Book covers only 3 of 10 requested contracts and they're all at the
+    top price. Spec wants a 3-contract slice instead of a silent skip.
+    """
     monkeypatch.setattr(lifecycle, "get_settings", lambda: _settings(threshold_pct=50.0))
 
     async def go():
@@ -316,7 +325,62 @@ def test_slippage_guard_rejects_when_book_lacks_depth(monkeypatch, _reset):
         )
         req = lifecycle.OrderRequest(
             market_ticker="X-THIN", side="yes", action="buy", count=10,
-            limit_price_cents=40, client_order_id="thin-1",
+            limit_price_cents=40, client_order_id="thin-slice-1",
+            context={"model_edge_cents": 4.0},
+        )
+        return await lifecycle.submit_order(req)
+
+    rec = _run(go())
+    assert rec.state == "filled"
+    assert rec.filled_count == 3
+    submitted = [w for w in _reset if w["event_type"] == "submitted"]
+    slice_md = submitted[0]["metadata"]["context"]["sliced_by_slippage_guard"]
+    assert slice_md["original_count"] == 10
+    assert slice_md["sliced_count"] == 3
+    assert "sliced 3 of 10" in slice_md["detail"]
+
+
+def test_slippage_guard_full_reject_when_no_acceptable_levels(monkeypatch, _reset):
+    """Book exists but every level violates the worst-acceptable price:
+    no slice possible, so reject (the spec's first test case).
+    """
+    monkeypatch.setattr(lifecycle, "get_settings", lambda: _settings(threshold_pct=50.0))
+
+    async def go():
+        # BUY YES at 40¢, edge=2¢ → max_slip=1¢ → ceiling=41¢. The no-book
+        # has only one level at 30¢ (=> taker pays 70¢ ≫ 41¢). Slice = 0.
+        await kalshi_orderbook.orderbook_cache.apply_snapshot(
+            "X-NOSLICE", yes=[[40, 999]], no=[[30, 100]],
+        )
+        req = lifecycle.OrderRequest(
+            market_ticker="X-NOSLICE", side="yes", action="buy", count=10,
+            limit_price_cents=40, client_order_id="noslice-1",
+            context={"model_edge_cents": 2.0},
+        )
+        return await lifecycle.submit_order(req)
+
+    with pytest.raises(lifecycle.OrderRejected, match="slippage guard"):
+        _run(go())
+    md = [w for w in _reset if w["event_type"] == "rejected"][0]["metadata"]
+    assert md["reason"] == "slippage_guard"
+    assert md["worst_acceptable_price_cents"] == 41
+    assert "violates worst-acceptable price" in md["detail"]
+
+
+def test_slippage_guard_full_reject_when_side_empty(monkeypatch, _reset):
+    """Book is known but the requested side has zero liquidity at any
+    price → no slice possible, reject (spec's "no depth at all" case).
+    """
+    monkeypatch.setattr(lifecycle, "get_settings", lambda: _settings(threshold_pct=50.0))
+
+    async def go():
+        # BUY YES needs the no-book; we publish only yes-bids.
+        await kalshi_orderbook.orderbook_cache.apply_snapshot(
+            "X-EMPTY", yes=[[40, 100]], no=[],
+        )
+        req = lifecycle.OrderRequest(
+            market_ticker="X-EMPTY", side="yes", action="buy", count=10,
+            limit_price_cents=40, client_order_id="empty-1",
             context={"model_edge_cents": 4.0},
         )
         return await lifecycle.submit_order(req)
@@ -325,8 +389,8 @@ def test_slippage_guard_rejects_when_book_lacks_depth(monkeypatch, _reset):
         _run(go())
     md = [w for w in _reset if w["event_type"] == "rejected"][0]["metadata"]
     assert md["reason"] == "slippage_guard"
-    assert md["filled_available"] == 3
-    assert "insufficient depth" in md["detail"]
+    assert md["filled_available"] == 0
+    assert "no liquidity" in md["detail"]
 
 
 def test_slippage_guard_skips_when_no_cached_book(monkeypatch, _reset):
@@ -405,10 +469,11 @@ def test_slippage_guard_blocks_live_path_before_wire(monkeypatch, _reset):
     monkeypatch.setattr(lifecycle.kalshi_client, "KalshiClient", lambda **kw: _Boom())
 
     async def go():
-        # BUY YES at 40 needs 60¢ no-bids. We supply 1 at 60 then 100 at 20
-        # ⇒ worst yes-cost = 80 ⇒ 40¢ slippage on a 2¢ edge = 2000% erased.
+        # No no-bids at all → BUY YES has zero acceptable depth so the
+        # guard returns a full reject (slice_count == 0). The KalshiClient
+        # must never be opened in that case.
         await kalshi_orderbook.orderbook_cache.apply_snapshot(
-            "X-LIVE", yes=[[40, 999]], no=[[60, 1], [20, 100]],
+            "X-LIVE", yes=[[40, 999]], no=[],
         )
         req = lifecycle.OrderRequest(
             market_ticker="X-LIVE", side="yes", action="buy", count=5,
@@ -434,8 +499,8 @@ def test_end_to_end_ws_frame_to_guard_decision(monkeypatch, _reset):
     async def go():
         await kalshi_orderbook.start_orderbook_consumer()
         try:
-            # Snapshot makes BUY YES at 40¢ require no-bids at >=60¢. Only
-            # 1 contract at 60¢; the rest at 30¢ (worst yes-cost = 70¢).
+            # Snapshot: 1 acceptable contract at no=60 (taker yes-cost 40),
+            # then 999 at no=30 (taker cost 70). Slicing keeps just the 1.
             await bus.publish({
                 "type": "kalshi_event",
                 "msg": {
@@ -454,16 +519,14 @@ def test_end_to_end_ws_frame_to_guard_decision(monkeypatch, _reset):
                 limit_price_cents=40, client_order_id="e2e-1",
                 context={"model_edge_cents": 4.0},
             )
-            try:
-                await lifecycle.submit_order(req)
-                return None
-            except lifecycle.OrderRejected as e:
-                return str(e)
+            return await lifecycle.submit_order(req)
         finally:
             await kalshi_orderbook.stop_orderbook_consumer()
 
-    err = _run(go())
-    assert err is not None and "slippage guard" in err
-    md = [w for w in _reset if w["event_type"] == "rejected"][0]["metadata"]
-    assert md["reason"] == "slippage_guard"
-    assert md["worst_fill_price_cents"] == 70  # 100 - 30
+    rec = _run(go())
+    assert rec.state == "filled"
+    assert rec.filled_count == 1
+    submitted = [w for w in _reset if w["event_type"] == "submitted"]
+    slice_md = submitted[0]["metadata"]["context"]["sliced_by_slippage_guard"]
+    assert slice_md["original_count"] == 5
+    assert slice_md["sliced_count"] == 1

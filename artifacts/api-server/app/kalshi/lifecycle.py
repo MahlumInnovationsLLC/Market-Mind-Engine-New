@@ -420,12 +420,42 @@ async def submit_order(req: OrderRequest, *, force_paper: bool | None = None) ->
     # reject before submission with reason=`slippage_guard`.
     guard = await _check_slippage_guard(req, settings=s)
     if guard is not None:
-        await _record(req, paper=paper, state="rejected",
-                      price=req.limit_price_cents or 0,
-                      extra={"reason": "slippage_guard", **guard})
-        raise OrderRejected(
-            f"slippage guard: {guard.get('detail') or 'rejected'}"
-        )
+        slice_count = int(guard.get("slice_count") or 0)
+        if slice_count > 0 and slice_count < int(req.count):
+            # Don't reject — submit a smaller order that fits within the
+            # configured edge-erosion budget. Stash slice provenance into
+            # the request context so the existing `submitted` lifecycle
+            # row records "filled X of Y" instead of a silent shrink.
+            from dataclasses import replace as _dc_replace
+            original_count = int(req.count)
+            new_context = dict(req.context) if isinstance(req.context, dict) else {}
+            new_context["sliced_by_slippage_guard"] = {
+                "original_count": original_count,
+                "sliced_count": slice_count,
+                "reason": "slippage_guard_partial_depth",
+                "detail": guard.get("detail"),
+                "worst_acceptable_price_cents": guard.get("worst_acceptable_price_cents"),
+                "model_edge_cents": guard.get("model_edge_cents"),
+                "threshold_pct": guard.get("threshold_pct"),
+                "limit_price_cents": guard.get("limit_price_cents"),
+                "original_worst_fill_price_cents": guard.get("original_worst_fill_price_cents"),
+                "sliced_worst_fill_price_cents": guard.get("sliced_worst_fill_price_cents"),
+                "sliced_slippage_cents": guard.get("sliced_slippage_cents"),
+                "edge_erased_pct": guard.get("edge_erased_pct"),
+            }
+            req = _dc_replace(req, count=slice_count, context=new_context)
+            log.info(
+                "slippage guard sliced order %s on %s: %d → %d (%s)",
+                req.client_order_id, req.market_ticker,
+                original_count, slice_count, guard.get("detail"),
+            )
+        else:
+            await _record(req, paper=paper, state="rejected",
+                          price=req.limit_price_cents or 0,
+                          extra={"reason": "slippage_guard", **guard})
+            raise OrderRejected(
+                f"slippage guard: {guard.get('detail') or 'rejected'}"
+            )
 
     # ---- in-process duplicate-client_order_id gate ----------------------
     # A second submission re-using a client_order_id that's already resting
@@ -1164,72 +1194,122 @@ async def _check_slippage_guard(req: OrderRequest, *, settings) -> dict[str, Any
     if edge_cents <= 0:
         return None
 
+    import math
+
+    requested = int(req.count)
+    action = (req.action or "").lower()
+    limit = int(req.limit_price_cents)
+
     worst, filled = await kalshi_orderbook.orderbook_cache.worst_fill_price(
         req.market_ticker,
-        action=req.action,
+        action=action,
         side=req.side,
-        count=int(req.count),
+        count=requested,
     )
-    # Cache miss → degraded; allow.
+
+    # Cache miss vs empty-side book — only the former is degraded-allow.
+    book_known = True
     if worst is None and filled == 0:
         snap = await kalshi_orderbook.orderbook_cache.snapshot(req.market_ticker)
         if snap is None:
-            return None
-        # Book exists but is empty on this side: zero liquidity.
-        return {
-            "detail": "no liquidity on requested side",
-            "market_ticker": req.market_ticker,
-            "side": req.side,
-            "requested_count": int(req.count),
-            "filled_available": 0,
-            "model_edge_cents": edge_cents,
-            "threshold_pct": threshold_pct,
-        }
-    if filled < int(req.count):
-        # Partial book depth — treat as a liquidity reject too.
-        return {
-            "detail": (
-                f"insufficient depth: book covers {filled} of {req.count}"
-            ),
-            "market_ticker": req.market_ticker,
-            "side": req.side,
-            "requested_count": int(req.count),
-            "filled_available": int(filled),
-            "worst_fill_price_cents": int(worst) if worst is not None else None,
-            "model_edge_cents": edge_cents,
-            "threshold_pct": threshold_pct,
-        }
+            return None  # degraded — let the order through
+        book_known = False  # book exists but the requested side is empty
 
-    limit = int(req.limit_price_cents)
-    # Slippage in cents per contract. For a BUY we paid more than we
-    # wanted (worst > limit); for a SELL we received less (worst < limit).
-    # In both cases the magnitude of "worse-than-limit" is what erodes
-    # the model edge. Negative => the book is *better* than our limit
-    # (zero slippage).
-    if (req.action or "").lower() == "sell":
-        slip_cents = max(0, limit - int(worst))
+    # Full pass: book covers the whole order AND projected slippage stays
+    # within the configured threshold. Short-circuit before doing slice math.
+    if book_known and filled >= requested:
+        if action == "sell":
+            slip_cents = max(0, limit - int(worst))
+        else:
+            slip_cents = max(0, int(worst) - limit)
+        erased_pct = (slip_cents / edge_cents) * 100.0 if edge_cents > 0 else 0.0
+        if erased_pct <= threshold_pct:
+            return None
+
+    # Either the book is too thin OR the full-size walk pushes past the
+    # edge-erosion threshold. Compute the largest slice that still
+    # respects the budget by walking only price levels whose taker-units
+    # cost stays within `worst_acceptable`.
+    max_slip_cents = (threshold_pct / 100.0) * edge_cents
+    if action == "sell":
+        # SELL: receive >= floor. Use ceil so partial-cent budget can't push us
+        # below the floor (e.g. limit=60, max_slip=2.5 → floor=58, not 57).
+        worst_acceptable = int(math.ceil(limit - max_slip_cents))
     else:
-        slip_cents = max(0, int(worst) - limit)
-    erased_pct = (slip_cents / edge_cents) * 100.0 if edge_cents > 0 else 0.0
-    if erased_pct > threshold_pct:
-        return {
-            "detail": (
-                f"projected slippage {slip_cents}¢ erases "
-                f"{erased_pct:.1f}% of {edge_cents:.2f}¢ edge "
-                f"(threshold {threshold_pct:.1f}%)"
-            ),
-            "market_ticker": req.market_ticker,
-            "side": req.side,
-            "requested_count": int(req.count),
-            "filled_available": int(filled),
-            "worst_fill_price_cents": int(worst),
-            "limit_price_cents": limit,
-            "slippage_cents": slip_cents,
-            "model_edge_cents": edge_cents,
-            "edge_erased_pct": round(erased_pct, 4),
-            "threshold_pct": threshold_pct,
-        }
-    return None
+        # BUY: pay <= ceiling. Use floor for the symmetric reason.
+        worst_acceptable = int(math.floor(limit + max_slip_cents))
+
+    slice_count = 0
+    if book_known:
+        slice_count = await kalshi_orderbook.orderbook_cache.fillable_within_price(
+            req.market_ticker,
+            action=action,
+            side=req.side,
+            count=requested,
+            worst_acceptable_price_cents=worst_acceptable,
+        )
+
+    common = {
+        "market_ticker": req.market_ticker,
+        "side": req.side,
+        "requested_count": requested,
+        "filled_available": int(filled),
+        "limit_price_cents": limit,
+        "model_edge_cents": edge_cents,
+        "threshold_pct": threshold_pct,
+        "worst_acceptable_price_cents": worst_acceptable,
+        "original_worst_fill_price_cents": int(worst) if worst is not None else None,
+    }
+
+    if slice_count <= 0:
+        # Nothing fits inside the acceptable price band — full reject.
+        if not book_known:
+            common["detail"] = "no liquidity on requested side"
+        elif filled <= 0:
+            common["detail"] = "no liquidity on requested side at any price"
+        else:
+            common["detail"] = (
+                f"book covers {filled} of {requested} but every level "
+                f"violates worst-acceptable price {worst_acceptable}¢"
+            )
+        return common
+
+    if slice_count >= requested:
+        # Defensive — full coverage at acceptable prices means we should
+        # not have reached this branch. Allow the order through.
+        return None
+
+    # Project the worst-case price for the slice so dashboards see the
+    # actual fill envelope, not the full-size projection.
+    sliced_worst, _sf = await kalshi_orderbook.orderbook_cache.worst_fill_price(
+        req.market_ticker,
+        action=action,
+        side=req.side,
+        count=int(slice_count),
+    )
+    if sliced_worst is None:
+        # Should be unreachable given slice_count > 0, but stay safe.
+        sliced_slip = 0
+        sliced_erased = 0.0
+    elif action == "sell":
+        sliced_slip = max(0, limit - int(sliced_worst))
+        sliced_erased = (sliced_slip / edge_cents) * 100.0 if edge_cents > 0 else 0.0
+    else:
+        sliced_slip = max(0, int(sliced_worst) - limit)
+        sliced_erased = (sliced_slip / edge_cents) * 100.0 if edge_cents > 0 else 0.0
+
+    common.update({
+        "slice_count": int(slice_count),
+        "sliced_worst_fill_price_cents": int(sliced_worst) if sliced_worst is not None else None,
+        "sliced_slippage_cents": int(sliced_slip),
+        "edge_erased_pct": round(sliced_erased, 4),
+        "detail": (
+            f"sliced {slice_count} of {requested} contracts to keep "
+            f"slippage ≤ {threshold_pct:.1f}% of {edge_cents:.2f}¢ edge "
+            f"(worst now {sliced_slip}¢ = {sliced_erased:.1f}%)"
+        ),
+    })
+    return common
 
 
 async def _record(
