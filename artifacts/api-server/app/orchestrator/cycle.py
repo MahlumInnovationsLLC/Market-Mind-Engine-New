@@ -1414,6 +1414,15 @@ async def run_cycle(vertical: str = "sports") -> CycleResult:
             "live_model_feature_inputs": (
                 live_pred.get("feature_inputs") if live_pred else None
             ),
+            # When the spread/total margin regressor adjusted the
+            # baseline, surface its components so operators can see
+            # which signal is moving the live probability.
+            "margin_adjustment": (
+                live_pred.get("margin_adjustment") if live_pred else None
+            ),
+            "baseline_probability": (
+                live_pred.get("baseline_probability") if live_pred else None
+            ),
         })
 
         async def _on_gate_event(ev: dict[str, Any]) -> None:

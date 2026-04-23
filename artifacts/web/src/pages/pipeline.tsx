@@ -259,6 +259,32 @@ function CandidateBlock({
     pickStr(startEv, "live_model_name") ??
     pickStr(startEv, "live_model_version");
   const liveMissing = liveProb === null;
+  // Spread/total tickers carry a margin_adjustment payload that records
+  // the binary baseline, the regressor's own probability, the expected
+  // margin/total, and the blend weight.  When present, surface the
+  // split so operators can see when the regressor is moving the call.
+  const adjRaw = startEv["margin_adjustment"];
+  const adj =
+    adjRaw && typeof adjRaw === "object" ? (adjRaw as Record<string, unknown>) : null;
+  const baselineProb =
+    pickNum(startEv, "baseline_probability") ?? (adj ? pickNum(adj, "baseline_prob") : null);
+  const regressorProb = adj ? pickNum(adj, "regressor_prob") : null;
+  const expected = adj ? pickNum(adj, "expected") : null;
+  const blendWeight = adj ? pickNum(adj, "blend_weight") : null;
+  const adjMarketType = adj ? pickStr(adj, "market_type") : null;
+  const adjLine = adj ? pickNum(adj, "line") : null;
+  const adjSide = adj ? pickStr(adj, "side") : null;
+  // Flag rows where the regressor actually changed the YES/NO call the
+  // operator sees — i.e. the blended live probability lands on the
+  // opposite side of 0.5 from the binary baseline.  This is stricter
+  // than "baseline vs regressor disagree" because a tiny regressor
+  // edge with a small blend weight can leave the final call unchanged.
+  const blendedForFlip = liveProb ?? (adj ? pickNum(adj, "blended") : null);
+  const flipped =
+    baselineProb !== null &&
+    blendedForFlip !== null &&
+    regressorProb !== null &&
+    baselineProb >= 0.5 !== blendedForFlip >= 0.5;
   return (
     <div className="border border-border/60 bg-background/40 p-2 text-[10px]">
       <div className="flex items-center justify-between mb-1">
@@ -290,7 +316,52 @@ function CandidateBlock({
             </span>
           )}
         </span>
+        {flipped && (
+          <span
+            className="px-1 py-px bg-warning/20 text-warning border border-warning/40"
+            data-testid="margin-flip-badge"
+            title="Regressor flipped the YES/NO call vs the binary baseline"
+          >
+            REG FLIP
+          </span>
+        )}
       </div>
+      {adj && (
+        <div
+          className="flex flex-wrap items-center gap-x-3 gap-y-0.5 mb-1 text-[10px] uppercase tracking-wider text-muted-foreground"
+          data-testid="margin-adjustment"
+        >
+          <span>
+            BASE{" "}
+            <span className="text-foreground font-bold">{fmtPct(baselineProb)}</span>
+          </span>
+          <span>
+            REG{" "}
+            <span className={`font-bold ${flipped ? "text-warning" : "text-foreground"}`}>
+              {fmtPct(regressorProb)}
+            </span>
+          </span>
+          {expected !== null && (
+            <span>
+              {adjMarketType === "Total" ? "EXP TOTAL" : "EXP MARGIN"}{" "}
+              <span className="text-foreground font-bold normal-case">
+                {expected.toFixed(1)}
+              </span>
+              {adjLine !== null && (
+                <span className="text-muted-foreground/60 normal-case">
+                  {" "}vs {adjLine.toFixed(1)}
+                  {adjSide ? ` ${adjSide}` : ""}
+                </span>
+              )}
+            </span>
+          )}
+          {blendWeight !== null && (
+            <span>
+              W <span className="text-foreground font-bold">{blendWeight.toFixed(2)}</span>
+            </span>
+          )}
+        </div>
+      )}
       <div className="space-y-0.5">
         {events.map((ev, i) => {
           const t = pickStr(ev, "type");
