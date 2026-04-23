@@ -2522,6 +2522,7 @@ async def notifications_status(
         "postmark": notif_postmark.status(),
         "recent_sends": notif_postmark.recent_sends(limit=25),
         "suppressions": await notif_suppression.list_recent(limit=50),
+        "dedupe_suppressions": notif_alerts.suppression_counts(),
     }
 
 

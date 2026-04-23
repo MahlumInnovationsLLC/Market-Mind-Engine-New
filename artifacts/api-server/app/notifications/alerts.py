@@ -74,6 +74,23 @@ _dedupe_table_ready = False
 _dedupe_lock = asyncio.Lock()
 
 
+# In-memory counter of how many alert dispatches were dropped by the
+# dedupe layer, keyed by `alert_type`.  Resets on process restart —
+# exposed via `/api/notifications/status` so operators can tell
+# "everything is quiet" from "the dedupe is hiding something".
+_suppression_counts: dict[str, int] = {}
+
+
+def suppression_counts() -> dict[str, int]:
+    """Snapshot of dedupe-suppressed alert counts since process start."""
+    return dict(_suppression_counts)
+
+
+def reset_suppression_counts() -> None:
+    """Test helper — wipe the in-memory counter."""
+    _suppression_counts.clear()
+
+
 async def _ensure_dedupe_table() -> None:
     """Schema is now owned by the Alembic baseline migration; no-op."""
     global _dedupe_table_ready
@@ -116,7 +133,12 @@ async def dedupe_or_skip(
             """,
             full_key, int(ttl_seconds),
         )
-        return bool(row)
+        claimed = bool(row)
+        if not claimed:
+            _suppression_counts[alert_type] = (
+                _suppression_counts.get(alert_type, 0) + 1
+            )
+        return claimed
     except Exception as e:
         log.warning("dedupe_or_skip claim failed for %s: %s", full_key, e)
         return True

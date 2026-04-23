@@ -55,6 +55,7 @@ type NotificationsStatus = {
     error?: string | null;
     skipped_reason?: string | null;
   }[];
+  dedupe_suppressions?: Record<string, number>;
 };
 
 const STATUS_COLOR: Record<Card["status"], string> = {
@@ -504,6 +505,35 @@ export function HealthPanel() {
             <pre className="text-[11px] bg-muted/30 border border-border p-3 overflow-x-auto whitespace-pre-wrap break-all">
               {JSON.stringify(testResult, null, 2)}
             </pre>
+          )}
+
+          {notif && notif.dedupe_suppressions && (
+            <div className="border border-border bg-card p-3 text-xs">
+              <div className="text-[10px] uppercase tracking-widest text-muted-foreground mb-2">
+                dedupe :: suppressed since boot
+              </div>
+              {Object.keys(notif.dedupe_suppressions).length === 0 ? (
+                <div className="text-muted-foreground">
+                  no duplicates suppressed
+                </div>
+              ) : (
+                <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-2">
+                  {Object.entries(notif.dedupe_suppressions)
+                    .sort(([a], [b]) => a.localeCompare(b))
+                    .map(([alertType, count]) => (
+                      <div
+                        key={alertType}
+                        className="border border-border/60 bg-muted/20 p-2"
+                      >
+                        <div className="text-[10px] text-muted-foreground uppercase tracking-widest break-all">
+                          {alertType}
+                        </div>
+                        <div className="text-base font-bold">{count}</div>
+                      </div>
+                    ))}
+                </div>
+              )}
+            </div>
           )}
 
           {notif && notif.recent_sends.length > 0 && (

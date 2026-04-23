@@ -88,6 +88,30 @@ def test_dedupe_or_skip_first_call_wins(fake_store: _FakeDedupeStore) -> None:
     asyncio.run(go())
 
 
+def test_suppression_counts_track_per_alert_type(
+    fake_store: _FakeDedupeStore,
+) -> None:
+    _alerts.reset_suppression_counts()
+
+    async def go() -> None:
+        # First claims: not suppressed, no counter bump.
+        await _alerts.dedupe_or_skip("halt", "k1", ttl_seconds=60)
+        await _alerts.dedupe_or_skip("drift", "vx:warning", ttl_seconds=60)
+        # Replays: suppressed, counter bumps.
+        await _alerts.dedupe_or_skip("halt", "k1", ttl_seconds=60)
+        await _alerts.dedupe_or_skip("halt", "k1", ttl_seconds=60)
+        await _alerts.dedupe_or_skip("drift", "vx:warning", ttl_seconds=60)
+
+    asyncio.run(go())
+    counts = _alerts.suppression_counts()
+    assert counts == {"halt": 2, "drift": 1}
+    # Snapshot is a copy — mutating it must not affect the live counter.
+    counts["halt"] = 999
+    assert _alerts.suppression_counts()["halt"] == 2
+    _alerts.reset_suppression_counts()
+    assert _alerts.suppression_counts() == {}
+
+
 def test_dedupe_or_skip_expired_window_re_fires(fake_store: _FakeDedupeStore) -> None:
     async def go() -> None:
         assert await _alerts.dedupe_or_skip("drift", "vx:warning", ttl_seconds=60)
