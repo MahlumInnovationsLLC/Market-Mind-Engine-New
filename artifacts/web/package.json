@@ -12,6 +12,7 @@
   },
   "devDependencies": {
     "@axe-core/playwright": "^4.11.2",
+    "@clerk/testing": "^2.0.17",
     "@hookform/resolvers": "^3.10.0",
     "@playwright/test": "^1.50.0",
     "@radix-ui/react-accordion": "^1.2.4",
