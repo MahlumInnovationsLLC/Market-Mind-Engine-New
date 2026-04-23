@@ -19,14 +19,28 @@ log = logging.getLogger("axiom.autoresearch.store")
 VALID_STATUSES = ("shadow", "production", "rejected")
 
 
-def feature_name(vertical: str, signal_type: str, aggregator: str) -> str:
+def feature_name(
+    vertical: str,
+    signal_type: str,
+    aggregator: str,
+    ticker: str | None = None,
+) -> str:
     """Stable identifier for a discovered candidate.
 
-    Format: ``uw__{signal_type}__{aggregator}__{vertical}``. Kept
-    underscored / lowercase so it can also serve as a column name in
-    downstream training tables without quoting.
+    Format: ``uw__{signal_type}__{aggregator}__{vertical}`` for global
+    (vertical-only) candidates, or
+    ``uw__{signal_type}__{aggregator}__{vertical}__{ticker}`` for the
+    per-(vertical, ticker) candidates emitted by ticker-linked verticals
+    (crypto, equities, macro etc — see
+    :data:`app.autoresearch.mining.TICKER_LINKED_VERTICALS`).
+
+    Kept underscored / lowercase so it can also serve as a column name
+    in downstream training tables without quoting.
     """
     parts = [str(p).strip().lower() for p in (signal_type, aggregator, vertical)]
+    ticker_norm = (ticker or "").strip().lower()
+    if ticker_norm:
+        parts.append(ticker_norm)
     return "uw__" + "__".join(parts)
 
 
