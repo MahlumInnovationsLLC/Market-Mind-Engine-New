@@ -1017,6 +1017,18 @@ async def _predict_for_candidate(
                 },
                 "feature_count": len(ratings),
                 "n_way_probabilities": probs,
+                # Full audit sketch persisted onto the debate row so
+                # analysts can reproduce the per-entrant probabilities
+                # without re-pulling the (process-local) ratings cache.
+                "n_way_sketch": {
+                    "model": "plackett_luce",
+                    "entrant": entrant,
+                    "entrant_rating": ratings[entrant],
+                    "entrant_probability": yes_prob,
+                    "field_size": len(ratings),
+                    "ratings": ratings,
+                    "probabilities": probs,
+                },
             }
         except Exception as e:  # pragma: no cover - never kill the loop
             log.debug(
@@ -1275,6 +1287,38 @@ async def run_cycle(vertical: str = "sports") -> CycleResult:
             edge=pre_edge,
             vertical=vertical,
         )
+        # N-way tournament markets (task #213): when the candidate
+        # priced through Plackett-Luce, persist the full per-entrant
+        # sketch onto the debate row's `game_context` so analysts can
+        # audit which leg was being priced and what the alternative
+        # entrants would have looked like.  Best-effort: a sick
+        # swarm_debates UPDATE must NOT take down the trading loop.
+        if (
+            live_pred is not None
+            and isinstance(live_pred.get("n_way_sketch"), dict)
+            and cand.get("debate_id") is not None
+        ):
+            try:
+                # Namespace the audit data under a single key so we
+                # never collide with other game_context fields.  The
+                # entrant identifier already lives inside the sketch.
+                await db.execute(
+                    """
+                    UPDATE swarm_debates
+                       SET game_context = coalesce(game_context, '{}'::jsonb)
+                                          || jsonb_build_object(
+                                                'plackett_luce_sketch', $2::jsonb
+                                             )
+                     WHERE id = $1
+                    """,
+                    int(cand["debate_id"]),
+                    json.dumps(live_pred["n_way_sketch"]),
+                )
+            except Exception as e:  # pragma: no cover — defensive
+                log.debug(
+                    "plackett-luce sketch persist failed for debate %s: %s",
+                    cand.get("debate_id"), e,
+                )
         # If swarm consensus is missing, fall back to the live model
         # probability so the gates still get a real number to chew on —
         # storing the live probability "alongside" the cached consensus
@@ -1413,6 +1457,12 @@ async def run_cycle(vertical: str = "sports") -> CycleResult:
             ),
             "live_model_feature_inputs": (
                 live_pred.get("feature_inputs") if live_pred else None
+            ),
+            # N-way pricing audit: surface the per-entrant Plackett-Luce
+            # sketch in real time so dashboards can render every leg's
+            # probability alongside the one this candidate is trading.
+            "n_way_sketch": (
+                live_pred.get("n_way_sketch") if live_pred else None
             ),
             # When the spread/total margin regressor adjusted the
             # baseline, surface its components so operators can see

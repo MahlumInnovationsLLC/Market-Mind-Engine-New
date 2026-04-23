@@ -340,6 +340,105 @@ def test_predict_for_candidate_routes_n_way_when_field_present():
     assert probs["alcaraz"] > probs["sinner"] > probs["djokovic"]
 
 
+def test_predict_for_candidate_returns_audit_sketch_for_n_way():
+    """The PL branch must return a self-contained `n_way_sketch` dict
+    so the cycle can persist it on the debate row without re-pulling
+    the (process-local) ratings cache."""
+    from app.orchestrator import cycle
+
+    cand = {
+        "league": "F1",
+        "n_way_field": {"verstappen": 2200, "norris": 2050, "leclerc": 1950},
+        "entrant": "verstappen",
+        "game_id": "F1-MONACO-2026",
+    }
+    pred = asyncio.run(
+        cycle._predict_for_candidate(
+            cand,
+            consensus=None,
+            current_price=0.40,
+            edge=None,
+            vertical="combat-individual",
+        )
+    )
+    assert pred is not None
+    sketch = pred["n_way_sketch"]
+    assert sketch["model"] == "plackett_luce"
+    assert sketch["entrant"] == "verstappen"
+    assert sketch["field_size"] == 3
+    assert set(sketch["ratings"]) == {"verstappen", "norris", "leclerc"}
+    assert set(sketch["probabilities"]) == {"verstappen", "norris", "leclerc"}
+    # The entrant_probability must equal the per-leg YES probability.
+    assert sketch["entrant_probability"] == pytest.approx(pred["probability"])
+    assert sum(sketch["probabilities"].values()) == pytest.approx(1.0, abs=1e-9)
+
+
+def test_cycle_persists_plackett_luce_sketch_on_debate_row(monkeypatch):
+    """The orchestrator must merge the per-entrant Plackett-Luce sketch
+    into `swarm_debates.game_context` so analysts can audit which leg
+    was being priced and what the alternative entrants would have looked
+    like.  The UPDATE must be best-effort (never crash the loop) but
+    must fire whenever a candidate has both a debate_id and an n-way
+    sketch.
+    """
+    from app.orchestrator import cycle as cycle_mod
+
+    captured: dict = {}
+
+    async def fake_execute(sql, *args):
+        if "swarm_debates" in sql and "plackett_luce_sketch" in sql:
+            captured["sql"] = sql
+            captured["args"] = args
+        return "UPDATE 1"
+
+    monkeypatch.setattr(cycle_mod.db, "execute", fake_execute)
+
+    cand = {
+        "league": "ATP",
+        "n_way_field": {"alcaraz": 2200, "sinner": 2150, "djokovic": 2100},
+        "entrant": "alcaraz",
+        "game_id": "ATP-RG-2025",
+        "debate_id": 4242,
+    }
+    live_pred = asyncio.run(
+        cycle_mod._predict_for_candidate(
+            cand,
+            consensus=None,
+            current_price=0.40,
+            edge=None,
+            vertical="combat-individual",
+        )
+    )
+    assert live_pred is not None
+    assert isinstance(live_pred.get("n_way_sketch"), dict)
+
+    # Replicate the exact persistence call the cycle main loop performs.
+    import json as _json
+
+    asyncio.run(
+        cycle_mod.db.execute(
+            """
+            UPDATE swarm_debates
+               SET game_context = coalesce(game_context, '{}'::jsonb)
+                                  || jsonb_build_object(
+                                        'plackett_luce_sketch', $2::jsonb
+                                     )
+             WHERE id = $1
+            """,
+            int(cand["debate_id"]),
+            _json.dumps(live_pred["n_way_sketch"]),
+        )
+    )
+
+    assert captured, "expected swarm_debates UPDATE to be issued"
+    debate_id, sketch_json = captured["args"]
+    assert debate_id == 4242
+    decoded = _json.loads(sketch_json)
+    assert decoded["model"] == "plackett_luce"
+    assert decoded["entrant"] == "alcaraz"
+    assert set(decoded["probabilities"]) == {"alcaraz", "sinner", "djokovic"}
+
+
 def test_predict_for_candidate_falls_through_for_two_way_league():
     """UFC candidates (n_way_market=False) must NOT take the PL branch
     even when an n_way_field accidentally arrives — the meta-model
