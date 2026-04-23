@@ -79,6 +79,61 @@ def submit_recovery_state() -> dict[str, Any]:
     return dict(_submit_recovery)
 
 
+# --- stale-resting cancel counters (surfaced on /api/health/snapshot) ----
+#
+# Orchestrator cycles start with an age-based sweep over resting orders
+# (see ``app.orchestrator.cycle._cancel_stale_resting_orders``). These
+# counters tell operators how often that sweep fires, how many orders
+# it successfully cancels, and how often the venue refuses the cancel
+# (which we swallow so the cycle proceeds).
+_stale_resting: dict[str, int | str | float | None] = {
+    "cancelled": 0,        # total resting orders successfully cancelled
+    "cancel_failed": 0,    # cancel call raised — swallowed, cycle continues
+    "scans": 0,            # number of cycle-start sweeps invoked
+    "last_scan_at": None,
+    "last_cancelled_at": None,
+    "last_error": None,    # str — last cancel_failed error message
+}
+
+
+def stale_resting_cancelled_state() -> dict[str, Any]:
+    """JSON-safe copy of the stale-resting counters for health snapshots."""
+    return dict(_stale_resting)
+
+
+def record_stale_resting_scan() -> None:
+    """Called by the orchestrator at the start of each sweep."""
+    import time as _time
+    _stale_resting["scans"] = int(_stale_resting["scans"]) + 1  # type: ignore[arg-type]
+    _stale_resting["last_scan_at"] = _time.time()
+
+
+def record_stale_resting_cancelled(order_id: str) -> None:
+    """Called after each successful cancel in the cycle-start sweep."""
+    import time as _time
+    _stale_resting["cancelled"] = int(_stale_resting["cancelled"]) + 1  # type: ignore[arg-type]
+    _stale_resting["last_cancelled_at"] = _time.time()
+    log.info("stale resting order cancelled: %s", order_id)
+
+
+def record_stale_resting_cancel_failed(order_id: str, err: str) -> None:
+    """Called when cancel_order raises during the cycle-start sweep."""
+    _stale_resting["cancel_failed"] = int(_stale_resting["cancel_failed"]) + 1  # type: ignore[arg-type]
+    _stale_resting["last_error"] = f"{order_id}: {err}"[:300]
+
+
+def _reset_stale_resting_state() -> None:
+    """Test helper — clears every counter."""
+    _stale_resting.update({
+        "cancelled": 0,
+        "cancel_failed": 0,
+        "scans": 0,
+        "last_scan_at": None,
+        "last_cancelled_at": None,
+        "last_error": None,
+    })
+
+
 def _reset_submit_recovery_state() -> None:
     """Test helper — clears every counter."""
     _submit_recovery.update(

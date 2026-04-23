@@ -30,6 +30,7 @@ from ..weather.precip_tickers import (
 )
 from ..config import get_settings
 from ..elo import attach_elo_to_candidate
+from ..kalshi import lifecycle as kalshi_lifecycle
 from ..predictor_n_way import plackett_luce_from_mapping
 from ..risk import RiskContext, run_all_gates
 from ..sports import coerce_to_ratings, get_field, get_league_config
@@ -47,6 +48,12 @@ log = logging.getLogger(__name__)
 DEFAULT_INTENDED_QUANTITY = 10  # contracts
 DEFAULT_MIN_PRICE = 0.05
 DEFAULT_MAX_PRICE = 0.95
+
+# Default TTL (seconds) for a resting order before the cycle-start sweep
+# will cancel it. Overridable via AXIOM_RESTING_ORDER_MAX_AGE_SECS, via
+# `risk.resting_order_max_age_secs` in system_settings, or per-vertical
+# via `risk.resting_order_max_age_secs.<vertical>`.
+DEFAULT_RESTING_ORDER_MAX_AGE_SECS = 30
 
 
 # Vertical → league filter is now driven by the pluggable
@@ -95,6 +102,93 @@ async def _load_operator_overrides() -> dict[str, Any]:
             pass
         out[k] = v
     return out
+
+
+def _resolve_resting_max_age(vertical: str, overrides: dict[str, Any]) -> float:
+    """Resolve the max-age TTL (seconds) for resting orders in `vertical`.
+
+    Precedence (first hit wins):
+      1. `risk.resting_order_max_age_secs.<vertical>` system_settings row
+      2. `risk.resting_order_max_age_secs` system_settings row (global)
+      3. `AXIOM_RESTING_ORDER_MAX_AGE_SECS` env var
+      4. `DEFAULT_RESTING_ORDER_MAX_AGE_SECS` module constant
+
+    Non-positive values disable the sweep (treated as +inf).
+    """
+    import os as _os
+    per_vert_key = f"resting_order_max_age_secs.{vertical}"
+    candidates: list[Any] = [
+        overrides.get(per_vert_key),
+        overrides.get("resting_order_max_age_secs"),
+        _os.environ.get("AXIOM_RESTING_ORDER_MAX_AGE_SECS"),
+        DEFAULT_RESTING_ORDER_MAX_AGE_SECS,
+    ]
+    for v in candidates:
+        if v is None or v == "":
+            continue
+        try:
+            age = float(v)
+        except (TypeError, ValueError):
+            continue
+        return age
+    return float(DEFAULT_RESTING_ORDER_MAX_AGE_SECS)
+
+
+async def _cancel_stale_resting_orders(
+    vertical: str, overrides: dict[str, Any]
+) -> dict[str, int]:
+    """Cycle-start sweep: cancel resting orders older than the per-vertical
+    TTL before new candidates are evaluated.
+
+    Cancel failures are swallowed (logged + counted) so a flaky exchange
+    can't park the orchestrator. Returns a small stats dict the caller
+    can fold into the cycle's telemetry.
+
+    When `max_age` <= 0 the sweep is disabled (no-op) — used by operators
+    who want to opt a vertical out of auto-cancellation entirely.
+    """
+    max_age = _resolve_resting_max_age(vertical, overrides)
+    kalshi_lifecycle.record_stale_resting_scan()
+    if max_age <= 0:
+        return {"scanned": 0, "cancelled": 0, "failed": 0, "max_age": int(max_age)}
+    try:
+        resting = await kalshi_lifecycle.list_resting_orders()
+    except Exception as e:  # pragma: no cover — defensive
+        log.warning("list_resting_orders failed (%s); skipping sweep", e)
+        return {"scanned": 0, "cancelled": 0, "failed": 0, "max_age": int(max_age)}
+    now = datetime.now(timezone.utc)
+    cancelled = 0
+    failed = 0
+    scanned = 0
+    for rec in resting:
+        # Only touch orders relevant to this cycle's vertical so each
+        # vertical's sweep is isolated; the per-vertical override can
+        # intentionally extend the TTL without bleeding into others.
+        if getattr(rec.request, "vertical", None) and rec.request.vertical != vertical:
+            continue
+        scanned += 1
+        age_secs = (now - rec.created_at).total_seconds()
+        if age_secs <= max_age:
+            continue
+        try:
+            await kalshi_lifecycle.cancel_order(rec.order_id)
+        except Exception as e:  # noqa: BLE001 — cycle must proceed on failure
+            failed += 1
+            err = f"{type(e).__name__}: {e}"[:200]
+            kalshi_lifecycle.record_stale_resting_cancel_failed(rec.order_id, err)
+            log.warning(
+                "stale resting cancel failed for %s (age=%.1fs, vertical=%s): %s",
+                rec.order_id, age_secs, vertical, err,
+            )
+            continue
+        cancelled += 1
+        kalshi_lifecycle.record_stale_resting_cancelled(rec.order_id)
+    return {
+        "scanned": scanned,
+        "cancelled": cancelled,
+        "failed": failed,
+        "max_age": int(max_age),
+    }
 
 
 async def _latest_bankroll() -> float | None:
@@ -978,6 +1072,27 @@ async def run_cycle(vertical: str = "sports") -> CycleResult:
     effective_mode = (
         overrides.get("trading_mode") or settings.trading_mode or "paper"
     ).lower()
+    # Age-based sweep: cancel resting orders older than the per-vertical
+    # TTL before *anything else* happens in the cycle. A resting order
+    # from cycle N can fill against cycle N+1's view of the world (new
+    # edge, new persona disagreement, new drift signal) — we'd rather
+    # cancel and re-submit fresh if still warranted. Runs even when
+    # `effective_mode == "halt"` so halting the loop does not leave
+    # already-resting orders live against an arbitrarily stale thesis.
+    # Cancel failures are swallowed so a flaky venue cannot park the
+    # orchestrator.
+    try:
+        sweep_stats = await _cancel_stale_resting_orders(vertical, overrides)
+        if sweep_stats.get("cancelled") or sweep_stats.get("failed"):
+            await _publish({
+                "type": "stale_resting_sweep",
+                "cycle_id": result.cycle_id,
+                "vertical": vertical,
+                **sweep_stats,
+            })
+    except Exception as e:  # pragma: no cover — defensive: sweep must never block the cycle
+        log.warning("stale resting sweep crashed (cycle continues): %s", e)
+
     if effective_mode == "halt":
         result.errors.append("trading_mode=halt — cycle skipped placement stage")
         await _publish({

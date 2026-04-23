@@ -377,6 +377,42 @@ def _probe_submit_recovery() -> dict:
     )
 
 
+def _probe_stale_resting_cancelled() -> dict:
+    """Surface the cycle-start stale-resting cancel sweep counters.
+
+    The orchestrator cancels resting orders older than
+    ``AXIOM_RESTING_ORDER_MAX_AGE_SECS`` before evaluating new
+    candidates (see ``app.orchestrator.cycle._cancel_stale_resting_orders``).
+    ``stale_resting_cancelled`` exposes the cumulative count of
+    successful cancels; ``cancel_failed`` flags flaky-venue conditions
+    the cycle swallows so it can continue.
+    """
+    s = kalshi_lifecycle.stale_resting_cancelled_state()
+    cancelled = int(s.get("cancelled") or 0)
+    failed = int(s.get("cancel_failed") or 0)
+    scans = int(s.get("scans") or 0)
+    if failed > 0:
+        status = "degraded"
+        detail = (
+            f"cancelled={cancelled} failed={failed} scans={scans} "
+            f"last_error={(s.get('last_error') or '')[:160]}"
+        )
+    elif scans == 0:
+        status = "ok"
+        detail = "no cycle-start sweeps yet"
+    else:
+        status = "ok"
+        detail = f"cancelled={cancelled} scans={scans}"
+    return _card(
+        key="stale_resting_cancelled",
+        label="Stale resting cancel sweep",
+        category="passive",
+        status=status,
+        detail=detail,
+        extras={**s, "stale_resting_cancelled": cancelled},
+    )
+
+
 def _probe_kill_switch() -> dict:
     state = kalshi_lifecycle.kill_switch_state()
     halted = bool(state.get("halted"))
@@ -906,6 +942,7 @@ async def _build_snapshot() -> _Snapshot:
         _probe_ws_subscribers(),
         _probe_kalshi_reconciler(),
         _probe_submit_recovery(),
+        _probe_stale_resting_cancelled(),
         *_probe_feeds(),
     ]
     config = _probe_config()
