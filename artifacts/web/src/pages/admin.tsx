@@ -1874,6 +1874,273 @@ export function ModelsPanel() {
 }
 
 // ---------------------------------------------------------------------------
+// GitHub mirror status (task #172) — surface whether the recovery mirror is
+// configured, the last successfully mirrored model version, the timestamp +
+// outcome of the most recent push, and a "Push to mirror now" button.
+// ---------------------------------------------------------------------------
+
+type MirrorLastResult = {
+  ok: boolean;
+  skipped: boolean;
+  reason: string | null;
+  version: string | null;
+  files_pushed: string[];
+  elapsed_seconds: number;
+  started_at: number | null;
+  completed_at: number | null;
+};
+
+type MirrorPersistedState = {
+  last_version?: string;
+  last_mirrored_at?: number;
+  repo?: string;
+  branch?: string;
+  files_pushed?: string[];
+};
+
+type MirrorStatusPayload = {
+  enabled: boolean;
+  config: { repo?: string; branch?: string };
+  last_result: MirrorLastResult | null;
+  persisted_state: MirrorPersistedState;
+};
+
+function fmtMirrorTime(epochSeconds: number | null | undefined): string {
+  if (!epochSeconds) return "—";
+  return new Date(epochSeconds * 1000).toISOString().replace("T", " ").slice(0, 19);
+}
+
+export function GithubMirrorPanel() {
+  const { getToken, isSignedIn } = useAuth();
+  const tokenFn = useMemo(
+    () => () => getToken().then((t) => t ?? null),
+    [getToken],
+  );
+  const queryClient = useQueryClient();
+  const queryKey = ["admin", "models", "mirror", "status"] as const;
+
+  const { data, isLoading, error } = useQuery<MirrorStatusPayload>({
+    queryKey,
+    queryFn: () =>
+      apiFetch<MirrorStatusPayload>("/api/admin/models/mirror/status", {
+        getToken: tokenFn,
+      }),
+    enabled: !!isSignedIn,
+    refetchInterval: 30_000,
+  });
+
+  const pushNow = useMutation({
+    mutationFn: () =>
+      apiFetch<MirrorLastResult>("/api/admin/models/mirror/push", {
+        method: "POST",
+        getToken: tokenFn,
+      }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey });
+    },
+  });
+
+  if (isLoading) {
+    return (
+      <div className="h-24 animate-pulse bg-muted/30" data-testid="mirror-loading" />
+    );
+  }
+  if (error || !data) {
+    return (
+      <div className="text-loss text-xs" data-testid="mirror-error">
+        Failed to load mirror status.
+      </div>
+    );
+  }
+
+  const enabled = data.enabled;
+  const last = data.last_result;
+  const persisted = data.persisted_state ?? {};
+
+  const stateLabel = !enabled
+    ? "DISABLED"
+    : last && !last.ok && !last.skipped
+      ? "FAILED"
+      : last && last.ok
+        ? "OK"
+        : persisted.last_version
+          ? "OK"
+          : "PENDING";
+  const stateClass = !enabled
+    ? "border-border text-muted-foreground"
+    : stateLabel === "FAILED"
+      ? "border-loss/60 bg-loss/10 text-loss"
+      : stateLabel === "PENDING"
+        ? "border-accent-warning/60 text-accent-warning"
+        : "border-accent-cyan/40 text-accent-cyan";
+
+  const lastVersion = last?.version ?? persisted.last_version ?? null;
+  const lastTimestamp =
+    last?.completed_at ?? persisted.last_mirrored_at ?? null;
+  const repo = data.config.repo ?? persisted.repo ?? null;
+  const branch = data.config.branch ?? persisted.branch ?? null;
+  const lastPushed = last?.files_pushed ?? [];
+
+  return (
+    <div className="space-y-3" data-testid="panel-github-mirror">
+      <div className="flex flex-wrap items-start justify-between gap-2">
+        <p className="text-[11px] text-muted-foreground leading-snug normal-case tracking-normal">
+          Every successful <code>/api/models/reload</code> mirrors the active
+          model artifact + manifest to a private GitHub repo so we can recover
+          from a Supabase outage. Push is best-effort and runs in the
+          background; use the button below to force a re-sync.
+        </p>
+        <span
+          className={`text-[10px] uppercase border px-2 py-0.5 ${stateClass}`}
+          data-testid="mirror-state"
+        >
+          {stateLabel}
+        </span>
+      </div>
+
+      <div className="grid grid-cols-2 gap-3 text-[11px] md:grid-cols-4">
+        <div>
+          <div className="text-muted-foreground uppercase tracking-wider">
+            Repo
+          </div>
+          <div
+            className="font-mono text-xs break-all text-foreground"
+            data-testid="mirror-repo"
+          >
+            {repo ?? "—"}
+          </div>
+          {branch && (
+            <div className="text-[10px] text-muted-foreground">
+              branch {branch}
+            </div>
+          )}
+        </div>
+        <div>
+          <div className="text-muted-foreground uppercase tracking-wider">
+            Last mirrored version
+          </div>
+          <div
+            className="font-mono text-xs break-all text-foreground"
+            data-testid="mirror-last-version"
+          >
+            {lastVersion ?? "—"}
+          </div>
+        </div>
+        <div>
+          <div className="text-muted-foreground uppercase tracking-wider">
+            Last push
+          </div>
+          <div
+            className="font-mono text-xs text-foreground"
+            data-testid="mirror-last-push-time"
+          >
+            {fmtMirrorTime(lastTimestamp)}
+          </div>
+          {last && (
+            <div className="text-[10px] text-muted-foreground">
+              took {last.elapsed_seconds.toFixed(2)}s
+            </div>
+          )}
+        </div>
+        <div>
+          <div className="text-muted-foreground uppercase tracking-wider">
+            Last result
+          </div>
+          <div
+            className={`font-mono text-xs ${
+              last && !last.ok && !last.skipped
+                ? "text-loss"
+                : last && last.skipped
+                  ? "text-muted-foreground"
+                  : last && last.ok
+                    ? "text-accent-cyan"
+                    : "text-muted-foreground"
+            }`}
+            data-testid="mirror-last-result"
+          >
+            {last
+              ? last.ok
+                ? last.skipped
+                  ? "skipped"
+                  : `pushed ${last.files_pushed.length} file(s)`
+                : "failed"
+              : persisted.last_version
+                ? "no push since restart"
+                : "never"}
+          </div>
+          {last?.reason && (
+            <div
+              className="text-[10px] text-muted-foreground normal-case tracking-normal break-words"
+              data-testid="mirror-last-reason"
+            >
+              {last.reason}
+            </div>
+          )}
+        </div>
+      </div>
+
+      {lastPushed.length > 0 && (
+        <details
+          className="border border-border bg-background/50 p-2 text-[11px]"
+          data-testid="mirror-files-pushed"
+        >
+          <summary className="cursor-pointer text-muted-foreground uppercase tracking-wider text-[10px]">
+            Files pushed in last run ({lastPushed.length})
+          </summary>
+          <ul className="mt-2 space-y-0.5 font-mono text-[11px] text-foreground">
+            {lastPushed.map((p) => (
+              <li key={p} className="break-all">
+                {p}
+              </li>
+            ))}
+          </ul>
+        </details>
+      )}
+
+      <div className="flex flex-wrap items-center gap-3 border-t border-border pt-3">
+        <button
+          type="button"
+          disabled={!enabled || pushNow.isPending}
+          onClick={() => pushNow.mutate()}
+          data-testid="button-mirror-push-now"
+          className="border border-border px-3 py-1.5 text-[10px] uppercase tracking-widest hover:text-primary hover:border-primary disabled:opacity-50 disabled:cursor-not-allowed"
+        >
+          {pushNow.isPending ? "Pushing…" : "Push to mirror now"}
+        </button>
+        {!enabled && (
+          <span className="text-[11px] text-muted-foreground normal-case tracking-normal">
+            Set <code>GITHUB_MIRROR_REPO</code> and <code>GITHUB_TOKEN</code>{" "}
+            to enable.
+          </span>
+        )}
+        {pushNow.isError && (
+          <span
+            className="text-loss text-[11px] normal-case tracking-normal"
+            data-testid="mirror-push-error"
+          >
+            {(pushNow.error as Error)?.message ?? "Mirror push failed."}
+          </span>
+        )}
+        {pushNow.isSuccess && pushNow.data && (
+          <span
+            className={`text-[11px] normal-case tracking-normal ${
+              pushNow.data.ok ? "text-accent-cyan" : "text-loss"
+            }`}
+            data-testid="mirror-push-result"
+          >
+            {pushNow.data.ok
+              ? pushNow.data.skipped
+                ? `Skipped: ${pushNow.data.reason ?? "no changes"}`
+                : `Pushed ${pushNow.data.files_pushed.length} file(s) in ${pushNow.data.elapsed_seconds.toFixed(2)}s.`
+              : `Failed: ${pushNow.data.reason ?? "unknown error"}`}
+          </span>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Personas tab — per-vertical persona enable/disable (Task #194)
 // ---------------------------------------------------------------------------
 

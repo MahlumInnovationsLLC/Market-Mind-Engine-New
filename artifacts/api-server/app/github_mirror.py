@@ -120,6 +120,26 @@ def last_result() -> dict[str, Any] | None:
     return _last_result.as_dict() if _last_result is not None else None
 
 
+def last_persisted_state() -> dict[str, Any]:
+    """Return the on-disk state file (last successfully mirrored version,
+    timestamp, repo, branch). Survives process restarts so the dashboard
+    can show "last mirrored version" even when the in-memory `last_result`
+    has been cleared. Returns ``{}`` when no mirror push has succeeded yet."""
+    return _load_state()
+
+
+def config_summary() -> dict[str, Any]:
+    """Return the effective mirror configuration for display purposes.
+
+    Never exposes the GitHub token. Returns ``{}`` when the mirror is
+    disabled (so the UI can render an "unconfigured" state without
+    leaking which env vars are missing)."""
+    cfg = _config()
+    if cfg is None:
+        return {}
+    return {"repo": cfg["repo"], "branch": cfg["branch"]}
+
+
 def _sha256_bytes(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 

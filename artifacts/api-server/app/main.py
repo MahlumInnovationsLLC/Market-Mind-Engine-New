@@ -4687,7 +4687,9 @@ async def admin_models_mirror_status(
     paths."""
     return {
         "enabled": github_mirror.is_enabled(),
+        "config": github_mirror.config_summary(),
         "last_result": github_mirror.last_result(),
+        "persisted_state": github_mirror.last_persisted_state(),
     }
 
 
