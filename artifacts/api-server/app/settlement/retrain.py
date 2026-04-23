@@ -219,6 +219,27 @@ async def _write_rollback(
     retrain cycle must continue processing the remaining verticals.
     """
     pinned = os.environ.get("AXIOM_MODEL_VERSION") or None
+    # Resolve the *previous* good snapshot for this vertical — i.e.
+    # the most recent calibration_snapshots row that wasn't itself a
+    # rollback.  That row stays in service: the loader picks the
+    # newest non-rolled-back snapshot per vertical, so by tagging the
+    # bad refit's drift_status we effectively pin to this id.
+    prev_snapshot_id: int | None = None
+    try:
+        prev_snapshot_id = await db.fetchval(
+            """
+            SELECT id FROM calibration_snapshots
+             WHERE vertical = $1
+               AND id <> COALESCE($2, -1)
+               AND COALESCE(drift_status->>'status', '') <> 'rolled_back'
+             ORDER BY created_at DESC
+             LIMIT 1
+            """,
+            vertical, snapshot_id,
+        )
+    except Exception as e:
+        log.warning("rollback: prev-snapshot lookup failed for %s: %s",
+                    vertical, e)
     brier_before = state.get("brier_before")
     brier_after = state.get("brier_after")
     reason = (
@@ -247,6 +268,11 @@ async def _write_rollback(
                 "triggered_by": triggered_by,
                 "knot_count": len(state.get("x") or []),
                 "n": int(state.get("n") or 0),
+                # The previous good snapshot is what the loader will
+                # serve until a successful retrain promotes a new one;
+                # surfacing it here gives the operator runbook §6 a
+                # single place to point at for "restored to id=N".
+                "pinned_snapshot_id": prev_snapshot_id,
             }),
         )
     except Exception as e:
