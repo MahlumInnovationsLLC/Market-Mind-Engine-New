@@ -476,6 +476,19 @@ def adjust_probability(
         return None
     if market_type not in {"Spread", "Total"}:
         return None
+    # Soccer / cup competitions ship 3-way h/d/a moneyline markets
+    # rather than continuous-margin Spread/Total questions.  The
+    # Spread/Total filter above already excludes them in practice, but
+    # we also short-circuit on the league-config flag so a future
+    # Spread-style soccer market (e.g. Asian handicap) can't silently
+    # pick up the NA-sports regressor without a 3-way-aware fit.
+    try:
+        from .sports.leagues import get_league_config as _glc
+        _cfg = _glc(league)
+    except Exception:
+        _cfg = None
+    if _cfg is not None and _cfg.three_way_market:
+        return None
 
     ctx = candidate.get("game_context")
     if isinstance(ctx, str):

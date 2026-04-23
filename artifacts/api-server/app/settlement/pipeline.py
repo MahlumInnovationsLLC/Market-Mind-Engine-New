@@ -22,10 +22,84 @@ from datetime import date, datetime, timezone
 from typing import Any
 
 from .. import db
+from ..sports.leagues import get_league_config
 from .streams import settlement_event_hub
 
 
 log = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# 3-way (soccer h/d/a) helpers
+# ---------------------------------------------------------------------------
+
+# Canonical 3-way outcome labels used across the settlement, persona
+# Brier and postmortem paths.  Soccer markets ship as three independent
+# YES/NO legs (home, draw, away); each leg's binary outcome is derived
+# from the actual match result via `outcome_yes_for_three_way_leg`.
+THREE_WAY_OUTCOMES: tuple[str, ...] = ("home", "draw", "away")
+
+
+def normalize_three_way_result(result: str | None) -> str | None:
+    """Lower-case and validate a 3-way match result.  Returns None when
+    the input doesn't match one of the canonical outcomes so callers
+    can transparently fall back to the binary path."""
+    if result is None:
+        return None
+    r = str(result).strip().lower()
+    # Accept a few common synonyms so feed integrations don't have to
+    # normalise upstream.
+    aliases = {
+        "h": "home", "home_win": "home", "home win": "home", "1": "home",
+        "d": "draw", "tie": "draw", "x": "draw",
+        "a": "away", "away_win": "away", "away win": "away", "2": "away",
+    }
+    r = aliases.get(r, r)
+    return r if r in THREE_WAY_OUTCOMES else None
+
+
+def outcome_yes_for_three_way_leg(result_3way: str, leg: str) -> int:
+    """Map a 3-way match result (home/draw/away) to the YES/NO outcome
+    for a single leg of that market.
+
+    Each soccer match is structured as three independent YES/NO Kalshi
+    markets — the home leg pays YES iff home wins, the draw leg pays YES
+    iff the match ends level, and the away leg pays YES iff away wins.
+    A draw therefore settles BOTH the home and away legs as NO without
+    being a "model miss" for a persona that correctly leaned toward a
+    draw on the draw leg.
+    """
+    r = normalize_three_way_result(result_3way)
+    l = normalize_three_way_result(leg)
+    if r is None:
+        raise ValueError(f"unknown 3-way result: {result_3way!r}")
+    if l is None:
+        raise ValueError(f"unknown 3-way leg: {leg!r}")
+    return 1 if r == l else 0
+
+
+def resolve_three_way_leg(trade: dict[str, Any]) -> str | None:
+    """Best-effort extraction of which leg (home/draw/away) a soccer
+    trade was placed on.  Inspects the trade's metadata jsonb first
+    (canonical key: `three_way_leg`), falling back to the trade's
+    `side` column when that already encodes a leg name."""
+    md = trade.get("metadata")
+    if isinstance(md, str):
+        try:
+            md = json.loads(md)
+        except Exception:
+            md = None
+    if isinstance(md, dict):
+        for key in ("three_way_leg", "outcome_3way", "leg"):
+            v = md.get(key)
+            if isinstance(v, str):
+                norm = normalize_three_way_result(v)
+                if norm is not None:
+                    return norm
+    side = trade.get("side")
+    if isinstance(side, str):
+        return normalize_three_way_result(side)
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -94,9 +168,16 @@ def _trade_pnl(side: str | None, quantity: float | None, price: float | None,
 
 
 async def _settle_one_trade(
-    trade: dict[str, Any], outcome_yes: int, settle_price: float | None
+    trade: dict[str, Any], outcome_yes: int, settle_price: float | None,
+    *, result_3way: str | None = None, leg: str | None = None,
 ) -> dict[str, Any]:
-    """Settle a single un-settled trade row.  Returns a result dict."""
+    """Settle a single un-settled trade row.  Returns a result dict.
+
+    `result_3way`/`leg` carry the soccer h/d/a context when the trade
+    belongs to a 3-way market — they are written into the postmortem
+    details so downstream analytics can distinguish a draw outcome on
+    a home/away leg from a "model miss" on a true 2-way moneyline.
+    """
     tid = trade["id"]
     pnl = _trade_pnl(trade.get("side"), trade.get("quantity"), trade.get("price"),
                      outcome_yes)
@@ -152,6 +233,11 @@ async def _settle_one_trade(
                 "price": float(trade.get("price") or 0),
                 "exchange": trade.get("exchange"),
                 "trading_mode": trade.get("trading_mode"),
+                # 3-way h/d/a context — present only for soccer-vertical
+                # trades; null otherwise so legacy 2-way analytics keep
+                # working unchanged.
+                "three_way_result": result_3way,
+                "three_way_leg": leg,
             }),
         )
     except Exception as e:
@@ -217,7 +303,9 @@ async def _close_position(market_id: str, outcome_yes: int) -> None:
 # ---------------------------------------------------------------------------
 
 
-async def _update_personas_for_market(market_id: str, outcome_yes: int) -> int:
+async def _update_personas_for_market(
+    market_id: str, outcome_yes: int, *, result_3way: str | None = None,
+) -> int:
     """For every recent swarm_debate associated with this market that has
     NOT already been settled, update `swarm_analyst_metrics` (running
     Brier + accuracy) per persona using a Bayesian online update:
@@ -246,7 +334,19 @@ async def _update_personas_for_market(market_id: str, outcome_yes: int) -> int:
         return 0
 
     touched = 0
-    outcome_label = "WIN" if outcome_yes == 1 else "LOSS"
+    # Stamp a richer label on 3-way markets so per-persona analytics
+    # can break out draw outcomes from straight WIN/LOSS rows.  The
+    # binary Brier update below is unchanged — a persona that leaned
+    # NO on the home leg and saw a draw is already correctly rewarded
+    # with a tight squared-error against y=0 — but the label lets the
+    # operator slice persona accuracy by 3-way result class without
+    # joining back to trade_postmortems.
+    if result_3way is not None:
+        outcome_label = (
+            f"{result_3way.upper()}_RESULT_{'WIN' if outcome_yes == 1 else 'LOSS'}"
+        )
+    else:
+        outcome_label = "WIN" if outcome_yes == 1 else "LOSS"
     for d in debates:
         verdicts = d["analyst_verdicts"]
         if isinstance(verdicts, str):
@@ -589,21 +689,35 @@ async def _calibration_and_drift(vertical: str | None) -> int:
 
 
 async def settle_market(
-    market_id: str, *, outcome_yes: int, settle_price: float | None = None
+    market_id: str, *, outcome_yes: int, settle_price: float | None = None,
+    result_3way: str | None = None,
 ) -> dict[str, Any]:
     """Settle every un-settled trade against `market_id` with the given
     binary outcome.  Cascades through positions, postmortems, persona
     metrics, daily PnL, calibration, and the online learning buffer.
 
+    `outcome_yes` is the canonical per-leg binary outcome the Kalshi
+    market resolved to (1=YES, 0=NO).  For soccer / cup competitions
+    that ship as 3-way h/d/a markets, callers may additionally pass
+    `result_3way` ("home" / "draw" / "away") so each trade's per-leg
+    outcome is derived from the actual match result + the trade's
+    `three_way_leg` metadata — a draw correctly settles BOTH the home
+    and away legs as NO without being treated as a 2-way moneyline
+    miss in the persona Brier path.  When the league config does NOT
+    flag the market as 3-way, `result_3way` is ignored and the binary
+    `outcome_yes` is used unchanged for every trade (legacy behaviour).
+
     Returns a result dict the API endpoint can serialize.
     """
     if outcome_yes not in (0, 1):
         raise ValueError("outcome_yes must be 0 or 1")
+    result_3way = normalize_three_way_result(result_3way)
 
     await _publish({
         "type": "market_settle_start",
         "market_id": market_id,
         "outcome_yes": outcome_yes,
+        "result_3way": result_3way,
     })
 
     try:
@@ -633,9 +747,39 @@ async def settle_market(
     position_pnl = 0.0
     position_vertical: str | None = None
     any_trade_settled = False
+    # Track per-trade legs so the persona Brier path can score each
+    # debate against the actual per-leg outcome on 3-way markets.
+    trade_outcomes: dict[Any, int] = {}
     for t in trades:
         td = dict(t)
-        res = await _settle_one_trade(td, outcome_yes, settle_price)
+        # Per-trade outcome derivation: when the league is configured
+        # as a 3-way market AND the caller supplied a 3-way result, use
+        # the trade's leg metadata to decide whether THIS leg pays out.
+        # Falls back to the binary `outcome_yes` for any trade whose
+        # leg can't be resolved (preserves legacy 2-way behaviour for
+        # rows persisted before the leg metadata convention landed).
+        trade_leg: str | None = None
+        trade_outcome_yes = outcome_yes
+        if result_3way is not None:
+            cfg = get_league_config(td.get("league"))
+            if cfg is not None and cfg.three_way_market:
+                trade_leg = resolve_three_way_leg(td)
+                if trade_leg is not None:
+                    try:
+                        trade_outcome_yes = outcome_yes_for_three_way_leg(
+                            result_3way, trade_leg
+                        )
+                    except ValueError:
+                        # Defensive — normalize_three_way_result already
+                        # validated `result_3way`, so this can only fire
+                        # if `trade_leg` is malformed.  Fall back to the
+                        # binary outcome rather than skipping the trade.
+                        trade_outcome_yes = outcome_yes
+        res = await _settle_one_trade(
+            td, trade_outcome_yes, settle_price,
+            result_3way=result_3way, leg=trade_leg,
+        )
+        trade_outcomes[td.get("id")] = trade_outcome_yes
         settled.append(res)
         if td.get("vertical"):
             verticals.add(td["vertical"])
@@ -670,8 +814,27 @@ async def settle_market(
             log.warning("settlement push dispatch failed for market %s: %s",
                         market_id, e)
 
-    await _close_position(market_id, outcome_yes)
-    persona_touched = await _update_personas_for_market(market_id, outcome_yes)
+    # Per-leg persona outcome: when this market is one leg of a 3-way
+    # soccer fixture and the caller supplied `result_3way`, the persona
+    # Brier must be scored against the per-leg outcome derived from the
+    # actual match result — NOT the binary `outcome_yes` the caller may
+    # have passed (which a non-3-way-aware caller can mis-set).  Every
+    # trade on a single Kalshi market belongs to the same leg, so we
+    # take the most common per-trade outcome from `trade_outcomes` and
+    # use that as the canonical per-leg outcome for persona scoring.
+    persona_outcome_yes = outcome_yes
+    if result_3way is not None and trade_outcomes:
+        outcome_counts: dict[int, int] = {}
+        for v in trade_outcomes.values():
+            outcome_counts[v] = outcome_counts.get(v, 0) + 1
+        # mode() picks the most-frequent value; ties resolve to YES (1)
+        # so a market with mixed legs (which shouldn't happen but might
+        # under data drift) errs on the safer side of recording a WIN.
+        persona_outcome_yes = max(outcome_counts.items(), key=lambda kv: (kv[1], kv[0]))[0]
+    await _close_position(market_id, persona_outcome_yes)
+    persona_touched = await _update_personas_for_market(
+        market_id, persona_outcome_yes, result_3way=result_3way,
+    )
     # If we updated any persona metrics, refresh the in-memory weight
     # cache so the very next swarm debate reflects the new Brier scores.
     # Without this the gatekeeper would keep using startup-time weights
@@ -690,6 +853,7 @@ async def settle_market(
     result = {
         "market_id": market_id,
         "outcome_yes": outcome_yes,
+        "result_3way": result_3way,
         "trades_settled": len([s for s in settled if s.get("ok")]),
         "persona_metrics_updated": persona_touched,
         "verticals": sorted(verticals),
