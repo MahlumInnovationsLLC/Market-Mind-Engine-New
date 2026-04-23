@@ -1901,7 +1901,6 @@ async def get_over_filled_orders_today() -> dict[str, Any]:
     return {"date_utc": today_utc, "count": len(items), "items": items}
 
 
-<<<<<<< HEAD
 async def get_per_league_calibration() -> dict[str, Any]:
     """Most-recent per-league calibrator snapshots for the dashboard.
 
