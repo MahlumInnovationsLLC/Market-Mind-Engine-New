@@ -170,18 +170,22 @@ async def _raise_position_drift_alert(
     )
     raised = False
     try:
-        # Suppress same-hour duplicates at the row level too — the
-        # dedupe table is the primary suppressor but the SQL filter is
-        # a cheap belt-and-braces guard.
+        # Suppress same-hour duplicates of the SAME ticker AT THE SAME
+        # drift magnitude. The dedupe key is `(ticker, drift_qty)` so a
+        # ticker whose drift jumps from 5 -> 50 still produces a fresh
+        # alert (the magnitude change is itself news), while a stable
+        # 5-contract drift is suppressed for an hour.
         recent = await db.fetchval(
             """
             SELECT 1 FROM model_health_alerts
              WHERE alert_type = 'position_drift'
                AND metric_name = $1
+               AND metric_value = $2
                AND created_at > now() - interval '1 hour'
              LIMIT 1
             """,
             ticker,
+            float(drift),
         )
         if not recent:
             await db.execute(
@@ -248,10 +252,9 @@ async def _diff_positions(exchange_positions: list[Any]) -> tuple[int, int]:
         if diff == 0:
             continue
         if diff <= tolerance:
-            log.info(
-                "position drift within tolerance: ticker=%s local=%s exchange=%s "
-                "diff=%s tol=%s",
-                ticker, local_qty, exch_qty, diff, tolerance,
+            await _record_auto_correction(
+                ticker=ticker, local_qty=local_qty, exchange_qty=exch_qty,
+                drift=diff, tolerance=tolerance,
             )
             auto_corrected += 1
             continue
@@ -268,6 +271,10 @@ async def _diff_positions(exchange_positions: list[Any]) -> tuple[int, int]:
             continue
         diff = abs(local_qty)
         if diff <= tolerance:
+            await _record_auto_correction(
+                ticker=ticker, local_qty=local_qty, exchange_qty=0,
+                drift=diff, tolerance=tolerance,
+            )
             auto_corrected += 1
             continue
         await _raise_position_drift_alert(
@@ -276,6 +283,44 @@ async def _diff_positions(exchange_positions: list[Any]) -> tuple[int, int]:
         )
         drift_count += 1
     return drift_count, auto_corrected
+
+
+async def _record_auto_correction(
+    *,
+    ticker: str,
+    local_qty: int,
+    exchange_qty: int,
+    drift: int,
+    tolerance: int,
+) -> None:
+    """Persist a within-tolerance drift as an INFO-level, pre-acknowledged
+    `model_health_alerts` row so an operator can audit small drifts in
+    the same UI without being paged.
+
+    We deliberately do NOT mutate `positions.quantity` here: the WS
+    pipeline + the next durable fill replay are the truth path; a
+    blind quantity overwrite based on a single REST snapshot risks
+    racing against an in-flight WS fill on the same ticker. The
+    audit row is the "correction" — it documents that we observed
+    and accepted the small drift.
+    """
+    msg = (
+        f"Kalshi position drift within tolerance on {ticker}: "
+        f"local={local_qty} exchange={exchange_qty} "
+        f"drift={drift} (tolerance={tolerance})"
+    )
+    try:
+        await db.execute(
+            """
+            INSERT INTO model_health_alerts
+                (vertical, alert_type, severity, metric_name,
+                 metric_value, threshold, message, acknowledged)
+            VALUES ('trading', 'position_drift', 'info', $1, $2, $3, $4, true)
+            """,
+            ticker, float(drift), float(tolerance), msg,
+        )
+    except Exception as e:
+        log.debug("auto-correction audit insert failed for %s: %s", ticker, e)
 
 
 # ---------------------------------------------------------------------------
@@ -386,52 +431,49 @@ async def _replay_fill(fill: dict[str, Any]) -> str:
         return "duplicate"
 
     # Re-derive the cumulative rollup from the durable order_fills
-    # table so we don't have to trust in-memory state from before a
-    # restart. We then mirror the over-fill cap that `handle_ws_fill`
-    # applies, so a missed over-fill replay can't inflate exposure
-    # beyond the order's requested size.
+    # table by REPLAYING fills in arrival order (`received_at`) and
+    # capping accepted contracts at the requested size — exactly the
+    # semantics `handle_ws_fill` uses. This means an over-fill is
+    # discarded from the latest-arriving fill, not proportionally
+    # scaled across all fills. Mixed-price fills (e.g. 3 @ 50¢ then
+    # 5 @ 60¢ with requested=5) therefore produce the same avg the WS
+    # path would have produced.
     try:
-        agg = await db.fetchrow(
+        rows = await db.fetch(
             """
-            SELECT coalesce(sum(count), 0)::int AS total_count,
-                   coalesce(sum(count * price_cents), 0)::bigint AS weighted_sum
+            SELECT count, price_cents
               FROM order_fills
              WHERE order_id = $1
+             ORDER BY received_at ASC, fill_id ASC
             """,
             order_id,
         )
-        raw_total = int(agg["total_count"] or 0)
-        raw_weighted = int(agg["weighted_sum"] or 0)
     except Exception as e:
         log.warning("rollup recompute failed for %s: %s", order_id, e)
-        raw_total = count
-        raw_weighted = count * price
+        rows = [{"count": count, "price_cents": price}]
 
-    # Cap accepted contracts at the requested size; mark over_filled
-    # when the cap actually kicked in. When `requested == 0` the order
-    # came from a path that doesn't record a submitted size — in that
-    # case fall back to "accept everything" rather than zero out the
-    # rollup.
-    if requested > 0 and raw_total > requested:
-        accepted_total = requested
-        over_filled = True
-    else:
-        accepted_total = raw_total
-        over_filled = False
+    accepted_total = 0
+    accepted_weighted = 0
+    over_filled = False
+    cap = requested if requested > 0 else None
+    for r in rows or []:
+        c = int(r["count"] or 0)
+        p = int(r["price_cents"] or 0)
+        if cap is not None:
+            remaining = cap - accepted_total
+            if remaining <= 0:
+                over_filled = True
+                continue
+            take = min(c, remaining)
+            if take < c:
+                over_filled = True
+        else:
+            take = c
+        accepted_total += take
+        accepted_weighted += take * p
 
     if accepted_total > 0:
-        # Weighted average over the accepted slice. We approximate the
-        # accepted weighted sum by scaling the raw weighted sum by the
-        # accepted ratio — uniformly proportional across all recorded
-        # fills, which matches `handle_ws_fill`'s order-of-arrival math
-        # within a single satoshi when fills arrive at similar prices,
-        # and is the best we can do over the durable record without
-        # tracking per-fill accept/discard flags.
-        if raw_total > 0:
-            accepted_weighted = int(round(raw_weighted * accepted_total / raw_total))
-            avg_cents = int(round(accepted_weighted / accepted_total))
-        else:
-            avg_cents = price
+        avg_cents = int(round(accepted_weighted / accepted_total))
     else:
         avg_cents = price
 

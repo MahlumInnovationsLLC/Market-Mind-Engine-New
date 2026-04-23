@@ -106,6 +106,17 @@ def _stub_db(monkeypatch, *, local_positions=None, recent_alert=False,
     async def _fetch(q, *a):
         if "FROM positions" in q:
             return [{"market_id": t, "side": s, "qty": q_} for t, s, q_ in local_positions]
+        if "FROM order_fills" in q:
+            # Replay path: arrival-ordered fills with count + price_cents.
+            if agg is None:
+                return []
+            # Synthesize a single row that matches the previous `agg`
+            # contract: total_count contracts at the average price.
+            tc = int(agg.get("total_count") or 0)
+            ws = int(agg.get("weighted_sum") or 0)
+            if tc <= 0:
+                return []
+            return [{"count": tc, "price_cents": int(round(ws / tc))}]
         return []
 
     async def _fetchval(q, *a):
@@ -225,8 +236,14 @@ def test_drift_within_tolerance_logs_only(monkeypatch):
     summary = _run(reconciler._tick_once(client_factory=lambda: client))
     assert summary["drift_count"] == 0
     assert summary["auto_corrected"] == 1
+    # No operator email for within-tolerance drift.
     assert alerts == []
-    assert not any("INSERT INTO model_health_alerts" in q for q, _ in executes)
+    # But an INFO-severity, pre-acknowledged audit row IS written so
+    # small drifts are reviewable after the fact.
+    audit = [q for q, _ in executes if "INSERT INTO model_health_alerts" in q]
+    assert len(audit) == 1
+    assert "'info'" in audit[0]
+    assert "true" in audit[0]  # acknowledged=true
 
 
 def test_drift_exceeds_tolerance_raises_alert(monkeypatch):
@@ -369,6 +386,70 @@ def test_duplicate_fill_does_not_double_count(monkeypatch):
     assert rollup_calls == []
     # No audit row either.
     assert not any("INSERT INTO order_lifecycle" in q for q, _ in executes)
+
+
+def test_replay_overfill_uses_arrival_order_not_proportional(monkeypatch):
+    """When mixed-price fills exceed requested size, the rollup must
+    discard the OVERFLOW from the latest-arriving fill (matching the
+    WS path), not proportionally scale across fills — otherwise the
+    avg_price drifts from what the live path produces.
+
+    Scenario: requested=5. Order_fills contains (in arrival order):
+      1) count=3 @ 50¢  -> all 3 accepted
+      2) count=5 @ 60¢  -> only 2 accepted (cap = 5 - 3); 3 discarded
+    Expected avg = (3*50 + 2*60) / 5 = 270 / 5 = 54¢.
+    Proportional scaling would have given (3*50+5*60)/8 ≈ 56¢ — wrong.
+    """
+    from app.kalshi import lifecycle as life
+    from app import db as app_db
+
+    async def _fetch(q, *a):
+        if "FROM order_fills" in q:
+            return [
+                {"count": 3, "price_cents": 50},
+                {"count": 5, "price_cents": 60},
+            ]
+        return []
+
+    async def _fetchval(q, *a):
+        return None
+
+    async def _fetchrow(q, *a):
+        if "FROM order_lifecycle" in q:
+            if "max(coalesce(contracts" in q:
+                return {"req": 5}
+            return {"order_id": "coid-1", "market_id": "MKT-A",
+                    "side": "yes", "vertical": "sports"}
+        return None
+
+    async def _execute(q, *a):
+        return None
+
+    monkeypatch.setattr(app_db, "fetch", _fetch)
+    monkeypatch.setattr(app_db, "fetchval", _fetchval)
+    monkeypatch.setattr(app_db, "fetchrow", _fetchrow)
+    monkeypatch.setattr(app_db, "execute", _execute)
+
+    rollup_calls: list[dict[str, Any]] = []
+
+    async def _record_fill(**kw):
+        return True
+
+    async def _upsert(**kw):
+        rollup_calls.append(kw)
+
+    monkeypatch.setattr(life, "_record_fill_idempotent", _record_fill)
+    monkeypatch.setattr(life, "_upsert_position_rollup", _upsert)
+
+    fill = {"order_id": "exo-1", "trade_id": "fill-99",
+            "side": "yes", "yes_price": 60, "count": 5, "ticker": "MKT-A"}
+    client = _FakeClient(fills=[fill])
+    _run(reconciler._tick_once(client_factory=lambda: client))
+
+    assert rollup_calls[0]["quantity"] == 5
+    assert rollup_calls[0]["over_filled"] is True
+    # Arrival-ordered semantics: 54¢, not ~56¢.
+    assert rollup_calls[0]["avg_price_cents"] == 54
 
 
 def test_replay_caps_overfill_at_requested_size(monkeypatch):
