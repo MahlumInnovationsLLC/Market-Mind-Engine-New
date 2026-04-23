@@ -265,6 +265,23 @@ Accessibility primitives shipped in #237:
   `E2E_CLERK_USER_EMAIL` / `_PASSWORD` (and optionally
   `E2E_CLERK_ADMIN_EMAIL` / `_PASSWORD`) are set. Override the
   target with `E2E_BASE_URL=https://…` to run against a deploy.
+
+  CI runs this suite automatically on every push + PR to `main` via
+  `.github/workflows/web-e2e.yml` (Task #243). The job builds the web
+  bundle, optionally boots the FastAPI server in the background (when
+  `SUPABASE_DB_PASSWORD` is set as a CI secret), starts `vite preview`,
+  installs Chromium with system libs, and runs the suite. On failure it
+  uploads `playwright-report/`, `test-results/` (traces + screenshots +
+  video), and the API/web background-process logs as job artifacts.
+
+  CI secrets to configure in GitHub for the full 16-test matrix:
+  `E2E_CLERK_PUBLISHABLE_KEY`, `E2E_CLERK_SECRET_KEY` (Clerk dev
+  instance), `E2E_CLERK_USER_EMAIL`, `E2E_CLERK_USER_PASSWORD`,
+  `E2E_CLERK_ADMIN_EMAIL`, `E2E_CLERK_ADMIN_PASSWORD`, plus the backend
+  trio `SUPABASE_DB_PASSWORD`, `SUPABASE_SERVICE_ROLE_KEY`,
+  `OPERATOR_ALLOWED_EMAILS`, `OPERATOR_ADMIN_EMAILS`. Without them only
+  the public-surface tests execute; auth-gated tests skip themselves
+  rather than failing.
 - `pnpm --filter @workspace/db run push` — push DB schema changes (dev only)
 - API server: managed by the `artifacts/api-server: API Server` workflow (uvicorn on `$PORT`)
 - Web: managed by the `artifacts/web: web` workflow
