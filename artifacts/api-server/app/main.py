@@ -242,6 +242,16 @@ async def lifespan(_: FastAPI):
     else:
         log.warning("Polymarket credentials NOT validated: %s", pcred.get("error"))
 
+    # Drain the Polymarket bus into the lifecycle so user-channel `trade`
+    # / `order` updates flip resting orders to `filled`. Mirrors the
+    # Kalshi fill router above; non-fatal so a missing WS doesn't take
+    # down the API.
+    polymarket_fill_task = None
+    try:
+        polymarket_fill_task = await polymarket_lifecycle.attach_ws_fill_handler()
+    except Exception as e:
+        log.warning("Polymarket fill router start failed: %s", e)
+
     # Start the trading orchestrator scheduler.  Honors
     # AXIOM_ORCHESTRATOR_ENABLED + AXIOM_TRADING_MODE.  Cycle failures
     # are caught inside the loop so a sick DB doesn't stop the process.
@@ -451,6 +461,12 @@ async def lifespan(_: FastAPI):
             pass
         if fill_task is not None:
             fill_task.cancel()
+        if polymarket_fill_task is not None:
+            polymarket_fill_task.cancel()
+            try:
+                await polymarket_fill_task
+            except (asyncio.CancelledError, Exception):
+                pass
         await db.close_pool()
         log.info("axiom-predict api stopped")
 
