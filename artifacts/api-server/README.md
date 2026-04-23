@@ -221,3 +221,133 @@ To add a new schema change:
 
 Do **not** introduce new `ensure_schema` / `ensure_table` helpers in the
 app code; the lazy-DDL pattern was retired in task #134.
+
+## Private GitHub recovery mirror
+
+Every `/api/models/reload` (i.e. every model promotion) pushes the loaded
+artifacts to a private GitHub repository so we can rebuild the predictor
+catalog if Supabase Storage is unavailable. The mirror is **best-effort**
+and silently no-ops when the env vars below are missing, so it must be
+provisioned explicitly before a recovery is needed.
+
+### Configuration
+
+| Var | Required | Default | Purpose |
+| --- | --- | --- | --- |
+| `GITHUB_MIRROR_REPO` | yes | — | `owner/repo` slug of the private mirror. |
+| `GITHUB_TOKEN` | yes | — | Fine-grained or classic PAT with `repo` scope on the mirror repo. |
+| `GITHUB_MIRROR_BRANCH` | no | `main` | Branch that receives the mirror commits. |
+| `GITHUB_API_BASE` | no | `https://api.github.com` | Override for GitHub Enterprise. |
+
+If either of `GITHUB_MIRROR_REPO` / `GITHUB_TOKEN` is unset, every push
+short-circuits with `skipped=true, reason="GITHUB_MIRROR_REPO and/or
+GITHUB_TOKEN not configured"` and `GET /api/admin/models/mirror/status`
+returns `enabled=false`. **Mirroring will not run** until both are set.
+
+The mirror status and force-push endpoints are admin-only and live
+under `/api/admin/models/mirror/...` (not `/api/models/mirror/...`);
+the operator account hitting them must satisfy `require_admin`.
+
+### One-time setup
+
+1. **Create the private repo.** On GitHub, create an empty private repo
+   (e.g. `your-org/axiom-models-mirror`) and initialize it with a
+   default branch named `main` (or whatever you intend to set
+   `GITHUB_MIRROR_BRANCH` to). The branch must already exist — the
+   mirror writes to it via the Contents API and does not create
+   branches.
+2. **Mint a Personal Access Token.** Either:
+   - **Fine-grained PAT** (recommended): scope it to *only* the mirror
+     repo, with `Contents: Read and write` and `Metadata: Read` repo
+     permissions. Set an expiry and put a calendar reminder to rotate.
+   - **Classic PAT**: grant the `repo` scope. Classic tokens have access
+     to every repo the user can see, so prefer the fine-grained option.
+3. **Set the secrets** on the API server. In the Replit workspace, open
+   the Secrets pane (or use `replit secrets set` in deployment) and add
+   `GITHUB_MIRROR_REPO`, `GITHUB_TOKEN`, and optionally
+   `GITHUB_MIRROR_BRANCH`. Restart the `artifacts/api-server: API Server`
+   workflow so the new env is picked up.
+4. **Verify the wiring.** As an admin user:
+   ```bash
+   curl -sS -H "X-API-Token: $AXIOM_API_TOKEN" \
+     "$AXIOM_API_BASE/api/admin/models/mirror/status"
+   ```
+   You should see `{"enabled": true, "last_result": null}` (or the
+   previous run's result). Then force a push:
+   ```bash
+   curl -sS -X POST -H "X-API-Token: $AXIOM_API_TOKEN" \
+     "$AXIOM_API_BASE/api/admin/models/mirror/push"
+   ```
+   A successful response is `{"ok": true, "skipped": false, "version":
+   "<v>", "files_pushed": ["models/<v>/models_manifest.json", ...,
+   "models/latest.json"], ...}`. Confirm the files appear in the mirror
+   repo on GitHub.
+
+   Common failure modes:
+   - `400 github mirror is not configured` — env vars are missing or the
+     workflow wasn't restarted.
+   - `ok=false, reason="github_mirror PUT ... failed: 404 ..."` — the
+     repo slug is wrong or the token can't see it.
+   - `ok=false, reason="...: 422 ... Branch ... not found"` — the
+     branch in `GITHUB_MIRROR_BRANCH` doesn't exist on the mirror repo.
+   - `ok=false, reason="...: 401 Bad credentials"` — token is invalid
+     or expired; mint a new one and re-set `GITHUB_TOKEN`.
+
+### Layout in the mirror repo
+
+```
+models/<version>/models_manifest.json
+models/<version>/models.tar
+models/<version>/source.tar
+models/latest.json   # { "version": "<v>", "promoted_at": "...", "files": [...] }
+```
+
+`models/latest.json` is a pointer to the most recent promoted version so
+recovery doesn't need to enumerate the tree. Older versions are kept
+indefinitely — the mirror never deletes.
+
+### Recovering when Supabase Storage is down
+
+If `/api/health` reports Storage unavailable and the API server cannot
+download the model artifacts, you can rebuild the local cache from the
+mirror by hand. The cache directory is whatever `resolve_model_cache_dir()`
+returns (`app/models_loader.py`); typically a writable path on the
+server's filesystem.
+
+1. Read the latest pointer to find the active version and capture it
+   into `$VERSION`:
+   ```bash
+   VERSION=$(curl -sS -H "Authorization: Bearer $GITHUB_TOKEN" \
+     -H "Accept: application/vnd.github.raw" \
+     "https://api.github.com/repos/$GITHUB_MIRROR_REPO/contents/models/latest.json?ref=${GITHUB_MIRROR_BRANCH:-main}" \
+     | python -c "import json,sys; print(json.load(sys.stdin)['version'])")
+   echo "recovering version: $VERSION"
+   ```
+2. Download the three artifact files into the model cache directory
+   (overwriting whatever is there). The cache path is whatever
+   `app.models_loader.resolve_model_cache_dir()` returns on this
+   host — print it with
+   `python -c "from app.models_loader import CACHE_ROOT; print(CACHE_ROOT)"`
+   from the api-server working directory so you don't have to guess.
+   Then, using the raw Contents API:
+   ```bash
+   CACHE=/path/printed/above
+   for f in models_manifest.json models.tar source.tar; do
+     curl -sSL -H "Authorization: Bearer $GITHUB_TOKEN" \
+       -H "Accept: application/vnd.github.raw" \
+       "https://api.github.com/repos/$GITHUB_MIRROR_REPO/contents/models/$VERSION/$f?ref=${GITHUB_MIRROR_BRANCH:-main}" \
+       -o "$CACHE/$f"
+   done
+   ```
+   (For files larger than 100 MiB the Contents API rejects raw
+   downloads — clone the repo with `git clone --depth=1` instead and
+   copy the files out of `models/<v>/`.)
+3. Restart the API server. On boot, `models_loader.ensure_artifacts()`
+   sees the manifest + archives already on disk, validates the sha256s
+   against the manifest, extracts them, and the predictor catalog comes
+   back online without ever touching Supabase Storage.
+4. Once Supabase Storage is healthy again, call
+   `POST /api/admin/models/mirror/push` to confirm round-trip parity
+   (it will short-circuit with `skipped=true` if the version is
+   unchanged) and `POST /api/models/reload` to re-sync from Supabase as
+   the source of truth.
