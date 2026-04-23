@@ -454,11 +454,25 @@ async def run_retrain_cycle() -> RetrainCycleResult:
             and isinstance(brier_after, (int, float))
             and brier_after > brier_before + ROLLBACK_TOLERANCE
         ):
-            rollback_id = await _write_rollback(
-                vertical, snap_id, state, triggered_by
-            )
-            rolled_back = rollback_id is not None
-            cr.rollbacks += 1 if rolled_back else 0
+            # Fail-closed: regression *detected* is the source of truth
+            # for rollback. _write_rollback can fail (DB blip), but we
+            # must still skip promotion + leave rows un-acked. The
+            # rollback_id may be None if the audit-log insert failed;
+            # the calibrator-loader filter on drift_status would also
+            # fail in that case, but the un-ack of rows guarantees we
+            # retry the refit on the next cycle, which is the safe
+            # path (no buffer loss, no bad calibrator promoted).
+            rolled_back = True
+            cr.rollbacks += 1
+            try:
+                rollback_id = await _write_rollback(
+                    vertical, snap_id, state, triggered_by
+                )
+            except Exception as e:
+                log.warning(
+                    "rollback log write raised for %s: %s", vertical, e
+                )
+                rollback_id = None
             await _publish({
                 "type": "retrain_rolled_back",
                 "vertical": vertical,

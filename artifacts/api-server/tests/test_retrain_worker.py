@@ -276,6 +276,134 @@ def test_buffer_rows_left_when_snapshot_insert_fails(
     asyncio.run(go())
 
 
+def _make_brier_regression_buffer(fake_db: _FakeDb) -> None:
+    """Stuff the buffer with enough well-formed rows for a refit to
+    even be attempted.  Pair this with `_force_brier_regression` to
+    actually trip the rollback gate — isotonic regression on real
+    data is monotonic by construction and rarely worsens Brier, so
+    we patch the fit's reported numbers to simulate the bug-or-noise
+    case the gate is built to defend against.
+    """
+    for i in range(_retrain.MIN_BATCH):
+        fake_db.buffer.append(_row(i, "sports", 0.5 + 0.001 * i, i % 2))
+
+
+def _force_brier_regression(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Wrap the real fitter so it reports a *worse* post-Brier."""
+    real_fit = _retrain._fit_isotonic_async
+
+    async def bad_fit(probs, outcomes):
+        st = await real_fit(probs, outcomes)
+        b_before = float(st.get("brier_before") or 0.0)
+        st["brier_after"] = b_before + 0.05  # well above ROLLBACK_TOLERANCE
+        return st
+
+    monkeypatch.setattr(_retrain, "_fit_isotonic_async", bad_fit)
+
+
+def test_rollback_writes_log_and_leaves_buffer_unacked(
+    fake_db: _FakeDb, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When Brier worsens beyond tolerance: write rollback row, raise
+    health alert, tag snapshot rolled_back, and leave buffer un-acked.
+    """
+    _make_brier_regression_buffer(fake_db)
+    _force_brier_regression(monkeypatch)
+    rollback_inserts: list[tuple[Any, ...]] = []
+    health_inserts: list[tuple[Any, ...]] = []
+    snapshot_updates: list[tuple[Any, ...]] = []
+
+    real_fetchval = fake_db.fetchval
+    real_execute = fake_db.execute
+
+    async def fetchval_router(query: str, *args: Any) -> Any:
+        q = " ".join(query.split())
+        if "INSERT INTO model_rollback_log" in q:
+            rollback_inserts.append(args)
+            return 9001
+        if "FROM calibration_snapshots" in q and "rolled_back" in q:
+            return None  # no prior good snapshot in this test
+        if "INSERT INTO calibration_snapshots" in q:
+            return await real_fetchval(query, *args)
+        return None
+
+    async def execute_router(query: str, *args: Any) -> str:
+        q = " ".join(query.split())
+        if "INSERT INTO model_health_alerts" in q:
+            health_inserts.append(args)
+            return "INSERT 1"
+        if "UPDATE calibration_snapshots" in q and "drift_status" in q:
+            snapshot_updates.append(args)
+            return "UPDATE 1"
+        return await real_execute(query, *args)
+
+    monkeypatch.setattr(_db, "fetchval", fetchval_router)
+    monkeypatch.setattr(_db, "execute", execute_router)
+
+    async def go() -> None:
+        cr = await _retrain.run_retrain_cycle()
+        assert cr.rollbacks == 1, "expected exactly one rollback"
+        assert cr.rows_processed == 0, "rolled-back refit must not ack buffer rows"
+        assert all(r["processed"] is False for r in fake_db.buffer)
+        assert len(rollback_inserts) == 1
+        assert len(health_inserts) == 1
+        assert len(snapshot_updates) == 1
+
+    asyncio.run(go())
+
+
+def test_rollback_fails_closed_when_audit_log_write_fails(
+    fake_db: _FakeDb, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """If `_write_rollback`'s INSERT raises, we still must NOT promote
+    the bad refit nor ack buffer rows. The detection of the regression
+    is the source of truth for rollback; the audit-log row is best
+    effort.
+    """
+    _make_brier_regression_buffer(fake_db)
+    _force_brier_regression(monkeypatch)
+    real_fetchval = fake_db.fetchval
+
+    async def fetchval_router(query: str, *args: Any) -> Any:
+        q = " ".join(query.split())
+        if "INSERT INTO model_rollback_log" in q:
+            raise RuntimeError("simulated DB outage on audit log")
+        if "FROM calibration_snapshots" in q and "rolled_back" in q:
+            return None
+        if "INSERT INTO calibration_snapshots" in q:
+            return await real_fetchval(query, *args)
+        return None
+
+    async def execute_swallow(query: str, *args: Any) -> str:
+        q = " ".join(query.split())
+        if "INSERT INTO model_health_alerts" in q:
+            return "INSERT 1"
+        if "UPDATE calibration_snapshots" in q and "drift_status" in q:
+            return "UPDATE 1"
+        if "UPDATE online_learning_buffer SET processed = true" in q:
+            ids = set(int(i) for i in args[0])
+            for r in fake_db.buffer:
+                if r["id"] in ids:
+                    r["processed"] = True
+            return f"UPDATE {len(ids)}"
+        return ""
+
+    monkeypatch.setattr(_db, "fetchval", fetchval_router)
+    monkeypatch.setattr(_db, "execute", execute_swallow)
+
+    async def go() -> None:
+        cr = await _retrain.run_retrain_cycle()
+        # Even though the audit-log INSERT raised, the gate fired and
+        # the rollback was counted; promotion was skipped; buffer
+        # rows were left un-acked for the next cycle.
+        assert cr.rollbacks == 1
+        assert cr.rows_processed == 0
+        assert cr.verticals_retrained == 0
+        assert all(r["processed"] is False for r in fake_db.buffer)
+
+    asyncio.run(go())
+
+
 def test_multiple_verticals_independent(fake_db: _FakeDb) -> None:
     """Per-vertical decisions are independent: 'sports' has enough rows,
     'crypto' does not — only sports should refit.
