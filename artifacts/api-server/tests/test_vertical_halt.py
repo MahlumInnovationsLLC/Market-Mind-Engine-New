@@ -341,6 +341,118 @@ def test_halt_cancels_resting_orders_for_vertical_only(monkeypatch):
     assert sorted(cancelled) == ["ord-sports-1", "ord-sports-2"]
 
 
+# ---------------------------------------------------------------------------
+# HTTP-level auth: admin succeeds, non-admin gets 403
+# ---------------------------------------------------------------------------
+
+
+def _admin_user():
+    from app.auth import AuthedUser
+
+    return AuthedUser(
+        user_id="user_admin",
+        session_id="sess_test",
+        claims={"sub": "user_admin"},
+    )
+
+
+def test_halt_endpoint_requires_admin(monkeypatch):
+    """Non-admins must get 403 before any halt state is mutated."""
+    from fastapi.testclient import TestClient
+
+    from app.auth import require_auth
+    from app.main import app
+
+    # Authenticate as a known user, but leave require_admin in place so
+    # the check_admin lookup (which returns False by default in tests)
+    # surfaces the 403.
+    app.dependency_overrides[require_auth] = _admin_user
+    try:
+        with TestClient(app) as client:
+            # check_admin is DB-backed; force it to deny for this test.
+            from app import auth as auth_module
+
+            async def _deny(_user):
+                return False
+
+            monkeypatch.setattr(auth_module, "check_admin", _deny)
+            r = client.post("/api/admin/verticals/sports/halt")
+            assert r.status_code == 403
+            r = client.post("/api/admin/verticals/sports/resume")
+            assert r.status_code == 403
+            r = client.get("/api/admin/verticals/halts")
+            assert r.status_code == 403
+    finally:
+        app.dependency_overrides.pop(require_auth, None)
+
+
+def test_halt_endpoint_happy_path_as_admin(monkeypatch, mem_db):
+    """Admin can halt and resume via HTTP; halt triggers the cancel sweep."""
+    from fastapi.testclient import TestClient
+
+    from app import auth as auth_module
+    from app.auth import require_auth
+    from app.main import app, kalshi_lifecycle
+
+    async def _approved(_user):
+        return True, "admin@example.com"
+
+    async def _is_admin(_user):
+        return True
+
+    monkeypatch.setattr(auth_module, "check_admin", _is_admin)
+    monkeypatch.setattr(auth_module, "check_approval", _approved)
+
+    async def _list_resting() -> list[Any]:
+        return [_FakeRec("ord-sports-1", _FakeReq("sports"))]
+
+    cancelled: list[str] = []
+
+    async def _cancel(order_id: str) -> dict[str, Any]:
+        cancelled.append(order_id)
+        return {"order_id": order_id, "state": "canceled"}
+
+    monkeypatch.setattr(
+        kalshi_lifecycle, "list_resting_orders", _list_resting
+    )
+    monkeypatch.setattr(kalshi_lifecycle, "cancel_order", _cancel)
+
+    app.dependency_overrides[require_auth] = _admin_user
+    try:
+        with TestClient(app) as client:
+            target = _first_known_vertical()
+            r = client.post(
+                f"/api/admin/verticals/{target}/halt",
+                json={"reason": "smoke"},
+            )
+            assert r.status_code == 200, r.text
+            body = r.json()
+            assert body["halted"] is True
+            assert body["changed"] is True
+
+            # Second halt: idempotent.
+            r2 = client.post(f"/api/admin/verticals/{target}/halt")
+            assert r2.status_code == 200
+            assert r2.json()["changed"] is False
+
+            # List halts.
+            r3 = client.get("/api/admin/verticals/halts")
+            assert r3.status_code == 200
+            assert target in r3.json()["halts"]
+
+            # Resume.
+            r4 = client.post(f"/api/admin/verticals/{target}/resume")
+            assert r4.status_code == 200
+            assert r4.json()["halted"] is False
+            assert r4.json()["changed"] is True
+
+            # Unknown vertical rejected.
+            r5 = client.post("/api/admin/verticals/not-a-real/halt")
+            assert r5.status_code == 400
+    finally:
+        app.dependency_overrides.pop(require_auth, None)
+
+
 def test_halt_cancel_sweep_swallows_individual_failures(monkeypatch):
     from app import main as api_main
     from app.kalshi.lifecycle import OrderRejected
