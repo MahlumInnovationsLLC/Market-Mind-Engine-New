@@ -135,6 +135,21 @@ class Settings:
     # 0 to disable.  Default 50%: half the edge gone to slippage = nope.
     slippage_guard_max_edge_pct: float
 
+    # Maximum age (seconds) of a cached Kalshi orderbook snapshot before
+    # the lifecycle slippage guard considers it stale. When stale (or
+    # missing entirely), the guard either issues a one-shot REST
+    # fallback (see ``kalshi_orderbook_rest_fallback_enabled``) or
+    # falls through to degraded-allow. Default 5s — WS pushes deltas
+    # within ~1s in steady state.  Set to 0 to disable the freshness
+    # check (any cached snapshot, no matter how old, counts as fresh).
+    kalshi_orderbook_max_age_secs: float
+    # When True the slippage guard fires a single ``GET
+    # /markets/{ticker}/orderbook`` REST call to repopulate the cache
+    # whenever the WS view is stale or missing. Disable to fall back
+    # to the previous degraded-allow behaviour (no REST call, guard
+    # skipped). Default True.
+    kalshi_orderbook_rest_fallback_enabled: bool
+
     # Verticals the orchestrator schedules.  One asyncio task per
     # vertical, each tick runs run_cycle(vertical) which scopes
     # candidate selection to that vertical's leagues.
@@ -310,6 +325,12 @@ def get_settings() -> Settings:
         ),
         slippage_guard_max_edge_pct=max(
             0.0, float(os.environ.get("AXIOM_SLIPPAGE_GUARD_MAX_EDGE_PCT") or "50")
+        ),
+        kalshi_orderbook_max_age_secs=max(
+            0.0, float(os.environ.get("AXIOM_KALSHI_ORDERBOOK_MAX_AGE_SECS") or "5")
+        ),
+        kalshi_orderbook_rest_fallback_enabled=_truthy(
+            os.environ.get("AXIOM_KALSHI_ORDERBOOK_REST_FALLBACK"), default=True
         ),
         model_cache_dir=resolve_model_cache_dir(),
         model_cache_max_bytes=resolve_model_cache_max_bytes(),

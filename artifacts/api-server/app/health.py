@@ -413,6 +413,60 @@ def _probe_stale_resting_cancelled() -> dict:
     )
 
 
+def _probe_orderbook_guard() -> dict:
+    """Surface the slippage-guard orderbook freshness counters.
+
+    The lifecycle slippage guard reads the in-process Kalshi orderbook
+    cache. When the WS view is missing or stale the guard now tries a
+    one-shot REST fetch as a fallback, and only falls back to
+    degraded-allow when both paths are unusable. This card lets
+    operators see the cache-vs-fallback-vs-degraded split so WS
+    coverage gaps surface as a metric — a sustained ``degraded_allow``
+    rate means the slippage guard is silently disabled for a chunk of
+    submissions.
+
+    Status policy: ``degraded`` when the most recent submission went
+    degraded-allow (latest signal matters most for an oncall view) or
+    when the degraded-allow ratio across all observed submissions
+    exceeds 25%. ``ok`` otherwise.
+    """
+    s = kalshi_lifecycle.orderbook_guard_state()
+    checks = int(s.get("checks") or 0)
+    cache = int(s.get("cache_fresh") or 0)
+    fallback = int(s.get("rest_fallback") or 0)
+    degraded = int(s.get("degraded_allow") or 0)
+    rest_failed = int(s.get("rest_failed") or 0)
+    last_source = s.get("last_source")
+
+    if checks == 0:
+        status = "ok"
+        detail = "no slippage-guard checks observed yet"
+    else:
+        deg_pct = (degraded / checks) * 100.0
+        if last_source == "degraded" or deg_pct > 25.0:
+            status = "degraded"
+        else:
+            status = "ok"
+        detail = (
+            f"checks={checks} cache={cache} fallback={fallback} "
+            f"degraded={degraded} rest_failed={rest_failed} "
+            f"last={last_source}"
+        )
+    return _card(
+        key="orderbook_guard_freshness",
+        label="Orderbook guard freshness",
+        category="passive",
+        status=status,
+        detail=detail,
+        extras={
+            **s,
+            "cache_pct": (cache / checks * 100.0) if checks else None,
+            "fallback_pct": (fallback / checks * 100.0) if checks else None,
+            "degraded_pct": (degraded / checks * 100.0) if checks else None,
+        },
+    )
+
+
 def _probe_kill_switch() -> dict:
     state = kalshi_lifecycle.kill_switch_state()
     halted = bool(state.get("halted"))
@@ -943,6 +997,7 @@ async def _build_snapshot() -> _Snapshot:
         _probe_kalshi_reconciler(),
         _probe_submit_recovery(),
         _probe_stale_resting_cancelled(),
+        _probe_orderbook_guard(),
         *_probe_feeds(),
     ]
     config = _probe_config()

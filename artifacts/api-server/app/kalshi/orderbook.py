@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from typing import Any
 
 from .bus import bus
@@ -60,6 +61,10 @@ class OrderbookCache:
     def __init__(self) -> None:
         # ticker -> side -> {price_cents: size}
         self._books: dict[str, dict[str, dict[int, int]]] = {}
+        # ticker -> monotonic-ish wall-clock seconds of last mutation.
+        # Used by the lifecycle slippage guard to decide whether the
+        # cached view is fresh enough to trust before a live submit.
+        self._updated_at: dict[str, float] = {}
         self._lock = asyncio.Lock()
 
     # ---- mutation -------------------------------------------------------
@@ -103,6 +108,7 @@ class OrderbookCache:
                 "yes": self._normalize_levels(yes),
                 "no": self._normalize_levels(no),
             }
+            self._updated_at[ticker] = time.time()
 
     async def apply_delta(
         self,
@@ -130,13 +136,48 @@ class OrderbookCache:
                 level.pop(price_cents, None)
             else:
                 level[price_cents] = new
+            self._updated_at[ticker] = time.time()
 
     async def clear(self, ticker: str | None = None) -> None:
         async with self._lock:
             if ticker is None:
                 self._books.clear()
+                self._updated_at.clear()
             else:
                 self._books.pop(ticker, None)
+                self._updated_at.pop(ticker, None)
+
+    # ---- freshness ------------------------------------------------------
+
+    async def last_updated_at(self, ticker: str) -> float | None:
+        """Wall-clock seconds when the cache last saw any mutation for
+        ``ticker`` (snapshot or delta). ``None`` when the cache has
+        never received a frame for this market.
+        """
+        async with self._lock:
+            return self._updated_at.get(ticker)
+
+    async def age_seconds(self, ticker: str) -> float | None:
+        """Seconds since the last cache mutation for ``ticker``, or
+        ``None`` if never seen.
+        """
+        async with self._lock:
+            ts = self._updated_at.get(ticker)
+            if ts is None:
+                return None
+            return max(0.0, time.time() - ts)
+
+    async def is_fresh(self, ticker: str, max_age_seconds: float) -> bool:
+        """``True`` when the cache has data for ``ticker`` newer than
+        ``max_age_seconds``. ``max_age_seconds <= 0`` means "any cached
+        snapshot counts as fresh" (operator-disabled freshness check).
+        """
+        age = await self.age_seconds(ticker)
+        if age is None:
+            return False
+        if max_age_seconds <= 0:
+            return True
+        return age <= float(max_age_seconds)
 
     # ---- queries --------------------------------------------------------
 

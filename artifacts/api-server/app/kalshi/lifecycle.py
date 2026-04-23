@@ -101,6 +101,54 @@ def stale_resting_cancelled_state() -> dict[str, Any]:
     return dict(_stale_resting)
 
 
+# --- orderbook freshness / fallback counters (surfaced on /api/health) ---
+#
+# The slippage guard reads the in-process orderbook cache that the WS
+# subscriber feeds. Markets the WS hasn't covered yet — or where the
+# connection has been silent for a while — leave the cache stale. The
+# guard now refuses to silently wave those trades through: it tries a
+# one-shot REST orderbook fetch as a fallback, and only falls back to
+# degraded-allow when both the cache *and* REST are unusable. These
+# counters give operators visibility into how often each path fires so
+# WS coverage gaps surface as a metric instead of as silently-skipped
+# guard checks.
+_orderbook_guard: dict[str, int | str | float | None] = {
+    "checks": 0,           # total submissions where the guard ran past early-exits
+    "cache_fresh": 0,      # cache had a snapshot newer than max_age
+    "rest_fallback": 0,    # cache stale/missing, REST repopulated it
+    "rest_failed": 0,      # cache stale/missing, REST also errored
+    "degraded_allow": 0,   # neither cache nor REST → allowed without check
+    "last_source": None,   # "cache" | "fallback" | "degraded"
+    "last_age_seconds": None,
+    "last_ticker": None,
+    "last_at": None,
+    "last_error": None,    # str — last REST fallback error
+}
+
+
+def orderbook_guard_state() -> dict[str, Any]:
+    """JSON-safe copy of the orderbook freshness counters for health snapshots."""
+    return dict(_orderbook_guard)
+
+
+def _reset_orderbook_guard_state() -> None:
+    """Test helper — clears every counter."""
+    _orderbook_guard.update(
+        {
+            "checks": 0,
+            "cache_fresh": 0,
+            "rest_fallback": 0,
+            "rest_failed": 0,
+            "degraded_allow": 0,
+            "last_source": None,
+            "last_age_seconds": None,
+            "last_ticker": None,
+            "last_at": None,
+            "last_error": None,
+        }
+    )
+
+
 def record_stale_resting_scan() -> None:
     """Called by the orchestrator at the start of each sweep."""
     import time as _time
@@ -1155,6 +1203,108 @@ async def _send_trade_confirmation_from_snapshot(snap: dict[str, Any]) -> None:
 
 # --- helpers --------------------------------------------------------------
 
+def _record_orderbook_guard_outcome(
+    *,
+    source: str,
+    age: float | None,
+    ticker: str,
+    error: str | None = None,
+) -> None:
+    """Bump the per-source counters that /api/health surfaces.
+
+    ``source`` is one of ``"cache"`` (WS view was fresh enough),
+    ``"fallback"`` (WS view was stale/missing but the REST one-shot
+    repopulated it), or ``"degraded"`` (neither path produced data —
+    the trade was waved through without a guard check).
+    """
+    import time as _time
+    _orderbook_guard["checks"] = int(_orderbook_guard["checks"]) + 1  # type: ignore[arg-type]
+    if source == "cache":
+        _orderbook_guard["cache_fresh"] = int(_orderbook_guard["cache_fresh"]) + 1  # type: ignore[arg-type]
+    elif source == "fallback":
+        _orderbook_guard["rest_fallback"] = int(_orderbook_guard["rest_fallback"]) + 1  # type: ignore[arg-type]
+    elif source == "degraded":
+        _orderbook_guard["degraded_allow"] = int(_orderbook_guard["degraded_allow"]) + 1  # type: ignore[arg-type]
+    _orderbook_guard["last_source"] = source
+    _orderbook_guard["last_age_seconds"] = float(age) if age is not None else None
+    _orderbook_guard["last_ticker"] = ticker
+    _orderbook_guard["last_at"] = _time.time()
+    if error is not None:
+        _orderbook_guard["last_error"] = str(error)[:300]
+
+
+async def _ensure_fresh_orderbook(
+    ticker: str, *, settings,
+) -> tuple[str, float | None]:
+    """Make sure the in-process cache has a recent snapshot for ``ticker``.
+
+    Returns ``(source, age_seconds)`` where ``source`` is:
+
+      * ``"cache"``    — cache already had data newer than
+        ``kalshi_orderbook_max_age_secs``; nothing was fetched.
+      * ``"fallback"`` — cache was stale or missing, so we issued a
+        one-shot REST orderbook fetch and applied it as a snapshot.
+      * ``"degraded"`` — cache was unusable AND the REST fallback was
+        either disabled, missing credentials, or errored. The caller
+        must skip the guard (degraded-allow) and the counter is
+        bumped so operators can see the gap.
+
+    This function records the per-source counters before returning, so
+    callers can short-circuit on ``"degraded"`` without forgetting to
+    update health metrics.
+    """
+    max_age = float(getattr(settings, "kalshi_orderbook_max_age_secs", 5.0) or 0.0)
+    age = await kalshi_orderbook.orderbook_cache.age_seconds(ticker)
+    if age is not None and (max_age <= 0 or age <= max_age):
+        _record_orderbook_guard_outcome(source="cache", age=age, ticker=ticker)
+        return "cache", age
+
+    rest_enabled = bool(
+        getattr(settings, "kalshi_orderbook_rest_fallback_enabled", True)
+    )
+    has_creds = bool(
+        getattr(settings, "kalshi_api_key_id", None)
+        and getattr(settings, "kalshi_private_key", None)
+    )
+    if not rest_enabled or not has_creds:
+        _record_orderbook_guard_outcome(
+            source="degraded",
+            age=age,
+            ticker=ticker,
+            error=None if rest_enabled else "rest_fallback_disabled",
+        )
+        return "degraded", age
+
+    try:
+        async with kalshi_client.KalshiClient(settings=settings) as c:
+            data = await c.get_orderbook(ticker)
+    except Exception as e:  # noqa: BLE001 — network/auth errors degrade
+        _orderbook_guard["rest_failed"] = int(_orderbook_guard["rest_failed"]) + 1  # type: ignore[arg-type]
+        err = f"{type(e).__name__}: {e}"[:300]
+        log.warning(
+            "orderbook REST fallback failed for %s: %s — degraded-allow",
+            ticker, err,
+        )
+        _record_orderbook_guard_outcome(
+            source="degraded", age=age, ticker=ticker, error=err,
+        )
+        return "degraded", age
+
+    body = (data or {}).get("orderbook") if isinstance(data, dict) else None
+    if not isinstance(body, dict):
+        body = data if isinstance(data, dict) else {}
+    yes_levels = body.get("yes") or body.get("yes_levels")
+    no_levels = body.get("no") or body.get("no_levels")
+    await kalshi_orderbook.orderbook_cache.apply_snapshot(
+        ticker, yes=yes_levels, no=no_levels,
+    )
+    new_age = await kalshi_orderbook.orderbook_cache.age_seconds(ticker)
+    _record_orderbook_guard_outcome(
+        source="fallback", age=new_age, ticker=ticker,
+    )
+    return "fallback", new_age
+
+
 async def _check_slippage_guard(req: OrderRequest, *, settings) -> dict[str, Any] | None:
     """Project worst-case fill against the cached orderbook.
 
@@ -1200,6 +1350,15 @@ async def _check_slippage_guard(req: OrderRequest, *, settings) -> dict[str, Any
     action = (req.action or "").lower()
     limit = int(req.limit_price_cents)
 
+    # Make sure the cache has fresh data before we trust it. If the WS
+    # hasn't pushed a snapshot for this ticker, or the last update is
+    # older than ``kalshi_orderbook_max_age_secs``, fall back to a
+    # one-shot REST orderbook fetch. Only when *both* paths fail do we
+    # degraded-allow — and we count it so operators see WS gaps.
+    source, _age = await _ensure_fresh_orderbook(req.market_ticker, settings=settings)
+    if source == "degraded":
+        return None
+
     worst, filled = await kalshi_orderbook.orderbook_cache.worst_fill_price(
         req.market_ticker,
         action=action,
@@ -1208,10 +1367,16 @@ async def _check_slippage_guard(req: OrderRequest, *, settings) -> dict[str, Any
     )
 
     # Cache miss vs empty-side book — only the former is degraded-allow.
+    # Cache miss should be unreachable after a successful fresh-ensure
+    # but defended for race-condition safety (cache could have been
+    # cleared between ensure and read).
     book_known = True
     if worst is None and filled == 0:
         snap = await kalshi_orderbook.orderbook_cache.snapshot(req.market_ticker)
         if snap is None:
+            _record_orderbook_guard_outcome(
+                source="degraded", age=None, ticker=req.market_ticker,
+            )
             return None  # degraded — let the order through
         book_known = False  # book exists but the requested side is empty
 

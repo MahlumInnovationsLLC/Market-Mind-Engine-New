@@ -45,6 +45,7 @@ def _reset(monkeypatch):
     # Re-create the cache singleton so its internal lock is bound to the
     # current loop on every test (matches the lifecycle's strategy).
     kalshi_orderbook.orderbook_cache = kalshi_orderbook.OrderbookCache()
+    lifecycle._reset_orderbook_guard_state()
 
     written: list[dict[str, Any]] = []
 
@@ -56,13 +57,24 @@ def _reset(monkeypatch):
     yield written
 
 
-def _settings(threshold_pct: float = 50.0, mode: str = "paper") -> SimpleNamespace:
+def _settings(
+    threshold_pct: float = 50.0,
+    mode: str = "paper",
+    *,
+    rest_fallback: bool = False,
+    max_age_secs: float = 5.0,
+) -> SimpleNamespace:
     return SimpleNamespace(
         kalshi_api_key_id="kid",
         kalshi_private_key="pem",
         kalshi_api_base_url="https://demo-api.kalshi.co/trade-api/v2",
         trading_mode=mode,
         slippage_guard_max_edge_pct=threshold_pct,
+        kalshi_orderbook_max_age_secs=max_age_secs,
+        # Default off in tests so the cache-miss path stays degraded-allow
+        # without making a real network call. Tests that exercise the
+        # REST fallback opt in explicitly + monkeypatch KalshiClient.
+        kalshi_orderbook_rest_fallback_enabled=rest_fallback,
     )
 
 
@@ -530,3 +542,218 @@ def test_end_to_end_ws_frame_to_guard_decision(monkeypatch, _reset):
     slice_md = submitted[0]["metadata"]["context"]["sliced_by_slippage_guard"]
     assert slice_md["original_count"] == 5
     assert slice_md["sliced_count"] == 1
+
+
+# ---------------------------------------------------------------------------
+# Cache freshness + REST fallback (task #148)
+# ---------------------------------------------------------------------------
+
+def test_orderbook_cache_records_last_update_timestamp():
+    """Snapshots and deltas both bump the per-ticker timestamp so the
+    freshness check has something to compare against.
+    """
+    cache = kalshi_orderbook.OrderbookCache()
+
+    async def go():
+        assert await cache.last_updated_at("X") is None
+        await cache.apply_snapshot("X", yes=[[40, 1]], no=[[60, 1]])
+        t1 = await cache.last_updated_at("X")
+        assert t1 is not None
+        await asyncio.sleep(0.01)
+        await cache.apply_delta("X", side="yes", price_cents=40, delta=1)
+        t2 = await cache.last_updated_at("X")
+        return t1, t2
+
+    t1, t2 = _run(go())
+    assert t2 is not None and t2 >= t1
+
+
+def test_orderbook_cache_is_fresh_window():
+    cache = kalshi_orderbook.OrderbookCache()
+
+    async def go():
+        # Unknown ticker is never fresh.
+        assert await cache.is_fresh("MISSING", 5.0) is False
+        await cache.apply_snapshot("X", yes=[[40, 1]], no=[[60, 1]])
+        # Just-applied is fresh under any positive window.
+        assert await cache.is_fresh("X", 60.0) is True
+        # max_age <= 0 disables the check (any cached snapshot counts).
+        assert await cache.is_fresh("X", 0.0) is True
+        # Pretend the snapshot is ancient by rewriting its timestamp.
+        cache._updated_at["X"] = 0.0  # epoch
+        assert await cache.is_fresh("X", 5.0) is False
+        return True
+
+    assert _run(go()) is True
+
+
+class _FakeKalshiClient:
+    """Stands in for `kalshi_client.KalshiClient` in fallback tests."""
+
+    instances: list["_FakeKalshiClient"] = []
+
+    def __init__(self, *, settings=None, response=None, raise_exc: Exception | None = None):
+        self._response = response
+        self._raise = raise_exc
+        self.calls: list[str] = []
+        _FakeKalshiClient.instances.append(self)
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return None
+
+    async def get_orderbook(self, ticker: str):
+        self.calls.append(ticker)
+        if self._raise is not None:
+            raise self._raise
+        return self._response
+
+
+def test_slippage_guard_uses_rest_fallback_when_cache_missing(monkeypatch, _reset):
+    """Cache empty + REST fallback enabled: lifecycle pulls a fresh
+    orderbook over REST, applies it as a snapshot, and the guard runs
+    on that data. Counter increments under `rest_fallback`.
+    """
+    monkeypatch.setattr(
+        lifecycle, "get_settings",
+        lambda: _settings(threshold_pct=50.0, rest_fallback=True),
+    )
+
+    rest_body = {"orderbook": {"yes": [[40, 999]], "no": [[60, 500]]}}
+    _FakeKalshiClient.instances.clear()
+    monkeypatch.setattr(
+        lifecycle.kalshi_client, "KalshiClient",
+        lambda **kw: _FakeKalshiClient(response=rest_body),
+    )
+
+    async def go():
+        req = lifecycle.OrderRequest(
+            market_ticker="X-FB", side="yes", action="buy", count=10,
+            limit_price_cents=40, client_order_id="fb-1",
+            context={"model_edge_cents": 4.0},
+        )
+        return await lifecycle.submit_order(req)
+
+    rec = _run(go())
+    assert rec.state == "filled"
+    assert _FakeKalshiClient.instances and _FakeKalshiClient.instances[0].calls == ["X-FB"]
+    state = lifecycle.orderbook_guard_state()
+    assert state["rest_fallback"] == 1
+    assert state["cache_fresh"] == 0
+    assert state["degraded_allow"] == 0
+    assert state["last_source"] == "fallback"
+
+    # The REST snapshot is now in-cache, so a second submit takes the cache path.
+    async def go2():
+        req = lifecycle.OrderRequest(
+            market_ticker="X-FB", side="yes", action="buy", count=5,
+            limit_price_cents=40, client_order_id="fb-2",
+            context={"model_edge_cents": 4.0},
+        )
+        return await lifecycle.submit_order(req)
+
+    _run(go2())
+    state2 = lifecycle.orderbook_guard_state()
+    assert state2["cache_fresh"] == 1
+    assert state2["rest_fallback"] == 1
+
+
+def test_slippage_guard_rest_fallback_failure_degraded_allows(monkeypatch, _reset):
+    """REST fallback enabled but the call errors: degraded-allow path
+    fires, the trade proceeds, and `rest_failed`/`degraded_allow`
+    counters both go up.
+    """
+    monkeypatch.setattr(
+        lifecycle, "get_settings",
+        lambda: _settings(threshold_pct=50.0, rest_fallback=True),
+    )
+
+    _FakeKalshiClient.instances.clear()
+    boom = RuntimeError("network down")
+    monkeypatch.setattr(
+        lifecycle.kalshi_client, "KalshiClient",
+        lambda **kw: _FakeKalshiClient(raise_exc=boom),
+    )
+
+    async def go():
+        req = lifecycle.OrderRequest(
+            market_ticker="X-FB-FAIL", side="yes", action="buy", count=3,
+            limit_price_cents=40, client_order_id="fb-fail-1",
+            context={"model_edge_cents": 4.0},
+        )
+        return await lifecycle.submit_order(req)
+
+    rec = _run(go())
+    assert rec.state == "filled"  # paper degraded-allow
+    state = lifecycle.orderbook_guard_state()
+    assert state["rest_failed"] == 1
+    assert state["degraded_allow"] == 1
+    assert state["rest_fallback"] == 0
+    assert state["last_source"] == "degraded"
+    assert state["last_error"] and "network down" in state["last_error"]
+
+
+def test_slippage_guard_refreshes_stale_cache_via_rest(monkeypatch, _reset):
+    """Cache has data but it's older than the configured max age:
+    the guard bypasses the stale view and pulls fresh data via REST.
+    """
+    monkeypatch.setattr(
+        lifecycle, "get_settings",
+        lambda: _settings(threshold_pct=50.0, rest_fallback=True, max_age_secs=1.0),
+    )
+
+    # REST returns a much thinner book that should trip the guard.
+    rest_body = {"orderbook": {"yes": [[40, 999]], "no": [[60, 1], [50, 100]]}}
+    _FakeKalshiClient.instances.clear()
+    monkeypatch.setattr(
+        lifecycle.kalshi_client, "KalshiClient",
+        lambda **kw: _FakeKalshiClient(response=rest_body),
+    )
+
+    async def go():
+        # Seed a deep, fresh-looking cache then backdate its timestamp
+        # so the guard considers it stale.
+        await kalshi_orderbook.orderbook_cache.apply_snapshot(
+            "X-STALE", yes=[[40, 999]], no=[[60, 999]],
+        )
+        kalshi_orderbook.orderbook_cache._updated_at["X-STALE"] = 0.0
+        req = lifecycle.OrderRequest(
+            market_ticker="X-STALE", side="yes", action="buy", count=10,
+            limit_price_cents=40, client_order_id="stale-1",
+            context={"model_edge_cents": 4.0},
+        )
+        return await lifecycle.submit_order(req)
+
+    with pytest.raises(lifecycle.OrderRejected, match="slippage guard"):
+        _run(go())
+    assert _FakeKalshiClient.instances and _FakeKalshiClient.instances[0].calls == ["X-STALE"]
+    state = lifecycle.orderbook_guard_state()
+    assert state["rest_fallback"] == 1
+    assert state["cache_fresh"] == 0
+
+
+def test_slippage_guard_degraded_allow_when_rest_disabled(monkeypatch, _reset):
+    """Cache empty AND REST fallback disabled: degraded-allow, with the
+    `degraded_allow` counter incremented and `last_source` set.
+    """
+    monkeypatch.setattr(
+        lifecycle, "get_settings",
+        lambda: _settings(threshold_pct=50.0, rest_fallback=False),
+    )
+
+    async def go():
+        req = lifecycle.OrderRequest(
+            market_ticker="X-NONE", side="yes", action="buy", count=5,
+            limit_price_cents=40, client_order_id="none-1",
+            context={"model_edge_cents": 4.0},
+        )
+        return await lifecycle.submit_order(req)
+
+    rec = _run(go())
+    assert rec.state == "filled"
+    state = lifecycle.orderbook_guard_state()
+    assert state["degraded_allow"] == 1
+    assert state["rest_fallback"] == 0
+    assert state["last_source"] == "degraded"

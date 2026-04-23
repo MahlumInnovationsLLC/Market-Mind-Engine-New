@@ -267,6 +267,18 @@ class KalshiClient:
                 return {"found": True, "order": row}
         return {"found": False, "order": None}
 
+    async def get_orderbook(self, ticker: str) -> dict[str, Any]:
+        """Pull a one-shot orderbook snapshot for ``ticker``.
+
+        Used by the lifecycle slippage guard as a fallback when the
+        WS-fed in-process cache is missing or stale beyond the
+        configured freshness window. Kalshi returns
+        ``{"orderbook": {"yes": [[price, size], ...], "no": [...]}}``;
+        this method returns the parsed body unchanged so the caller
+        decides how to apply it (typically ``orderbook_cache.apply_snapshot``).
+        """
+        return await self._request("GET", f"/markets/{ticker}/orderbook")
+
     async def list_fills(
         self,
         *,
