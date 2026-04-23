@@ -3757,10 +3757,14 @@ async def kalshi_resting_orders(_: object = Depends(require_auth)) -> dict[str, 
 
 @app.post("/api/kalshi/paper-order")
 async def kalshi_paper_order(
-    payload: dict, _: object = Depends(require_auth)
+    payload: dict,
+    _: object = Depends(billing.require_tier(billing.TIER_PRO)),
 ) -> dict[str, object]:
     """Submit a paper order via the lifecycle. Always paper, even when
-    AXIOM_TRADING_MODE=live, so this endpoint is safe to expose to operators.
+    AXIOM_TRADING_MODE=live, so this endpoint is safe to expose to
+    operators — but it is still a Pro-tier feature ("manual cycle
+    execution" on the pricing page).  Free callers get the standard
+    ``tier_required`` 403 from :func:`billing.require_tier`.
     """
     try:
         req = OrderRequest(
@@ -3941,11 +3945,14 @@ async def polymarket_resting_orders(_: object = Depends(require_auth)) -> dict[s
 
 @app.post("/api/polymarket/paper-order")
 async def polymarket_paper_order(
-    payload: dict, _: object = Depends(require_auth)
+    payload: dict,
+    _: object = Depends(billing.require_tier(billing.TIER_PRO)),
 ) -> dict[str, object]:
     """Submit a paper order via the Polymarket lifecycle. Always paper,
     even when AXIOM_TRADING_MODE=live, so this endpoint is safe to expose
-    to operators."""
+    to operators — but it is still a Pro-tier feature ("manual cycle
+    execution" on the pricing page).  Free callers get the standard
+    ``tier_required`` 403 from :func:`billing.require_tier`."""
     try:
         req = PolymarketOrderRequest(
             market_id=str(payload.get("market_id") or payload.get("conditionId") or "").strip(),
