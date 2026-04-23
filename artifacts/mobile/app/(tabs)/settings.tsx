@@ -3,6 +3,7 @@ import { Redirect } from "expo-router";
 import React, { useState } from "react";
 import {
   ActivityIndicator,
+  Alert,
   RefreshControl,
   ScrollView,
   StyleSheet,
@@ -85,8 +86,6 @@ export default function SettingsScreen() {
     },
   });
 
-  const [pendingArm, setPendingArm] = useState(false);
-  const [confirmingStop, setConfirmingStop] = useState(false);
   const [reason, setReason] = useState("");
   const [stopResult, setStopResult] = useState<EmergencyStopResult | null>(null);
 
@@ -126,25 +125,49 @@ export default function SettingsScreen() {
 
   function onArmToggle() {
     if (toggleBusy) return;
-    if (!enabled) {
-      if (!pendingArm) {
-        setPendingArm(true);
-        return;
-      }
+    if (enabled) {
+      // Switching back to PAPER is the safe direction — no extra confirm
+      // (matches the web toggle, which only two-steps the ARM path).
+      toggleMutation.mutate(false);
+      return;
     }
-    setPendingArm(false);
-    toggleMutation.mutate(!enabled);
+    Alert.alert(
+      "Arm LIVE execution?",
+      "Real money. The trading loop will start placing live orders on Kalshi.",
+      [
+        { text: "Cancel", style: "cancel" },
+        {
+          text: "Arm LIVE",
+          style: "destructive",
+          onPress: () => toggleMutation.mutate(true),
+        },
+      ],
+      { cancelable: true },
+    );
   }
 
-  function onConfirmStop() {
+  function onEmergencyStop() {
     if (stopBusy) return;
-    stopMutation.mutate(reason, {
-      onSuccess: (data) => {
-        setStopResult(data);
-        setConfirmingStop(false);
-        setReason("");
-      },
-    });
+    Alert.alert(
+      "Emergency stop?",
+      "Cancels every resting Kalshi order, halts the trading loop, and emails the on-call operator.",
+      [
+        { text: "Cancel", style: "cancel" },
+        {
+          text: "KILL ALL",
+          style: "destructive",
+          onPress: () => {
+            stopMutation.mutate(reason, {
+              onSuccess: (data) => {
+                setStopResult(data);
+                setReason("");
+              },
+            });
+          },
+        },
+      ],
+      { cancelable: true },
+    );
   }
 
   return (
@@ -210,55 +233,37 @@ export default function SettingsScreen() {
             Toggle requires Elite tier (current: {live?.caller_tier ?? "?"}).
           </Text>
         ) : (
-          <>
-            <TouchableOpacity
-              onPress={onArmToggle}
-              disabled={toggleBusy}
+          <TouchableOpacity
+            onPress={onArmToggle}
+            disabled={toggleBusy}
+            style={[
+              styles.btn,
+              {
+                borderColor: enabled
+                  ? colors.mutedForeground
+                  : colors.primary,
+                opacity: toggleBusy ? 0.5 : 1,
+              },
+            ]}
+            testID="button-live-execute-toggle"
+          >
+            <Text
               style={[
-                styles.btn,
+                styles.btnText,
                 {
-                  borderColor: enabled
+                  color: enabled
                     ? colors.mutedForeground
-                    : pendingArm
-                      ? colors.destructive
-                      : colors.primary,
-                  opacity: toggleBusy ? 0.5 : 1,
+                    : colors.primary,
                 },
               ]}
-              testID="button-live-execute-toggle"
             >
-              <Text
-                style={[
-                  styles.btnText,
-                  {
-                    color: enabled
-                      ? colors.mutedForeground
-                      : pendingArm
-                        ? colors.destructive
-                        : colors.primary,
-                  },
-                ]}
-              >
-                {toggleBusy
-                  ? "…"
-                  : enabled
-                    ? "Switch to PAPER"
-                    : pendingArm
-                      ? "Confirm: ARM LIVE"
-                      : "Arm LIVE execution"}
-              </Text>
-            </TouchableOpacity>
-            {pendingArm && !enabled ? (
-              <TouchableOpacity
-                onPress={() => setPendingArm(false)}
-                style={styles.cancelBtn}
-              >
-                <Text style={[styles.cancelText, { color: colors.mutedForeground }]}>
-                  cancel
-                </Text>
-              </TouchableOpacity>
-            ) : null}
-          </>
+              {toggleBusy
+                ? "…"
+                : enabled
+                  ? "Switch to PAPER"
+                  : "Arm LIVE execution"}
+            </Text>
+          </TouchableOpacity>
         )}
         {toggleErr ? (
           <Text style={[styles.muted, { color: colors.destructive }]}>
@@ -299,83 +304,48 @@ export default function SettingsScreen() {
           admin re-arms LIVE.
         </Text>
 
-        {!confirmingStop ? (
+        <View style={[styles.confirmBox, { borderColor: colors.destructive }]}>
+          <Text style={[styles.label, { color: colors.mutedForeground }]}>
+            REASON (OPTIONAL)
+          </Text>
+          <TextInput
+            value={reason}
+            onChangeText={setReason}
+            placeholder="e.g. settlement feed lag"
+            placeholderTextColor={colors.mutedForeground}
+            maxLength={200}
+            editable={!stopBusy}
+            style={[
+              styles.input,
+              {
+                color: colors.foreground,
+                borderColor: colors.border,
+                backgroundColor: colors.background,
+              },
+            ]}
+            testID="input-emergency-stop-reason"
+          />
           <TouchableOpacity
             onPress={() => {
               setStopResult(null);
-              setConfirmingStop(true);
+              onEmergencyStop();
             }}
             disabled={stopBusy}
             style={[
               styles.btn,
-              { borderColor: colors.destructive, opacity: stopBusy ? 0.5 : 1 },
+              {
+                borderColor: colors.destructive,
+                backgroundColor: colors.destructive,
+                opacity: stopBusy ? 0.5 : 1,
+              },
             ]}
             testID="button-emergency-stop-arm"
           >
-            <Text style={[styles.btnText, { color: colors.destructive }]}>
-              Emergency Stop
+            <Text style={[styles.btnText, { color: colors.background }]}>
+              {stopBusy ? "…" : "Emergency Stop"}
             </Text>
           </TouchableOpacity>
-        ) : (
-          <View style={[styles.confirmBox, { borderColor: colors.destructive }]}>
-            <Text
-              style={[
-                styles.label,
-                { color: colors.mutedForeground },
-              ]}
-            >
-              REASON (OPTIONAL)
-            </Text>
-            <TextInput
-              value={reason}
-              onChangeText={setReason}
-              placeholder="e.g. settlement feed lag"
-              placeholderTextColor={colors.mutedForeground}
-              maxLength={200}
-              editable={!stopBusy}
-              style={[
-                styles.input,
-                {
-                  color: colors.foreground,
-                  borderColor: colors.border,
-                  backgroundColor: colors.background,
-                },
-              ]}
-              testID="input-emergency-stop-reason"
-            />
-            <View style={styles.confirmRow}>
-              <TouchableOpacity
-                onPress={onConfirmStop}
-                disabled={stopBusy}
-                style={[
-                  styles.btn,
-                  {
-                    flex: 1,
-                    borderColor: colors.destructive,
-                    backgroundColor: colors.destructive,
-                    opacity: stopBusy ? 0.5 : 1,
-                  },
-                ]}
-                testID="button-emergency-stop-confirm"
-              >
-                <Text style={[styles.btnText, { color: colors.background }]}>
-                  {stopBusy ? "…" : "CONFIRM: KILL ALL"}
-                </Text>
-              </TouchableOpacity>
-              <TouchableOpacity
-                onPress={() => setConfirmingStop(false)}
-                disabled={stopBusy}
-                style={styles.cancelBtn}
-              >
-                <Text
-                  style={[styles.cancelText, { color: colors.mutedForeground }]}
-                >
-                  cancel
-                </Text>
-              </TouchableOpacity>
-            </View>
-          </View>
-        )}
+        </View>
 
         {stopErr ? (
           <Text style={[styles.muted, { color: colors.destructive }]}>
@@ -426,13 +396,6 @@ const styles = StyleSheet.create({
     fontFamily: "Inter_700Bold",
     textTransform: "uppercase",
   },
-  cancelBtn: { paddingVertical: 6, alignItems: "center" },
-  cancelText: {
-    fontSize: 10,
-    letterSpacing: 1.5,
-    fontFamily: "Inter_500Medium",
-    textTransform: "uppercase",
-  },
   badge: {
     fontSize: 10,
     letterSpacing: 1,
@@ -458,5 +421,4 @@ const styles = StyleSheet.create({
     fontFamily: "Inter_400Regular",
     fontSize: 13,
   },
-  confirmRow: { flexDirection: "row", alignItems: "center", gap: 8 },
 });
