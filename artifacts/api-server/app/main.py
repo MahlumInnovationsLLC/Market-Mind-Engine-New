@@ -376,6 +376,16 @@ async def lifespan(_: FastAPI):
     except Exception as e:
         log.warning("order_fills retention start failed: %s", e)
 
+    # `free_tier_market_views` quota-table retention sweep. The free-tier
+    # quota check only ever reads today's UTC partition, so anything older
+    # than ~30 days is dead weight and would otherwise grow linearly with
+    # active free users. Per task #165.
+    try:
+        from . import free_tier_views_retention as _free_tier_views_retention
+        await _free_tier_views_retention.start()
+    except Exception as e:
+        log.warning("free_tier_views retention start failed: %s", e)
+
     # Continuous Kalshi position + fill reconciler. Periodically pulls
     # /portfolio/positions and /portfolio/fills, diffs against our local
     # DB, raises model_health_alerts on drift > tolerance, and back-fills
@@ -519,6 +529,11 @@ async def lifespan(_: FastAPI):
             await _order_fills_retention.stop()
         except Exception as e:
             log.warning("order_fills retention stop error: %s", e)
+        try:
+            from . import free_tier_views_retention as _free_tier_views_retention
+            await _free_tier_views_retention.stop()
+        except Exception as e:
+            log.warning("free_tier_views retention stop error: %s", e)
         try:
             from .kalshi import reconciler as _kalshi_reconciler
             await _kalshi_reconciler.stop()
