@@ -243,6 +243,48 @@ def test_html_body_escapes_user_content() -> None:
     assert "&lt;script&gt;x&lt;/script&gt;" in html
 
 
+def test_renders_slippage_guard_offenders_text_and_html() -> None:
+    res = alerts.daily_pnl_summary(
+        **{
+            **_BASE_KW,
+            "slippage_guard_rejects_today": 7,
+            "slippage_guard_offenders": [
+                {
+                    "market_ticker": "KXNFL-THIN",
+                    "rejects": 4,
+                    "max_slippage_cents": 12,
+                    "max_edge_erased_pct": 250.5,
+                },
+                {
+                    "market_ticker": "KXMLB-LITE",
+                    "rejects": 1,
+                    "max_slippage_cents": None,
+                    "max_edge_erased_pct": None,
+                },
+            ],
+        }
+    )
+    body = res["body_preview"]
+    html = res["html_preview"]
+    assert "slippage_guard_rejects_today" in body
+    assert "Slippage-guard repeat offenders" in body
+    assert "KXNFL-THIN" in body and "KXMLB-LITE" in body
+    assert "12¢" in body
+    assert "250.5" in body
+    assert html is not None
+    assert "Slippage-guard offenders" in html
+    assert "KXNFL-THIN" in html
+    assert "250.5%" in html
+
+
+def test_slippage_guard_section_degrades_when_empty() -> None:
+    res = alerts.daily_pnl_summary(
+        **{**_BASE_KW, "slippage_guard_offenders": []}
+    )
+    assert "(no slippage-guard rejections today)" in res["body_preview"]
+    assert "No slippage-guard rejections today." in res["html_preview"]
+
+
 def test_subject_unchanged_by_new_sections() -> None:
     res = alerts.daily_pnl_summary(
         **{**_BASE_KW, "by_vertical": [], "by_persona": []}

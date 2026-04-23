@@ -395,6 +395,7 @@ export const GetRecentCyclesResponse = zod.object({
       started_at: zod.string().nullish(),
       completed_at: zod.string().nullish(),
       duration_seconds: zod.number().nullish(),
+      slippage_guard_rejects: zod.number().nullish(),
     }),
   ),
 });
@@ -432,6 +433,52 @@ export const GetOverFilledOrdersTodayResponse = zod.object({
       last_fill_at: zod.string().nullish(),
     }),
   ),
+});
+
+/**
+ * @summary Detail rows for trades the pre-submit slippage guard rejected
+ */
+export const getSlippageGuardRejectsQuerySinceHoursDefault = 24;
+export const getSlippageGuardRejectsQuerySinceHoursMax = 168;
+
+export const getSlippageGuardRejectsQueryLimitDefault = 100;
+export const getSlippageGuardRejectsQueryLimitMax = 500;
+
+export const GetSlippageGuardRejectsQueryParams = zod.object({
+  cycle_id: zod.coerce.number().optional(),
+  since_hours: zod.coerce
+    .number()
+    .min(1)
+    .max(getSlippageGuardRejectsQuerySinceHoursMax)
+    .default(getSlippageGuardRejectsQuerySinceHoursDefault),
+  limit: zod.coerce
+    .number()
+    .min(1)
+    .max(getSlippageGuardRejectsQueryLimitMax)
+    .default(getSlippageGuardRejectsQueryLimitDefault),
+});
+
+export const GetSlippageGuardRejectsResponse = zod.object({
+  items: zod.array(
+    zod.object({
+      id: zod.number(),
+      market_ticker: zod.string().nullish(),
+      side: zod.string().nullish(),
+      vertical: zod.string().nullish(),
+      created_at: zod.string().nullish(),
+      detail: zod.string().nullish(),
+      requested_count: zod.number().nullish(),
+      filled_available: zod.number().nullish(),
+      worst_fill_price_cents: zod.number().nullish(),
+      limit_price_cents: zod.number().nullish(),
+      slippage_cents: zod.number().nullish(),
+      model_edge_cents: zod.number().nullish(),
+      edge_erased_pct: zod.number().nullish(),
+      threshold_pct: zod.number().nullish(),
+      cycle_id: zod.number().nullish(),
+    }),
+  ),
+  cycle_id: zod.number().nullish(),
 });
 
 /**

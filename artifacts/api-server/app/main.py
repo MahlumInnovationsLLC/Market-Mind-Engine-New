@@ -3488,6 +3488,25 @@ async def dashboard_recent_cycles(
     return {"items": await dashboard.get_recent_cycles(limit)}
 
 
+@app.get("/api/dashboard/slippage-guard-rejects")
+async def dashboard_slippage_guard_rejects(
+    cycle_id: int | None = None,
+    since_hours: int = 24,
+    limit: int = 100,
+    _: object = Depends(require_approved_user),
+) -> dict[str, object]:
+    """Detail rows for orders the pre-submit slippage / liquidity guard
+    rejected — by cycle when ``cycle_id`` is supplied, otherwise the last
+    ``since_hours`` (capped at 168). Scoped to approved operators, same
+    gating as `/api/dashboard/recent-cycles`.
+    """
+    limit = max(1, min(500, int(limit)))
+    items = await dashboard.get_slippage_guard_rejects(
+        cycle_id=cycle_id, since_hours=since_hours, limit=limit,
+    )
+    return {"items": items, "cycle_id": cycle_id}
+
+
 @app.get("/api/dashboard/uw-signals")
 async def dashboard_uw_signals(
     limit: int = 20,

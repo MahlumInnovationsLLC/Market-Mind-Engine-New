@@ -255,16 +255,24 @@ async def get_recent_cycles(limit: int = 10) -> list[dict[str, Any]]:
         rows = await db.fetch(
             """
             SELECT
-              id,
-              vertical,
-              picks_evaluated,
-              trades_placed,
-              errors,
-              to_char(started_at,   'YYYY-MM-DD"T"HH24:MI:SSZ') AS started_at,
-              to_char(completed_at, 'YYYY-MM-DD"T"HH24:MI:SSZ') AS completed_at,
-              extract(epoch from (completed_at - started_at))::float AS duration_seconds
-            FROM trading_cycles
-            ORDER BY started_at DESC NULLS LAST
+              c.id,
+              c.vertical,
+              c.picks_evaluated,
+              c.trades_placed,
+              c.errors,
+              to_char(c.started_at,   'YYYY-MM-DD"T"HH24:MI:SSZ') AS started_at,
+              to_char(c.completed_at, 'YYYY-MM-DD"T"HH24:MI:SSZ') AS completed_at,
+              extract(epoch from (c.completed_at - c.started_at))::float AS duration_seconds,
+              coalesce((
+                SELECT count(*)::int FROM order_lifecycle ol
+                 WHERE ol.event_type = 'rejected'
+                   AND ol.metadata->>'reason' = 'slippage_guard'
+                   AND (ol.vertical IS NULL OR c.vertical IS NULL OR ol.vertical = c.vertical)
+                   AND ol.created_at >= c.started_at
+                   AND ol.created_at <= coalesce(c.completed_at, now())
+              ), 0)                                                  AS slippage_guard_rejects
+            FROM trading_cycles c
+            ORDER BY c.started_at DESC NULLS LAST
             LIMIT $1
             """,
             limit,
@@ -272,6 +280,129 @@ async def get_recent_cycles(limit: int = 10) -> list[dict[str, Any]]:
         return [dict(r) for r in rows]
     except Exception as e:
         log.warning("recent_cycles failed: %s", e)
+        return []
+
+
+async def get_slippage_guard_rejects(
+    *,
+    cycle_id: int | None = None,
+    since_hours: int = 24,
+    limit: int = 100,
+) -> list[dict[str, Any]]:
+    """Return recent slippage-guard rejection rows from `order_lifecycle`.
+
+    Each row carries the metadata the lifecycle attached at reject time
+    (market ticker, requested vs. fillable depth, worst projected fill
+    price, slippage in cents, model edge in cents, and how much of that
+    edge would have been erased).
+
+    When ``cycle_id`` is provided the result is scoped to rejects whose
+    ``created_at`` falls inside that cycle's [started_at, completed_at]
+    window (matching the per-cycle counter exposed by
+    :func:`get_recent_cycles`). Otherwise the query falls back to the
+    last ``since_hours`` of activity.
+    """
+    limit = max(1, min(500, int(limit)))
+    try:
+        if cycle_id is not None:
+            rows = await db.fetch(
+                """
+                WITH c AS (
+                  SELECT id, vertical, started_at, completed_at
+                    FROM trading_cycles WHERE id = $1
+                )
+                SELECT
+                  ol.id,
+                  ol.market_id                                              AS market_ticker,
+                  ol.side,
+                  ol.vertical,
+                  to_char(ol.created_at, 'YYYY-MM-DD"T"HH24:MI:SSZ')        AS created_at,
+                  ol.metadata->>'detail'                                    AS detail,
+                  (ol.metadata->>'requested_count')::int                    AS requested_count,
+                  (ol.metadata->>'filled_available')::int                   AS filled_available,
+                  nullif(ol.metadata->>'worst_fill_price_cents','')::int    AS worst_fill_price_cents,
+                  nullif(ol.metadata->>'limit_price_cents','')::int         AS limit_price_cents,
+                  nullif(ol.metadata->>'slippage_cents','')::int            AS slippage_cents,
+                  nullif(ol.metadata->>'model_edge_cents','')::float        AS model_edge_cents,
+                  nullif(ol.metadata->>'edge_erased_pct','')::float         AS edge_erased_pct,
+                  nullif(ol.metadata->>'threshold_pct','')::float           AS threshold_pct,
+                  c.id                                                      AS cycle_id
+                  FROM order_lifecycle ol JOIN c ON true
+                 WHERE ol.event_type = 'rejected'
+                   AND ol.metadata->>'reason' = 'slippage_guard'
+                   AND (ol.vertical IS NULL OR c.vertical IS NULL OR ol.vertical = c.vertical)
+                   AND ol.created_at >= c.started_at
+                   AND ol.created_at <= coalesce(c.completed_at, now())
+                 ORDER BY ol.created_at DESC
+                 LIMIT $2
+                """,
+                int(cycle_id), limit,
+            )
+        else:
+            since = max(1, min(168, int(since_hours)))
+            rows = await db.fetch(
+                f"""
+                SELECT
+                  ol.id,
+                  ol.market_id                                              AS market_ticker,
+                  ol.side,
+                  ol.vertical,
+                  to_char(ol.created_at, 'YYYY-MM-DD"T"HH24:MI:SSZ')        AS created_at,
+                  ol.metadata->>'detail'                                    AS detail,
+                  (ol.metadata->>'requested_count')::int                    AS requested_count,
+                  (ol.metadata->>'filled_available')::int                   AS filled_available,
+                  nullif(ol.metadata->>'worst_fill_price_cents','')::int    AS worst_fill_price_cents,
+                  nullif(ol.metadata->>'limit_price_cents','')::int         AS limit_price_cents,
+                  nullif(ol.metadata->>'slippage_cents','')::int            AS slippage_cents,
+                  nullif(ol.metadata->>'model_edge_cents','')::float        AS model_edge_cents,
+                  nullif(ol.metadata->>'edge_erased_pct','')::float         AS edge_erased_pct,
+                  nullif(ol.metadata->>'threshold_pct','')::float           AS threshold_pct,
+                  NULL::bigint                                              AS cycle_id
+                  FROM order_lifecycle ol
+                 WHERE ol.event_type = 'rejected'
+                   AND ol.metadata->>'reason' = 'slippage_guard'
+                   AND ol.created_at >= now() - interval '{since} hours'
+                 ORDER BY ol.created_at DESC
+                 LIMIT $1
+                """,
+                limit,
+            )
+        return [dict(r) for r in rows]
+    except Exception as e:
+        log.warning("slippage_guard_rejects failed: %s", e)
+        return []
+
+
+async def get_slippage_guard_top_offenders(
+    *, date_utc: str, limit: int = 10
+) -> list[dict[str, Any]]:
+    """Per-market repeat-offender list for the daily summary email.
+
+    Returns up to ``limit`` markets ordered by the number of slippage-guard
+    rejections recorded on ``date_utc`` (UTC), heaviest first.
+    """
+    limit = max(1, min(50, int(limit)))
+    try:
+        rows = await db.fetch(
+            """
+            SELECT
+              market_id                                            AS market_ticker,
+              count(*)::int                                        AS rejects,
+              max(nullif(metadata->>'edge_erased_pct','')::float)  AS max_edge_erased_pct,
+              max(nullif(metadata->>'slippage_cents','')::int)     AS max_slippage_cents
+              FROM order_lifecycle
+             WHERE event_type = 'rejected'
+               AND metadata->>'reason' = 'slippage_guard'
+               AND date_trunc('day', created_at AT TIME ZONE 'UTC') = $1::date
+             GROUP BY market_id
+             ORDER BY rejects DESC, market_id
+             LIMIT $2
+            """,
+            date_utc, limit,
+        )
+        return [dict(r) for r in rows]
+    except Exception as e:
+        log.warning("slippage_guard_top_offenders failed: %s", e)
         return []
 
 

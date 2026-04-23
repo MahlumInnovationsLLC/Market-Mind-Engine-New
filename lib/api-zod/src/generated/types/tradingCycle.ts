@@ -15,4 +15,5 @@ export interface TradingCycle {
   started_at?: string | null;
   completed_at?: string | null;
   duration_seconds?: number | null;
+  slippage_guard_rejects?: number | null;
 }

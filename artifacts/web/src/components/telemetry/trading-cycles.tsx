@@ -1,5 +1,10 @@
-import { useGetRecentCycles, getGetRecentCyclesQueryKey } from "@workspace/api-client-react";
+import { useState } from "react";
+import {
+  useGetRecentCycles,
+  getGetRecentCyclesQueryKey,
+} from "@workspace/api-client-react";
 import { useVerticalFilter } from "@/hooks/use-selected-verticals";
+import SlippageGuardRejectsPanel from "./slippage-guard-rejects";
 
 function fmtDuration(seconds: number | null | undefined): string {
   if (seconds === null || seconds === undefined) return "—";
@@ -27,6 +32,7 @@ export default function TradingCycles() {
   });
 
   const { matches } = useVerticalFilter();
+  const [expandedCycle, setExpandedCycle] = useState<number | null>(null);
 
   if (isLoading) {
     return <div className="border border-border p-4 animate-pulse h-64 bg-card" />;
@@ -52,24 +58,33 @@ export default function TradingCycles() {
               <th className="p-2 font-normal text-right">DURATION</th>
               <th className="p-2 font-normal text-right">EVAL</th>
               <th className="p-2 font-normal text-right">PLACED</th>
+              <th
+                className="p-2 font-normal text-right"
+                title="Trades skipped because the orderbook was too thin / would erode the model edge"
+              >
+                GUARD
+              </th>
               <th className="p-2 font-normal">STATUS</th>
             </tr>
           </thead>
           <tbody className="divide-y divide-border/50">
             {items.length === 0 ? (
               <tr>
-                <td colSpan={6} className="p-4 text-center text-muted-foreground">
+                <td colSpan={7} className="p-4 text-center text-muted-foreground">
                   NO_CYCLES_FOUND
                 </td>
               </tr>
             ) : (
-              items.map((c) => {
+              items.flatMap((c) => {
                 const hasError = !!c.errors;
                 const placed = c.trades_placed ?? 0;
-                return (
+                const guard = c.slippage_guard_rejects ?? 0;
+                const isExpanded = expandedCycle === c.id;
+                const rows = [
                   <tr
                     key={c.id}
                     data-focus-id={`cycle-${c.id}`}
+                    data-testid={`cycle-row-${c.id}`}
                     className="hover:bg-muted/30 transition-colors scroll-mt-24 data-[focus-flash=true]:outline data-[focus-flash=true]:outline-2 data-[focus-flash=true]:outline-accent-cyan data-[focus-flash=true]:bg-accent-cyan/10"
                   >
                     <td className="p-2 text-muted-foreground whitespace-nowrap">
@@ -85,14 +100,46 @@ export default function TradingCycles() {
                     >
                       {c.trades_placed ?? "—"}
                     </td>
+                    <td className="p-2 text-right">
+                      {guard > 0 ? (
+                        <button
+                          type="button"
+                          onClick={() =>
+                            setExpandedCycle(isExpanded ? null : c.id)
+                          }
+                          className="font-bold text-loss underline-offset-2 hover:underline focus:outline-none focus:underline"
+                          aria-expanded={isExpanded}
+                          aria-controls={`slippage-guard-panel-${c.id}`}
+                          data-testid={`guard-toggle-${c.id}`}
+                        >
+                          {guard}
+                        </button>
+                      ) : (
+                        <span className="text-muted-foreground">0</span>
+                      )}
+                    </td>
                     <td
                       className={`p-2 uppercase text-[10px] ${hasError ? "text-loss" : c.completed_at ? "text-success" : "text-muted-foreground"}`}
                       title={c.errors ?? undefined}
                     >
                       {hasError ? "ERROR" : c.completed_at ? "DONE" : "RUN"}
                     </td>
-                  </tr>
-                );
+                  </tr>,
+                ];
+                if (isExpanded) {
+                  rows.push(
+                    <tr key={`${c.id}-detail`}>
+                      <td
+                        colSpan={7}
+                        id={`slippage-guard-panel-${c.id}`}
+                        className="p-0"
+                      >
+                        <SlippageGuardRejectsPanel cycleId={c.id} />
+                      </td>
+                    </tr>,
+                  );
+                }
+                return rows;
               })
             )}
           </tbody>

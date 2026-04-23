@@ -267,6 +267,7 @@ export interface TradingCycle {
   started_at?: string | null;
   completed_at?: string | null;
   duration_seconds?: number | null;
+  slippage_guard_rejects?: number | null;
 }
 
 export interface TradingCycleList {
@@ -293,6 +294,29 @@ export interface OverFilledOrdersToday {
   date_utc: string;
   count: number;
   items: OverFilledOrder[];
+}
+
+export interface SlippageGuardReject {
+  id: number;
+  market_ticker?: string | null;
+  side?: string | null;
+  vertical?: string | null;
+  created_at?: string | null;
+  detail?: string | null;
+  requested_count?: number | null;
+  filled_available?: number | null;
+  worst_fill_price_cents?: number | null;
+  limit_price_cents?: number | null;
+  slippage_cents?: number | null;
+  model_edge_cents?: number | null;
+  edge_erased_pct?: number | null;
+  threshold_pct?: number | null;
+  cycle_id?: number | null;
+}
+
+export interface SlippageGuardRejectList {
+  items: SlippageGuardReject[];
+  cycle_id?: number | null;
 }
 
 export type SwarmDebateAnalystVerdicts =
@@ -954,6 +978,20 @@ export type GetRecentCyclesParams = {
   /**
    * @minimum 1
    * @maximum 100
+   */
+  limit?: number;
+};
+
+export type GetSlippageGuardRejectsParams = {
+  cycle_id?: number;
+  /**
+   * @minimum 1
+   * @maximum 168
+   */
+  since_hours?: number;
+  /**
+   * @minimum 1
+   * @maximum 500
    */
   limit?: number;
 };

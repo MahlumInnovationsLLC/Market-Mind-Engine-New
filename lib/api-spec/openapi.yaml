@@ -198,6 +198,28 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/OverFilledOrdersToday" }
 
+  /dashboard/slippage-guard-rejects:
+    get:
+      operationId: getSlippageGuardRejects
+      tags: [dashboard]
+      summary: Detail rows for trades the pre-submit slippage guard rejected
+      parameters:
+        - in: query
+          name: cycle_id
+          schema: { type: integer }
+        - in: query
+          name: since_hours
+          schema: { type: integer, minimum: 1, maximum: 168, default: 24 }
+        - in: query
+          name: limit
+          schema: { type: integer, minimum: 1, maximum: 500, default: 100 }
+      responses:
+        "200":
+          description: Slippage-guard rejection rows
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SlippageGuardRejectList" }
+
   /dashboard/recent-debates:
     get:
       operationId: getRecentDebates
@@ -1076,6 +1098,7 @@ components:
         started_at: { type: string, nullable: true }
         completed_at: { type: string, nullable: true }
         duration_seconds: { type: number, nullable: true }
+        slippage_guard_rejects: { type: integer, nullable: true }
       required: [id]
 
     TradingCycleList:
@@ -1115,6 +1138,35 @@ components:
           type: array
           items: { $ref: "#/components/schemas/OverFilledOrder" }
       required: [date_utc, count, items]
+
+    SlippageGuardReject:
+      type: object
+      properties:
+        id: { type: integer }
+        market_ticker: { type: string, nullable: true }
+        side: { type: string, nullable: true }
+        vertical: { type: string, nullable: true }
+        created_at: { type: string, nullable: true }
+        detail: { type: string, nullable: true }
+        requested_count: { type: integer, nullable: true }
+        filled_available: { type: integer, nullable: true }
+        worst_fill_price_cents: { type: integer, nullable: true }
+        limit_price_cents: { type: integer, nullable: true }
+        slippage_cents: { type: integer, nullable: true }
+        model_edge_cents: { type: number, nullable: true }
+        edge_erased_pct: { type: number, nullable: true }
+        threshold_pct: { type: number, nullable: true }
+        cycle_id: { type: integer, nullable: true }
+      required: [id]
+
+    SlippageGuardRejectList:
+      type: object
+      properties:
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/SlippageGuardReject" }
+        cycle_id: { type: integer, nullable: true }
+      required: [items]
 
     SwarmDebate:
       type: object

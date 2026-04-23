@@ -117,9 +117,11 @@ async def collect_summary(date_utc: str) -> dict[str, Any]:
         "cycles_completed": 0,
         "halts_today": 0,
         "drift_alerts_today": 0,
+        "slippage_guard_rejects_today": 0,
         "top_movers": [],
         "by_vertical": [],
         "by_persona": [],
+        "slippage_guard_offenders": [],
     }
     # Realized + settled count
     try:
@@ -254,6 +256,31 @@ async def collect_summary(date_utc: str) -> dict[str, Any]:
         out["by_persona"] = await aggregate_persona_day(date_utc)
     except Exception as e:
         error_log("daily_summary.by_persona", f"{type(e).__name__}: {e}")
+    # Slippage-guard rejects today (count + per-market repeat-offender list).
+    # Sourced from `order_lifecycle` rows tagged `reason=slippage_guard`.
+    try:
+        n = await db.fetchval(
+            """
+            SELECT count(*)::int FROM order_lifecycle
+             WHERE event_type = 'rejected'
+               AND metadata->>'reason' = 'slippage_guard'
+               AND date_trunc('day', created_at AT TIME ZONE 'UTC') = $1::date
+            """,
+            date_utc,
+        )
+        out["slippage_guard_rejects_today"] = int(n or 0)
+    except Exception as e:
+        error_log("daily_summary.slippage_guard_count", f"{type(e).__name__}: {e}")
+    try:
+        # Lazy import to avoid a circular: dashboard imports notifications.* too.
+        from .. import dashboard as _dashboard
+        out["slippage_guard_offenders"] = (
+            await _dashboard.get_slippage_guard_top_offenders(
+                date_utc=date_utc, limit=10,
+            )
+        )
+    except Exception as e:
+        error_log("daily_summary.slippage_guard_offenders", f"{type(e).__name__}: {e}")
     return out
 
 

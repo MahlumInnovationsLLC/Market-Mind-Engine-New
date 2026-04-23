@@ -1187,9 +1187,11 @@ def daily_pnl_summary(
     cycles_completed: int,
     halts_today: int,
     drift_alerts_today: int,
+    slippage_guard_rejects_today: int = 0,
     top_movers: list[dict[str, Any]] | None = None,
     by_vertical: list[dict[str, Any]] | None = None,
     by_persona: list[dict[str, Any]] | None = None,
+    slippage_guard_offenders: list[dict[str, Any]] | None = None,
     dry_run: bool = False,
 ) -> dict[str, Any]:
     fmt_cents = lambda c: f"{'+' if c >= 0 else '-'}${abs(c) / 100.0:,.2f}"
@@ -1208,6 +1210,7 @@ def daily_pnl_summary(
         ("cycles_completed", cycles_completed),
         ("halts_today", halts_today),
         ("drift_alerts_today", drift_alerts_today),
+        ("slippage_guard_rejects_today", slippage_guard_rejects_today),
     ]
     body = "Daily Axiom-Predict summary.\n\n" + _format_lines(rows) + "\n"
     if top_movers:
@@ -1220,12 +1223,14 @@ def daily_pnl_summary(
             )
     body += _render_by_vertical(by_vertical, fmt_cents)
     body += _render_by_persona(by_persona)
+    body += _render_slippage_guard_offenders(slippage_guard_offenders)
     html_body = _render_daily_pnl_summary_html(
         date_utc=date_utc,
         summary_rows=rows,
         top_movers=top_movers,
         by_vertical=by_vertical,
         by_persona=by_persona,
+        slippage_guard_offenders=slippage_guard_offenders,
         fmt_cents=fmt_cents,
     )
     return _dispatch(
@@ -1258,6 +1263,29 @@ def _render_by_vertical(
             f"{float(r.get('win_rate_pct') or 0.0):>5.1f}% "
             f"{float(r.get('avg_edge') or 0.0):>+6.3f} "
             f"{brier_s:>6}\n"
+        )
+    return out
+
+
+def _render_slippage_guard_offenders(rows: list[dict[str, Any]] | None) -> str:
+    out = "\nSlippage-guard repeat offenders (markets rejected today):\n"
+    if not rows:
+        out += "  (no slippage-guard rejections today)\n"
+        return out
+    header = (
+        f"  {'market':<28} {'rejects':>7} "
+        f"{'max_slip':>9} {'max_erased%':>11}\n"
+    )
+    out += header
+    for r in rows:
+        slip = r.get("max_slippage_cents")
+        slip_s = f"{int(slip)}¢" if isinstance(slip, (int, float)) else "  -  "
+        erased = r.get("max_edge_erased_pct")
+        erased_s = f"{float(erased):.1f}" if isinstance(erased, (int, float)) else "  -  "
+        out += (
+            f"  {str(r.get('market_ticker') or '?'):<28} "
+            f"{int(r.get('rejects') or 0):>7} "
+            f"{slip_s:>9} {erased_s:>11}\n"
         )
     return out
 
@@ -1426,6 +1454,42 @@ def _render_by_persona_html(rows: list[dict[str, Any]] | None) -> str:
     return title + _html_table(headers, body_rows)
 
 
+def _render_slippage_guard_offenders_html(
+    rows: list[dict[str, Any]] | None,
+) -> str:
+    title = (
+        '<h3 style="margin:24px 0 8px 0;font-size:14px;color:#111827;">'
+        "Slippage-guard offenders</h3>"
+        '<p style="margin:0 0 8px 0;color:#6B7280;font-size:12px;">'
+        "Markets where the pre-submit guard rejected at least one order today.</p>"
+    )
+    if not rows:
+        return (
+            title
+            + '<p style="margin:0;color:#6B7280;font-size:13px;font-style:italic;">'
+              "No slippage-guard rejections today.</p>"
+        )
+    headers = [
+        ("Market", "left"),
+        ("Rejects", "right"),
+        ("Max slip", "right"),
+        ("Max edge erased", "right"),
+    ]
+    body_rows = []
+    for r in rows:
+        slip = r.get("max_slippage_cents")
+        slip_s = f"{int(slip)}¢" if isinstance(slip, (int, float)) else "—"
+        erased = r.get("max_edge_erased_pct")
+        erased_s = f"{float(erased):.1f}%" if isinstance(erased, (int, float)) else "—"
+        body_rows.append([
+            _html_escape(r.get("market_ticker") or "?"),
+            _html_escape(int(r.get("rejects") or 0)),
+            _html_escape(slip_s),
+            _html_escape(erased_s),
+        ])
+    return title + _html_table(headers, body_rows)
+
+
 def _render_daily_pnl_summary_html(
     *,
     date_utc: str,
@@ -1433,6 +1497,7 @@ def _render_daily_pnl_summary_html(
     top_movers: list[dict[str, Any]] | None,
     by_vertical: list[dict[str, Any]] | None,
     by_persona: list[dict[str, Any]] | None,
+    slippage_guard_offenders: list[dict[str, Any]] | None = None,
     fmt_cents,
 ) -> str:
     overview_headers = [("Metric", "left"), ("Value", "right")]
@@ -1470,6 +1535,7 @@ def _render_daily_pnl_summary_html(
 
     by_vertical_html = _render_by_vertical_html(by_vertical, fmt_cents)
     by_persona_html = _render_by_persona_html(by_persona)
+    slippage_html = _render_slippage_guard_offenders_html(slippage_guard_offenders)
 
     return f"""<!DOCTYPE html>
 <html>
@@ -1489,6 +1555,7 @@ def _render_daily_pnl_summary_html(
             {movers_html}
             {by_vertical_html}
             {by_persona_html}
+            {slippage_html}
           </td>
         </tr>
         <tr>

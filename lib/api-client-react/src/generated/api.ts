@@ -45,6 +45,7 @@ import type {
   GetRecentCyclesParams,
   GetRecentDebatesParams,
   GetRecentTradesParams,
+  GetSlippageGuardRejectsParams,
   GetVerticalPerformanceParams,
   GetVerticalsOverviewParams,
   HealthStatus,
@@ -67,6 +68,7 @@ import type {
   SettleMarketResult,
   SettlementCycleResult,
   SettlementStatus,
+  SlippageGuardRejectList,
   SwarmDebateList,
   SwarmDebateRequest,
   SwarmDebateResult,
@@ -1082,6 +1084,112 @@ export function useGetOverFilledOrdersToday<
   request?: SecondParameter<typeof customFetch>;
 }): UseQueryResult<TData, TError> & { queryKey: QueryKey } {
   const queryOptions = getGetOverFilledOrdersTodayQueryOptions(options);
+
+  const query = useQuery(queryOptions) as UseQueryResult<TData, TError> & {
+    queryKey: QueryKey;
+  };
+
+  return { ...query, queryKey: queryOptions.queryKey };
+}
+
+/**
+ * @summary Detail rows for trades the pre-submit slippage guard rejected
+ */
+export const getGetSlippageGuardRejectsUrl = (
+  params?: GetSlippageGuardRejectsParams,
+) => {
+  const normalizedParams = new URLSearchParams();
+
+  Object.entries(params || {}).forEach(([key, value]) => {
+    if (value !== undefined) {
+      normalizedParams.append(key, value === null ? "null" : value.toString());
+    }
+  });
+
+  const stringifiedParams = normalizedParams.toString();
+
+  return stringifiedParams.length > 0
+    ? `/api/dashboard/slippage-guard-rejects?${stringifiedParams}`
+    : `/api/dashboard/slippage-guard-rejects`;
+};
+
+export const getSlippageGuardRejects = async (
+  params?: GetSlippageGuardRejectsParams,
+  options?: RequestInit,
+): Promise<SlippageGuardRejectList> => {
+  return customFetch<SlippageGuardRejectList>(
+    getGetSlippageGuardRejectsUrl(params),
+    {
+      ...options,
+      method: "GET",
+    },
+  );
+};
+
+export const getGetSlippageGuardRejectsQueryKey = (
+  params?: GetSlippageGuardRejectsParams,
+) => {
+  return [
+    `/api/dashboard/slippage-guard-rejects`,
+    ...(params ? [params] : []),
+  ] as const;
+};
+
+export const getGetSlippageGuardRejectsQueryOptions = <
+  TData = Awaited<ReturnType<typeof getSlippageGuardRejects>>,
+  TError = ErrorType<unknown>,
+>(
+  params?: GetSlippageGuardRejectsParams,
+  options?: {
+    query?: UseQueryOptions<
+      Awaited<ReturnType<typeof getSlippageGuardRejects>>,
+      TError,
+      TData
+    >;
+    request?: SecondParameter<typeof customFetch>;
+  },
+) => {
+  const { query: queryOptions, request: requestOptions } = options ?? {};
+
+  const queryKey =
+    queryOptions?.queryKey ?? getGetSlippageGuardRejectsQueryKey(params);
+
+  const queryFn: QueryFunction<
+    Awaited<ReturnType<typeof getSlippageGuardRejects>>
+  > = ({ signal }) =>
+    getSlippageGuardRejects(params, { signal, ...requestOptions });
+
+  return { queryKey, queryFn, ...queryOptions } as UseQueryOptions<
+    Awaited<ReturnType<typeof getSlippageGuardRejects>>,
+    TError,
+    TData
+  > & { queryKey: QueryKey };
+};
+
+export type GetSlippageGuardRejectsQueryResult = NonNullable<
+  Awaited<ReturnType<typeof getSlippageGuardRejects>>
+>;
+export type GetSlippageGuardRejectsQueryError = ErrorType<unknown>;
+
+/**
+ * @summary Detail rows for trades the pre-submit slippage guard rejected
+ */
+
+export function useGetSlippageGuardRejects<
+  TData = Awaited<ReturnType<typeof getSlippageGuardRejects>>,
+  TError = ErrorType<unknown>,
+>(
+  params?: GetSlippageGuardRejectsParams,
+  options?: {
+    query?: UseQueryOptions<
+      Awaited<ReturnType<typeof getSlippageGuardRejects>>,
+      TError,
+      TData
+    >;
+    request?: SecondParameter<typeof customFetch>;
+  },
+): UseQueryResult<TData, TError> & { queryKey: QueryKey } {
+  const queryOptions = getGetSlippageGuardRejectsQueryOptions(params, options);
 
   const query = useQuery(queryOptions) as UseQueryResult<TData, TError> & {
     queryKey: QueryKey;
