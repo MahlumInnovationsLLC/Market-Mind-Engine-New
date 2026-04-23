@@ -130,10 +130,51 @@ _lock = asyncio.Lock()
 # In-memory cache of deserialized predictor objects keyed by relative name.
 _loaded_objects: dict[str, Any] = {}
 _source_path_added = False
+# Boot-cycle guard so a manifest-mismatch alert fires at most once per
+# process. Reset by `ensure_artifacts(force=True)` so an operator-driven
+# reload that fails again will re-page.
+_integrity_alert_sent = False
 
 
 def get_state() -> ModelsState:
     return _state
+
+
+def _maybe_alert_integrity_failure(
+    *,
+    manifest_version: str | None,
+    missing: list[str],
+    mismatch: list[str],
+    error: str,
+) -> None:
+    """Page the operator the first time manifest verification fails this
+    boot cycle. Subsequent failures within the same process are
+    suppressed so we don't spam Postmark on every retry. Reset by
+    `ensure_artifacts(force=True)`.
+
+    Failures inside the alert path are swallowed — the loader's job
+    here is to surface the bad state, not to break further on a flaky
+    notification channel.
+    """
+    global _integrity_alert_sent
+    if _integrity_alert_sent:
+        return
+    try:
+        from .notifications import alerts as _alerts
+        _alerts.model_integrity_failure(
+            manifest_version=manifest_version,
+            missing=missing,
+            mismatch=mismatch,
+            error=error,
+        )
+        _integrity_alert_sent = True
+        log.warning(
+            "[models_loader] dispatched model-integrity alert "
+            "(missing=%d mismatch=%d version=%s)",
+            len(missing), len(mismatch), manifest_version,
+        )
+    except Exception as e:  # pragma: no cover — alerting must not break boot
+        log.warning("[models_loader] integrity alert dispatch failed: %s", e)
 
 
 # ---------------------------------------------------------------------------
@@ -422,11 +463,12 @@ async def ensure_artifacts(*, force: bool = False) -> ModelsState:
     to clear the in-memory state (and the cached predictor objects) and
     rerun the pipeline — used by `/api/models/reload`.
     """
-    global _state
+    global _state, _integrity_alert_sent
     async with _lock:
         if force:
             _loaded_objects.clear()
             _state = ModelsState()
+            _integrity_alert_sent = False
         if _state.ready:
             return _state
         _state.in_progress = True
@@ -472,15 +514,25 @@ async def ensure_artifacts(*, force: bool = False) -> ModelsState:
             check = _verify_against_manifest(predictors, manifest)
             _state.manifest_check = check
             if not check["ok"]:
-                bad = [m["name"] for m in check["missing"]] + [
-                    m["name"] for m in check["mismatch"]
-                ]
-                raise RuntimeError(
+                missing_names = [m["name"] for m in check["missing"]]
+                mismatch_names = [m["name"] for m in check["mismatch"]]
+                bad = missing_names + mismatch_names
+                err = RuntimeError(
                     "manifest verification failed: "
                     f"missing={len(check['missing'])} "
                     f"mismatch={len(check['mismatch'])} "
                     f"files={bad}"
                 )
+                # Page the operator on the very first failure of this
+                # boot cycle. Subsequent retries (e.g. periodic
+                # `ensure_artifacts` callers) won't re-spam.
+                _maybe_alert_integrity_failure(
+                    manifest_version=(_state.manifest or {}).get("version"),
+                    missing=missing_names,
+                    mismatch=mismatch_names,
+                    error=str(err),
+                )
+                raise err
             log.info(
                 "[models_loader] manifest OK matched=%d/%d unexpected=%d",
                 check["matched_count"],

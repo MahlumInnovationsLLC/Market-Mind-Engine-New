@@ -855,6 +855,64 @@ def drift(
 
 
 # ---------------------------------------------------------------------------
+# Model integrity verification failure (manifest mismatch on boot)
+# ---------------------------------------------------------------------------
+
+
+def model_integrity_failure(
+    *,
+    manifest_version: str | None,
+    missing: list[str] | None = None,
+    mismatch: list[str] | None = None,
+    error: str | None = None,
+    dry_run: bool = False,
+) -> dict[str, Any]:
+    """Operator alert: the on-boot manifest verification refused readiness.
+
+    Fired from `app.models_loader.ensure_artifacts` when the scanned
+    predictors don't match the published manifest (missing required
+    files or sha256 mismatch). The trader stays in degraded mode until
+    the deployment is fixed, so paging the operator immediately is the
+    whole point of this alert.
+    """
+    miss = list(missing or [])
+    mis = list(mismatch or [])
+    bad_count = len(miss) + len(mis)
+    subject = (
+        f"[axiom][MODEL INTEGRITY] Manifest verification failed "
+        f"({bad_count} bad file(s), version={manifest_version or 'unknown'})"
+    )
+
+    def _bullets(label: str, items: list[str]) -> str:
+        if not items:
+            return f"  {label}: (none)\n"
+        return f"  {label}:\n" + "".join(f"    - {n}\n" for n in items)
+
+    body = (
+        "The model loader refused to mark itself ready: the predictor "
+        "files on disk do not match the published manifest. The trader "
+        "is in degraded mode and will not place orders until the "
+        "deployment is repaired.\n\n"
+        + _format_lines(
+            [
+                ("manifest_version", manifest_version or "(unknown)"),
+                ("missing_count", len(miss)),
+                ("mismatch_count", len(mis)),
+                ("at", _utc_now_iso()),
+            ]
+        )
+        + "\n\n"
+        + _bullets("missing files", miss)
+        + _bullets("sha256 mismatch", mis)
+    )
+    if error:
+        body += f"\nLoader error:\n  {error}\n"
+    return _dispatch(
+        subject, body, tag="model-integrity-failure", dry_run=dry_run
+    )
+
+
+# ---------------------------------------------------------------------------
 # WebSocket subscriber stuck / silent
 # ---------------------------------------------------------------------------
 

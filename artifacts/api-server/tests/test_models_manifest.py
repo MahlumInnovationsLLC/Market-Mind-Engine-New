@@ -239,3 +239,84 @@ def test_ensure_artifacts_refuses_ready_when_required_missing(
     assert state.error is not None
     assert state.manifest_check["missing"]
     assert state.manifest_check["missing"][0]["name"] == "models/saved/meta_model.pkl"
+
+
+# --- operator alert on manifest-mismatch -----------------------------------
+
+
+def _patch_alert(monkeypatch):
+    """Stub the integrity alert helper and capture every call."""
+    calls: list[dict] = []
+
+    def fake_alert(**kwargs):
+        calls.append(kwargs)
+        return {"queued": True}
+
+    from app.notifications import alerts as _alerts
+    monkeypatch.setattr(_alerts, "model_integrity_failure", fake_alert)
+    return calls
+
+
+def test_ensure_artifacts_pages_operator_on_manifest_mismatch(
+    monkeypatch, patched_pipeline
+):
+    sha_disk = _sha("CORRUPTED")
+    sha_expected = _sha("meta")
+    _set_scan(monkeypatch, {
+        "models/saved/meta_model.pkl": {
+            "size": 1, "mtime": 0.0, "sha256": sha_disk, "version": sha_disk[:12],
+        },
+    })
+    _patch_download(monkeypatch, json.dumps({
+        "version": "v42",
+        "predictors": {
+            "models/saved/meta_model.pkl": {"sha256": sha_expected, "version": "1.0"},
+            "models/saved/missing_required.pkl": {"sha256": _sha("b")},
+        },
+    }))
+    calls = _patch_alert(monkeypatch)
+    models_loader._integrity_alert_sent = False
+
+    state = asyncio.run(models_loader.ensure_artifacts(force=True))
+    assert state.ready is False
+    assert len(calls) == 1
+    payload = calls[0]
+    assert payload["manifest_version"] == "v42"
+    assert "models/saved/meta_model.pkl" in payload["mismatch"]
+    assert "models/saved/missing_required.pkl" in payload["missing"]
+    assert "manifest verification failed" in payload["error"]
+
+
+def test_integrity_alert_suppressed_within_same_boot_cycle(
+    monkeypatch, patched_pipeline
+):
+    sha_disk = _sha("CORRUPTED")
+    sha_expected = _sha("meta")
+    _set_scan(monkeypatch, {
+        "models/saved/meta_model.pkl": {
+            "size": 1, "mtime": 0.0, "sha256": sha_disk, "version": sha_disk[:12],
+        },
+    })
+    _patch_download(monkeypatch, json.dumps({
+        "version": "v1",
+        "predictors": {
+            "models/saved/meta_model.pkl": {"sha256": sha_expected, "version": "1.0"},
+        },
+    }))
+    calls = _patch_alert(monkeypatch)
+    models_loader._integrity_alert_sent = False
+
+    # First failed boot -> page once.
+    asyncio.run(models_loader.ensure_artifacts(force=True))
+    assert len(calls) == 1
+
+    # Subsequent ensure_artifacts call within the same process must NOT
+    # re-page (boot-cycle dedupe). force=False so the in-memory state
+    # carries over.
+    asyncio.run(models_loader.ensure_artifacts(force=False))
+    assert len(calls) == 1
+
+    # An operator-driven reload (force=True) clears the guard, so a
+    # repeat failure pages again — operators expect feedback on reload.
+    asyncio.run(models_loader.ensure_artifacts(force=True))
+    assert len(calls) == 2
