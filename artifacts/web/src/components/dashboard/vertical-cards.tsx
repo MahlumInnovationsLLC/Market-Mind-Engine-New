@@ -1,13 +1,64 @@
+import { useMemo } from "react";
 import { Link } from "wouter";
+import { useAuth } from "@clerk/react";
+import { useQuery } from "@tanstack/react-query";
 import {
+  getGetMyAccessQueryKey,
   getGetVerticalsOverviewQueryKey,
+  useGetMyAccess,
   useGetVerticalsOverview,
   type VerticalsOverviewEntry,
 } from "@workspace/api-client-react";
+import { apiFetch } from "@/lib/api";
 import { GlassCard } from "@/components/ui/glass-card";
 import { SectionHeader } from "@/components/ui/section-header";
 import { useVerticalFilter } from "@/hooks/use-selected-verticals";
 import { usePeriod } from "./period-context";
+
+type PersonaOverrideSummary = {
+  disabledByVertical: Record<string, string[]>;
+  totalVerticalsWithOverrides: number;
+};
+
+type PersonaTogglesPayload = {
+  items: Array<{
+    vertical: string;
+    vertical_label?: string;
+    persona_profile?: string | null;
+    personas: Array<{ id: string; display?: string; enabled: boolean }>;
+    orphaned?: boolean;
+  }>;
+};
+
+function usePersonaOverrideSummary(enabled: boolean): PersonaOverrideSummary | null {
+  const { getToken } = useAuth();
+  const tokenFn = useMemo(
+    () => () => getToken().then((t) => t ?? null),
+    [getToken],
+  );
+  const { data } = useQuery<PersonaTogglesPayload>({
+    queryKey: ["admin", "persona-toggles", "summary"],
+    queryFn: () =>
+      apiFetch<PersonaTogglesPayload>("/api/admin/persona-toggles", {
+        getToken: tokenFn,
+      }),
+    enabled,
+    staleTime: 60_000,
+    refetchInterval: 120_000,
+  });
+  return useMemo(() => {
+    if (!data) return null;
+    const disabledByVertical: Record<string, string[]> = {};
+    for (const v of data.items) {
+      const off = v.personas.filter((p) => !p.enabled).map((p) => p.display || p.id);
+      if (off.length > 0) disabledByVertical[v.vertical] = off;
+    }
+    return {
+      disabledByVertical,
+      totalVerticalsWithOverrides: Object.keys(disabledByVertical).length,
+    };
+  }, [data]);
+}
 
 function fmtCurrency(n: number | null | undefined): string {
   if (n === null || n === undefined || Number.isNaN(n)) return "—";
@@ -35,7 +86,13 @@ function pnlClass(n: number | null | undefined): string {
   return "text-foreground";
 }
 
-function VerticalCard({ entry }: { entry: VerticalsOverviewEntry }) {
+function VerticalCard({
+  entry,
+  disabledPersonas,
+}: {
+  entry: VerticalsOverviewEntry;
+  disabledPersonas?: string[];
+}) {
   const isPnlPos = entry.pnl > 0;
   const isPnlNeg = entry.pnl < 0;
   const slug = entry.vertical;
@@ -70,6 +127,15 @@ function VerticalCard({ entry }: { entry: VerticalsOverviewEntry }) {
             ) : null}
             {!entry.enabled ? (
               <span className="border border-loss/60 px-1 text-loss">OFF</span>
+            ) : null}
+            {disabledPersonas && disabledPersonas.length > 0 ? (
+              <span
+                className="border border-accent-warning/60 px-1 text-accent-warning"
+                title={`Personas disabled: ${disabledPersonas.join(", ")}`}
+                data-testid={`badge-persona-override-${slug}`}
+              >
+                {disabledPersonas.length} OFF
+              </span>
             ) : null}
           </div>
         </div>
@@ -130,6 +196,11 @@ export default function VerticalCards() {
     },
   });
   const { matches } = useVerticalFilter();
+  const { data: access } = useGetMyAccess({
+    query: { queryKey: getGetMyAccessQueryKey(), staleTime: 60_000 },
+  });
+  const isAdmin = !!access?.is_admin;
+  const personaSummary = usePersonaOverrideSummary(isAdmin);
 
   const all = data?.verticals ?? [];
   const visible = all
@@ -140,6 +211,8 @@ export default function VerticalCards() {
       return Math.abs(b.pnl) - Math.abs(a.pnl);
     });
 
+  const overrideCount = personaSummary?.totalVerticalsWithOverrides ?? 0;
+
   return (
     <div data-testid="vertical-cards">
       <SectionHeader
@@ -147,6 +220,33 @@ export default function VerticalCards() {
         title="Per-vertical performance"
         subtitle="Click a card to drill into intelligence + calibration."
       />
+      {isAdmin && overrideCount > 0 ? (
+        <div
+          className="mb-3 flex flex-wrap items-center gap-2 border border-accent-warning/40 bg-accent-warning/5 px-3 py-2 text-[11px]"
+          data-testid="persona-override-summary"
+        >
+          <span className="font-bold uppercase tracking-widest text-accent-warning">
+            Persona overrides
+          </span>
+          <span className="text-muted-foreground normal-case tracking-normal">
+            {overrideCount} {overrideCount === 1 ? "vertical is" : "verticals are"}{" "}
+            running with non-default personas:
+          </span>
+          {Object.entries(personaSummary?.disabledByVertical ?? {}).map(
+            ([v, disabled]) => (
+              <Link
+                key={v}
+                href="/system?tab=risk"
+                title={`Disabled: ${disabled.join(", ")}`}
+                className="border border-accent-warning/60 px-1.5 py-0.5 uppercase tracking-widest text-accent-warning hover:bg-accent-warning/10"
+                data-testid={`persona-override-chip-${v}`}
+              >
+                {v} · {disabled.length} OFF
+              </Link>
+            ),
+          )}
+        </div>
+      ) : null}
       {isLoading && all.length === 0 ? (
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
           {[0, 1, 2, 3].map((i) => (
@@ -169,7 +269,15 @@ export default function VerticalCards() {
       ) : (
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
           {visible.map((v) => (
-            <VerticalCard key={v.vertical} entry={v} />
+            <VerticalCard
+              key={v.vertical}
+              entry={v}
+              disabledPersonas={
+                isAdmin
+                  ? personaSummary?.disabledByVertical[v.vertical]
+                  : undefined
+              }
+            />
           ))}
         </div>
       )}
