@@ -1,17 +1,15 @@
-import { useEffect, useMemo, useState } from "react";
+import { lazy, Suspense, useEffect, useMemo, useState } from "react";
 import { Link } from "wouter";
-import { SignInButton, SignUpButton, useAuth } from "@clerk/react";
-import {
-  Area,
-  AreaChart,
-  CartesianGrid,
-  ResponsiveContainer,
-  Tooltip,
-  XAxis,
-  YAxis,
-} from "recharts";
 import { apiFetch } from "@/lib/api";
+import { hasClerkSession } from "@/lib/clerk-session";
 import { PublicFooter, PublicNav } from "@/components/public/public-nav";
+
+// Recharts is ~100kb gzipped — lazy-load it as its own chunk so the
+// marketing hero / methodology / pricing sections can paint before
+// the chart code is fetched and parsed.
+const EquityChart = lazy(
+  () => import("@/components/public/equity-chart"),
+);
 
 type RangeKey = "7" | "30" | "90";
 
@@ -110,7 +108,16 @@ function formatInt(n: number | null | undefined): string {
 }
 
 export default function MarketingPage() {
-  const { isSignedIn } = useAuth();
+  // Best-effort cookie-based check so the hero CTA can render the
+  // correct affordance before the Clerk SDK chunk is even fetched.
+  const [isSignedIn, setIsSignedIn] = useState<boolean>(() =>
+    hasClerkSession(),
+  );
+  useEffect(() => {
+    // Re-check on mount in case the cookie became available between
+    // module evaluation and first paint (e.g. hydration race).
+    setIsSignedIn(hasClerkSession());
+  }, []);
   const [range, setRange] = useState<RangeKey>("30");
   const [curve, setCurve] = useState<EquityPoint[]>([]);
   const [curveLoading, setCurveLoading] = useState(true);
@@ -263,15 +270,13 @@ export default function MarketingPage() {
                 Open operator console →
               </Link>
             ) : (
-              <SignUpButton mode="modal">
-                <button
-                  type="button"
-                  className="rounded-full bg-primary text-primary-foreground px-7 py-3.5 text-sm font-semibold hover:opacity-90 transition-opacity glow-primary"
-                  data-testid="button-hero-signup"
-                >
-                  Get access →
-                </button>
-              </SignUpButton>
+              <a
+                href={`${import.meta.env.BASE_URL.replace(/\/$/, "")}/sign-up`}
+                className="rounded-full bg-primary text-primary-foreground px-7 py-3.5 text-sm font-semibold hover:opacity-90 transition-opacity glow-primary"
+                data-testid="button-hero-signup"
+              >
+                Get access →
+              </a>
             )}
             <a
               href="#equity"
@@ -446,65 +451,15 @@ export default function MarketingPage() {
                 No trades in the selected window yet.
               </div>
             ) : (
-              <ResponsiveContainer width="100%" height="100%">
-                <AreaChart
-                  data={curve}
-                  margin={{ top: 10, right: 16, left: 0, bottom: 0 }}
-                >
-                  <defs>
-                    <linearGradient id="equityFill" x1="0" y1="0" x2="0" y2="1">
-                      <stop
-                        offset="0%"
-                        stopColor="hsl(189 94% 55%)"
-                        stopOpacity={0.45}
-                      />
-                      <stop
-                        offset="100%"
-                        stopColor="hsl(189 94% 55%)"
-                        stopOpacity={0}
-                      />
-                    </linearGradient>
-                  </defs>
-                  <CartesianGrid
-                    strokeDasharray="2 4"
-                    stroke="hsl(220 25% 18%)"
-                  />
-                  <XAxis
-                    dataKey="date"
-                    stroke="hsl(215 20% 70%)"
-                    tick={{ fontSize: 11, fontFamily: "Inter, sans-serif" }}
-                    tickFormatter={(v: string) => v.slice(5)}
-                    minTickGap={24}
-                  />
-                  <YAxis
-                    stroke="hsl(215 20% 70%)"
-                    tick={{ fontSize: 11, fontFamily: "Inter, sans-serif" }}
-                    tickFormatter={(v: number) => formatUsd(v)}
-                    width={70}
-                  />
-                  <Tooltip
-                    contentStyle={{
-                      background: "hsl(222 35% 7%)",
-                      border: "1px solid hsl(220 25% 18%)",
-                      borderRadius: 12,
-                      fontSize: 12,
-                      fontFamily: "Inter, sans-serif",
-                    }}
-                    labelStyle={{ color: "hsl(210 40% 98%)" }}
-                    formatter={(value: number, name: string) => [
-                      formatUsd(value, name === "daily_pnl"),
-                      name === "cumulative_pnl" ? "Cumulative" : "Daily",
-                    ]}
-                  />
-                  <Area
-                    type="monotone"
-                    dataKey="cumulative_pnl"
-                    stroke="hsl(189 94% 55%)"
-                    strokeWidth={2}
-                    fill="url(#equityFill)"
-                  />
-                </AreaChart>
-              </ResponsiveContainer>
+              <Suspense
+                fallback={
+                  <div className="h-full flex items-center justify-center text-sm text-muted-foreground">
+                    Loading chart…
+                  </div>
+                }
+              >
+                <EquityChart data={curve} />
+              </Suspense>
             )}
           </div>
           <p className="text-xs text-muted-foreground mt-4">
@@ -832,15 +787,13 @@ export default function MarketingPage() {
                 Open console →
               </Link>
             ) : (
-              <SignUpButton mode="modal">
-                <button
-                  type="button"
-                  className="rounded-full bg-primary text-primary-foreground px-7 py-3.5 text-sm font-semibold hover:opacity-90 transition-opacity glow-primary"
-                  data-testid="button-cta-signup"
-                >
-                  Create account →
-                </button>
-              </SignUpButton>
+              <a
+                href={`${import.meta.env.BASE_URL.replace(/\/$/, "")}/sign-up`}
+                className="rounded-full bg-primary text-primary-foreground px-7 py-3.5 text-sm font-semibold hover:opacity-90 transition-opacity glow-primary"
+                data-testid="button-cta-signup"
+              >
+                Create account →
+              </a>
             )}
           </div>
         </div>
@@ -924,19 +877,13 @@ function TierCard({
           {tier.cta}
         </Link>
       ) : (
-        <SignUpButton
-          mode="modal"
-          forceRedirectUrl={target}
-          signInForceRedirectUrl={target}
+        <a
+          href={`${import.meta.env.BASE_URL.replace(/\/$/, "")}/sign-up?redirect_url=${encodeURIComponent(target)}`}
+          className={cls}
+          data-testid={`button-marketing-cta-${tier.id}`}
         >
-          <button
-            type="button"
-            className={cls}
-            data-testid={`button-marketing-cta-${tier.id}`}
-          >
-            {tier.cta}
-          </button>
-        </SignUpButton>
+          {tier.cta}
+        </a>
       )}
     </div>
   );

@@ -1,5 +1,19 @@
+import { useEffect, useState } from "react";
 import { Link, useLocation } from "wouter";
-import { SignInButton, SignUpButton, useAuth } from "@clerk/react";
+import { hasClerkSession } from "@/lib/clerk-session";
+
+const basePath = import.meta.env.BASE_URL.replace(/\/$/, "");
+
+function useIsSignedIn(): boolean {
+  // Cookie-based heuristic so the public nav can render the right CTA
+  // before the Clerk SDK chunk has loaded. The server still verifies
+  // every authed request via the real session JWT.
+  const [signedIn, setSignedIn] = useState<boolean>(() => hasClerkSession());
+  useEffect(() => {
+    setSignedIn(hasClerkSession());
+  }, []);
+  return signedIn;
+}
 
 export function BrandMark({ size = 28 }: { size?: number }) {
   return (
@@ -44,7 +58,7 @@ export interface PublicNavProps {
 }
 
 export function PublicNav({ active }: PublicNavProps) {
-  const { isSignedIn } = useAuth();
+  const isSignedIn = useIsSignedIn();
   // Pathname is read solely to keep the nav re-render-aware of route changes.
   useLocation();
 
@@ -100,25 +114,21 @@ export function PublicNav({ active }: PublicNavProps) {
             </Link>
           ) : (
             <>
-              <SignInButton mode="modal">
-                <button
-                  type="button"
-                  className="px-3 py-2 text-muted-foreground hover:text-foreground transition-colors"
-                  data-testid="button-nav-signin"
-                >
-                  Sign in
-                </button>
-              </SignInButton>
-              <SignUpButton mode="modal">
-                <button
-                  type="button"
-                  className="ml-2 inline-flex items-center gap-1.5 rounded-full border border-primary/60 text-primary px-4 py-1.5 text-sm font-medium hover:bg-primary hover:text-primary-foreground transition-colors"
-                  data-testid="button-nav-signup"
-                >
-                  Get access
-                  <span aria-hidden>→</span>
-                </button>
-              </SignUpButton>
+              <a
+                href={`${basePath}/sign-in`}
+                className="px-3 py-2 text-muted-foreground hover:text-foreground transition-colors"
+                data-testid="button-nav-signin"
+              >
+                Sign in
+              </a>
+              <a
+                href={`${basePath}/sign-up`}
+                className="ml-2 inline-flex items-center gap-1.5 rounded-full border border-primary/60 text-primary px-4 py-1.5 text-sm font-medium hover:bg-primary hover:text-primary-foreground transition-colors"
+                data-testid="button-nav-signup"
+              >
+                Get access
+                <span aria-hidden>→</span>
+              </a>
             </>
           )}
         </div>
@@ -128,7 +138,7 @@ export function PublicNav({ active }: PublicNavProps) {
 }
 
 export function PublicFooter() {
-  const { isSignedIn } = useAuth();
+  const isSignedIn = useIsSignedIn();
   return (
     <footer className="border-t border-border/60 py-10">
       <div className="max-w-6xl mx-auto px-4 md:px-6 flex flex-col md:flex-row items-center justify-between gap-4 text-sm text-muted-foreground">
@@ -174,15 +184,13 @@ export function PublicFooter() {
               Console
             </Link>
           ) : (
-            <SignInButton mode="modal">
-              <button
-                type="button"
-                className="hover:text-primary transition-colors"
-                data-testid="button-footer-signin"
-              >
-                Sign in
-              </button>
-            </SignInButton>
+            <a
+              href={`${basePath}/sign-in`}
+              className="hover:text-primary transition-colors"
+              data-testid="button-footer-signin"
+            >
+              Sign in
+            </a>
           )}
         </div>
       </div>
