@@ -38,6 +38,7 @@ from ..runtime_settings import get_aggression_mode
 from ..swarm import run_debate
 from .features import build_features
 from .paper import place_order
+from .venue_router import route_for_candidate
 from .streams import pipeline_event_hub
 
 
@@ -1383,54 +1384,83 @@ async def run_cycle(vertical: str = "sports") -> CycleResult:
                 (gr.details.get("kelly") for gr in gate_results if gr.name == "kelly_fraction"),
                 None,
             )
-            placement = await place_order(
-                ctx,
-                debate_id=ctx.debate_id,
-                consensus=ctx.model_probability,
-                edge=ctx.edge,
-                kelly=kelly,
-            )
-            result.trades_placed += 1
-            # Update local aggregates so subsequent candidates in the
-            # SAME cycle see the new exposure.
-            open_n += 1
-            open_notional += intended_notional
-            per_vertical[vertical] = per_vertical.get(vertical, 0.0) + intended_notional
+            venues = route_for_candidate(cand, side=ctx.side)
+            placements: list[dict[str, Any]] = []
+            placement_errors: list[str] = []
             league_key = (cand.get("league") or "").upper()
-            if league_key:
-                per_league[league_key] = per_league.get(league_key, 0.0) + intended_notional
-                # Increment per-league trade count so the
-                # `max_daily_trades` sub-check inside
-                # `gate_per_vertical_cap` (task #196) sees the just-
-                # placed trade for subsequent candidates in the same
-                # cycle.  Without this, a single cycle can blow past
-                # EPL's 10-trade-day cap.
-                trades_today_per_league[league_key] = (
-                    trades_today_per_league.get(league_key, 0) + 1
-                )
-                matchup_val = cand.get("matchup")
-                if matchup_val:
-                    mkey = f"{league_key}:{matchup_val}"
-                    per_matchup[mkey] = per_matchup.get(mkey, 0.0) + intended_notional
-                # Same-cycle per-event aggregation (task #197) — without
-                # this, multiple legs on the same UFC card / F1 GP /
-                # tournament inside a single cycle could individually
-                # pass the per-event cap.
-                event_id_val = cand.get("event_id") or cand.get("game_id")
-                if event_id_val:
-                    ekey = f"{league_key}:{event_id_val}"
-                    per_event[ekey] = per_event.get(ekey, 0.0) + intended_notional
-                # Sunday-window aggregation must follow the *candidate's*
-                # kickoff, not wall-clock now() — otherwise a midweek
-                # pre-position on a Sunday game would not show up in the
-                # Sunday bucket, letting subsequent same-cycle candidates
-                # evade the slate concentration cap.
-                from ..sports import is_sunday_window as _isw
-                sunday_anchor = ctx.game_time or datetime.now(timezone.utc)
-                if _isw(league_key, sunday_anchor):
-                    per_sunday_window[league_key] = (
-                        per_sunday_window.get(league_key, 0.0) + intended_notional
+            event_id_val = cand.get("event_id") or cand.get("game_id")
+            from ..sports import is_sunday_window as _isw
+            sunday_anchor = ctx.game_time or datetime.now(timezone.utc)
+            sunday_match = bool(league_key) and _isw(league_key, sunday_anchor)
+            for venue in venues:
+                try:
+                    pl = await place_order(
+                        ctx,
+                        debate_id=ctx.debate_id,
+                        consensus=ctx.model_probability,
+                        edge=ctx.edge,
+                        kelly=kelly,
+                        exchange=venue,
+                        cand=cand,
                     )
+                except Exception as venue_err:
+                    placement_errors.append(f"{venue}: {venue_err}")
+                    log.warning(
+                        "place_order failed for %s on %s: %s",
+                        ctx.market_id, venue, venue_err,
+                    )
+                    continue
+                placements.append(pl)
+                # Per-venue accounting: each successful placement adds a
+                # *separate* position with its own notional, so risk-cap
+                # aggregates must increment per placement (not per
+                # candidate). Without this, fan-out to two venues would
+                # double real exposure but only count as one trade —
+                # letting subsequent same-cycle candidates evade caps.
+                result.trades_placed += 1
+                open_n += 1
+                open_notional += intended_notional
+                per_vertical[vertical] = (
+                    per_vertical.get(vertical, 0.0) + intended_notional
+                )
+                if league_key:
+                    per_league[league_key] = (
+                        per_league.get(league_key, 0.0) + intended_notional
+                    )
+                    trades_today_per_league[league_key] = (
+                        trades_today_per_league.get(league_key, 0) + 1
+                    )
+                    matchup_val = cand.get("matchup")
+                    if matchup_val:
+                        mkey = f"{league_key}:{matchup_val}"
+                        per_matchup[mkey] = (
+                            per_matchup.get(mkey, 0.0) + intended_notional
+                        )
+                    if event_id_val:
+                        ekey = f"{league_key}:{event_id_val}"
+                        per_event[ekey] = (
+                            per_event.get(ekey, 0.0) + intended_notional
+                        )
+                    if sunday_match:
+                        per_sunday_window[league_key] = (
+                            per_sunday_window.get(league_key, 0.0) + intended_notional
+                        )
+            if not placements:
+                # All venues errored — surface as a place_error so the
+                # cycle records it consistently with the prior single-
+                # venue behavior.
+                raise RuntimeError(
+                    "all venues failed: " + "; ".join(placement_errors)
+                )
+            # Pick a representative placement (first successful) for legacy
+            # consumers that expect a single `placement` dict, but also
+            # publish the full list under `placements` for venue-aware UIs.
+            placement = placements[0]
+            if len(placements) > 1:
+                placement = {
+                    **placement,
+                    "venues": [p["exchange"] for p in placements],
+                }
             await _publish({
                 "type": "candidate_complete",
                 "cycle_id": result.cycle_id,
@@ -1439,6 +1469,8 @@ async def run_cycle(vertical: str = "sports") -> CycleResult:
                 "debate_id": ctx.debate_id,
                 "outcome": "placed",
                 "placement": placement,
+                "placements": placements,
+                "venues": [p["exchange"] for p in placements],
             })
         except Exception as e:
             result.errors.append(f"place_order failed for {ctx.market_id}: {e}")

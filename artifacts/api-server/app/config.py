@@ -102,6 +102,11 @@ class Settings:
     polymarket_api_base_url: str
     polymarket_ws_url: str
 
+    # Venue routing for the orchestrator's submission step.
+    # AXIOM_VENUE_ROUTING = "kalshi" (default) | "polymarket" | "both" | "auto"
+    # See app.orchestrator.venue_router for the per-candidate decision rules.
+    venue_routing: str
+
     # Operating mode
     paper_mode: bool
     # AXIOM_TRADING_MODE = "paper" (default) | "live" | "halt"
@@ -236,6 +241,13 @@ def get_settings() -> Settings:
             f"AXIOM_TRADING_MODE must be 'paper', 'live', or 'halt' (got {trading_mode!r})"
         )
 
+    venue_routing = (os.environ.get("AXIOM_VENUE_ROUTING") or "kalshi").strip().lower()
+    if venue_routing not in ("kalshi", "polymarket", "both", "auto"):
+        raise RuntimeError(
+            "AXIOM_VENUE_ROUTING must be 'kalshi', 'polymarket', 'both', or "
+            f"'auto' (got {venue_routing!r})"
+        )
+
     return Settings(
         supabase_db_password=pwd,
         supabase_service_key=svc,
@@ -260,6 +272,7 @@ def get_settings() -> Settings:
         polymarket_ws_url=(
             os.environ.get("POLYMARKET_WS_URL") or "wss://ws-subscriptions-clob.polymarket.com/ws/"
         ),
+        venue_routing=venue_routing,
         paper_mode=_truthy(os.environ.get("AXIOM_PAPER_MODE"), default=True),
         trading_mode=trading_mode,
         orchestrator_enabled=_truthy(

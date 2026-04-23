@@ -1,16 +1,20 @@
 """Paper-mode order lifecycle.
 
-Writes a row into `trades` with trading_mode='paper' and exchange='kalshi'
-(so dashboards that filter on exchange continue to surface paper rows).
-Live-mode submission is OUT OF SCOPE for this task — when the operator
-flips AXIOM_TRADING_MODE=live without the Kalshi client (#4) being
-present, this module raises so the cycle records the failure rather
-than silently submitting nothing.
+Writes a row into `trades` (with the routed exchange tag) for the
+operator dashboard, and **also dispatches through the chosen venue's
+lifecycle** (`app.kalshi.lifecycle.submit_order` /
+`app.polymarket.lifecycle.submit_order`) so the lifecycle audit trail
+(slippage guards, dedupe, etc.) and live-mode flow run for both venues.
+
+Live-mode Polymarket signing is owned by a separate task; if a live order
+routes to Polymarket it surfaces as an `OrderRejected` from the Polymarket
+lifecycle rather than silently no-op'ing.
 """
 from __future__ import annotations
 
 import logging
 import secrets
+import uuid
 from datetime import datetime, timezone
 from typing import Any
 
@@ -28,6 +32,122 @@ def _gen_paper_trade_id() -> str:
     return f"paper_{int(datetime.now(timezone.utc).timestamp())}_{secrets.token_hex(4)}"
 
 
+def _resolve_polymarket_ids(
+    cand: dict | None, ctx: RiskContext, *, paper: bool
+) -> tuple[str, str]:
+    """Return (market_id, token_id) for a Polymarket order.
+
+    Polymarket orders need both the conditionId (market) and the ERC1155
+    outcome token id. Both come from the candidate dict when an upstream
+    feed has already mapped Kalshi <-> Polymarket. In paper mode we
+    synthesise placeholders if absent so the simulated lifecycle still
+    runs; in live mode we refuse rather than send a malformed order.
+    """
+    market_id = (
+        (cand or {}).get("polymarket_market_id")
+        or (cand or {}).get("polymarket_condition_id")
+        or ctx.market_id
+        or ""
+    )
+    token_id = (
+        (cand or {}).get("polymarket_token_id")
+        or (cand or {}).get("polymarket_yes_token_id" if ctx.side.upper() == "YES"
+                            else "polymarket_no_token_id")
+        or ""
+    )
+    if not paper:
+        if not market_id:
+            raise RuntimeError(
+                "Polymarket routing requires polymarket_market_id on the candidate"
+            )
+        if not token_id:
+            raise RuntimeError(
+                "Polymarket routing requires polymarket_token_id on the candidate"
+            )
+    if not market_id:
+        market_id = ctx.market_id or f"paper-{uuid.uuid4().hex[:8]}"
+    if not token_id:
+        token_id = f"paper-{ctx.side.lower()}-{uuid.uuid4().hex[:8]}"
+    return str(market_id), str(token_id)
+
+
+async def _dispatch_via_lifecycle(
+    *,
+    exchange: str,
+    ctx: RiskContext,
+    cand: dict | None,
+    side_norm: str,
+    quantity: int,
+    price: float,
+    paper: bool,
+    consensus: float | None,
+    edge: float | None,
+) -> dict[str, Any]:
+    """Submit through the chosen venue's lifecycle.submit_order.
+
+    Returns a small dict describing the resulting OrderRecord (or raises
+    OrderRejected / RuntimeError, which the caller surfaces as a venue
+    failure).
+    """
+    # Lifecycle expects integer cents in 1..99 for limit orders.
+    cents = int(round(price * 100))
+    cents = max(1, min(99, cents))
+    context = {
+        "model_consensus": consensus,
+        "model_edge": edge,
+        "vertical": ctx.vertical or "sports",
+    }
+    if exchange == "kalshi":
+        from ..kalshi import lifecycle as kalshi_lifecycle
+
+        req = kalshi_lifecycle.OrderRequest(
+            market_ticker=str(ctx.market_id or ""),
+            side="yes" if side_norm == "yes" else "no",
+            action="buy",
+            count=quantity,
+            limit_price_cents=cents,
+            type="limit",
+            time_in_force="GTC",
+            vertical=ctx.vertical or "sports",
+            context=context,
+        )
+        rec = await kalshi_lifecycle.submit_order(req, force_paper=paper)
+        return {
+            "exchange_order_id": rec.exchange_order_id,
+            "lifecycle_state": rec.state,
+            "filled_count": rec.filled_count,
+            "avg_fill_price_cents": rec.avg_fill_price_cents,
+            "client_order_id": rec.order_id,
+        }
+
+    # exchange == "polymarket"
+    from ..polymarket import lifecycle as polymarket_lifecycle
+
+    market_id, token_id = _resolve_polymarket_ids(cand, ctx, paper=paper)
+    req = polymarket_lifecycle.OrderRequest(
+        market_id=market_id,
+        token_id=token_id,
+        side="yes" if side_norm == "yes" else "no",
+        action="buy",
+        count=quantity,
+        limit_price_cents=cents,
+        type="limit",
+        time_in_force="GTC",
+        vertical=ctx.vertical or "sports",
+        context=context,
+    )
+    rec = await polymarket_lifecycle.submit_order(req, force_paper=paper)
+    return {
+        "exchange_order_id": rec.exchange_order_id,
+        "lifecycle_state": rec.state,
+        "filled_count": rec.filled_count,
+        "avg_fill_price_cents": rec.avg_fill_price_cents,
+        "client_order_id": rec.order_id,
+        "polymarket_market_id": market_id,
+        "polymarket_token_id": token_id,
+    }
+
+
 async def place_order(
     ctx: RiskContext,
     *,
@@ -35,14 +155,30 @@ async def place_order(
     consensus: float | None,
     edge: float | None,
     kelly: float | None,
+    exchange: str = "kalshi",
+    cand: dict | None = None,
 ) -> dict[str, Any]:
-    """Place a paper trade.  Returns a dict the orchestrator can publish
-    on the pipeline stream and persist alongside the cycle record.
+    """Place a paper (or live) trade routed to ``exchange``.
 
-    Raises NotImplementedError when AXIOM_TRADING_MODE=live (until the
-    Kalshi client lands in task #4).  RuntimeError on DB write failure
-    so the cycle counts the trade as an error rather than a silent no-op.
+    Dispatches through the chosen venue's ``lifecycle.submit_order``
+    (Kalshi or Polymarket) so the venue's audit trail / slippage guard /
+    dedupe gate run, then writes the operator-dashboard `trades` row
+    tagged with the routed exchange.
+
+    ``exchange`` defaults to ``"kalshi"`` so existing Kalshi-only behavior
+    is preserved when the operator hasn't flipped ``AXIOM_VENUE_ROUTING``.
+    Returns a dict the orchestrator publishes on the pipeline stream and
+    persists alongside the cycle record.
+
+    Raises ``RuntimeError`` (DB write) / ``OrderRejected`` (lifecycle) so
+    the cycle counts the trade as a venue failure rather than a silent
+    no-op.
     """
+    exchange = (exchange or "kalshi").strip().lower()
+    if exchange not in ("kalshi", "polymarket"):
+        raise ValueError(
+            f"place_order exchange must be 'kalshi' or 'polymarket' (got {exchange!r})"
+        )
     settings = get_settings()
     # Effective mode honors the operator override carried on the
     # RiskContext (`risk.trading_mode` in system_settings) so flipping
@@ -52,19 +188,27 @@ async def place_order(
     if isinstance(ctx.operator_overrides, dict):
         override_mode = ctx.operator_overrides.get("trading_mode")
     mode = (override_mode or settings.trading_mode or "paper").strip().lower()
-    if mode == "live":
-        # Important: do NOT silently fall back to paper here — operators
-        # who set live=ON expect submission attempts (or a clear failure).
-        raise NotImplementedError(
-            "AXIOM_TRADING_MODE=live but the Kalshi client (task #4) is not yet "
-            "available; refusing to silently degrade to paper-mode"
-        )
+    paper = mode != "live"
 
     trade_id = _gen_paper_trade_id()
     action = "buy"
     side_norm = "yes" if ctx.side.upper() == "YES" else "no"
     quantity = max(1, int(ctx.intended_quantity))
-    price = float(ctx.current_price or 0.0)
+    # Prefer the venue-specific quote when present so a Polymarket-routed
+    # order isn't priced off a Kalshi mid (and vice-versa). Falls back to
+    # ctx.current_price (historically the Kalshi mid) when the candidate
+    # only carries one side's quote.
+    venue_price: float | None = None
+    if cand is not None:
+        if exchange == "polymarket":
+            raw = cand.get("polymarket_price")
+        else:
+            raw = cand.get("kalshi_price")
+        try:
+            venue_price = float(raw) if raw is not None else None
+        except (TypeError, ValueError):
+            venue_price = None
+    price = float(venue_price if venue_price is not None else (ctx.current_price or 0.0))
 
     market_title: str | None = None
     if ctx.market_id:
@@ -73,6 +217,21 @@ async def place_order(
             market_title = titles.get(ctx.market_id)
         except Exception as e:
             log.warning("resolve market title failed for %s: %s", ctx.market_id, e)
+
+    # Submit through the chosen venue's lifecycle FIRST so a rejection
+    # (slippage, dedupe, kill switch, missing polymarket id) prevents a
+    # ghost row in the trades table.
+    lifecycle_result = await _dispatch_via_lifecycle(
+        exchange=exchange,
+        ctx=ctx,
+        cand=cand,
+        side_norm=side_norm,
+        quantity=quantity,
+        price=price,
+        paper=paper,
+        consensus=consensus,
+        edge=edge,
+    )
 
     try:
         new_id = await db.fetchval(
@@ -85,8 +244,8 @@ async def place_order(
             ) VALUES (
                 $1, $2, $3, $4, $5, $6,
                 $7, $8, 0, NULL,
-                'paper', 'kalshi', now(),
-                $9, $10, $11
+                $9, $10, now(),
+                $11, $12, $13
             )
             RETURNING id
             """,
@@ -98,13 +257,15 @@ async def place_order(
             action,
             quantity,
             price,
+            "paper" if paper else "live",
+            exchange,
             consensus,
             edge,
             kelly,
         )
     except Exception as e:
-        log.error("paper trade insert failed: %s", e)
-        raise RuntimeError(f"paper trade insert failed: {e}") from e
+        log.error("trade insert failed: %s", e)
+        raise RuntimeError(f"trade insert failed: {e}") from e
 
     return {
         "trade_id": trade_id,
@@ -114,6 +275,8 @@ async def place_order(
         "side": side_norm,
         "quantity": quantity,
         "price": price,
-        "trading_mode": "paper",
+        "trading_mode": "paper" if paper else "live",
+        "exchange": exchange,
         "debate_id": debate_id,
+        "lifecycle": lifecycle_result,
     }
