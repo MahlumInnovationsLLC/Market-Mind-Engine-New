@@ -2637,6 +2637,62 @@ async def admin_set_active_model(
     }
 
 
+# ---------------------------------------------------------------------------
+# Crypto-binary backtest (admin-only).  Wraps `app.crypto.backtest.run_backtest`
+# so the operator dashboard can run a fresh expanding-window backtest on
+# demand and render the Brier / log-loss summary plus the reliability bin
+# table — early warning that the live crypto stack is drifting versus its
+# historical performance.
+# ---------------------------------------------------------------------------
+
+
+from .crypto import backtest as crypto_backtest  # noqa: E402
+from .crypto.tickers import (  # noqa: E402
+    SUPPORTED_SYMBOLS as _CRYPTO_SYMBOLS,
+    SUPPORTED_TIMEFRAMES as _CRYPTO_TIMEFRAMES,
+)
+
+
+@app.get("/api/admin/crypto/backtest")
+async def admin_crypto_backtest(
+    symbol: str = Query("BTC"),
+    timeframe: str = Query("1h"),
+    days: int = Query(14, ge=1, le=90),
+    lookback: int = Query(50, ge=10, le=500),
+    actor: AuthedUser = Depends(require_admin),
+) -> dict[str, object]:
+    """Run an expanding-window backtest against historical OHLCV and
+    return the structured `BacktestResult` payload.
+
+    Pulls bars from `crypto_ohlcv` for the requested window, scores
+    every bar against the symmetric strike grid, and returns
+    accuracy / Brier / log-loss plus the per-bin reliability table.
+    """
+    sym = symbol.strip().upper()
+    if sym not in _CRYPTO_SYMBOLS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"unsupported symbol {sym!r}; expected one of {list(_CRYPTO_SYMBOLS)}",
+        )
+    tf = timeframe.strip().lower()
+    if tf not in _CRYPTO_TIMEFRAMES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"unsupported timeframe {tf!r}; expected one of {list(_CRYPTO_TIMEFRAMES)}",
+        )
+    try:
+        result = await crypto_backtest.run_backtest(
+            symbol=sym,
+            timeframe=tf,
+            days=days,
+            lookback=lookback,
+        )
+    except Exception:
+        log.exception("crypto backtest failed")
+        raise HTTPException(status_code=502, detail="backtest failed")
+    return result.as_dict()
+
+
 @app.get("/api/health")
 async def health_full(_: object = Depends(require_approved_user)) -> dict[str, object]:
     """Full readiness check across DB and Storage."""

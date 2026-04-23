@@ -13,6 +13,7 @@ import { HealthPanel } from "@/pages/health";
 import { NotificationPrefsPanel } from "@/pages/settings-notifications";
 import {
   AuditLogPanel,
+  CryptoBacktestPanel,
   GithubMirrorPanel,
   LeadsPanel,
   ModelsPanel,
@@ -187,6 +188,13 @@ export default function SystemPage() {
               Models
             </div>
             <ModelsPanel />
+          </GlassCard>
+
+          <GlassCard tone="solid" padding="md">
+            <div className="mb-3 text-[11px] font-semibold uppercase tracking-[0.18em] text-accent-cyan/80">
+              Crypto-binary backtest
+            </div>
+            <CryptoBacktestPanel />
           </GlassCard>
 
           <GlassCard tone="solid" padding="md">

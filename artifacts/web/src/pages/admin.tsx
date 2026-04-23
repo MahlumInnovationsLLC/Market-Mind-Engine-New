@@ -3301,3 +3301,320 @@ export function LeadsPanel() {
     </div>
   );
 }
+
+// ---------------------------------------------------------------------------
+// Crypto-binary backtest panel — exposes `/api/admin/crypto/backtest` to the
+// operator dashboard so they can spot model drift.  Renders the Brier /
+// log-loss / accuracy summary plus the reliability bin table for each
+// (symbol, timeframe) combination they request.
+// ---------------------------------------------------------------------------
+
+const CRYPTO_BACKTEST_SYMBOLS = ["BTC", "ETH"] as const;
+const CRYPTO_BACKTEST_TIMEFRAMES = ["5m", "15m", "1h"] as const;
+
+type CryptoBacktestBin = {
+  bin_lower: number;
+  bin_upper: number;
+  mean_predicted: number;
+  mean_actual: number;
+  count: number;
+};
+
+type CryptoBacktestResult = {
+  symbol: string;
+  timeframe: string;
+  n_evaluated: number;
+  accuracy: number;
+  brier_score: number;
+  log_loss: number;
+  reliability: CryptoBacktestBin[];
+  started_at: string;
+  completed_at: string;
+};
+
+function fmtMetric(v: number | null | undefined, digits = 4): string {
+  if (v === null || v === undefined || Number.isNaN(v)) return "—";
+  return v.toFixed(digits);
+}
+
+export function CryptoBacktestPanel() {
+  const { getToken, isSignedIn } = useAuth();
+  const tokenFn = useMemo(
+    () => () => getToken().then((t) => t ?? null),
+    [getToken],
+  );
+
+  const [symbol, setSymbol] = useState<(typeof CRYPTO_BACKTEST_SYMBOLS)[number]>(
+    "BTC",
+  );
+  const [timeframe, setTimeframe] = useState<
+    (typeof CRYPTO_BACKTEST_TIMEFRAMES)[number]
+  >("1h");
+  const [days, setDays] = useState<number>(14);
+
+  // Track the params the operator has actually committed to running so the
+  // backtest only fires when they click "Run", not on every keystroke.
+  const [pendingParams, setPendingParams] = useState<{
+    symbol: string;
+    timeframe: string;
+    days: number;
+    nonce: number;
+  } | null>(null);
+
+  const queryKey = useMemo(
+    () =>
+      [
+        "admin",
+        "crypto-backtest",
+        pendingParams?.symbol ?? "",
+        pendingParams?.timeframe ?? "",
+        pendingParams?.days ?? 0,
+        pendingParams?.nonce ?? 0,
+      ] as const,
+    [pendingParams],
+  );
+
+  const { data, isFetching, error, refetch } = useQuery<CryptoBacktestResult>({
+    queryKey,
+    queryFn: () => {
+      const params = pendingParams!;
+      const qs = new URLSearchParams({
+        symbol: params.symbol,
+        timeframe: params.timeframe,
+        days: String(params.days),
+      });
+      return apiFetch<CryptoBacktestResult>(
+        `/api/admin/crypto/backtest?${qs.toString()}`,
+        { getToken: tokenFn },
+      );
+    },
+    enabled: !!isSignedIn && pendingParams !== null,
+    refetchOnWindowFocus: false,
+    staleTime: 60_000,
+  });
+
+  const handleRun = () => {
+    setPendingParams({ symbol, timeframe, days, nonce: Date.now() });
+  };
+
+  const reliabilityRows = data?.reliability ?? [];
+
+  return (
+    <div className="space-y-3" data-testid="panel-crypto-backtest">
+      <p className="text-[11px] text-muted-foreground leading-snug">
+        Runs an expanding-window backtest of the crypto-binary predictor
+        against historical OHLCV. Surfaces accuracy / Brier / log-loss plus
+        the per-bin reliability table — early warning that the live stack is
+        drifting versus its historical performance.
+      </p>
+
+      <div className="flex flex-wrap items-end gap-3 text-[11px]">
+        <label className="flex flex-col gap-1">
+          <span className="uppercase tracking-widest text-muted-foreground">
+            Symbol
+          </span>
+          <select
+            value={symbol}
+            onChange={(e) =>
+              setSymbol(
+                e.target.value as (typeof CRYPTO_BACKTEST_SYMBOLS)[number],
+              )
+            }
+            className="border border-border bg-input px-2 py-1 text-xs"
+            data-testid="select-crypto-backtest-symbol"
+          >
+            {CRYPTO_BACKTEST_SYMBOLS.map((s) => (
+              <option key={s} value={s}>
+                {s}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label className="flex flex-col gap-1">
+          <span className="uppercase tracking-widest text-muted-foreground">
+            Timeframe
+          </span>
+          <select
+            value={timeframe}
+            onChange={(e) =>
+              setTimeframe(
+                e.target.value as (typeof CRYPTO_BACKTEST_TIMEFRAMES)[number],
+              )
+            }
+            className="border border-border bg-input px-2 py-1 text-xs"
+            data-testid="select-crypto-backtest-timeframe"
+          >
+            {CRYPTO_BACKTEST_TIMEFRAMES.map((t) => (
+              <option key={t} value={t}>
+                {t}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label className="flex flex-col gap-1">
+          <span className="uppercase tracking-widest text-muted-foreground">
+            Days
+          </span>
+          <input
+            type="number"
+            min={1}
+            max={90}
+            value={days}
+            onChange={(e) => {
+              const next = Number.parseInt(e.target.value, 10);
+              if (Number.isFinite(next)) {
+                setDays(Math.max(1, Math.min(90, next)));
+              }
+            }}
+            className="w-20 border border-border bg-input px-2 py-1 text-xs"
+            data-testid="input-crypto-backtest-days"
+          />
+        </label>
+        <button
+          type="button"
+          onClick={handleRun}
+          disabled={isFetching}
+          className="border border-primary px-3 py-1 text-xs uppercase tracking-widest text-primary hover:bg-primary/10 disabled:opacity-50"
+          data-testid="button-crypto-backtest-run"
+        >
+          {isFetching ? "Running…" : pendingParams ? "Re-run" : "Run"}
+        </button>
+        {pendingParams && !isFetching && (
+          <button
+            type="button"
+            onClick={() => refetch()}
+            className="text-[10px] uppercase tracking-widest text-muted-foreground hover:text-foreground"
+            data-testid="button-crypto-backtest-refresh"
+          >
+            Refresh
+          </button>
+        )}
+      </div>
+
+      {error && (
+        <div
+          className="border border-loss/60 bg-loss/10 p-2 text-xs text-loss"
+          data-testid="crypto-backtest-error"
+        >
+          Failed to run backtest:{" "}
+          {error instanceof Error ? error.message : String(error)}
+        </div>
+      )}
+
+      {!pendingParams && !error && (
+        <div className="text-[11px] text-muted-foreground">
+          Choose a symbol / timeframe / window above and press Run.
+        </div>
+      )}
+
+      {data && (
+        <div className="space-y-3" data-testid="crypto-backtest-result">
+          <div className="grid grid-cols-2 gap-3 text-[11px] md:grid-cols-4">
+            <div>
+              <div className="uppercase tracking-wider text-muted-foreground">
+                Pair
+              </div>
+              <div
+                className="font-mono text-sm"
+                data-testid="crypto-backtest-pair"
+              >
+                {data.symbol} · {data.timeframe}
+              </div>
+            </div>
+            <div>
+              <div className="uppercase tracking-wider text-muted-foreground">
+                Evaluated
+              </div>
+              <div
+                className="font-mono text-sm"
+                data-testid="crypto-backtest-n"
+              >
+                {data.n_evaluated.toLocaleString()}
+              </div>
+            </div>
+            <div>
+              <div className="uppercase tracking-wider text-muted-foreground">
+                Accuracy
+              </div>
+              <div
+                className="font-mono text-sm"
+                data-testid="crypto-backtest-accuracy"
+              >
+                {fmtMetric(data.accuracy)}
+              </div>
+            </div>
+            <div>
+              <div className="uppercase tracking-wider text-muted-foreground">
+                Brier
+              </div>
+              <div
+                className="font-mono text-sm"
+                data-testid="crypto-backtest-brier"
+              >
+                {fmtMetric(data.brier_score)}
+              </div>
+              <div className="text-[10px] text-muted-foreground">
+                log-loss {fmtMetric(data.log_loss)}
+              </div>
+            </div>
+          </div>
+
+          {data.completed_at && (
+            <div className="text-[10px] uppercase tracking-widest text-muted-foreground">
+              Completed{" "}
+              {data.completed_at.replace("T", " ").replace(/\..*$/, "")}
+            </div>
+          )}
+
+          <div className="border border-border bg-card overflow-x-auto">
+            <table className="w-full text-xs">
+              <thead className="bg-muted/20 text-muted-foreground uppercase tracking-widest">
+                <tr>
+                  <th className="text-left p-2">Bin</th>
+                  <th className="text-right p-2">Mean predicted</th>
+                  <th className="text-right p-2">Mean actual</th>
+                  <th className="text-right p-2">Count</th>
+                </tr>
+              </thead>
+              <tbody data-testid="crypto-backtest-reliability">
+                {reliabilityRows.length === 0 ? (
+                  <tr>
+                    <td
+                      colSpan={4}
+                      className="p-3 text-center text-muted-foreground"
+                    >
+                      {data.n_evaluated === 0
+                        ? "No bars matched the requested window — backfill OHLCV or widen the days range."
+                        : "No populated reliability bins."}
+                    </td>
+                  </tr>
+                ) : (
+                  reliabilityRows.map((row, i) => (
+                    <tr
+                      key={`${row.bin_lower}-${row.bin_upper}-${i}`}
+                      className="border-t border-border"
+                      data-testid={`crypto-backtest-bin-${i}`}
+                    >
+                      <td className="p-2 font-mono">
+                        {row.bin_lower.toFixed(2)}–{row.bin_upper.toFixed(2)}
+                      </td>
+                      <td className="p-2 text-right font-mono">
+                        {fmtMetric(row.mean_predicted)}
+                      </td>
+                      <td className="p-2 text-right font-mono">
+                        {fmtMetric(row.mean_actual)}
+                      </td>
+                      <td className="p-2 text-right font-mono">
+                        {row.count.toLocaleString()}
+                      </td>
+                    </tr>
+                  ))
+                )}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
