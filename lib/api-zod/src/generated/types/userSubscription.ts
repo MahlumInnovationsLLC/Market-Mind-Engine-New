@@ -5,6 +5,7 @@
  * Axiom-Predict API — backend for the prediction-market trading platform.
  * OpenAPI spec version: 0.1.0
  */
+import type { FreeTierQuota } from "./freeTierQuota";
 import type { UserSubscriptionTier } from "./userSubscriptionTier";
 
 export interface UserSubscription {
@@ -19,4 +20,5 @@ export interface UserSubscription {
   interval?: string | null;
   current_period_end?: string | null;
   cancel_at_period_end: boolean;
+  quota?: FreeTierQuota;
 }

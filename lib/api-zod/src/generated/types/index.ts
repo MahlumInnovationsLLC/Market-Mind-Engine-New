@@ -50,6 +50,7 @@ export * from "./emergencyStopRequest";
 export * from "./emergencyStopResult";
 export * from "./emergencyStopResultKillSwitch";
 export * from "./exportsInventory";
+export * from "./freeTierQuota";
 export * from "./fullHealth";
 export * from "./getRecentCyclesParams";
 export * from "./getRecentDebatesParams";

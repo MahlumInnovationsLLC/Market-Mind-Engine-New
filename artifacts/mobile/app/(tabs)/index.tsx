@@ -40,6 +40,11 @@ type SubInfo = {
   status: string;
   is_founder: boolean;
   email?: string | null;
+  quota?: {
+    viewed_today: number;
+    limit: number;
+    resets_at: string;
+  } | null;
 };
 
 function fmtCurrency(n: number | null | undefined): string {
@@ -86,6 +91,13 @@ export default function DashboardScreen() {
   const sub = useQuery({
     queryKey: ["me", "subscription"],
     queryFn: () => apiFetch<SubInfo>("/api/me/subscription"),
+    // Keep the free-tier quota indicator current. The counter is
+    // server-authoritative and increments whenever the user opens
+    // a market, so a periodic refetch (and pull-to-refresh below)
+    // is enough to keep the badge honest without an explicit
+    // invalidation hook on every market view.
+    refetchInterval: 60_000,
+    refetchOnWindowFocus: true,
   });
   const verticals = useQuery({
     queryKey: ["dashboard", "verticals", period],
@@ -171,6 +183,31 @@ export default function DashboardScreen() {
       }
     >
       <SectionHeader>OPERATOR :: {sub.data?.email ?? "—"}</SectionHeader>
+
+      {sub.data?.quota ? (
+        <View
+          style={[
+            styles.quotaPill,
+            {
+              borderColor:
+                sub.data.quota.viewed_today >= sub.data.quota.limit
+                  ? colors.destructive
+                  : sub.data.quota.limit - sub.data.quota.viewed_today <= 1
+                    ? colors.warning
+                    : colors.primary,
+              backgroundColor: colors.card,
+            },
+          ]}
+          testID="pill-free-quota"
+        >
+          <Text style={[styles.quotaText, { color: colors.foreground }]}>
+            {sub.data.quota.viewed_today} / {sub.data.quota.limit} MARKETS TODAY
+          </Text>
+          <Text style={[styles.quotaResets, { color: colors.mutedForeground }]}>
+            RESETS {sub.data.quota.resets_at}
+          </Text>
+        </View>
+      ) : null}
 
       <View
         style={[
@@ -312,6 +349,21 @@ const styles = StyleSheet.create({
     paddingVertical: 12,
   },
   kvKey: { fontSize: 11, letterSpacing: 1.5, fontFamily: "Inter_500Medium" },
+  quotaPill: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    borderWidth: 1,
+    paddingVertical: 8,
+    paddingHorizontal: 12,
+    marginBottom: 12,
+  },
+  quotaText: { fontSize: 11, letterSpacing: 1.5, fontFamily: "Inter_700Bold" },
+  quotaResets: {
+    fontSize: 10,
+    letterSpacing: 1,
+    fontFamily: "Inter_400Regular",
+  },
   kvVal: { fontSize: 13, fontFamily: "Inter_600SemiBold" },
   eyebrow: { fontSize: 11, letterSpacing: 3, fontFamily: "Inter_500Medium" },
   title: { fontSize: 22, fontFamily: "Inter_700Bold", letterSpacing: 1.5, marginTop: 8 },

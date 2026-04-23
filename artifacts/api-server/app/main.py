@@ -888,7 +888,20 @@ async def me_subscription(
     user: AuthedUser = Depends(require_auth),
 ) -> dict[str, object]:
     sub = await billing.get_user_subscription(user)
-    return sub.as_dict()
+    payload = sub.as_dict()
+    # Surface the daily market-view quota for free callers so the
+    # dashboard can render a "N of 5 markets used today" indicator
+    # before the user even opens a market. Pro/Elite/Founder are
+    # uncapped, so we omit the field entirely for them — the client
+    # uses presence-of-quota as the signal to render the badge.
+    if sub.tier == billing.TIER_FREE:
+        viewed = await free_tier.count_markets_viewed_today(user.user_id)
+        payload["quota"] = {
+            "viewed_today": viewed,
+            "limit": free_tier.FREE_TIER_DAILY_MARKET_LIMIT,
+            "resets_at": "00:00 UTC",
+        }
+    return payload
 
 
 @app.post("/api/billing/checkout-session")

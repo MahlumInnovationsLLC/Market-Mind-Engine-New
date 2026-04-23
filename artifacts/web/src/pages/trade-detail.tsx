@@ -1,5 +1,6 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Link, useLocation, useRoute } from "wouter";
+import { useQueryClient } from "@tanstack/react-query";
 import {
   CartesianGrid,
   Legend,
@@ -84,7 +85,8 @@ export default function TradeDetailPage() {
   const [, params] = useRoute("/trade/:ref");
   const [, setLocation] = useLocation();
   const ref = params?.ref ?? "";
-  const { data, isLoading, isError, error } = useGetTradeDetail(ref, {
+  const queryClient = useQueryClient();
+  const { data, isLoading, isError, error, isSuccess } = useGetTradeDetail(ref, {
     query: {
       enabled: !!ref,
       staleTime: 30_000,
@@ -101,6 +103,16 @@ export default function TradeDetailPage() {
   // Modal is open whenever the request 402'd. Closing it routes back to
   // the dashboard — there's no detail to render behind it.
   const [modalOpen, setModalOpen] = useState(true);
+
+  // Free-tier callers' market-view counter increments server-side on
+  // every successful trade-detail load. Refresh the subscription
+  // query so the persistent quota indicator in the shell header
+  // reflects the new count without a full reload.
+  useEffect(() => {
+    if (isSuccess) {
+      queryClient.invalidateQueries({ queryKey: ["shell", "me-subscription"] });
+    }
+  }, [isSuccess, ref, queryClient]);
 
   if (!ref) {
     return <Empty message="Missing trade reference" />;

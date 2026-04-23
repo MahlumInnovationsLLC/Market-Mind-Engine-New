@@ -845,6 +845,18 @@ export const UserSubscriptionTier = {
   founder: "founder",
 } as const;
 
+/**
+ * Daily market-view quota for free-tier callers. Present only on
+the /api/me/subscription response when the caller is on the
+free tier; omitted for pro/elite/founder.
+
+ */
+export interface FreeTierQuota {
+  viewed_today: number;
+  limit: number;
+  resets_at: string;
+}
+
 export interface UserSubscription {
   user_id: string;
   email?: string | null;
@@ -857,6 +869,7 @@ export interface UserSubscription {
   interval?: string | null;
   current_period_end?: string | null;
   cancel_at_period_end: boolean;
+  quota?: FreeTierQuota;
 }
 
 export interface PriceSlot {

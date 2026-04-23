@@ -1814,7 +1814,21 @@ components:
         interval: { type: string, nullable: true }
         current_period_end: { type: string, nullable: true }
         cancel_at_period_end: { type: boolean }
+        quota:
+          $ref: "#/components/schemas/FreeTierQuota"
       required: [user_id, tier, status, is_founder, cancel_at_period_end]
+
+    FreeTierQuota:
+      type: object
+      description: |
+        Daily market-view quota for free-tier callers. Present only on
+        the /api/me/subscription response when the caller is on the
+        free tier; omitted for pro/elite/founder.
+      properties:
+        viewed_today: { type: integer }
+        limit: { type: integer }
+        resets_at: { type: string }
+      required: [viewed_today, limit, resets_at]
 
     PriceSlot:
       type: object

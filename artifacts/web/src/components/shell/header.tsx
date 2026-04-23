@@ -31,6 +31,11 @@ type RuntimeSettingsLite = {
 
 type SubscriptionLite = {
   tier?: string | null;
+  quota?: {
+    viewed_today: number;
+    limit: number;
+    resets_at: string;
+  } | null;
 };
 
 const THEME_KEY = "axiom.theme";
@@ -133,6 +138,11 @@ export function ShellHeader({ operatorEmail: emailOverride }: ShellHeaderProps) 
     refetchInterval: 5 * 60_000,
   });
   const tier = (subscription.data?.tier ?? "").toString().trim().toUpperCase();
+  const quota = subscription.data?.quota ?? null;
+  const quotaRemaining = quota
+    ? Math.max(0, quota.limit - quota.viewed_today)
+    : null;
+  const quotaExhausted = quota ? quota.viewed_today >= quota.limit : false;
 
   const paperMode = health.data?.paper_mode;
   const tradingHalted = !!runtime.data?.trading_halted;
@@ -177,6 +187,27 @@ export function ShellHeader({ operatorEmail: emailOverride }: ShellHeaderProps) 
         <span>{modeLabel}</span>
         {env ? <span className="opacity-60 normal-case font-normal">· {env}</span> : null}
       </div>
+
+      {quota ? (
+        <div
+          className={`hidden md:flex items-center gap-1.5 border px-2.5 py-1 rounded-sm text-[10px] uppercase tracking-widest font-bold ${
+            quotaExhausted
+              ? "border-loss/60 text-loss bg-loss/5"
+              : quotaRemaining !== null && quotaRemaining <= 1
+                ? "border-warning/60 text-warning bg-warning/5"
+                : "border-info/60 text-info bg-info/5"
+          }`}
+          data-testid="pill-free-quota"
+          title={`Free tier: ${quota.viewed_today} of ${quota.limit} markets viewed today. Resets at ${quota.resets_at}.`}
+        >
+          <span>
+            {quota.viewed_today} / {quota.limit} markets
+          </span>
+          <span className="opacity-60 normal-case font-normal">
+            · resets {quota.resets_at}
+          </span>
+        </div>
+      ) : null}
 
       <div className="ml-auto flex items-center gap-1">
         <button

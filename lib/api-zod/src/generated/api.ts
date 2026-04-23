@@ -1237,6 +1237,16 @@ export const GetMySubscriptionResponse = zod.object({
   interval: zod.string().nullish(),
   current_period_end: zod.string().nullish(),
   cancel_at_period_end: zod.boolean(),
+  quota: zod
+    .object({
+      viewed_today: zod.number(),
+      limit: zod.number(),
+      resets_at: zod.string(),
+    })
+    .optional()
+    .describe(
+      "Daily market-view quota for free-tier callers. Present only on\nthe \/api\/me\/subscription response when the caller is on the\nfree tier; omitted for pro\/elite\/founder.\n",
+    ),
 });
 
 /**
