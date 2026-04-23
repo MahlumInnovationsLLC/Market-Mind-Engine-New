@@ -67,7 +67,11 @@ export default function TradingCycles() {
                 const hasError = !!c.errors;
                 const placed = c.trades_placed ?? 0;
                 return (
-                  <tr key={c.id} className="hover:bg-muted/30 transition-colors">
+                  <tr
+                    key={c.id}
+                    data-focus-id={`cycle-${c.id}`}
+                    className="hover:bg-muted/30 transition-colors scroll-mt-24 data-[focus-flash=true]:outline data-[focus-flash=true]:outline-2 data-[focus-flash=true]:outline-accent-cyan data-[focus-flash=true]:bg-accent-cyan/10"
+                  >
                     <td className="p-2 text-muted-foreground whitespace-nowrap">
                       {fmtTime(c.started_at)}
                     </td>

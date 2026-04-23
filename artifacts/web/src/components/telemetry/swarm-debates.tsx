@@ -86,7 +86,11 @@ export default function SwarmDebates() {
                     ? "text-loss border-loss/50"
                     : "text-primary border-primary/50";
             return (
-              <div key={d.id} className="p-3 hover:bg-muted/20 transition-colors text-xs">
+              <div
+                key={d.id}
+                data-focus-id={`debate-${d.id}`}
+                className="p-3 hover:bg-muted/20 transition-colors text-xs scroll-mt-24 data-[focus-flash=true]:ring-2 data-[focus-flash=true]:ring-accent-cyan data-[focus-flash=true]:bg-accent-cyan/10"
+              >
                 <div className="flex items-start justify-between gap-2 mb-2">
                   <div className="min-w-0 flex-1">
                     <div className="text-foreground truncate" title={d.matchup ?? ""}>
