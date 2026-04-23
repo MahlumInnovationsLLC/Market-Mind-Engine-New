@@ -11,6 +11,14 @@ concurrency:
   group: web-e2e-${{ github.ref }}
   cancel-in-progress: true
 
+# `contents: write` lets us push the rendered Playwright HTML report to the
+# `gh-pages` branch on failure; `pull-requests: write` lets us post a sticky
+# comment on the PR with a link to that report. Both default to read-only,
+# so we have to opt in here.
+permissions:
+  contents: write
+  pull-requests: write
+
 jobs:
   playwright:
     name: Playwright (operator + admin)
@@ -180,3 +188,159 @@ jobs:
             /tmp/web-preview.log
           if-no-files-found: ignore
           retention-days: 7
+
+      # ----------------------------------------------------------------------
+      # On failure, publish the Playwright HTML report to the `gh-pages`
+      # branch under `pr-<number>/run-<runid>/` (or `branch-<sanitized>/...`
+      # for non-PR runs) and post a sticky PR comment linking to it. This
+      # means operators can click straight into the rendered report instead
+      # of downloading the raw artifact zip from the GitHub UI.
+      #
+      # Requires GitHub Pages to be enabled for the repo with source set to
+      # the `gh-pages` branch (Settings → Pages). The first failed run will
+      # initialize the branch automatically.
+      # ----------------------------------------------------------------------
+      - name: Publish Playwright HTML report to gh-pages
+        if: failure()
+        id: publish-report
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          RUN_ID: ${{ github.run_id }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          if [ ! -d artifacts/web/playwright-report ] || \
+             [ -z "$(ls -A artifacts/web/playwright-report 2>/dev/null)" ]; then
+            echo "No HTML report on disk; skipping publish."
+            echo "published=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if [ -n "${PR_NUMBER}" ]; then
+            SUBDIR="pr-${PR_NUMBER}/run-${RUN_ID}"
+          else
+            SAFE_REF="$(printf '%s' "${REF_NAME}" | tr -c 'A-Za-z0-9._-' '-')"
+            SUBDIR="branch-${SAFE_REF}/run-${RUN_ID}"
+          fi
+
+          WORK="$(mktemp -d)"
+          REPO_URL="https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+
+          if git ls-remote --exit-code --heads "${REPO_URL}" gh-pages >/dev/null 2>&1; then
+            git clone --depth=1 --branch=gh-pages "${REPO_URL}" "${WORK}"
+          else
+            echo "gh-pages branch does not exist yet; initializing it."
+            git clone --depth=1 "${REPO_URL}" "${WORK}"
+            (
+              cd "${WORK}"
+              git checkout --orphan gh-pages
+              git rm -rf . >/dev/null 2>&1 || true
+              cat > index.html <<'HTML'
+          <!doctype html>
+          <meta charset="utf-8">
+          <title>Playwright reports</title>
+          <h1>Playwright reports</h1>
+          <p>Per-run HTML reports live under <code>pr-&lt;number&gt;/run-&lt;id&gt;/</code>
+          and <code>branch-&lt;name&gt;/run-&lt;id&gt;/</code>.</p>
+          HTML
+              git add index.html
+              git -c user.name='github-actions[bot]' \
+                  -c user.email='github-actions[bot]@users.noreply.github.com' \
+                  commit -m "Initialize gh-pages for Playwright reports"
+              git push -u origin gh-pages
+            )
+          fi
+
+          mkdir -p "${WORK}/${SUBDIR}"
+          cp -R artifacts/web/playwright-report/. "${WORK}/${SUBDIR}/"
+
+          (
+            cd "${WORK}"
+            git add "${SUBDIR}"
+            git -c user.name='github-actions[bot]' \
+                -c user.email='github-actions[bot]@users.noreply.github.com' \
+                commit -m "Publish Playwright report: ${SUBDIR}"
+            # Retry the push once if a concurrent run raced us.
+            git push origin gh-pages || (git pull --rebase origin gh-pages && git push origin gh-pages)
+          )
+
+          OWNER="${GITHUB_REPOSITORY%%/*}"
+          REPO="${GITHUB_REPOSITORY##*/}"
+          REPORT_URL="https://${OWNER}.github.io/${REPO}/${SUBDIR}/"
+          echo "Report published to: ${REPORT_URL}"
+          echo "published=true" >> "$GITHUB_OUTPUT"
+          echo "report_url=${REPORT_URL}" >> "$GITHUB_OUTPUT"
+
+      - name: Comment on PR with report link
+        if: failure() && github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        env:
+          REPORT_URL: ${{ steps.publish-report.outputs.report_url }}
+          REPORT_PUBLISHED: ${{ steps.publish-report.outputs.published }}
+        with:
+          script: |
+            const fs = require('fs');
+            const { owner, repo } = context.repo;
+            const prNumber = context.payload.pull_request.number;
+            const runId = context.runId;
+            const runUrl = `https://github.com/${owner}/${repo}/actions/runs/${runId}`;
+            const reportUrl = process.env.REPORT_URL;
+            const published = process.env.REPORT_PUBLISHED === 'true';
+
+            // Walk the Playwright JSON report and collect the titles of
+            // tests that did not end in `passed` or `skipped`.
+            const failures = [];
+            try {
+              const raw = fs.readFileSync(
+                'artifacts/web/test-results/results.json', 'utf8');
+              const data = JSON.parse(raw);
+              const walk = (suite, prefix) => {
+                const title = suite.title ? [...prefix, suite.title] : prefix;
+                for (const child of suite.suites || []) walk(child, title);
+                for (const spec of suite.specs || []) {
+                  for (const test of spec.tests || []) {
+                    const ok = (test.results || []).every(
+                      r => r.status === 'passed' || r.status === 'skipped');
+                    if (!ok) failures.push([...title, spec.title].join(' > '));
+                  }
+                }
+              };
+              for (const s of data.suites || []) walk(s, []);
+            } catch (err) {
+              core.warning(`Could not parse Playwright JSON report: ${err.message}`);
+            }
+
+            const marker = '<!-- playwright-report-comment -->';
+            const lines = [marker, '### Playwright e2e failed', ''];
+            if (published && reportUrl) {
+              lines.push(`**HTML report:** ${reportUrl}`);
+            } else {
+              lines.push('**HTML report:** not available (download the `playwright-report` artifact from the run instead).');
+            }
+            lines.push(`**Workflow run:** ${runUrl}`);
+            lines.push('');
+            if (failures.length) {
+              lines.push(`**Failing tests (${failures.length}):**`);
+              const shown = failures.slice(0, 25);
+              for (const name of shown) lines.push(`- \`${name}\``);
+              if (failures.length > shown.length) {
+                lines.push(`- _…and ${failures.length - shown.length} more — see the report._`);
+              }
+            } else {
+              lines.push('_No individual test failures parsed; the job itself failed (build, server start, etc.). Check the run logs._');
+            }
+            const body = lines.join('\n');
+
+            const { data: comments } = await github.rest.issues.listComments({
+              owner, repo, issue_number: prNumber, per_page: 100,
+            });
+            const existing = comments.find(
+              c => c.body && c.body.startsWith(marker));
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner, repo, comment_id: existing.id, body });
+            } else {
+              await github.rest.issues.createComment({
+                owner, repo, issue_number: prNumber, body });
+            }
