@@ -481,6 +481,67 @@ def drift(
 
 
 # ---------------------------------------------------------------------------
+# WebSocket subscriber stuck / silent
+# ---------------------------------------------------------------------------
+
+
+def ws_subscriber_silent(
+    *,
+    hub: str,
+    label: str,
+    qsize: int,
+    maxsize: int | None,
+    dropped: int,
+    overflowed: bool,
+    consecutive_snapshots: int,
+    age_seconds: float | None = None,
+    dry_run: bool = False,
+) -> dict[str, Any]:
+    """Operator alert: a WebSocket subscriber's queue has stayed >=90%
+    full (or tripped close-on-overflow) for ``consecutive_snapshots``
+    health snapshots in a row.
+
+    The body identifies the offending hub + label so the operator knows
+    which page / endpoint to investigate.
+    """
+    pct = (
+        f"{(qsize / maxsize) * 100:.0f}% ({qsize}/{maxsize})"
+        if maxsize else f"{qsize}"
+    )
+    state = "overflowed (closed)" if overflowed else f"{pct} full"
+    subject = (
+        f"[axiom] WS subscriber stuck: {hub}/{label} ({state})"
+    )
+    body = (
+        "A WebSocket subscriber has been pinned at >=90% queue depth "
+        "(or tripped the close-on-overflow policy) for "
+        f"{consecutive_snapshots} consecutive health snapshots.\n\n"
+        "This usually means a client (operator browser tab, mobile app, "
+        "or downstream consumer) stopped reading from the hub but the "
+        "TCP socket is still open — investigate the page tied to the "
+        "hub label below.\n\n"
+        + _format_lines(
+            [
+                ("hub", hub),
+                ("label", label),
+                ("qsize", qsize),
+                ("maxsize", maxsize if maxsize is not None else "(n/a)"),
+                ("dropped", dropped),
+                ("overflowed", overflowed),
+                ("consecutive_snapshots", consecutive_snapshots),
+                (
+                    "age_seconds",
+                    f"{age_seconds:.1f}" if age_seconds is not None else "(n/a)",
+                ),
+                ("at", _utc_now_iso()),
+            ]
+        )
+        + "\n"
+    )
+    return _dispatch(subject, body, tag="ws-subscriber-silent", dry_run=dry_run)
+
+
+# ---------------------------------------------------------------------------
 # Pending teammate approval
 # ---------------------------------------------------------------------------
 

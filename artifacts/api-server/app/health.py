@@ -572,6 +572,104 @@ def _probe_calibration() -> dict:
     )
 
 
+# Per-subscriber consecutive "bad snapshot" counters.  Keyed by the
+# Subscription's stable in-process id (monotonic across the lifetime of
+# the connection).  When a sub disappears from the registry its entry
+# is dropped so the dict can't grow without bound.
+_ws_bad_snapshot_counts: dict[int, int] = {}
+
+# How many consecutive snapshots a subscriber must stay >=90% full /
+# overflowed before we fan out an operator alert.  Default 3 — at the
+# 30s health interval that's ~90s of being stuck.
+WS_SILENT_ALERT_THRESHOLD = max(
+    1, int(os.environ.get("AXIOM_WS_SILENT_ALERT_SNAPSHOTS") or "3")
+)
+
+# Dedupe TTL for the resulting Postmark alert.  We share the
+# ``notification_dedupe`` table with the rest of the alert helpers; one
+# alert per (hub, label) per hour is plenty for a stuck-client signal.
+WS_SILENT_ALERT_TTL_SECONDS = max(
+    60, int(os.environ.get("AXIOM_WS_SILENT_ALERT_TTL_SECONDS") or "3600")
+)
+
+
+def _is_ws_subscriber_bad(sub: dict) -> bool:
+    if sub.get("overflowed"):
+        return True
+    maxsize = sub.get("maxsize")
+    qsize = sub.get("qsize") or 0
+    return bool(maxsize) and qsize >= 0.9 * maxsize
+
+
+def _maybe_dispatch_ws_silent_alert(bad_subs: list[dict]) -> list[dict]:
+    """Update consecutive-bad counters and fire alerts for any sub that
+    just crossed the threshold this snapshot.  Returns the list of
+    subscriber dicts that triggered an alert (used by tests).
+    """
+    seen_ids: set[int] = set()
+    triggered: list[dict] = []
+    for sub in bad_subs:
+        sid = int(sub.get("id") or 0)
+        seen_ids.add(sid)
+        prev = _ws_bad_snapshot_counts.get(sid, 0)
+        cur = prev + 1
+        _ws_bad_snapshot_counts[sid] = cur
+        if cur == WS_SILENT_ALERT_THRESHOLD:
+            triggered.append({**sub, "consecutive_snapshots": cur})
+
+    # Drop counters for subs no longer present (or no longer bad).
+    stale = [k for k in _ws_bad_snapshot_counts if k not in seen_ids]
+    for k in stale:
+        _ws_bad_snapshot_counts.pop(k, None)
+
+    if not triggered:
+        return []
+
+    from .notifications import alerts as _alerts
+
+    async def _runner() -> None:
+        for s in triggered:
+            hub = str(s.get("hub") or "?")
+            label = str(s.get("label") or "?")
+            try:
+                ok = await _alerts.dedupe_or_skip(
+                    "ws_subscriber_silent",
+                    f"{hub}:{label}",
+                    ttl_seconds=WS_SILENT_ALERT_TTL_SECONDS,
+                )
+            except Exception as e:  # pragma: no cover — fail-open
+                log.warning("ws-silent dedupe failed: %s", e)
+                ok = True
+            if not ok:
+                continue
+            try:
+                _alerts.ws_subscriber_silent(
+                    hub=hub,
+                    label=label,
+                    qsize=int(s.get("qsize") or 0),
+                    maxsize=s.get("maxsize"),
+                    dropped=int(s.get("dropped") or 0),
+                    overflowed=bool(s.get("overflowed")),
+                    consecutive_snapshots=int(s["consecutive_snapshots"]),
+                    age_seconds=s.get("age_seconds"),
+                )
+            except Exception as e:  # pragma: no cover
+                log.warning("ws-silent alert dispatch failed: %s", e)
+
+    try:
+        loop = asyncio.get_running_loop()
+        loop.create_task(_runner())
+    except RuntimeError:
+        # No running loop (sync test context) — run inline so the test
+        # can observe the dispatch.
+        try:
+            asyncio.run(_runner())
+        except Exception as e:  # pragma: no cover
+            log.warning("inline ws-silent dispatch failed: %s", e)
+
+    return triggered
+
+
 def _probe_ws_subscribers() -> dict:
     """WebSocket subscriber backpressure card.
 
@@ -580,6 +678,11 @@ def _probe_ws_subscribers() -> dict:
     settlement, kalshi, polymarket, llm-logs).  A subscriber pinned at
     full depth or with non-zero drops is the smoking gun for a stuck
     client.
+
+    When a subscriber stays bad (>=90% full or overflowed) for
+    ``WS_SILENT_ALERT_THRESHOLD`` consecutive snapshots, we fan an
+    alert into the operator Postmark pipeline (deduped via the shared
+    ``notification_dedupe`` table).
     """
     from .ws_backpressure import registry_summary
 
@@ -592,6 +695,8 @@ def _probe_ws_subscribers() -> dict:
         s for s in subs
         if s.get("maxsize") and s["qsize"] >= 0.9 * s["maxsize"]
     ]
+    bad_subs = [s for s in subs if _is_ws_subscriber_bad(s)]
+    _maybe_dispatch_ws_silent_alert(bad_subs)
     if overflowed:
         status = "degraded"
         detail = f"{overflowed} subscriber(s) closed on overflow"
