@@ -172,7 +172,11 @@ the audit trail required by `docs/runbook.md` §6.
 
 `docs/runbook.md` is the on-call reference for Axiom-Predict — paper↔live
 toggling, Kalshi key rotation, emergency-stop, pipeline-log reading,
-manual model promotion, and drift-rollback recovery.
+manual model promotion, and drift-rollback recovery. Task #272 added
+four cutover-focused sections: Postgres outage (§7), Clerk / auth
+provider outage (§8), per-vertical halt (§9 — uses the Task #271
+toggle), and the paper → tiny-live → full-live go/no-go checklist
+(§10) plus a "first 24 hours live" pager rider (§11).
 
 ## Subscription tiers
 
