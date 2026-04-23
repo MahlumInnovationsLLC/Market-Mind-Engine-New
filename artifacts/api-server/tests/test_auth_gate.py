@@ -68,6 +68,7 @@ PROTECTED_ROUTES: tuple[str, ...] = (
     "/api/me/access",
     "/api/me/subscription",
     "/api/me/notification-prefs",
+    "/api/me/notification-history",
     "/api/me/notifications",
     "/api/me/telegram",
     "/api/feeds/status",

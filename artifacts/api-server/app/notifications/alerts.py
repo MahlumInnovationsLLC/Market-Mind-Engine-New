@@ -133,6 +133,200 @@ async def dedupe_or_skip(
         return True
 
 
+# ---------------------------------------------------------------------------
+# Per-user "recent alerts" history.
+#
+# Each row in `notification_dedupe` represents one alert dispatch claim.
+# Some claims are global (operator broadcasts that fan out to every
+# opted-in user — `halt`, `drift`, `daily_pnl_summary`, `live_trade`,
+# `weekly_roundup`); others are user-scoped and embed the recipient
+# `user_id` directly in the dedupe key (`trade_confirmation`,
+# `tier_change`).
+#
+# The settings page surfaces the last ~30 entries the calling user was
+# eligible to receive, so a subscriber can sanity-check "did I actually
+# get yesterday's drift alert?". The mapping below is the single source
+# of truth for which alert types are user-visible, what label to show,
+# and which preference columns gate each delivery channel.
+# ---------------------------------------------------------------------------
+
+
+# alert_type -> ("scope", "label", channels)
+#   scope:    "broadcast" (every opted-in user is a recipient) or
+#             "user" (key prefix `<alert_type>:<user_id>:...` filters by recipient)
+#   channels: list of (channel_kind, pref_column or None) — `None` means
+#             the channel always fires regardless of opt-in (e.g. tier
+#             change emails are transactional).
+USER_VISIBLE_ALERTS: dict[str, dict[str, Any]] = {
+    "daily_pnl_summary": {
+        "label": "Daily P&L summary",
+        "scope": "broadcast",
+        "channels": [("email", "email_daily_summary")],
+    },
+    "weekly_roundup": {
+        "label": "Weekly roundup",
+        "scope": "broadcast",
+        "channels": [("email", "email_weekly_roundup")],
+    },
+    "drift": {
+        "label": "Drift alert",
+        "scope": "broadcast",
+        "channels": [("email", "email_drift")],
+    },
+    "position_drift": {
+        "label": "Position drift alert",
+        "scope": "broadcast",
+        "channels": [("email", "email_drift")],
+    },
+    "halt": {
+        "label": "Trading halt",
+        "scope": "broadcast",
+        "channels": [
+            ("email", "email_halt"),
+            ("push", "notify_halt"),
+        ],
+    },
+    "daily_loss_halt": {
+        "label": "Daily loss halt",
+        "scope": "broadcast",
+        "channels": [
+            ("email", "email_halt"),
+            ("push", "notify_halt"),
+        ],
+    },
+    "live_trade": {
+        "label": "Live trade fill",
+        "scope": "broadcast",
+        "channels": [
+            ("email", "email_live_trade"),
+            ("push", "notify_live_trade"),
+            ("sms", "sms_live_trade"),
+            ("telegram", "telegram_live_trade"),
+        ],
+    },
+    "trade_confirmation": {
+        "label": "Trade confirmation",
+        "scope": "user",
+        "channels": [("email", "email_trade_confirmation")],
+    },
+    "tier_change": {
+        "label": "Subscription change",
+        "scope": "user",
+        "channels": [("email", None)],
+    },
+}
+
+
+async def list_user_history(
+    *, user_id: str, limit: int = 30
+) -> list[dict[str, Any]]:
+    """Return the most recent alert dispatches the given user was
+    eligible for, newest first.
+
+    Combines `notification_dedupe` rows (the source of truth for "was
+    an alert claimed/dispatched") with the user's current preference
+    snapshot to compute the per-channel breakdown each row would have
+    used. Failures fall back to an empty list — this endpoint is
+    advisory and must never break the settings page.
+    """
+    limit = max(1, min(200, int(limit or 30)))
+    from .. import db
+    from . import push as _push
+
+    # Build a SQL prefix predicate per user-visible alert type so we
+    # only scan rows that can ever surface for this user. `key` is
+    # either equal to the alert_type (e.g. `daily_pnl_summary`) or
+    # starts with `<alert_type>:`. User-scoped types additionally embed
+    # the recipient `user_id` after the alert_type.
+    #
+    # We deliberately use PostgreSQL's `starts_with(key, $prefix)`
+    # rather than `key LIKE $prefix || '%'` because Clerk user IDs
+    # contain underscores ("user_xyz") and SQL `LIKE` treats `_` as a
+    # single-character wildcard — that would let one user's history
+    # query match another user's `trade_confirmation:user_zyx:...` keys.
+    predicates: list[str] = []
+    params: list[Any] = []
+    for alert_type, info in USER_VISIBLE_ALERTS.items():
+        if info["scope"] == "user":
+            params.append(f"{alert_type}:{user_id}:")
+            predicates.append(f"starts_with(key, ${len(params)})")
+            params.append(f"{alert_type}:{user_id}")
+            predicates.append(f"key = ${len(params)}")
+        else:
+            params.append(f"{alert_type}:")
+            predicates.append(f"starts_with(key, ${len(params)})")
+            params.append(alert_type)
+            predicates.append(f"key = ${len(params)}")
+    params.append(limit)
+    where_sql = " OR ".join(predicates)
+    try:
+        rows = await db.fetch(
+            f"""
+            SELECT key, sent_at, expires_at, date_utc
+              FROM notification_dedupe
+             WHERE sent_at IS NOT NULL
+               AND ({where_sql})
+             ORDER BY sent_at DESC
+             LIMIT ${len(params)}
+            """,
+            *params,
+        )
+    except Exception as e:  # pragma: no cover — advisory endpoint
+        log.warning("list_user_history fetch failed: %s", e)
+        return []
+
+    try:
+        prefs = await _push.get_prefs(user_id)
+    except Exception as e:  # pragma: no cover
+        log.warning("list_user_history get_prefs failed: %s", e)
+        prefs = {}
+
+    out: list[dict[str, Any]] = []
+    # Match longest alert_type prefix first so e.g. `daily_loss_halt`
+    # never gets misclassified as `daily_pnl_summary`. The ordering
+    # also disambiguates `live_trade` from any future `live_trade_*`.
+    types_by_len = sorted(
+        USER_VISIBLE_ALERTS.keys(), key=len, reverse=True
+    )
+    for r in rows:
+        key = r.get("key") or ""
+        alert_type = None
+        for t in types_by_len:
+            if key == t or key.startswith(f"{t}:"):
+                alert_type = t
+                break
+        if not alert_type:
+            continue
+        info = USER_VISIBLE_ALERTS[alert_type]
+        sent_at = r.get("sent_at")
+        try:
+            sent_iso = sent_at.isoformat() if sent_at else None
+        except Exception:
+            sent_iso = str(sent_at) if sent_at else None
+        channels = []
+        for kind, pref_col in info["channels"]:
+            opted_in = True if pref_col is None else bool(prefs.get(pref_col))
+            channels.append({
+                "kind": kind,
+                "pref_column": pref_col,
+                "opted_in": opted_in,
+            })
+        out.append({
+            "alert_type": alert_type,
+            "label": info["label"],
+            "scope": info["scope"],
+            "sent_at": sent_iso,
+            "dedupe_key": key,
+            "channels": channels,
+            # We only know the dedupe row was claimed (the alert was
+            # *attempted*); per-recipient delivery success would need a
+            # separate outbox table. Surface that distinction honestly
+            # so the UI doesn't imply confirmed delivery.
+            "attempted": True,
+        })
+    return out
+
+
 async def gc_expired_dedupe(*, older_than_days: int = 7) -> dict[str, Any]:
     """Delete `notification_dedupe` rows whose TTL expired more than
     `older_than_days` days ago.

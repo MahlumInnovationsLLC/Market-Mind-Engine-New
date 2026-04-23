@@ -34,6 +34,22 @@ interface PrefsView {
 
 type ToggleKey = keyof PrefsView["prefs"] & string;
 
+interface HistoryChannel {
+  kind: "email" | "push" | "sms" | "telegram";
+  pref_column: string | null;
+  opted_in: boolean;
+}
+
+interface HistoryItem {
+  alert_type: string;
+  label: string;
+  scope: "broadcast" | "user";
+  sent_at: string | null;
+  dedupe_key: string;
+  channels: HistoryChannel[];
+  attempted: boolean;
+}
+
 interface ToggleRow {
   key: ToggleKey;
   label: string;
@@ -135,6 +151,9 @@ export function NotificationPrefsPanel() {
   const [verifyCode, setVerifyCode] = useState<string>("");
   const [verifyBusy, setVerifyBusy] = useState(false);
   const [verifyMsg, setVerifyMsg] = useState<string | null>(null);
+  const [history, setHistory] = useState<HistoryItem[] | null>(null);
+  const [historyLoading, setHistoryLoading] = useState(true);
+  const [historyError, setHistoryError] = useState<string | null>(null);
 
   useEffect(() => {
     if (!isSignedIn) {
@@ -159,6 +178,34 @@ export function NotificationPrefsPanel() {
       cancelled = true;
     };
   }, [isSignedIn, token]);
+
+  const loadHistory = useMemo(
+    () => async () => {
+      setHistoryLoading(true);
+      setHistoryError(null);
+      try {
+        const res = await apiFetch<{ items: HistoryItem[] }>(
+          "/api/me/notification-history?limit=30",
+          { getToken: token },
+        );
+        setHistory(res.items ?? []);
+      } catch (e) {
+        setHistoryError(formatErrorMessage(e));
+        setHistory([]);
+      } finally {
+        setHistoryLoading(false);
+      }
+    },
+    [token],
+  );
+
+  useEffect(() => {
+    if (!isSignedIn) {
+      setHistoryLoading(false);
+      return;
+    }
+    loadHistory();
+  }, [isSignedIn, loadHistory]);
 
   const update = async (patch: Record<string, unknown>) => {
     setSaving(true);
@@ -499,10 +546,138 @@ export function NotificationPrefsPanel() {
                 )}
               </div>
             </section>
+
+            <RecentAlertsPanel
+              items={history}
+              loading={historyLoading}
+              error={historyError}
+              onReload={loadHistory}
+            />
           </>
         )}
       </main>
     </div>
+  );
+}
+
+function RecentAlertsPanel({
+  items,
+  loading,
+  error,
+  onReload,
+}: {
+  items: HistoryItem[] | null;
+  loading: boolean;
+  error: string | null;
+  onReload: () => void | Promise<void>;
+}) {
+  return (
+    <section
+      className="border border-border bg-card p-6 space-y-4"
+      data-testid="section-recent-alerts"
+    >
+      <div className="flex items-center justify-between">
+        <div>
+          <h2 className="text-sm uppercase tracking-widest text-foreground font-bold">
+            Recent alerts
+          </h2>
+          <p className="text-[10px] uppercase tracking-widest text-muted-foreground">
+            Last 30 alerts you were eligible to receive.
+          </p>
+        </div>
+        <button
+          type="button"
+          onClick={() => onReload()}
+          disabled={loading}
+          className="border border-border text-xs uppercase tracking-widest px-3 py-1 hover:border-primary/50 disabled:opacity-50"
+          data-testid="button-reload-history"
+        >
+          {loading ? "Loading…" : "Refresh"}
+        </button>
+      </div>
+
+      {error && (
+        <div
+          className="border border-destructive text-destructive p-3 text-xs uppercase tracking-widest"
+          data-testid="text-history-error"
+        >
+          {error}
+        </div>
+      )}
+
+      {!error && loading && (
+        <div
+          className="text-xs uppercase tracking-widest text-muted-foreground"
+          data-testid="text-history-loading"
+        >
+          Loading recent alerts…
+        </div>
+      )}
+
+      {!error && !loading && items && items.length === 0 && (
+        <div
+          className="text-xs text-muted-foreground"
+          data-testid="text-history-empty"
+        >
+          No recent alerts dispatched yet. Once you start receiving
+          notifications, the last 30 will show up here.
+        </div>
+      )}
+
+      {!error && !loading && items && items.length > 0 && (
+        <ul className="divide-y divide-border" data-testid="list-history">
+          {items.map((item, idx) => (
+            <li
+              key={`${item.dedupe_key}-${idx}`}
+              className="py-3 flex items-start justify-between gap-3"
+              data-testid={`history-row-${idx}`}
+            >
+              <div className="min-w-0 flex-1">
+                <div className="text-sm text-foreground font-medium">
+                  {item.label}
+                </div>
+                <div className="text-[11px] text-muted-foreground">
+                  {item.sent_at
+                    ? new Date(item.sent_at).toLocaleString()
+                    : "(no timestamp)"}
+                </div>
+              </div>
+              <div className="flex flex-wrap items-center gap-1 justify-end">
+                {item.channels.map((c) => (
+                  <span
+                    key={c.kind}
+                    className={`text-[10px] uppercase tracking-widest border px-2 py-0.5 ${
+                      c.opted_in
+                        ? "border-primary text-primary"
+                        : "border-border text-muted-foreground line-through"
+                    }`}
+                    data-testid={`history-channel-${idx}-${c.kind}`}
+                    title={
+                      c.opted_in
+                        ? `Sent via ${c.kind}`
+                        : `${c.kind} channel — you weren't opted in`
+                    }
+                  >
+                    {c.kind}
+                  </span>
+                ))}
+                <span
+                  className={`text-[10px] uppercase tracking-widest border px-2 py-0.5 ${
+                    item.attempted
+                      ? "border-primary text-primary"
+                      : "border-destructive text-destructive"
+                  }`}
+                  data-testid={`history-status-${idx}`}
+                  title="The dispatch was attempted. Per-channel delivery status isn't tracked yet."
+                >
+                  {item.attempted ? "Attempted" : "Skipped"}
+                </span>
+              </div>
+            </li>
+          ))}
+        </ul>
+      )}
+    </section>
   );
 }
 

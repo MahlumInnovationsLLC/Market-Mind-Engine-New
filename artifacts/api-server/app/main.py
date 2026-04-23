@@ -1172,6 +1172,24 @@ async def me_notifications_mark_read(
     return {"ok": True, "updated": updated, "unread_count": unread}
 
 
+@app.get("/api/me/notification-history")
+async def me_notification_history(
+    limit: int = 30,
+    user: AuthedUser = Depends(require_auth),
+) -> dict[str, object]:
+    """Read-only feed of the most recent alert dispatches the calling
+    user was eligible for (task #192).
+
+    Backed by `notification_dedupe`; entries include the alert type,
+    timestamp, and the channels (email/push/sms/telegram) the user was
+    opted into at fetch time. Caps at 200.
+    """
+    items = await notif_alerts.list_user_history(
+        user_id=user.user_id, limit=int(limit or 30)
+    )
+    return {"items": items, "limit": min(200, max(1, int(limit or 30)))}
+
+
 @app.get("/api/me/notification-prefs")
 async def me_get_notification_prefs(
     user: AuthedUser = Depends(require_auth),
