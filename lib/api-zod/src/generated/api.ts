@@ -820,12 +820,31 @@ export const AdminEmergencyStopResponse = zod.object({
 export const adminGetAuditLogQueryLimitDefault = 100;
 export const adminGetAuditLogQueryLimitMax = 500;
 
+export const adminGetAuditLogQueryOffsetDefault = 0;
+export const adminGetAuditLogQueryOffsetMin = 0;
+
 export const AdminGetAuditLogQueryParams = zod.object({
   limit: zod.coerce
     .number()
     .min(1)
     .max(adminGetAuditLogQueryLimitMax)
     .default(adminGetAuditLogQueryLimitDefault),
+  offset: zod.coerce
+    .number()
+    .min(adminGetAuditLogQueryOffsetMin)
+    .default(adminGetAuditLogQueryOffsetDefault),
+  target: zod.coerce
+    .string()
+    .optional()
+    .describe("Target user id (exact) or email substring (case-insensitive)"),
+  actor: zod.coerce
+    .string()
+    .optional()
+    .describe("Actor user id (exact) or email substring (case-insensitive)"),
+  action: zod.coerce
+    .string()
+    .optional()
+    .describe("Exact action name (e.g. set_approved, set_admin)"),
 });
 
 export const AdminGetAuditLogResponse = zod.object({
@@ -842,6 +861,18 @@ export const AdminGetAuditLogResponse = zod.object({
       created_at: zod.string().nullish(),
     }),
   ),
+  limit: zod.number().nullish(),
+  offset: zod.number().nullish(),
+  target: zod.string().nullish(),
+  actor: zod.string().nullish(),
+  action: zod.string().nullish(),
+});
+
+/**
+ * @summary Distinct action values present in the audit log (for filter UI)
+ */
+export const AdminGetAuditLogActionsResponse = zod.object({
+  items: zod.array(zod.string()),
 });
 
 /**

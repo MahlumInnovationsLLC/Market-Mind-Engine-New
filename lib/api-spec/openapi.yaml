@@ -464,12 +464,39 @@ paths:
         - in: query
           name: limit
           schema: { type: integer, minimum: 1, maximum: 500, default: 100 }
+        - in: query
+          name: offset
+          schema: { type: integer, minimum: 0, default: 0 }
+        - in: query
+          name: target
+          schema: { type: string }
+          description: Target user id (exact) or email substring (case-insensitive)
+        - in: query
+          name: actor
+          schema: { type: string }
+          description: Actor user id (exact) or email substring (case-insensitive)
+        - in: query
+          name: action
+          schema: { type: string }
+          description: Exact action name (e.g. set_approved, set_admin)
       responses:
         "200":
           description: Audit log
           content:
             application/json:
               schema: { $ref: "#/components/schemas/AdminAuditLogList" }
+
+  /admin/audit-log/actions:
+    get:
+      operationId: adminGetAuditLogActions
+      tags: [admin]
+      summary: Distinct action values present in the audit log (for filter UI)
+      responses:
+        "200":
+          description: Action list
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AdminAuditLogActionList" }
 
   /admin/autoresearch/features:
     get:
@@ -1524,6 +1551,19 @@ components:
         items:
           type: array
           items: { $ref: "#/components/schemas/AdminAuditLogEntry" }
+        limit: { type: integer, nullable: true }
+        offset: { type: integer, nullable: true }
+        target: { type: string, nullable: true }
+        actor: { type: string, nullable: true }
+        action: { type: string, nullable: true }
+      required: [items]
+
+    AdminAuditLogActionList:
+      type: object
+      properties:
+        items:
+          type: array
+          items: { type: string }
       required: [items]
 
     AutoResearchFeature:

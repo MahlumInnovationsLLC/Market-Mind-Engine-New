@@ -15,7 +15,7 @@ import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 
-from fastapi import Depends, FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
+from fastapi import Depends, FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
@@ -1142,12 +1142,35 @@ async def admin_set_runtime_settings(
 async def admin_get_audit_log(
     limit: int = 100,
     offset: int = 0,
+    target: str | None = None,
+    actor_filter: str | None = Query(default=None, alias="actor"),
+    action: str | None = None,
     actor: AuthedUser = Depends(require_admin),
 ) -> dict[str, object]:
     limit = max(1, min(500, int(limit)))
     offset = max(0, int(offset))
-    items = await admin_module.list_audit_log(limit, offset)
-    return {"items": items, "limit": limit, "offset": offset}
+    items = await admin_module.list_audit_log(
+        limit,
+        offset,
+        target=target,
+        actor=actor_filter,
+        action=action,
+    )
+    return {
+        "items": items,
+        "limit": limit,
+        "offset": offset,
+        "target": target,
+        "actor": actor_filter,
+        "action": action,
+    }
+
+
+@app.get("/api/admin/audit-log/actions")
+async def admin_get_audit_log_actions(
+    actor: AuthedUser = Depends(require_admin),
+) -> dict[str, object]:
+    return {"items": await admin_module.list_audit_log_actions()}
 
 
 # ---------------------------------------------------------------------------

@@ -55,6 +55,7 @@ PROTECTED_ROUTES: tuple[str, ...] = (
     "/api/admin/users/{clerk_user_id}",
     "/api/admin/rc-webhook/stats",
     "/api/admin/audit-log",
+    "/api/admin/audit-log/actions",
     "/api/me/access",
     "/api/me/subscription",
     "/api/me/notification-prefs",

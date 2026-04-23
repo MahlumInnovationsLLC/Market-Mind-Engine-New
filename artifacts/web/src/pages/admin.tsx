@@ -524,19 +524,66 @@ export function AuditLogPanel() {
   const [pageSize, setPageSize] = useState<number>(50);
   const [page, setPage] = useState<number>(0); // zero-indexed
 
+  // Filter inputs are split into "draft" (the live <input> value) and
+  // "applied" (what the query actually sends). This avoids re-fetching on
+  // every keystroke and lets the operator hit Enter / blur to commit.
+  const [targetDraft, setTargetDraft] = useState("");
+  const [actorDraft, setActorDraft] = useState("");
+  const [actionApplied, setActionApplied] = useState("");
+  const [targetApplied, setTargetApplied] = useState("");
+  const [actorApplied, setActorApplied] = useState("");
+
+  const applyFilters = () => {
+    setTargetApplied(targetDraft.trim());
+    setActorApplied(actorDraft.trim());
+    setPage(0);
+  };
+  const clearFilters = () => {
+    setTargetDraft("");
+    setActorDraft("");
+    setTargetApplied("");
+    setActorApplied("");
+    setActionApplied("");
+    setPage(0);
+  };
+
   type AuditPage = { items: AdminAuditLogEntry[]; limit: number; offset: number };
   const offset = page * pageSize;
+  const buildUrl = () => {
+    const qs = new URLSearchParams();
+    qs.set("limit", String(pageSize));
+    qs.set("offset", String(offset));
+    if (targetApplied) qs.set("target", targetApplied);
+    if (actorApplied) qs.set("actor", actorApplied);
+    if (actionApplied) qs.set("action", actionApplied);
+    return `/api/admin/audit-log?${qs.toString()}`;
+  };
   const query = useQuery<AuditPage>({
-    queryKey: ["admin", "audit-log", pageSize, offset],
-    queryFn: () =>
-      apiFetch<AuditPage>(
-        `/api/admin/audit-log?limit=${pageSize}&offset=${offset}`,
-        { getToken: tokenFn },
-      ),
+    queryKey: [
+      "admin",
+      "audit-log",
+      pageSize,
+      offset,
+      targetApplied,
+      actorApplied,
+      actionApplied,
+    ],
+    queryFn: () => apiFetch<AuditPage>(buildUrl(), { getToken: tokenFn }),
     enabled: !!isSignedIn,
     refetchInterval: 30_000,
     placeholderData: (prev) => prev,
   });
+
+  type ActionsList = { items: string[] };
+  const actionsQuery = useQuery<ActionsList>({
+    queryKey: ["admin", "audit-log", "actions"],
+    queryFn: () =>
+      apiFetch<ActionsList>("/api/admin/audit-log/actions", { getToken: tokenFn }),
+    enabled: !!isSignedIn,
+    staleTime: 60_000,
+  });
+  const knownActions = actionsQuery.data?.items ?? [];
+  const hasActiveFilters = !!(targetApplied || actorApplied || actionApplied);
 
   const items: AdminAuditLogEntry[] = query.data?.items ?? [];
   const hasMore = items.length === pageSize;
@@ -557,6 +604,84 @@ export function AuditLogPanel() {
 
   return (
     <div className="space-y-3" data-testid="panel-audit-log">
+      <div className="flex flex-wrap items-end gap-2 text-[11px] uppercase tracking-widest text-muted-foreground border border-border bg-card p-2">
+        <label className="flex flex-col gap-1">
+          <span>Target user</span>
+          <input
+            value={targetDraft}
+            onChange={(e) => setTargetDraft(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") applyFilters();
+            }}
+            onBlur={() => {
+              if (targetDraft.trim() !== targetApplied) applyFilters();
+            }}
+            placeholder="email or user id"
+            data-testid="input-audit-filter-target"
+            className="bg-input border border-border px-2 py-1 text-xs lowercase tracking-normal w-56 max-w-full normal-case text-foreground"
+          />
+        </label>
+        <label className="flex flex-col gap-1">
+          <span>Actor</span>
+          <input
+            value={actorDraft}
+            onChange={(e) => setActorDraft(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") applyFilters();
+            }}
+            onBlur={() => {
+              if (actorDraft.trim() !== actorApplied) applyFilters();
+            }}
+            placeholder="email or user id"
+            data-testid="input-audit-filter-actor"
+            className="bg-input border border-border px-2 py-1 text-xs lowercase tracking-normal w-56 max-w-full normal-case text-foreground"
+          />
+        </label>
+        <label className="flex flex-col gap-1">
+          <span>Action</span>
+          <select
+            value={actionApplied}
+            onChange={(e) => {
+              setActionApplied(e.target.value);
+              setPage(0);
+            }}
+            data-testid="select-audit-filter-action"
+            className="bg-input border border-border px-2 py-1 text-xs lowercase tracking-normal text-foreground min-w-[10rem]"
+          >
+            <option value="">all actions</option>
+            {knownActions.map((a) => (
+              <option key={a} value={a}>
+                {a}
+              </option>
+            ))}
+          </select>
+        </label>
+        <button
+          type="button"
+          onClick={applyFilters}
+          data-testid="button-audit-apply-filters"
+          className="border border-border px-2 py-1 text-[11px] uppercase tracking-widest text-foreground hover:bg-muted/30"
+        >
+          Apply
+        </button>
+        <button
+          type="button"
+          onClick={clearFilters}
+          disabled={!hasActiveFilters && !targetDraft && !actorDraft}
+          data-testid="button-audit-clear-filters"
+          className="border border-border px-2 py-1 text-[11px] uppercase tracking-widest text-muted-foreground hover:text-foreground disabled:cursor-not-allowed disabled:opacity-40"
+        >
+          Clear
+        </button>
+        {hasActiveFilters ? (
+          <span
+            className="text-primary text-[10px] tracking-widest"
+            data-testid="text-audit-filter-active"
+          >
+            filters on
+          </span>
+        ) : null}
+      </div>
       <div className="flex flex-wrap items-center justify-between gap-2 text-[11px] uppercase tracking-widest text-muted-foreground">
         <div data-testid="text-audit-range">
           {isLoading && !query.data
@@ -628,7 +753,11 @@ export function AuditLogPanel() {
             ) : items.length === 0 ? (
               <tr>
                 <td colSpan={5} className="p-6 text-center text-muted-foreground">
-                  {page === 0 ? "No audit entries yet." : "No more entries."}
+                  {hasActiveFilters
+                    ? "No audit entries match the current filters."
+                    : page === 0
+                      ? "No audit entries yet."
+                      : "No more entries."}
                 </td>
               </tr>
             ) : (

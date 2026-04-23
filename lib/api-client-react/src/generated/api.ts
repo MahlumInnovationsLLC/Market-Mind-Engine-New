@@ -22,6 +22,7 @@ import type {
   AdminAccessRequestDecision,
   AdminAccessRequestList,
   AdminAccessRequestResult,
+  AdminAuditLogActionList,
   AdminAuditLogList,
   AdminAutoResearchListFeaturesParams,
   AdminGetAuditLogParams,
@@ -2489,6 +2490,82 @@ export function useAdminGetAuditLog<
   },
 ): UseQueryResult<TData, TError> & { queryKey: QueryKey } {
   const queryOptions = getAdminGetAuditLogQueryOptions(params, options);
+
+  const query = useQuery(queryOptions) as UseQueryResult<TData, TError> & {
+    queryKey: QueryKey;
+  };
+
+  return { ...query, queryKey: queryOptions.queryKey };
+}
+
+/**
+ * @summary Distinct action values present in the audit log (for filter UI)
+ */
+export const getAdminGetAuditLogActionsUrl = () => {
+  return `/api/admin/audit-log/actions`;
+};
+
+export const adminGetAuditLogActions = async (
+  options?: RequestInit,
+): Promise<AdminAuditLogActionList> => {
+  return customFetch<AdminAuditLogActionList>(getAdminGetAuditLogActionsUrl(), {
+    ...options,
+    method: "GET",
+  });
+};
+
+export const getAdminGetAuditLogActionsQueryKey = () => {
+  return [`/api/admin/audit-log/actions`] as const;
+};
+
+export const getAdminGetAuditLogActionsQueryOptions = <
+  TData = Awaited<ReturnType<typeof adminGetAuditLogActions>>,
+  TError = ErrorType<unknown>,
+>(options?: {
+  query?: UseQueryOptions<
+    Awaited<ReturnType<typeof adminGetAuditLogActions>>,
+    TError,
+    TData
+  >;
+  request?: SecondParameter<typeof customFetch>;
+}) => {
+  const { query: queryOptions, request: requestOptions } = options ?? {};
+
+  const queryKey =
+    queryOptions?.queryKey ?? getAdminGetAuditLogActionsQueryKey();
+
+  const queryFn: QueryFunction<
+    Awaited<ReturnType<typeof adminGetAuditLogActions>>
+  > = ({ signal }) => adminGetAuditLogActions({ signal, ...requestOptions });
+
+  return { queryKey, queryFn, ...queryOptions } as UseQueryOptions<
+    Awaited<ReturnType<typeof adminGetAuditLogActions>>,
+    TError,
+    TData
+  > & { queryKey: QueryKey };
+};
+
+export type AdminGetAuditLogActionsQueryResult = NonNullable<
+  Awaited<ReturnType<typeof adminGetAuditLogActions>>
+>;
+export type AdminGetAuditLogActionsQueryError = ErrorType<unknown>;
+
+/**
+ * @summary Distinct action values present in the audit log (for filter UI)
+ */
+
+export function useAdminGetAuditLogActions<
+  TData = Awaited<ReturnType<typeof adminGetAuditLogActions>>,
+  TError = ErrorType<unknown>,
+>(options?: {
+  query?: UseQueryOptions<
+    Awaited<ReturnType<typeof adminGetAuditLogActions>>,
+    TError,
+    TData
+  >;
+  request?: SecondParameter<typeof customFetch>;
+}): UseQueryResult<TData, TError> & { queryKey: QueryKey } {
+  const queryOptions = getAdminGetAuditLogActionsQueryOptions(options);
 
   const query = useQuery(queryOptions) as UseQueryResult<TData, TError> & {
     queryKey: QueryKey;

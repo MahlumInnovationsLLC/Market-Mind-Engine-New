@@ -669,28 +669,84 @@ async def _mirror_to_clerk(
         log.warning("clerk metadata mirror failed: %s", e)
 
 
-async def list_audit_log(limit: int = 100, offset: int = 0) -> list[dict[str, Any]]:
+async def list_audit_log_actions() -> list[str]:
+    """Distinct ``action`` values currently in the audit log.
+
+    Used by the admin console to populate the action-filter dropdown.
+    """
     await ensure_schema()
     try:
         async with db.acquire() as c:
             rows = await c.fetch(
-                """
-                SELECT
-                  id,
-                  actor_user_id,
-                  actor_email,
-                  target_user_id,
-                  target_email,
-                  action,
-                  before_value,
-                  after_value,
-                  to_char(created_at, 'YYYY-MM-DD"T"HH24:MI:SSZ') AS created_at
-                FROM admin_audit_log
-                ORDER BY created_at DESC
-                LIMIT $1 OFFSET $2
-                """,
-                limit, offset,
+                "SELECT DISTINCT action FROM admin_audit_log ORDER BY action"
             )
+            return [r["action"] for r in rows if r["action"]]
+    except Exception as e:
+        log.warning("admin audit_log distinct actions failed: %s", e)
+        return []
+
+
+async def list_audit_log(
+    limit: int = 100,
+    offset: int = 0,
+    *,
+    target: str | None = None,
+    actor: str | None = None,
+    action: str | None = None,
+) -> list[dict[str, Any]]:
+    """Recent audit entries with optional filters.
+
+    ``target`` and ``actor`` match either the user id (exact) or the
+    email (case-insensitive substring) so the admin console can filter
+    by whatever the operator types in. ``action`` is an exact match on
+    the ``action`` column (the UI offers a dropdown of known values).
+    """
+    await ensure_schema()
+    where: list[str] = []
+    params: list[Any] = [limit, offset]
+
+    def _add_userish(col_id: str, col_email: str, value: str) -> None:
+        v = value.strip()
+        if not v:
+            return
+        params.append(v)
+        idx_exact = len(params)
+        params.append(f"%{v.lower()}%")
+        idx_like = len(params)
+        where.append(
+            f"({col_id} = ${idx_exact} OR lower(coalesce({col_email}, '')) LIKE ${idx_like})"
+        )
+
+    if target:
+        _add_userish("target_user_id", "target_email", target)
+    if actor:
+        _add_userish("actor_user_id", "actor_email", actor)
+    if action:
+        a = action.strip()
+        if a:
+            params.append(a)
+            where.append(f"action = ${len(params)}")
+
+    where_sql = ("WHERE " + " AND ".join(where)) if where else ""
+    sql = f"""
+        SELECT
+          id,
+          actor_user_id,
+          actor_email,
+          target_user_id,
+          target_email,
+          action,
+          before_value,
+          after_value,
+          to_char(created_at, 'YYYY-MM-DD"T"HH24:MI:SSZ') AS created_at
+        FROM admin_audit_log
+        {where_sql}
+        ORDER BY created_at DESC
+        LIMIT $1 OFFSET $2
+    """
+    try:
+        async with db.acquire() as c:
+            rows = await c.fetch(sql, *params)
             out: list[dict[str, Any]] = []
             for r in rows:
                 d = dict(r)

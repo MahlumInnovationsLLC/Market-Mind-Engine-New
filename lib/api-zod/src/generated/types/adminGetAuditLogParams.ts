@@ -12,4 +12,20 @@ export type AdminGetAuditLogParams = {
    * @maximum 500
    */
   limit?: number;
+  /**
+   * @minimum 0
+   */
+  offset?: number;
+  /**
+   * Target user id (exact) or email substring (case-insensitive)
+   */
+  target?: string;
+  /**
+   * Actor user id (exact) or email substring (case-insensitive)
+   */
+  actor?: string;
+  /**
+   * Exact action name (e.g. set_approved, set_admin)
+   */
+  action?: string;
 };

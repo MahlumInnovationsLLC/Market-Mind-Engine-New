@@ -668,6 +668,15 @@ export interface AdminAuditLogEntry {
 
 export interface AdminAuditLogList {
   items: AdminAuditLogEntry[];
+  limit?: number | null;
+  offset?: number | null;
+  target?: string | null;
+  actor?: string | null;
+  action?: string | null;
+}
+
+export interface AdminAuditLogActionList {
+  items: string[];
 }
 
 export type AutoResearchFeatureStatus =
@@ -910,6 +919,22 @@ export type AdminGetAuditLogParams = {
    * @maximum 500
    */
   limit?: number;
+  /**
+   * @minimum 0
+   */
+  offset?: number;
+  /**
+   * Target user id (exact) or email substring (case-insensitive)
+   */
+  target?: string;
+  /**
+   * Actor user id (exact) or email substring (case-insensitive)
+   */
+  actor?: string;
+  /**
+   * Exact action name (e.g. set_approved, set_admin)
+   */
+  action?: string;
 };
 
 export type AdminAutoResearchListFeaturesParams = {

@@ -9,4 +9,9 @@ import type { AdminAuditLogEntry } from "./adminAuditLogEntry";
 
 export interface AdminAuditLogList {
   items: AdminAuditLogEntry[];
+  limit?: number | null;
+  offset?: number | null;
+  target?: string | null;
+  actor?: string | null;
+  action?: string | null;
 }

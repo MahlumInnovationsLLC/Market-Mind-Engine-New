@@ -14,6 +14,7 @@ export * from "./adminAccessRequestDecision";
 export * from "./adminAccessRequestDecisionDecision";
 export * from "./adminAccessRequestList";
 export * from "./adminAccessRequestResult";
+export * from "./adminAuditLogActionList";
 export * from "./adminAuditLogEntry";
 export * from "./adminAuditLogEntryAfterValue";
 export * from "./adminAuditLogEntryBeforeValue";
