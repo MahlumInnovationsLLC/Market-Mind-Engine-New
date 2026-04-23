@@ -14,6 +14,7 @@ import OverFilledOrdersBadge from "@/components/dashboard/over-filled-orders-bad
 import PerLeagueCalibration from "@/components/dashboard/per-league-calibration";
 import { PeriodProvider, PeriodStrip } from "@/components/dashboard/period-context";
 import PipelineTracker from "@/components/dashboard/pipeline-tracker";
+import TelegramConcierge from "@/components/dashboard/telegram-concierge";
 import TradeStatsPanel from "@/components/dashboard/trade-stats-panel";
 import VerticalCards from "@/components/dashboard/vertical-cards";
 
@@ -204,6 +205,8 @@ export default function Dashboard() {
           />
           <SwarmFallbacksToday />
         </GlassCard>
+
+        <TelegramConcierge />
 
         <OperatorControls isAdmin={isAdmin} />
       </div>
