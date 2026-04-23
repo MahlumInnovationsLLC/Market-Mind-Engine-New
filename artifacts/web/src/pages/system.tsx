@@ -356,7 +356,8 @@ function ThemePickerPanel() {
 }
 
 type DailyLossSnapshot = {
-  date_utc: string;
+  date_local: string;
+  timezone: string;
   realized_pnl_usd: number;
   unrealized_pnl_usd: number;
   net_pnl_usd: number;
@@ -448,13 +449,13 @@ function DailyLossPanel() {
       <div className="grid grid-cols-2 gap-3 text-[11px] md:grid-cols-4">
         <div>
           <div className="text-muted-foreground uppercase tracking-wider">
-            Today (UTC)
+            Today ({data.timezone})
           </div>
           <div
             className="font-mono text-sm"
             data-testid="daily-loss-date"
           >
-            {data.date_utc}
+            {data.date_local}
           </div>
         </div>
         <div>

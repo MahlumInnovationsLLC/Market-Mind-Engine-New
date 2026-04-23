@@ -189,7 +189,8 @@ async def gate_daily_loss(ctx: RiskContext) -> GateResult:
         log.warning("daily_loss snapshot failed (degraded): %s", e)
         return GateResult("daily_loss", True, "snapshot degraded", {"error": str(e)})
     details: dict[str, Any] = {
-        "date_utc": snap.date_utc,
+        "date_local": snap.date_local,
+        "timezone": snap.timezone,
         "loss_usd": snap.loss_usd,
         "net_pnl_usd": snap.net_pnl_usd,
         "realized_pnl_usd": snap.realized_pnl_usd,

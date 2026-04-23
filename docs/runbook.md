@@ -130,11 +130,29 @@ P&L and auto-halts trading when either of two caps is breached:
 - `AXIOM_DAILY_LOSS_HALT_USD` — absolute dollar cap (e.g. `500`).
 - `AXIOM_DAILY_LOSS_HALT_PCT` — percent of **start-of-day** bankroll
   (e.g. `2.5` = 2.5%). The denominator is the last `bankroll_events`
-  row before today (UTC).
+  row before today in the trading-day timezone.
 
 Either / both / neither may be set. When neither is configured the
 gate is a no-op and logs a warning on every cycle so operators know
 the safety net is unarmed.
+
+### Trading-day timezone
+
+The "today" boundary is UTC by default but is configurable so
+markets can halt on a local-calendar basis (e.g. NY close at 17:00
+ET for US-market deployments):
+
+- `AXIOM_DAILY_LOSS_TZ` — any IANA zone name (e.g.
+  `America/New_York`, `Asia/Tokyo`). Default: `UTC`.
+- `risk.daily_loss_tz` operator override in `system_settings`
+  beats the env var.
+
+Both the realized-PnL SQL filter and the start-of-day bankroll
+boundary use this zone, so a non-UTC setting shifts both ends of
+the window consistently. A typo in the zone name falls back to UTC
+with a warning — a mis-set boundary will never silently shift by
+hours. The System → Controls card renders "Today (&lt;tz&gt;)" so
+operators can see which zone is in effect at a glance.
 
 ### Operator override (preferred)
 

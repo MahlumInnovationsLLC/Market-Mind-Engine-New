@@ -71,13 +71,17 @@ class _Patcher:
         self.halt_calls: list[str] = []
         self.alerts: list[dict] = []
 
-    async def _fake_sum_realized(self, today):
+    async def _fake_sum_realized(self, today, tz_name="UTC"):
+        self.last_tz_realized = tz_name
+        self.last_date_realized = today
         return float(self.realized)
 
     async def _fake_sum_unrealized(self):
         return float(self.unrealized)
 
-    async def _fake_start_of_day(self, today):
+    async def _fake_start_of_day(self, today, tz_name="UTC"):
+        self.last_tz_bankroll = tz_name
+        self.last_date_bankroll = today
         return self.bankroll
 
     async def _fake_current_mode(self):
@@ -108,6 +112,7 @@ class _Patcher:
         _dl.invalidate_cache()
         self._patches = [
             patch.object(_dl, "_today_utc", lambda: self.today),
+            patch.object(_dl, "_today_in_tz", lambda tz: self.today),
             patch.object(_dl, "_sum_realized_today", self._fake_sum_realized),
             patch.object(_dl, "_sum_unrealized", self._fake_sum_unrealized),
             patch.object(_dl, "_start_of_day_bankroll", self._fake_start_of_day),
@@ -241,6 +246,45 @@ def test_operator_override_beats_env(monkeypatch):
     assert len(p.alerts) == 1
 
 
+def test_configurable_timezone_shifts_day_boundary(monkeypatch):
+    """Setting AXIOM_DAILY_LOSS_TZ must change the trading-day boundary:
+    the SQL filter binds the configured zone, and the snapshot's
+    ``timezone`` + ``date_local`` fields reflect it."""
+    monkeypatch.setenv("AXIOM_DAILY_LOSS_TZ", "America/New_York")
+    monkeypatch.setenv("AXIOM_DAILY_LOSS_HALT_USD", "500")
+    _dl.invalidate_cache()
+    # Intentionally don't patch _today_in_tz so the real TZ lookup runs.
+    with _Patcher(realized=-100.0, unrealized=0.0, bankroll=1000.0) as p:
+        # Unpatch the _today_in_tz patcher set in __enter__ so the real
+        # zoneinfo lookup runs against the env var.
+        for patcher in p._patches:
+            if getattr(patcher, "attribute", None) == "_today_in_tz":
+                patcher.stop()
+        snap = asyncio.run(_dl.compute_snapshot(None))
+    assert snap.timezone == "America/New_York"
+    assert p.last_tz_realized == "America/New_York"
+    assert p.last_tz_bankroll == "America/New_York"
+    # date_local must be an ISO date string in that zone (today in NY)
+    import re as _re
+    assert _re.fullmatch(r"\d{4}-\d{2}-\d{2}", snap.date_local)
+
+
+def test_unknown_timezone_falls_back_to_utc(monkeypatch):
+    """A typo in the TZ name must not silently shift the halt boundary —
+    fall back to UTC with a warning."""
+    monkeypatch.setenv("AXIOM_DAILY_LOSS_TZ", "Not/A_Real_Zone")
+    _dl.invalidate_cache()
+    tz_name, _tz = _dl._resolve_tz(None)
+    assert tz_name == "UTC"
+
+
+def test_operator_override_tz_beats_env(monkeypatch):
+    """operator_override 'daily_loss_tz' must beat the env var."""
+    monkeypatch.setenv("AXIOM_DAILY_LOSS_TZ", "America/New_York")
+    name, _tz = _dl._resolve_tz({"daily_loss_tz": "Asia/Tokyo"})
+    assert name == "Asia/Tokyo"
+
+
 def test_tz_rollover_invalidates_cache(monkeypatch):
     """When the UTC day ticks over the snapshot cache must NOT return the
     previous day's numbers — that would mis-report yesterday's loss as
@@ -254,7 +298,7 @@ def test_tz_rollover_invalidates_cache(monkeypatch):
         today=date(2026, 4, 23),
     ) as p:
         snap1 = asyncio.run(_dl.compute_snapshot(None))
-        assert snap1.date_utc == "2026-04-23"
+        assert snap1.date_local == "2026-04-23"
         assert snap1.loss_usd == 900.0
 
     # Day 2 — same process, fresh day, realized resets to 0, snapshot
@@ -266,7 +310,7 @@ def test_tz_rollover_invalidates_cache(monkeypatch):
         today=date(2026, 4, 24),
     ) as p:
         snap2 = asyncio.run(_dl.compute_snapshot(None))
-        assert snap2.date_utc == "2026-04-24"
+        assert snap2.date_local == "2026-04-24"
         assert snap2.loss_usd == 0.0
         assert snap2.tripped is False
 

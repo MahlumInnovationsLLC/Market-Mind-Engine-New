@@ -20,6 +20,7 @@ import time
 from dataclasses import asdict, dataclass
 from datetime import date, datetime, timezone
 from typing import Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from .. import db
 from ..notifications import alerts as notif_alerts
@@ -34,11 +35,17 @@ log = logging.getLogger(__name__)
 
 
 CACHE_TTL_SECONDS = 5.0
+DEFAULT_TZ = "UTC"
 
 
 @dataclass
 class DailyLossSnapshot:
-    date_utc: str
+    # Trading-day boundary, expressed in whatever timezone the operator
+    # has configured (``AXIOM_DAILY_LOSS_TZ`` or risk.daily_loss_tz
+    # override).  The field name is kept generic (not "date_utc") so
+    # the UI doesn't lie when a non-UTC zone is in effect.
+    date_local: str
+    timezone: str
     realized_pnl_usd: float
     unrealized_pnl_usd: float
     net_pnl_usd: float
@@ -60,6 +67,39 @@ _cache_lock = asyncio.Lock()
 _cache: tuple[float, DailyLossSnapshot] | None = None
 
 
+def _resolve_tz(overrides: dict[str, Any] | None = None) -> tuple[str, ZoneInfo]:
+    """Pick the trading-day timezone.
+
+    Precedence: operator override ``risk.daily_loss_tz`` > env
+    ``AXIOM_DAILY_LOSS_TZ`` > ``UTC``.  An unknown zone name falls
+    back to UTC with a warning so a typo never silently shifts the
+    halt boundary by hours.
+    """
+    name: str | None = None
+    if overrides and overrides.get("daily_loss_tz"):
+        name = str(overrides["daily_loss_tz"]).strip() or None
+    if name is None:
+        env = os.environ.get("AXIOM_DAILY_LOSS_TZ", "").strip()
+        if env:
+            name = env
+    if not name:
+        name = DEFAULT_TZ
+    try:
+        return name, ZoneInfo(name)
+    except ZoneInfoNotFoundError:
+        log.warning(
+            "AXIOM_DAILY_LOSS_TZ / risk.daily_loss_tz = %r is not a known "
+            "IANA zone; falling back to UTC", name,
+        )
+        return DEFAULT_TZ, ZoneInfo(DEFAULT_TZ)
+
+
+def _today_in_tz(tz: ZoneInfo) -> date:
+    return datetime.now(tz).date()
+
+
+# Kept for backwards compatibility with the test suite + callers that
+# don't need a configurable zone.
 def _today_utc() -> date:
     return datetime.now(timezone.utc).date()
 
@@ -100,16 +140,17 @@ def _read_threshold_pct(overrides: dict[str, Any] | None) -> float | None:
         return None
 
 
-async def _sum_realized_today(today: date) -> float:
+async def _sum_realized_today(today: date, tz_name: str = DEFAULT_TZ) -> float:
     try:
         row = await db.fetchrow(
             """
             SELECT coalesce(sum(realized_pnl), 0)::float AS realized
               FROM trades
              WHERE settled_at IS NOT NULL
-               AND ((settled_at at time zone 'UTC')::date) = $1
+               AND ((settled_at at time zone $2)::date) = $1
             """,
             today,
+            tz_name,
         )
         return float(row["realized"] or 0.0) if row else 0.0
     except Exception as e:
@@ -132,8 +173,11 @@ async def _sum_unrealized() -> float:
         return 0.0
 
 
-async def _start_of_day_bankroll(today: date) -> float | None:
-    """Balance before the first bankroll_events row of ``today`` (UTC).
+async def _start_of_day_bankroll(
+    today: date, tz_name: str = DEFAULT_TZ
+) -> float | None:
+    """Balance before the first bankroll_events row of ``today``
+    (expressed in the configured trading-day timezone).
 
     Falls back to the latest bankroll_events balance, which is correct
     on a quiet day — if there were no bankroll changes yet today, the
@@ -143,11 +187,12 @@ async def _start_of_day_bankroll(today: date) -> float | None:
         v = await db.fetchval(
             """
             SELECT balance_cents FROM bankroll_events
-             WHERE ((created_at at time zone 'UTC')::date) < $1
+             WHERE ((created_at at time zone $2)::date) < $1
              ORDER BY id DESC
              LIMIT 1
             """,
             today,
+            tz_name,
         )
         if v is not None:
             return float(int(v)) / 100.0
@@ -172,24 +217,39 @@ async def compute_snapshot(
     *,
     use_cache: bool = True,
 ) -> DailyLossSnapshot:
-    """Build a fresh (or cached) snapshot of today's P&L and thresholds."""
+    """Build a fresh (or cached) snapshot of today's P&L and thresholds.
+
+    "Today" is the current date in the configured trading-day timezone
+    (default UTC). A TZ or override change invalidates the cache on the
+    next call because the cache-key comparison checks ``(date_local, tz)``.
+    """
     global _cache
+    tz_name, tz = _resolve_tz(overrides)
     now_m = time.monotonic()
+    today_str = _today_in_tz(tz).isoformat()
     if use_cache and _cache is not None:
         expires, snap = _cache
-        if now_m < expires and snap.date_utc == _today_utc().isoformat():
+        if (
+            now_m < expires
+            and snap.date_local == today_str
+            and snap.timezone == tz_name
+        ):
             return snap
     async with _cache_lock:
         # Re-check inside lock so concurrent callers share one DB hit.
         if use_cache and _cache is not None:
             expires, snap = _cache
-            if time.monotonic() < expires and snap.date_utc == _today_utc().isoformat():
+            if (
+                time.monotonic() < expires
+                and snap.date_local == _today_in_tz(tz).isoformat()
+                and snap.timezone == tz_name
+            ):
                 return snap
-        today = _today_utc()
+        today = _today_in_tz(tz)
         realized, unrealized, bankroll = await asyncio.gather(
-            _sum_realized_today(today),
+            _sum_realized_today(today, tz_name),
             _sum_unrealized(),
-            _start_of_day_bankroll(today),
+            _start_of_day_bankroll(today, tz_name),
         )
         net = float(realized) + float(unrealized)
         loss = -net if net < 0 else 0.0
@@ -214,7 +274,8 @@ async def compute_snapshot(
                 f"start-of-day bankroll (${thr_pct_usd:.2f})"
             )
         snap = DailyLossSnapshot(
-            date_utc=today.isoformat(),
+            date_local=today.isoformat(),
+            timezone=tz_name,
             realized_pnl_usd=realized,
             unrealized_pnl_usd=unrealized,
             net_pnl_usd=net,
@@ -284,10 +345,10 @@ async def apply_halt(snap: DailyLossSnapshot) -> bool:
     if current == "halt":
         return False
     # Claim the dedupe key; only the winner performs side effects.
-    dedupe_key = f"daily_loss_halt:{snap.date_utc}"
+    dedupe_key = f"daily_loss_halt:{snap.date_local}"
     try:
         ok = await notif_alerts.dedupe_or_skip(
-            "daily_loss_halt", snap.date_utc, ttl_seconds=86400
+            "daily_loss_halt", snap.date_local, ttl_seconds=86400
         )
     except Exception as e:
         log.warning("daily_loss dedupe claim failed: %s", e)
@@ -306,7 +367,7 @@ async def apply_halt(snap: DailyLossSnapshot) -> bool:
     # Fire the operator alert via the standard notification path.
     try:
         notif_alerts.daily_loss_halt(
-            date_utc=snap.date_utc,
+            date_utc=snap.date_local,
             loss_usd=snap.loss_usd,
             realized_pnl_usd=snap.realized_pnl_usd,
             unrealized_pnl_usd=snap.unrealized_pnl_usd,
