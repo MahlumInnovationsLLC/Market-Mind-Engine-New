@@ -196,10 +196,28 @@ class KalshiClient:
             params=params,
         )
 
-    async def list_markets(self, *, limit: int = 50, status: str | None = "open") -> dict[str, Any]:
+    async def list_markets(
+        self,
+        *,
+        limit: int = 50,
+        status: str | None = "open",
+        series_ticker: str | None = None,
+        cursor: str | None = None,
+    ) -> dict[str, Any]:
+        """List markets via ``GET /markets``.
+
+        ``series_ticker`` filters server-side to a single Kalshi series
+        (e.g. ``KXBTC``); ``cursor`` follows the standard Kalshi
+        pagination token. Both default to ``None`` so existing callers
+        keep their previous behavior.
+        """
         params: dict[str, Any] = {"limit": limit}
         if status:
             params["status"] = status
+        if series_ticker:
+            params["series_ticker"] = series_ticker
+        if cursor:
+            params["cursor"] = cursor
         return await self._request("GET", "/markets", params=params)
 
     async def submit_order(self, payload: dict[str, Any]) -> dict[str, Any]:

@@ -71,6 +71,7 @@ from .feeds.sportradar import (
 from .feeds.weather import register_weather_feeds
 from .feeds.crypto import register_crypto_feeds
 from .feeds.commodities import register_commodities_feeds
+from .feeds.kalshi_crypto_markets import register_kalshi_crypto_markets_feed
 from .feeds.tech_evidence import register_tech_evidence_feeds
 from .feeds.election_polls import register_election_polls_feeds
 from .feeds.unusual_whales import register_unusual_whales_feeds
@@ -161,6 +162,10 @@ async def lifespan(_: FastAPI):
         register_weather_feeds()
         register_crypto_feeds()
         register_commodities_feeds()
+        try:
+            register_kalshi_crypto_markets_feed()
+        except Exception as e:
+            log.warning("kalshi_crypto_markets feed registration failed: %s", e)
         register_tech_evidence_feeds()
         try:
             register_election_polls_feeds()
