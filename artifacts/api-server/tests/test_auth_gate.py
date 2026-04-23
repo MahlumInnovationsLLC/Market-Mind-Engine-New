@@ -148,6 +148,8 @@ PROTECTED_MUTATING_ENDPOINTS: tuple[tuple[str, str], ...] = (
     ("POST", "/api/admin/events-econ/promote-kelly"),
     ("POST", "/api/admin/entertainment/promote-kelly"),
     ("POST", "/api/admin/orchestrator/run-cycle"),
+    ("GET",  "/api/admin/elo/status"),
+    ("POST", "/api/admin/elo/run-cycle"),
     ("POST", "/api/admin/models/active"),
     ("POST", "/api/admin/models/mirror/push"),
     ("POST", "/api/admin/autoresearch/features/{name}/decision"),

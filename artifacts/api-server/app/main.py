@@ -74,6 +74,7 @@ from .feeds.unusual_whales import register_unusual_whales_feeds
 from .feeds.public_betting import register_public_betting_feeds
 from .feeds.outlier_bet import register_outlier_bet_feed
 from .features import drift as feature_drift, registry as feature_registry
+from .elo import scheduler as elo_scheduler
 from .orchestrator import pipeline_event_hub, run_cycle, scheduler as orchestrator_scheduler
 from .settlement import (
     backfill_is_running,
@@ -338,6 +339,14 @@ async def lifespan(_: FastAPI):
     except Exception as e:
         log.warning("feature drift scheduler start failed: %s", e)
 
+    # Elo updater: scans the `games` table for newly-finished matchups
+    # and feeds them into `record_game()` so per-team Elo ratings stay
+    # current.  Idempotent at both the SQL and engine layers.
+    try:
+        await elo_scheduler.scheduler.start()
+    except Exception as e:
+        log.warning("elo updater scheduler start failed: %s", e)
+
     # Continuous Kalshi balance -> bankroll_events sync. Polls every 60s
     # and writes a delta row whenever the live balance moves so the
     # bankroll-floor risk gate and equity curve always reflect reality.
@@ -437,6 +446,10 @@ async def lifespan(_: FastAPI):
             await feature_drift.scheduler.stop()
         except Exception as e:
             log.warning("feature drift scheduler stop error: %s", e)
+        try:
+            await elo_scheduler.scheduler.stop()
+        except Exception as e:
+            log.warning("elo updater scheduler stop error: %s", e)
         try:
             await autoresearch.scheduler.stop()
         except Exception as e:
@@ -2102,6 +2115,32 @@ async def admin_set_persona_toggle(
 
 class AdminRunCycleRequest(BaseModel):
     vertical: str = Field("sports", min_length=1, max_length=64)
+
+
+@app.get("/api/admin/elo/status")
+async def admin_elo_status(
+    actor: AuthedUser = Depends(require_admin),
+) -> dict[str, object]:
+    """Return the elo updater scheduler status (last cycle counters)."""
+    return elo_scheduler.scheduler.status()
+
+
+@app.post("/api/admin/elo/run-cycle")
+async def admin_elo_run_cycle(
+    actor: AuthedUser = Depends(require_admin),
+) -> dict[str, object]:
+    """Run one elo updater cycle out-of-band and return the counters."""
+    cr = await elo_scheduler.scheduler.run_now()
+    return {
+        "started_at": cr.started_at,
+        "completed_at": cr.completed_at,
+        "duration_seconds": cr.duration_seconds,
+        "games_examined": cr.games_examined,
+        "games_updated": cr.games_updated,
+        "games_skipped": cr.games_skipped,
+        "teams_touched": cr.teams_touched,
+        "errors": cr.errors,
+    }
 
 
 @app.post("/api/admin/orchestrator/run-cycle")
