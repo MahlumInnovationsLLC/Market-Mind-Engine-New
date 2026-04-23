@@ -281,3 +281,160 @@ async def health_probe() -> dict[str, Any]:
         return {"ok": False, "error": f"http {e.status}: {e.body!r}"[:300]}
     except Exception as e:
         return {"ok": False, "error": str(e)[:300]}
+
+
+# ---------------------------------------------------------------------------
+# Cluster auto-detect probe
+# ---------------------------------------------------------------------------
+#
+# Task #20 root-caused a long outage to prod credentials being pointed at
+# the demo cluster: every signed REST call and the WS upgrade silently
+# 401'd, but ``/exchange/status`` is unauthenticated so the existing
+# health check stayed green. The probe below runs once at boot, signs a
+# real authenticated call (``GET /portfolio/balance``), and if it gets
+# 401'd from the configured cluster it tries the *other* cluster too so
+# the operator sees "your key actually belongs to <other>" instead of a
+# slow drip of 401s in the reconnect loop.
+
+KALSHI_PROD_BASE = "https://api.elections.kalshi.com/trade-api/v2"
+KALSHI_DEMO_BASE = "https://demo-api.kalshi.co/trade-api/v2"
+
+_cluster_probe_state: dict[str, Any] = {"checked": False}
+
+
+def cluster_probe_state() -> dict[str, Any]:
+    """Return the latest cluster-probe result (empty until probe has run)."""
+    return dict(_cluster_probe_state)
+
+
+async def _signed_balance_call(base_url: str) -> dict[str, Any]:
+    """Sign+send ``GET /portfolio/balance`` against ``base_url``.
+
+    Returns ``{status, body}`` for any HTTP response, or raises on
+    network errors. Never raises ``KalshiAPIError``.
+    """
+    s = get_settings()
+    base = base_url.rstrip("/")
+    sub_path = "/portfolio/balance"
+    sign_path = (urlsplit(base).path or "") + sub_path
+    headers = auth.sign_request(
+        key_id=s.kalshi_api_key_id or "",
+        private_key_pem=s.kalshi_private_key or "",
+        method="GET",
+        path=sign_path,
+    )
+    async with httpx.AsyncClient(timeout=8.0) as c:
+        r = await c.get(f"{base}{sub_path}", headers=headers)
+    body: Any
+    try:
+        body = r.json() if r.content else None
+    except ValueError:
+        body = r.text
+    return {"status": r.status_code, "body": body}
+
+
+async def cluster_probe() -> dict[str, Any]:
+    """Authenticated cluster check. Runs once at boot.
+
+    Returns a dict with at least: ``ok``, ``configured_env``,
+    ``key_belongs_to`` (``"prod"|"demo"|None``), and either ``detail``
+    or ``error``. Never raises. The result is cached in
+    :func:`cluster_probe_state` so /api/health can surface it.
+    """
+    s = get_settings()
+    if not s.kalshi_api_key_id or not s.kalshi_private_key:
+        result = {
+            "ok": False,
+            "configured_env": s.kalshi_env,
+            "key_belongs_to": None,
+            "error": "missing KALSHI_API_KEY_ID or KALSHI_API_PRIVATE_KEY",
+        }
+        _cluster_probe_state.clear()
+        _cluster_probe_state.update({"checked": True, **result})
+        return result
+
+    configured_env = s.kalshi_env
+    configured_url = s.kalshi_api_base_url
+    try:
+        primary = await _signed_balance_call(configured_url)
+    except Exception as e:
+        result = {
+            "ok": False,
+            "configured_env": configured_env,
+            "key_belongs_to": None,
+            "error": f"network error probing {configured_env!r}: {e}"[:300],
+        }
+        _cluster_probe_state.clear()
+        _cluster_probe_state.update({"checked": True, **result})
+        return result
+
+    status = int(primary.get("status") or 0)
+    if 200 <= status < 300:
+        result = {
+            "ok": True,
+            "configured_env": configured_env,
+            "key_belongs_to": configured_env,
+            "status": status,
+            "detail": f"authenticated against cluster {configured_env!r}",
+        }
+        _cluster_probe_state.clear()
+        _cluster_probe_state.update({"checked": True, **result})
+        return result
+
+    # Anything other than an auth-rejection: don't mislabel as
+    # wrong-cluster. The operator likely has a different problem
+    # (network, 5xx, expired key id, etc).
+    if status not in (401, 403, 404):
+        result = {
+            "ok": False,
+            "configured_env": configured_env,
+            "key_belongs_to": None,
+            "status": status,
+            "error": f"http {status} from cluster {configured_env!r}: {str(primary.get('body'))[:200]}",
+        }
+        _cluster_probe_state.clear()
+        _cluster_probe_state.update({"checked": True, **result})
+        return result
+
+    # Auth rejected on the configured cluster. Probe the OTHER cluster
+    # to see if the key actually belongs there.
+    other_env = "demo" if configured_env == "prod" else "prod"
+    other_url = KALSHI_DEMO_BASE if other_env == "demo" else KALSHI_PROD_BASE
+    try:
+        secondary = await _signed_balance_call(other_url)
+        sec_status = int(secondary.get("status") or 0)
+    except Exception as e:
+        log.warning("kalshi cluster cross-probe of %s failed: %s", other_env, e)
+        secondary = {"status": 0, "body": f"network error: {e}"}
+        sec_status = 0
+
+    if 200 <= sec_status < 300:
+        msg = (
+            f"Kalshi credentials look valid but were rejected by cluster "
+            f"{configured_env!r} — the key authenticates against "
+            f"{other_env!r}. Set KALSHI_ENV={other_env}."
+        )
+        result = {
+            "ok": False,
+            "configured_env": configured_env,
+            "key_belongs_to": other_env,
+            "status": status,
+            "error": msg,
+        }
+    else:
+        msg = (
+            f"Kalshi credentials rejected by cluster {configured_env!r} "
+            f"(http {status}); the other cluster {other_env!r} also "
+            f"returned http {sec_status}. Check KALSHI_API_KEY_ID and "
+            f"KALSHI_API_PRIVATE_KEY."
+        )
+        result = {
+            "ok": False,
+            "configured_env": configured_env,
+            "key_belongs_to": None,
+            "status": status,
+            "error": msg,
+        }
+    _cluster_probe_state.clear()
+    _cluster_probe_state.update({"checked": True, **result})
+    return result

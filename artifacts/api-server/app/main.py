@@ -219,6 +219,26 @@ async def lifespan(_: FastAPI):
     else:
         log.warning("Kalshi credentials NOT validated: %s", cred.get("error"))
 
+    # Cluster auto-detect: sign a real authenticated call against the
+    # configured Kalshi cluster so a wrong-environment mistake (prod
+    # creds pointed at demo, or vice versa) is loud at boot instead of
+    # silently 401'ing the WS reconnect loop and balance/position polls.
+    # See `app.kalshi.client.cluster_probe` for the policy.
+    try:
+        cluster_check = await kalshi_client_mod.cluster_probe()
+        if cluster_check.get("ok"):
+            log.info(
+                "Kalshi cluster auth probe OK (env=%s, key_belongs_to=%s)",
+                cluster_check.get("configured_env"),
+                cluster_check.get("key_belongs_to"),
+            )
+        else:
+            log.error(
+                "Kalshi cluster auth probe FAILED: %s", cluster_check.get("error")
+            )
+    except Exception as e:
+        log.warning("Kalshi cluster auth probe raised: %s", e)
+
     # Start WS subscriber + bus->lifecycle bridge if creds are present.
     fill_task = None
     try:
@@ -2200,6 +2220,12 @@ async def health_full(_: object = Depends(require_approved_user)) -> dict[str, o
     # Kalshi reachability
     out["kalshi"] = await kalshi_client_mod.health_probe()
     if not out["kalshi"].get("ok"):
+        out["status"] = "degraded"
+    # Cluster auto-detect result captured at boot.  Surfaces "your prod
+    # creds were rejected by demo — set KALSHI_ENV=prod" loudly here
+    # rather than buried in startup logs.
+    out["kalshi_cluster"] = kalshi_client_mod.cluster_probe_state()
+    if out["kalshi_cluster"].get("checked") and not out["kalshi_cluster"].get("ok"):
         out["status"] = "degraded"
     out["polymarket"] = await polymarket_client_mod.health_probe()
     if not out["polymarket"].get("ok"):

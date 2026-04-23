@@ -236,3 +236,148 @@ def test_request_wraps_network_errors(settings):
     _run(c.aclose())
     assert exc.value.status == 0
     assert "network error" in str(exc.value)
+
+
+# ---------------------------------------------------------------------------
+# cluster_probe — auto-detect wrong KALSHI_ENV at boot
+# ---------------------------------------------------------------------------
+
+
+def _patch_cluster_probe(monkeypatch, rsa_key, *, kalshi_env: str, responses: dict[str, httpx.Response]):
+    """Wire ``cluster_probe`` to a fake settings + a per-base-URL response map.
+
+    ``responses`` is keyed by the base URL the probe should call (one of
+    ``KALSHI_PROD_BASE`` / ``KALSHI_DEMO_BASE``). Any URL not in the map
+    raises so we catch unintended calls.
+    """
+    _, pem = rsa_key
+    base = (
+        kalshi_client.KALSHI_PROD_BASE
+        if kalshi_env == "prod"
+        else kalshi_client.KALSHI_DEMO_BASE
+    )
+    fake = SimpleNamespace(
+        kalshi_api_key_id=KEY_ID,
+        kalshi_private_key=pem,
+        kalshi_api_base_url=base,
+        kalshi_env=kalshi_env,
+    )
+    monkeypatch.setattr(kalshi_client, "get_settings", lambda: fake)
+
+    seen: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        url = f"{request.url.scheme}://{request.url.host}{request.url.path}"
+        # strip the trailing /portfolio/balance to match map keys
+        assert url.endswith("/portfolio/balance"), url
+        base_key = url[: -len("/portfolio/balance")]
+        seen.append(base_key)
+        if base_key not in responses:
+            raise httpx.ConnectError(f"unexpected base url {base_key}")
+        return responses[base_key]
+
+    transport = httpx.MockTransport(handler)
+    real_async_client = httpx.AsyncClient
+
+    def patched_client(*args, **kwargs):
+        kwargs["transport"] = transport
+        return real_async_client(*args, **kwargs)
+
+    monkeypatch.setattr(kalshi_client.httpx, "AsyncClient", patched_client)
+    # Reset cached state between tests.
+    kalshi_client._cluster_probe_state.clear()
+    kalshi_client._cluster_probe_state["checked"] = False
+    return seen
+
+
+def test_cluster_probe_ok_against_configured(monkeypatch, rsa_key):
+    seen = _patch_cluster_probe(
+        monkeypatch,
+        rsa_key,
+        kalshi_env="prod",
+        responses={
+            kalshi_client.KALSHI_PROD_BASE: httpx.Response(200, json={"balance": 1}),
+        },
+    )
+    out = _run(kalshi_client.cluster_probe())
+    assert out["ok"] is True
+    assert out["configured_env"] == "prod"
+    assert out["key_belongs_to"] == "prod"
+    # Only the configured cluster should be hit.
+    assert seen == [kalshi_client.KALSHI_PROD_BASE]
+    state = kalshi_client.cluster_probe_state()
+    assert state["ok"] is True
+    assert state["checked"] is True
+
+
+def test_cluster_probe_detects_wrong_env(monkeypatch, rsa_key):
+    """Configured=demo but key authenticates against prod -> loud error
+    that names the right cluster."""
+    seen = _patch_cluster_probe(
+        monkeypatch,
+        rsa_key,
+        kalshi_env="demo",
+        responses={
+            kalshi_client.KALSHI_DEMO_BASE: httpx.Response(401, json={"error": "unauthorized"}),
+            kalshi_client.KALSHI_PROD_BASE: httpx.Response(200, json={"balance": 0}),
+        },
+    )
+    out = _run(kalshi_client.cluster_probe())
+    assert out["ok"] is False
+    assert out["configured_env"] == "demo"
+    assert out["key_belongs_to"] == "prod"
+    assert "KALSHI_ENV=prod" in out["error"]
+    # Both clusters were probed.
+    assert kalshi_client.KALSHI_DEMO_BASE in seen
+    assert kalshi_client.KALSHI_PROD_BASE in seen
+
+
+def test_cluster_probe_both_clusters_reject(monkeypatch, rsa_key):
+    """If both clusters reject the key, we don't speculate about ownership."""
+    _patch_cluster_probe(
+        monkeypatch,
+        rsa_key,
+        kalshi_env="prod",
+        responses={
+            kalshi_client.KALSHI_PROD_BASE: httpx.Response(401, json={"error": "unauthorized"}),
+            kalshi_client.KALSHI_DEMO_BASE: httpx.Response(401, json={"error": "unauthorized"}),
+        },
+    )
+    out = _run(kalshi_client.cluster_probe())
+    assert out["ok"] is False
+    assert out["key_belongs_to"] is None
+    assert "Check KALSHI_API_KEY_ID" in out["error"]
+
+
+def test_cluster_probe_other_status_does_not_mislabel(monkeypatch, rsa_key):
+    """A 5xx from the configured cluster is not a wrong-env signal —
+    don't cross-probe and don't claim the key belongs elsewhere."""
+    seen = _patch_cluster_probe(
+        monkeypatch,
+        rsa_key,
+        kalshi_env="prod",
+        responses={
+            kalshi_client.KALSHI_PROD_BASE: httpx.Response(503, text="upstream down"),
+        },
+    )
+    out = _run(kalshi_client.cluster_probe())
+    assert out["ok"] is False
+    assert out["key_belongs_to"] is None
+    assert out["status"] == 503
+    # Did NOT probe the other cluster.
+    assert seen == [kalshi_client.KALSHI_PROD_BASE]
+
+
+def test_cluster_probe_missing_credentials(monkeypatch):
+    fake = SimpleNamespace(
+        kalshi_api_key_id=None,
+        kalshi_private_key=None,
+        kalshi_api_base_url=BASE_URL,
+        kalshi_env="prod",
+    )
+    monkeypatch.setattr(kalshi_client, "get_settings", lambda: fake)
+    kalshi_client._cluster_probe_state.clear()
+    out = _run(kalshi_client.cluster_probe())
+    assert out["ok"] is False
+    assert "missing" in out["error"].lower()
+    assert kalshi_client.cluster_probe_state()["checked"] is True
