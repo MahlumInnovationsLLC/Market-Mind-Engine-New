@@ -1,4 +1,5 @@
 import { useCallback } from "react";
+import { Link } from "wouter";
 import { useQueryClient } from "@tanstack/react-query";
 import { useGetRecentDebates, getGetRecentDebatesQueryKey } from "@workspace/api-client-react";
 import { useWebSocket } from "@/hooks/use-websocket";
@@ -101,6 +102,28 @@ export default function SwarmDebates() {
                     {verdict || "—"}
                   </div>
                 </div>
+                {d.redacted ? (
+                  <div
+                    className="mb-2 border border-primary/40 bg-primary/5 px-2.5 py-2 flex items-center justify-between gap-2"
+                    data-testid={`upsell-redacted-${d.id}`}
+                  >
+                    <div className="min-w-0">
+                      <div className="text-[10px] uppercase tracking-wider text-primary font-bold">
+                        PRO_ONLY
+                      </div>
+                      <div className="text-[11px] text-foreground/80 truncate">
+                        Upgrade to Pro to see persona reasoning
+                      </div>
+                    </div>
+                    <Link
+                      href="/pricing"
+                      className="shrink-0 text-[10px] uppercase tracking-widest font-semibold border border-primary/60 text-primary px-2 py-1 hover:bg-primary hover:text-primary-foreground transition-colors"
+                      data-testid={`link-upgrade-${d.id}`}
+                    >
+                      UPGRADE →
+                    </Link>
+                  </div>
+                ) : null}
                 <div className="grid grid-cols-4 gap-2 text-[10px]">
                   <div>
                     <div className="text-muted-foreground">CONSENSUS</div>
