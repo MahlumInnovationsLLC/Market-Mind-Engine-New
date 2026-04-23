@@ -18,6 +18,11 @@ from ..commodities.tickers import (
 )
 from ..crypto import predictor as crypto_predictor
 from ..crypto.tickers import InvalidCryptoTicker, parse_crypto_ticker
+from ..weather import predictor as weather_predictor
+from ..weather.tickers import (
+    InvalidTemperatureTicker,
+    parse_temperature_ticker,
+)
 from ..config import get_settings
 from ..elo import attach_elo_to_candidate
 from ..predictor_n_way import plackett_luce_from_mapping
@@ -461,6 +466,42 @@ async def _predict_for_crypto_binary(cand: dict[str, Any]) -> dict[str, Any] | N
     return payload
 
 
+async def _predict_for_temperature_binary(cand: dict[str, Any]) -> dict[str, Any] | None:
+    """Route a temperature candidate (KXHIGH/KXTEMP/KXLOW) through the
+    GRU + EMOS pipeline (task #246).
+
+    Returns the prediction's `as_dict()` payload (so the cycle's
+    downstream telemetry/gates see the same shape they get from the
+    generic predictor) or None when the ticker can't be parsed (e.g.
+    KXRAIN — which falls through to the meta-model) or the multi-source
+    payload didn't surface any usable forecasts.
+    """
+    market_id = _resolve_market_id(cand) or cand.get("kalshi_market_id")
+    if not market_id:
+        return None
+    try:
+        ticker = parse_temperature_ticker(str(market_id))
+    except InvalidTemperatureTicker as e:
+        log.debug("temperature ticker parse failed for %s: %s", market_id, e)
+        return None
+    try:
+        pred = await weather_predictor.predict_temperature_binary(
+            ticker, league=cand.get("league") or "WEATHER"
+        )
+    except weather_predictor.TemperaturePredictionError as e:
+        log.debug("temperature predict failed for %s: %s", market_id, e)
+        return None
+    except Exception as e:  # pragma: no cover — defensive
+        log.warning("temperature predict crashed for %s: %s", market_id, e)
+        return None
+    payload = pred.as_dict()
+    payload["feature_inputs"] = payload.get("raw", {}).get("ensemble", {})
+    payload["feature_count"] = (
+        (payload.get("raw", {}).get("ensemble", {}) or {}).get("n", 0)
+    )
+    return payload
+
+
 async def _predict_for_commodities_binary(cand: dict[str, Any]) -> dict[str, Any] | None:
     """Route a commodities-binary candidate through `app.commodities.predictor`.
 
@@ -724,6 +765,12 @@ async def _predict_for_candidate(
         return await _predict_for_events_econ_binary(cand)
     if spec is not None and spec.predictor_hook == "entertainment_hybrid":
         return await _predict_for_entertainment_binary(cand)
+    if spec is not None and spec.predictor_hook == "weather_temp_gru_emos":
+        weather_payload = await _predict_for_temperature_binary(cand)
+        if weather_payload is not None:
+            return weather_payload
+        # Parse failure (e.g. KXRAIN) -> fall through to the generic
+        # meta-model so precip markets keep trading.
 
     # N-way tournament markets (task #197) — leagues that flag
     # `LeagueConfig.n_way_market=True` (ATP / WTA / F1 / PGA) and ship

@@ -38,6 +38,7 @@ log = logging.getLogger("axiom.feeds.weather_payload")
 _FRESHNESS_S: dict[str, float] = {
     "open-meteo": 30 * 60.0,    # 5-min cadence -> 30 min stale window
     "nws":        30 * 60.0,    # 5-min cadence
+    "tomorrow.io": 30 * 60.0,   # 5-min cadence -> 30 min stale window
     "accuweather": 15 * 60.0,   # 1-min cadence -> 15 min stale window
     "hrrr":       12 * 60 * 60.0,  # 6h cadence -> 12 h stale window
 }
@@ -147,6 +148,55 @@ async def build_weather_payload(
         payload["nws_temperature_f"] = _f(obs_nws["temperature_f"])
         payload["nws_observed_at"] = _iso(obs_nws["observed_at"])
 
+    # Tomorrow.io realtime observation --------------------------------------
+    # Surfaces the third independent point-forecast required by the GRU+EMOS
+    # ensemble (task #246) — the poller writes into weather_observations
+    # under the 'tomorrow.io' source tag.
+    try:
+        obs_tio = await db.fetchrow(
+            """
+            SELECT temperature_f, observed_at
+            FROM weather_observations
+            WHERE city_code = $1 AND source = 'tomorrow.io'
+            ORDER BY observed_at DESC
+            LIMIT 1
+            """,
+            city,
+        )
+    except Exception as e:
+        log.debug("payload tomorrow.io fetch failed for %s: %s", city, e)
+        obs_tio = None
+    if obs_tio is not None and _is_fresh(
+        obs_tio["observed_at"], "tomorrow.io", now=now
+    ):
+        payload["tio_temperature_f"] = _f(obs_tio["temperature_f"])
+        payload["tio_observed_at"] = _iso(obs_tio["observed_at"])
+        try:
+            ext_tio = await db.fetchrow(
+                """
+                SELECT wind_mph, humidity_pct, uv_index, dewpoint_f,
+                       pressure_in, visibility_mi, cloud_cover_pct,
+                       precip_1hr_in, wind_gust_mph, observed_at
+                FROM weather_extended
+                WHERE city_code = $1 AND source = 'tomorrow.io'
+                ORDER BY observed_at DESC
+                LIMIT 1
+                """,
+                city,
+            )
+        except Exception as e:
+            log.debug("payload tomorrow.io extended fetch failed for %s: %s", city, e)
+            ext_tio = None
+        if ext_tio is not None:
+            for col in (
+                "wind_mph", "humidity_pct", "uv_index", "dewpoint_f",
+                "pressure_in", "visibility_mi", "cloud_cover_pct",
+                "precip_1hr_in", "wind_gust_mph",
+            ):
+                v = _f(ext_tio[col])
+                if v is not None:
+                    payload[f"tio_{col}"] = v
+
     # AccuWeather minutecast -------------------------------------------------
     try:
         mc = await db.fetchrow(
@@ -197,6 +247,26 @@ async def build_weather_payload(
                 payload["hrrr_t2m_f"] = _f(t2m)
             if tmin is not None:
                 payload["hrrr_tmin_f"] = _f(tmin)
+            # Surface the HRRR hourly trace so the GRU sees a real
+            # multi-step temperature sequence (task #246).  The poller
+            # writes `samples = [{"t": ts, "f": temp_f}, ...]` into
+            # the JSONB column; keep the same shape so the predictor's
+            # `_build_sequence` consumer can iterate it directly.
+            samples = body.get("samples")
+            if isinstance(samples, list):
+                hourly: list[dict[str, Any]] = []
+                for s in samples:
+                    if not isinstance(s, Mapping):
+                        continue
+                    f_val = _f(s.get("f"))
+                    if f_val is None:
+                        continue
+                    entry: dict[str, Any] = {"f": f_val}
+                    if s.get("t") is not None:
+                        entry["t"] = s.get("t")
+                    hourly.append(entry)
+                if hourly:
+                    payload["hrrr_hourly_samples"] = hourly
             nomads = body.get("nomads")
             if isinstance(nomads, Mapping):
                 payload["hrrr_run_cycle"] = nomads.get("cycle")

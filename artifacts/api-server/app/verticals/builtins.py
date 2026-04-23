@@ -24,6 +24,11 @@ REGISTRY.register(VerticalSpec(
     leagues=("WEATHER",),
     ticker_prefixes=("KXHIGH", "KXTEMP", "KXLOW", "KXRAIN"),
     persona_profile="weather",
+    # Temperature contracts (KXHIGH/KXTEMP/KXLOW) route through the
+    # GRU + EMOS pipeline (task #246).  KXRAIN parses cleanly fail and
+    # falls through to the generic meta-model so precip markets keep
+    # trading while a precip-specific stack is wired in.
+    predictor_hook="weather_temp_gru_emos",
     include_in_dashboard_strip=True,
     description="NOAA-driven binary weather markets (temperature thresholds, precipitation, etc).",
 ))

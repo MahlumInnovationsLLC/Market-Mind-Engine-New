@@ -93,7 +93,10 @@ _BASELINE_BUILTINS: dict[str, dict[str, Any]] = {
         "persona_profile": "weather",
         "kelly_multiplier": 1.0,
         "default_allocation_pct": 0.30,
-        "predictor_hook": None,
+        # Temperature contracts route through the GRU + EMOS hook
+        # registered in task #246.  Pinned here so any future change
+        # to the wiring trips the baseline-drift guard.
+        "predictor_hook": "weather_temp_gru_emos",
         "feature_builder_hook": None,
         "duplicate_trade_exempt": False,
         "include_in_dashboard_strip": True,
@@ -487,11 +490,13 @@ def test_candidate_predictions_sql_parity_per_vertical(
 
 def test_predictor_routing_per_vertical_baseline() -> None:
     """`crypto-binary` must route through the specialist
-    `crypto_binary` predictor hook; every other built-in vertical
-    must use the generic meta-model (predictor_hook=None)."""
+    `crypto_binary` predictor hook; the `weather` vertical routes
+    through the GRU + EMOS temperature pipeline (task #246).  Every
+    other built-in vertical must use the generic meta-model
+    (predictor_hook=None)."""
     routing = {
         "sports": None,
-        "weather": None,
+        "weather": "weather_temp_gru_emos",
         "crypto": None,
         "crypto-binary": "crypto_binary",
         "politics": None,
