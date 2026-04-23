@@ -103,49 +103,62 @@ PROTECTED_ROUTES: tuple[str, ...] = (
     "/api/research/directives",
 )
 
-# Mutating endpoints — auth-protected but only accept POST.  We don't
-# parametrize them through the GET-based rejection tests (FastAPI would
-# answer 405 before the auth dependency runs); they're listed here so
-# the inventory check still catches missing coverage.
-PROTECTED_POST_ROUTES: tuple[str, ...] = (
-    "/api/health/model-alerts/{alert_id}/ack",
-    "/api/admin/users/{clerk_user_id}/approved",
-    "/api/admin/users/{clerk_user_id}/admin",
-    "/api/billing/checkout-session",
-    "/api/billing/portal-session",
-    "/api/notifications/test",
-    "/api/me/push-token",
-    "/api/me/telegram/link",
-    "/api/orchestrator/run-cycle",
-    "/api/settlement/run-cycle",
-    "/api/settlement/settle-market",
-    "/api/settlement/backfill",
-    "/api/swarm/debate",
-    "/api/kalshi/paper-order",
-    "/api/kalshi/resume",
-    "/api/models/reload",
-    "/api/models/predict",
-    "/api/admin/access-requests/{clerk_user_id}",
-    "/api/admin/persona-toggles",
-    "/api/admin/emergency-stop",
-    "/api/health/acknowledge-alert",
-    "/api/polymarket/paper-order",
-    "/api/admin/runtime-settings",
-    "/api/admin/risk-knobs",
-    "/api/admin/tech-ai/promote-kelly",
-    "/api/admin/elections/promote-kelly",
-    "/api/admin/events-econ/promote-kelly",
-    "/api/admin/entertainment/promote-kelly",
-    "/api/admin/orchestrator/run-cycle",
-    "/api/admin/models/active",
-    "/api/admin/models/mirror/push",
-    "/api/admin/autoresearch/features/{name}/decision",
-    "/api/admin/autoresearch/run",
+# Mutating endpoints — auth-protected, accept POST / PUT / DELETE.  These
+# get the same missing-header / malformed / expired / wrong-issuer /
+# wrong-key rejection coverage as the GET-based dashboard endpoints, just
+# parametrised over (method, route) so we exercise the right HTTP verb.
+# Listed as (method, route) tuples; the inventory check derives the path
+# set from this list as well.
+PROTECTED_MUTATING_ENDPOINTS: tuple[tuple[str, str], ...] = (
+    ("POST", "/api/health/model-alerts/{alert_id}/ack"),
+    ("POST", "/api/health/acknowledge-alert"),
+    ("POST", "/api/admin/users/{clerk_user_id}/approved"),
+    ("POST", "/api/admin/users/{clerk_user_id}/admin"),
+    ("POST", "/api/billing/checkout-session"),
+    ("POST", "/api/billing/portal-session"),
+    ("POST", "/api/notifications/test"),
+    ("POST", "/api/me/push-token"),
+    ("DELETE", "/api/me/push-token"),
+    ("PUT", "/api/me/notification-prefs"),
+    ("DELETE", "/api/me/telegram"),
+    ("POST", "/api/me/telegram/link"),
+    ("POST", "/api/orchestrator/run-cycle"),
+    ("POST", "/api/orchestrator/live-execute"),
+    ("POST", "/api/settlement/run-cycle"),
+    ("POST", "/api/settlement/settle-market"),
+    ("POST", "/api/settlement/backfill"),
+    ("POST", "/api/swarm/debate"),
+    ("POST", "/api/kalshi/paper-order"),
+    ("POST", "/api/kalshi/resume"),
+    ("POST", "/api/models/reload"),
+    ("POST", "/api/models/predict"),
+    ("POST", "/api/admin/access-requests/{clerk_user_id}"),
+    ("POST", "/api/admin/persona-toggles"),
+    ("POST", "/api/admin/emergency-stop"),
+    ("POST", "/api/polymarket/paper-order"),
+    ("POST", "/api/admin/runtime-settings"),
+    ("POST", "/api/admin/risk-knobs"),
+    ("POST", "/api/admin/vertical-visibility"),
+    ("POST", "/api/admin/tech-ai/promote-kelly"),
+    ("POST", "/api/admin/elections/promote-kelly"),
+    ("POST", "/api/admin/events-econ/promote-kelly"),
+    ("POST", "/api/admin/entertainment/promote-kelly"),
+    ("POST", "/api/admin/orchestrator/run-cycle"),
+    ("POST", "/api/admin/models/active"),
+    ("POST", "/api/admin/models/mirror/push"),
+    ("POST", "/api/admin/autoresearch/features/{name}/decision"),
+    ("POST", "/api/admin/autoresearch/run"),
     # Task #271 — per-vertical halt/resume toggles.
-    "/api/admin/verticals/{vertical}/halt",
-    "/api/admin/verticals/{vertical}/resume",
+    ("POST", "/api/admin/verticals/{vertical}/halt"),
+    ("POST", "/api/admin/verticals/{vertical}/resume"),
     # Task #245 — research-directives admin gating + drift rollback workflow.
-    "/api/research/directives/{directive_id}/decision",
+    ("POST", "/api/research/directives/{directive_id}/decision"),
+)
+
+# Path-only view of the mutating-endpoint inventory, used by the
+# route-inventory check below.
+PROTECTED_MUTATING_ROUTES: tuple[str, ...] = tuple(
+    {route for _method, route in PROTECTED_MUTATING_ENDPOINTS}
 )
 
 # Liveness probes — must answer 200 with no auth (parameterized below).
@@ -212,7 +225,7 @@ def test_route_inventory_matches_app() -> None:
     declared = {r.path for r in app.routes if getattr(r, "path", "").startswith("/api/")}
     covered = (
         set(PROTECTED_ROUTES)
-        | set(PROTECTED_POST_ROUTES)
+        | set(PROTECTED_MUTATING_ROUTES)
         | set(PUBLIC_ROUTES)
         | set(OTHER_PUBLIC_ROUTES)
     )
@@ -375,6 +388,87 @@ def test_protected_routes_reject_token_signed_by_wrong_key(
     # we just sign with a key the server has never seen.
     token = _make_token(attacker_keypair)
     resp = client.get(route, headers={"Authorization": f"Bearer {token}"})
+    _assert_unauthorized(resp)
+
+
+# ---------------------------------------------------------------------------
+# Same rejection coverage for mutating endpoints (POST / PUT / DELETE).
+#
+# FastAPI resolves the path-operation function by method, so we have to hit
+# each route with the verb it actually accepts — a GET against a POST-only
+# route returns 405 before the auth dependency even runs, which would mask
+# regressions where a new mutating endpoint forgets to depend on
+# `require_auth`.  The auth dependency runs before request-body parsing, so
+# we deliberately send no body here: a bare 401 is the contract we care
+# about.
+# ---------------------------------------------------------------------------
+
+
+def _request_no_body(client: TestClient, method: str, route: str, **kwargs):
+    # Some FastAPI test-client backends 400 on a missing Content-Length for
+    # body-bearing verbs; pass an explicit empty JSON to keep the request
+    # well-formed without committing to a particular schema.
+    if method.upper() in {"POST", "PUT", "PATCH"} and "json" not in kwargs:
+        kwargs["json"] = {}
+    return client.request(method, route, **kwargs)
+
+
+@pytest.mark.parametrize("method,route", PROTECTED_MUTATING_ENDPOINTS)
+def test_protected_mutating_endpoints_reject_missing_header(client, method, route):
+    _assert_unauthorized(_request_no_body(client, method, route))
+
+
+@pytest.mark.parametrize("method,route", PROTECTED_MUTATING_ENDPOINTS)
+@pytest.mark.parametrize(
+    "header_value",
+    [
+        "",
+        "Bearer",
+        "Bearer ",
+        "Token abc.def.ghi",
+        "abc.def.ghi",
+        "Bearer not-a-jwt",
+    ],
+)
+def test_protected_mutating_endpoints_reject_malformed_header(
+    client, method, route, header_value
+):
+    resp = _request_no_body(
+        client, method, route, headers={"Authorization": header_value}
+    )
+    _assert_unauthorized(resp)
+
+
+@pytest.mark.parametrize("method,route", PROTECTED_MUTATING_ENDPOINTS)
+def test_protected_mutating_endpoints_reject_expired_token(
+    client, method, route, legit_keypair
+):
+    token = _make_token(legit_keypair, expired=True)
+    resp = _request_no_body(
+        client, method, route, headers={"Authorization": f"Bearer {token}"}
+    )
+    _assert_unauthorized(resp)
+
+
+@pytest.mark.parametrize("method,route", PROTECTED_MUTATING_ENDPOINTS)
+def test_protected_mutating_endpoints_reject_wrong_issuer(
+    client, method, route, legit_keypair
+):
+    token = _make_token(legit_keypair, issuer="https://clerk.attacker.example.com")
+    resp = _request_no_body(
+        client, method, route, headers={"Authorization": f"Bearer {token}"}
+    )
+    _assert_unauthorized(resp)
+
+
+@pytest.mark.parametrize("method,route", PROTECTED_MUTATING_ENDPOINTS)
+def test_protected_mutating_endpoints_reject_token_signed_by_wrong_key(
+    client, method, route, attacker_keypair
+):
+    token = _make_token(attacker_keypair)
+    resp = _request_no_body(
+        client, method, route, headers={"Authorization": f"Bearer {token}"}
+    )
     _assert_unauthorized(resp)
 
 
