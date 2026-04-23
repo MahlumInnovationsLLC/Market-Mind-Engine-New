@@ -1,8 +1,9 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Link, Redirect } from "wouter";
 import { useAuth } from "@clerk/react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { apiFetch, REQUEST_ID_HEADER, newRequestId } from "@/lib/api";
+import { usePipelineSubscription } from "@/components/realtime/websocket-provider";
 import {
   AdminAuditLogEntry,
   AdminUser,
@@ -1338,6 +1339,8 @@ type CycleResult = {
   }>;
 };
 
+type TraceEvent = CycleResult["trace"][number];
+
 export function TriggerCyclePanel() {
   const { getToken } = useAuth();
   const tokenFn = useMemo(
@@ -1346,6 +1349,13 @@ export function TriggerCyclePanel() {
   );
   const [vertical, setVertical] = useState("sports");
   const [last, setLast] = useState<CycleResult | null>(null);
+  const [liveTrace, setLiveTrace] = useState<TraceEvent[]>([]);
+  // We don't know the cycle_id ahead of time, so capture every event
+  // received while the trigger is in-flight. Once the response lands
+  // we can filter to that exact cycle_id and replace with the
+  // authoritative trace from the server's ring buffer.
+  const isStreamingRef = useRef(false);
+  const seenSeqRef = useRef<Set<number>>(new Set());
 
   const trigger = useMutation({
     mutationFn: () =>
@@ -1354,8 +1364,59 @@ export function TriggerCyclePanel() {
         body: { vertical },
         getToken: tokenFn,
       }),
-    onSuccess: (res) => setLast(res),
+    onMutate: () => {
+      setLast(null);
+      setLiveTrace([]);
+      seenSeqRef.current = new Set();
+      isStreamingRef.current = true;
+    },
+    onSuccess: (res) => {
+      isStreamingRef.current = false;
+      setLast(res);
+    },
+    onError: () => {
+      isStreamingRef.current = false;
+    },
   });
+
+  usePipelineSubscription((event) => {
+    if (!isStreamingRef.current) return;
+    const seqRaw = event["_seq"];
+    const seq = typeof seqRaw === "number" ? seqRaw : null;
+    if (seq != null) {
+      if (seenSeqRef.current.has(seq)) return;
+      seenSeqRef.current.add(seq);
+    }
+    setLiveTrace((prev) => [...prev, event as TraceEvent]);
+  });
+
+  // If a result lands, drop any live events that don't belong to its
+  // cycle (e.g. a background scheduler cycle that fired concurrently).
+  useEffect(() => {
+    if (!last) return;
+    setLiveTrace((prev) =>
+      prev.filter((ev) => !ev.cycle_id || ev.cycle_id === last.cycle_id),
+    );
+  }, [last]);
+
+  const streaming = trigger.isPending;
+  // Prefer the authoritative server trace once the cycle returns, but
+  // fall back to streamed events that arrived after it (rare — the
+  // ring buffer is the source of truth).
+  const displayTrace: TraceEvent[] = useMemo(() => {
+    if (!last) return liveTrace;
+    if (liveTrace.length <= last.trace.length) return last.trace;
+    const known = new Set<number>();
+    for (const ev of last.trace) {
+      const s = (ev as Record<string, unknown>)["_seq"];
+      if (typeof s === "number") known.add(s);
+    }
+    const extras = liveTrace.filter((ev) => {
+      const s = (ev as Record<string, unknown>)["_seq"];
+      return typeof s === "number" ? !known.has(s) : true;
+    });
+    return [...last.trace, ...extras];
+  }, [last, liveTrace]);
 
   return (
     <main className="grid grid-cols-1 gap-4" data-testid="panel-trigger-cycle">
@@ -1397,32 +1458,40 @@ export function TriggerCyclePanel() {
             </span>
           ) : null}
         </div>
-        {last ? (
+        {streaming || last ? (
           <div
             className="border border-border bg-background p-3"
             data-testid="block-cycle-result"
           >
             <div className="grid grid-cols-2 md:grid-cols-5 gap-3 text-xs">
-              <ThresholdStat label="CYCLE_ID" value={last.cycle_id.slice(0, 12)} />
-              <ThresholdStat label="VERTICAL" value={last.vertical} />
+              <ThresholdStat
+                label="CYCLE_ID"
+                value={last ? last.cycle_id.slice(0, 12) : "…"}
+              />
+              <ThresholdStat
+                label="VERTICAL"
+                value={last ? last.vertical : vertical}
+              />
               <ThresholdStat
                 label="DURATION"
                 value={
-                  last.duration_seconds != null
+                  last && last.duration_seconds != null
                     ? `${last.duration_seconds.toFixed(2)}s`
+                    : streaming
+                    ? "running…"
                     : "—"
                 }
               />
               <ThresholdStat
                 label="PICKS"
-                value={String(last.picks_evaluated)}
+                value={last ? String(last.picks_evaluated) : "—"}
               />
               <ThresholdStat
                 label="TRADES"
-                value={String(last.trades_placed)}
+                value={last ? String(last.trades_placed) : "—"}
               />
             </div>
-            {last.errors.length > 0 ? (
+            {last && last.errors.length > 0 ? (
               <div className="mt-3 text-xs text-loss">
                 {last.errors.length} error(s):
                 <ul className="list-disc list-inside">
@@ -1433,8 +1502,19 @@ export function TriggerCyclePanel() {
               </div>
             ) : null}
             <div className="mt-4">
-              <div className="text-[10px] uppercase tracking-widest text-muted-foreground mb-2">
-                Pipeline trace ({last.trace.length} events)
+              <div className="text-[10px] uppercase tracking-widest text-muted-foreground mb-2 flex items-center gap-2">
+                <span>
+                  Pipeline trace ({displayTrace.length} events)
+                </span>
+                {streaming ? (
+                  <span
+                    className="inline-flex items-center gap-1 text-primary normal-case tracking-normal"
+                    data-testid="text-cycle-streaming"
+                  >
+                    <span className="inline-block h-1.5 w-1.5 rounded-full bg-primary animate-pulse" />
+                    streaming live
+                  </span>
+                ) : null}
               </div>
               <div
                 className="max-h-96 overflow-auto border border-border bg-muted/10"
@@ -1450,22 +1530,25 @@ export function TriggerCyclePanel() {
                     </tr>
                   </thead>
                   <tbody>
-                    {last.trace.length === 0 ? (
+                    {displayTrace.length === 0 ? (
                       <tr>
                         <td
                           colSpan={4}
                           className="p-3 text-center text-muted-foreground"
                         >
-                          No trace events captured.
+                          {streaming
+                            ? "Waiting for the first event…"
+                            : "No trace events captured."}
                         </td>
                       </tr>
                     ) : (
-                      last.trace.map((ev, i) => {
+                      displayTrace.map((ev, i) => {
                         const detail = { ...ev };
                         delete (detail as Record<string, unknown>).stage;
                         delete (detail as Record<string, unknown>).event;
                         delete (detail as Record<string, unknown>).ts;
                         delete (detail as Record<string, unknown>).cycle_id;
+                        delete (detail as Record<string, unknown>)._seq;
                         return (
                           <tr
                             key={i}
