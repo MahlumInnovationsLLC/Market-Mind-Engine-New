@@ -24,6 +24,8 @@ interface PrefsView {
     sms_live_trade: boolean;
     telegram_live_trade: boolean;
     sms_phone_number: string | null;
+    sms_phone_verified: boolean;
+    sms_phone_verification_expires_at: string | null;
   };
   tier: string;
   elite_unlocked: boolean;
@@ -130,6 +132,9 @@ export function NotificationPrefsPanel() {
   const [saving, setSaving] = useState(false);
   const [savedAt, setSavedAt] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [verifyCode, setVerifyCode] = useState<string>("");
+  const [verifyBusy, setVerifyBusy] = useState(false);
+  const [verifyMsg, setVerifyMsg] = useState<string | null>(null);
 
   useEffect(() => {
     if (!isSignedIn) {
@@ -186,10 +191,59 @@ export function NotificationPrefsPanel() {
 
   const savePhone = async () => {
     const next = phone.trim();
+    setVerifyMsg(null);
+    setVerifyCode("");
     await update({
       sms_phone_number_present: true,
       sms_phone_number: next || null,
     });
+    if (next) {
+      setVerifyMsg(
+        "We just texted a 6-digit verification code. Enter it below to confirm this number.",
+      );
+    }
+  };
+
+  const resendCode = async () => {
+    setVerifyBusy(true);
+    setVerifyMsg(null);
+    setError(null);
+    try {
+      await apiFetch<unknown>(
+        "/api/me/notification-prefs/sms/start-verification",
+        { method: "POST", getToken: token, body: {} },
+      );
+      setVerifyMsg("New code sent. Check your phone.");
+    } catch (e) {
+      setError(formatErrorMessage(e));
+    } finally {
+      setVerifyBusy(false);
+    }
+  };
+
+  const submitCode = async () => {
+    const code = verifyCode.trim();
+    if (!/^\d{6}$/.test(code)) {
+      setError("Enter the 6-digit code we texted you.");
+      return;
+    }
+    setVerifyBusy(true);
+    setVerifyMsg(null);
+    setError(null);
+    try {
+      const next = await apiFetch<PrefsView>(
+        "/api/me/notification-prefs/sms/verify",
+        { method: "POST", getToken: token, body: { code } },
+      );
+      setData(next);
+      setPhone(next.prefs.sms_phone_number ?? "");
+      setVerifyCode("");
+      setVerifyMsg("Phone number verified. SMS alerts are unlocked.");
+    } catch (e) {
+      setError(formatErrorMessage(e, "Code was rejected. Try again."));
+    } finally {
+      setVerifyBusy(false);
+    }
   };
 
   return (
@@ -314,24 +368,49 @@ export function NotificationPrefsPanel() {
                 </p>
               )}
               <div className="space-y-3">
-                {PREMIUM_TOGGLES.map((row) => (
-                  <ToggleItem
-                    key={row.key}
-                    row={row}
-                    checked={Boolean(data.prefs[row.key])}
-                    disabled={saving || !data.elite_unlocked}
-                    onChange={(v) => toggle(row.key, v)}
-                  />
-                ))}
+                {PREMIUM_TOGGLES.map((row) => {
+                  const needsVerification =
+                    row.channel === "sms" && !data.prefs.sms_phone_verified;
+                  return (
+                    <ToggleItem
+                      key={row.key}
+                      row={row}
+                      checked={Boolean(data.prefs[row.key])}
+                      disabled={
+                        saving || !data.elite_unlocked || needsVerification
+                      }
+                      hint={
+                        needsVerification
+                          ? "Verify your phone number below to enable SMS alerts."
+                          : undefined
+                      }
+                      onChange={(v) => toggle(row.key, v)}
+                    />
+                  );
+                })}
               </div>
 
-              <div className="border-t border-border pt-4 space-y-2">
-                <label
-                  htmlFor="sms-phone"
-                  className="block text-[10px] uppercase tracking-widest text-muted-foreground"
-                >
-                  SMS phone number (E.164, e.g. +15551234567)
-                </label>
+              <div className="border-t border-border pt-4 space-y-3">
+                <div className="flex items-center justify-between gap-2">
+                  <label
+                    htmlFor="sms-phone"
+                    className="block text-[10px] uppercase tracking-widest text-muted-foreground"
+                  >
+                    SMS phone number (E.164, e.g. +15551234567)
+                  </label>
+                  {data.prefs.sms_phone_number ? (
+                    <span
+                      className={`text-[10px] uppercase tracking-widest border px-2 py-0.5 ${
+                        data.prefs.sms_phone_verified
+                          ? "border-primary text-primary"
+                          : "border-destructive text-destructive"
+                      }`}
+                      data-testid="text-phone-verified-status"
+                    >
+                      {data.prefs.sms_phone_verified ? "Verified" : "Unverified"}
+                    </span>
+                  ) : null}
+                </div>
                 <div className="flex gap-2">
                   <input
                     id="sms-phone"
@@ -353,6 +432,71 @@ export function NotificationPrefsPanel() {
                     Save phone
                   </button>
                 </div>
+
+                {data.elite_unlocked &&
+                  data.prefs.sms_phone_number &&
+                  !data.prefs.sms_phone_verified && (
+                    <div
+                      className="space-y-2 border border-border rounded-md p-3 bg-muted/30"
+                      data-testid="section-phone-verify"
+                    >
+                      <div className="text-[10px] uppercase tracking-widest text-muted-foreground">
+                        Confirm ownership
+                      </div>
+                      <p className="text-[11px] text-muted-foreground">
+                        We sent a 6-digit code to{" "}
+                        <span className="text-foreground">
+                          {data.prefs.sms_phone_number}
+                        </span>
+                        . Enter it below to enable paid SMS alerts.
+                      </p>
+                      <div className="flex gap-2">
+                        <input
+                          type="text"
+                          inputMode="numeric"
+                          autoComplete="one-time-code"
+                          maxLength={6}
+                          value={verifyCode}
+                          placeholder="123456"
+                          onChange={(e) =>
+                            setVerifyCode(
+                              e.target.value.replace(/\D/g, "").slice(0, 6),
+                            )
+                          }
+                          disabled={verifyBusy || saving}
+                          className="flex-1 bg-input border border-border text-foreground rounded-md px-3 py-2 text-xs tracking-[0.4em] text-center disabled:opacity-50"
+                          data-testid="input-sms-code"
+                        />
+                        <button
+                          type="button"
+                          onClick={submitCode}
+                          disabled={verifyBusy || saving || verifyCode.length !== 6}
+                          className="bg-primary text-primary-foreground px-4 py-2 text-xs uppercase tracking-widest font-bold hover:opacity-90 disabled:opacity-50"
+                          data-testid="button-verify-code"
+                        >
+                          Verify
+                        </button>
+                        <button
+                          type="button"
+                          onClick={resendCode}
+                          disabled={verifyBusy || saving}
+                          className="border border-border px-3 py-2 text-xs uppercase tracking-widest hover:border-primary/50 disabled:opacity-50"
+                          data-testid="button-resend-code"
+                        >
+                          Resend
+                        </button>
+                      </div>
+                    </div>
+                  )}
+
+                {verifyMsg && (
+                  <div
+                    className="text-[11px] text-primary"
+                    data-testid="text-verify-msg"
+                  >
+                    {verifyMsg}
+                  </div>
+                )}
               </div>
             </section>
           </>
@@ -410,11 +554,13 @@ function ToggleItem({
   checked,
   disabled,
   onChange,
+  hint,
 }: {
   row: ToggleRow;
   checked: boolean;
   disabled: boolean;
   onChange: (v: boolean) => void;
+  hint?: string;
 }) {
   return (
     <label
@@ -434,6 +580,14 @@ function ToggleItem({
       <div className="flex-1">
         <div className="text-sm text-foreground font-medium">{row.label}</div>
         <div className="text-[11px] text-muted-foreground">{row.description}</div>
+        {hint && (
+          <div
+            className="text-[11px] text-destructive mt-1"
+            data-testid={`hint-${row.key}`}
+          >
+            {hint}
+          </div>
+        )}
       </div>
     </label>
   );

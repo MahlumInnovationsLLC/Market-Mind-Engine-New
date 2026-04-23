@@ -138,6 +138,8 @@ PROTECTED_MUTATING_ENDPOINTS: tuple[tuple[str, str], ...] = (
     ("POST", "/api/me/push-token"),
     ("DELETE", "/api/me/push-token"),
     ("PUT", "/api/me/notification-prefs"),
+    ("POST", "/api/me/notification-prefs/sms/start-verification"),
+    ("POST", "/api/me/notification-prefs/sms/verify"),
     ("POST", "/api/me/notifications/read"),
     ("DELETE", "/api/me/telegram"),
     ("POST", "/api/me/telegram/link"),

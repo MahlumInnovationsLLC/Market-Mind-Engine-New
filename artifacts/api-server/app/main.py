@@ -45,6 +45,7 @@ from .notifications import (
     email as notif_user_email,
     postmark as notif_postmark,
     push as notif_push,
+    sms as notif_sms,
     suppression as notif_suppression,
     weekly_roundup as notif_weekly_roundup,
 )
@@ -1103,10 +1104,19 @@ async def me_unregister_push_token(
 
 async def _notification_prefs_payload(user: AuthedUser) -> dict[str, object]:
     prefs = await notif_push.get_prefs(user.user_id)
+    # SECURITY: never echo the in-flight verification code back to the
+    # client — that would let any authenticated session bypass the SMS
+    # round-trip and self-verify a stranger's phone. Strip the raw code
+    # and the internal `verified_at` timestamp; expose only the public
+    # `sms_phone_verified` boolean (and the expiry, for UI countdown).
+    safe_prefs = {
+        k: v for k, v in prefs.items()
+        if k not in ("sms_phone_verification_code", "sms_phone_verified_at")
+    }
     sub = await billing.get_user_subscription(user)
     elite_unlocked = sub.tier in (billing.TIER_ELITE, billing.TIER_FOUNDER)
     return {
-        "prefs": prefs,
+        "prefs": safe_prefs,
         "tier": sub.tier,
         "elite_unlocked": elite_unlocked,
         "elite_only_toggles": sorted(notif_push.ELITE_ONLY_TOGGLES),
@@ -1175,6 +1185,34 @@ async def me_set_notification_prefs(
                     },
                 )
 
+    # Block paid SMS toggles unless the destination phone has been
+    # verified end-to-end (task #191). Users who change the phone in
+    # the same call are also blocked, since the change wipes the
+    # previous proof and the new number isn't verified yet.
+    sms_enabling = [
+        col for col in notif_push.SMS_PREF_COLUMNS
+        if bool(getattr(body, col, None))
+    ]
+    if sms_enabling:
+        current = await notif_push.get_prefs(user.user_id)
+        cur_phone = (current.get("sms_phone_number") or "")
+        next_phone = (
+            (body.sms_phone_number or "").strip()
+            if body.sms_phone_number_present
+            else cur_phone
+        )
+        verified = bool(current.get("sms_phone_verified")) and (
+            not body.sms_phone_number_present or next_phone == cur_phone
+        )
+        if not verified:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "error": "sms_phone_not_verified",
+                    "toggles": sorted(sms_enabling),
+                },
+            )
+
     toggles: dict[str, bool | None] = {}
     for col in notif_push.PREF_COLUMNS:
         toggles[col] = getattr(body, col, None)
@@ -1189,14 +1227,121 @@ async def me_set_notification_prefs(
     if body.quiet_hours_tz_present:
         extra["quiet_hours_tz"] = body.quiet_hours_tz
     try:
-        await notif_push.set_prefs(
+        prefs_after = await notif_push.set_prefs(
             clerk_user_id=user.user_id,
             **extra,
             **toggles,
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+
+    # Auto-issue a verification SMS as soon as a new (unverified) number
+    # is saved so the user lands directly on the "enter the code" step
+    # without an extra round trip. Gated on Elite tier so non-paying
+    # accounts can't repeatedly save phone numbers to burn Twilio spend
+    # on a channel they cannot use anyway — mirrors the explicit gate
+    # on /sms/start-verification.
+    if (
+        elite_unlocked
+        and body.sms_phone_number_present
+        and prefs_after.get("sms_phone_number")
+        and not prefs_after.get("sms_phone_verified")
+    ):
+        await _send_sms_verification(user.user_id)
+
     return await _notification_prefs_payload(user)
+
+
+async def _send_sms_verification(clerk_user_id: str) -> dict[str, object]:
+    issued = await notif_push.issue_phone_verification_code(clerk_user_id)
+    if not issued:
+        raise HTTPException(
+            status_code=400,
+            detail={"error": "no_phone_on_file"},
+        )
+    code, phone, expires_at = issued
+    body = (
+        f"Axiom verification code: {code}. "
+        f"Enter it on /system?tab=settings to confirm this number. "
+        f"Expires in {notif_push.SMS_VERIFICATION_TTL_SECONDS // 60} min."
+    )
+    sent = await notif_sms.send([phone], body, tag="phone_verify")
+    return {
+        "sent": sent,
+        "expires_at": expires_at.isoformat(),
+        "twilio_configured": notif_sms.is_configured(),
+    }
+
+
+class SmsVerifyRequest(BaseModel):
+    code: str = Field(..., min_length=4, max_length=10)
+
+
+async def _require_elite_for_sms(user: AuthedUser) -> None:
+    """Reject verification calls from non-Elite users.
+
+    SMS dispatch is an Elite-only premium channel; allowing free or Pro
+    users to trigger verification SMS would expose us to Twilio spend
+    from accounts that can't actually use the channel. The auth-gate
+    mirrors the toggle-side check in PUT /api/me/notification-prefs.
+    """
+    sub = await billing.get_user_subscription(user)
+    if sub.tier not in (billing.TIER_ELITE, billing.TIER_FOUNDER):
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "error": "tier_required",
+                "required_tier": "elite",
+                "current_tier": sub.tier,
+            },
+        )
+
+
+@app.post("/api/me/notification-prefs/sms/start-verification")
+async def me_sms_start_verification(
+    user: AuthedUser = Depends(require_auth),
+) -> dict[str, object]:
+    """Send (or re-send) the 6-digit verification code via SMS.
+
+    Idempotent — each call rotates the code and resets the expiry, so
+    repeated taps from a user who didn't receive the first text just
+    issue a fresh challenge.
+    """
+    await _require_elite_for_sms(user)
+    prefs = await notif_push.get_prefs(user.user_id)
+    if not prefs.get("sms_phone_number"):
+        raise HTTPException(
+            status_code=400, detail={"error": "no_phone_on_file"}
+        )
+    if prefs.get("sms_phone_verified"):
+        return {"ok": True, "already_verified": True}
+    result = await _send_sms_verification(user.user_id)
+    # Don't surface raw issuance internals to the client — only the
+    # high-level "we sent it" + expiry hint for UI countdown.
+    return {
+        "ok": True,
+        "expires_at": result.get("expires_at"),
+        "twilio_configured": result.get("twilio_configured"),
+    }
+
+
+@app.post("/api/me/notification-prefs/sms/verify")
+async def me_sms_verify(
+    body: SmsVerifyRequest,
+    user: AuthedUser = Depends(require_auth),
+) -> dict[str, object]:
+    await _require_elite_for_sms(user)
+    ok = await notif_push.confirm_phone_verification_code(
+        user.user_id, body.code
+    )
+    if not ok:
+        raise HTTPException(
+            status_code=400,
+            detail={"error": "invalid_or_expired_code"},
+        )
+    payload = await _notification_prefs_payload(user)
+    payload["ok"] = True
+    return payload
 
 
 # ---------------------------------------------------------------------------

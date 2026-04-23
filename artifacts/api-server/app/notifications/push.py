@@ -29,7 +29,8 @@ import asyncio
 import json
 import logging
 import os
-from datetime import datetime
+import secrets
+from datetime import datetime, timedelta, timezone
 from typing import Any, Iterable
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -121,8 +122,30 @@ ALTER TABLE user_notification_prefs
     -- Mobile push for position settlement (task #132). Default on so the
     -- natural follow-up to a live-trade fill push (the resolution) is
     -- delivered without requiring users to opt in.
-    ADD COLUMN IF NOT EXISTS notify_settlement         boolean NOT NULL DEFAULT true;
+    ADD COLUMN IF NOT EXISTS notify_settlement         boolean NOT NULL DEFAULT true,
+    -- One-time SMS verification of the saved phone number (task #191).
+    -- We refuse to dispatch paid Twilio messages until the operator
+    -- confirms ownership of the destination number with a 6-digit code,
+    -- so a typo doesn't quietly burn revenue (or worse, ship trade
+    -- alerts to a stranger). `verified_at` is the proof; `code` +
+    -- `expires_at` track the in-flight challenge and are cleared on
+    -- success or when the phone is changed.
+    ADD COLUMN IF NOT EXISTS sms_phone_verified_at             timestamptz,
+    ADD COLUMN IF NOT EXISTS sms_phone_verification_code       text,
+    ADD COLUMN IF NOT EXISTS sms_phone_verification_expires_at timestamptz;
 """
+
+
+# Verification challenge lives for ten minutes — long enough that the
+# Twilio relay + a distracted user can complete the round trip, short
+# enough that an old code is useless if the phone leaves their hands.
+SMS_VERIFICATION_TTL_SECONDS = 600
+
+
+# Boolean toggles that *send paid SMS*. Listed explicitly so the gate
+# in the prefs endpoint and the dispatch-side filter (`opted_in_sms_phones`)
+# stay in sync as new SMS channels are added.
+SMS_PREF_COLUMNS: frozenset[str] = frozenset({"sms_live_trade"})
 
 
 # Non-boolean per-user pref columns. Kept separate from `PREF_COLUMNS`
@@ -306,6 +329,13 @@ def _defaults() -> dict[str, bool]:
     return dict(PREF_COLUMNS)
 
 
+_VERIFICATION_COLS = (
+    "sms_phone_verified_at",
+    "sms_phone_verification_code",
+    "sms_phone_verification_expires_at",
+)
+
+
 async def get_prefs(clerk_user_id: str) -> dict[str, object]:
     """Return all per-user notification toggles + the optional SMS phone.
 
@@ -313,7 +343,11 @@ async def get_prefs(clerk_user_id: str) -> dict[str, object]:
     deterministic state for first-time users.
     """
     await ensure_schema()
-    extra_cols = ["sms_phone_number"] + list(QUIET_HOURS_COLUMNS.keys())
+    extra_cols = (
+        ["sms_phone_number"]
+        + list(QUIET_HOURS_COLUMNS.keys())
+        + list(_VERIFICATION_COLS)
+    )
     try:
         row = await db.fetchrow(
             f"SELECT {_PREF_COLS_SQL}, {', '.join(extra_cols)} "
@@ -327,12 +361,17 @@ async def get_prefs(clerk_user_id: str) -> dict[str, object]:
     out["sms_phone_number"] = None
     for k, default in QUIET_HOURS_COLUMNS.items():
         out[k] = default
+    for k in _VERIFICATION_COLS:
+        out[k] = None
     if row is not None:
         for k in PREF_COLUMNS:
             out[k] = bool(row[k])
         out["sms_phone_number"] = row["sms_phone_number"]
         for k in QUIET_HOURS_COLUMNS:
             out[k] = row[k]
+        for k in _VERIFICATION_COLS:
+            out[k] = row[k]
+    out["sms_phone_verified"] = out.get("sms_phone_verified_at") is not None
     return out
 
 
@@ -396,6 +435,16 @@ async def set_prefs(
         else (str(sms_phone_number).strip() or None) if sms_phone_number else None
     )
 
+    # Whenever the destination phone changes (including being set for
+    # the first time, or cleared back to NULL) the previous verification
+    # is no longer meaningful — drop the proof and any in-flight code so
+    # the user is forced to re-verify before paid SMS resumes.
+    phone_changed = next_phone != current.get("sms_phone_number")
+    if phone_changed:
+        next_verification: dict[str, Any] = {c: None for c in _VERIFICATION_COLS}
+    else:
+        next_verification = {c: current.get(c) for c in _VERIFICATION_COLS}
+
     next_qh: dict[str, Any] = {
         k: current[k] for k in QUIET_HOURS_COLUMNS
     }
@@ -410,6 +459,7 @@ async def set_prefs(
         list(PREF_COLUMNS.keys())
         + ["sms_phone_number"]
         + list(QUIET_HOURS_COLUMNS.keys())
+        + list(_VERIFICATION_COLS)
     )
     placeholders = ", ".join(f"${i + 2}" for i in range(len(cols)))
     set_clause = ", ".join(f"{c} = EXCLUDED.{c}" for c in cols)
@@ -423,6 +473,7 @@ async def set_prefs(
         + [next_vals[c] for c in PREF_COLUMNS]
         + [next_phone]
         + [next_qh[c] for c in QUIET_HOURS_COLUMNS]
+        + [next_verification[c] for c in _VERIFICATION_COLS]
     )
     try:
         await db.execute(sql, *args)
@@ -433,7 +484,120 @@ async def set_prefs(
     out["sms_phone_number"] = next_phone
     for k in QUIET_HOURS_COLUMNS:
         out[k] = next_qh[k]
+    for k in _VERIFICATION_COLS:
+        out[k] = next_verification[k]
+    out["sms_phone_verified"] = next_verification["sms_phone_verified_at"] is not None
     return out
+
+
+# ---------------------------------------------------------------------------
+# SMS phone-number verification (task #191)
+# ---------------------------------------------------------------------------
+
+
+async def issue_phone_verification_code(
+    clerk_user_id: str,
+) -> tuple[str, str, datetime] | None:
+    """Generate a fresh 6-digit code for the user's saved phone number.
+
+    Persists the code + expiry, and clears any prior verification so the
+    number is treated as unverified until the new code is confirmed.
+    Returns ``(code, phone, expires_at)`` on success, or ``None`` if the
+    user has no phone on file (caller should surface a 400 in that case).
+    """
+    await ensure_schema()
+    try:
+        row = await db.fetchrow(
+            "SELECT sms_phone_number FROM user_notification_prefs "
+            "WHERE clerk_user_id = $1",
+            clerk_user_id,
+        )
+    except Exception as e:
+        log.warning("issue_phone_verification_code lookup failed: %s", e)
+        return None
+    phone = (row or {}).get("sms_phone_number") if row else None
+    phone = (str(phone).strip() if phone else "") or None
+    if not phone:
+        return None
+    code = f"{secrets.randbelow(1_000_000):06d}"
+    expires_at = datetime.now(timezone.utc) + timedelta(
+        seconds=SMS_VERIFICATION_TTL_SECONDS
+    )
+    try:
+        await db.execute(
+            """
+            UPDATE user_notification_prefs
+               SET sms_phone_verification_code = $2,
+                   sms_phone_verification_expires_at = $3,
+                   sms_phone_verified_at = NULL,
+                   updated_at = now()
+             WHERE clerk_user_id = $1
+            """,
+            clerk_user_id, code, expires_at,
+        )
+    except Exception as e:
+        log.warning("issue_phone_verification_code persist failed: %s", e)
+        return None
+    return code, phone, expires_at
+
+
+async def confirm_phone_verification_code(
+    clerk_user_id: str, code: str
+) -> bool:
+    """Mark the user's saved phone as verified iff ``code`` matches.
+
+    Constant-time string comparison via :func:`secrets.compare_digest`
+    so a slow timing oracle can't be used to brute-force the 6-digit
+    space. Returns ``False`` for missing / mismatched / expired codes —
+    the caller surfaces a generic error so we don't leak which.
+    """
+    await ensure_schema()
+    submitted = (code or "").strip()
+    if len(submitted) != 6 or not submitted.isdigit():
+        return False
+    try:
+        row = await db.fetchrow(
+            "SELECT sms_phone_number, sms_phone_verification_code, "
+            "       sms_phone_verification_expires_at "
+            "  FROM user_notification_prefs WHERE clerk_user_id = $1",
+            clerk_user_id,
+        )
+    except Exception as e:
+        log.warning("confirm_phone_verification_code lookup failed: %s", e)
+        return False
+    if not row:
+        return False
+    expected = row.get("sms_phone_verification_code")
+    expires = row.get("sms_phone_verification_expires_at")
+    phone = row.get("sms_phone_number")
+    if not expected or not phone:
+        return False
+    if expires is not None:
+        try:
+            now = datetime.now(timezone.utc)
+            exp = expires if expires.tzinfo else expires.replace(tzinfo=timezone.utc)
+            if exp < now:
+                return False
+        except Exception:
+            return False
+    if not secrets.compare_digest(str(expected), submitted):
+        return False
+    try:
+        await db.execute(
+            """
+            UPDATE user_notification_prefs
+               SET sms_phone_verified_at = now(),
+                   sms_phone_verification_code = NULL,
+                   sms_phone_verification_expires_at = NULL,
+                   updated_at = now()
+             WHERE clerk_user_id = $1
+            """,
+            clerk_user_id,
+        )
+    except Exception as e:
+        log.warning("confirm_phone_verification_code persist failed: %s", e)
+        return False
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -550,6 +714,10 @@ async def opted_in_sms_phones(pref_column: str = "sms_live_trade") -> list[str]:
     if pref_column not in PREF_COLUMNS:
         raise ValueError(f"unknown pref column {pref_column!r}")
     await ensure_schema()
+    # `sms_phone_verified_at IS NOT NULL` enforces task #191's
+    # ownership-confirmation gate: an opted-in user with an unverified
+    # number is silently skipped on dispatch, so a typo can't bill us
+    # for an undeliverable Twilio segment.
     sql = f"""
         SELECT p.sms_phone_number
           FROM user_notification_prefs p
@@ -557,6 +725,7 @@ async def opted_in_sms_phones(pref_column: str = "sms_live_trade") -> list[str]:
          WHERE p.{pref_column} = true
            AND p.sms_phone_number IS NOT NULL
            AND p.sms_phone_number <> ''
+           AND p.sms_phone_verified_at IS NOT NULL
            AND ( (LOWER(COALESCE(s.tier,'')) IN ('elite','founder')
                   AND COALESCE(s.status,'') IN ('active','trialing','past_due'))
               OR LOWER(COALESCE(s.tier,'')) = 'founder' )

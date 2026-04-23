@@ -31,6 +31,7 @@ from app.notifications import push as _push
 
 _PREF_BOOL_COLS = list(_push.PREF_COLUMNS.keys())
 _QUIET_HOURS_COLS = list(_push.QUIET_HOURS_COLUMNS.keys())
+_VERIFICATION_COLS = list(_push._VERIFICATION_COLS)
 
 
 class _Store:
@@ -60,16 +61,37 @@ class _Store:
         if q.startswith("INSERT INTO user_notification_prefs"):
             uid = args[0]
             # All known boolean columns, then sms_phone_number, then
-            # the quiet-hours columns — matching the column order
-            # assembled in `push.set_prefs`.
+            # the quiet-hours columns, then the SMS-verification
+            # columns — matching the column order assembled in
+            # `push.set_prefs`.
             row: dict[str, Any] = {}
             for i, col in enumerate(_PREF_BOOL_COLS):
                 row[col] = args[1 + i]
             row["sms_phone_number"] = args[1 + len(_PREF_BOOL_COLS)]
             for j, col in enumerate(_QUIET_HOURS_COLS):
                 row[col] = args[2 + len(_PREF_BOOL_COLS) + j]
+            base = 2 + len(_PREF_BOOL_COLS) + len(_QUIET_HOURS_COLS)
+            for k, col in enumerate(_VERIFICATION_COLS):
+                row[col] = args[base + k]
             self.prefs[uid] = row
             return "INSERT 0 1"
+        if q.startswith("UPDATE user_notification_prefs SET sms_phone_verification_code"):
+            uid, code, expires = args
+            row = self.prefs.get(uid)
+            if row is not None:
+                row["sms_phone_verification_code"] = code
+                row["sms_phone_verification_expires_at"] = expires
+                row["sms_phone_verified_at"] = None
+            return "UPDATE 1"
+        if q.startswith("UPDATE user_notification_prefs SET sms_phone_verified_at = now()"):
+            (uid,) = args
+            row = self.prefs.get(uid)
+            if row is not None:
+                from datetime import datetime, timezone
+                row["sms_phone_verified_at"] = datetime.now(timezone.utc)
+                row["sms_phone_verification_code"] = None
+                row["sms_phone_verification_expires_at"] = None
+            return "UPDATE 1"
         return "OK"
 
     async def fetchrow(self, query: str, *args: Any) -> dict[str, Any] | None:
@@ -77,6 +99,10 @@ class _Store:
         if q.startswith("SELECT") and "FROM user_notification_prefs WHERE clerk_user_id" in q:
             (uid,) = args
             return self.prefs.get(uid)
+        if q.startswith("SELECT sms_phone_number FROM user_notification_prefs"):
+            (uid,) = args
+            row = self.prefs.get(uid)
+            return {"sms_phone_number": row["sms_phone_number"]} if row else None
         return None
 
     async def fetch(self, query: str, *_args: Any) -> list[dict[str, Any]]:
@@ -196,6 +222,199 @@ def test_prefs_set_phone_number(store: _Store) -> None:
     prefs = _run(_push.get_prefs("user_1"))
     assert prefs["sms_phone_number"] == "+15551234567"
     assert prefs["sms_live_trade"] is True
+    # New numbers are unverified by default — task #191 gate.
+    assert prefs["sms_phone_verified"] is False
+    assert prefs["sms_phone_verified_at"] is None
+
+
+def test_phone_verification_round_trip(store: _Store) -> None:
+    """Save phone → issue code → confirm code → verified flag flips on."""
+    _run(_push.set_prefs(
+        clerk_user_id="user_v", sms_phone_number="+15550001111",
+    ))
+    issued = _run(_push.issue_phone_verification_code("user_v"))
+    assert issued is not None
+    code, phone, expires = issued
+    assert phone == "+15550001111"
+    assert len(code) == 6 and code.isdigit()
+
+    # Wrong code is rejected and does not flip the verified flag.
+    assert _run(_push.confirm_phone_verification_code("user_v", "000000")) is False
+    assert _run(_push.get_prefs("user_v"))["sms_phone_verified"] is False
+
+    assert _run(_push.confirm_phone_verification_code("user_v", code)) is True
+    after = _run(_push.get_prefs("user_v"))
+    assert after["sms_phone_verified"] is True
+    assert after["sms_phone_verification_code"] is None
+
+
+def test_changing_phone_clears_prior_verification(store: _Store) -> None:
+    """A verified user who edits their number is forced to re-verify."""
+    _run(_push.set_prefs(clerk_user_id="user_e", sms_phone_number="+15551112222"))
+    issued = _run(_push.issue_phone_verification_code("user_e"))
+    assert issued is not None
+    assert _run(_push.confirm_phone_verification_code("user_e", issued[0])) is True
+    assert _run(_push.get_prefs("user_e"))["sms_phone_verified"] is True
+
+    _run(_push.set_prefs(clerk_user_id="user_e", sms_phone_number="+15553334444"))
+    after = _run(_push.get_prefs("user_e"))
+    assert after["sms_phone_number"] == "+15553334444"
+    assert after["sms_phone_verified"] is False, (
+        "changing the phone must drop the prior verification"
+    )
+
+
+def test_issue_phone_verification_without_phone_returns_none(
+    store: _Store,
+) -> None:
+    assert _run(_push.issue_phone_verification_code("nobody")) is None
+
+
+def test_notification_prefs_endpoint_blocks_sms_toggle_without_verification(
+    store: _Store, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Enabling `sms_live_trade` for an Elite user with an unverified
+    phone must 400 with `sms_phone_not_verified` and the dispatcher
+    must skip them too. Verifying the number unlocks both."""
+    from fastapi.testclient import TestClient
+    from app import main as _main
+    from app.auth import require_auth, AuthedUser
+    from app import billing as _billing
+    from app.notifications import sms as _sms
+
+    user = AuthedUser(
+        user_id="user_sms", session_id=None,
+        claims={"sub": "user_sms", "email": "s@example.com"},
+    )
+
+    async def _fake_sub(_u):
+        return _billing.UserSubscription(
+            user_id="user_sms", email="s@example.com",
+            tier=_billing.TIER_ELITE, status="active",
+            stripe_customer_id=None, stripe_subscription_id=None,
+            stripe_price_id=None, interval=None,
+            current_period_end=None, cancel_at_period_end=False,
+            is_founder=False,
+        )
+
+    sent: list[tuple[tuple, dict]] = []
+
+    async def _fake_sms_send(to, body, *, tag=None):  # noqa: ANN001
+        sent.append((tuple(to), {"body": body, "tag": tag}))
+        return [{"to": list(to)[0], "ok": True}]
+
+    monkeypatch.setattr(_billing, "get_user_subscription", _fake_sub)
+    monkeypatch.setattr(_sms, "send", _fake_sms_send)
+    _main.app.dependency_overrides[require_auth] = lambda: user
+    try:
+        client = TestClient(_main.app)
+        # Save phone — server should auto-fire a verification SMS.
+        resp = client.put(
+            "/api/me/notification-prefs",
+            json={
+                "sms_phone_number": "+15557776666",
+                "sms_phone_number_present": True,
+            },
+        )
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["prefs"]["sms_phone_number"] == "+15557776666"
+        assert body["prefs"]["sms_phone_verified"] is False
+        # SECURITY: never echo the in-flight verification code back to
+        # the client (would let any session self-verify a stranger's
+        # phone without ever receiving the SMS).
+        assert "sms_phone_verification_code" not in body["prefs"]
+        assert "sms_phone_verified_at" not in body["prefs"]
+        assert sent, "saving a new phone must trigger a verification SMS"
+
+        # Enabling the toggle is blocked while unverified.
+        resp = client.put(
+            "/api/me/notification-prefs",
+            json={"sms_live_trade": True},
+        )
+        assert resp.status_code == 400
+        assert resp.json()["detail"]["error"] == "sms_phone_not_verified"
+
+        # Confirm the code from the in-flight challenge.
+        code = store.prefs["user_sms"]["sms_phone_verification_code"]
+        resp = client.post(
+            "/api/me/notification-prefs/sms/verify",
+            json={"code": code},
+        )
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["prefs"]["sms_phone_verified"] is True
+
+        # Now the toggle saves cleanly.
+        resp = client.put(
+            "/api/me/notification-prefs",
+            json={"sms_live_trade": True},
+        )
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["prefs"]["sms_live_trade"] is True
+    finally:
+        _main.app.dependency_overrides.pop(require_auth, None)
+
+
+def test_notification_prefs_endpoint_skips_auto_sms_for_non_elite(
+    store: _Store, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A free/pro user saving a phone number must NOT trigger a paid
+    Twilio SMS — they can't enable SMS toggles anyway, so auto-sending
+    a verification code is pure spend leakage. The same save by an
+    Elite user does fire the SMS (covered by the test above)."""
+    from fastapi.testclient import TestClient
+    from app import main as _main
+    from app.auth import require_auth, AuthedUser
+    from app import billing as _billing
+    from app.notifications import sms as _sms
+
+    user = AuthedUser(
+        user_id="user_free", session_id=None,
+        claims={"sub": "user_free", "email": "f@example.com"},
+    )
+
+    async def _fake_sub(_u):
+        return _billing.UserSubscription(
+            user_id="user_free", email="f@example.com",
+            tier=_billing.TIER_FREE, status="active",
+            stripe_customer_id=None, stripe_subscription_id=None,
+            stripe_price_id=None, interval=None,
+            current_period_end=None, cancel_at_period_end=False,
+            is_founder=False,
+        )
+
+    sent: list[tuple] = []
+
+    async def _fake_sms_send(to, body, *, tag=None):  # noqa: ANN001
+        sent.append((tuple(to), body, tag))
+        return [{"to": list(to)[0], "ok": True}]
+
+    monkeypatch.setattr(_billing, "get_user_subscription", _fake_sub)
+    monkeypatch.setattr(_sms, "send", _fake_sms_send)
+    _main.app.dependency_overrides[require_auth] = lambda: user
+    try:
+        client = TestClient(_main.app)
+        resp = client.put(
+            "/api/me/notification-prefs",
+            json={
+                "sms_phone_number": "+15558884444",
+                "sms_phone_number_present": True,
+            },
+        )
+        assert resp.status_code == 200, resp.text
+        assert sent == [], (
+            "non-elite phone save must not dispatch a verification SMS"
+        )
+        # And the explicit start-verification endpoint must reject the
+        # free user with a tier_required error rather than send the code.
+        resp = client.post(
+            "/api/me/notification-prefs/sms/start-verification"
+        )
+        assert resp.status_code == 403
+        assert resp.json()["detail"]["error"] == "tier_required"
+        assert sent == []
+    finally:
+        _main.app.dependency_overrides.pop(require_auth, None)
 
 
 def test_tokens_for_pref_respects_toggles(store: _Store) -> None:
