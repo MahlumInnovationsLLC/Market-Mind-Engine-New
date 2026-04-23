@@ -233,6 +233,37 @@ Accessibility primitives shipped in #237:
 - API server: managed by the `artifacts/api-server: API Server` workflow (uvicorn on `$PORT`)
 - Web: managed by the `artifacts/web: web` workflow
 
+## Outbound HTTP reliability
+
+All outbound REST calls from the API server route through
+`app/http_retry.py`, a shared retry primitive that:
+
+- retries on `httpx.TransportError`, 408/425/429/5xx with exponential
+  backoff + full jitter (default `max_attempts=4`)
+- honours upstream `Retry-After` headers when present
+- records per-client attempt / retry / failure counters surfaced under
+  `summary.retry_counters` in `/api/health/snapshot`
+
+Wired into the GET / read paths of: **kalshi**, **polymarket**,
+**sportradar:<sport>:<feed>**, **postmark**, **clerk** (backend
+`/v1/users/{id}` lookup), **expo_push**.  Mutating verbs (Kalshi /
+Polymarket order POSTs) are intentionally NOT retried so the system
+cannot duplicate fills.  Polymarket re-signs every retry attempt
+inside `_do()` because the L2 HMAC bakes in a per-attempt timestamp
+that goes stale across the retry-after window — same pattern as
+Kalshi's per-attempt RSA-PSS signing.
+
+The LLM gatekeeper persona is **fail-closed** with strict schema
+validation: a verdict is only honoured when the response is a dict
+containing a real `bool` for `approved` AND a `recommended_action` in
+the closed enum (`BUY_YES` | `BUY_NO` | `PASS`).  Anything else (call
+exception, malformed JSON, wrong-typed `approved`, missing /
+unknown action) completes the debate with `approved=false`,
+`recommended_action="PASS"`, and bumps
+`summary.gatekeeper_failures.{call_error|malformed_json}` on the
+health snapshot.  Tests in `tests/test_swarm_gatekeeper_failclosed.py`
+pin every branch of this contract.
+
 ## Follow-up scope (NOT in this slice)
 
 Live Kalshi trading loop, 6-persona LLM swarm debate engine, 12-gate risk system,

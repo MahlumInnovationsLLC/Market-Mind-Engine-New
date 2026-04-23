@@ -648,12 +648,28 @@ async def _build_snapshot() -> _Snapshot:
     ]
     config = _probe_config()
     cards = list(live) + passive + config
+    # Per-client retry / failure counters (populated by every outbound
+    # REST call routed through ``app.http_retry``).  Lazy-imported to
+    # keep this module's import graph free of cycles.
+    try:
+        from .http_retry import snapshot_counters as _retry_snapshot
+        retry_counters = _retry_snapshot()
+    except Exception:  # noqa: BLE001 — counters are best-effort observability
+        retry_counters = {}
+    try:
+        from .swarm.runner import gatekeeper_failure_counters
+        gatekeeper_failures = gatekeeper_failure_counters()
+    except Exception:  # noqa: BLE001
+        gatekeeper_failures = {}
+
     summary = {
         "ok": sum(1 for c in cards if c["status"] == "ok"),
         "degraded": sum(1 for c in cards if c["status"] == "degraded"),
         "down": sum(1 for c in cards if c["status"] == "down"),
         "unconfigured": sum(1 for c in cards if c["status"] == "unconfigured"),
         "errors_24h": errors_in_last_24h(),
+        "retry_counters": retry_counters,
+        "gatekeeper_failures": gatekeeper_failures,
     }
     if summary["down"] > 0:
         summary["overall"] = "down"

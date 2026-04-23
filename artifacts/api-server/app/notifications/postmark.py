@@ -27,6 +27,8 @@ from typing import Iterable
 
 import httpx
 
+from ..http_retry import retry_request
+
 
 log = logging.getLogger("axiom.notifications.postmark")
 
@@ -172,14 +174,28 @@ async def _send_one(
 
     try:
         async with httpx.AsyncClient(timeout=15.0) as c:
-            r = await c.post(
-                POSTMARK_API,
-                json=payload,
-                headers={
-                    "Accept": "application/json",
-                    "Content-Type": "application/json",
-                    "X-Postmark-Server-Token": token,
-                },
+            async def _do() -> httpx.Response:
+                return await c.post(
+                    POSTMARK_API,
+                    json=payload,
+                    headers={
+                        "Accept": "application/json",
+                        "Content-Type": "application/json",
+                        "X-Postmark-Server-Token": token,
+                    },
+                )
+
+            # Postmark POSTs are technically non-idempotent, but we
+            # only retry on transient 5xx / network failures: the
+            # Postmark server cannot have queued the message in those
+            # cases, so a duplicate is impossible.  4xx responses
+            # (validation, suppression, bad token) are returned to the
+            # caller untouched.
+            r = await retry_request(
+                _do,
+                client_name="postmark",
+                max_attempts=3,
+                retryable_statuses=frozenset({500, 502, 503, 504}),
             )
         if r.status_code >= 300:
             err = f"HTTP {r.status_code}: {r.text[:300]}"

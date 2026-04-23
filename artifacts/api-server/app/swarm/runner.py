@@ -49,6 +49,24 @@ _current_debate_id: contextvars.ContextVar[str | None] = contextvars.ContextVar(
 )
 
 
+# Per-process counters for gatekeeper fail-closed events.  Surfaced by
+# /api/health/snapshot so operators can see when the gatekeeper has
+# been forcing PASS due to upstream LLM trouble vs. legitimate vetoes.
+# Keys: "call_error" (provider exception), "malformed_json" (provider
+# responded but JSON contract violated).
+_GATEKEEPER_FAILURES: dict[str, int] = {}
+
+
+def gatekeeper_failure_counters() -> dict[str, int]:
+    """Snapshot of fail-closed gatekeeper counters (read-only copy)."""
+    return dict(_GATEKEEPER_FAILURES)
+
+
+def reset_gatekeeper_failure_counters() -> None:
+    """Test helper — clears the in-process gatekeeper counters."""
+    _GATEKEEPER_FAILURES.clear()
+
+
 def _now_iso() -> str:
     from datetime import datetime, timezone
 
@@ -555,21 +573,82 @@ async def _run_debate_inner(
         + "\n\nPERSONA LEANS: "
         + json.dumps({v["persona"]: v["lean"] for v in verdicts})
     )
-    gk_verdict = await _call_persona(GATEKEEPER, gk_input)
-    gk_parsed = _extract_json(gk_verdict["raw_text"]) or {}
-    approved = bool(gk_parsed.get("approved"))
-    final_action = str(gk_parsed.get("recommended_action") or mod_action or "PASS").upper()
-    if final_action not in ("BUY_YES", "BUY_NO", "PASS"):
+    # 4) Gatekeeper veto.  This is the last line of defence in front of
+    # the order pipe — if it cannot return a definitive `approved=true`
+    # verdict (provider outage, malformed JSON, both fallbacks
+    # exhausted) the entire trade is forced to PASS.  We never let a
+    # gatekeeper failure silently fall back to the moderator's
+    # recommendation, because the gatekeeper is what enforces the 12
+    # risk gates the moderator does not see.
+    gk_failed_closed = False
+    gk_failure_reason: str | None = None
+    try:
+        gk_verdict = await _call_persona(GATEKEEPER, gk_input)
+    except Exception as e:  # noqa: BLE001 — fail-closed by design
+        log.warning("gatekeeper call failed; forcing PASS: %s", e)
+        _GATEKEEPER_FAILURES["call_error"] = _GATEKEEPER_FAILURES.get("call_error", 0) + 1
+        gk_failed_closed = True
+        gk_failure_reason = f"gatekeeper_call_error: {type(e).__name__}: {e}"
+        gk_verdict = {
+            "persona": GATEKEEPER.id,
+            "probability": None,
+            "confidence": None,
+            "lean": None,
+            "reasoning": gk_failure_reason,
+            "raw_text": "",
+            "weight": 1.0,
+            "cost": 0.0,
+            "latency_ms": 0,
+            "model": None,
+            "provider": None,
+        }
+        gk_parsed: dict[str, Any] = {}
+    else:
+        gk_parsed = _extract_json(gk_verdict["raw_text"]) or {}
+        # Strict schema check.  An approval is only honoured when the
+        # gatekeeper response is a dict containing a real boolean
+        # `approved` key AND a `recommended_action` in the closed enum.
+        # Anything else (empty parse, wrong types, missing keys,
+        # unknown action) is treated as a malformed contract and fails
+        # closed.  This pins the contract the architect flagged: a
+        # syntactically-valid `{"approved": true}` with no action MUST
+        # NOT slip through.
+        valid_actions = ("BUY_YES", "BUY_NO", "PASS")
+        gk_action_raw = gk_parsed.get("recommended_action")
+        gk_action = str(gk_action_raw).upper() if isinstance(gk_action_raw, str) else ""
+        schema_ok = (
+            isinstance(gk_parsed, dict)
+            and isinstance(gk_parsed.get("approved"), bool)
+            and gk_action in valid_actions
+        )
+        if not schema_ok:
+            _GATEKEEPER_FAILURES["malformed_json"] = (
+                _GATEKEEPER_FAILURES.get("malformed_json", 0) + 1
+            )
+            gk_failed_closed = True
+            gk_failure_reason = (
+                "gatekeeper_malformed_schema: "
+                f"approved={type(gk_parsed.get('approved')).__name__} "
+                f"action={gk_action_raw!r}"
+            )
+
+    approved = (
+        not gk_failed_closed and bool(gk_parsed.get("approved"))
+    )
+    if gk_failed_closed or not approved:
         final_action = "PASS"
-    if not approved:
-        final_action = "PASS"
+    else:
+        final_action = str(gk_parsed.get("recommended_action") or "PASS").upper()
+        if final_action not in ("BUY_YES", "BUY_NO", "PASS"):
+            final_action = "PASS"
 
     await _publish(
         {
             "type": "gatekeeper_done",
             "approved": approved,
             "recommended_action": final_action,
-            "veto_reason": gk_parsed.get("veto_reason"),
+            "veto_reason": gk_parsed.get("veto_reason") or gk_failure_reason,
+            "failed_closed": gk_failed_closed,
         }
     )
 

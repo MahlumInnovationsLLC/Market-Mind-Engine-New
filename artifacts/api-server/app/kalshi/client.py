@@ -17,6 +17,7 @@ from urllib.parse import urlsplit
 import httpx
 
 from ..config import get_settings
+from ..http_retry import retry_request
 from . import auth
 
 log = logging.getLogger(__name__)
@@ -87,16 +88,33 @@ class KalshiClient:
         params: dict[str, Any] | None = None,
         json: dict[str, Any] | None = None,
     ) -> Any:
+        # Idempotent reads (GET) get retry-with-backoff on transient
+        # 5xx / network errors via the shared helper.  Mutating verbs
+        # (POST/PUT/PATCH/DELETE) keep the previous single-shot
+        # behaviour to avoid double-submitting orders.
         sign_path = self._sign_path(sub_path)
-        headers = auth.sign_request(
-            key_id=self._settings.kalshi_api_key_id or "",
-            private_key_pem=self._settings.kalshi_private_key or "",
-            method=method,
-            path=sign_path,
-        )
         url = f"{self._base}{sub_path}"
+        is_idempotent = method.upper() == "GET"
+
+        async def _do() -> httpx.Response:
+            # Re-sign on every attempt: Kalshi includes a timestamp in
+            # the signed payload so a stale signature is rejected on
+            # retry.
+            headers = auth.sign_request(
+                key_id=self._settings.kalshi_api_key_id or "",
+                private_key_pem=self._settings.kalshi_private_key or "",
+                method=method,
+                path=sign_path,
+            )
+            return await self._http.request(
+                method, url, params=params, json=json, headers=headers
+            )
+
         try:
-            r = await self._http.request(method, url, params=params, json=json, headers=headers)
+            if is_idempotent:
+                r = await retry_request(_do, client_name="kalshi", max_attempts=4)
+            else:
+                r = await _do()
         except httpx.HTTPError as e:
             raise KalshiAPIError(0, None, f"Kalshi network error: {e}") from e
         try:

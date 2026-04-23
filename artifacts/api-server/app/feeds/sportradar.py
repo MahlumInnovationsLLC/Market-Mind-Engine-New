@@ -26,6 +26,7 @@ from typing import Any
 import httpx
 
 from .. import db
+from ..http_retry import retry_request
 from .odds_api import (
     SPORTRADAR_SPORTS,
     _SPORTRADAR_LEAGUE,
@@ -150,7 +151,18 @@ async def _get_json(provider: str, url: str, api_key: str) -> dict[str, Any] | N
     """
     timeout = httpx.Timeout(10.0, connect=5.0)
     async with httpx.AsyncClient(timeout=timeout) as client:
-        r = await client.get(url, params={"api_key": api_key})
+        # 429 stays the caller's problem (we re-raise as RateLimited
+        # below so the scheduler can apply per-provider cooldown), but
+        # transient 5xx / network errors retry up to 3 times.
+        async def _do() -> httpx.Response:
+            return await client.get(url, params={"api_key": api_key})
+
+        r = await retry_request(
+            _do,
+            client_name=f"sportradar:{provider}",
+            max_attempts=3,
+            retryable_statuses=frozenset({500, 502, 503, 504}),
+        )
     if r.status_code in (401, 403):
         raise RuntimeError(f"{provider} auth rejected ({r.status_code})")
     if r.status_code == 429:

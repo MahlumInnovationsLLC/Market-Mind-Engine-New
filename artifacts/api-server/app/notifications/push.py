@@ -505,16 +505,26 @@ async def send_to_tokens(
     errors: list[str] = []
     ok_count = 0
     try:
+        from ..http_retry import retry_request
+
         async with httpx.AsyncClient(timeout=10.0) as client:
-            r = await client.post(
-                EXPO_PUSH_URL,
-                json=messages,
-                headers={
-                    "accept": "application/json",
-                    "accept-encoding": "gzip, deflate",
-                    "content-type": "application/json",
-                },
-            )
+            async def _do():
+                return await client.post(
+                    EXPO_PUSH_URL,
+                    json=messages,
+                    headers={
+                        "accept": "application/json",
+                        "accept-encoding": "gzip, deflate",
+                        "content-type": "application/json",
+                    },
+                )
+
+            # Expo's push API is idempotent in the receipts model: a
+            # duplicated batch yields duplicate tickets but never a
+            # double notification (the device dedupes on token+content
+            # within the throttle window), so it is safe to retry on
+            # 5xx and transport errors.
+            r = await retry_request(_do, client_name="expo_push", max_attempts=3)
         if r.status_code >= 400:
             errors.append(f"HTTP {r.status_code}: {r.text[:200]}")
             return {"sent": len(tokens), "ok": 0, "errors": errors}

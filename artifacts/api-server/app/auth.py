@@ -208,11 +208,16 @@ async def _fetch_clerk_user(user_id: str) -> dict[str, Any]:
         if cached and now - cached[0] < _USER_CACHE_TTL:
             return cached[1]
         try:
+            from .http_retry import retry_request
+
             async with httpx.AsyncClient(timeout=10.0) as client:
-                r = await client.get(
-                    f"https://api.clerk.com/v1/users/{user_id}",
-                    headers={"Authorization": f"Bearer {secret}"},
-                )
+                async def _do():
+                    return await client.get(
+                        f"https://api.clerk.com/v1/users/{user_id}",
+                        headers={"Authorization": f"Bearer {secret}"},
+                    )
+
+                r = await retry_request(_do, client_name="clerk", max_attempts=3)
             if r.status_code != 200:
                 log.warning("clerk user fetch %s: %s", r.status_code, r.text[:200])
                 return {}

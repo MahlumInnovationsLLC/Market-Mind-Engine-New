@@ -19,6 +19,7 @@ from urllib.parse import urlsplit
 import httpx
 
 from ..config import get_settings
+from ..http_retry import retry_request
 from . import auth
 
 log = logging.getLogger(__name__)
@@ -107,35 +108,53 @@ class PolymarketClient:
         require_auth: bool = True,
     ) -> Any:
         url = f"{self._base}{sub_path}"
-        headers: dict[str, str] = {"Accept": "application/json"}
         body_str = ""
         if json is not None:
             import json as _json
             body_str = _json.dumps(json, separators=(",", ":"))
-            headers["Content-Type"] = "application/json"
-        if require_auth:
-            if not self._have_creds():
-                raise auth.PolymarketAuthError(
-                    "Polymarket credentials missing — set POLYMARKET_API_KEY, "
-                    "POLYMARKET_API_SECRET, POLYMARKET_API_PASSPHRASE and "
-                    "POLYMARKET_WALLET_ADDRESS"
-                )
-            headers.update(
-                auth.sign_request(
-                    api_key=self._settings.polymarket_api_key or "",
-                    api_secret=self._settings.polymarket_api_secret or "",
-                    passphrase=self._settings.polymarket_api_passphrase or "",
-                    address=self._settings.polymarket_wallet_address or "",
-                    method=method,
-                    path=self._sign_path(sub_path),
-                    body=body_str,
-                )
+        if require_auth and not self._have_creds():
+            raise auth.PolymarketAuthError(
+                "Polymarket credentials missing — set POLYMARKET_API_KEY, "
+                "POLYMARKET_API_SECRET, POLYMARKET_API_PASSPHRASE and "
+                "POLYMARKET_WALLET_ADDRESS"
             )
-        try:
+
+        # Idempotent reads (GET) get retry-with-backoff via the shared
+        # helper; mutating verbs keep the previous single-shot
+        # behaviour to avoid duplicate order submission.  The L2 HMAC
+        # signature is regenerated on every attempt because Polymarket
+        # bakes the current timestamp into the signed payload — a
+        # signature reused after the retry-after delay would be
+        # rejected as stale, defeating the retry.
+        is_idempotent = method.upper() == "GET"
+
+        async def _do() -> httpx.Response:
+            headers: dict[str, str] = {"Accept": "application/json"}
             if json is not None:
-                r = await self._http.request(method, url, params=params, content=body_str, headers=headers)
+                headers["Content-Type"] = "application/json"
+            if require_auth:
+                headers.update(
+                    auth.sign_request(
+                        api_key=self._settings.polymarket_api_key or "",
+                        api_secret=self._settings.polymarket_api_secret or "",
+                        passphrase=self._settings.polymarket_api_passphrase or "",
+                        address=self._settings.polymarket_wallet_address or "",
+                        method=method,
+                        path=self._sign_path(sub_path),
+                        body=body_str,
+                    )
+                )
+            if json is not None:
+                return await self._http.request(
+                    method, url, params=params, content=body_str, headers=headers
+                )
+            return await self._http.request(method, url, params=params, headers=headers)
+
+        try:
+            if is_idempotent:
+                r = await retry_request(_do, client_name="polymarket", max_attempts=4)
             else:
-                r = await self._http.request(method, url, params=params, headers=headers)
+                r = await _do()
         except httpx.HTTPError as e:
             raise PolymarketAPIError(0, None, f"Polymarket network error: {e}") from e
         try:
