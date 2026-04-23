@@ -35,6 +35,24 @@ type Snapshot = {
   };
 };
 
+type ReadyCheck = {
+  name: string;
+  ok: boolean;
+  detail: string;
+  checked_at: number;
+};
+
+type ReadinessSnapshot = {
+  status?: "ready" | "not_ready";
+  ready: boolean;
+  started_at: number | null;
+  completed_at: number | null;
+  elapsed_seconds: number | null;
+  checks: Record<string, ReadyCheck>;
+};
+
+const READY_CHECK_ORDER = ["migrations", "secrets", "models", "feeds"] as const;
+
 type ErrorsResponse = {
   items: { at: string; source: string; message: string }[];
   errors_24h: number;
@@ -133,6 +151,8 @@ function formatUptime(seconds: number): string {
 export function HealthPanel() {
   const { getToken, isSignedIn } = useAuth();
   const [snap, setSnap] = useState<Snapshot | null>(null);
+  const [readiness, setReadiness] = useState<ReadinessSnapshot | null>(null);
+  const [readinessError, setReadinessError] = useState<string | null>(null);
   const [errors, setErrors] = useState<ErrorsResponse | null>(null);
   const [notif, setNotif] = useState<NotificationsStatus | null>(null);
   const [modelAlerts, setModelAlerts] = useState<ModelAlertsResponse | null>(null);
@@ -152,7 +172,32 @@ export function HealthPanel() {
       ? "/api/health/model-alerts?ack=true"
       : "/api/health/model-alerts?ack=false";
 
+  async function refreshReadiness() {
+    try {
+      const r = await apiFetch<ReadinessSnapshot>("/api/health/ready");
+      setReadiness(r);
+      setReadinessError(null);
+    } catch (e: unknown) {
+      if (e instanceof ApiError && e.status === 503) {
+        const body = e.body as { detail?: ReadinessSnapshot } | null;
+        if (body && body.detail && typeof body.detail === "object") {
+          setReadiness(body.detail);
+          setReadinessError(null);
+          return;
+        }
+      }
+      setReadinessError(
+        e instanceof ApiError
+          ? `HTTP ${e.status} :: ${e.message}`
+          : e instanceof Error
+            ? e.message
+            : String(e),
+      );
+    }
+  }
+
   async function refresh() {
+    refreshReadiness();
     try {
       const [s, e, n, m] = await Promise.all([
         apiFetch<Snapshot>("/api/health/snapshot", { getToken: token }),
@@ -256,6 +301,11 @@ export function HealthPanel() {
 
   return (
     <div className="space-y-6 font-mono" data-testid="panel-health">
+        <ReadinessSection
+          snap={readiness}
+          error={readinessError}
+        />
+
         {error && (
           <div className="border border-destructive bg-destructive/10 text-destructive p-3 text-xs">
             {error}
@@ -657,6 +707,120 @@ export function HealthPanel() {
           )}
         </section>
     </div>
+  );
+}
+
+function formatElapsed(seconds: number | null): string {
+  if (seconds === null || Number.isNaN(seconds)) return "—";
+  if (seconds < 60) return `${seconds.toFixed(1)}s`;
+  const m = Math.floor(seconds / 60);
+  const s = Math.round(seconds - m * 60);
+  if (m < 60) return s > 0 ? `${m}m ${s}s` : `${m}m`;
+  const h = Math.floor(m / 60);
+  const rm = m % 60;
+  return rm > 0 ? `${h}h ${rm}m` : `${h}h`;
+}
+
+function ReadinessSection({
+  snap,
+  error,
+}: {
+  snap: ReadinessSnapshot | null;
+  error: string | null;
+}) {
+  const checks = snap?.checks ?? {};
+  const known = READY_CHECK_ORDER.filter((n) => n in checks);
+  const extras = Object.keys(checks).filter(
+    (n) => !(READY_CHECK_ORDER as readonly string[]).includes(n),
+  );
+  const orderedNames = [...known, ...extras];
+  const failing = orderedNames.filter((n) => checks[n] && !checks[n].ok);
+  const ready = !!snap?.ready;
+  const badgeCls = ready
+    ? "border-success text-success bg-success/10"
+    : "border-destructive text-destructive bg-destructive/10";
+  const badgeLabel = snap === null ? "PENDING" : ready ? "READY" : "NOT READY";
+
+  return (
+    <section
+      className="border border-border bg-card p-4 space-y-3"
+      data-testid="panel-readiness"
+    >
+      <div className="flex items-center justify-between gap-3 flex-wrap">
+        <div className="flex items-center gap-3">
+          <span
+            className={`inline-flex items-center px-3 py-1 border text-xs font-bold uppercase tracking-widest ${badgeCls}`}
+            data-testid="readiness-badge"
+          >
+            {badgeLabel}
+          </span>
+          <span className="text-[10px] uppercase tracking-widest text-muted-foreground">
+            ready gate ::{" "}
+            {snap
+              ? ready
+                ? `flipped after ${formatElapsed(snap.elapsed_seconds)}`
+                : `waiting · ${formatElapsed(snap.elapsed_seconds)} since boot`
+              : "loading…"}
+          </span>
+        </div>
+        {!ready && failing.length > 0 && (
+          <span
+            className="text-[10px] uppercase tracking-widest text-destructive"
+            data-testid="readiness-failing"
+          >
+            failing :: {failing.join(", ")}
+          </span>
+        )}
+      </div>
+
+      {error && (
+        <div className="border border-destructive bg-destructive/10 text-destructive p-2 text-xs">
+          readiness probe error :: {error}
+        </div>
+      )}
+
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2">
+        {orderedNames.length === 0 && (
+          <div className="text-xs text-muted-foreground col-span-full">
+            (no checks reported yet)
+          </div>
+        )}
+        {orderedNames.map((name) => {
+          const c = checks[name];
+          const isFailing = !ready && !c.ok;
+          const tone = c.ok
+            ? "border-success/50 bg-success/5 text-success"
+            : "border-destructive/60 bg-destructive/10 text-destructive";
+          const checkedAt = c.checked_at
+            ? new Date(c.checked_at * 1000).toISOString().slice(11, 19)
+            : "—";
+          return (
+            <div
+              key={name}
+              data-testid={`readiness-check-${name}`}
+              className={`border p-2 text-xs space-y-1 ${tone} ${
+                isFailing ? "ring-2 ring-destructive" : ""
+              }`}
+            >
+              <div className="flex items-center justify-between">
+                <span className="font-bold uppercase tracking-widest">
+                  {name}
+                </span>
+                <span className="text-[10px] uppercase tracking-widest">
+                  {c.ok ? "ok" : "fail"}
+                </span>
+              </div>
+              <div className="text-muted-foreground break-all">
+                {c.detail || "(no detail)"}
+              </div>
+              <div className="text-[10px] text-muted-foreground/70">
+                checked {checkedAt}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </section>
   );
 }
 
