@@ -1597,3 +1597,257 @@ export function VerticalVisibilityPanel() {
     </main>
   );
 }
+
+// ---------------------------------------------------------------------------
+// RevenueCat (mobile IAP) webhook health tile
+//
+// Surfaces the last 24h of webhook deliveries split by status. A silent
+// outage means paying mobile customers stop being upgraded, so we want
+// the operator to spot a spike or a long stretch of silence at a
+// glance. Backed by /api/admin/rc-webhook/stats.
+// ---------------------------------------------------------------------------
+
+type RcWebhookStats = {
+  hours: number;
+  totals: Record<string, number>;
+  hourly: { hour: string | null; status: string; count: number }[];
+  last_event_at: string | null;
+  last_5xx_at: string | null;
+  alert: {
+    failure_threshold_pct: number;
+    failures_last_hour: number;
+    failure_rate_pct: number;
+    silence_threshold_seconds: number;
+    business_hours_utc: number[];
+    in_business_hours: boolean;
+  };
+};
+
+const RC_STATUSES = ["ok", "duplicate", "http_4xx", "http_5xx"] as const;
+const RC_STATUS_LABEL: Record<(typeof RC_STATUSES)[number], string> = {
+  ok: "OK",
+  duplicate: "Duplicate",
+  http_4xx: "4xx",
+  http_5xx: "5xx",
+};
+const RC_STATUS_COLOR: Record<(typeof RC_STATUSES)[number], string> = {
+  ok: "bg-emerald-500/70",
+  duplicate: "bg-sky-500/60",
+  http_4xx: "bg-amber-500/70",
+  http_5xx: "bg-rose-500/80",
+};
+
+function _fmtRelative(iso: string | null): string {
+  if (!iso) return "never";
+  const t = Date.parse(iso);
+  if (Number.isNaN(t)) return iso;
+  const sec = Math.max(0, Math.floor((Date.now() - t) / 1000));
+  if (sec < 60) return `${sec}s ago`;
+  if (sec < 3600) return `${Math.floor(sec / 60)}m ago`;
+  if (sec < 86400) return `${Math.floor(sec / 3600)}h ago`;
+  return `${Math.floor(sec / 86400)}d ago`;
+}
+
+export function RcWebhookPanel() {
+  const { getToken, isSignedIn } = useAuth();
+  const tokenFn = useMemo(
+    () => () => getToken().then((t) => t ?? null),
+    [getToken],
+  );
+
+  const query = useQuery<RcWebhookStats>({
+    queryKey: ["admin", "rc-webhook-stats"],
+    queryFn: () =>
+      apiFetch<RcWebhookStats>("/api/admin/rc-webhook/stats?hours=24", {
+        getToken: tokenFn,
+      }),
+    enabled: !!isSignedIn,
+    refetchInterval: 60_000,
+    placeholderData: (prev) => prev,
+  });
+
+  const data = query.data;
+
+  // Bucket the hourly rows by hour key for a 24-column stacked bar.
+  const buckets = useMemo(() => {
+    if (!data) return [] as { hour: string; counts: Record<string, number>; total: number }[];
+    const byHour = new Map<string, Record<string, number>>();
+    for (const r of data.hourly) {
+      if (!r.hour) continue;
+      const slot = byHour.get(r.hour) ?? {};
+      slot[r.status] = (slot[r.status] ?? 0) + r.count;
+      byHour.set(r.hour, slot);
+    }
+    const sorted = Array.from(byHour.entries())
+      .sort((a, b) => a[0].localeCompare(b[0]))
+      .map(([hour, counts]) => {
+        const total = RC_STATUSES.reduce((s, k) => s + (counts[k] ?? 0), 0);
+        return { hour, counts, total };
+      });
+    return sorted.slice(-24);
+  }, [data]);
+
+  const maxBucket = useMemo(
+    () => buckets.reduce((m, b) => Math.max(m, b.total), 0) || 1,
+    [buckets],
+  );
+
+  // Health summary line shown above the chart.
+  const healthBadge = useMemo(() => {
+    if (!data) return { label: "Loading", tone: "text-muted-foreground" };
+    const failPct = data.alert.failure_rate_pct;
+    const threshold = data.alert.failure_threshold_pct;
+    const lastEventSec = data.last_event_at
+      ? (Date.now() - Date.parse(data.last_event_at)) / 1000
+      : Infinity;
+    if (failPct >= threshold && data.alert.failures_last_hour > 0) {
+      return {
+        label: `5xx rate ${failPct.toFixed(0)}% — alert tripped`,
+        tone: "text-destructive",
+      };
+    }
+    if (
+      data.alert.in_business_hours &&
+      lastEventSec > data.alert.silence_threshold_seconds
+    ) {
+      return {
+        label: "Silent during business hours — alert tripped",
+        tone: "text-destructive",
+      };
+    }
+    if (data.totals.http_5xx > 0) {
+      return {
+        label: `${data.totals.http_5xx} 5xx in 24h`,
+        tone: "text-amber-500",
+      };
+    }
+    return { label: "Healthy", tone: "text-emerald-500" };
+  }, [data]);
+
+  return (
+    <main className="space-y-3" data-testid="panel-rc-webhook">
+      <div className="flex flex-wrap items-end justify-between gap-2">
+        <div>
+          <h2 className="text-xs uppercase tracking-widest text-muted-foreground">
+            Mobile IAP webhook (RevenueCat) · 24h
+          </h2>
+          <p className="text-[11px] text-muted-foreground mt-1 normal-case tracking-normal">
+            Counts every delivery the api-server has seen — including
+            duplicates and rejects — so a silent dashboard pause or a
+            spike in 5xx errors is visible without grepping logs.
+          </p>
+        </div>
+        <div
+          className={`text-[11px] uppercase tracking-widest ${healthBadge.tone}`}
+          data-testid="text-rc-webhook-health"
+        >
+          {healthBadge.label}
+        </div>
+      </div>
+
+      {query.isLoading && !data ? (
+        <div className="h-32 animate-pulse bg-muted/30" />
+      ) : query.isError ? (
+        <div className="text-xs text-destructive">
+          Failed to load webhook stats. {(query.error as Error)?.message ?? ""}
+        </div>
+      ) : data ? (
+        <>
+          <div
+            className="grid grid-cols-2 gap-2 sm:grid-cols-4"
+            data-testid="grid-rc-webhook-totals"
+          >
+            {RC_STATUSES.map((s) => (
+              <div
+                key={s}
+                className="border border-border bg-card p-2"
+                data-testid={`tile-rc-${s}`}
+              >
+                <div className="flex items-center gap-2">
+                  <span
+                    className={`inline-block h-2 w-2 rounded-sm ${RC_STATUS_COLOR[s]}`}
+                  />
+                  <span className="text-[10px] uppercase tracking-widest text-muted-foreground">
+                    {RC_STATUS_LABEL[s]}
+                  </span>
+                </div>
+                <div className="mt-1 font-mono text-lg text-foreground">
+                  {data.totals[s] ?? 0}
+                </div>
+              </div>
+            ))}
+          </div>
+
+          <div className="border border-border bg-card p-2">
+            <div className="text-[10px] uppercase tracking-widest text-muted-foreground mb-2">
+              Hourly deliveries
+            </div>
+            {buckets.length === 0 ? (
+              <div className="text-[11px] text-muted-foreground py-6 text-center">
+                No webhook deliveries in the last 24h.
+              </div>
+            ) : (
+              <div
+                className="flex h-24 items-end gap-1"
+                data-testid="chart-rc-webhook-hourly"
+              >
+                {buckets.map((b) => {
+                  const heightPct = (b.total / maxBucket) * 100;
+                  return (
+                    <div
+                      key={b.hour}
+                      className="flex-1 flex flex-col-reverse"
+                      title={`${b.hour}\n${RC_STATUSES.map(
+                        (s) => `${RC_STATUS_LABEL[s]}: ${b.counts[s] ?? 0}`,
+                      ).join("\n")}`}
+                      style={{ height: `${heightPct}%` }}
+                    >
+                      {RC_STATUSES.map((s) => {
+                        const c = b.counts[s] ?? 0;
+                        if (c === 0) return null;
+                        const segPct = (c / b.total) * 100;
+                        return (
+                          <div
+                            key={s}
+                            className={RC_STATUS_COLOR[s]}
+                            style={{ height: `${segPct}%` }}
+                          />
+                        );
+                      })}
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+
+          <div className="grid grid-cols-1 gap-1 text-[11px] text-muted-foreground sm:grid-cols-2">
+            <div>
+              Last event:{" "}
+              <span
+                className="text-foreground"
+                data-testid="text-rc-last-event"
+              >
+                {_fmtRelative(data.last_event_at)}
+              </span>
+            </div>
+            <div>
+              Last 5xx:{" "}
+              <span className="text-foreground">
+                {_fmtRelative(data.last_5xx_at)}
+              </span>
+            </div>
+            <div>
+              5xx alert at ≥{data.alert.failure_threshold_pct.toFixed(0)}%/hr ·
+              now {data.alert.failure_rate_pct.toFixed(1)}%
+            </div>
+            <div>
+              Silence alert ≥{Math.round(data.alert.silence_threshold_seconds / 60)}m
+              {" "}({data.alert.in_business_hours ? "in business hrs" : "off-hours"})
+            </div>
+          </div>
+        </>
+      ) : null}
+    </main>
+  );
+}

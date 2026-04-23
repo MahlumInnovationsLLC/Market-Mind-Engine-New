@@ -23,6 +23,7 @@ If neither is active the user is mapped back to the free tier.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -41,6 +42,156 @@ _ENTITLEMENT_ELITE = "elite"
 _PROVIDER = "revenuecat"
 
 _schema_ready = False
+
+
+# ---------------------------------------------------------------------------
+# Delivery audit + alert thresholds (task #252)
+#
+# Every webhook delivery — including auth failures, malformed bodies,
+# duplicates and 5xx apply errors — is recorded in `rc_webhook_deliveries`
+# so the operator dashboard can show a 24h breakdown and a cron-style
+# silence detector can fire when no events have arrived during business
+# hours.
+# ---------------------------------------------------------------------------
+
+# Status buckets used by the dashboard tile. Keep in sync with the
+# admin endpoint and React tile.
+DELIVERY_STATUS_OK = "ok"
+DELIVERY_STATUS_DUPLICATE = "duplicate"
+DELIVERY_STATUS_4XX = "http_4xx"
+DELIVERY_STATUS_5XX = "http_5xx"
+ALL_DELIVERY_STATUSES = (
+    DELIVERY_STATUS_OK,
+    DELIVERY_STATUS_DUPLICATE,
+    DELIVERY_STATUS_4XX,
+    DELIVERY_STATUS_5XX,
+)
+
+
+def _failure_threshold_pct() -> float:
+    """5xx percentage over the last hour that trips the alert."""
+    raw = os.environ.get("RC_WEBHOOK_5XX_THRESHOLD_PCT", "20")
+    try:
+        return max(0.0, float(raw))
+    except Exception:
+        return 20.0
+
+
+def _silence_threshold_seconds() -> int:
+    """Seconds of inbound silence (during business hours) that trips the alert."""
+    raw = os.environ.get("RC_WEBHOOK_SILENCE_SECONDS", "3600")
+    try:
+        return max(60, int(raw))
+    except Exception:
+        return 3600
+
+
+def _business_hours_utc() -> tuple[int, int]:
+    """Inclusive [start_hour, end_hour) range, in UTC, when silence alerts fire."""
+    raw = os.environ.get("RC_WEBHOOK_BUSINESS_HOURS_UTC", "13-23")
+    try:
+        a, b = raw.split("-", 1)
+        start, end = int(a), int(b)
+        if 0 <= start < 24 and 0 < end <= 24 and start < end:
+            return start, end
+    except Exception:
+        pass
+    return 13, 23  # ~9am–7pm ET default
+
+
+def _in_business_hours(now: datetime | None = None) -> bool:
+    now = now or datetime.now(tz=timezone.utc)
+    start, end = _business_hours_utc()
+    return start <= now.hour < end
+
+
+async def _record_delivery(
+    *,
+    status_bucket: str,
+    http_status: int,
+    event_id: str | None,
+    event_type: str | None,
+    error: str | None = None,
+) -> None:
+    """Append a single delivery audit row. Best-effort; never raises."""
+    try:
+        async with db.acquire() as conn:
+            await conn.execute(
+                """
+                INSERT INTO rc_webhook_deliveries (
+                    status, http_status, event_id, event_type, error
+                )
+                VALUES ($1, $2, $3, $4, $5)
+                """,
+                status_bucket,
+                int(http_status),
+                event_id,
+                event_type,
+                (error or None),
+            )
+    except Exception as e:
+        log.warning("rc_webhook_deliveries insert failed: %s", e)
+
+
+async def _hourly_5xx_rate() -> tuple[int, int, float]:
+    """Return (total_count, 5xx_count, pct) for the last 60 minutes."""
+    try:
+        async with db.acquire() as conn:
+            row = await conn.fetchrow(
+                """
+                SELECT
+                    count(*) FILTER (
+                        WHERE received_at >= now() - interval '1 hour'
+                    ) AS total,
+                    count(*) FILTER (
+                        WHERE received_at >= now() - interval '1 hour'
+                          AND status = $1
+                    ) AS errs
+                FROM rc_webhook_deliveries
+                """,
+                DELIVERY_STATUS_5XX,
+            )
+    except Exception as e:
+        log.warning("hourly 5xx rate query failed: %s", e)
+        return 0, 0, 0.0
+    if not row:
+        return 0, 0, 0.0
+    total = int(row["total"] or 0)
+    errs = int(row["errs"] or 0)
+    pct = (100.0 * errs / total) if total else 0.0
+    return total, errs, pct
+
+
+async def _maybe_alert_failure_spike() -> None:
+    """Fire the 5xx-spike alert when the per-hour rate crosses the threshold.
+
+    Called after every recorded 5xx outcome. Dedupes through the
+    `notification_dedupe` table for an hour so we don't paste the
+    operator inbox during an extended outage.
+    """
+    threshold = _failure_threshold_pct()
+    total, errs, pct = await _hourly_5xx_rate()
+    # Require at least 5 deliveries in the window so a single failure
+    # in a quiet hour doesn't trip a 100% rate.
+    if total < 5 or pct < threshold:
+        return
+    try:
+        from .notifications import alerts as _alerts
+
+        ok = await _alerts.dedupe_or_skip(
+            "rc-webhook-failures", "5xx-spike", ttl_seconds=3600
+        )
+        if not ok:
+            return
+        _alerts.rc_webhook_failure_rate(
+            window_minutes=60,
+            total=total,
+            failures=errs,
+            pct=pct,
+            threshold_pct=threshold,
+        )
+    except Exception as e:  # pragma: no cover — alerting must not break the webhook
+        log.warning("rc webhook failure alert dispatch failed: %s", e)
 
 
 async def ensure_schema() -> None:
@@ -308,12 +459,27 @@ async def handle_webhook(request: Request) -> dict[str, object]:
             "REVENUECAT_WEBHOOK_AUTH_HEADER is not configured; rejecting"
             " RevenueCat webhook delivery to avoid forged subscription updates."
         )
+        await _record_delivery(
+            status_bucket=DELIVERY_STATUS_5XX,
+            http_status=503,
+            event_id=None,
+            event_type=None,
+            error="auth header env not configured",
+        )
+        await _maybe_alert_failure_spike()
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="revenuecat webhook auth not configured",
         )
     auth = request.headers.get("authorization") or ""
     if auth != expected_auth:
+        await _record_delivery(
+            status_bucket=DELIVERY_STATUS_4XX,
+            http_status=401,
+            event_id=None,
+            event_type=None,
+            error="invalid auth header",
+        )
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="invalid revenuecat auth header",
@@ -322,25 +488,54 @@ async def handle_webhook(request: Request) -> dict[str, object]:
     try:
         payload = await request.json()
     except Exception:
+        await _record_delivery(
+            status_bucket=DELIVERY_STATUS_4XX,
+            http_status=400,
+            event_id=None,
+            event_type=None,
+            error="invalid json",
+        )
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST, detail="invalid json"
         )
 
     event = payload.get("event") if isinstance(payload, dict) else None
     if not isinstance(event, dict):
+        await _record_delivery(
+            status_bucket=DELIVERY_STATUS_4XX,
+            http_status=400,
+            event_id=None,
+            event_type=None,
+            error="missing event payload",
+        )
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="missing event payload",
         )
 
     event_id = str(event.get("id") or "")
+    event_type = str(event.get("type") or "") or None
     if event_id and await _is_duplicate_event(event_id):
+        await _record_delivery(
+            status_bucket=DELIVERY_STATUS_DUPLICATE,
+            http_status=200,
+            event_id=event_id,
+            event_type=event_type,
+        )
         return {"status": "duplicate", "event_id": event_id}
 
     try:
         await _apply_event(event)
     except Exception as e:
         log.exception("rc webhook apply failed: %s", e)
+        await _record_delivery(
+            status_bucket=DELIVERY_STATUS_5XX,
+            http_status=500,
+            event_id=event_id or None,
+            event_type=event_type,
+            error=str(e)[:500],
+        )
+        await _maybe_alert_failure_spike()
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="webhook handler failed",
@@ -349,4 +544,150 @@ async def handle_webhook(request: Request) -> dict[str, object]:
     if event_id:
         await _mark_event_processed(event_id, str(event.get("type") or ""), event)
 
+    await _record_delivery(
+        status_bucket=DELIVERY_STATUS_OK,
+        http_status=200,
+        event_id=event_id or None,
+        event_type=event_type,
+    )
     return {"status": "ok", "event_id": event_id}
+
+
+# ---------------------------------------------------------------------------
+# Stats query (powers /api/admin/rc-webhook/stats)
+# ---------------------------------------------------------------------------
+
+
+async def get_webhook_stats(*, hours: int = 24) -> dict[str, Any]:
+    """Aggregate the last `hours` of webhook deliveries for the admin tile."""
+    hours = max(1, min(int(hours or 24), 168))
+    totals = {s: 0 for s in ALL_DELIVERY_STATUSES}
+    hourly: list[dict[str, Any]] = []
+    last_event_at: datetime | None = None
+    last_5xx_at: datetime | None = None
+    try:
+        async with db.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT date_trunc('hour', received_at) AS hour,
+                       status,
+                       count(*) AS n
+                FROM rc_webhook_deliveries
+                WHERE received_at >= now() - make_interval(hours => $1)
+                GROUP BY 1, 2
+                ORDER BY 1
+                """,
+                hours,
+            )
+            for r in rows:
+                bucket = str(r["status"])
+                n = int(r["n"] or 0)
+                totals[bucket] = totals.get(bucket, 0) + n
+                hourly.append(
+                    {
+                        "hour": r["hour"].isoformat() if r["hour"] else None,
+                        "status": bucket,
+                        "count": n,
+                    }
+                )
+            last_event_at = await conn.fetchval(
+                "SELECT max(received_at) FROM rc_webhook_deliveries"
+            )
+            last_5xx_at = await conn.fetchval(
+                "SELECT max(received_at) FROM rc_webhook_deliveries WHERE status = $1",
+                DELIVERY_STATUS_5XX,
+            )
+    except Exception as e:
+        log.warning("rc webhook stats query failed: %s", e)
+
+    _, errs_60m, pct_60m = await _hourly_5xx_rate()
+    return {
+        "hours": hours,
+        "totals": totals,
+        "hourly": hourly,
+        "last_event_at": last_event_at.isoformat() if last_event_at else None,
+        "last_5xx_at": last_5xx_at.isoformat() if last_5xx_at else None,
+        "alert": {
+            "failure_threshold_pct": _failure_threshold_pct(),
+            "failures_last_hour": errs_60m,
+            "failure_rate_pct": pct_60m,
+            "silence_threshold_seconds": _silence_threshold_seconds(),
+            "business_hours_utc": list(_business_hours_utc()),
+            "in_business_hours": _in_business_hours(),
+        },
+    }
+
+
+# ---------------------------------------------------------------------------
+# Silence detector (cron-style background loop)
+# ---------------------------------------------------------------------------
+
+
+_silence_task: asyncio.Task[None] | None = None
+
+
+async def _silence_check_once() -> None:
+    if not _in_business_hours():
+        return
+    threshold = _silence_threshold_seconds()
+    try:
+        async with db.acquire() as conn:
+            last = await conn.fetchval(
+                "SELECT max(received_at) FROM rc_webhook_deliveries"
+            )
+    except Exception as e:
+        log.warning("rc webhook silence query failed: %s", e)
+        return
+    now = datetime.now(tz=timezone.utc)
+    if last is None:
+        silence_seconds: float = float(threshold + 1)
+    else:
+        silence_seconds = (now - last).total_seconds()
+    if silence_seconds < threshold:
+        return
+    try:
+        from .notifications import alerts as _alerts
+
+        ok = await _alerts.dedupe_or_skip(
+            "rc-webhook-silence", "no-events", ttl_seconds=threshold
+        )
+        if not ok:
+            return
+        _alerts.rc_webhook_silence(
+            silence_seconds=int(silence_seconds),
+            threshold_seconds=int(threshold),
+            last_event_at=last.isoformat() if last else None,
+        )
+    except Exception as e:  # pragma: no cover
+        log.warning("rc webhook silence alert dispatch failed: %s", e)
+
+
+async def _silence_loop(interval_seconds: int = 600) -> None:
+    while True:
+        try:
+            await _silence_check_once()
+        except Exception as e:  # pragma: no cover
+            log.warning("rc webhook silence loop iteration failed: %s", e)
+        await asyncio.sleep(interval_seconds)
+
+
+async def start() -> None:
+    """Start the background silence detector. Idempotent."""
+    global _silence_task
+    if _silence_task and not _silence_task.done():
+        return
+    _silence_task = asyncio.create_task(
+        _silence_loop(), name="rc-webhook-silence-loop"
+    )
+
+
+async def stop() -> None:
+    global _silence_task
+    if _silence_task is None:
+        return
+    _silence_task.cancel()
+    try:
+        await _silence_task
+    except (asyncio.CancelledError, Exception):
+        pass
+    _silence_task = None

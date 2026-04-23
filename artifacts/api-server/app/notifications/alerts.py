@@ -852,6 +852,82 @@ def ws_subscriber_silent(
 
 
 # ---------------------------------------------------------------------------
+# RevenueCat (mobile IAP) webhook health
+# ---------------------------------------------------------------------------
+
+
+def rc_webhook_failure_rate(
+    *,
+    window_minutes: int,
+    total: int,
+    failures: int,
+    pct: float,
+    threshold_pct: float,
+    dry_run: bool = False,
+) -> dict[str, Any]:
+    """Fire when the per-hour RevenueCat webhook 5xx rate crosses
+    `threshold_pct`. A silent webhook outage means paying mobile
+    customers stop being upgraded, so this is treated as an operator
+    alert (no user fan-out).
+    """
+    subject = (
+        f"[axiom][RC-WEBHOOK] 5xx rate {pct:.0f}% "
+        f"({failures}/{total} in {window_minutes}m)"
+    )
+    body = (
+        "RevenueCat webhook deliveries are failing at an elevated rate.\n"
+        "Mobile in-app purchases will not flip subscription tiers until\n"
+        "the handler is healthy again.\n\n"
+        + _format_lines(
+            [
+                ("window_minutes", window_minutes),
+                ("deliveries_total", total),
+                ("deliveries_5xx", failures),
+                ("failure_rate_pct", f"{pct:.2f}"),
+                ("threshold_pct", f"{threshold_pct:.2f}"),
+                ("at", _utc_now_iso()),
+            ]
+        )
+        + "\n"
+    )
+    return _dispatch(subject, body, tag="rc-webhook-failures", dry_run=dry_run)
+
+
+def rc_webhook_silence(
+    *,
+    silence_seconds: int,
+    threshold_seconds: int,
+    last_event_at: str | None,
+    dry_run: bool = False,
+) -> dict[str, Any]:
+    """Fire when no RevenueCat events have arrived during business hours
+    for longer than `threshold_seconds`. Catches dashboard pause/resume
+    misconfiguration and upstream outages.
+    """
+    minutes = silence_seconds // 60
+    subject = (
+        f"[axiom][RC-WEBHOOK] No events for {minutes}m "
+        f"(threshold {threshold_seconds // 60}m)"
+    )
+    body = (
+        "No RevenueCat webhook deliveries have arrived during business\n"
+        "hours for longer than the configured silence threshold. Check\n"
+        "the RevenueCat dashboard webhook config (paused?) and the\n"
+        "api-server logs.\n\n"
+        + _format_lines(
+            [
+                ("silence_seconds", silence_seconds),
+                ("threshold_seconds", threshold_seconds),
+                ("last_event_at", last_event_at or "(never)"),
+                ("at", _utc_now_iso()),
+            ]
+        )
+        + "\n"
+    )
+    return _dispatch(subject, body, tag="rc-webhook-silence", dry_run=dry_run)
+
+
+# ---------------------------------------------------------------------------
 # Pending teammate approval
 # ---------------------------------------------------------------------------
 

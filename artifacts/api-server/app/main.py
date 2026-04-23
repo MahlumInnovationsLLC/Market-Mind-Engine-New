@@ -277,6 +277,13 @@ async def lifespan(_: FastAPI):
         await daily_summary.start()
     except Exception as e:
         log.warning("daily summary scheduler start failed: %s", e)
+    # RevenueCat webhook silence detector — fires an operator alert
+    # when the mobile-IAP webhook stops delivering during business hours
+    # (catches dashboard pause/resume + upstream outages). Per task #252.
+    try:
+        await rc_billing.start()
+    except Exception as e:
+        log.warning("rc webhook silence loop start failed: %s", e)
     try:
         await notif_churn.start()
     except Exception as e:
@@ -367,6 +374,10 @@ async def lifespan(_: FastAPI):
             await daily_summary.stop()
         except Exception as e:
             log.warning("daily summary stop error: %s", e)
+        try:
+            await rc_billing.stop()
+        except Exception as e:
+            log.warning("rc webhook silence loop stop error: %s", e)
         try:
             await notif_churn.stop()
         except Exception as e:
@@ -996,6 +1007,21 @@ async def admin_list_users(
     actor: AuthedUser = Depends(require_admin),
 ) -> dict[str, object]:
     return {"items": await admin_module.list_users()}
+
+
+@app.get("/api/admin/rc-webhook/stats")
+async def admin_rc_webhook_stats(
+    hours: int = 24,
+    actor: AuthedUser = Depends(require_admin),
+) -> dict[str, object]:
+    """Last `hours` of RevenueCat webhook deliveries for the admin tile.
+
+    Returns hourly counts split by status (ok / duplicate / 4xx / 5xx),
+    aggregate totals, the last delivery timestamp, and the configured
+    alerting thresholds so the operator can sanity-check both the
+    inbound traffic and the alert config in one place.
+    """
+    return await rc_billing.get_webhook_stats(hours=hours)
 
 
 @app.get("/api/admin/users/{clerk_user_id}")

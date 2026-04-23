@@ -124,6 +124,11 @@ class _FakeConn:
             }
             return "OK"
 
+        if q.startswith("INSERT INTO rc_webhook_deliveries"):
+            # Audit-only table — record the call so tests can assert on
+            # it via execute_log but otherwise no derived state.
+            return "OK"
+
         if q.startswith("INSERT INTO rc_events"):
             event_id, event_type, payload = args
             self._db.rc_events.setdefault(
@@ -633,13 +638,99 @@ def test_duplicate_event_id_short_circuits_with_no_extra_writes(fake_db):
         expiration_ms=_future_ms(30),
     )
 
+    # The audit-only `rc_webhook_deliveries` table is appended to on
+    # every delivery (including duplicates) so the operator dashboard
+    # can show the dedupe traffic. Exclude it when asserting that no
+    # *derived* state was mutated by the second delivery.
+    def _derived_writes() -> list[tuple[str, tuple]]:
+        return [
+            row
+            for row in fake_db.execute_log
+            if not row[0].startswith("INSERT INTO rc_webhook_deliveries")
+        ]
+
     first = _run(rc_billing.handle_webhook(_post(payload)))  # type: ignore[arg-type]
     assert first == {"status": "ok", "event_id": "evt_dup"}
-    writes_after_first = len(fake_db.execute_log)
+    derived_after_first = len(_derived_writes())
 
     second = _run(rc_billing.handle_webhook(_post(payload)))  # type: ignore[arg-type]
     assert second == {"status": "duplicate", "event_id": "evt_dup"}
-    assert len(fake_db.execute_log) == writes_after_first
+    assert len(_derived_writes()) == derived_after_first
+
+
+# ---------------------------------------------------------------------------
+# Per-status delivery audit (powers the operator dashboard tile)
+# ---------------------------------------------------------------------------
+
+
+def _delivery_rows(fake_db: _FakeDB) -> list[tuple[str, tuple]]:
+    return [
+        row
+        for row in fake_db.execute_log
+        if row[0].startswith("INSERT INTO rc_webhook_deliveries")
+    ]
+
+
+def test_delivery_audit_records_ok_outcome(fake_db):
+    _run(
+        rc_billing.handle_webhook(  # type: ignore[arg-type]
+            _post(
+                _evt(
+                    event_id="evt_audit_ok",
+                    event_type="INITIAL_PURCHASE",
+                    app_user_id="user_audit_ok",
+                    expiration_ms=_future_ms(30),
+                )
+            )
+        )
+    )
+    rows = _delivery_rows(fake_db)
+    assert len(rows) == 1
+    status_bucket, http_status, event_id, event_type, _err = rows[0][1]
+    assert status_bucket == "ok"
+    assert http_status == 200
+    assert event_id == "evt_audit_ok"
+    assert event_type == "INITIAL_PURCHASE"
+
+
+def test_delivery_audit_records_duplicate_outcome(fake_db):
+    payload = _evt(
+        event_id="evt_audit_dup",
+        event_type="INITIAL_PURCHASE",
+        app_user_id="user_audit_dup",
+        expiration_ms=_future_ms(30),
+    )
+    _run(rc_billing.handle_webhook(_post(payload)))  # type: ignore[arg-type]
+    _run(rc_billing.handle_webhook(_post(payload)))  # type: ignore[arg-type]
+    rows = _delivery_rows(fake_db)
+    statuses = [r[1][0] for r in rows]
+    assert statuses == ["ok", "duplicate"]
+
+
+def test_delivery_audit_records_4xx_on_bad_auth(fake_db):
+    req = _post(
+        _evt(event_id="evt_bad", event_type="INITIAL_PURCHASE", app_user_id="u"),
+        auth="Bearer wrong",
+    )
+    with pytest.raises(Exception):
+        _run(rc_billing.handle_webhook(req))  # type: ignore[arg-type]
+    rows = _delivery_rows(fake_db)
+    assert len(rows) == 1
+    status_bucket, http_status, *_ = rows[0][1]
+    assert status_bucket == "http_4xx"
+    assert http_status == 401
+
+
+def test_delivery_audit_records_5xx_when_secret_unset(fake_db, monkeypatch):
+    monkeypatch.delenv("REVENUECAT_WEBHOOK_AUTH_HEADER", raising=False)
+    req = _post(_evt(event_id="evt_unset", event_type="INITIAL_PURCHASE", app_user_id="u"))
+    with pytest.raises(Exception):
+        _run(rc_billing.handle_webhook(req))  # type: ignore[arg-type]
+    rows = _delivery_rows(fake_db)
+    assert len(rows) == 1
+    status_bucket, http_status, *_ = rows[0][1]
+    assert status_bucket == "http_5xx"
+    assert http_status == 503
 
 
 def test_event_with_no_app_user_id_is_ignored_safely(fake_db):

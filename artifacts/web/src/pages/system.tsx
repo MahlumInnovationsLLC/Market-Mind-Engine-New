@@ -15,6 +15,7 @@ import {
   AuditLogPanel,
   ModelsPanel,
   PersonasPanel,
+  RcWebhookPanel,
   RiskKnobsPanel,
   RuntimePanel,
   TriggerCyclePanel,
@@ -177,6 +178,13 @@ export default function SystemPage() {
               Pending access requests
             </div>
             <AccessRequests />
+          </GlassCard>
+
+          <GlassCard tone="solid" padding="md">
+            <div className="mb-3 text-[11px] font-semibold uppercase tracking-[0.18em] text-accent-cyan/80">
+              Mobile IAP webhook
+            </div>
+            <RcWebhookPanel />
           </GlassCard>
         </div>
       )}
