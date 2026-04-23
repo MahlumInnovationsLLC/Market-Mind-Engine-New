@@ -3503,7 +3503,7 @@ async def orchestrator_recent_events(
     dedupe against any frames the WebSocket replays.
     """
     n = max(1, min(20, int(cycles)))
-    events = pipeline_event_hub.recent_events(max_cycles=n)
+    events = await pipeline_event_hub.recent_events_with_fallback(max_cycles=n)
     return {"cycles": n, "events": events}
 
 
