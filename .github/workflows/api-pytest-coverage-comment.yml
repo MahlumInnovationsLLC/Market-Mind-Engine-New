@@ -1,0 +1,56 @@
+name: api-pytest coverage comment
+
+# Triggered when api-pytest finishes. Two reasons we listen for both
+# pull_request and push events from the upstream workflow:
+#   - pull_request runs: post / update the coverage delta comment on the PR.
+#   - push (to main) runs: refresh the baseline coverage stored on the
+#     `python-coverage-comment-action-data` branch so future PR deltas are
+#     compared against an up-to-date main.
+
+on:
+  workflow_run:
+    workflows: ["api-pytest"]
+    types: [completed]
+
+jobs:
+  post-coverage-comment:
+    name: Post coverage delta comment
+    runs-on: ubuntu-latest
+    if: ${{ github.event.workflow_run.event == 'pull_request' || github.event.workflow_run.event == 'push' }}
+
+    permissions:
+      contents: write
+      pull-requests: write
+      actions: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download coverage artifact from triggering run
+        uses: actions/download-artifact@v4
+        with:
+          name: api-pytest-coverage-data
+          path: coverage-artifact
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Restore .coverage from artifact
+        id: restore
+        run: |
+          if [ -f coverage-artifact/.coverage ]; then
+            cp coverage-artifact/.coverage "$GITHUB_WORKSPACE/.coverage"
+          else
+            echo "No .coverage file found; nothing to comment."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Post coverage comment with delta vs. main
+        if: steps.restore.outputs.skip != 'true'
+        uses: py-cov-action/python-coverage-comment-action@v3
+        with:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_PR_RUN_ID: ${{ github.event.workflow_run.id }}
+          COVERAGE_DATA_BRANCH: python-coverage-comment-action-data
+          MINIMUM_GREEN: 90
+          MINIMUM_ORANGE: 70

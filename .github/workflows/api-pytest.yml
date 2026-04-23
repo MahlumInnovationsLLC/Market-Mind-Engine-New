@@ -17,6 +17,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
 
+    permissions:
+      contents: read
+
     env:
       CI: "true"
       PYTHONDONTWRITEBYTECODE: "1"
@@ -50,13 +53,31 @@ jobs:
             --cov-report=term \
             -v
 
+      - name: Stage .coverage for the commenter workflow
+        if: always()
+        run: |
+          if [ -f artifacts/api-server/.coverage ]; then
+            cp artifacts/api-server/.coverage "$GITHUB_WORKSPACE/.coverage"
+          fi
+
       - name: Upload pytest results
-        if: failure()
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: pytest-results
           path: |
             /tmp/pytest-junit.xml
+            /tmp/pytest-coverage.xml
+          if-no-files-found: ignore
+          retention-days: 14
+
+      - name: Upload raw coverage data for the commenter workflow
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: api-pytest-coverage-data
+          path: |
+            .coverage
             /tmp/pytest-coverage.xml
           if-no-files-found: ignore
           retention-days: 14
