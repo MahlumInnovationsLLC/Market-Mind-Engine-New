@@ -49,6 +49,13 @@ def _send_minute() -> int:
 _task: asyncio.Task | None = None
 _stop = asyncio.Event()
 _last_sent_date: str | None = None
+_last_gc_date: str | None = None
+
+
+# How many days of expired dedupe rows we keep around for forensic
+# debugging before the daily GC sweeps them. Daily-summary markers
+# (`expires_at IS NULL`) are always preserved.
+_DEDUPE_GC_RETAIN_DAYS = 7
 
 
 # ---------------------------------------------------------------------------
@@ -360,6 +367,28 @@ async def fire_now(*, dry_run: bool = False) -> dict[str, Any]:
     return alerts.daily_pnl_summary(**summary, dry_run=dry_run)
 
 
+async def _run_dedupe_gc(today: str) -> None:
+    """Run the daily GC against `notification_dedupe` at most once per
+    UTC day. Only marks the day as done when the cleanup actually
+    succeeded, so a transient DB outage gets retried on the next tick
+    instead of being skipped until tomorrow."""
+    global _last_gc_date
+    if _last_gc_date == today:
+        return
+    try:
+        result = await alerts.gc_expired_dedupe(
+            older_than_days=_DEDUPE_GC_RETAIN_DAYS
+        )
+    except Exception as e:  # pragma: no cover — gc_expired_dedupe already logs
+        log.warning("dedupe gc tick failed: %s", e)
+        return
+    if "error" in result:
+        # gc_expired_dedupe swallowed a DB error — leave _last_gc_date
+        # alone so the next loop iteration tries again.
+        return
+    _last_gc_date = today
+
+
 async def _loop() -> None:
     global _last_sent_date
     log.info(
@@ -379,6 +408,11 @@ async def _loop() -> None:
                 now.hour > target_hour
                 or (now.hour == target_hour and now.minute >= target_minute)
             )
+            # Daily GC of expired dedupe rows — runs once per UTC day,
+            # independent of whether the summary itself has fired yet,
+            # so the table stays bounded even when the send-time window
+            # is in the future.
+            await _run_dedupe_gc(today)
             if past_target and _last_sent_date != today:
                 # Atomic claim — survives process restarts.  If another
                 # worker already sent for `today`, the INSERT...ON CONFLICT

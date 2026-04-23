@@ -323,6 +323,70 @@ def test_live_trade_dedupe_fill_replay_no_fill_id(
     assert fake_store.dispatch_count.get("live-trade") == 1
 
 
+def test_gc_expired_dedupe_drops_only_expired_rows(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The GC sweep must delete rows whose `expires_at` is older than the
+    retention window, preserve in-window rows, and never touch
+    daily-summary markers (`expires_at IS NULL`)."""
+
+    rows: list[dict[str, Any]] = [
+        # Stale TTL — should be deleted.
+        {"key": "live_trade:ord_1:fill_1",
+         "expires_at": datetime.now(timezone.utc) - timedelta(days=10)},
+        # Just outside the window — should be deleted.
+        {"key": "drift:sports:warning",
+         "expires_at": datetime.now(timezone.utc) - timedelta(days=8)},
+        # In-window expired (less than retention) — preserved.
+        {"key": "halt:k1",
+         "expires_at": datetime.now(timezone.utc) - timedelta(days=2)},
+        # Still active — preserved.
+        {"key": "halt:k2",
+         "expires_at": datetime.now(timezone.utc) + timedelta(hours=1)},
+        # Daily-summary marker (NULL expires_at) — must be preserved
+        # regardless of age.
+        {"key": "daily_pnl_summary", "expires_at": None},
+    ]
+
+    async def fake_fetchval(query: str, *args: Any) -> int:
+        if "DELETE FROM notification_dedupe" in query:
+            cutoff = datetime.now(timezone.utc) - timedelta(days=int(args[0]))
+            before = len(rows)
+            rows[:] = [
+                r for r in rows
+                if r["expires_at"] is None or r["expires_at"] >= cutoff
+            ]
+            return before - len(rows)
+        if "count(*)" in query:
+            return len(rows)
+        raise AssertionError(f"unexpected query: {query}")
+
+    async def _noop_ensure() -> None:
+        return None
+
+    monkeypatch.setattr(_alerts, "_ensure_dedupe_table", _noop_ensure)
+    monkeypatch.setattr(_db, "fetchval", fake_fetchval)
+
+    out = asyncio.run(_alerts.gc_expired_dedupe(older_than_days=7))
+    assert out["deleted"] == 2
+    assert out["remaining"] == 3
+    remaining_keys = {r["key"] for r in rows}
+    assert "daily_pnl_summary" in remaining_keys
+    assert "halt:k1" in remaining_keys
+    assert "halt:k2" in remaining_keys
+
+
+def test_gc_expired_dedupe_fails_soft(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def boom(*_a: Any, **_kw: Any) -> Any:
+        raise RuntimeError("db gone")
+
+    monkeypatch.setattr(_db, "fetchval", boom)
+    out = asyncio.run(_alerts.gc_expired_dedupe(older_than_days=7))
+    assert out["deleted"] == 0
+    assert out["remaining"] == 0
+    assert "error" in out
+
+
 def test_dedupe_fails_open_on_db_error(monkeypatch: pytest.MonkeyPatch) -> None:
     async def boom(*_a: Any, **_kw: Any) -> Any:
         raise RuntimeError("db gone")

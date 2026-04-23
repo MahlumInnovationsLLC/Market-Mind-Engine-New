@@ -144,6 +144,48 @@ async def dedupe_or_skip(
         return True
 
 
+async def gc_expired_dedupe(*, older_than_days: int = 7) -> dict[str, Any]:
+    """Delete `notification_dedupe` rows whose TTL expired more than
+    `older_than_days` days ago.
+
+    Rows with `expires_at IS NULL` (e.g. the daily-summary marker that
+    uses `date_utc` instead of a TTL) are preserved.
+
+    Returns ``{"deleted": int, "remaining": int}`` and logs the same
+    counts so operators can confirm the cleanup ran. Fails soft (logs
+    + returns zeros) on DB error.
+    """
+    from .. import db
+    try:
+        deleted = await db.fetchval(
+            """
+            WITH d AS (
+              DELETE FROM notification_dedupe
+               WHERE expires_at IS NOT NULL
+                 AND expires_at < now() - make_interval(days => $1)
+              RETURNING 1
+            )
+            SELECT count(*)::int FROM d
+            """,
+            int(older_than_days),
+        )
+        remaining = await db.fetchval(
+            "SELECT count(*)::int FROM notification_dedupe"
+        )
+        out = {
+            "deleted": int(deleted or 0),
+            "remaining": int(remaining or 0),
+        }
+        log.info(
+            "notification_dedupe gc: deleted=%s remaining=%s",
+            out["deleted"], out["remaining"],
+        )
+        return out
+    except Exception as e:
+        log.warning("notification_dedupe gc failed: %s", e)
+        return {"deleted": 0, "remaining": 0, "error": str(e)}
+
+
 def _hash_reason(reason: str | None) -> str:
     h = hashlib.sha256((reason or "").encode("utf-8")).hexdigest()
     return h[:16]
