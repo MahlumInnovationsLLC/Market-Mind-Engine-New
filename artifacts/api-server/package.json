@@ -3,7 +3,7 @@
   "version": "0.0.0",
   "private": true,
   "scripts": {
-    "dev": "../../.pythonlibs/bin/python3 -m uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8080} --reload",
+    "dev": "../../.pythonlibs/bin/python3 scripts/watchdog.py --supervise --target http://127.0.0.1:${PORT:-8080}/api/healthz -- ../../.pythonlibs/bin/python3 -m uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8080}",
     "start": "../../.pythonlibs/bin/python3 scripts/watchdog.py --supervise --target http://127.0.0.1:${PORT:-8080}/api/healthz -- ../../.pythonlibs/bin/python3 -m uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8080}",
     "typecheck": "echo 'python service — no ts typecheck' && exit 0",
     "test": "../../.pythonlibs/bin/python -m pytest tests/"

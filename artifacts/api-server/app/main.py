@@ -1267,6 +1267,41 @@ async def admin_list_users(
     return {"items": await admin_module.list_users()}
 
 
+@app.get("/api/admin/watchdog")
+async def admin_watchdog_status(
+    actor: AuthedUser = Depends(require_admin),
+) -> dict[str, object]:
+    """Proxy the L2 watchdog's status snapshot to the operator console.
+
+    The watchdog process binds to ``127.0.0.1:${WATCHDOG_PORT:-8099}`` and
+    is not directly exposed by the artifact's reverse proxy, so the
+    operator console reaches it through this admin endpoint. Returns
+    ``{"available": False, "error": ...}`` if the watchdog is not running
+    (e.g. the API server was started without it).
+    """
+    import httpx as _httpx
+
+    host = os.environ.get("WATCHDOG_HOST", "127.0.0.1")
+    port = int(os.environ.get("WATCHDOG_PORT", "8099"))
+    url = f"http://{host}:{port}/status"
+    try:
+        async with _httpx.AsyncClient(timeout=2.0) as client:
+            r = await client.get(url)
+        if r.status_code != 200:
+            return {
+                "available": False,
+                "error": f"watchdog returned HTTP {r.status_code}",
+                "endpoint": url,
+            }
+        return {"available": True, "endpoint": url, "status": r.json()}
+    except Exception as e:  # noqa: BLE001
+        return {
+            "available": False,
+            "error": f"{type(e).__name__}: {e}",
+            "endpoint": url,
+        }
+
+
 @app.get("/api/admin/rc-webhook/stats")
 async def admin_rc_webhook_stats(
     hours: int = 24,
