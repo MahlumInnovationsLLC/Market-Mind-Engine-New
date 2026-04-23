@@ -387,6 +387,15 @@ async def lifespan(_: FastAPI):
     except Exception as e:
         log.warning("free_tier_views retention start failed: %s", e)
 
+    # `crypto_ohlcv` bar-table retention sweep. The poller is
+    # append-with-upsert with no TTL, so without this loop the table
+    # grows unboundedly (~1M rows/year per symbol at 1m). Per task #175.
+    try:
+        from . import crypto_ohlcv_retention as _crypto_ohlcv_retention
+        await _crypto_ohlcv_retention.start()
+    except Exception as e:
+        log.warning("crypto_ohlcv retention start failed: %s", e)
+
     # Continuous Kalshi position + fill reconciler. Periodically pulls
     # /portfolio/positions and /portfolio/fills, diffs against our local
     # DB, raises model_health_alerts on drift > tolerance, and back-fills
@@ -535,6 +544,11 @@ async def lifespan(_: FastAPI):
             await _free_tier_views_retention.stop()
         except Exception as e:
             log.warning("free_tier_views retention stop error: %s", e)
+        try:
+            from . import crypto_ohlcv_retention as _crypto_ohlcv_retention
+            await _crypto_ohlcv_retention.stop()
+        except Exception as e:
+            log.warning("crypto_ohlcv retention stop error: %s", e)
         try:
             from .kalshi import reconciler as _kalshi_reconciler
             await _kalshi_reconciler.stop()
