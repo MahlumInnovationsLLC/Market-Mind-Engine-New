@@ -19,6 +19,13 @@ interface PipelineSocketContextValue {
   reconnectNow: () => void;
   /** Subscribe to incoming pipeline events. Returns an unsubscribe fn. */
   subscribe: (handler: Listener) => () => void;
+  /** See `useWebSocket` for semantics — re-exposed here so any badge
+   *  in the shell can show a brief "refreshed" pulse without each
+   *  consumer opening its own socket. */
+  rotationCount: number;
+  lastRotationAt: number | null;
+  rotationFailureCount: number;
+  lastRotationError: string | null;
 }
 
 const PipelineSocketContext = createContext<PipelineSocketContextValue | null>(
@@ -73,6 +80,10 @@ export function WebSocketProvider({ children, bufferSize = 50 }: Props) {
       lastEvent: ws.lastEvent,
       reconnectNow: ws.reconnectNow,
       subscribe,
+      rotationCount: ws.rotationCount,
+      lastRotationAt: ws.lastRotationAt,
+      rotationFailureCount: ws.rotationFailureCount,
+      lastRotationError: ws.lastRotationError,
     }),
     [
       ws.status,
@@ -81,6 +92,10 @@ export function WebSocketProvider({ children, bufferSize = 50 }: Props) {
       ws.lastEvent,
       ws.reconnectNow,
       subscribe,
+      ws.rotationCount,
+      ws.lastRotationAt,
+      ws.rotationFailureCount,
+      ws.lastRotationError,
     ],
   );
 

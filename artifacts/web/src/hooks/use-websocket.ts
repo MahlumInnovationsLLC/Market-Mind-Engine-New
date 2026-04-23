@@ -18,6 +18,24 @@ export interface UseWebSocketResult {
   closeCode: number | null;
   reconnectNow: () => void;
   clear: () => void;
+  /** Number of successful background token rotations since this hook
+   *  mounted.  Useful as a debug counter — operators can watch this
+   *  tick up to confirm rotations are still happening on long sessions. */
+  rotationCount: number;
+  /** Timestamp (ms) of the most recent successful background rotation,
+   *  or null if none has occurred yet.  UI can use this to flash a
+   *  brief acknowledgement on the connection badge. */
+  lastRotationAt: number | null;
+  /** Number of background rotation attempts that failed (e.g. token
+   *  fetch threw, new socket couldn't be constructed, or the new
+   *  socket closed before the swap).  Stays > 0 until the next
+   *  successful rotation. */
+  rotationFailureCount: number;
+  /** Human-readable description of the most recent rotation failure,
+   *  or null if the last rotation succeeded.  Surfaced so support /
+   *  operators can tell what went wrong without digging through the
+   *  raw browser console. */
+  lastRotationError: string | null;
 }
 
 const basePath = import.meta.env.BASE_URL.replace(/\/$/, "");
@@ -86,6 +104,12 @@ export function useWebSocket(opts: UseWebSocketOptions): UseWebSocketResult {
   const [events, setEvents] = useState<Record<string, unknown>[]>([]);
   const [reconnectIn, setReconnectIn] = useState<number | null>(null);
   const [closeCode, setCloseCode] = useState<number | null>(null);
+  const [rotationCount, setRotationCount] = useState(0);
+  const [lastRotationAt, setLastRotationAt] = useState<number | null>(null);
+  const [rotationFailureCount, setRotationFailureCount] = useState(0);
+  const [lastRotationError, setLastRotationError] = useState<string | null>(
+    null,
+  );
 
   // Refs for non-reactive bookkeeping.  Using a generation counter
   // makes stale callbacks (from an old socket) no-ops once we've
@@ -248,6 +272,16 @@ export function useWebSocket(opts: UseWebSocketOptions): UseWebSocketResult {
   // the new one is open.  This is the "smart rotation" path that
   // avoids a visible disconnect: the old socket keeps serving events
   // until the moment we hand traffic over.
+  const noteRotationFailure = useCallback((reason: string) => {
+    setRotationFailureCount((n) => n + 1);
+    setLastRotationError(reason);
+    // console.warn so it's visible in browser devtools and any log
+    // aggregator (Sentry breadcrumbs, LogRocket, etc.) that captures
+    // warn-level entries — no need for the operator to be watching
+    // the raw console.
+    console.warn(`[ws] background rotation failed: ${reason}`);
+  }, []);
+
   const rotate = useCallback(async () => {
     if (stoppedRef.current) return;
     const oldWs = wsRef.current;
@@ -256,21 +290,27 @@ export function useWebSocket(opts: UseWebSocketOptions): UseWebSocketResult {
     if (!oldWs || oldWs.readyState !== WebSocket.OPEN) return;
 
     let token: string | null = null;
+    let tokenError = false;
     try {
       token = (await getToken()) ?? null;
     } catch {
       token = null;
+      tokenError = true;
     }
     if (stoppedRef.current) return;
     // If the current socket was closed/replaced while we were
     // awaiting the new token, abort: a more recent generation owns
     // the connection now.
     if (wsRef.current !== oldWs) return;
+    if (tokenError) {
+      noteRotationFailure("token fetch threw");
+    }
 
     let nextWs: WebSocket;
     try {
       nextWs = new WebSocket(buildWsUrl(path, token));
     } catch {
+      noteRotationFailure("failed to construct replacement socket");
       // Couldn't even construct a new socket; try again shortly.
       // The old socket is still live, so the user sees no disruption.
       clearRotateTimer();
@@ -308,6 +348,14 @@ export function useWebSocket(opts: UseWebSocketOptions): UseWebSocketResult {
       lastUnauthorizedRef.current = false;
       setCloseCode(null);
       setStatus("open");
+      // Surface a successful background refresh so the UI can flash
+      // a brief acknowledgement and operators have an inspectable
+      // counter to watch on long-lived sessions.
+      setRotationCount((n) => n + 1);
+      setLastRotationAt(Date.now());
+      setRotationFailureCount(0);
+      setLastRotationError(null);
+      console.info("[ws] background rotation succeeded");
       // Re-bind handlers under the new generation so subsequent
       // messages/closes route through the same logic.
       attachHandlers(nextWs, newGen, token, false);
@@ -327,12 +375,17 @@ export function useWebSocket(opts: UseWebSocketOptions): UseWebSocketResult {
     nextWs.onerror = () => {
       // Suppress; rely on onclose to decide what to do.
     };
-    nextWs.onclose = () => {
+    nextWs.onclose = (ev) => {
       if (swapped) return; // Post-swap closes are handled by attachHandlers.
       // Rotation attempt failed before opening.  Old socket is still
       // live; just retry rotation soon.  If the old socket also drops,
       // its onclose will trigger the normal reconnect path.
       if (stoppedRef.current) return;
+      noteRotationFailure(
+        ev.code === 4401
+          ? "replacement socket rejected (unauthorized)"
+          : `replacement socket closed before swap (code ${ev.code || "n/a"})`,
+      );
       if (wsRef.current === oldWs && oldWs.readyState === WebSocket.OPEN) {
         clearRotateTimer();
         rotateTimerRef.current = setTimeout(() => {
@@ -340,7 +393,7 @@ export function useWebSocket(opts: UseWebSocketOptions): UseWebSocketResult {
         }, ROTATION_MIN_MS);
       }
     };
-  }, [path, getToken, detach, attachHandlers, clearRotateTimer]);
+  }, [path, getToken, detach, attachHandlers, clearRotateTimer, noteRotationFailure]);
 
   const scheduleRotation = useCallback(
     (token: string | null) => {
@@ -438,5 +491,17 @@ export function useWebSocket(opts: UseWebSocketOptions): UseWebSocketResult {
 
   const lastEvent = events.length > 0 ? events[events.length - 1] : null;
 
-  return { status, events, lastEvent, reconnectIn, closeCode, reconnectNow, clear };
+  return {
+    status,
+    events,
+    lastEvent,
+    reconnectIn,
+    closeCode,
+    reconnectNow,
+    clear,
+    rotationCount,
+    lastRotationAt,
+    rotationFailureCount,
+    lastRotationError,
+  };
 }

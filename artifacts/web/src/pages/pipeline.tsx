@@ -496,6 +496,9 @@ export default function PipelinePage() {
       reconnectNow: sharedPipeline.reconnectNow,
       events: pipelineBuffer.events,
       clear: pipelineBuffer.clear,
+      rotationCount: sharedPipeline.rotationCount,
+      lastRotationAt: sharedPipeline.lastRotationAt,
+      lastRotationError: sharedPipeline.lastRotationError,
     }),
     [
       sharedPipeline.status,
@@ -504,6 +507,9 @@ export default function PipelinePage() {
       sharedPipeline.reconnectNow,
       pipelineBuffer.events,
       pipelineBuffer.clear,
+      sharedPipeline.rotationCount,
+      sharedPipeline.lastRotationAt,
+      sharedPipeline.lastRotationError,
     ],
   );
   const swarm = useSwarmTranscript();
@@ -703,6 +709,9 @@ export default function PipelinePage() {
             reconnectIn={ws.reconnectIn}
             closeCode={ws.closeCode}
             label="WS_OPEN"
+            rotationCount={ws.rotationCount}
+            lastRotationAt={ws.lastRotationAt}
+            lastRotationError={ws.lastRotationError}
           />
         </div>
       </header>
