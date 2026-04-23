@@ -606,6 +606,68 @@ export default function PipelinePage() {
     }
   }, [autoScroll, latestCycleId]);
 
+  // While auto-scroll is paused, remember which cycle was newest at
+  // pause-time so we can show operators how many cycles have arrived
+  // since. The anchor also resets whenever the operator scrolls the
+  // latest cycle back into view or explicitly jumps to it.
+  const [pausedAnchorCycleId, setPausedAnchorCycleId] = useState<string | null>(
+    null,
+  );
+  const [cyclesTopVisible, setCyclesTopVisible] = useState(true);
+  useEffect(() => {
+    const el = cyclesTopRef.current;
+    if (!el || typeof IntersectionObserver === "undefined") return;
+    const obs = new IntersectionObserver(
+      (entries) => {
+        for (const entry of entries) {
+          setCyclesTopVisible(entry.isIntersecting);
+        }
+      },
+      { threshold: 0 },
+    );
+    obs.observe(el);
+    return () => obs.disconnect();
+  }, []);
+  // Reset the "new since pause" counter when the latest cycle is back
+  // on screen — operators are caught up even if they haven't resumed.
+  useEffect(() => {
+    if (!autoScroll && cyclesTopVisible) {
+      setPausedAnchorCycleId(latestCycleId);
+    }
+  }, [autoScroll, cyclesTopVisible, latestCycleId]);
+
+  const newCyclesSincePause = useMemo(() => {
+    if (autoScroll) return 0;
+    if (!pausedAnchorCycleId) return 0;
+    const idx = visibleGroups.findIndex(
+      (g) => g.cycle_id === pausedAnchorCycleId,
+    );
+    if (idx < 0) return visibleGroups.length;
+    return idx;
+  }, [autoScroll, pausedAnchorCycleId, visibleGroups]);
+
+  const toggleAutoScroll = useCallback(() => {
+    setAutoScroll((prev) => {
+      const next = !prev;
+      if (!next) {
+        setPausedAnchorCycleId(latestCycleId);
+      } else {
+        setPausedAnchorCycleId(null);
+      }
+      return next;
+    });
+  }, [latestCycleId]);
+
+  const jumpToLatest = useCallback(() => {
+    const el = cyclesTopRef.current;
+    if (el && typeof el.scrollIntoView === "function") {
+      el.scrollIntoView({ behavior: "smooth", block: "start" });
+    }
+    setPausedAnchorCycleId(latestCycleId);
+  }, [latestCycleId]);
+
+  const showJumpToLatest = !autoScroll && !cyclesTopVisible;
+
   const liveMarketId = useMemo<string | null>(() => {
     for (const g of groups) {
       if (g.status !== "running") continue;
@@ -665,9 +727,28 @@ export default function PipelinePage() {
           )}
         </span>
         <div className="flex gap-2">
+          {showJumpToLatest && (
+            <button
+              type="button"
+              onClick={jumpToLatest}
+              className="border border-primary text-primary px-2 py-1 hover:bg-primary/10 flex items-center gap-2"
+              data-testid="button-jump-to-latest"
+              title="Scroll to the most recent cycle"
+            >
+              <span>↑ Jump to latest</span>
+              {newCyclesSincePause > 0 && (
+                <span
+                  className="bg-primary text-primary-foreground px-1.5 py-0.5 text-[10px] font-bold rounded-sm"
+                  data-testid="badge-new-cycles"
+                >
+                  +{newCyclesSincePause}
+                </span>
+              )}
+            </button>
+          )}
           <button
             type="button"
-            onClick={() => setAutoScroll((v) => !v)}
+            onClick={toggleAutoScroll}
             className={`border px-2 py-1 ${
               autoScroll
                 ? "border-primary text-primary"
