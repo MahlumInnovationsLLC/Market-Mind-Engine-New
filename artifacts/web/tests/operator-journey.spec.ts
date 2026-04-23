@@ -10,9 +10,9 @@ import { test, expect, type Page } from "@playwright/test";
  * env vars are absent the auth-gated portion skips so CI can still
  * smoke-test the unauthenticated surfaces.
  *
- * Each authenticated route asserts that the shell's `<main>` region
- * (data-testid="shell-main") renders and that no chunk-load error
- * surfaces — both confirm route-level lazy loading is healthy.
+ * Each authenticated route asserts a page-specific KPI/card data-testid
+ * (not just `shell-main`) so a regression that drops the page body
+ * fails the test.
  */
 
 const CLERK_EMAIL = process.env.E2E_CLERK_USER_EMAIL;
@@ -22,6 +22,15 @@ const HAS_CLERK_CREDS = Boolean(CLERK_EMAIL && CLERK_PASSWORD);
 async function expectNoChunkLoadError(page: Page) {
   await expect(page.locator("text=ChunkLoadError")).toHaveCount(0);
   await expect(page.locator("text=Failed to fetch dynamically imported module")).toHaveCount(0);
+}
+
+async function clerkSignIn(page: Page, email: string, password: string) {
+  await page.goto("/sign-in");
+  await page.locator('input[name="identifier"], input[type="email"]').fill(email);
+  await page.getByRole("button", { name: /continue|next/i }).click();
+  await page.locator('input[name="password"], input[type="password"]').fill(password);
+  await page.getByRole("button", { name: /continue|sign in/i }).click();
+  await page.waitForURL(/\/(app|sign-in)/, { timeout: 30_000 }).catch(() => {});
 }
 
 test.describe("operator journey — public surfaces", () => {
@@ -55,7 +64,6 @@ test.describe("operator journey — public surfaces", () => {
 
   test("sign-in route mounts the Clerk widget", async ({ page }) => {
     await page.goto("/sign-in");
-    // Clerk renders an email input regardless of social-button config.
     await expect(page.locator('input[name="identifier"], input[type="email"]')).toBeVisible({
       timeout: 15_000,
     });
@@ -63,57 +71,74 @@ test.describe("operator journey — public surfaces", () => {
   });
 });
 
+/**
+ * Per-page assertion targets. Each entry pairs a route with a list of
+ * `data-testid` values that must be present once the lazy chunk has
+ * mounted. These are real cards/panels rendered by the pages under
+ * test, not generic shell scaffolding.
+ */
+const AUTHED_ROUTES: Array<{ path: string; testIds: string[] }> = [
+  {
+    path: "/app",
+    testIds: ["card-recent-trades", "card-trading-cycles", "card-health-snapshot"],
+  },
+  { path: "/trading", testIds: ["page-trading", "card-command-center"] },
+  { path: "/positions", testIds: ["page-positions", "card-positions-table"] },
+  { path: "/pipeline", testIds: ["page-pipeline"] },
+  { path: "/intelligence", testIds: ["page-intelligence", "panel-intelligence-swarm"] },
+  { path: "/system", testIds: ["page-system", "panel-system-health"] },
+  { path: "/profile", testIds: ["page-profile", "card-profile-identity"] },
+];
+
 test.describe("operator journey — authenticated walk-through", () => {
   test.skip(!HAS_CLERK_CREDS, "E2E_CLERK_USER_EMAIL / _PASSWORD not set");
 
   test.beforeEach(async ({ page }) => {
-    await page.goto("/sign-in");
-    await page.locator('input[name="identifier"], input[type="email"]').fill(CLERK_EMAIL!);
-    await page.getByRole("button", { name: /continue|next/i }).click();
-    await page.locator('input[name="password"], input[type="password"]').fill(CLERK_PASSWORD!);
-    await page.getByRole("button", { name: /continue|sign in/i }).click();
-    // Either the operator shell or the pending-approval gate.
-    await page.waitForURL(/\/(app|sign-in)/, { timeout: 30_000 }).catch(() => {});
+    await clerkSignIn(page, CLERK_EMAIL!, CLERK_PASSWORD!);
   });
 
   test("skip-to-content link is the first focusable element", async ({ page }) => {
     await page.goto("/app");
-    // If the user lands on the pending-approval screen there is no shell
-    // to skip to, so we soft-skip when the test-id is absent.
     const shell = page.getByTestId("shell-main");
     if ((await shell.count()) === 0) test.skip(true, "user not approved — shell not rendered");
 
     await page.keyboard.press("Tab");
     await expect(page.getByTestId("link-skip-to-content")).toBeFocused();
+    // Activating the link should land focus on <main>.
+    await page.keyboard.press("Enter");
+    await expect(page.locator("main#main-content")).toBeFocused();
   });
 
-  for (const path of [
-    "/app",
-    "/trading",
-    "/positions",
-    "/pipeline",
-    "/intelligence",
-    "/system",
-    "/profile",
-  ]) {
-    test(`renders ${path} via the lazy-loaded chunk`, async ({ page }) => {
+  for (const { path, testIds } of AUTHED_ROUTES) {
+    test(`${path} renders its KPI/cards via the lazy chunk`, async ({ page }) => {
       await page.goto(path);
       const shell = page.getByTestId("shell-main");
       if ((await shell.count()) === 0) test.skip(true, "user not approved — shell not rendered");
+
       await expect(shell).toBeVisible();
+      for (const id of testIds) {
+        await expect(page.getByTestId(id).first()).toBeVisible({ timeout: 15_000 });
+      }
       await expectNoChunkLoadError(page);
     });
   }
 
-  test("sign-out returns the user to the marketing surface", async ({ page }) => {
+  test("sign-out clears the session and returns the user to the marketing surface", async ({
+    page,
+  }) => {
     await page.goto("/profile");
     const shell = page.getByTestId("shell-main");
     if ((await shell.count()) === 0) test.skip(true, "user not approved — shell not rendered");
-    // Clerk's UserButton is in the header; opening it exposes "Sign out".
-    await page
-      .getByRole("button", { name: /sign out|account|profile/i })
-      .first()
-      .click({ trial: true })
-      .catch(() => {});
+
+    // Open the operator-id menu in the shell header and click "Sign out".
+    await page.getByTestId("button-shell-user").click();
+    await page.getByTestId("button-shell-sign-out").click();
+
+    // Clerk redirects to BASE_URL (/) on sign-out. We expect the
+    // marketing hero (signed-out) to be visible and the sign-in link to
+    // re-appear in the public nav.
+    await page.waitForURL(/\/$/, { timeout: 30_000 });
+    await expect(page.getByRole("link", { name: /sign in/i })).toBeVisible();
+    await expect(page.getByTestId("shell-main")).toHaveCount(0);
   });
 });
