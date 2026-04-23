@@ -8,6 +8,10 @@ import {
   useCreateBillingCheckoutSession,
 } from "@workspace/api-client-react";
 import { PublicFooter, PublicNav } from "@/components/public/public-nav";
+import {
+  getPendingCheckoutPriceId,
+  setPendingCheckoutPriceId,
+} from "@/lib/pending-checkout";
 
 export default function PricingPage() {
   const { isSignedIn } = useAuth();
@@ -24,6 +28,10 @@ export default function PricingPage() {
   const [autoCheckoutError, setAutoCheckoutError] = useState<string | null>(
     null,
   );
+  const [pendingPriceId, setPendingPriceId] = useState<string | null>(() =>
+    typeof window !== "undefined" ? getPendingCheckoutPriceId() : null,
+  );
+  const pendingIntervalApplied = useRef(false);
 
   const dismissAutoCheckout = () => {
     autoCheckoutFired.current = false;
@@ -73,6 +81,12 @@ export default function PricingPage() {
   const startCheckout = async (tierId: string, priceId: string) => {
     setActionTier(tierId);
     setActionError(null);
+    // Persist the chosen price so we can offer "Resume checkout" if Stripe
+    // throws an error or the user hits "Back" inside the hosted page. We
+    // also mirror it into local state so an in-page failure (no remount)
+    // immediately renders the recovery affordance.
+    setPendingCheckoutPriceId(priceId);
+    setPendingPriceId(priceId);
     try {
       const res = await checkoutMutation.mutateAsync({
         data: { price_id: priceId },
@@ -131,6 +145,26 @@ export default function PricingPage() {
     void startCheckout(target.id, autoCheckoutPriceId);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [autoCheckoutPriceId, catalog, isSignedIn]);
+
+  // Resume-checkout: if the user previously kicked off a checkout and bailed,
+  // auto-switch the billing interval toggle to match the stored price so the
+  // highlighted card and "Resume checkout" button line up on first paint.
+  useEffect(() => {
+    if (pendingIntervalApplied.current) return;
+    if (!pendingPriceId || !catalog) return;
+    const target = catalog.tiers.find(
+      (t) =>
+        t.monthly?.price_id === pendingPriceId ||
+        t.annual?.price_id === pendingPriceId,
+    );
+    if (!target) return;
+    pendingIntervalApplied.current = true;
+    if (target.annual?.price_id === pendingPriceId) {
+      setInterval("year");
+    } else {
+      setInterval("month");
+    }
+  }, [pendingPriceId, catalog]);
 
   const handleUpgrade = async (tier: PricingTier) => {
     setActionError(null);
@@ -347,13 +381,20 @@ export default function PricingPage() {
             const slot = interval === "month" ? tier.monthly : tier.annual;
             const isPaid = tier.id === "pro" || tier.id === "elite";
             const configured = slot?.configured ?? false;
+            const isPendingTier =
+              !!pendingPriceId &&
+              (tier.monthly?.price_id === pendingPriceId ||
+                tier.annual?.price_id === pendingPriceId);
+            const showResume = isPendingTier && isPaid && configured;
             return (
               <div
                 key={tier.id}
                 className={`rounded-2xl border bg-card p-6 flex flex-col ${
-                  tier.highlight
-                    ? "border-primary/50 shadow-[0_0_60px_-15px_hsl(189_94%_55%_/_0.4)]"
-                    : "border-border"
+                  showResume
+                    ? "border-primary shadow-[0_0_60px_-15px_hsl(189_94%_55%_/_0.6)]"
+                    : tier.highlight
+                      ? "border-primary/50 shadow-[0_0_60px_-15px_hsl(189_94%_55%_/_0.4)]"
+                      : "border-border"
                 }`}
                 data-testid={`card-tier-${tier.id}`}
               >
@@ -362,11 +403,18 @@ export default function PricingPage() {
                     <h2 className="text-lg font-semibold text-foreground">
                       {tier.name}
                     </h2>
-                    {tier.highlight && (
+                    {showResume ? (
+                      <span
+                        className="text-[10px] uppercase tracking-widest font-semibold rounded-full bg-primary/15 text-primary border border-primary/40 px-2.5 py-1"
+                        data-testid={`badge-resume-${tier.id}`}
+                      >
+                        Your pick
+                      </span>
+                    ) : tier.highlight ? (
                       <span className="text-[10px] uppercase tracking-widest font-semibold rounded-full bg-primary/10 text-primary border border-primary/30 px-2.5 py-1">
                         Popular
                       </span>
-                    )}
+                    ) : null}
                   </div>
                   <p className="text-sm text-muted-foreground mt-1.5 min-h-[40px]">
                     {tier.tagline}
@@ -411,7 +459,9 @@ export default function PricingPage() {
                       {actionTier === tier.id
                         ? "Redirecting…"
                         : configured
-                          ? tier.cta
+                          ? showResume
+                            ? "Resume checkout"
+                            : tier.cta
                           : "Coming soon"}
                     </button>
                   ) : (

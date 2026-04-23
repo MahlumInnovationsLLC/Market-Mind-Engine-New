@@ -1,6 +1,10 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Link, useLocation } from "wouter";
 import { useAuth, useClerk } from "@clerk/react";
+import {
+  clearPendingCheckoutPriceId,
+  getPendingCheckoutPriceId,
+} from "@/lib/pending-checkout";
 import {
   ApiError,
   UserSubscription,
@@ -39,6 +43,19 @@ export default function BillingPage() {
   const queryClient = useQueryClient();
   const [error, setError] = useState<string | null>(null);
   const showSuccess = location.includes("checkout=success");
+  const showCancelled = location.includes("checkout=cancelled");
+  const [pendingPriceId, setPendingPriceId] = useState<string | null>(() =>
+    typeof window !== "undefined" ? getPendingCheckoutPriceId() : null,
+  );
+
+  // The user finished paying — drop any leftover "resume checkout" intent so
+  // they don't see a stale resume banner the next time they hit /pricing.
+  useEffect(() => {
+    if (showSuccess) {
+      clearPendingCheckoutPriceId();
+      setPendingPriceId(null);
+    }
+  }, [showSuccess]);
 
   const subQuery = useGetMySubscription({
     query: {
@@ -131,6 +148,26 @@ export default function BillingPage() {
             data-testid="text-signin-required"
           >
             Please sign in to manage your subscription.
+          </div>
+        )}
+
+        {pendingPriceId && !showSuccess && (
+          <div
+            className="border border-primary text-primary p-3 text-xs uppercase tracking-widest flex items-center justify-between gap-3"
+            data-testid="banner-resume-checkout"
+          >
+            <span>
+              {showCancelled
+                ? "✗ Checkout cancelled. Pick up where you left off:"
+                : "↻ You started a checkout but didn't finish. Resume it:"}
+            </span>
+            <Link
+              href={`/pricing?checkout=${encodeURIComponent(pendingPriceId)}`}
+              className="border border-primary px-3 py-1 hover:bg-primary hover:text-primary-foreground"
+              data-testid="link-resume-checkout"
+            >
+              Resume checkout →
+            </Link>
           </div>
         )}
 
