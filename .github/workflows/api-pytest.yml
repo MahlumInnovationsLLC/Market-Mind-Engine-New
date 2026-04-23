@@ -1,0 +1,60 @@
+name: api-pytest
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: api-pytest-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  pytest:
+    name: FastAPI pytest suite
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    env:
+      CI: "true"
+      PYTHONDONTWRITEBYTECODE: "1"
+      PIP_DISABLE_PIP_VERSION_CHECK: "1"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install Python deps (FastAPI + asyncpg + …)
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e .
+          pip install pytest-cov
+
+      - name: Run pytest
+        working-directory: artifacts/api-server
+        run: |
+          python -m pytest tests/ \
+            --junitxml=/tmp/pytest-junit.xml \
+            --cov=app \
+            --cov-report=xml:/tmp/pytest-coverage.xml \
+            --cov-report=term \
+            -v
+
+      - name: Upload pytest results
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pytest-results
+          path: |
+            /tmp/pytest-junit.xml
+            /tmp/pytest-coverage.xml
+          if-no-files-found: ignore
+          retention-days: 14
