@@ -19,6 +19,8 @@ interface PrefsView {
     email_halt: boolean;
     email_live_trade: boolean;
     email_weekly_roundup: boolean;
+    email_trade_confirmation: boolean;
+    digest_partials: boolean;
     sms_live_trade: boolean;
     telegram_live_trade: boolean;
     sms_phone_number: string | null;
@@ -67,6 +69,20 @@ const EMAIL_TOGGLES: ToggleRow[] = [
     label: "Live trade fills",
     description:
       "Every non-paper Kalshi fill — high volume; opt-in only.",
+    channel: "email",
+  },
+  {
+    key: "email_trade_confirmation",
+    label: "Trade confirmations",
+    description:
+      "Branded HTML receipt for each of your fills, with market, side, qty, price, cost, and updated position.",
+    channel: "email",
+  },
+  {
+    key: "digest_partials",
+    label: "Consolidate partial fills",
+    description:
+      "Send a single confirmation when the whole order finishes instead of one per partial fill.",
     channel: "email",
   },
 ];

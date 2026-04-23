@@ -6,7 +6,12 @@ import { Card, SectionHeader } from "@/components/Card";
 import { useColors } from "@/hooks/useColors";
 import { apiFetch } from "@/lib/api";
 
-type PrefsBody = { notify_live_trade: boolean; notify_halt: boolean };
+type PrefsBody = {
+  notify_live_trade: boolean;
+  notify_halt: boolean;
+  email_trade_confirmation: boolean;
+  digest_partials: boolean;
+};
 type PrefsResponse = {
   prefs: PrefsBody & Record<string, unknown>;
   tier?: string;
@@ -37,6 +42,10 @@ export function NotificationPrefs(): React.ReactElement {
   const data: PrefsBody = {
     notify_live_trade: prefs.data?.prefs?.notify_live_trade ?? true,
     notify_halt: prefs.data?.prefs?.notify_halt ?? true,
+    email_trade_confirmation:
+      (prefs.data?.prefs?.email_trade_confirmation as boolean | undefined) ?? true,
+    digest_partials:
+      (prefs.data?.prefs?.digest_partials as boolean | undefined) ?? false,
   };
   const busy = prefs.isLoading || mutation.isPending;
 
@@ -59,6 +68,24 @@ export function NotificationPrefs(): React.ReactElement {
           value={data.notify_halt}
           disabled={busy}
           onChange={(v) => mutation.mutate({ notify_halt: v })}
+          colors={colors}
+        />
+        <View style={[styles.divider, { backgroundColor: colors.border }]} />
+        <Row
+          label="Trade confirmations"
+          hint="Email a receipt with market, side, qty, price, and position after each fill."
+          value={data.email_trade_confirmation}
+          disabled={busy}
+          onChange={(v) => mutation.mutate({ email_trade_confirmation: v })}
+          colors={colors}
+        />
+        <View style={[styles.divider, { backgroundColor: colors.border }]} />
+        <Row
+          label="Consolidate partial fills"
+          hint="One email per completed order instead of one per partial fill."
+          value={data.digest_partials}
+          disabled={busy}
+          onChange={(v) => mutation.mutate({ digest_partials: v })}
           colors={colors}
         />
         {prefs.isLoading ? (

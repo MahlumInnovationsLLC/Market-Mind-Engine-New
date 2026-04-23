@@ -798,6 +798,220 @@ async def handle_ws_fill(message: dict[str, Any]) -> None:
     except Exception as e:  # pragma: no cover
         log.warning("live_trade alert dispatch failed: %s", e)
 
+    # ---- per-user HTML trade-confirmation email (task #269) -----------
+    # Distinct from the operator-broadcast `live_trade` alert above.
+    # Fully off the hot path: we capture an immutable snapshot of the
+    # fill and schedule a background task that does the DB recipient
+    # lookup, optional digest aggregation, market-title resolution, and
+    # dispatch. `handle_ws_fill` must return promptly so the WS router
+    # can process the next fill without backlog.
+    try:
+        ctx = rec.request.context if isinstance(rec.request.context, dict) else {}
+        _user_id = ctx.get("user_id") or ctx.get("clerk_user_id")
+        if _user_id:
+            snapshot = {
+                "user_id": str(_user_id),
+                "order_id": rec.order_id,
+                "fill_id": fill_id,
+                "price_cents": int(price),
+                "accepted_count": int(accepted),
+                "market_ticker": rec.request.market_ticker,
+                "side": rec.request.side,
+                "action": rec.request.action,
+                "vertical": rec.request.vertical,
+                "state": rec.state,
+                "filled_count": int(rec.filled_count),
+                "avg_fill_price_cents": int(rec.avg_fill_price_cents or 0),
+            }
+            try:
+                loop = asyncio.get_running_loop()
+                loop.create_task(_send_trade_confirmation_from_snapshot(snapshot))
+            except RuntimeError:  # pragma: no cover
+                # No running loop (unlikely from handle_ws_fill). Run
+                # inline as a last resort — still bounded by timeouts.
+                await _send_trade_confirmation_from_snapshot(snapshot)
+    except Exception as e:  # pragma: no cover
+        log.warning("trade_confirmation dispatch failed: %s", e)
+
+
+async def _resolve_trade_confirmation_recipient(
+    user_id: str,
+) -> tuple[str | None, bool, bool]:
+    """Return ``(email, email_trade_confirmation, digest_partials)`` for
+    a user.
+
+    Missing prefs rows fall back to the PREF_COLUMNS defaults (email on,
+    digest off). Missing/empty email yields ``(None, ...)`` so the caller
+    can short-circuit.
+    """
+    from ..notifications import push as _push
+    await _push.ensure_schema()
+    default_conf = "true" if _push.PREF_COLUMNS["email_trade_confirmation"] else "false"
+    default_digest = "true" if _push.PREF_COLUMNS["digest_partials"] else "false"
+    try:
+        row = await db.fetchrow(
+            f"""
+            SELECT u.email,
+                   COALESCE(p.email_trade_confirmation, {default_conf}) AS conf,
+                   COALESCE(p.digest_partials,          {default_digest}) AS digest
+              FROM app_users u
+              LEFT JOIN user_notification_prefs p
+                     ON p.clerk_user_id = u.clerk_user_id
+             WHERE u.clerk_user_id = $1
+            """,
+            user_id,
+        )
+    except Exception as e:
+        log.warning("trade_confirmation recipient lookup failed: %s", e)
+        return (None, False, False)
+    if not row:
+        return (None, False, False)
+    email = row["email"]
+    conf = bool(row["conf"]) if row["conf"] is not None else bool(
+        _push.PREF_COLUMNS["email_trade_confirmation"]
+    )
+    digest = bool(row["digest"]) if row["digest"] is not None else bool(
+        _push.PREF_COLUMNS["digest_partials"]
+    )
+    return (
+        (str(email).strip() or None) if email else None,
+        conf,
+        digest,
+    )
+
+
+async def _aggregate_order_fills(order_id: str) -> tuple[int, int, int]:
+    """Sum all fills for ``order_id``. Returns
+    ``(total_contracts, weighted_avg_price_cents, fill_count)``. When
+    no rows exist (shouldn't happen post-insert) returns zeros.
+    """
+    try:
+        rows = await db.fetch(
+            "SELECT count, price_cents FROM order_fills "
+            "WHERE order_id = $1",
+            order_id,
+        )
+    except Exception as e:
+        log.warning("order_fills aggregate failed for %s: %s", order_id, e)
+        return (0, 0, 0)
+    total_qty = 0
+    total_cents = 0
+    n = 0
+    for r in rows or []:
+        c = int(r["count"] or 0)
+        p = int(r["price_cents"] or 0)
+        total_qty += c
+        total_cents += c * p
+        n += 1
+    avg = int(round(total_cents / total_qty)) if total_qty > 0 else 0
+    return (total_qty, avg, n)
+
+
+_TRADE_CONFIRMATION_LOOKUP_TIMEOUT_S = 3.0
+_TRADE_CONFIRMATION_TITLE_TIMEOUT_S = 2.5
+
+
+async def _send_trade_confirmation_from_snapshot(snap: dict[str, Any]) -> None:
+    """Background worker: enrich the fill snapshot and dispatch the
+    confirmation email. Completely off the WS fill hot path.
+
+    All external-ish calls (DB lookups, Kalshi title API) are wrapped
+    in short timeouts so notification enrichment cannot accumulate
+    backlog under dependency slowness. Every failure is logged and
+    swallowed — a failed email must never surface upstream.
+    """
+    from ..notifications import alerts as _alerts
+    from . import market_titles as _titles
+
+    user_id = str(snap["user_id"])
+    order_id = str(snap["order_id"])
+    fill_id = str(snap["fill_id"])
+
+    try:
+        email, wants_email, digest = await asyncio.wait_for(
+            _resolve_trade_confirmation_recipient(user_id),
+            timeout=_TRADE_CONFIRMATION_LOOKUP_TIMEOUT_S,
+        )
+    except asyncio.TimeoutError:
+        log.warning(
+            "trade_confirmation recipient lookup timed out user=%s", user_id,
+        )
+        return
+    except Exception as e:  # pragma: no cover
+        log.warning("trade_confirmation recipient lookup failed: %s", e)
+        return
+
+    if not wants_email:
+        return
+    if not email:
+        log.info(
+            "trade_confirmation: user=%s has no email on file; skipping",
+            user_id,
+        )
+        return
+
+    partial = snap["state"] != "filled"
+    if digest and partial:
+        log.debug(
+            "trade_confirmation deferred (digest_partials) user=%s order=%s",
+            user_id, order_id,
+        )
+        return
+
+    if digest:
+        try:
+            total_qty, avg_price, fills_summed = await asyncio.wait_for(
+                _aggregate_order_fills(order_id),
+                timeout=_TRADE_CONFIRMATION_LOOKUP_TIMEOUT_S,
+            )
+        except asyncio.TimeoutError:
+            log.warning(
+                "trade_confirmation digest aggregate timed out order=%s",
+                order_id,
+            )
+            total_qty, avg_price, fills_summed = (0, 0, 0)
+        if total_qty <= 0:
+            total_qty = int(snap["filled_count"])
+            avg_price = int(snap["avg_fill_price_cents"] or 0)
+            fills_summed = 1
+        confirm_fill_id = "digest"
+        contracts_for_email = total_qty
+        avg_for_email = avg_price
+    else:
+        fills_summed = None
+        confirm_fill_id = fill_id
+        contracts_for_email = int(snap["accepted_count"])
+        avg_for_email = int(snap["price_cents"])
+
+    total_cost = avg_for_email * contracts_for_email
+
+    try:
+        market_title = await asyncio.wait_for(
+            _titles.get_title(snap["market_ticker"]),
+            timeout=_TRADE_CONFIRMATION_TITLE_TIMEOUT_S,
+        )
+    except Exception:
+        market_title = None
+
+    _alerts.trade_confirmation(
+        user_id=user_id,
+        email=email,
+        market_ticker=snap["market_ticker"],
+        market_title=market_title or snap["market_ticker"],
+        side=snap["side"],
+        action=snap["action"],
+        contracts=contracts_for_email,
+        avg_price_cents=avg_for_email,
+        total_cost_cents=total_cost,
+        current_position=int(snap["filled_count"]),
+        order_id=order_id,
+        fill_id=confirm_fill_id,
+        vertical=snap["vertical"],
+        partial=partial,
+        digest=digest,
+        fills_summed=fills_summed,
+    )
+
 
 # --- helpers --------------------------------------------------------------
 

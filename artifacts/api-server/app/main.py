@@ -802,6 +802,10 @@ class NotificationPrefsRequest(BaseModel):
     email_halt: bool | None = None
     email_live_trade: bool | None = None
     email_weekly_roundup: bool | None = None
+    # Per-user HTML trade-fill confirmation + consolidate-partials mode
+    # (task #269).
+    email_trade_confirmation: bool | None = None
+    digest_partials: bool | None = None
     # Elite-only premium channels.
     sms_live_trade: bool | None = None
     telegram_live_trade: bool | None = None

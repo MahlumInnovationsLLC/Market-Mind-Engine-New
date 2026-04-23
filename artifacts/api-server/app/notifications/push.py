@@ -70,14 +70,16 @@ CREATE TABLE IF NOT EXISTS user_notification_prefs (
 -- summaries; the live-trade firehose is opt-in because it is noisy
 -- and gated behind the Elite tier.
 ALTER TABLE user_notification_prefs
-    ADD COLUMN IF NOT EXISTS email_daily_summary  boolean NOT NULL DEFAULT true,
-    ADD COLUMN IF NOT EXISTS email_drift          boolean NOT NULL DEFAULT true,
-    ADD COLUMN IF NOT EXISTS email_halt           boolean NOT NULL DEFAULT true,
-    ADD COLUMN IF NOT EXISTS email_live_trade     boolean NOT NULL DEFAULT false,
-    ADD COLUMN IF NOT EXISTS email_weekly_roundup boolean NOT NULL DEFAULT true,
-    ADD COLUMN IF NOT EXISTS sms_live_trade       boolean NOT NULL DEFAULT false,
-    ADD COLUMN IF NOT EXISTS telegram_live_trade  boolean NOT NULL DEFAULT false,
-    ADD COLUMN IF NOT EXISTS sms_phone_number     text;
+    ADD COLUMN IF NOT EXISTS email_daily_summary       boolean NOT NULL DEFAULT true,
+    ADD COLUMN IF NOT EXISTS email_drift               boolean NOT NULL DEFAULT true,
+    ADD COLUMN IF NOT EXISTS email_halt                boolean NOT NULL DEFAULT true,
+    ADD COLUMN IF NOT EXISTS email_live_trade          boolean NOT NULL DEFAULT false,
+    ADD COLUMN IF NOT EXISTS email_weekly_roundup      boolean NOT NULL DEFAULT true,
+    ADD COLUMN IF NOT EXISTS email_trade_confirmation  boolean NOT NULL DEFAULT true,
+    ADD COLUMN IF NOT EXISTS digest_partials           boolean NOT NULL DEFAULT false,
+    ADD COLUMN IF NOT EXISTS sms_live_trade            boolean NOT NULL DEFAULT false,
+    ADD COLUMN IF NOT EXISTS telegram_live_trade       boolean NOT NULL DEFAULT false,
+    ADD COLUMN IF NOT EXISTS sms_phone_number          text;
 """
 
 
@@ -86,15 +88,24 @@ ALTER TABLE user_notification_prefs
 # `get_prefs` / `set_prefs` / the `/api/me/notification-prefs` endpoint
 # stay in sync as new alert types are added.
 PREF_COLUMNS: dict[str, bool] = {
-    "notify_live_trade":    True,   # mobile push — live fill
-    "notify_halt":          True,   # mobile push — kill switch
-    "email_daily_summary":  True,
-    "email_drift":          True,
-    "email_halt":           True,
-    "email_live_trade":     False,  # noisy + Elite-only feature
-    "email_weekly_roundup": True,
-    "sms_live_trade":       False,  # Elite-only premium channel
-    "telegram_live_trade":  False,  # Elite-only premium channel
+    "notify_live_trade":       True,   # mobile push — live fill
+    "notify_halt":             True,   # mobile push — kill switch
+    "email_daily_summary":     True,
+    "email_drift":             True,
+    "email_halt":              True,
+    "email_live_trade":        False,  # noisy + Elite-only feature
+    "email_weekly_roundup":    True,
+    # Per-user HTML trade confirmation sent on each fill (or consolidated
+    # at terminal state when `digest_partials` is on). Distinct from the
+    # operator-broadcast `email_live_trade`. Default on so a user never
+    # misses a fill receipt; they can silence it from /settings.
+    "email_trade_confirmation": True,
+    # When true, partial fills for a single order are deferred and
+    # combined into a single confirmation email at terminal state
+    # (`filled`). Default off — most users want a receipt per fill.
+    "digest_partials":         False,
+    "sms_live_trade":          False,  # Elite-only premium channel
+    "telegram_live_trade":     False,  # Elite-only premium channel
 }
 
 # Subset of toggles that require the Elite (or higher) tier to actually

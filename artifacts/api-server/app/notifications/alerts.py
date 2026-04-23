@@ -314,6 +314,316 @@ def _schedule_premium_live_trade(*, subject: str, body_short: str) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Per-user trade confirmation email (task #269).
+#
+# Unlike `live_trade` (operator-broadcast), this is a single branded
+# HTML receipt sent to the end user whose order filled. It carries
+# market/side/qty/price/position detail and a link back to the
+# dashboard. Trigger lives in `kalshi.lifecycle.handle_ws_fill`.
+# ---------------------------------------------------------------------------
+
+
+def _public_base_url() -> str:
+    """Reuse the public-URL resolver from `notifications.email` so the
+    dashboard CTA ends up on the same origin as billing links."""
+    from . import email as _email
+    return _email._public_base_url()
+
+
+def _fmt_cents_usd(c: int | None) -> str:
+    if c is None:
+        return "—"
+    sign = "-" if c < 0 else ""
+    return f"{sign}${abs(int(c)) / 100.0:,.2f}"
+
+
+def _render_trade_confirmation_html(
+    *,
+    market_title: str,
+    market_ticker: str,
+    side: str,
+    action: str,
+    contracts: int,
+    avg_price_cents: int,
+    total_cost_cents: int,
+    current_position: int,
+    dashboard_url: str,
+    vertical: str | None,
+    order_id: str,
+    fill_id: str,
+    timestamp_iso: str,
+    partial: bool,
+    digest: bool,
+    fills_summed: int | None,
+) -> str:
+    side_label = (side or "").upper()
+    action_label = (action or "").upper()
+    fill_note = ""
+    if digest and fills_summed is not None and fills_summed > 1:
+        fill_note = (
+            f'<div style="color:#6B7280;font-size:12px;margin-top:4px;">'
+            f"Consolidated across {fills_summed} partial fills.</div>"
+        )
+    elif partial:
+        fill_note = (
+            '<div style="color:#6B7280;font-size:12px;margin-top:4px;">'
+            "Partial fill — remaining contracts are still resting.</div>"
+        )
+    rows = [
+        ("Market", f"{market_title} <span style=\"color:#6B7280;\">({market_ticker})</span>"),
+        ("Side", side_label),
+        ("Action", action_label),
+        ("Contracts filled", f"{contracts}"),
+        ("Average price", f"{avg_price_cents}¢"),
+        ("Total cost", _fmt_cents_usd(total_cost_cents)),
+        ("Position after fill", f"{current_position}"),
+    ]
+    if vertical:
+        rows.append(("Vertical", vertical))
+    rows.extend([
+        ("Order ID", f'<code style="font-family:monospace;font-size:12px;">{order_id}</code>'),
+        ("Fill ID", f'<code style="font-family:monospace;font-size:12px;">{fill_id}</code>'),
+        ("Timestamp", timestamp_iso),
+    ])
+    row_html = "".join(
+        f'<tr><td style="padding:8px 12px;color:#6B7280;font-size:12px;'
+        f'text-transform:uppercase;letter-spacing:0.08em;'
+        f'border-bottom:1px solid #E5E7EB;white-space:nowrap;">{k}</td>'
+        f'<td style="padding:8px 12px;color:#111827;font-size:14px;'
+        f'border-bottom:1px solid #E5E7EB;">{v}</td></tr>'
+        for k, v in rows
+    )
+    return f"""<!DOCTYPE html>
+<html>
+<body style="margin:0;padding:0;background:#F9FAFB;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Inter,Arial,sans-serif;">
+  <table width="100%" cellpadding="0" cellspacing="0" style="background:#F9FAFB;padding:24px 0;">
+    <tr><td align="center">
+      <table width="560" cellpadding="0" cellspacing="0" style="background:#FFFFFF;border:1px solid #E5E7EB;border-radius:8px;overflow:hidden;">
+        <tr>
+          <td style="background:#111827;color:#F9FAFB;padding:20px 24px;">
+            <div style="font-size:11px;letter-spacing:0.16em;text-transform:uppercase;color:#9CA3AF;">Axiom Predict</div>
+            <div style="font-size:20px;font-weight:700;margin-top:4px;">Trade confirmation</div>
+          </td>
+        </tr>
+        <tr>
+          <td style="padding:20px 24px 8px 24px;">
+            <div style="font-size:14px;color:#111827;">
+              Your Kalshi order just filled{' (partially)' if partial and not digest else ''}.
+            </div>
+            {fill_note}
+          </td>
+        </tr>
+        <tr>
+          <td style="padding:8px 24px 8px 24px;">
+            <table width="100%" cellpadding="0" cellspacing="0" style="border:1px solid #E5E7EB;border-radius:6px;border-collapse:separate;">
+              {row_html}
+            </table>
+          </td>
+        </tr>
+        <tr>
+          <td style="padding:16px 24px 24px 24px;">
+            <a href="{dashboard_url}" style="display:inline-block;background:#2563EB;color:#FFFFFF;text-decoration:none;padding:10px 16px;border-radius:6px;font-weight:600;font-size:14px;">View in dashboard</a>
+          </td>
+        </tr>
+        <tr>
+          <td style="padding:12px 24px 20px 24px;border-top:1px solid #E5E7EB;color:#6B7280;font-size:11px;line-height:1.5;">
+            You're receiving this because you opted in to trade confirmations.
+            Turn them off any time from Settings → Notifications.
+          </td>
+        </tr>
+      </table>
+    </td></tr>
+  </table>
+</body>
+</html>"""
+
+
+def _render_trade_confirmation_text(
+    *,
+    market_title: str,
+    market_ticker: str,
+    side: str,
+    action: str,
+    contracts: int,
+    avg_price_cents: int,
+    total_cost_cents: int,
+    current_position: int,
+    dashboard_url: str,
+    vertical: str | None,
+    order_id: str,
+    fill_id: str,
+    timestamp_iso: str,
+    partial: bool,
+    digest: bool,
+    fills_summed: int | None,
+) -> str:
+    lines: list[tuple[str, Any]] = [
+        ("market", f"{market_title} ({market_ticker})"),
+        ("side", (side or "").upper()),
+        ("action", (action or "").upper()),
+        ("contracts_filled", contracts),
+        ("avg_price", f"{avg_price_cents}¢"),
+        ("total_cost", _fmt_cents_usd(total_cost_cents)),
+        ("position_after", current_position),
+    ]
+    if vertical:
+        lines.append(("vertical", vertical))
+    lines.extend([
+        ("order_id", order_id),
+        ("fill_id", fill_id),
+        ("at", timestamp_iso),
+    ])
+    header = "Your Kalshi order just filled"
+    if digest and fills_summed is not None and fills_summed > 1:
+        header += f" (consolidated across {fills_summed} partial fills)"
+    elif partial:
+        header += " (partial — remaining contracts still resting)"
+    return (
+        f"{header}.\n\n"
+        + _format_lines(lines)
+        + f"\n\nView in dashboard: {dashboard_url}\n"
+        + "\n--\n"
+        + "You're receiving this because you opted in to trade confirmations.\n"
+        + "Turn them off from Settings -> Notifications.\n"
+    )
+
+
+async def _send_trade_confirmation(
+    *,
+    user_id: str,
+    email: str,
+    subject: str,
+    text_body: str,
+    html_body: str,
+    dedupe_key: str,
+    dry_run: bool,
+) -> dict[str, Any]:
+    claimed = await dedupe_or_skip(
+        "trade_confirmation", dedupe_key, ttl_seconds=7 * 24 * 3600
+    )
+    if not claimed:
+        log.info(
+            "trade_confirmation suppressed by dedupe: %s", dedupe_key
+        )
+        return {"sent": False, "skipped_reason": "dedupe"}
+    from . import suppression as _supp
+    try:
+        if await _supp.is_suppressed(email):
+            log.info("trade_confirmation suppressed (bounce/unsub): %s", email)
+            return {"sent": False, "skipped_reason": "suppressed"}
+    except Exception as e:  # pragma: no cover
+        log.warning("trade_confirmation suppression check failed: %s", e)
+    try:
+        results = await postmark.send(
+            subject=subject,
+            text_body=text_body,
+            html_body=html_body,
+            to=[email],
+            tag="trade-confirmation",
+            dry_run=dry_run,
+        )
+        return {"sent": True, "dry_run": dry_run, "results": results}
+    except Exception as e:  # pragma: no cover
+        log.warning("trade_confirmation send failed for %s: %s", user_id, e)
+        return {"sent": False, "error": str(e)}
+
+
+def trade_confirmation(
+    *,
+    user_id: str,
+    email: str | None,
+    market_ticker: str,
+    market_title: str | None,
+    side: str,
+    action: str,
+    contracts: int,
+    avg_price_cents: int,
+    total_cost_cents: int | None,
+    current_position: int,
+    order_id: str,
+    fill_id: str,
+    vertical: str | None = None,
+    partial: bool = False,
+    digest: bool = False,
+    fills_summed: int | None = None,
+    dashboard_url: str | None = None,
+    dry_run: bool = False,
+) -> "asyncio.Task | dict[str, Any]":
+    """Per-user HTML trade confirmation.
+
+    Non-blocking: schedules the send on the running loop and returns
+    the ``asyncio.Task``. Runs inline when no loop is available (sync
+    test path).
+    """
+    if not email:
+        log.info(
+            "trade_confirmation skipped (no email) user=%s order=%s fill=%s",
+            user_id, order_id, fill_id,
+        )
+        return {"sent": False, "skipped_reason": "no_email"}
+    title = market_title or market_ticker
+    total_c = (
+        int(avg_price_cents) * int(contracts)
+        if total_cost_cents is None
+        else int(total_cost_cents)
+    )
+    url = dashboard_url or f"{_public_base_url()}/positions"
+    ts = _utc_now_iso()
+    subject = (
+        f"[Axiom Predict] Filled: {action.upper()} {side.upper()} "
+        f"{contracts}x {market_ticker} @ {avg_price_cents}¢"
+    )
+    html_body = _render_trade_confirmation_html(
+        market_title=title, market_ticker=market_ticker,
+        side=side, action=action, contracts=int(contracts),
+        avg_price_cents=int(avg_price_cents),
+        total_cost_cents=int(total_c),
+        current_position=int(current_position),
+        dashboard_url=url, vertical=vertical,
+        order_id=order_id, fill_id=fill_id, timestamp_iso=ts,
+        partial=partial, digest=digest, fills_summed=fills_summed,
+    )
+    text_body = _render_trade_confirmation_text(
+        market_title=title, market_ticker=market_ticker,
+        side=side, action=action, contracts=int(contracts),
+        avg_price_cents=int(avg_price_cents),
+        total_cost_cents=int(total_c),
+        current_position=int(current_position),
+        dashboard_url=url, vertical=vertical,
+        order_id=order_id, fill_id=fill_id, timestamp_iso=ts,
+        partial=partial, digest=digest, fills_summed=fills_summed,
+    )
+    dedupe_key = f"{user_id}:{order_id}:{fill_id}"
+    if dry_run:
+        log.info(
+            "trade_confirmation dry_run user=%s order=%s fill=%s",
+            user_id, order_id, fill_id,
+        )
+        return {
+            "dry_run": True,
+            "tag": "trade-confirmation",
+            "subject": subject,
+            "body_preview": text_body[:4000],
+            "would_send_to": [email],
+            "dedupe_key": dedupe_key,
+        }
+    coro = _send_trade_confirmation(
+        user_id=user_id, email=email,
+        subject=subject, text_body=text_body, html_body=html_body,
+        dedupe_key=dedupe_key, dry_run=False,
+    )
+    try:
+        loop = asyncio.get_running_loop()
+        return loop.create_task(coro)
+    except RuntimeError:
+        try:
+            return asyncio.run(coro)
+        except Exception as e:  # pragma: no cover
+            log.warning("inline trade_confirmation send failed: %s", e)
+            return {"sent": False, "error": str(e)}
+
+
+# ---------------------------------------------------------------------------
 # Halt / kill switch
 # ---------------------------------------------------------------------------
 
