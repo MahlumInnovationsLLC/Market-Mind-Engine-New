@@ -809,6 +809,11 @@ async def _persist_debate(
             "kalshi_market_id": candidate.get("kalshi_market_id"),
             "kalshi_price": candidate.get("kalshi_price"),
             "vertical": candidate.get("vertical"),
+            # Persist team names so the cached-debate rehydration
+            # path (`cycle._cached_debates`) can drive the Elo
+            # enrichment even when the `games` join misses (task #130).
+            "home_team": candidate.get("home_team"),
+            "away_team": candidate.get("away_team"),
         }
     )
 

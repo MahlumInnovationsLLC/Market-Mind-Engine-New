@@ -443,8 +443,11 @@ def test_fresh_candidate_carries_game_time_into_riskcontext():
     import inspect
     from app.orchestrator import cycle as cycle_mod
 
-    src = inspect.getsource(cycle_mod.run_cycle)
-    # The fresh-candidate dict literal must include game_time.
+    # As of task #130 the fresh-candidate construction lives in the
+    # `_fresh_debate_candidate` helper instead of being inlined into
+    # run_cycle.  The contract (game_time must be propagated from the
+    # source prediction onto the candidate) is unchanged.
+    src = inspect.getsource(cycle_mod._fresh_debate_candidate)
     assert '"game_time": pred.get("game_time")' in src, (
         "fresh candidate must propagate pred['game_time'] so RiskContext "
         "sees the kickoff for blackout/Sunday-window evaluation"

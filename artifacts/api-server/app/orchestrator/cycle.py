@@ -388,8 +388,10 @@ async def _candidate_predictions(vertical: str, limit: int) -> list[dict[str, An
             rows = await db.fetch(
                 """
                 SELECT p.id, p.game_id, p.league, p.kalshi_market_id, p.kalshi_price,
-                       p.home_win_prob, p.confidence, p.edge, p.game_time
+                       p.home_win_prob, p.confidence, p.edge, p.game_time,
+                       g.home_team, g.away_team
                   FROM predictions p
+                  LEFT JOIN games g ON g.game_id = p.game_id
                  WHERE p.kalshi_market_id IS NOT NULL
                    AND p.league = ANY($2)
                    AND (p.game_time IS NULL OR p.game_time > now())
@@ -408,8 +410,10 @@ async def _candidate_predictions(vertical: str, limit: int) -> list[dict[str, An
             rows = await db.fetch(
                 """
                 SELECT p.id, p.game_id, p.league, p.kalshi_market_id, p.kalshi_price,
-                       p.home_win_prob, p.confidence, p.edge, p.game_time
+                       p.home_win_prob, p.confidence, p.edge, p.game_time,
+                       g.home_team, g.away_team
                   FROM predictions p
+                  LEFT JOIN games g ON g.game_id = p.game_id
                  WHERE p.kalshi_market_id IS NOT NULL
                    AND (p.game_time IS NULL OR p.game_time > now())
                    AND NOT EXISTS (
@@ -455,7 +459,8 @@ async def _cached_debates(
                        sd.consensus_probability, sd.confidence_band_low, sd.confidence_band_high,
                        sd.agreement_rate, sd.approved, sd.recommended_action,
                        sd.game_context,
-                       g.scheduled_start AS game_time
+                       g.scheduled_start AS game_time,
+                       g.home_team, g.away_team
                   FROM swarm_debates sd
                   LEFT JOIN games g ON g.game_id = sd.game_id
                  WHERE sd.created_at > now() - interval '60 minutes'
@@ -484,7 +489,8 @@ async def _cached_debates(
                        sd.consensus_probability, sd.confidence_band_low, sd.confidence_band_high,
                        sd.agreement_rate, sd.approved, sd.recommended_action,
                        sd.game_context,
-                       g.scheduled_start AS game_time
+                       g.scheduled_start AS game_time,
+                       g.home_team, g.away_team
                   FROM swarm_debates sd
                   LEFT JOIN games g ON g.game_id = sd.game_id
                  WHERE sd.created_at > now() - interval '60 minutes'
@@ -528,6 +534,50 @@ def _resolve_market_id(d: dict[str, Any]) -> str | None:
         d.get("kalshi_market_id")
         or (ctx.get("kalshi_market_id") if isinstance(ctx, dict) else None)
     )
+
+
+def _fresh_debate_candidate(
+    pred: dict[str, Any], debate: dict[str, Any]
+) -> dict[str, Any]:
+    """Build the orchestrator candidate dict from a freshly-completed
+    swarm debate plus its source `predictions` row.
+
+    Critically, this carries `home_team` / `away_team` from the
+    prediction (joined onto the `games` table in
+    `_candidate_predictions`) into `game_context` so the downstream
+    `attach_elo_to_candidate` enrichment can actually populate
+    team_elo / opponent_elo / recent_form_delta on the fresh-debate
+    path.  Without this the debate's game_context only carried market
+    ids and the Elo lookup silently no-op'd (task #130).
+    """
+    return {
+        "debate_id": debate.get("debate_id"),
+        "game_id": debate.get("game_id"),
+        "matchup": debate.get("matchup"),
+        "league": debate.get("league"),
+        "market_type": debate.get("market_type"),
+        "consensus_probability": debate.get("consensus_probability"),
+        "confidence_band_low": debate.get("confidence_band_low"),
+        "confidence_band_high": debate.get("confidence_band_high"),
+        "agreement_rate": debate.get("agreement_rate"),
+        "approved": debate.get("approved"),
+        "recommended_action": debate.get("recommended_action"),
+        # Carry kickoff onto the candidate so RiskContext.game_time is
+        # populated for the fresh-debate path too — drives pre-kickoff
+        # blackout + Sunday-window cap evaluation.
+        "game_time": pred.get("game_time"),
+        # Top-level home/away (attach_elo_to_candidate accepts either
+        # location) so the elo enrichment fires even when an upstream
+        # consumer ignores game_context.
+        "home_team": pred.get("home_team"),
+        "away_team": pred.get("away_team"),
+        "game_context": {
+            "kalshi_market_id": pred.get("kalshi_market_id"),
+            "kalshi_price": pred.get("kalshi_price"),
+            "home_team": pred.get("home_team"),
+            "away_team": pred.get("away_team"),
+        },
+    }
 
 
 async def _publish(event: dict[str, Any]) -> None:
@@ -1147,33 +1197,19 @@ async def run_cycle(vertical: str = "sports") -> CycleResult:
                 # can join debates -> markets -> persona Brier updates.
                 "kalshi_market_id": pred.get("kalshi_market_id"),
                 "kalshi_price": pred.get("kalshi_price"),
+                # Carried so the persisted swarm_debates.game_context
+                # row holds the team names — that's what the Elo
+                # enrichment (`attach_elo_to_candidate`) keys off when
+                # the cached-debate path rehydrates this debate later.
+                "home_team": pred.get("home_team"),
+                "away_team": pred.get("away_team"),
                 "aggression_mode": aggression_mode,
                 # Drives swarm.runner persona_profile resolution via the
                 # vertical registry (default profile for legacy verticals).
                 "vertical": vertical,
             })
             result.fresh_debates += 1
-            candidates.append({
-                "debate_id": d.get("debate_id"),
-                "game_id": d.get("game_id"),
-                "matchup": d.get("matchup"),
-                "league": d.get("league"),
-                "market_type": d.get("market_type"),
-                "consensus_probability": d.get("consensus_probability"),
-                "confidence_band_low": d.get("confidence_band_low"),
-                "confidence_band_high": d.get("confidence_band_high"),
-                "agreement_rate": d.get("agreement_rate"),
-                "approved": d.get("approved"),
-                "recommended_action": d.get("recommended_action"),
-                # Carry kickoff onto the candidate so RiskContext.game_time
-                # is populated for the fresh-debate path too — drives
-                # pre-kickoff blackout + Sunday-window cap evaluation.
-                "game_time": pred.get("game_time"),
-                "game_context": {
-                    "kalshi_market_id": pred.get("kalshi_market_id"),
-                    "kalshi_price": pred.get("kalshi_price"),
-                },
-            })
+            candidates.append(_fresh_debate_candidate(pred, d))
         except Exception as e:
             result.errors.append(f"fresh debate failed for {pred.get('game_id')}: {e}")
             log.warning("fresh debate failed: %s", e)
