@@ -8,7 +8,10 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from datetime import datetime, timedelta, timezone
+
 from . import db
+from .kalshi import client as kalshi_client
 from .kalshi.market_titles import resolve_titles as resolve_market_titles
 
 
@@ -753,6 +756,132 @@ async def search_global(q: str, limit: int = 10) -> dict[str, list[dict[str, Any
     return {"trades": trades, "debates": debates, "cycles": cycles}
 
 
+def _parse_iso_z(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    try:
+        s = value.replace("Z", "+00:00")
+        return datetime.fromisoformat(s)
+    except Exception:
+        return None
+
+
+def _select_period_interval(span_minutes: float) -> int:
+    """Pick a Kalshi candlestick bar size (1/60/1440 min) that keeps
+    the returned series under a few hundred points for any window."""
+    if span_minutes <= 240:
+        return 1
+    if span_minutes <= 60 * 24 * 7:
+        return 60
+    return 1440
+
+
+async def _fetch_market_price_history(
+    market_id: str,
+    *,
+    executed_at: str | None,
+    debate_points: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Pull a continuous market price tick series from Kalshi.
+
+    Returns a list of ``{t, model_prob: None, market_price}`` dicts
+    suitable for merging into the swarm-debate series. Best-effort —
+    silently returns ``[]`` on any error (missing creds, ticker that
+    isn't a Kalshi market, http failure, etc.) so the caller still
+    gets the debate-snapshot fallback.
+
+    The window spans the trade's executed_at ± 60 minutes, extended
+    to cover the earliest/latest debate timestamps so the merged
+    series is contiguous. Bar size scales with span (1m / 1h / 1d)
+    to keep the response small.
+    """
+    if not market_id:
+        return []
+    exec_ts = _parse_iso_z(executed_at)
+    debate_times: list[datetime] = []
+    for p in debate_points or []:
+        dt = _parse_iso_z(p.get("t"))
+        if dt is not None:
+            debate_times.append(dt)
+
+    if exec_ts is None and not debate_times:
+        return []
+
+    anchor = exec_ts or debate_times[0]
+    candidates_lo = [anchor - timedelta(minutes=60)]
+    candidates_hi = [anchor + timedelta(minutes=60)]
+    candidates_lo.extend(debate_times)
+    candidates_hi.extend(debate_times)
+    start_dt = min(candidates_lo)
+    end_dt = max(candidates_hi)
+    # Don't run off the end of "now" — Kalshi rejects future windows
+    # on settled markets in some cases and it's wasted work in any.
+    now = datetime.now(timezone.utc)
+    if end_dt > now:
+        end_dt = now
+    if start_dt >= end_dt:
+        return []
+
+    span_min = (end_dt - start_dt).total_seconds() / 60.0
+    period_interval = _select_period_interval(span_min)
+
+    try:
+        client = kalshi_client.KalshiClient()
+    except Exception as e:
+        log.info("trade detail candlesticks: kalshi client unavailable: %s", e)
+        return []
+
+    try:
+        data = await client.get_market_candlesticks(
+            market_id,
+            start_ts=int(start_dt.timestamp()),
+            end_ts=int(end_dt.timestamp()),
+            period_interval=period_interval,
+        )
+    except kalshi_client.KalshiAPIError as e:
+        log.info("kalshi candlesticks(%s) failed: http %s", market_id, e.status)
+        return []
+    except Exception as e:
+        log.info("kalshi candlesticks(%s) error: %s", market_id, e)
+        return []
+    finally:
+        try:
+            await client.aclose()
+        except Exception:
+            pass
+
+    candles = (data or {}).get("candlesticks") or []
+    out: list[dict[str, Any]] = []
+    for row in candles:
+        if not isinstance(row, dict):
+            continue
+        end_ts = row.get("end_period_ts")
+        if not isinstance(end_ts, (int, float)):
+            continue
+        price_blk = row.get("price") or {}
+        cents = price_blk.get("mean")
+        if cents is None:
+            cents = price_blk.get("close")
+        if cents is None:
+            continue
+        try:
+            market_price = float(cents) / 100.0
+        except (TypeError, ValueError):
+            continue
+        t_iso = (
+            datetime.fromtimestamp(int(end_ts), tz=timezone.utc)
+            .strftime("%Y-%m-%dT%H:%M:%SZ")
+        )
+        out.append(
+            {
+                "t": t_iso,
+                "model_prob": None,
+                "market_price": market_price,
+            }
+        )
+    return out
+
+
 async def get_trade_detail(trade_ref: str) -> dict[str, Any] | None:
     """Return a single trade row + market-vs-model time series.
 
@@ -760,14 +889,21 @@ async def get_trade_detail(trade_ref: str) -> dict[str, Any] | None:
     that's what the recent-trades table renders) or the UUID-ish
     ``trades.trade_id``.  Returns ``None`` if no row matches.
 
-    The time series is built from ``swarm_debates`` rows that share the
-    same Kalshi market_id (via ``game_context->>'kalshi_market_id'``):
-    each debate carries both the consensus model probability *and* the
-    Kalshi price snapshot at debate time, which is exactly the
-    market-vs-model overlay the spec asks for.  The trade's own
-    snapshot (``trades.price`` and ``trades.model_prob``) is appended
-    as the anchor point at ``executed_at`` so the chart always shows at
-    least one data point.
+    The time series merges three sources so the market-vs-model overlay
+    reflects exchange tick history rather than only the moments where
+    a debate happened to run:
+
+    1. swarm_debates rows for the same market — consensus model_prob
+       plus the Kalshi snapshot at debate time (good for the model
+       line, sparse for price).
+    2. Kalshi market candlesticks for the window around the trade —
+       continuous tick history (1m / 1h / 1d bars depending on span)
+       so the market_price series is contiguous between debates.
+       Best-effort: if Kalshi is unreachable or credentials are
+       missing we silently fall back to source #1 only.
+    3. The trade's own snapshot (trades.price + trades.model_prob)
+       appended as an anchor at executed_at so the chart always
+       shows at least one point.
     """
     ref = (trade_ref or "").strip()
     if not ref:
@@ -851,6 +987,19 @@ async def get_trade_detail(trade_ref: str) -> dict[str, Any] | None:
             series = [dict(r) for r in srows]
         except Exception as e:
             log.warning("trade detail series failed: %s", e)
+
+        try:
+            tick_points = await _fetch_market_price_history(
+                market_id,
+                executed_at=trade.get("executed_at"),
+                debate_points=series,
+            )
+        except Exception as e:
+            log.warning("trade detail candlestick overlay failed: %s", e)
+            tick_points = []
+        if tick_points:
+            series.extend(tick_points)
+            series.sort(key=lambda p: (p.get("t") or ""))
 
     # Anchor: always append the trade's own snapshot so the chart isn't
     # empty even if no debate rows exist for this market.

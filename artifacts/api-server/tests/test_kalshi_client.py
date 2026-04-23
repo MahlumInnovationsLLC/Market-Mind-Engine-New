@@ -381,3 +381,59 @@ def test_cluster_probe_missing_credentials(monkeypatch):
     assert out["ok"] is False
     assert "missing" in out["error"].lower()
     assert kalshi_client.cluster_probe_state()["checked"] is True
+
+# ---------------------------------------------------------------------------
+# get_market_candlesticks
+# ---------------------------------------------------------------------------
+
+
+def test_get_market_candlesticks_signs_and_paths(settings, rsa_key):
+    key, _ = rsa_key
+    ticker = "KXNFL-25NOV23DETHGB-DET"
+    expected_path = (
+        "/trade-api/v2/series/KXNFL/markets/KXNFL-25NOV23DETHGB-DET/candlesticks"
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "GET"
+        assert request.url.path == expected_path
+        assert request.url.params.get("start_ts") == "100"
+        assert request.url.params.get("end_ts") == "200"
+        assert request.url.params.get("period_interval") == "1"
+        _verify_auth_headers(request, key.public_key(), "GET", expected_path)
+        return httpx.Response(
+            200,
+            json={
+                "candlesticks": [
+                    {
+                        "end_period_ts": 150,
+                        "price": {
+                            "open": 50, "high": 55, "low": 45,
+                            "close": 52, "mean": 51, "previous": 49,
+                        },
+                        "volume": 10,
+                        "open_interest": 100,
+                    }
+                ],
+                "ticker": ticker,
+            },
+        )
+
+    c = _make_client(settings, handler)
+    out = _run(
+        c.get_market_candlesticks(
+            ticker, start_ts=100, end_ts=200, period_interval=1
+        )
+    )
+    _run(c.aclose())
+    assert out["ticker"] == ticker
+    assert len(out["candlesticks"]) == 1
+    assert out["candlesticks"][0]["price"]["mean"] == 51
+
+
+def test_get_market_candlesticks_rejects_ticker_without_series(settings):
+    c = _make_client(settings, lambda _r: httpx.Response(200, json={}))
+    with pytest.raises(kalshi_client.KalshiAPIError) as exc:
+        _run(c.get_market_candlesticks("BADTICKER", start_ts=1, end_ts=2))
+    _run(c.aclose())
+    assert "series ticker" in str(exc.value)

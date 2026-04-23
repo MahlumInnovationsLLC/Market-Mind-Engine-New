@@ -156,6 +156,46 @@ class KalshiClient:
     async def get_market(self, ticker: str) -> dict[str, Any]:
         return await self._request("GET", f"/markets/{ticker}")
 
+    async def get_market_candlesticks(
+        self,
+        ticker: str,
+        *,
+        start_ts: int,
+        end_ts: int,
+        period_interval: int = 1,
+    ) -> dict[str, Any]:
+        """Fetch market price history (candlesticks) for ``ticker``.
+
+        Kalshi exposes per-market candlesticks at
+        ``GET /series/{series_ticker}/markets/{ticker}/candlesticks``.
+        ``period_interval`` is the bar size in minutes — Kalshi accepts
+        ``1``, ``60``, or ``1440``. ``start_ts`` / ``end_ts`` are unix
+        epoch seconds (the venue caps the returned window to ~5000
+        bars per call).
+
+        The returned dict carries a ``candlesticks`` list whose entries
+        have at least ``end_period_ts`` and a ``price`` block with
+        ``open``/``high``/``low``/``close``/``mean`` in cents (0..100).
+        Callers that just want a market-vs-model overlay should use
+        ``price.mean`` (or ``price.close`` when ``mean`` is null —
+        Kalshi nulls it for empty windows).
+        """
+        series_ticker = (ticker or "").split("-", 1)[0]
+        if not series_ticker or "-" not in (ticker or ""):
+            raise KalshiAPIError(
+                0, None, f"cannot derive series ticker from {ticker!r}"
+            )
+        params = {
+            "start_ts": int(start_ts),
+            "end_ts": int(end_ts),
+            "period_interval": int(period_interval),
+        }
+        return await self._request(
+            "GET",
+            f"/series/{series_ticker}/markets/{ticker}/candlesticks",
+            params=params,
+        )
+
     async def list_markets(self, *, limit: int = 50, status: str | None = "open") -> dict[str, Any]:
         params: dict[str, Any] = {"limit": limit}
         if status:
