@@ -185,6 +185,8 @@ PROTECTED_MUTATING_ENDPOINTS: tuple[tuple[str, str], ...] = (
     # Task #225 — admin-triggered historical entertainment-signal backfill.
     ("POST", "/api/admin/entertainment/backfill"),
     ("POST", "/api/admin/orchestrator/run-cycle"),
+    # Admin-triggered out-of-band feed poll (commit 6899fc1).
+    ("POST", "/api/admin/feeds/{name}/poll-now"),
     ("GET",  "/api/admin/elo/status"),
     ("POST", "/api/admin/elo/run-cycle"),
     ("POST", "/api/admin/models/active"),
