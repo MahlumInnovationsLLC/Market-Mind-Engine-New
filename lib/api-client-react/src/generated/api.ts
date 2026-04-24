@@ -82,6 +82,7 @@ import type {
   TradeDetail,
   TradeList,
   TradingCycleList,
+  UpgradeRequiredError,
   UserSubscription,
   VerticalPerformance,
   VerticalVisibility,
@@ -693,7 +694,7 @@ export const getGetTradeDetailQueryKey = (tradeRef: string) => {
 
 export const getGetTradeDetailQueryOptions = <
   TData = Awaited<ReturnType<typeof getTradeDetail>>,
-  TError = ErrorType<void>,
+  TError = ErrorType<UpgradeRequiredError | void>,
 >(
   tradeRef: string,
   options?: {
@@ -729,7 +730,7 @@ export const getGetTradeDetailQueryOptions = <
 export type GetTradeDetailQueryResult = NonNullable<
   Awaited<ReturnType<typeof getTradeDetail>>
 >;
-export type GetTradeDetailQueryError = ErrorType<void>;
+export type GetTradeDetailQueryError = ErrorType<UpgradeRequiredError | void>;
 
 /**
  * @summary Single trade + market-price-vs-model-probability time series
@@ -737,7 +738,7 @@ export type GetTradeDetailQueryError = ErrorType<void>;
 
 export function useGetTradeDetail<
   TData = Awaited<ReturnType<typeof getTradeDetail>>,
-  TError = ErrorType<void>,
+  TError = ErrorType<UpgradeRequiredError | void>,
 >(
   tradeRef: string,
   options?: {

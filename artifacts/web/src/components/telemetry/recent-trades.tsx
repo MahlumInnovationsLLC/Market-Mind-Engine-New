@@ -129,10 +129,6 @@ export default function RecentTrades() {
   }
 
   const live = pipeline.status === "open";
-  // `delayed` / `delay_minutes` are emitted by the backend for free-tier
-  // callers and aren't yet part of the OpenAPI schema, so we read them
-  // through a structural cast rather than regen-ing the client.
-  const meta = data as { delayed?: boolean; delay_minutes?: number } | undefined;
 
   // Pills always include "All"; per-venue pills appear when the venue
   // is present in the current feed OR currently selected (so the
@@ -155,9 +151,9 @@ export default function RecentTrades() {
 
   return (
     <div className="border border-border bg-card overflow-hidden flex flex-col h-[500px]">
-      {meta?.delayed ? (
+      {data?.delayed ? (
         <DelayedSignalsBanner
-          delayMinutes={meta.delay_minutes}
+          delayMinutes={data.delay_minutes}
           testId="banner-recent-trades-delayed"
         />
       ) : null}

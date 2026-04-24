@@ -141,6 +141,14 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/TradeDetail" }
+        "402":
+          description: >-
+            Free-tier caller has exhausted the daily distinct-market
+            quota. Body wraps the upsell payload in FastAPI's standard
+            ``detail`` envelope.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/UpgradeRequiredError" }
         "404":
           description: No trade matched
 
@@ -962,6 +970,21 @@ components:
         items:
           type: array
           items: { $ref: "#/components/schemas/Trade" }
+        tier:
+          type: string
+          nullable: true
+          description: Caller's effective subscription tier (free, pro, elite, founder).
+        delayed:
+          type: boolean
+          description: >-
+            True when the response was filtered through the free-tier
+            15-minute signal delay; rows newer than `delay_minutes` ago
+            were dropped. Always false for Pro+/founder callers.
+        delay_minutes:
+          type: integer
+          description: >-
+            Delay window applied when `delayed` is true. 0 when the
+            response is undelayed.
       required: [items]
 
     CalibrationBucket:
@@ -1331,6 +1354,17 @@ components:
           type: array
           items: { $ref: "#/components/schemas/SwarmDebate" }
         tier: { type: string, nullable: true }
+        delayed:
+          type: boolean
+          description: >-
+            True when the response was filtered through the free-tier
+            15-minute signal delay; rows newer than `delay_minutes` ago
+            were dropped. Always false for Pro+/founder callers.
+        delay_minutes:
+          type: integer
+          description: >-
+            Delay window applied when `delayed` is true. 0 when the
+            response is undelayed.
       required: [items]
 
     LiveExecuteState:
@@ -1427,7 +1461,80 @@ components:
         series:
           type: array
           items: { $ref: "#/components/schemas/TradeDetailPoint" }
+        delayed:
+          type: boolean
+          description: >-
+            True when the trade + series were filtered through the
+            free-tier 15-minute signal delay. Always false / absent for
+            Pro+/founder callers.
+        delay_minutes:
+          type: integer
+          description: >-
+            Delay window applied when `delayed` is true. Absent for
+            undelayed responses.
+        quota:
+          allOf:
+            - $ref: "#/components/schemas/TradeDetailQuota"
+          nullable: true
+          description: >-
+            Free-tier daily distinct-market quota snapshot taken after
+            recording this view. Present only for free callers.
       required: [trade, series]
+
+    TradeDetailQuota:
+      type: object
+      description: >-
+        Per-request snapshot of the free-tier distinct-market quota
+        attached to a successful trade-detail response. Mirrors the
+        backend's `enforce_market_view_quota` accounting.
+      properties:
+        tier:
+          type: string
+          description: Caller's effective subscription tier at time of read.
+        viewed_today:
+          type: integer
+          description: Distinct markets the caller has opened today (UTC).
+        limit:
+          type: integer
+          description: Daily distinct-market limit for the free tier.
+      required: [tier, viewed_today, limit]
+
+    UpgradeRequiredPayload:
+      type: object
+      description: >-
+        Structured 402 body returned when a free-tier caller exhausts
+        the daily distinct-market quota. See `app.free_tier`.
+      properties:
+        error:
+          type: string
+          enum: [upgrade_required]
+        reason:
+          type: string
+          description: Machine-readable reason code (e.g. `free_tier_daily_market_limit`).
+        limit:
+          type: integer
+          description: Daily distinct-market limit the caller hit.
+        viewed_today:
+          type: integer
+          description: Distinct markets the caller has already opened today (UTC).
+        market_id:
+          type: string
+          nullable: true
+          description: Market the caller tried to open when the quota refused.
+        resets_at:
+          type: string
+          description: When the quota resets, e.g. `00:00 UTC`.
+      required: [error, reason, limit, viewed_today, resets_at]
+
+    UpgradeRequiredError:
+      type: object
+      description: >-
+        FastAPI envelope for the 402 upgrade-required response. The
+        meaningful payload lives under `detail`.
+      properties:
+        detail:
+          $ref: "#/components/schemas/UpgradeRequiredPayload"
+      required: [detail]
 
     SearchTradeHit:
       type: object

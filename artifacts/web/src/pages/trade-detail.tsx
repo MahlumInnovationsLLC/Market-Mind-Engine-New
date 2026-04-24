@@ -16,10 +16,9 @@ import {
   ApiError,
   getGetTradeDetailQueryKey,
   useGetTradeDetail,
-} from "@workspace/api-client-react";
-import UpgradeRequiredModal, {
   type UpgradeRequiredPayload,
-} from "@/components/upgrade-required-modal";
+} from "@workspace/api-client-react";
+import UpgradeRequiredModal from "@/components/upgrade-required-modal";
 
 function fmtMoney(n: number | null | undefined): string {
   if (n === null || n === undefined) return "—";
@@ -58,27 +57,12 @@ function fmtTickTime(t: string): string {
 
 function extractUpgradePayload(err: unknown): UpgradeRequiredPayload | null {
   if (!(err instanceof ApiError) || err.status !== 402) return null;
-  // Backend nests the payload under FastAPI's `detail` key.
-  const data = err.data as { detail?: unknown } | null | undefined;
-  const candidate =
-    data && typeof data === "object" && "detail" in data
-      ? (data as { detail: unknown }).detail
-      : data;
-  if (!candidate || typeof candidate !== "object") return null;
-  const c = candidate as Record<string, unknown>;
-  if (c.error !== "upgrade_required") return null;
-  return {
-    error: typeof c.error === "string" ? c.error : undefined,
-    reason: typeof c.reason === "string" ? c.reason : undefined,
-    limit: typeof c.limit === "number" ? c.limit : undefined,
-    viewed_today:
-      typeof c.viewed_today === "number" ? c.viewed_today : undefined,
-    market_id:
-      typeof c.market_id === "string" || c.market_id === null
-        ? (c.market_id as string | null)
-        : undefined,
-    resets_at: typeof c.resets_at === "string" ? c.resets_at : undefined,
-  };
+  // Backend nests the payload under FastAPI's `detail` key; the
+  // generated `UpgradeRequiredError` schema describes that envelope.
+  const data = err.data;
+  const detail = data?.detail;
+  if (!detail || detail.error !== "upgrade_required") return null;
+  return detail;
 }
 
 export default function TradeDetailPage() {
@@ -127,7 +111,7 @@ export default function TradeDetailPage() {
     );
   }
   if (isError) {
-    const status = (error as { status?: number } | null)?.status;
+    const status = error instanceof ApiError ? error.status : undefined;
     if (upgradePayload) {
       return (
         <Frame>

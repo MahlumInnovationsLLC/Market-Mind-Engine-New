@@ -166,6 +166,24 @@ export const GetRecentTradesResponse = zod.object({
       market_title: zod.string().nullish(),
     }),
   ),
+  tier: zod
+    .string()
+    .nullish()
+    .describe(
+      "Caller's effective subscription tier (free, pro, elite, founder).",
+    ),
+  delayed: zod
+    .boolean()
+    .optional()
+    .describe(
+      "True when the response was filtered through the free-tier 15-minute signal delay; rows newer than `delay_minutes` ago were dropped. Always false for Pro+\/founder callers.",
+    ),
+  delay_minutes: zod
+    .number()
+    .optional()
+    .describe(
+      "Delay window applied when `delayed` is true. 0 when the response is undelayed.",
+    ),
 });
 
 /**
@@ -266,6 +284,37 @@ export const GetTradeDetailResponse = zod.object({
       })
       .describe("One sample of (market price, model probability) at time t"),
   ),
+  delayed: zod
+    .boolean()
+    .optional()
+    .describe(
+      "True when the trade + series were filtered through the free-tier 15-minute signal delay. Always false \/ absent for Pro+\/founder callers.",
+    ),
+  delay_minutes: zod
+    .number()
+    .optional()
+    .describe(
+      "Delay window applied when `delayed` is true. Absent for undelayed responses.",
+    ),
+  quota: zod
+    .object({
+      tier: zod
+        .string()
+        .describe("Caller's effective subscription tier at time of read."),
+      viewed_today: zod
+        .number()
+        .describe("Distinct markets the caller has opened today (UTC)."),
+      limit: zod
+        .number()
+        .describe("Daily distinct-market limit for the free tier."),
+    })
+    .describe(
+      "Per-request snapshot of the free-tier distinct-market quota attached to a successful trade-detail response. Mirrors the backend's `enforce_market_view_quota` accounting.",
+    )
+    .nullish()
+    .describe(
+      "Free-tier daily distinct-market quota snapshot taken after recording this view. Present only for free callers.",
+    ),
 });
 
 /**
@@ -606,6 +655,18 @@ export const GetRecentDebatesResponse = zod.object({
     }),
   ),
   tier: zod.string().nullish(),
+  delayed: zod
+    .boolean()
+    .optional()
+    .describe(
+      "True when the response was filtered through the free-tier 15-minute signal delay; rows newer than `delay_minutes` ago were dropped. Always false for Pro+\/founder callers.",
+    ),
+  delay_minutes: zod
+    .number()
+    .optional()
+    .describe(
+      "Delay window applied when `delayed` is true. 0 when the response is undelayed.",
+    ),
 });
 
 /**

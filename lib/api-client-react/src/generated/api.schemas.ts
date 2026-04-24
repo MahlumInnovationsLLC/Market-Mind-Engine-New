@@ -138,6 +138,12 @@ export interface MarketTitle {
 
 export interface TradeList {
   items: Trade[];
+  /** Caller's effective subscription tier (free, pro, elite, founder). */
+  tier?: string | null;
+  /** True when the response was filtered through the free-tier 15-minute signal delay; rows newer than `delay_minutes` ago were dropped. Always false for Pro+/founder callers. */
+  delayed?: boolean;
+  /** Delay window applied when `delayed` is true. 0 when the response is undelayed. */
+  delay_minutes?: number;
 }
 
 export interface CalibrationBucket {
@@ -422,6 +428,10 @@ export interface SwarmDebate {
 export interface SwarmDebateList {
   items: SwarmDebate[];
   tier?: string | null;
+  /** True when the response was filtered through the free-tier 15-minute signal delay; rows newer than `delay_minutes` ago were dropped. Always false for Pro+/founder callers. */
+  delayed?: boolean;
+  /** Delay window applied when `delayed` is true. 0 when the response is undelayed. */
+  delay_minutes?: number;
 }
 
 export interface LiveExecuteState {
@@ -510,9 +520,58 @@ export interface TradeDetailRow {
   executed_at?: string | null;
 }
 
+/**
+ * Per-request snapshot of the free-tier distinct-market quota attached to a successful trade-detail response. Mirrors the backend's `enforce_market_view_quota` accounting.
+ */
+export interface TradeDetailQuota {
+  /** Caller's effective subscription tier at time of read. */
+  tier: string;
+  /** Distinct markets the caller has opened today (UTC). */
+  viewed_today: number;
+  /** Daily distinct-market limit for the free tier. */
+  limit: number;
+}
+
 export interface TradeDetail {
   trade: TradeDetailRow;
   series: TradeDetailPoint[];
+  /** True when the trade + series were filtered through the free-tier 15-minute signal delay. Always false / absent for Pro+/founder callers. */
+  delayed?: boolean;
+  /** Delay window applied when `delayed` is true. Absent for undelayed responses. */
+  delay_minutes?: number;
+  /** Free-tier daily distinct-market quota snapshot taken after recording this view. Present only for free callers. */
+  quota?: TradeDetailQuota | null;
+}
+
+export type UpgradeRequiredPayloadError =
+  (typeof UpgradeRequiredPayloadError)[keyof typeof UpgradeRequiredPayloadError];
+
+export const UpgradeRequiredPayloadError = {
+  upgrade_required: "upgrade_required",
+} as const;
+
+/**
+ * Structured 402 body returned when a free-tier caller exhausts the daily distinct-market quota. See `app.free_tier`.
+ */
+export interface UpgradeRequiredPayload {
+  error: UpgradeRequiredPayloadError;
+  /** Machine-readable reason code (e.g. `free_tier_daily_market_limit`). */
+  reason: string;
+  /** Daily distinct-market limit the caller hit. */
+  limit: number;
+  /** Distinct markets the caller has already opened today (UTC). */
+  viewed_today: number;
+  /** Market the caller tried to open when the quota refused. */
+  market_id?: string | null;
+  /** When the quota resets, e.g. `00:00 UTC`. */
+  resets_at: string;
+}
+
+/**
+ * FastAPI envelope for the 402 upgrade-required response. The meaningful payload lives under `detail`.
+ */
+export interface UpgradeRequiredError {
+  detail: UpgradeRequiredPayload;
 }
 
 export interface SearchTradeHit {

@@ -9,4 +9,10 @@ import type { Trade } from "./trade";
 
 export interface TradeList {
   items: Trade[];
+  /** Caller's effective subscription tier (free, pro, elite, founder). */
+  tier?: string | null;
+  /** True when the response was filtered through the free-tier 15-minute signal delay; rows newer than `delay_minutes` ago were dropped. Always false for Pro+/founder callers. */
+  delayed?: boolean;
+  /** Delay window applied when `delayed` is true. 0 when the response is undelayed. */
+  delay_minutes?: number;
 }

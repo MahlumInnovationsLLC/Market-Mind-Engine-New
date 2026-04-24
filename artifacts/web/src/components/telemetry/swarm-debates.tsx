@@ -88,16 +88,12 @@ export default function SwarmDebates() {
 
   const items = data?.items ?? [];
   const live = llm.status === "open";
-  // `delayed` / `delay_minutes` are emitted by the backend for free-tier
-  // callers and aren't yet part of the OpenAPI schema; surface them via
-  // a structural cast.
-  const meta = data as { delayed?: boolean; delay_minutes?: number } | undefined;
 
   return (
     <div className="border border-border bg-card flex flex-col">
-      {meta?.delayed ? (
+      {data?.delayed ? (
         <DelayedSignalsBanner
-          delayMinutes={meta.delay_minutes}
+          delayMinutes={data.delay_minutes}
           testId="banner-recent-debates-delayed"
         />
       ) : null}

@@ -6,9 +6,16 @@
  * OpenAPI spec version: 0.1.0
  */
 import type { TradeDetailPoint } from "./tradeDetailPoint";
+import type { TradeDetailQuota } from "./tradeDetailQuota";
 import type { TradeDetailRow } from "./tradeDetailRow";
 
 export interface TradeDetail {
   trade: TradeDetailRow;
   series: TradeDetailPoint[];
+  /** True when the trade + series were filtered through the free-tier 15-minute signal delay. Always false / absent for Pro+/founder callers. */
+  delayed?: boolean;
+  /** Delay window applied when `delayed` is true. Absent for undelayed responses. */
+  delay_minutes?: number;
+  /** Free-tier daily distinct-market quota snapshot taken after recording this view. Present only for free callers. */
+  quota?: TradeDetailQuota | null;
 }
