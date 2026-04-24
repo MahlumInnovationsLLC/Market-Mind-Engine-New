@@ -125,7 +125,7 @@ function VerticalCard({
   return (
     <Link
       href={`/verticals?selected=${encodeURIComponent(slug)}`}
-      data-testid={`card-vertical-${slug}`}
+      data-testid={`card-vertical-overview-${slug}`}
       className="block focus:outline-none"
     >
       <GlassCard

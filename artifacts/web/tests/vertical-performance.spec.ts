@@ -8,8 +8,10 @@ import { clerk, clerkSetup } from "@clerk/testing/playwright";
  * Walks the operator-side widget mounted on `/app`:
  *
  *   - panel-vertical-performance container is visible.
- *   - At least one `card-vertical-{slug}` renders inside the panel with the
- *     widget's WIN%/TRADES/BRIER metric labels.
+ *   - At least one `card-vertical-perf-{slug}` renders with the widget's
+ *     WIN%/TRADES/BRIER metric labels. The widget owns the `-perf-`
+ *     namespace so it doesn't collide with the dashboard's
+ *     `card-vertical-overview-{slug}` strip (Task #408).
  *   - Clicking each `button-range-{7,30,90}` fires a matching
  *     `/api/dashboard/vertical-performance?days=N` request and updates the
  *     active-button styling (border-primary).
@@ -63,8 +65,10 @@ test.describe("vertical-performance widget", () => {
 
     // Collect the verticals the widget actually rendered (the API decides
     // which slugs are present — we don't assume sports/weather/crypto are
-    // all populated in this dev DB).
-    const cards = panel.locator('[data-testid^="card-vertical-"]');
+    // all populated in this dev DB). The widget owns the `card-vertical-perf-`
+    // namespace so this no longer needs to be scoped inside `panel` to
+    // disambiguate from the dashboard's `card-vertical-overview-` strip.
+    const cards = page.locator('[data-testid^="card-vertical-perf-"]');
     await expect(cards.first()).toBeVisible({ timeout: 20_000 });
     const cardCount = await cards.count();
     expect(cardCount).toBeGreaterThan(0);
@@ -124,18 +128,18 @@ test.describe("vertical-performance widget", () => {
     const panel = page.getByTestId("panel-vertical-performance");
     await expect(panel).toBeVisible({ timeout: 20_000 });
 
-    const cards = panel.locator('[data-testid^="card-vertical-"]');
+    const cards = page.locator('[data-testid^="card-vertical-perf-"]');
     await expect(cards.first()).toBeVisible({ timeout: 20_000 });
     const cardCount = await cards.count();
     expect(cardCount).toBeGreaterThan(0);
 
-    // Pull the slug suffix from each card-vertical-* testid and confirm
-    // the matching calibration and PIT panels are mounted. Each panel
-    // either renders a Recharts <svg> or the NO_SETTLED_DATA copy.
+    // Pull the slug suffix from each card-vertical-perf-* testid and
+    // confirm the matching calibration and PIT panels are mounted. Each
+    // panel either renders a Recharts <svg> or the NO_SETTLED_DATA copy.
     const slugs: string[] = [];
     for (let i = 0; i < cardCount; i += 1) {
       const tid = await cards.nth(i).getAttribute("data-testid");
-      if (tid) slugs.push(tid.replace(/^card-vertical-/, ""));
+      if (tid) slugs.push(tid.replace(/^card-vertical-perf-/, ""));
     }
     expect(slugs.length).toBe(cardCount);
 

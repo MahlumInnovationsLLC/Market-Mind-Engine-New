@@ -136,7 +136,7 @@ function VerticalCard({ entry }: { entry: VerticalPerformanceEntry }) {
   return (
     <div
       className="border border-border bg-card p-3"
-      data-testid={`card-vertical-${entry.vertical}`}
+      data-testid={`card-vertical-perf-${entry.vertical}`}
     >
       <div className="flex justify-between items-baseline mb-2">
         <h3 className="text-xs uppercase tracking-widest font-bold text-primary">
