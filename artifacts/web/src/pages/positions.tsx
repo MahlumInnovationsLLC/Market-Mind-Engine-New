@@ -12,6 +12,8 @@ import { apiFetch } from "@/lib/api";
 
 type KalshiPosition = {
   market_ticker: string;
+  market_title: string | null;
+  bet_type: "YES" | "NO" | "FLAT";
   position: number;
   market_exposure_cents: number;
   realized_pnl_cents: number;
@@ -131,6 +133,8 @@ function parseCommodityTicker(
 
 type Row = {
   market: string;
+  marketTitle: string | null;
+  betType: "YES" | "NO" | "FLAT";
   side: string | null;
   qty: number;
   entry: number | null;
@@ -212,6 +216,8 @@ export default function PositionsPage() {
         : null;
       return {
         market: p.market_ticker,
+        marketTitle: p.market_title ?? null,
+        betType: p.bet_type ?? "FLAT",
         side: latest?.side ?? null,
         qty: p.position,
         entry,
@@ -409,17 +415,27 @@ export default function PositionsPage() {
                       role={clickable ? "link" : undefined}
                     >
                       <td
-                        className="py-2 pr-2 max-w-[260px] font-mono text-[11px]"
+                        className="py-2 pr-2 max-w-[320px]"
                         title={r.market}
                       >
-                        <div className="truncate">
-                          {r.market}
+                        <div className="flex items-baseline gap-2">
+                          <div className="truncate text-[12px] text-foreground">
+                            {r.marketTitle ?? r.market}
+                          </div>
                           {r.vertical && (
-                            <span className="ml-2 text-[10px] uppercase text-muted-foreground">
+                            <span className="shrink-0 text-[10px] uppercase text-muted-foreground">
                               {r.vertical}
                             </span>
                           )}
                         </div>
+                        {r.marketTitle && (
+                          <div
+                            className="truncate font-mono text-[10px] text-muted-foreground"
+                            data-testid={`pos-row-ticker-${r.market}`}
+                          >
+                            {r.market}
+                          </div>
+                        )}
                         {r.vertical === "commodities" && (() => {
                           const parsed = parseCommodityTicker(r.market);
                           if (!parsed) return null;
@@ -442,8 +458,21 @@ export default function PositionsPage() {
                           );
                         })()}
                       </td>
-                      <td className="py-2 uppercase">{r.side ?? "—"}</td>
-                      <td className="py-2 text-right tabular-nums">{r.qty}</td>
+                      <td className="py-2">
+                        <span
+                          className={`border px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-widest ${
+                            r.betType === "YES"
+                              ? "border-win/40 bg-win/5 text-win"
+                              : r.betType === "NO"
+                              ? "border-loss/40 bg-loss/5 text-loss"
+                              : "border-border text-muted-foreground"
+                          }`}
+                          data-testid={`pos-row-bet-${r.market}`}
+                        >
+                          {r.betType}
+                        </span>
+                      </td>
+                      <td className="py-2 text-right tabular-nums">{Math.abs(r.qty)}</td>
                       <td className="py-2 text-right tabular-nums">
                         {fmtMoney(r.entry)}
                       </td>

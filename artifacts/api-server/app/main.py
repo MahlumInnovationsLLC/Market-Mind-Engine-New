@@ -96,6 +96,7 @@ from .kalshi import (
     bus as kalshi_bus,
     client as kalshi_client_mod,
     lifecycle as kalshi_lifecycle,
+    market_titles as kalshi_market_titles,
     ws as kalshi_ws,
 )
 from .polymarket import (
@@ -5343,19 +5344,35 @@ async def kalshi_positions(limit: int = 100, _: object = Depends(require_auth)) 
             pos = await c.get_positions(limit=limit)
     except Exception as e:
         raise _kalshi_error_to_http(e)
-    return {
-        "items": [
-            {
-                "market_ticker": p.market_ticker,
-                "position": p.position,
-                "market_exposure_cents": p.market_exposure_cents,
-                "realized_pnl_cents": p.realized_pnl_cents,
-                "fees_paid_cents": p.fees_paid_cents,
-            }
-            for p in pos
-        ],
-        "count": len(pos),
-    }
+    # Enrich each position with a human-readable market title (cached
+    # in `market_title_cache`, falls back to Kalshi `/markets/{ticker}`)
+    # and a derived bet_type. The UI shows the title prominently and
+    # keeps the raw ticker as a small secondary line.
+    tickers = [p.market_ticker for p in pos if p.market_ticker]
+    titles: dict[str, str] = {}
+    if tickers:
+        try:
+            titles = await kalshi_market_titles.resolve_titles(tickers)
+        except Exception as e:
+            log.warning("market title enrichment failed for /api/kalshi/positions: %s", e)
+    items: list[dict[str, object]] = []
+    for p in pos:
+        if p.position > 0:
+            bet_type = "YES"
+        elif p.position < 0:
+            bet_type = "NO"
+        else:
+            bet_type = "FLAT"
+        items.append({
+            "market_ticker": p.market_ticker,
+            "market_title": titles.get(p.market_ticker),
+            "bet_type": bet_type,
+            "position": p.position,
+            "market_exposure_cents": p.market_exposure_cents,
+            "realized_pnl_cents": p.realized_pnl_cents,
+            "fees_paid_cents": p.fees_paid_cents,
+        })
+    return {"items": items, "count": len(pos)}
 
 
 @app.get("/api/kalshi/markets")
