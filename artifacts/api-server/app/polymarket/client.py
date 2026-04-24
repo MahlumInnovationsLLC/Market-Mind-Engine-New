@@ -221,6 +221,40 @@ class PolymarketClient:
     async def get_market(self, condition_id: str) -> dict[str, Any]:
         return await self._request("GET", f"/markets/{condition_id}", require_auth=False)
 
+    async def get_prices_history(
+        self,
+        token_id: str,
+        *,
+        start_ts: int,
+        end_ts: int,
+        fidelity: int = 60,
+    ) -> list[dict[str, Any]]:
+        """Pull historical trade prices for a single outcome token.
+
+        Wraps the public CLOB ``/prices-history`` endpoint, which returns
+        ``{"history": [{"t": <unix>, "p": <0..1>}, ...]}`` — Polymarket's
+        analogue of Kalshi's market candlesticks.
+
+        ``fidelity`` is the bar size in minutes (1 / 60 / 1440 to match
+        the Kalshi-side caller). Returns an empty list rather than
+        raising if the response doesn't include a history array.
+        """
+        data = await self._request(
+            "GET",
+            "/prices-history",
+            params={
+                "market": token_id,
+                "startTs": int(start_ts),
+                "endTs": int(end_ts),
+                "fidelity": int(fidelity),
+            },
+            require_auth=False,
+        )
+        if not isinstance(data, dict):
+            return []
+        history = data.get("history") or []
+        return [row for row in history if isinstance(row, dict)]
+
     async def list_markets(self, *, limit: int = 50, next_cursor: str | None = None) -> dict[str, Any]:
         params: dict[str, Any] = {"limit": limit}
         if next_cursor:

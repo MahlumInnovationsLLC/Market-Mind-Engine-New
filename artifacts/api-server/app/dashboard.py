@@ -15,6 +15,7 @@ from . import db
 from .kalshi import client as kalshi_client
 from .kalshi import tick_cache as kalshi_tick_cache
 from .kalshi.market_titles import resolve_titles as resolve_market_titles
+from .polymarket import client as polymarket_client
 
 
 log = logging.getLogger(__name__)
@@ -1107,6 +1108,171 @@ async def _fetch_market_price_history(
     return sorted(merged.values(), key=lambda p: p.get("t") or "")
 
 
+def _select_polymarket_token_id(
+    market: dict[str, Any] | None, trade_side: str | None
+) -> str | None:
+    """Pick the outcome token whose label matches the trade's side.
+
+    Polymarket's ``/prices-history`` is per-token, but ``trades.market_id``
+    stores the conditionId.  We resolve the conditionId via
+    ``get_market`` and match on the outcome label ('yes' / 'no'). Falls
+    back to the first non-empty token id so chart rendering still
+    proceeds for markets with custom outcome labels.
+    """
+    tokens = (market or {}).get("tokens") or []
+    side = (trade_side or "").strip().lower()
+    if side in ("yes", "no"):
+        for t in tokens:
+            outcome = str((t or {}).get("outcome") or "").strip().lower()
+            if outcome == side:
+                tid = (t or {}).get("token_id")
+                if tid:
+                    return str(tid)
+    for t in tokens:
+        tid = (t or {}).get("token_id")
+        if tid:
+            return str(tid)
+    return None
+
+
+def _polymarket_history_to_points(
+    history: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Normalise CLOB ``/prices-history`` rows into trade-detail points.
+
+    Output rows match the Kalshi-side shape from
+    :func:`kalshi_tick_cache.candles_to_points`: ISO-Z timestamp,
+    ``model_prob`` always ``None`` so the front-end keeps the model
+    line driven by debate snapshots, and ``market_price`` as a 0..1
+    fraction (Polymarket prices are already decimals so no conversion
+    is needed).
+    """
+    out: list[dict[str, Any]] = []
+    for row in history or []:
+        if not isinstance(row, dict):
+            continue
+        ts = row.get("t")
+        if not isinstance(ts, (int, float)):
+            continue
+        try:
+            price = float(row.get("p"))
+        except (TypeError, ValueError):
+            continue
+        out.append(
+            {
+                "t": kalshi_tick_cache._to_iso_z(int(ts)),
+                "model_prob": None,
+                "market_price": price,
+            }
+        )
+    return out
+
+
+async def _fetch_polymarket_market_price_history(
+    condition_id: str,
+    *,
+    trade_side: str | None,
+    executed_at: str | None,
+    debate_points: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Polymarket analogue of :func:`_fetch_market_price_history`.
+
+    Returns a list of ``{t, model_prob: None, market_price}`` dicts in
+    the same shape the swarm-debate series uses. Best-effort — silently
+    returns ``[]`` on any error (network, client construction, missing
+    outcome token, http failure) so the caller still falls back to the
+    debate-snapshot series.
+
+    The window mirrors the Kalshi helper: ``executed_at`` ± 60 minutes,
+    extended to cover the earliest/latest debate timestamps so the
+    merged series stays contiguous. Bar size scales with span (1m / 1h
+    / 1d) via :func:`_select_period_interval`.
+    """
+    if not condition_id:
+        return []
+    exec_ts = _parse_iso_z(executed_at)
+    debate_times: list[datetime] = []
+    for p in debate_points or []:
+        dt = _parse_iso_z(p.get("t"))
+        if dt is not None:
+            debate_times.append(dt)
+
+    if exec_ts is None and not debate_times:
+        return []
+
+    anchor = exec_ts or debate_times[0]
+    candidates_lo = [anchor - timedelta(minutes=60)]
+    candidates_hi = [anchor + timedelta(minutes=60)]
+    candidates_lo.extend(debate_times)
+    candidates_hi.extend(debate_times)
+    start_dt = min(candidates_lo)
+    end_dt = max(candidates_hi)
+    now = datetime.now(timezone.utc)
+    if end_dt > now:
+        end_dt = now
+    if start_dt >= end_dt:
+        return []
+
+    span_min = (end_dt - start_dt).total_seconds() / 60.0
+    fidelity = _select_period_interval(span_min)
+    start_ts = int(start_dt.timestamp())
+    end_ts = int(end_dt.timestamp())
+
+    try:
+        client = polymarket_client.PolymarketClient()
+    except Exception as e:
+        log.info(
+            "trade detail polymarket history: client unavailable: %s", e
+        )
+        return []
+
+    try:
+        try:
+            market = await client.get_market(condition_id)
+        except polymarket_client.PolymarketAPIError as e:
+            log.info(
+                "polymarket get_market(%s) failed: http %s",
+                condition_id, e.status,
+            )
+            return []
+        except Exception as e:
+            log.info("polymarket get_market(%s) error: %s", condition_id, e)
+            return []
+
+        token_id = _select_polymarket_token_id(market, trade_side)
+        if not token_id:
+            log.info(
+                "polymarket prices-history skipped: no outcome token "
+                "for condition %s side=%s",
+                condition_id, trade_side,
+            )
+            return []
+
+        try:
+            history = await client.get_prices_history(
+                token_id,
+                start_ts=start_ts,
+                end_ts=end_ts,
+                fidelity=fidelity,
+            )
+        except polymarket_client.PolymarketAPIError as e:
+            log.info(
+                "polymarket prices-history(%s) failed: http %s",
+                token_id, e.status,
+            )
+            return []
+        except Exception as e:
+            log.info("polymarket prices-history(%s) error: %s", token_id, e)
+            return []
+    finally:
+        try:
+            await client.aclose()
+        except Exception:
+            pass
+
+    return _polymarket_history_to_points(history)
+
+
 async def get_trade_detail(trade_ref: str) -> dict[str, Any] | None:
     """Return a single trade row + market-vs-model time series.
 
@@ -1213,12 +1379,26 @@ async def get_trade_detail(trade_ref: str) -> dict[str, Any] | None:
         except Exception as e:
             log.warning("trade detail series failed: %s", e)
 
+        # Pull continuous market-price history from whichever venue the
+        # trade actually executed on so Polymarket trade-detail pages
+        # don't get stuck with the sparse debate-snapshot fallback.
+        # Unknown / missing exchange falls back to the Kalshi path
+        # (historical default before the venue column was populated).
+        exchange = (trade.get("exchange") or "").strip().lower()
         try:
-            tick_points = await _fetch_market_price_history(
-                market_id,
-                executed_at=trade.get("executed_at"),
-                debate_points=series,
-            )
+            if exchange == "polymarket":
+                tick_points = await _fetch_polymarket_market_price_history(
+                    market_id,
+                    trade_side=trade.get("side"),
+                    executed_at=trade.get("executed_at"),
+                    debate_points=series,
+                )
+            else:
+                tick_points = await _fetch_market_price_history(
+                    market_id,
+                    executed_at=trade.get("executed_at"),
+                    debate_points=series,
+                )
         except Exception as e:
             log.warning("trade detail candlestick overlay failed: %s", e)
             tick_points = []
