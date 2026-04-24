@@ -2255,6 +2255,67 @@ async def admin_entertainment_promote_kelly(
     return status.as_dict()
 
 
+class EntertainmentBackfillRequest(BaseModel):
+    days: int = Field(
+        default=730, ge=7, le=365 * 5,
+        description="Lookback window in days (7..1825).",
+    )
+
+
+@app.post("/api/admin/entertainment/backfill")
+async def admin_entertainment_backfill_start(
+    body: EntertainmentBackfillRequest | None = None,
+    actor: AuthedUser = Depends(require_admin),
+) -> dict[str, object]:
+    """Trigger a one-shot historical backfill of entertainment signals.
+
+    Walks each registered upstream archive (Box Office Mojo weekend,
+    Spotify weekly chart download, Rotten Tomatoes browse archive,
+    awards historical winners JSON) back ``days`` days (default 730 —
+    two years) and upserts the results into ``entertainment_signals``
+    so the entertainment hybrid model has calibrated priors from
+    cycle 1 instead of falling back to its 0.5 default.
+
+    Idempotent: safe to re-run.  Returns 409 if another backfill is
+    already in flight.
+    """
+    from .entertainment import backfill as _ent_backfill
+    if _ent_backfill.is_running():
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": "backfill_already_running",
+                "status": _ent_backfill.get_status(),
+            },
+        )
+    days = (body.days if body is not None
+            else _ent_backfill.DEFAULT_BACKFILL_DAYS)
+
+    async def _runner() -> None:
+        try:
+            await _ent_backfill.run_backfill(days=days)
+        except Exception:
+            log.exception("entertainment backfill failed")
+
+    asyncio.create_task(_runner(), name="entertainment-backfill")
+    return {"started": True, "days": days,
+            "status": _ent_backfill.get_status()}
+
+
+@app.get("/api/admin/entertainment/backfill-status")
+async def admin_entertainment_backfill_status(
+    actor: AuthedUser = Depends(require_admin),
+) -> dict[str, object]:
+    """Snapshot of the in-process backfill plus the most recent
+    persisted run (so the dashboard panel survives restarts)."""
+    from .entertainment import backfill as _ent_backfill
+    persisted = await _ent_backfill.load_persisted_status()
+    return {
+        "current": _ent_backfill.get_status(),
+        "last_persisted": persisted,
+    }
+
+
 @app.get("/api/entertainment/calendar")
 async def entertainment_calendar(
     within_hours: float = 168.0,
@@ -2269,6 +2330,7 @@ async def entertainment_calendar(
     from datetime import datetime, timezone
     from .entertainment.signals import settled_history_for_type, upcoming_signals
     from .entertainment.model import at_baseline_probability
+    from .entertainment import backfill as _ent_backfill
 
     rows = await upcoming_signals(within_hours=within_hours, limit=limit)
     history_cache: dict[str, list] = {}
@@ -2328,7 +2390,8 @@ async def entertainment_calendar(
             "seconds_until_event": seconds_until,
             "imminent": imminent,
         })
-    return {"items": items}
+    backfill_status = await _ent_backfill.load_persisted_status()
+    return {"items": items, "backfill": backfill_status}
 
 
 @app.get("/api/entertainment/awards-leaderboard")

@@ -17,9 +17,34 @@ type CalendarItem = {
   imminent: boolean;
 };
 
+type BackfillStatus = {
+  state: string;
+  started_at: string | null;
+  completed_at: string | null;
+  duration_seconds: number;
+  days: number;
+  rows_by_source: Record<string, number>;
+  rows_total: number;
+  sources_failed: string[];
+  last_error: string | null;
+};
+
 type CalendarResponse = {
   items: CalendarItem[];
+  backfill: BackfillStatus | null;
 };
+
+function fmtCompletedAt(iso: string | null): string {
+  if (!iso) return "never";
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "never";
+  const diffMs = Date.now() - d.getTime();
+  const mins = Math.max(0, Math.floor(diffMs / 60_000));
+  if (mins < 1) return "just now";
+  if (mins < 60) return `${mins}m ago`;
+  if (mins < 60 * 24) return `${Math.floor(mins / 60)}h ago`;
+  return `${Math.floor(mins / 60 / 24)}d ago`;
+}
 
 function fmtCountdown(seconds: number | null): string {
   if (seconds === null) return "—";
@@ -64,6 +89,10 @@ export default function EntertainmentCalendarPanel() {
   });
 
   const items = data?.items ?? [];
+  const backfill = data?.backfill ?? null;
+  const backfillSources = backfill
+    ? Object.entries(backfill.rows_by_source)
+    : [];
 
   return (
     <section className="border border-border rounded p-3 bg-card">
@@ -75,6 +104,39 @@ export default function EntertainmentCalendarPanel() {
           next 14d · box-office · awards · charts
         </span>
       </header>
+      <div className="mb-2 text-[10px] font-mono text-muted-foreground flex flex-wrap items-center gap-x-3 gap-y-1">
+        <span className="uppercase tracking-wider text-primary/70">
+          Backfill
+        </span>
+        {backfill ? (
+          <>
+            <span title={backfill.completed_at ?? ""}>
+              last: {fmtCompletedAt(backfill.completed_at)}
+            </span>
+            <span>·</span>
+            <span>{backfill.days}d window</span>
+            <span>·</span>
+            <span>{backfill.rows_total.toLocaleString()} rows</span>
+            {backfillSources.length > 0 && (
+              <>
+                <span>·</span>
+                {backfillSources.map(([src, n]) => (
+                  <span key={src} className="whitespace-nowrap">
+                    {src}: {n.toLocaleString()}
+                  </span>
+                ))}
+              </>
+            )}
+            {backfill.sources_failed.length > 0 && (
+              <span className="text-loss">
+                failed: {backfill.sources_failed.join(", ")}
+              </span>
+            )}
+          </>
+        ) : (
+          <span className="text-warn">never run — model on 0.5 fallback</span>
+        )}
+      </div>
       {isLoading && (
         <p className="text-xs text-muted-foreground">Loading…</p>
       )}

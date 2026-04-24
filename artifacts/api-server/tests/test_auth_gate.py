@@ -99,6 +99,8 @@ PROTECTED_ROUTES: tuple[str, ...] = (
     "/api/admin/elections/promotion-status",
     "/api/admin/events-econ/promotion-status",
     "/api/admin/entertainment/promotion-status",
+    # Task #225 — historical entertainment-signal backfill status surface.
+    "/api/admin/entertainment/backfill-status",
     "/api/dashboard/elections/markets/{ticker}/arb",
     "/api/dashboard/runtime-settings",
     "/api/admin/risk-knobs",
@@ -169,6 +171,8 @@ PROTECTED_MUTATING_ENDPOINTS: tuple[tuple[str, str], ...] = (
     ("POST", "/api/admin/elections/promote-kelly"),
     ("POST", "/api/admin/events-econ/promote-kelly"),
     ("POST", "/api/admin/entertainment/promote-kelly"),
+    # Task #225 — admin-triggered historical entertainment-signal backfill.
+    ("POST", "/api/admin/entertainment/backfill"),
     ("POST", "/api/admin/orchestrator/run-cycle"),
     ("GET",  "/api/admin/elo/status"),
     ("POST", "/api/admin/elo/run-cycle"),
