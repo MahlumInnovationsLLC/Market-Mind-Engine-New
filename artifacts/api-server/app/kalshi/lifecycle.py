@@ -963,26 +963,34 @@ async def handle_ws_fill(message: dict[str, Any]) -> None:
     await _emit({"event": "filled", "order": rec.to_dict()})
     # LIVE-trade alert (Elite-tier per spec). Paper fills never get
     # here — they short-circuit in submit_order().
+    #
+    # Fully off the hot path: the dedupe lookup is a DB round-trip
+    # (`notification_dedupe` UPSERT) that can stall under DB pressure.
+    # We capture an immutable snapshot and schedule a background task
+    # so the WS fill handler can return promptly and process the next
+    # fill without backlog. Mirrors the per-user trade-confirmation
+    # treatment immediately below.
     try:
-        # `fill_id` was already resolved above (with the same raw-field
-        # fallback) so the rolled-up dedupe and the alert dedupe share
-        # an idempotency key. Replays would have returned early above
-        # before reaching here, so this is purely a belt-and-braces
-        # guard against the alerts pipeline mis-routing.
-        dk = f"{rec.order_id or coid}:{fill_id}"
-        if await _alerts.dedupe_or_skip(
-            "live_trade", dk, ttl_seconds=7 * 24 * 3600
-        ):
-            _alerts.live_trade(
-                market_ticker=rec.request.market_ticker,
-                side=rec.request.side,
-                action=rec.request.action,
-                contracts=int(rec.request.count),
-                price_cents=price,
-                order_id=rec.order_id,
-                fill_id=fill_id,
-                vertical=rec.request.vertical,
+        live_trade_snapshot = {
+            "dedupe_key": f"{rec.order_id or coid}:{fill_id}",
+            "market_ticker": rec.request.market_ticker,
+            "side": rec.request.side,
+            "action": rec.request.action,
+            "contracts": int(rec.request.count),
+            "price_cents": int(price),
+            "order_id": rec.order_id,
+            "fill_id": fill_id,
+            "vertical": rec.request.vertical,
+        }
+        try:
+            loop = asyncio.get_running_loop()
+            loop.create_task(
+                _send_live_trade_alert_from_snapshot(live_trade_snapshot)
             )
+        except RuntimeError:  # pragma: no cover
+            # No running loop (unlikely from handle_ws_fill). Run
+            # inline as a last resort.
+            await _send_live_trade_alert_from_snapshot(live_trade_snapshot)
     except Exception as e:  # pragma: no cover
         log.warning("live_trade alert dispatch failed: %s", e)
 
@@ -1020,6 +1028,35 @@ async def handle_ws_fill(message: dict[str, Any]) -> None:
                 await _send_trade_confirmation_from_snapshot(snapshot)
     except Exception as e:  # pragma: no cover
         log.warning("trade_confirmation dispatch failed: %s", e)
+
+
+async def _send_live_trade_alert_from_snapshot(snap: dict[str, Any]) -> None:
+    """Background worker: claim the operator-broadcast `live_trade`
+    dedupe key and dispatch the alert. Completely off the WS fill
+    hot path so the dedupe DB round-trip cannot stall trade handling.
+
+    Every failure is logged and swallowed — a failed alert must never
+    surface upstream into the WS fill loop.
+    """
+    from ..notifications import alerts as _alerts
+    try:
+        if await _alerts.dedupe_or_skip(
+            "live_trade",
+            str(snap["dedupe_key"]),
+            ttl_seconds=7 * 24 * 3600,
+        ):
+            _alerts.live_trade(
+                market_ticker=snap["market_ticker"],
+                side=snap["side"],
+                action=snap["action"],
+                contracts=int(snap["contracts"]),
+                price_cents=snap["price_cents"],
+                order_id=snap.get("order_id"),
+                fill_id=snap.get("fill_id"),
+                vertical=snap.get("vertical"),
+            )
+    except Exception as e:  # pragma: no cover
+        log.warning("live_trade alert dispatch failed: %s", e)
 
 
 async def _resolve_trade_confirmation_recipient(

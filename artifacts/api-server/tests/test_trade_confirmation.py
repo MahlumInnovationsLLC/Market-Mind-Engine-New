@@ -355,6 +355,82 @@ def test_handle_ws_fill_returns_promptly_despite_slow_enrichment(
     assert len(_confirmations(harness)) == 1
 
 
+def test_handle_ws_fill_returns_promptly_despite_slow_live_trade_dedupe(
+    harness: _Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression for task #296: the WS fill hot path must not block on
+    the operator `live_trade` dedupe DB lookup. Simulate a slow
+    `notification_dedupe` UPSERT and assert `handle_ws_fill` still
+    returns promptly while the alert eventually dispatches off the hot
+    path.
+    """
+    harness.users["user_42"] = {
+        "email": "trader@example.com",
+        # Disable the per-user trade-confirmation path so this test
+        # isolates the operator-broadcast `live_trade` dedupe latency.
+        "email_trade_confirmation": False,
+    }
+
+    # Slow down ONLY the notification_dedupe UPSERT — every other
+    # query goes through the harness fast path.
+    original = harness.fetchrow
+
+    async def _slow_fetchrow(query: str, *args: Any) -> dict[str, Any] | None:
+        if "notification_dedupe" in query:
+            await asyncio.sleep(1.0)
+        return await original(query, *args)
+
+    monkeypatch.setattr(_db, "fetchrow", _slow_fetchrow)
+
+    # Capture every operator live_trade dispatch.
+    sent_alerts: list[dict[str, Any]] = []
+
+    def _capture_live_trade(**kwargs: Any) -> dict[str, Any]:
+        sent_alerts.append(kwargs)
+        return {"ok": True}
+
+    monkeypatch.setattr(_alerts, "live_trade", _capture_live_trade)
+
+    async def go() -> None:
+        rec = _mk_record(count=5)
+        async with _lc._resting_lock:
+            _lc._resting[rec.request.client_order_id] = rec
+        rec.state = "resting"
+        msg = {
+            "msg": {
+                "type": "fill",
+                "msg": {
+                    "client_order_id": rec.request.client_order_id,
+                    "count": 5, "yes_price": 42,
+                    "trade_id": "f1",
+                    "created_time": "2026-04-23T12:00:00Z",
+                },
+            }
+        }
+        start = asyncio.get_running_loop().time()
+        await _lc.handle_ws_fill(msg)
+        elapsed = asyncio.get_running_loop().time() - start
+        # Hot path must return well under the slow dedupe step (1s).
+        # Generous CI margin.
+        assert elapsed < 0.3, (
+            f"handle_ws_fill blocked for {elapsed:.3f}s on live_trade "
+            "dedupe DB lookup"
+        )
+        # Wait for the background task to flush — the dedupe sleeps 1s
+        # so we poll up to a few seconds.
+        for _ in range(30):
+            await asyncio.sleep(0.1)
+            if sent_alerts:
+                break
+
+    asyncio.run(go())
+    assert len(sent_alerts) == 1, (
+        f"expected exactly one live_trade alert, got {len(sent_alerts)}"
+    )
+    assert sent_alerts[0]["market_ticker"] == "KXBTC-24DEC12-50000"
+    assert sent_alerts[0]["fill_id"] == "f1"
+
+
 def test_trade_confirmation_skips_when_email_missing(
     harness: _Harness, caplog: pytest.LogCaptureFixture
 ) -> None:
