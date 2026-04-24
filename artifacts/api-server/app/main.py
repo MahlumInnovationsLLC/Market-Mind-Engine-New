@@ -5010,8 +5010,12 @@ async def settlement_backfill_start(
 @app.websocket("/api/ws/settlement")
 async def ws_settlement(ws: WebSocket) -> None:
     """Live stream of settlement events: cycle_start, market_settle_start,
-    trade_settled, market_settle_complete, cycle_complete.  Auth via
-    Clerk JWT in `?token=` (same contract as `/api/ws/pipeline`).
+    trade_settled, market_settle_complete, cycle_complete, plus the
+    historical-backfill lifecycle (backfill_run_start, backfill_progress,
+    backfill_run_complete) emitted by ``app.settlement.backfill`` so the
+    operator console can render live progress without polling
+    ``/api/settlement/backfill-status``.  Auth via Clerk JWT in
+    ``?token=`` (same contract as ``/api/ws/pipeline``).
     """
     from .auth import ws_authenticate
 

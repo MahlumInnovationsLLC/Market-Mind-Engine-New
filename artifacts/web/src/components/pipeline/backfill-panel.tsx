@@ -1,10 +1,11 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useAuth } from "@clerk/react";
 import {
   getGetMyAccessQueryKey,
   useGetMyAccess,
 } from "@workspace/api-client-react";
 import { ApiError, apiFetch, formatErrorMessage } from "@/lib/api";
+import { useWebSocket } from "@/hooks/use-websocket";
 
 interface BackfillStatus {
   state: "idle" | "running" | "completed" | "failed" | string;
@@ -81,14 +82,54 @@ export default function BackfillPanel() {
     }
   }, [getToken, isSignedIn]);
 
-  // Initial fetch + polling. Poll every 1.5s while running, every 30s
-  // while idle/completed so a fresh load reflects the last run quickly
-  // without hammering the API in steady state.
+  // Live progress over the settlement WebSocket. Each `backfill_*`
+  // event carries a full BackfillProgress snapshot at the top level
+  // (alongside its `type`), so we can replace local state outright
+  // and skip a status round-trip per market.
+  const handleSettlementEvent = useCallback(
+    (event: Record<string, unknown>) => {
+      const t = typeof event.type === "string" ? event.type : "";
+      if (
+        t !== "backfill_run_start" &&
+        t !== "backfill_progress" &&
+        t !== "backfill_run_complete"
+      ) {
+        return;
+      }
+      const { type: _type, ...snapshot } = event;
+      void _type;
+      setStatus(snapshot as unknown as BackfillStatus);
+      setStatusError(null);
+    },
+    [],
+  );
+
+  const { status: wsStatus } = useWebSocket({
+    path: "/api/ws/settlement",
+    onMessage: handleSettlementEvent,
+    bufferSize: 50,
+  });
+  const wsLive = wsStatus === "open";
+
+  // Initial fetch + polling fallback. While the WS is open we rely on
+  // pushed `backfill_*` events for progress. When the WS is anything
+  // else (connecting / closed / unauthorized) we poll every 1.5s
+  // during a run and every 30s otherwise so the panel still tracks
+  // progress on a degraded socket.
   useEffect(() => {
     if (!isSignedIn) return;
-    fetchStatus();
     let cancelled = false;
     let timer: ReturnType<typeof setTimeout> | null = null;
+    // Always seed with one fetch — even when the WS is open, the
+    // hub only fires events for actions taken *after* we subscribed,
+    // so the panel needs a snapshot to render the last run.
+    fetchStatus();
+    if (wsLive) {
+      return () => {
+        cancelled = true;
+        if (timer !== null) clearTimeout(timer);
+      };
+    }
     const tick = async () => {
       if (cancelled) return;
       await fetchStatus();
@@ -101,7 +142,14 @@ export default function BackfillPanel() {
       cancelled = true;
       if (timer !== null) clearTimeout(timer);
     };
-  }, [fetchStatus, isSignedIn]);
+  }, [fetchStatus, isSignedIn, wsLive]);
+
+  const transportLabel = useMemo(() => {
+    if (!isSignedIn) return null;
+    if (wsLive) return "LIVE";
+    if (wsStatus === "connecting") return "CONNECTING";
+    return "POLLING";
+  }, [isSignedIn, wsLive, wsStatus]);
 
   const start = useCallback(async () => {
     if (!isAdmin || isRunning || starting) return;
@@ -165,12 +213,31 @@ export default function BackfillPanel() {
             </span>
           )}
         </div>
-        <span
-          className={`text-[10px] uppercase tracking-widest ${stateTone}`}
-          data-testid="text-backfill-state"
-        >
-          {stateLabel}
-        </span>
+        <div className="flex items-center gap-2">
+          {transportLabel && (
+            <span
+              className={`text-[9px] uppercase tracking-widest border px-1.5 py-0.5 ${
+                wsLive
+                  ? "border-success/40 text-success"
+                  : "border-border text-muted-foreground"
+              }`}
+              data-testid="text-backfill-transport"
+              title={
+                wsLive
+                  ? "Streaming live progress over WebSocket"
+                  : "WebSocket disconnected — polling /api/settlement/backfill-status as a fallback"
+              }
+            >
+              {transportLabel}
+            </span>
+          )}
+          <span
+            className={`text-[10px] uppercase tracking-widest ${stateTone}`}
+            data-testid="text-backfill-state"
+          >
+            {stateLabel}
+          </span>
+        </div>
       </div>
 
       <div className="p-3 space-y-3 text-[11px]">

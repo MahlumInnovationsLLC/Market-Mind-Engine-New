@@ -27,9 +27,35 @@ from typing import Any
 
 from .. import db
 from .pipeline import _parse_kalshi_outcome, settle_market
+from .streams import settlement_event_hub
 
 
 log = logging.getLogger(__name__)
+
+
+# Event types emitted on the settlement WebSocket so the operator
+# console can render live progress without polling. The payload of
+# each event is the BackfillProgress.snapshot() dict merged in at the
+# top level, so a subscriber can `setStatus({...event, type: undefined})`
+# and treat it as a fresh snapshot.
+EVENT_RUN_START = "backfill_run_start"
+EVENT_PROGRESS = "backfill_progress"
+EVENT_RUN_COMPLETE = "backfill_run_complete"
+
+
+async def _emit(event_type: str) -> None:
+    """Publish a snapshot event to ``settlement_event_hub``.
+
+    Failures are swallowed: a sick subscriber must never stall a backfill
+    run. The hub itself uses bounded per-subscriber queues, so a single
+    slow consumer just drops the oldest event and we keep going.
+    """
+    try:
+        await settlement_event_hub.publish(
+            {"type": event_type, **_progress.snapshot()}
+        )
+    except Exception as e:  # pragma: no cover — defensive
+        log.warning("backfill emit %s failed: %s", event_type, e)
 
 
 @dataclass
@@ -172,6 +198,7 @@ async def _resolve_via_kalshi(market_ids: list[str], on_progress) -> int:
                 _progress.last_error = msg
                 _progress.markets_processed += 1
                 on_progress()
+                await _emit(EVENT_PROGRESS)
                 continue
             except Exception as e:
                 _progress.markets_failed += 1
@@ -180,6 +207,7 @@ async def _resolve_via_kalshi(market_ids: list[str], on_progress) -> int:
                 _progress.last_error = msg
                 _progress.markets_processed += 1
                 on_progress()
+                await _emit(EVENT_PROGRESS)
                 continue
 
             parsed = _parse_kalshi_outcome(raw)
@@ -187,6 +215,7 @@ async def _resolve_via_kalshi(market_ids: list[str], on_progress) -> int:
                 _progress.markets_skipped_unresolved += 1
                 _progress.markets_processed += 1
                 on_progress()
+                await _emit(EVENT_PROGRESS)
                 continue
             outcome_yes, settle_price = parsed
             try:
@@ -207,6 +236,7 @@ async def _resolve_via_kalshi(market_ids: list[str], on_progress) -> int:
                 _progress.last_error = msg
             _progress.markets_processed += 1
             on_progress()
+            await _emit(EVENT_PROGRESS)
     return settled
 
 
@@ -222,6 +252,7 @@ async def _resolve_via_csv(
             _progress.markets_skipped_unresolved += 1
             _progress.markets_processed += 1
             on_progress()
+            await _emit(EVENT_PROGRESS)
             continue
         outcome_yes, settle_price = overrides[mid]
         try:
@@ -242,6 +273,7 @@ async def _resolve_via_csv(
             _progress.last_error = msg
         _progress.markets_processed += 1
         on_progress()
+        await _emit(EVENT_PROGRESS)
     return settled
 
 
@@ -274,6 +306,7 @@ async def run_backfill(
             source="csv" if csv_path else "kalshi",
         )
         on_progress()
+        await _emit(EVENT_RUN_START)
         t0 = time.perf_counter()
         try:
             market_ids = await _list_unsettled_kalshi_markets()
@@ -281,6 +314,9 @@ async def run_backfill(
                 market_ids = market_ids[: max(0, int(limit))]
             _progress.markets_total = len(market_ids)
             on_progress()
+            # Emit a `backfill_progress` snapshot now that we know
+            # the total — UI can render the denominator immediately.
+            await _emit(EVENT_PROGRESS)
 
             if not market_ids:
                 _progress.state = "completed"
@@ -301,4 +337,8 @@ async def run_backfill(
             _progress.duration_seconds = time.perf_counter() - t0
             _progress.completed_at = datetime.now(timezone.utc).isoformat()
             on_progress()
+            # Always emit a terminal event — subscribers use it to
+            # flip their UI back out of the "running" state without
+            # waiting for the polling fallback.
+            await _emit(EVENT_RUN_COMPLETE)
         return _progress.snapshot()
