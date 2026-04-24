@@ -19,6 +19,7 @@ import pytest
 
 from app import dashboard
 from app.kalshi import client as kalshi_client
+from app.kalshi import tick_cache as kalshi_tick_cache
 
 
 def _run(coro):
@@ -190,3 +191,97 @@ def test_fetch_market_price_history_no_anchor_returns_empty(monkeypatch):
     )
     assert out == []
     assert fake.calls == []
+
+
+def test_fetch_market_price_history_serves_from_cache_without_kalshi(monkeypatch):
+    """Cache fully covers the window → no live Kalshi call (task #359).
+
+    The trade-detail path is the hot path; once the periodic refresh
+    job has warmed the cache, subsequent loads of /trade/:ref must
+    serve the chart from Postgres alone so a Kalshi outage (or a
+    settled-but-popular market that's no longer being polled) doesn't
+    block the render.
+    """
+    cached_points = [
+        {"t": "2023-11-14T22:00:00Z", "model_prob": None, "market_price": 0.61},
+        {"t": "2023-11-14T22:01:00Z", "model_prob": None, "market_price": 0.62},
+    ]
+
+    async def fake_fetch_window(
+        ticker: str, *, period_interval: int, start_ts: int, end_ts: int
+    ):
+        # Reports zero missing ranges → caller short-circuits.
+        return cached_points, []
+    monkeypatch.setattr(
+        kalshi_tick_cache, "fetch_window", fake_fetch_window
+    )
+
+    fake = _FakeClient(candles=[{"end_period_ts": 0, "price": {"mean": 99}}])
+    _patch_client(monkeypatch, fake)
+
+    out = _run(
+        dashboard._fetch_market_price_history(
+            "KXNFL-25NOV23DETHGB-DET",
+            executed_at="2023-11-14T22:00:00Z",
+            debate_points=[],
+        )
+    )
+    assert out == cached_points
+    # Crucially: zero round-trips to Kalshi.
+    assert fake.calls == []
+    assert fake.closed is False
+
+
+def test_fetch_market_price_history_persists_freshly_fetched_buckets(monkeypatch):
+    """Cache miss → live Kalshi fetch → buckets are upserted back.
+
+    Verifies the write-through behaviour so the next visitor finds
+    the cache warm and doesn't re-trigger the synchronous Kalshi
+    round-trip.
+    """
+    async def fake_fetch_window(
+        ticker: str, *, period_interval: int, start_ts: int, end_ts: int
+    ):
+        return [], [(start_ts, end_ts)]
+    monkeypatch.setattr(
+        kalshi_tick_cache, "fetch_window", fake_fetch_window
+    )
+
+    upserts: list[dict[str, Any]] = []
+
+    async def fake_upsert(
+        ticker: str, *, period_interval: int, candles: Any
+    ) -> int:
+        upserts.append(
+            {
+                "ticker": ticker,
+                "period_interval": period_interval,
+                "candles": list(candles),
+            }
+        )
+        return len(upserts[-1]["candles"])
+    monkeypatch.setattr(
+        kalshi_tick_cache, "upsert_candles", fake_upsert
+    )
+
+    fake = _FakeClient(
+        candles=[
+            {"end_period_ts": 1_700_000_060, "price": {"mean": 47}},
+            {"end_period_ts": 1_700_000_120, "price": {"mean": 53}},
+        ]
+    )
+    _patch_client(monkeypatch, fake)
+
+    out = _run(
+        dashboard._fetch_market_price_history(
+            "KXNFL-25NOV23DETHGB-DET",
+            executed_at="2023-11-14T22:14:00Z",
+            debate_points=[],
+        )
+    )
+    assert [p["market_price"] for p in out] == [0.47, 0.53]
+    assert len(upserts) == 1
+    assert upserts[0]["ticker"] == "KXNFL-25NOV23DETHGB-DET"
+    assert len(upserts[0]["candles"]) == 2
+    # The single Kalshi round-trip covered the whole missing window.
+    assert len(fake.calls) == 1

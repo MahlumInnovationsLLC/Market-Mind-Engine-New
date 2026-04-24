@@ -13,6 +13,7 @@ from datetime import datetime, timedelta, timezone
 
 from . import db
 from .kalshi import client as kalshi_client
+from .kalshi import tick_cache as kalshi_tick_cache
 from .kalshi.market_titles import resolve_titles as resolve_market_titles
 
 
@@ -1031,62 +1032,79 @@ async def _fetch_market_price_history(
 
     span_min = (end_dt - start_dt).total_seconds() / 60.0
     period_interval = _select_period_interval(span_min)
+    start_ts = int(start_dt.timestamp())
+    end_ts = int(end_dt.timestamp())
+
+    # Cache-first: read whatever buckets we already have for this
+    # window and ask the cache which ranges (if any) still need a
+    # live Kalshi fetch. The periodic refresh loop in
+    # ``app.kalshi.tick_cache_refresh`` keeps recently-traded markets
+    # warm so this almost always returns missing=[] in steady state.
+    cached_points, missing_ranges = await kalshi_tick_cache.fetch_window(
+        market_id,
+        period_interval=period_interval,
+        start_ts=start_ts,
+        end_ts=end_ts,
+    )
+    if not missing_ranges:
+        return cached_points
 
     try:
         client = kalshi_client.KalshiClient()
     except Exception as e:
         log.info("trade detail candlesticks: kalshi client unavailable: %s", e)
-        return []
+        return cached_points
 
+    fetched_points: list[dict[str, Any]] = []
     try:
-        data = await client.get_market_candlesticks(
-            market_id,
-            start_ts=int(start_dt.timestamp()),
-            end_ts=int(end_dt.timestamp()),
-            period_interval=period_interval,
-        )
-    except kalshi_client.KalshiAPIError as e:
-        log.info("kalshi candlesticks(%s) failed: http %s", market_id, e.status)
-        return []
-    except Exception as e:
-        log.info("kalshi candlesticks(%s) error: %s", market_id, e)
-        return []
+        for lo, hi in missing_ranges:
+            try:
+                data = await client.get_market_candlesticks(
+                    market_id,
+                    start_ts=int(lo),
+                    end_ts=int(hi),
+                    period_interval=period_interval,
+                )
+            except kalshi_client.KalshiAPIError as e:
+                log.info(
+                    "kalshi candlesticks(%s) failed: http %s",
+                    market_id, e.status,
+                )
+                continue
+            except Exception as e:
+                log.info("kalshi candlesticks(%s) error: %s", market_id, e)
+                continue
+
+            candles = (data or {}).get("candlesticks") or []
+            if not candles:
+                continue
+            # Persist the fresh buckets back into the cache so the
+            # next request (and the live operator dashboard) is served
+            # entirely from Postgres. Best-effort — failures don't
+            # block the in-memory render.
+            await kalshi_tick_cache.upsert_candles(
+                market_id,
+                period_interval=period_interval,
+                candles=candles,
+            )
+            fetched_points.extend(
+                kalshi_tick_cache.candles_to_points(candles)
+            )
     finally:
         try:
             await client.aclose()
         except Exception:
             pass
 
-    candles = (data or {}).get("candlesticks") or []
-    out: list[dict[str, Any]] = []
-    for row in candles:
-        if not isinstance(row, dict):
-            continue
-        end_ts = row.get("end_period_ts")
-        if not isinstance(end_ts, (int, float)):
-            continue
-        price_blk = row.get("price") or {}
-        cents = price_blk.get("mean")
-        if cents is None:
-            cents = price_blk.get("close")
-        if cents is None:
-            continue
-        try:
-            market_price = float(cents) / 100.0
-        except (TypeError, ValueError):
-            continue
-        t_iso = (
-            datetime.fromtimestamp(int(end_ts), tz=timezone.utc)
-            .strftime("%Y-%m-%dT%H:%M:%SZ")
-        )
-        out.append(
-            {
-                "t": t_iso,
-                "model_prob": None,
-                "market_price": market_price,
-            }
-        )
-    return out
+    if not fetched_points:
+        return cached_points
+
+    # Merge cached + freshly-fetched, deduping by ISO-Z timestamp so a
+    # bucket that overlapped both sources is rendered once.
+    merged: dict[str, dict[str, Any]] = {p["t"]: p for p in cached_points}
+    for p in fetched_points:
+        merged[p["t"]] = p
+    return sorted(merged.values(), key=lambda p: p.get("t") or "")
 
 
 async def get_trade_detail(trade_ref: str) -> dict[str, Any] | None:
