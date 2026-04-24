@@ -267,6 +267,13 @@ OTHER_PUBLIC_ROUTES: tuple[str, ...] = (
     # flips, so it's not parameterized into PUBLIC_ROUTES (which asserts
     # 200). Exercised directly by tests/test_ready_gate.py.
     "/api/health/ready",
+    # Localhost-only diagnostic endpoint that returns the in-process
+    # cached health snapshot without requiring a Clerk JWT.  The handler
+    # checks `request.client.host in {"127.0.0.1", "::1", "localhost"}`
+    # and returns 404 for any non-loopback caller, so it is safe to leave
+    # ungated; under the TestClient `request.client.host == "testclient"`
+    # so it returns 404 there too.
+    "/api/_debug/health-snapshot",
 )
 
 

@@ -3546,6 +3546,53 @@ async def health_snapshot(
     return health.get_snapshot()
 
 
+_DEBUG_PROXY_HEADERS: tuple[str, ...] = (
+    # Set by Replit's edge proxy and by virtually every reverse proxy in
+    # existence (nginx, GCLB, AWS ALB, Cloudflare, Caddy, ...). Their
+    # presence is conclusive evidence that the request was forwarded by
+    # an upstream — i.e. it did NOT originate from a loopback shell on
+    # this container — even when the TCP peer happens to be 127.0.0.1.
+    "x-forwarded-for",
+    "x-forwarded-proto",
+    "x-forwarded-host",
+    "x-real-ip",
+    "forwarded",
+    # Replit-specific markers added by the edge proxy on every request
+    # it forwards to the container.
+    "x-request-id",
+    "x-replit-user-id",
+    "x-replit-user-name",
+    "replit-cluster",
+)
+
+
+@app.get("/api/_debug/health-snapshot")
+async def health_snapshot_debug(request: Request) -> dict[str, object]:
+    """Loopback-only mirror of /api/health/snapshot for in-shell diagnostics.
+
+    Auth-bypass is gated to **two** signals that must BOTH hold:
+
+      1. The request's TCP peer is a loopback address (127.0.0.1 / ::1).
+      2. The request carries no proxy/forwarded headers (X-Forwarded-*,
+         X-Real-IP, Forwarded, X-Request-Id, Replit-Cluster, etc.).
+
+    Either signal alone is insufficient. In the current Replit deployment
+    the edge proxy connects to uvicorn from a non-loopback address, so
+    (1) suffices, but (1) alone could become spoofable if the platform
+    ever switched to a loopback proxy. (2) catches that case because the
+    edge proxy stamps Replit-specific request headers on every forwarded
+    request. Operators driving curl from inside the container's shell
+    pass both checks.
+    """
+    client_host = request.client.host if request.client else None
+    if client_host not in ("127.0.0.1", "::1", "localhost"):
+        raise HTTPException(status_code=404, detail="not found")
+    for header_name in _DEBUG_PROXY_HEADERS:
+        if header_name in request.headers:
+            raise HTTPException(status_code=404, detail="not found")
+    return health.get_snapshot()
+
+
 @app.get("/api/health/errors")
 async def health_errors(
     limit: int = 100,
