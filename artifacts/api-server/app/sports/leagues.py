@@ -470,10 +470,125 @@ def league_blackout_until(
     return kickoff  # blacked out until kickoff
 
 
-def persona_context_augment(league: str | None) -> str:
-    """Persona-prompt augment block for `league`. Empty string when no
-    augment is configured — keeps prompts clean for legacy leagues."""
+def persona_context_augment(
+    league: str | None,
+    game_context: dict | None = None,
+) -> str:
+    """Persona-prompt augment block for `league`.
+
+    When ``game_context`` carries structured ``weather`` /
+    ``player_status`` blocks (currently populated for NFL by
+    :mod:`app.sports.nfl_context`), an "OBSERVED CONDITIONS" tail is
+    appended so the personas reason on real numbers instead of just
+    being told to think about them.
+
+    Empty string when no augment is configured — keeps prompts clean
+    for legacy leagues.
+    """
     cfg = get_league_config(league)
     if cfg is None:
         return ""
-    return cfg.persona_context
+    base = cfg.persona_context
+    if not game_context:
+        return base
+    tail = _render_game_context(game_context)
+    if not tail:
+        return base
+    if not base:
+        return tail
+    return base + "\n\n" + tail
+
+
+def _render_game_context(game_context: dict) -> str:
+    """Render the structured game_context dict as a prompt-friendly
+    "OBSERVED CONDITIONS" block.  Only includes sub-blocks that are
+    actually populated so the prompt stays signal-dense."""
+    lines: list[str] = []
+
+    weather = game_context.get("weather") if isinstance(game_context, dict) else None
+    if isinstance(weather, dict):
+        venue = weather.get("venue") or "(unknown venue)"
+        venue_type = weather.get("venue_type")
+        if venue_type == "indoor":
+            lines.append(
+                f"  * Weather ({venue}, indoor / dome): N/A — sealed venue, "
+                f"weather is not a factor."
+            )
+        elif weather.get("forecast_unavailable"):
+            lines.append(
+                f"  * Weather ({venue}, outdoor): forecast feed unavailable; "
+                f"do not assume neutral conditions."
+            )
+        else:
+            parts: list[str] = []
+            if weather.get("temperature_f") is not None:
+                parts.append(f"{weather['temperature_f']:.0f}F")
+            if weather.get("wind_mph") is not None:
+                gust = weather.get("wind_gust_mph")
+                if gust is not None:
+                    parts.append(
+                        f"wind {weather['wind_mph']:.0f} mph (gust {gust:.0f})"
+                    )
+                else:
+                    parts.append(f"wind {weather['wind_mph']:.0f} mph")
+            if weather.get("precip_in_per_hr") is not None:
+                parts.append(f"precip {weather['precip_in_per_hr']:.2f} in/hr")
+            if weather.get("humidity_pct") is not None:
+                parts.append(f"humidity {weather['humidity_pct']:.0f}%")
+            detail = ", ".join(parts) if parts else "no detailed readings"
+            lines.append(f"  * Weather ({venue}, outdoor): {detail}.")
+
+    player_status = (
+        game_context.get("player_status") if isinstance(game_context, dict) else None
+    )
+    if isinstance(player_status, dict):
+        for side_key, side_label in (("home", "Home"), ("away", "Away")):
+            side = player_status.get(side_key)
+            if not isinstance(side, dict):
+                continue
+            team = side.get("team") or "(unknown)"
+            inj_summary = _summarise_injuries(side.get("injuries") or [])
+            snap_summary = _summarise_snap_counts(side.get("snap_counts") or [])
+            lines.append(
+                f"  * {side_label} ({team}) injuries: {inj_summary}"
+            )
+            lines.append(
+                f"  * {side_label} ({team}) skill snap %: {snap_summary}"
+            )
+
+    if not lines:
+        return ""
+    return "OBSERVED CONDITIONS for this matchup:\n" + "\n".join(lines)
+
+
+def _summarise_injuries(injuries: list) -> str:
+    if not injuries:
+        return "no notable OL/DL/skill scratches in feed cache."
+    chunks: list[str] = []
+    for inj in injuries[:8]:
+        if not isinstance(inj, dict):
+            continue
+        status = (inj.get("status") or "UNKNOWN").upper()
+        pos = (inj.get("position") or "??").upper()
+        player = inj.get("player") or "(unknown)"
+        chunks.append(f"{status} {pos} {player}")
+    return "; ".join(chunks) if chunks else "no notable OL/DL/skill scratches in feed cache."
+
+
+def _summarise_snap_counts(snap_counts: list) -> str:
+    if not snap_counts:
+        return "no snap-count data cached for the most recent game."
+    chunks: list[str] = []
+    for row in snap_counts[:6]:
+        if not isinstance(row, dict):
+            continue
+        player = row.get("player") or "(unknown)"
+        pos = (row.get("position") or "??").upper()
+        pct = row.get("snap_pct")
+        if pct is None:
+            chunks.append(f"{pos} {player}")
+        else:
+            chunks.append(f"{pos} {player} {float(pct):.0f}%")
+    return ", ".join(chunks) if chunks else (
+        "no snap-count data cached for the most recent game."
+    )

@@ -216,6 +216,15 @@ async def lifespan(_: FastAPI):
         except Exception as e:
             log.warning("sportradar extra feed registration failed: %s", e)
         try:
+            from .feeds.nfl_snap_counts import (
+                ensure_schema as _ensure_nfl_snap_schema,
+                register_nfl_snap_counts_feed,
+            )
+            await _ensure_nfl_snap_schema()
+            register_nfl_snap_counts_feed()
+        except Exception as e:
+            log.warning("nfl_snap_counts feed registration failed: %s", e)
+        try:
             from .feeds.team_elo_seed import register_team_elo_seed_feed
             register_team_elo_seed_feed()
         except Exception as e:

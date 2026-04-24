@@ -463,13 +463,42 @@ async def _run_debate_inner(
     # Per-league prompt augment (e.g. NFL snap counts / OL-DL injuries /
     # weather guidance for injury_roster + matchup_historian).  Empty
     # string for leagues without a configured augment.
+    #
+    # For NFL specifically we go further than the prose augment and
+    # actually fetch:
+    #   * outdoor stadium weather (Open-Meteo, keyless)
+    #   * OL/DL availability (sportradar_injuries cache)
+    #   * top skill-position snap %  (nfl_snap_counts cache)
+    # so the personas reason on real numbers instead of just being told
+    # to think about them.  All sub-fetches are best-effort: a failure
+    # in any of them collapses to "no data" for that sub-block, never
+    # blocks the debate.
+    nfl_game_context: dict[str, Any] = {}
+    if (league or "").strip().upper() == "NFL":
+        try:
+            from ..sports import build_nfl_game_context as _build_nfl_ctx
+            nfl_game_context = await _build_nfl_ctx(
+                candidate.get("home_team"), candidate.get("away_team")
+            )
+        except Exception as e:  # noqa: BLE001 — best-effort
+            log.debug("NFL game_context build failed (best-effort): %s", e)
+            nfl_game_context = {}
+
     try:
         from ..sports import persona_context_augment as _persona_aug
-        league_aug = _persona_aug(league)
+        league_aug = _persona_aug(league, game_context=nfl_game_context or None)
     except Exception:
         league_aug = ""
     if league_aug:
         user_prompt = user_prompt + "\n\n" + league_aug
+
+    # Stash the structured context onto the candidate so
+    # `_persist_debate` writes it into `swarm_debates.game_context` and
+    # downstream systems (settlement, dashboard, replay UI) can join
+    # against the exact numbers the personas saw.
+    if nfl_game_context:
+        candidate = dict(candidate)
+        candidate["nfl_context"] = nfl_game_context
 
     await _publish(
         {
@@ -814,6 +843,10 @@ async def _persist_debate(
             # enrichment even when the `games` join misses (task #130).
             "home_team": candidate.get("home_team"),
             "away_team": candidate.get("away_team"),
+            # Structured NFL conditions (weather + player_status) the
+            # personas actually saw, persisted alongside the prompt
+            # candidate so settlement / replay can audit the inputs.
+            "nfl_context": candidate.get("nfl_context"),
         }
     )
 
