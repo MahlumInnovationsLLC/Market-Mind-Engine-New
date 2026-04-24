@@ -3,6 +3,7 @@ import {
   getGetMyAccessQueryKey,
   useGetMyAccess,
 } from "@workspace/api-client-react";
+import { useFocusFromQuery } from "@/hooks/use-focus-from-query";
 import { GlassCard } from "@/components/ui/glass-card";
 import { SectionHeader } from "@/components/ui/section-header";
 import { TabBar, useTabState, type TabDef } from "@/components/shell/tab-bar";
@@ -24,6 +25,8 @@ const TABS: TabDef<TabKey>[] = [
 
 export default function TradingPage() {
   const [tab, setTab] = useTabState<TabKey>(TAB_KEYS, "live", "/trading");
+
+  useFocusFromQuery();
 
   const { data: access } = useGetMyAccess({
     query: { queryKey: getGetMyAccessQueryKey(), staleTime: 30_000 },

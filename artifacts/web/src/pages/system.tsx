@@ -7,6 +7,7 @@ import {
   useGetMyAccess,
 } from "@workspace/api-client-react";
 import { apiFetch } from "@/lib/api";
+import { useFocusFromQuery } from "@/hooks/use-focus-from-query";
 import { GlassCard } from "@/components/ui/glass-card";
 import { TabBar, useTabState, type TabDef } from "@/components/shell/tab-bar";
 import { HealthPanel } from "@/pages/health";
@@ -88,6 +89,8 @@ const TAB_DEFS: Record<TabKey, TabDef<TabKey> & { adminOnly: boolean; subtitle: 
 };
 
 export default function SystemPage() {
+  useFocusFromQuery();
+
   const { data: access } = useGetMyAccess({
     query: { queryKey: getGetMyAccessQueryKey(), staleTime: 30_000 },
   });

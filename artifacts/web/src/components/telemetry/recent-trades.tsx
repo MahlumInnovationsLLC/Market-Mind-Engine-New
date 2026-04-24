@@ -1,4 +1,5 @@
 import { useCallback } from "react";
+import { useLocation } from "wouter";
 import { useQueryClient } from "@tanstack/react-query";
 import { useGetRecentTrades, getGetRecentTradesQueryKey } from "@workspace/api-client-react";
 import { useWebSocket } from "@/hooks/use-websocket";
@@ -18,6 +19,7 @@ function formatMoney(num: number | null | undefined): string {
 export default function RecentTrades() {
   const params = { limit: 25 };
   const queryClient = useQueryClient();
+  const [, setLocation] = useLocation();
   const { data, isLoading } = useGetRecentTrades(params, {
     query: { refetchInterval: 60_000, queryKey: getGetRecentTradesQueryKey(params) },
   });
@@ -105,7 +107,13 @@ export default function RecentTrades() {
               const actionClass = isBuy ? "text-primary" : "text-loss";
 
               return (
-                <tr key={trade.id} className="hover:bg-muted/30 transition-colors">
+                <tr
+                  key={trade.id}
+                  data-focus-id={`trade-${trade.id}`}
+                  data-testid={`trade-row-${trade.id}`}
+                  onClick={() => setLocation(`/trade/${trade.id}`)}
+                  className="cursor-pointer hover:bg-muted/30 transition-colors scroll-mt-24 data-[focus-flash=true]:outline data-[focus-flash=true]:outline-2 data-[focus-flash=true]:outline-accent-cyan data-[focus-flash=true]:bg-accent-cyan/10"
+                >
                   <td className="p-2 whitespace-nowrap text-muted-foreground">
                     {trade.executed_at ? new Date(trade.executed_at).toLocaleTimeString([], {hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit'}) : "—"}
                   </td>

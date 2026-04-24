@@ -110,7 +110,7 @@ export default function GlobalSearch() {
               <CommandItem
                 key={`trade-${t.id}`}
                 value={`trade-${t.id}-${t.market_id ?? ""}`}
-                onSelect={() => go(`/trade/${t.id}`)}
+                onSelect={() => go(`/trading?focus=trade-${t.id}`)}
                 data-testid={`search-trade-${t.id}`}
               >
                 <div className="flex w-full items-center justify-between gap-3">

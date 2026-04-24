@@ -803,8 +803,9 @@ export function UserRow({
 
   return (
     <tr
-      className={`border-t border-border ${active ? "bg-muted/20" : "hover:bg-muted/10"} cursor-pointer`}
+      className={`border-t border-border ${active ? "bg-muted/20" : "hover:bg-muted/10"} cursor-pointer scroll-mt-24 data-[focus-flash=true]:outline data-[focus-flash=true]:outline-2 data-[focus-flash=true]:outline-accent-cyan data-[focus-flash=true]:bg-accent-cyan/10`}
       onClick={onSelect}
+      data-focus-id={`user-${user.clerk_user_id}`}
       data-testid={`row-user-${user.clerk_user_id}`}
     >
       <td className="p-2 align-top">
@@ -1283,7 +1284,8 @@ export function AuditLogPanel() {
               items.map((e) => (
                 <tr
                   key={e.id}
-                  className="border-t border-border"
+                  className="border-t border-border scroll-mt-24 data-[focus-flash=true]:outline data-[focus-flash=true]:outline-2 data-[focus-flash=true]:outline-accent-cyan data-[focus-flash=true]:bg-accent-cyan/10"
+                  data-focus-id={`audit-${e.id}`}
                   data-testid={`row-audit-${e.id}`}
                 >
                   <td className="p-2 align-top text-muted-foreground">

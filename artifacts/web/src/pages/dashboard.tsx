@@ -1,9 +1,8 @@
-import { useEffect } from "react";
-import { useLocation, useSearch } from "wouter";
 import {
   getGetMyAccessQueryKey,
   useGetMyAccess,
 } from "@workspace/api-client-react";
+import { useFocusFromQuery } from "@/hooks/use-focus-from-query";
 import ActivePositions from "@/components/dashboard/active-positions";
 import BankrollPanel from "@/components/dashboard/bankroll-panel";
 import EquityCharts from "@/components/dashboard/equity-charts";
@@ -40,47 +39,7 @@ export default function Dashboard() {
   });
   const isAdmin = !!access?.is_admin;
 
-  const search = useSearch();
-  const [location, setLocation] = useLocation();
-  useEffect(() => {
-    const focus = new URLSearchParams(search).get("focus");
-    if (!focus) return;
-
-    let cancelled = false;
-    let attempts = 0;
-    let flashTimer: number | undefined;
-
-    const tryFocus = () => {
-      if (cancelled) return;
-      const el = document.querySelector<HTMLElement>(
-        `[data-focus-id="${CSS.escape(focus)}"]`,
-      );
-      if (el) {
-        el.scrollIntoView({ behavior: "smooth", block: "center" });
-        el.dataset.focusFlash = "true";
-        flashTimer = window.setTimeout(() => {
-          delete el.dataset.focusFlash;
-        }, 2500);
-        // Strip the focus param so re-renders don't re-trigger.
-        const next = new URLSearchParams(search);
-        next.delete("focus");
-        const qs = next.toString();
-        setLocation(qs ? `${location}?${qs}` : location, { replace: true });
-        return;
-      }
-      attempts += 1;
-      if (attempts < 30) {
-        window.setTimeout(tryFocus, 100);
-      }
-    };
-    // Defer to next paint so freshly-mounted lists are in the DOM.
-    const start = window.setTimeout(tryFocus, 50);
-    return () => {
-      cancelled = true;
-      window.clearTimeout(start);
-      if (flashTimer !== undefined) window.clearTimeout(flashTimer);
-    };
-  }, [search, location, setLocation]);
+  useFocusFromQuery();
 
   return (
     <PeriodProvider>
