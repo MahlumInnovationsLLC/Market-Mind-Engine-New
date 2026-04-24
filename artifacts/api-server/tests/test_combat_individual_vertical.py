@@ -471,9 +471,13 @@ def test_predict_for_candidate_falls_through_for_two_way_league():
 
 
 def test_normalize_ufc_sport_events_envelope():
-    """UFC MMA returns `{"sport_events": [...]}` with no home/away
-    qualifier on competitors — normalizer must fall back to ordinal
-    position so 2-way fights still ingest cleanly."""
+    """UFC MMA returns `{"sport_events": [...]}` where each entry is a
+    single bout.  The combat/individual normalizer (task #214)
+    collapses every bout on a card into a single tradable row keyed
+    by the card identifier (`sport_event_context.competition.id`)
+    so the per-event risk cap treats the whole fight night as one
+    tradable surface — see app/orchestrator/cycle.py per-event
+    bucket comment."""
     from app.feeds.odds_api import _normalize_sportradar_payload
 
     payload = {
@@ -481,7 +485,9 @@ def test_normalize_ufc_sport_events_envelope():
             {
                 "id": "sr:sport_event:ufc-300-main",
                 "start_time": "2026-04-22T22:00:00+00:00",
-                "tournament": {"name": "UFC 300"},
+                "sport_event_context": {
+                    "competition": {"id": "sr:competition:ufc-300", "name": "UFC 300"},
+                },
                 "competitors": [
                     {"id": "sr:competitor:1", "name": "Pereira"},
                     {"id": "sr:competitor:2", "name": "Hill"},
@@ -492,17 +498,20 @@ def test_normalize_ufc_sport_events_envelope():
     rows = _normalize_sportradar_payload("ufc", "UFC", payload)
     assert len(rows) == 1
     r = rows[0]
-    assert r["id"] == "sr:sport_event:ufc-300-main"
-    assert r["home"]["name"] == "Pereira"
-    assert r["away"]["name"] == "Hill"
-    # 2-way fights MUST NOT carry n_way_field — they belong to the
-    # team-sport meta-model branch.
+    assert r["id"] == "sr:competition:ufc-300"
+    assert r["home"]["name"] == "UFC 300"
+    assert r["away"]["name"] == "FIELD"
+    # A single 2-fighter bout doesn't yet warrant Plackett-Luce
+    # routing; n_way_field is only emitted once the unioned card has
+    # >2 distinct competitors.
     assert "n_way_field" not in r
 
 
 def test_normalize_tennis_sport_events_envelope():
-    """ATP/WTA daily schedule returns `sport_events` with named
-    competitors but no home/away qualifier."""
+    """ATP/WTA daily schedule returns `sport_events` per match; the
+    combat/individual normalizer collapses them to a single row per
+    tournament so the per-event cap treats the whole bracket as one
+    tradable surface (task #214)."""
     from app.feeds.odds_api import _normalize_sportradar_payload
 
     payload = {
@@ -510,7 +519,10 @@ def test_normalize_tennis_sport_events_envelope():
             {
                 "id": "sr:sport_event:rg-r1-1",
                 "start_time": "2026-05-26T11:00:00+00:00",
-                "tournament": {"name": "Roland Garros"},
+                "sport_event_context": {
+                    "competition": {"id": "sr:competition:roland-garros",
+                                     "name": "Roland Garros"},
+                },
                 "competitors": [
                     {"id": "sr:player:1", "name": "Alcaraz"},
                     {"id": "sr:player:2", "name": "Tiafoe"},
@@ -520,8 +532,9 @@ def test_normalize_tennis_sport_events_envelope():
     }
     rows = _normalize_sportradar_payload("atp", "ATP", payload)
     assert len(rows) == 1
-    assert rows[0]["home"]["name"] == "Alcaraz"
-    assert rows[0]["away"]["name"] == "Tiafoe"
+    assert rows[0]["id"] == "sr:competition:roland-garros"
+    assert rows[0]["home"]["name"] == "Roland Garros"
+    assert rows[0]["away"]["name"] == "FIELD"
 
 
 def test_normalize_f1_summaries_envelope_with_n_way_field():

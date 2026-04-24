@@ -32,6 +32,10 @@ def test_sports_constant_covers_every_supported_league():
     expected = {
         "nba", "nhl", "mlb", "ncaab", "nfl", "ncaaf",
         "epl", "laliga", "seriea", "bundes", "ligue1", "mls", "ucl",
+        # Combat & individual sports (task #214) — every league must
+        # be registered in both maps so the registration loop wires
+        # the correct upper-cased league code into the feed name.
+        "ufc", "atp", "wta", "f1", "pga",
     }
     assert expected.issubset(set(SPORTRADAR_SPORTS))
     assert set(_SPORTRADAR_LEAGUE) == set(SPORTRADAR_SPORTS)
@@ -735,3 +739,213 @@ def test_api_key_for_prefers_per_sport(monkeypatch):
     monkeypatch.delenv("SPORTRADAR_API_KEY", raising=False)
     monkeypatch.delenv("SPORTRADAR_NBA_KEY", raising=False)
     assert sportradar._api_key_for("nba") is None
+
+
+# ---------------------------------------------------------------------------
+# Combat & individual sport schedule normalization (task #214).
+#
+# Sportradar's MMA v2, tennis v3, F1 v2 summaries and PGA v3 schedule
+# endpoints each ship a different envelope shape; without these tests
+# the new pollers would silently ingest zero rows because the previous
+# normalizer only knew the NA/soccer envelopes.
+# ---------------------------------------------------------------------------
+
+
+def _norm(league_code: str, payload: dict) -> list[dict]:
+    from app.feeds.odds_api import _normalize_sportradar_payload
+    return _normalize_sportradar_payload(league_code.lower(), league_code, payload)
+
+
+def test_normalize_ufc_fight_card_aggregates_to_one_row():
+    """A UFC numbered card lists every bout in `sport_events`.  Each
+    bout shares `sport_event_context.competition.id` (the card), so we
+    expect exactly one game row whose id == the card id and whose
+    competitor field contains the union of fighters."""
+    payload = {
+        "sport_events": [
+            {
+                "id": "sr:sport_event:bout-1",
+                "start_time": "2026-04-25T22:00:00Z",
+                "sport_event_context": {
+                    "competition": {"id": "sr:competition:ufc-300", "name": "UFC 300"},
+                    "season": {"id": "sr:season:mma-2026", "name": "MMA 2026"},
+                },
+                "competitors": [
+                    {"id": "c1", "name": "Fighter A"},
+                    {"id": "c2", "name": "Fighter B"},
+                ],
+            },
+            {
+                "id": "sr:sport_event:bout-2",
+                "start_time": "2026-04-25T23:30:00Z",
+                "sport_event_context": {
+                    "competition": {"id": "sr:competition:ufc-300", "name": "UFC 300"},
+                    "season": {"id": "sr:season:mma-2026"},
+                },
+                "competitors": [
+                    {"id": "c3", "name": "Fighter C"},
+                    {"id": "c4", "name": "Fighter D"},
+                ],
+            },
+            {
+                "id": "sr:sport_event:bout-3",
+                "start_time": "2026-04-25T21:00:00Z",  # earliest bout
+                "sport_event_context": {
+                    "competition": {"id": "sr:competition:ufc-300", "name": "UFC 300"},
+                },
+                "sport_event_status": {"status": "inprogress"},
+                "competitors": [
+                    {"id": "c5", "name": "Fighter E"},
+                    {"id": "c6", "name": "Fighter F"},
+                ],
+            },
+        ]
+    }
+    rows = _norm("UFC", payload)
+    assert len(rows) == 1, "all bouts should collapse into one fight-card row"
+    row = rows[0]
+    assert row["id"] == "sr:competition:ufc-300"
+    assert row["home"]["name"] == "UFC 300"
+    assert row["away"]["name"] == "FIELD"
+    # Earliest scheduled bout becomes the card kickoff.
+    assert row["scheduled"] == "2026-04-25T21:00:00Z"
+    # Live child promotes the parent so event_in_progress fires.
+    assert row["status"] == "inprogress"
+    # 6 unique fighters across 3 bouts -> Plackett-Luce field metadata.
+    assert "n_way_field" in row
+    assert {c["name"] for c in row["n_way_field"]} == {
+        "Fighter A", "Fighter B", "Fighter C", "Fighter D", "Fighter E", "Fighter F"
+    }
+
+
+def test_normalize_atp_tournament_aggregates_matches():
+    """Tennis daily schedule lists individual matches; we want one row
+    per tournament so the per-event cap gates the whole bracket."""
+    payload = {
+        "sport_events": [
+            {
+                "id": "sr:sport_event:m1",
+                "start_time": "2026-05-25T12:00:00Z",
+                "sport_event_context": {
+                    "competition": {"id": "sr:competition:roland-garros", "name": "Roland Garros"},
+                },
+                "competitors": [
+                    {"id": "p1", "name": "Player One"},
+                    {"id": "p2", "name": "Player Two"},
+                ],
+            },
+            {
+                "id": "sr:sport_event:m2",
+                "start_time": "2026-05-25T14:00:00Z",
+                "sport_event_context": {
+                    "competition": {"id": "sr:competition:roland-garros", "name": "Roland Garros"},
+                },
+                "competitors": [
+                    {"id": "p3", "name": "Player Three"},
+                    {"id": "p1", "name": "Player One"},  # duplicate id dedupes
+                ],
+            },
+        ]
+    }
+    rows = _norm("ATP", payload)
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["id"] == "sr:competition:roland-garros"
+    assert row["home"]["name"] == "Roland Garros"
+    # 3 unique players across both matches.
+    assert len(row["n_way_field"]) == 3
+
+
+def test_normalize_f1_summaries_aggregates_sessions():
+    """F1 summaries return one entry per session (FP1/FP2/FP3/Q/Race);
+    we want a single row per race weekend so betting on the GP is
+    treated as one tradable event."""
+    payload = {
+        "summaries": [
+            {
+                "sport_event": {
+                    "id": "sr:sport_event:fp1",
+                    "start_time": "2026-04-24T12:30:00Z",
+                    "sport_event_context": {
+                        "stage": {"id": "sr:stage:bahrain-2026",
+                                  "description": "Bahrain Grand Prix"},
+                        "season": {"id": "sr:season:f1-2026"},
+                    },
+                    "competitors": [
+                        {"id": d, "name": f"Driver {d}"} for d in ("d1", "d2", "d3")
+                    ],
+                },
+                "sport_event_status": {"status": "closed"},
+            },
+            {
+                "sport_event": {
+                    "id": "sr:sport_event:race",
+                    "start_time": "2026-04-26T15:00:00Z",
+                    "sport_event_context": {
+                        "stage": {"id": "sr:stage:bahrain-2026",
+                                  "description": "Bahrain Grand Prix"},
+                    },
+                    "competitors": [
+                        {"id": d, "name": f"Driver {d}"}
+                        for d in ("d1", "d2", "d3", "d4", "d5")
+                    ],
+                },
+                "sport_event_status": {"status": "scheduled"},
+            },
+        ]
+    }
+    rows = _norm("F1", payload)
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["id"] == "sr:stage:bahrain-2026"
+    assert row["home"]["name"] == "Bahrain Grand Prix"
+    assert row["scheduled"] == "2026-04-24T12:30:00Z"  # earliest session
+    # 5 unique drivers across both sessions -> Plackett-Luce grid.
+    assert len(row["n_way_field"]) == 5
+
+
+def test_normalize_pga_tournament_schedule_emits_one_row_per_event():
+    """PGA schedule.json returns `{tournaments: [...]}` with one entry
+    per tournament; each is independently tradable as an outright."""
+    payload = {
+        "tournaments": [
+            {
+                "id": "sr:tournament:masters-2026",
+                "name": "The Masters",
+                "start_date": "2026-04-09",
+                "status": "scheduled",
+            },
+            {
+                "id": "sr:tournament:rbc-2026",
+                "name": "RBC Heritage",
+                "start_date": "2026-04-16",
+                "status": "scheduled",
+            },
+            {"id": "", "name": "Skip me — missing id"},
+        ]
+    }
+    rows = _norm("PGA", payload)
+    assert len(rows) == 2
+    ids = [r["id"] for r in rows]
+    assert "sr:tournament:masters-2026" in ids
+    assert "sr:tournament:rbc-2026" in ids
+    assert all(r["away"]["name"] == "FIELD" for r in rows)
+
+
+def test_normalize_combat_payload_skips_entries_without_grouping_id_safely():
+    """Defensive guard: an entry missing every grouping key falls back
+    to its own id rather than silently dropping out."""
+    payload = {
+        "sport_events": [
+            {
+                "id": "sr:sport_event:loose-bout",
+                "start_time": "2026-04-25T22:00:00Z",
+                "competitors": [
+                    {"id": "c1", "name": "A"}, {"id": "c2", "name": "B"},
+                ],
+            },
+        ]
+    }
+    rows = _norm("UFC", payload)
+    assert len(rows) == 1
+    assert rows[0]["id"] == "sr:sport_event:loose-bout"

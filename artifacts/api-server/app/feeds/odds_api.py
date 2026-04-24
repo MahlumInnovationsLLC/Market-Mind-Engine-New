@@ -216,6 +216,109 @@ _SOCCER_TOURNAMENT_HINTS: dict[str, tuple[str, ...]] = {
 }
 
 
+def _aggregate_event_schedule(league: str, schedules: list) -> list[dict]:
+    """Collapse Sportradar bout/match/session entries into one
+    canonical row per fight card / tournament / GP (task #214).
+
+    Sportradar's MMA v2, tennis v3 and F1 v2 daily endpoints return
+    individual bouts, matches or sessions.  The trading bot's
+    per-event risk cap keys off `game_id`, so without aggregation a
+    single UFC card would consume the cap N times (once per bout) and
+    a tennis tournament would generate dozens of unrelated game rows.
+
+    The aggregator picks the first available group identifier from
+    `sport_event_context` (competition → stage → tournament → season),
+    accumulates the union of competitors across child entries, picks
+    the earliest scheduled start, and surfaces an `inprogress` status
+    if any child is currently live.  When the unioned field has more
+    than two competitors we set `n_way_field` and seed the per-event
+    ratings cache so the orchestrator's Plackett-Luce branch routes
+    automatically (mirrors the existing soccer-extended path).
+    """
+    grouped: dict[str, dict] = {}
+    competitors_by_group: dict[str, dict[str, dict]] = {}
+    for entry in schedules:
+        ev = entry.get("sport_event") or entry
+        if not isinstance(ev, dict):
+            continue
+        ctx = ev.get("sport_event_context") or {}
+        comp = ctx.get("competition") or {}
+        stage = ctx.get("stage") or {}
+        tournament = ctx.get("tournament") or ev.get("tournament") or {}
+        season = ctx.get("season") or {}
+        group_id = (
+            comp.get("id")
+            or stage.get("id")
+            or tournament.get("id")
+            or season.get("id")
+        )
+        if not group_id:
+            # No grouping context — fall back to the bout id so we at
+            # least surface the row instead of silently dropping it.
+            group_id = ev.get("id")
+        if not group_id:
+            continue
+        group_id = str(group_id)
+        name = (
+            comp.get("name")
+            or tournament.get("name")
+            or stage.get("description")
+            or season.get("name")
+            or {"UFC": "UFC Card", "ATP": "ATP Tournament",
+                "WTA": "WTA Tournament", "F1": "F1 Race Weekend"}[league]
+        )
+        status_obj = entry.get("sport_event_status") or {}
+        start = ev.get("start_time") or ev.get("scheduled")
+        bucket = grouped.get(group_id)
+        if bucket is None:
+            bucket = {
+                "id": group_id,
+                "home": {"name": name},
+                "away": {"name": "FIELD"},
+                "scheduled": start,
+                "status": status_obj.get("status") or "scheduled",
+            }
+            grouped[group_id] = bucket
+            competitors_by_group[group_id] = {}
+        else:
+            # Earliest scheduled start represents the event's kick-off.
+            if start and (not bucket.get("scheduled") or str(start) < str(bucket["scheduled"])):
+                bucket["scheduled"] = start
+            # Any live child promotes the parent so `event_in_progress`
+            # gates fire correctly.
+            child_status = status_obj.get("status")
+            if child_status in ("inprogress", "live", "started"):
+                bucket["status"] = child_status
+            elif bucket.get("status") == "scheduled" and child_status:
+                # Don't downgrade an already-live event back to scheduled.
+                pass
+        for c in ev.get("competitors") or []:
+            if not isinstance(c, dict):
+                continue
+            cid = c.get("id") or c.get("name")
+            if not cid:
+                continue
+            competitors_by_group[group_id].setdefault(str(cid), {
+                "name": c.get("name"),
+                "id": c.get("id"),
+                "seed": c.get("seed"),
+                "qualifier": c.get("qualifier"),
+            })
+
+    out: list[dict] = []
+    for gid, row in grouped.items():
+        field_meta = list(competitors_by_group.get(gid, {}).values())
+        if len(field_meta) > 2:
+            row["n_way_field"] = field_meta
+            try:
+                from ..sports import set_field as _set_field
+                _set_field(gid, field_meta)
+            except Exception:  # pragma: no cover — never kill ingest
+                pass
+        out.append(row)
+    return out
+
+
 def _normalize_sportradar_payload(
     sport: str, league: str, payload: dict,
 ) -> list[dict]:
@@ -243,9 +346,9 @@ def _normalize_sportradar_payload(
     # PGA Golf v3: `{"tournaments": [{id, name, start_date, end_date,
     # status, ...}]}`.  Each tournament is one tradable event (the
     # outright-winner market); competitor field arrives via a
-    # separate leaderboard endpoint (follow-up #214) — for now we
-    # emit the schedule rows so risk-gate per-event aggregation and
-    # event_in_progress derivation work end-to-end.
+    # separate leaderboard endpoint — for now we emit the schedule
+    # rows so risk-gate per-event aggregation and event_in_progress
+    # derivation work end-to-end (task #214).
     tournaments = payload.get("tournaments") or []
     if tournaments and league in ("PGA",):
         out: list[dict] = []
@@ -253,6 +356,8 @@ def _normalize_sportradar_payload(
             if not isinstance(t, dict):
                 continue
             tid = t.get("id")
+            if not tid:
+                continue
             name = t.get("name") or t.get("event_name") or "PGA Tournament"
             start = (
                 t.get("start_date")
@@ -261,7 +366,7 @@ def _normalize_sportradar_payload(
             )
             status = t.get("status") or "scheduled"
             out.append({
-                "id": tid,
+                "id": str(tid),
                 "home": {"name": name},  # outright market; "home" = field
                 "away": {"name": "FIELD"},
                 "scheduled": start,
@@ -284,6 +389,16 @@ def _normalize_sportradar_payload(
     )
     if not schedules:
         return []
+
+    # Combat / individual sports (task #214): MMA daily schedule lists
+    # bouts, tennis lists matches, F1 summaries lists race-weekend
+    # sessions.  We aggregate to one row per fight card / tournament /
+    # GP so the per-event risk cap (`event_id`) treats the whole event
+    # as a single tradable surface, and so the orchestrator's
+    # Plackett-Luce branch can price the union of competitors.
+    if league in {"UFC", "ATP", "WTA", "F1"}:
+        return _aggregate_event_schedule(league, schedules)
+
     hints = _SOCCER_TOURNAMENT_HINTS.get(league, ())
     out: list[dict] = []
     for entry in schedules:
