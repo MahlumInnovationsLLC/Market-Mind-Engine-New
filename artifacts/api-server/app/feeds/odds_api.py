@@ -44,7 +44,11 @@ DEFAULT_ODDS_MARKETS = os.environ.get("AXIOM_ODDS_MARKETS", "h2h,spreads,totals"
 
 
 async def _poll_the_odds_api() -> int:
-    api_key = os.environ.get("THE_ODDS_API_KEY") or os.environ.get("ODDS_API_KEY")
+    api_key = (
+        os.environ.get("THE_ODDS_API_KEY")
+        or os.environ.get("THEODDSAPI_KEY")
+        or os.environ.get("ODDS_API_KEY")
+    )
     if not api_key:
         # Defensive guard — registration should already have skipped us.
         raise RuntimeError("THE_ODDS_API_KEY not set")
@@ -579,7 +583,11 @@ def register_odds_feeds() -> None:
     if registry.status_of("the_odds_api"):
         return  # already registered
 
-    odds_key = os.environ.get("THE_ODDS_API_KEY") or os.environ.get("ODDS_API_KEY")
+    odds_key = (
+        os.environ.get("THE_ODDS_API_KEY")
+        or os.environ.get("THEODDSAPI_KEY")
+        or os.environ.get("ODDS_API_KEY")
+    )
     registry.register(Feed(
         name="the_odds_api",
         cadence_seconds=30.0,
