@@ -161,4 +161,125 @@ test.describe("operator journey — authenticated walk-through", () => {
     await expect(page.getByRole("button", { name: /sign in/i }).first()).toBeVisible();
     await expect(page.getByTestId("shell-main")).toHaveCount(0);
   });
+
+  /**
+   * Readiness panel coverage (Task #349).
+   *
+   * The Health tab embeds a readiness section sourced from
+   * `/api/health/ready` (HealthPanel → ReadinessSection). It surfaces
+   * a READY/NOT READY badge plus a tile per ready-gate check. These
+   * two cases lock down both the live happy path and the explicit
+   * 503-with-failing-check rendering so a regression in either the
+   * endpoint shape or the panel logic fails the suite.
+   */
+  test("Health → readiness panel renders the badge and each known check tile", async ({
+    page,
+  }) => {
+    await page.goto("/system?tab=health");
+    const shell = page.getByTestId("shell-main");
+    if ((await shell.count()) === 0) test.skip(true, "user not approved — shell not rendered");
+
+    // Health is the default tab on /system; the panel should mount
+    // on first navigation.
+    await expect(page.getByTestId("panel-system-health")).toBeVisible({ timeout: 15_000 });
+    await expect(page.getByTestId("panel-readiness")).toBeVisible({ timeout: 15_000 });
+
+    // Badge starts as PENDING while the readiness fetch is in flight,
+    // then settles to READY or NOT READY once the API responds.
+    const badge = page.getByTestId("readiness-badge");
+    await expect(badge).toBeVisible();
+    await expect(badge).toHaveText(/^(READY|NOT READY)$/, { timeout: 15_000 });
+
+    // The API always reports all four ready-gate checks by name
+    // (see _ready_gate_watcher in artifacts/api-server/app/main.py),
+    // so each one should render as its own tile in the panel.
+    for (const name of ["migrations", "secrets", "models", "feeds"] as const) {
+      await expect(
+        page.getByTestId(`readiness-check-${name}`),
+      ).toBeVisible({ timeout: 15_000 });
+    }
+  });
+
+  test("Health → readiness panel highlights failing check when /api/health/ready returns 503", async ({
+    page,
+  }) => {
+    // Force a deterministic NOT READY response so the failing-check
+    // rendering path is exercised regardless of the live API state.
+    // FastAPI wraps HTTPException(detail=...) as { "detail": ... }.
+    const now = Math.floor(Date.now() / 1000);
+    const detail = {
+      status: "not_ready",
+      ready: false,
+      started_at: now - 30,
+      completed_at: null,
+      elapsed_seconds: 30,
+      checks: {
+        migrations: {
+          name: "migrations",
+          ok: true,
+          detail: "head=abc123",
+          checked_at: now,
+        },
+        secrets: {
+          name: "secrets",
+          ok: true,
+          detail: "required secrets present",
+          checked_at: now,
+        },
+        models: {
+          name: "models",
+          ok: true,
+          detail: "3 predictor(s) loaded",
+          checked_at: now,
+        },
+        feeds: {
+          name: "feeds",
+          ok: false,
+          detail: "no first poll within 120s: kalshi",
+          checked_at: now,
+        },
+      },
+    };
+
+    await page.route("**/api/health/ready", async (route) => {
+      await route.fulfill({
+        status: 503,
+        contentType: "application/json",
+        body: JSON.stringify({ detail }),
+      });
+    });
+
+    await page.goto("/system?tab=health");
+    const shell = page.getByTestId("shell-main");
+    if ((await shell.count()) === 0) test.skip(true, "user not approved — shell not rendered");
+
+    await expect(page.getByTestId("panel-readiness")).toBeVisible({ timeout: 15_000 });
+    await expect(page.getByTestId("readiness-badge")).toHaveText("NOT READY", {
+      timeout: 15_000,
+    });
+
+    // The `failing :: <names>` summary should call out the failing
+    // check by name (and only that one, since the other three are ok).
+    const failing = page.getByTestId("readiness-failing");
+    await expect(failing).toBeVisible();
+    await expect(failing).toContainText(/^failing\s*::/i);
+    await expect(failing).toContainText("feeds");
+    await expect(failing).not.toContainText("migrations");
+    await expect(failing).not.toContainText("secrets");
+    await expect(failing).not.toContainText("models");
+
+    // The failing tile gets the destructive ring; the passing ones
+    // do not. This is what visually distinguishes the broken check
+    // for the operator scanning the panel.
+    const feedsTile = page.getByTestId("readiness-check-feeds");
+    await expect(feedsTile).toBeVisible();
+    await expect(feedsTile).toHaveClass(/ring-destructive/);
+    await expect(feedsTile).toContainText("kalshi");
+
+    for (const name of ["migrations", "secrets", "models"] as const) {
+      const tile = page.getByTestId(`readiness-check-${name}`);
+      await expect(tile).toBeVisible();
+      await expect(tile).not.toHaveClass(/ring-destructive/);
+    }
+  });
 });
