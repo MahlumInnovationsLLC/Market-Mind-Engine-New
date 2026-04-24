@@ -4175,3 +4175,291 @@ export function CryptoBacktestPanel() {
     </div>
   );
 }
+
+// ---------------------------------------------------------------------------
+// Elo updater scheduler (task #344) — surface the periodic team-rating
+// updater's per-cycle counters so operators can see at a glance that team
+// ratings are flowing, plus a button to kick a catch-up cycle without
+// dropping into curl.
+// ---------------------------------------------------------------------------
+
+export type EloUpdaterCycle = {
+  started_at: string | null;
+  completed_at: string | null;
+  duration_seconds: number;
+  games_examined: number;
+  games_updated: number;
+  games_skipped: number;
+  teams_touched: number;
+  errors: string[];
+};
+
+export type EloUpdaterStatus = {
+  running: boolean;
+  cycle_seconds: number;
+  last_cycle: EloUpdaterCycle | null;
+};
+
+function fmtEloTime(s: string | null | undefined): string {
+  if (!s) return "—";
+  try {
+    return new Date(s).toISOString().replace("T", " ").slice(0, 19);
+  } catch {
+    return String(s);
+  }
+}
+
+function fmtEloInterval(seconds: number): string {
+  if (!Number.isFinite(seconds) || seconds <= 0) return "—";
+  if (seconds < 60) return `${seconds}s`;
+  const m = seconds / 60;
+  if (m < 60) {
+    return Number.isInteger(m) ? `${m}m` : `${m.toFixed(1)}m`;
+  }
+  const h = m / 60;
+  return Number.isInteger(h) ? `${h}h` : `${h.toFixed(1)}h`;
+}
+
+export function EloUpdaterDisplay({
+  status,
+  onRunNow,
+  running,
+  error,
+  result,
+}: {
+  status: EloUpdaterStatus;
+  onRunNow: () => void;
+  running: boolean;
+  error?: string | null;
+  result?: EloUpdaterCycle | null;
+}) {
+  const last = status.last_cycle ?? null;
+  const stateLabel = !status.running
+    ? "STOPPED"
+    : last && last.errors.length > 0
+      ? "ERRORS"
+      : last
+        ? "OK"
+        : "PENDING";
+  const stateClass = !status.running
+    ? "border-border text-muted-foreground"
+    : stateLabel === "ERRORS"
+      ? "border-loss/60 bg-loss/10 text-loss"
+      : stateLabel === "PENDING"
+        ? "border-accent-warning/60 text-accent-warning"
+        : "border-accent-cyan/40 text-accent-cyan";
+
+  return (
+    <div className="space-y-3" data-testid="panel-elo-updater">
+      <div className="flex flex-wrap items-start justify-between gap-2">
+        <p className="text-[11px] text-muted-foreground leading-snug normal-case tracking-normal">
+          The periodic Elo updater scans the games table for finished
+          matchups that haven&apos;t yet been fed into{" "}
+          <code>record_game()</code> and updates per-league team ratings.
+          Counters below come from the most recent completed cycle.
+        </p>
+        <span
+          className={`text-[10px] uppercase border px-2 py-0.5 ${stateClass}`}
+          data-testid="elo-updater-state"
+        >
+          {stateLabel}
+        </span>
+      </div>
+
+      <div className="grid grid-cols-2 gap-3 text-[11px] md:grid-cols-4">
+        <div>
+          <div className="text-muted-foreground uppercase tracking-wider">
+            Cycle interval
+          </div>
+          <div
+            className="font-mono text-sm text-foreground"
+            data-testid="elo-updater-interval"
+          >
+            {fmtEloInterval(status.cycle_seconds)}
+          </div>
+        </div>
+        <div>
+          <div className="text-muted-foreground uppercase tracking-wider">
+            Last run
+          </div>
+          <div
+            className="font-mono text-xs text-foreground"
+            data-testid="elo-updater-last-run"
+          >
+            {last ? fmtEloTime(last.completed_at ?? last.started_at) : "—"}
+          </div>
+          {last && (
+            <div className="text-[10px] text-muted-foreground">
+              took {last.duration_seconds.toFixed(2)}s
+            </div>
+          )}
+        </div>
+        <div>
+          <div className="text-muted-foreground uppercase tracking-wider">
+            Games examined
+          </div>
+          <div
+            className="font-mono text-sm text-foreground"
+            data-testid="elo-updater-examined"
+          >
+            {last ? last.games_examined.toLocaleString() : "—"}
+          </div>
+          {last && (
+            <div className="text-[10px] text-muted-foreground">
+              skipped {last.games_skipped.toLocaleString()}
+            </div>
+          )}
+        </div>
+        <div>
+          <div className="text-muted-foreground uppercase tracking-wider">
+            Games updated
+          </div>
+          <div
+            className={`font-mono text-sm ${
+              last && last.games_updated > 0
+                ? "text-accent-cyan"
+                : "text-foreground"
+            }`}
+            data-testid="elo-updater-updated"
+          >
+            {last ? last.games_updated.toLocaleString() : "—"}
+          </div>
+          {last && (
+            <div className="text-[10px] text-muted-foreground">
+              {last.teams_touched.toLocaleString()} team-rows touched
+            </div>
+          )}
+        </div>
+      </div>
+
+      {!last && (
+        <div
+          className="border border-border bg-background/50 p-2 text-[11px] text-muted-foreground"
+          data-testid="elo-updater-empty"
+        >
+          The scheduler has not completed a cycle yet — counters will appear
+          after the first run finishes (default every 5 minutes), or use
+          &quot;Run cycle now&quot; below to kick one immediately.
+        </div>
+      )}
+
+      {last && last.errors.length > 0 && (
+        <div
+          className="border border-loss/60 bg-loss/10 p-2 text-[11px] text-loss"
+          data-testid="elo-updater-errors"
+        >
+          <div className="mb-1 uppercase tracking-wider text-[10px]">
+            Last cycle errors ({last.errors.length})
+          </div>
+          <ul className="list-disc list-inside space-y-0.5 normal-case tracking-normal break-words">
+            {last.errors.slice(0, 5).map((e, i) => (
+              <li key={i} data-testid={`elo-updater-error-${i}`}>
+                {e}
+              </li>
+            ))}
+            {last.errors.length > 5 && (
+              <li className="text-muted-foreground">
+                …and {last.errors.length - 5} more
+              </li>
+            )}
+          </ul>
+        </div>
+      )}
+
+      <div className="flex flex-wrap items-center gap-3 border-t border-border pt-3">
+        <button
+          type="button"
+          disabled={running}
+          onClick={onRunNow}
+          data-testid="button-elo-run-now"
+          className="border border-border px-3 py-1.5 text-[10px] uppercase tracking-widest hover:text-primary hover:border-primary disabled:opacity-50 disabled:cursor-not-allowed"
+        >
+          {running ? "Running…" : "Run cycle now"}
+        </button>
+        {error && (
+          <span
+            className="text-loss text-[11px] normal-case tracking-normal"
+            data-testid="elo-updater-run-error"
+          >
+            {error}
+          </span>
+        )}
+        {!error && result && (
+          <span
+            className="text-[11px] normal-case tracking-normal text-accent-cyan"
+            data-testid="elo-updater-run-result"
+          >
+            Examined {result.games_examined.toLocaleString()} · updated{" "}
+            {result.games_updated.toLocaleString()} · skipped{" "}
+            {result.games_skipped.toLocaleString()} ·{" "}
+            {result.duration_seconds.toFixed(2)}s
+            {result.errors.length > 0
+              ? ` · ${result.errors.length} error(s)`
+              : ""}
+          </span>
+        )}
+      </div>
+    </div>
+  );
+}
+
+export function EloUpdaterPanel() {
+  const { getToken, isSignedIn } = useAuth();
+  const tokenFn = useMemo(
+    () => () => getToken().then((t) => t ?? null),
+    [getToken],
+  );
+  const queryClient = useQueryClient();
+  const queryKey = ["admin", "elo", "status"] as const;
+
+  const { data, isLoading, error } = useQuery<EloUpdaterStatus>({
+    queryKey,
+    queryFn: () =>
+      apiFetch<EloUpdaterStatus>("/api/admin/elo/status", {
+        getToken: tokenFn,
+      }),
+    enabled: !!isSignedIn,
+    refetchInterval: 30_000,
+  });
+
+  const runNow = useMutation({
+    mutationFn: () =>
+      apiFetch<EloUpdaterCycle>("/api/admin/elo/run-cycle", {
+        method: "POST",
+        getToken: tokenFn,
+      }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey });
+    },
+  });
+
+  if (isLoading) {
+    return (
+      <div
+        className="h-24 animate-pulse bg-muted/30"
+        data-testid="elo-updater-loading"
+      />
+    );
+  }
+  if (error || !data) {
+    return (
+      <div className="text-loss text-xs" data-testid="elo-updater-error">
+        Failed to load Elo updater status.
+      </div>
+    );
+  }
+
+  return (
+    <EloUpdaterDisplay
+      status={data}
+      onRunNow={() => runNow.mutate()}
+      running={runNow.isPending}
+      error={
+        runNow.isError
+          ? ((runNow.error as Error)?.message ?? "Run cycle failed.")
+          : null
+      }
+      result={runNow.isSuccess ? (runNow.data ?? null) : null}
+    />
+  );
+}

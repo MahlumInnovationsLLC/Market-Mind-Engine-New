@@ -14,6 +14,7 @@ import { NotificationPrefsPanel } from "@/pages/settings-notifications";
 import {
   AuditLogPanel,
   CryptoBacktestPanel,
+  EloUpdaterPanel,
   GithubMirrorPanel,
   LeadsPanel,
   ModelsPanel,
@@ -189,6 +190,13 @@ export default function SystemPage() {
               Trigger cycle
             </div>
             <TriggerCyclePanel />
+          </GlassCard>
+
+          <GlassCard tone="solid" padding="md">
+            <div className="mb-3 text-[11px] font-semibold uppercase tracking-[0.18em] text-accent-cyan/80">
+              Team rating updater
+            </div>
+            <EloUpdaterPanel />
           </GlassCard>
 
           <GlassCard tone="solid" padding="md">
