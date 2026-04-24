@@ -16,6 +16,7 @@ import type { VerticalsOverview } from "@workspace/api-client-react";
 
 import { Card, SectionHeader, StatTile } from "@/components/Card";
 import DelayedSignalsBanner from "@/components/DelayedSignalsBanner";
+import PerLeagueCalibration from "@/components/PerLeagueCalibration";
 import { useColors } from "@/hooks/useColors";
 import { apiFetch } from "@/lib/api";
 import { useSelectedVerticals } from "@/lib/vertical-filter";
@@ -354,6 +355,9 @@ export default function DashboardScreen() {
           </Text>
         </View>
       </Card>
+
+      <View style={{ height: 16 }} />
+      <PerLeagueCalibration />
     </ScrollView>
   );
 }
