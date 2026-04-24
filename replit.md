@@ -85,6 +85,23 @@ Axiom Predict is a pnpm workspace monorepo hosting a prediction-market trading p
   trips fan out via `notifications/push.py` to every device whose owner has
   the matching toggle in `user_notification_prefs` set (defaults: both on).
   Tokens that come back as `DeviceNotRegistered` are pruned automatically.
+- `AXIOM_ALLOW_MISSING_MANIFEST` (default `0`) — when `1`, an HTTP 400/404
+  fetching `models_manifest.json` from the storage bucket is treated as
+  "no model artifacts published yet" (T007 deferral) and surfaces as
+  `models=unconfigured` rather than `down`, allowing the READY gate to
+  open without ML predictors. Set to `0` once a manifest is expected so
+  a misconfigured bucket cannot silently masquerade as "unconfigured".
+- `AXIOM_READY_FEEDS_TIMEOUT_SECONDS` (default `120`) — max time the READY
+  gate waits for every enabled real-time feed to record its first poll
+  outcome. Bumped to `300` here because Kalshi market discovery
+  (`kalshi_crypto_markets`) walks multiple pages of BTC/ETH binaries on
+  cold start and routinely takes 90-130s end-to-end (auth handshake +
+  paginated `list_markets`). The watcher does NOT retry — if the window
+  elapses with pending feeds, the gate stays closed until restart.
+- `AXIOM_READY_FEEDS_REALTIME_THRESHOLD_SECONDS` (default `3600`) — feeds
+  whose cadence is at or above this are classified as backfill and
+  excluded from the READY gate (FRED/macro backfill polls would
+  otherwise hold the gate closed for tens of minutes).
 
 **Backend (FastAPI):**
 - **Authentication:** Integrates with Clerk for user authentication. All authenticated endpoints require a Clerk session JWT. Unapproved users are restricted to `/api/me/access`.

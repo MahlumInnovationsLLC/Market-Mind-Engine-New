@@ -176,6 +176,17 @@ class Settings:
     # but logs a warning that signature enforcement is disabled.
     manifest_public_key: str | None
 
+    # When True, a HTTP 400/404 from the storage bucket while fetching
+    # `models_manifest.json` is translated to a non-fatal "unconfigured"
+    # state (empty predictors, no error) so the READY gate can still
+    # open and the orchestrator can run without ML predictions. Intended
+    # for the T007 deferral period when no model artifacts have been
+    # published yet. Default False (strict): once a manifest IS expected
+    # in the bucket, a 400/404 becomes a real error so an operator
+    # mistake (wrong bucket / path / permissions) does NOT silently
+    # appear as "unconfigured". Toggle via AXIOM_ALLOW_MISSING_MANIFEST.
+    models_allow_missing_manifest: bool
+
     # Telegram concierge bot. When unset the long-poll loop stays asleep
     # (dev / CI default). Per task #111.
     telegram_bot_token: str | None
@@ -354,6 +365,9 @@ def get_settings() -> Settings:
         model_cache_dir=resolve_model_cache_dir(),
         model_cache_max_bytes=resolve_model_cache_max_bytes(),
         manifest_public_key=(os.environ.get("AXIOM_MANIFEST_PUBLIC_KEY") or "").strip() or None,
+        models_allow_missing_manifest=_truthy(
+            os.environ.get("AXIOM_ALLOW_MISSING_MANIFEST"), default=False
+        ),
         telegram_bot_token=(os.environ.get("TELEGRAM_BOT_TOKEN") or "").strip() or None,
         llm_fallback_alert_enabled=_truthy(
             os.environ.get("AXIOM_LLM_FALLBACK_ALERT_ENABLED"), default=True

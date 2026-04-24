@@ -100,9 +100,21 @@ async def _fetch_coinapi(
     # The spot-rate history endpoint synthesises an OHLCV view across
     # exchanges so we don't have to pick a single venue.
     url = f"{COINAPI_BASE}/exchangerate/{asset}/USD/history"
-    params: dict[str, Any] = {"period_id": period, "limit": str(limit)}
-    if time_start is not None:
-        params["time_start"] = time_start.replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    # CoinAPI's /history endpoint REQUIRES `time_start` (it returns
+    # HTTP 400 "The parameter time_start is required." otherwise — even
+    # when `limit` is supplied). When the caller didn't provide one,
+    # default to a window large enough to backfill `limit` bars at the
+    # requested granularity, plus a 2× safety margin so a stalled poll
+    # can catch up after a long pause.
+    if time_start is None:
+        bucket_seconds = int(GRANULARITIES[granularity]["seconds"])
+        window_seconds = max(bucket_seconds * limit * 2, 3600)
+        time_start = datetime.now(tz=timezone.utc) - timedelta(seconds=window_seconds)
+    params: dict[str, Any] = {
+        "period_id": period,
+        "limit": str(limit),
+        "time_start": time_start.replace(microsecond=0).isoformat().replace("+00:00", "Z"),
+    }
     if time_end is not None:
         params["time_end"] = time_end.replace(microsecond=0).isoformat().replace("+00:00", "Z")
     headers = {"X-CoinAPI-Key": api_key, "Accept": "application/json"}

@@ -793,8 +793,32 @@ def _probe_models() -> dict:
         status = "down"
         detail = f"error: {state.error}"[:240]
     elif not state.ready:
-        status = "degraded" if state.in_progress else "down"
-        detail = "loading…" if state.in_progress else "not loaded"
+        if state.in_progress:
+            status = "degraded"
+            detail = "loading…"
+        elif not state.predictors:
+            # No predictors loaded AND no error reported — either the
+            # loader hasn't been kicked off yet, or it ran but the
+            # manifest is unavailable (T007 deferred). Treat as
+            # "unconfigured" rather than "down" so the trading banner
+            # doesn't fire while artifacts are still pending. Trading
+            # code paths that actually need predictors check
+            # `state.ready` themselves and degrade gracefully.
+            reason = (mcheck.get("reason") if mcheck else None)
+            if reason == "manifest_unavailable":
+                detail = (
+                    "manifest not published yet — upload models_manifest.json "
+                    "to the Supabase bucket and call /api/models/reload (T007)"
+                )
+            else:
+                detail = (
+                    "no model artifacts deployed — set the Supabase model "
+                    "bucket path and call /api/models/reload (T007)"
+                )
+            status = "unconfigured"
+        else:
+            status = "down"
+            detail = "not loaded"
     elif mcheck and not manifest_ok:
         status = "down"
         bad = [m["name"] for m in mcheck.get("missing", [])] + [
@@ -841,7 +865,18 @@ def _probe_calibration() -> dict:
     loaded = int(snap["loaded_count"])
     stale = int(snap["stale_count"])
     missing = int(snap["missing_count"])
-    if loaded == 0:
+    last_refit = snap.get("last_refit_at")
+    if loaded == 0 and not last_refit:
+        # Fresh deploy: calibrator artifacts have never been fit. This is
+        # not a failure — surface as "unconfigured" so the trading banner
+        # doesn't fire while the operator runs the initial /api/calibrators
+        # /refit-all (matches the T007/models semantics).
+        status = "unconfigured"
+        detail = (
+            "no calibrators fit yet — run /api/calibrators/refit-all "
+            "to seed per-league probability calibrators"
+        )
+    elif loaded == 0:
         status = "down"
         detail = "no per-league calibrators loaded"
     elif missing > 0 or stale > 0:

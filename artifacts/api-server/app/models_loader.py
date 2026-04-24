@@ -33,6 +33,8 @@ import sys
 import tarfile
 import time
 import warnings
+
+import httpx
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
@@ -346,6 +348,14 @@ class ManifestSignatureError(RuntimeError):
     reason and the operator can tell tampering apart from corruption."""
 
 
+class ManifestUnavailable(RuntimeError):
+    """Raised when the manifest object does not exist in storage (HTTP
+    400/404). Distinct from network/auth errors so `ensure_artifacts`
+    can surface this as a non-fatal "not configured yet" state — the
+    deploy simply has no model artifacts published yet (T007 deferred)
+    rather than a misconfigured/broken manifest."""
+
+
 def _load_manifest_public_key():
     """Decode `Settings.manifest_public_key` into an Ed25519PublicKey, or
     return None if the operator has not configured one. Accepts the raw
@@ -456,7 +466,29 @@ async def _download_manifest() -> tuple[dict[str, Any], str]:
         except OSError:
             pass
     log.info("[models_loader] fetching manifest %s", MANIFEST_REMOTE_PATH)
-    await storage.download_to_path(MANIFEST_REMOTE_PATH, MANIFEST_LOCAL, force=True)
+    try:
+        await storage.download_to_path(MANIFEST_REMOTE_PATH, MANIFEST_LOCAL, force=True)
+    except httpx.HTTPStatusError as e:
+        # Supabase storage returns 400 for "object not found" on the
+        # signed-object endpoint and 404 for missing buckets. When the
+        # operator has explicitly opted in via AXIOM_ALLOW_MISSING_MANIFEST
+        # (T007 deferral), translate to a non-fatal sentinel so the caller
+        # can surface "unconfigured" instead of "down". Otherwise treat as
+        # a real error so a misconfigured bucket / wrong path / missing
+        # permissions cannot silently masquerade as "no artifacts yet".
+        if e.response is not None and e.response.status_code in (400, 404):
+            allow_missing = False
+            try:
+                allow_missing = bool(get_settings().models_allow_missing_manifest)
+            except Exception:
+                allow_missing = False
+            if allow_missing:
+                raise ManifestUnavailable(
+                    f"manifest not found at {MANIFEST_REMOTE_PATH} "
+                    f"(HTTP {e.response.status_code}) — no model artifacts "
+                    f"published (AXIOM_ALLOW_MISSING_MANIFEST=1)"
+                ) from e
+        raise
     payload = MANIFEST_LOCAL.read_bytes()
 
     # Verify the detached signature over the EXACT bytes pulled from
@@ -627,6 +659,33 @@ async def ensure_artifacts(*, force: bool = False) -> ModelsState:
             # corrupt or partial set.
             try:
                 manifest, sig_status = await _download_manifest()
+            except ManifestUnavailable as e:
+                # Deploy has not yet published a model manifest (T007
+                # deferred). Leave _state.ready=False, _state.error=None
+                # so /api/health.models surfaces "unconfigured" (handled
+                # in app.health._probe_models) and the READY gate flips
+                # without parking the orchestrator.
+                log.info(
+                    "[models_loader] manifest not configured: %s — "
+                    "loader will idle until artifacts are published",
+                    e,
+                )
+                _state.manifest_check = {
+                    "ok": False,
+                    "reason": "manifest_unavailable",
+                    "checked_at": time.time(),
+                    "signature": "skipped",
+                    "error": str(e),
+                    "missing": [],
+                    "mismatch": [],
+                    "unexpected": [],
+                }
+                # Drop the predictor scan results — without a manifest
+                # we have nothing to verify them against, and the probe
+                # uses (predictors==[] AND archives==[]) as the
+                # "unconfigured" sentinel.
+                _state.predictors = {}
+                return _state
             except ManifestSignatureError as e:
                 # Distinct surfacing in /api/health.models so an operator
                 # can tell tampering ("signature invalid") apart from a

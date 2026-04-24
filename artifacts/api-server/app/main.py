@@ -715,7 +715,11 @@ async def _ready_gate_watcher(models_task: asyncio.Task) -> None:
         ready_gate.mark_check("secrets", ok=True, detail="required secrets present")
 
     # Models — wait for the loader background task; mark ok only when
-    # the resulting state is `ready` (manifest verification passed).
+    # the resulting state is `ready` (manifest verification passed),
+    # OR when the deploy explicitly has no model artifacts configured
+    # yet (T007 deferred). The latter must not park the orchestrator —
+    # downstream code that needs predictors checks `state.ready` itself
+    # and degrades gracefully.
     try:
         await models_task
         state = models_loader.get_state()
@@ -724,6 +728,20 @@ async def _ready_gate_watcher(models_task: asyncio.Task) -> None:
                 "models",
                 ok=True,
                 detail=f"{len(state.predictors)} predictor(s) loaded",
+            )
+        elif (
+            not state.error
+            and not state.ready
+            and not state.in_progress
+            and not state.predictors
+        ):
+            # T007 deferred: no artifacts available, no error reported.
+            # Allow READY to flip so the orchestrator can run feed-driven
+            # work (markets refresh, settlement, etc.) without ML scoring.
+            ready_gate.mark_check(
+                "models",
+                ok=True,
+                detail="no model artifacts configured (T007 deferred); orchestrator allowed without ML predictors",
             )
         else:
             ready_gate.mark_check(
@@ -736,19 +754,29 @@ async def _ready_gate_watcher(models_task: asyncio.Task) -> None:
     except Exception as e:
         ready_gate.mark_check("models", ok=False, detail=f"{type(e).__name__}: {e}")
 
-    # Feeds — give each enabled feed up to FEED_FIRST_POLL_TIMEOUT to
-    # produce its first outcome. Disabled feeds are ignored. Bound the
-    # wait so a permanently broken feed can't park the trading loop
-    # forever; surface the names of any feeds still missing a response.
+    # Feeds — give each enabled real-time feed up to FEED_FIRST_POLL_TIMEOUT
+    # to produce its first outcome. Disabled feeds are ignored. Long-cadence
+    # backfill feeds (cadence ≥ FEEDS_REALTIME_THRESHOLD_SECONDS) are
+    # excluded — they're not real-time data sources and shouldn't park the
+    # trading loop while they slowly chew through historical data on the
+    # 24h tick. The threshold defaults to 1 hour: anything that polls less
+    # often than that is treated as a backfill/maintenance feed.
     timeout = float(os.environ.get("AXIOM_READY_FEEDS_TIMEOUT_SECONDS") or "120")
+    realtime_threshold = float(
+        os.environ.get("AXIOM_READY_FEEDS_REALTIME_THRESHOLD_SECONDS") or "3600"
+    )
     deadline = asyncio.get_event_loop().time() + timeout
     pending_feeds: list[str] = []
     while True:
         snap = feed_registry.snapshot()
-        enabled = [s for s in snap if s.get("enabled")]
+        enabled_realtime = [
+            s for s in snap
+            if s.get("enabled")
+            and float(s.get("cadence_seconds") or 0.0) < realtime_threshold
+        ]
         pending_feeds = [
             s["name"]
-            for s in enabled
+            for s in enabled_realtime
             if not (s.get("last_ok_at") or s.get("last_error_at"))
         ]
         if not pending_feeds:
@@ -756,16 +784,31 @@ async def _ready_gate_watcher(models_task: asyncio.Task) -> None:
         if asyncio.get_event_loop().time() >= deadline:
             break
         await asyncio.sleep(1.0)
+    snap_now = feed_registry.snapshot()
+    enabled_total = sum(1 for s in snap_now if s.get("enabled"))
+    backfill_n = sum(
+        1 for s in snap_now
+        if s.get("enabled")
+        and float(s.get("cadence_seconds") or 0.0) >= realtime_threshold
+    )
     if pending_feeds:
         ready_gate.mark_check(
             "feeds",
             ok=False,
-            detail=f"no first poll within {timeout:.0f}s: {', '.join(pending_feeds)}",
+            detail=(
+                f"no first poll within {timeout:.0f}s: {', '.join(pending_feeds)} "
+                f"(realtime threshold={realtime_threshold:.0f}s; "
+                f"{backfill_n} backfill feed(s) excluded)"
+            ),
         )
     else:
-        n = len([s for s in feed_registry.snapshot() if s.get("enabled")])
         ready_gate.mark_check(
-            "feeds", ok=True, detail=f"{n} enabled feed(s) responded"
+            "feeds",
+            ok=True,
+            detail=(
+                f"{enabled_total - backfill_n} realtime feed(s) responded; "
+                f"{backfill_n} backfill feed(s) deferred"
+            ),
         )
 
     # Trip the gate only if every check passed. If any failed, leave
