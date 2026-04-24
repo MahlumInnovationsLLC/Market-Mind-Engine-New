@@ -237,11 +237,8 @@ def test_operator_override_absent_falls_back_to_env_paper(monkeypatch, _reset_li
 
 def test_kill_switch_rejects_orders(monkeypatch, _reset_lifecycle):
     monkeypatch.setattr(lifecycle, "get_settings", lambda: _make_settings("paper"))
-    # Stub alert dispatch so halt() doesn't reach for SMTP.
-    import sys
-    fake_alerts = SimpleNamespace(halt=lambda **kw: None,
-                                  live_trade=lambda **kw: None)
-    monkeypatch.setitem(sys.modules, "app.notifications.alerts", fake_alerts)
+    # Stub alert dispatch so halt() doesn't reach for SMTP / Postmark.
+    _stub_real_alerts(monkeypatch)
 
     lifecycle.halt(reason="testing")
     assert lifecycle.is_halted() is True
@@ -259,10 +256,7 @@ def test_kill_switch_rejects_orders(monkeypatch, _reset_lifecycle):
 
 
 def test_kill_switch_state_round_trip(monkeypatch, _reset_lifecycle):
-    import sys
-    monkeypatch.setitem(sys.modules, "app.notifications.alerts",
-                        SimpleNamespace(halt=lambda **kw: None,
-                                        live_trade=lambda **kw: None))
+    _stub_real_alerts(monkeypatch)
     state = lifecycle.halt(reason="r1")
     assert state["halted"] is True and state["reason"] == "r1"
     assert lifecycle.kill_switch_state()["halted"] is True
@@ -478,10 +472,7 @@ def test_cancel_unknown_raises():
 
 
 def test_handle_ws_fill_marks_resting_filled(monkeypatch, _reset_lifecycle):
-    import sys
-    monkeypatch.setitem(sys.modules, "app.notifications.alerts",
-                        SimpleNamespace(halt=lambda **kw: None,
-                                        live_trade=lambda **kw: None))
+    _stub_real_alerts(monkeypatch)
     req = lifecycle.OrderRequest(
         market_ticker="X-1", side="yes", action="buy", count=2,
         limit_price_cents=44, client_order_id="ws-1",
@@ -508,16 +499,41 @@ def test_handle_ws_fill_marks_resting_filled(monkeypatch, _reset_lifecycle):
 # ---------------------------------------------------------------------------
 
 def _stub_alerts(monkeypatch):
-    import sys
-    monkeypatch.setitem(sys.modules, "app.notifications.alerts",
-                        SimpleNamespace(halt=lambda **kw: None,
-                                        live_trade=lambda **kw: None,
-                                        _hash_reason=lambda s: f"h{abs(hash(s)) % 10000}",
-                                        dedupe_or_skip=_async_true))
+    _stub_real_alerts(monkeypatch)
 
 
 async def _async_true(*a, **kw):
     return True
+
+
+def _stub_real_alerts(monkeypatch):
+    """Patch attributes on the *real* ``app.notifications.alerts`` module.
+
+    The lifecycle module reaches the alerts dispatch via
+    ``from ..notifications import alerts as _alerts`` inside function
+    bodies. Per Python's ``from X import Y`` semantics, that lookup
+    resolves through the parent package's *attribute* (set when
+    ``app.notifications`` was first imported), NOT through
+    ``sys.modules``. Replacing the entry in ``sys.modules`` is therefore
+    a no-op for those imports — the real ``live_trade`` would still run
+    and schedule a Postmark ``send`` background task. When the test's
+    short-lived event loop closes (we spin a fresh one per ``_run``),
+    the unstarted ``_send_one`` coroutines inside ``asyncio.gather``
+    are garbage-collected without ever being awaited, polluting the
+    pytest run with ``RuntimeWarning: coroutine '_send_one' was never
+    awaited`` (task #265).
+
+    Patching the attributes directly on the real module routes both
+    ``import`` styles through our stubs and stops the leak at the
+    source.
+    """
+    from app.notifications import alerts as _alerts
+
+    monkeypatch.setattr(_alerts, "halt", lambda **kw: None, raising=False)
+    monkeypatch.setattr(_alerts, "live_trade", lambda **kw: None, raising=False)
+    monkeypatch.setattr(_alerts, "trade_confirmation", lambda **kw: None,
+                        raising=False)
+    monkeypatch.setattr(_alerts, "dedupe_or_skip", _async_true, raising=False)
 
 
 def _seed_resting(client_order_id: str, *, count: int, side="yes", price=50):
