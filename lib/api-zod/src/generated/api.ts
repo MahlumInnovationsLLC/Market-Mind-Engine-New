@@ -1089,6 +1089,12 @@ export const AdminGetAuditLogResponse = zod.object({
       created_at: zod.string().nullish(),
     }),
   ),
+  total: zod
+    .number()
+    .nullish()
+    .describe(
+      "Total number of audit entries matching the active filters (independent of paging).",
+    ),
   limit: zod.number().nullish(),
   offset: zod.number().nullish(),
   target: zod.string().nullish(),

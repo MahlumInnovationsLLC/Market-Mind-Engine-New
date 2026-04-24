@@ -957,8 +957,10 @@ export function AuditLogPanel() {
   // Server-side pagination (added per UI overhaul code review): we drive
   // /api/admin/audit-log with `limit` + `offset` query params via raw
   // apiFetch so we don't have to regen the typed client just to add an
-  // offset arg. The endpoint returns `{ items, limit, offset }`; we infer
-  // hasMore from `items.length === pageSize` (cheap and avoids a count(*)).
+  // offset arg. The endpoint returns `{ items, total, limit, offset }`;
+  // `total` is the number of rows matching the active filters (independent
+  // of paging) so we can render "Showing N–M of T" and disable Next on the
+  // actual last page.
   const { getToken, isSignedIn } = useAuth();
   const tokenFn = useMemo(
     () => () => getToken().then((t) => t ?? null),
@@ -992,7 +994,12 @@ export function AuditLogPanel() {
     setPage(0);
   };
 
-  type AuditPage = { items: AdminAuditLogEntry[]; limit: number; offset: number };
+  type AuditPage = {
+    items: AdminAuditLogEntry[];
+    total?: number | null;
+    limit: number;
+    offset: number;
+  };
   const offset = page * pageSize;
   const buildUrl = () => {
     const qs = new URLSearchParams();
@@ -1031,7 +1038,13 @@ export function AuditLogPanel() {
   const hasActiveFilters = !!(targetApplied || actorApplied || actionApplied);
 
   const items: AdminAuditLogEntry[] = query.data?.items ?? [];
-  const hasMore = items.length === pageSize;
+  // `total` may be missing on older deploys / error responses; fall back to
+  // the cheap heuristic in that case so the Next button still behaves.
+  const totalRaw = query.data?.total;
+  const total: number | null =
+    typeof totalRaw === "number" && Number.isFinite(totalRaw) ? totalRaw : null;
+  const hasMore =
+    total != null ? offset + items.length < total : items.length === pageSize;
   const isLoading = query.isLoading;
   const isError = query.isError;
 
@@ -1046,6 +1059,7 @@ export function AuditLogPanel() {
 
   const rangeStart = items.length === 0 ? 0 : offset + 1;
   const rangeEnd = offset + items.length;
+  const totalLabel = total != null ? ` of ${total.toLocaleString()}` : "";
 
   return (
     <div className="space-y-3" data-testid="panel-audit-log">
@@ -1133,7 +1147,7 @@ export function AuditLogPanel() {
             ? "Loading…"
             : isError
               ? "—"
-              : `Showing ${rangeStart}–${rangeEnd} (page ${page + 1})`}
+              : `Showing ${rangeStart}–${rangeEnd}${totalLabel} (page ${page + 1})`}
         </div>
         <div className="flex items-center gap-2">
           <label className="flex items-center gap-1">

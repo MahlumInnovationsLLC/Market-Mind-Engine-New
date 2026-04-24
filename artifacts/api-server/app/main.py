@@ -1783,15 +1783,26 @@ async def admin_get_audit_log(
 ) -> dict[str, object]:
     limit = max(1, min(500, int(limit)))
     offset = max(0, int(offset))
-    items = await admin_module.list_audit_log(
-        limit,
-        offset,
-        target=target,
-        actor=actor_filter,
-        action=action,
+    # Fetch the page and the total in parallel: operators want to see
+    # "Showing 1–50 of 312" so they know whether further paging is worthwhile,
+    # and the Next button should be disabled on the actual last page.
+    items, total = await asyncio.gather(
+        admin_module.list_audit_log(
+            limit,
+            offset,
+            target=target,
+            actor=actor_filter,
+            action=action,
+        ),
+        admin_module.count_audit_log(
+            target=target,
+            actor=actor_filter,
+            action=action,
+        ),
     )
     return {
         "items": items,
+        "total": total,
         "limit": limit,
         "offset": offset,
         "target": target,

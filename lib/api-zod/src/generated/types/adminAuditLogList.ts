@@ -9,6 +9,8 @@ import type { AdminAuditLogEntry } from "./adminAuditLogEntry";
 
 export interface AdminAuditLogList {
   items: AdminAuditLogEntry[];
+  /** Total number of audit entries matching the active filters (independent of paging). */
+  total?: number | null;
   limit?: number | null;
   offset?: number | null;
   target?: string | null;

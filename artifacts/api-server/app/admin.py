@@ -711,6 +711,51 @@ async def list_audit_log_actions() -> list[str]:
         return []
 
 
+def _audit_log_filter_sql(
+    *,
+    start_param_idx: int,
+    target: str | None,
+    actor: str | None,
+    action: str | None,
+) -> tuple[str, list[Any]]:
+    """Build the shared WHERE clause for ``list_audit_log`` / ``count_audit_log``.
+
+    Returns ``(where_sql, params)`` where ``where_sql`` is either ``""`` or
+    ``"WHERE …"`` and ``params`` are the positional values to pass after any
+    callsite-specific leading args (e.g. ``LIMIT``/``OFFSET`` for the list
+    query, none for the count query). ``start_param_idx`` is the 1-based
+    offset of the first param this helper should claim, so its placeholders
+    line up with the caller's ``$N``.
+    """
+    where: list[str] = []
+    params: list[Any] = []
+
+    def _add_userish(col_id: str, col_email: str, value: str) -> None:
+        v = value.strip()
+        if not v:
+            return
+        params.append(v)
+        idx_exact = start_param_idx + len(params) - 1
+        params.append(f"%{v.lower()}%")
+        idx_like = start_param_idx + len(params) - 1
+        where.append(
+            f"({col_id} = ${idx_exact} OR lower(coalesce({col_email}, '')) LIKE ${idx_like})"
+        )
+
+    if target:
+        _add_userish("target_user_id", "target_email", target)
+    if actor:
+        _add_userish("actor_user_id", "actor_email", actor)
+    if action:
+        a = action.strip()
+        if a:
+            params.append(a)
+            where.append(f"action = ${start_param_idx + len(params) - 1}")
+
+    where_sql = ("WHERE " + " AND ".join(where)) if where else ""
+    return where_sql, params
+
+
 async def list_audit_log(
     limit: int = 100,
     offset: int = 0,
@@ -726,32 +771,13 @@ async def list_audit_log(
     by whatever the operator types in. ``action`` is an exact match on
     the ``action`` column (the UI offers a dropdown of known values).
     """
-    where: list[str] = []
-    params: list[Any] = [limit, offset]
-
-    def _add_userish(col_id: str, col_email: str, value: str) -> None:
-        v = value.strip()
-        if not v:
-            return
-        params.append(v)
-        idx_exact = len(params)
-        params.append(f"%{v.lower()}%")
-        idx_like = len(params)
-        where.append(
-            f"({col_id} = ${idx_exact} OR lower(coalesce({col_email}, '')) LIKE ${idx_like})"
-        )
-
-    if target:
-        _add_userish("target_user_id", "target_email", target)
-    if actor:
-        _add_userish("actor_user_id", "actor_email", actor)
-    if action:
-        a = action.strip()
-        if a:
-            params.append(a)
-            where.append(f"action = ${len(params)}")
-
-    where_sql = ("WHERE " + " AND ".join(where)) if where else ""
+    where_sql, filter_params = _audit_log_filter_sql(
+        start_param_idx=3,  # $1=limit, $2=offset, then filter params
+        target=target,
+        actor=actor,
+        action=action,
+    )
+    params: list[Any] = [limit, offset, *filter_params]
     sql = f"""
         SELECT
           id,
@@ -789,3 +815,32 @@ async def list_audit_log(
     except Exception as e:
         log.warning("admin audit_log list failed: %s", e)
         return []
+
+
+async def count_audit_log(
+    *,
+    target: str | None = None,
+    actor: str | None = None,
+    action: str | None = None,
+) -> int:
+    """Total number of audit entries matching the same filters as ``list_audit_log``.
+
+    Used by the admin console to render "Showing 1–50 of N" so operators
+    know whether further paging / refinement is worthwhile.
+    """
+    where_sql, params = _audit_log_filter_sql(
+        start_param_idx=1,
+        target=target,
+        actor=actor,
+        action=action,
+    )
+    sql = f"SELECT count(*) AS n FROM admin_audit_log {where_sql}"
+    try:
+        async with db.acquire() as c:
+            row = await c.fetchrow(sql, *params)
+            if row is None:
+                return 0
+            return int(row["n"])
+    except Exception as e:
+        log.warning("admin audit_log count failed: %s", e)
+        return 0
