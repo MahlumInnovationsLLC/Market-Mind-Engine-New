@@ -43,6 +43,7 @@ from .notifications import (
     churn as notif_churn,
     daily_summary,
     email as notif_user_email,
+    persona_brier_alerts as notif_persona_brier_alerts,
     postmark as notif_postmark,
     push as notif_push,
     sms as notif_sms,
@@ -354,6 +355,15 @@ async def lifespan(_: FastAPI):
         await notif_weekly_roundup.start()
     except Exception as e:
         log.warning("weekly roundup scheduler start failed: %s", e)
+    # Per-persona daily Brier degradation watcher (task #305).  Polls
+    # every ~10m, computes today's per-persona Brier via the same
+    # `aggregate_persona_day` helper the daily summary uses, and pages
+    # an operator alert when any persona's score crosses the configured
+    # absolute / jump threshold.
+    try:
+        await notif_persona_brier_alerts.start()
+    except Exception as e:
+        log.warning("persona brier alerts scheduler start failed: %s", e)
     # RevenueCat webhook silence detector — fires an operator alert
     # when the mobile-IAP webhook stops delivering during business hours
     # (catches dashboard pause/resume + upstream outages). Per task #252.
@@ -533,6 +543,10 @@ async def lifespan(_: FastAPI):
             await notif_weekly_roundup.stop()
         except Exception as e:
             log.warning("weekly roundup stop error: %s", e)
+        try:
+            await notif_persona_brier_alerts.stop()
+        except Exception as e:
+            log.warning("persona brier alerts stop error: %s", e)
         try:
             await rc_billing.stop()
         except Exception as e:
@@ -3595,7 +3609,7 @@ async def notifications_unsubscribe(
 
 _ALERT_TYPES = {
     "halt", "drift", "tier_change", "live_trade", "daily_pnl_summary",
-    "weekly_roundup",
+    "weekly_roundup", "persona_daily_brier",
     "churn_digest", "user_payment_failed", "user_will_cancel", "user_canceled",
 }
 
@@ -3687,6 +3701,22 @@ async def notifications_test(
         return result
     if body.type == "churn_digest":
         return await notif_churn.fire_now(dry_run=body.dry_run)
+    if body.type == "persona_daily_brier":
+        import datetime as _dt
+        return notif_alerts.persona_brier_drift(
+            persona_id="skeptic",
+            date_utc=_dt.date.today().isoformat(),
+            brier=0.34,
+            debates=8,
+            abs_threshold=0.30,
+            jump_threshold=0.10,
+            severity="warn",
+            reason="absolute",
+            baseline=0.22,
+            jump=0.12,
+            note="test persona brier drift",
+            dry_run=body.dry_run,
+        )
     if body.type == "weekly_roundup":
         import datetime as _dt
         return notif_alerts.weekly_roundup(

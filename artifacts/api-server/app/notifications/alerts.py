@@ -50,6 +50,7 @@ _TAG_TO_USER_PREF: dict[str, str] = {
     "drift":            "email_drift",
     "halt":             "email_halt",
     "live-trade":       "email_live_trade",
+    "persona-brier":    "email_drift",
     "weekly-roundup":   "email_weekly_roundup",
 }
 
@@ -175,6 +176,11 @@ USER_VISIBLE_ALERTS: dict[str, dict[str, Any]] = {
     },
     "position_drift": {
         "label": "Position drift alert",
+        "scope": "broadcast",
+        "channels": [("email", "email_drift")],
+    },
+    "persona_daily_brier": {
+        "label": "Persona Brier degradation",
         "scope": "broadcast",
         "channels": [("email", "email_drift")],
     },
@@ -1052,6 +1058,72 @@ def drift(
         + "\n"
     )
     return _dispatch(subject, body, tag="drift", dry_run=dry_run)
+
+
+# ---------------------------------------------------------------------------
+# Per-persona daily Brier degradation
+# ---------------------------------------------------------------------------
+
+
+def persona_brier_drift(
+    *,
+    persona_id: str,
+    date_utc: str,
+    brier: float,
+    debates: int,
+    abs_threshold: float,
+    jump_threshold: float,
+    severity: str,
+    reason: str,
+    baseline: float | None = None,
+    jump: float | None = None,
+    note: str | None = None,
+    dry_run: bool = False,
+) -> dict[str, Any]:
+    """Operator alert: a single persona's daily Brier crossed one of the
+    configured thresholds.
+
+    Caller (`notifications.persona_brier_alerts`) is responsible for
+    dedupe (use `dedupe_or_skip` keyed on
+    ``f"{persona_id}:{severity}:{date_utc}"`` with a 24h TTL) so a
+    persona that flaps in/out of the window only pages once per day.
+    """
+    sev = (severity or "warn").lower()
+    sev_tag = "HIGH" if sev == "high" else "WARN"
+    subject = (
+        f"[axiom][PERSONA-BRIER][{sev_tag}] {persona_id} :: "
+        f"daily Brier {brier:.4f} on {date_utc}"
+    )
+    body = (
+        "A swarm persona's daily Brier degraded sharply. "
+        "Investigate the persona's recent verdicts before the "
+        "weighted-vote impact compounds.\n\n"
+        + _format_lines(
+            [
+                ("persona_id", persona_id),
+                ("date_utc", date_utc),
+                ("debates", debates),
+                ("brier", f"{brier:.4f}"),
+                (
+                    "all_time_brier",
+                    f"{baseline:.4f}" if baseline is not None else "(n/a)",
+                ),
+                (
+                    "jump",
+                    f"+{jump:.4f}" if jump is not None else "(n/a)",
+                ),
+                ("abs_threshold", f"{abs_threshold:.2f}"),
+                ("jump_threshold", f"+{jump_threshold:.2f}"),
+                ("trigger", reason),
+                ("severity", sev),
+                ("at", _utc_now_iso()),
+            ]
+        )
+        + "\n"
+    )
+    if note:
+        body += f"\nDetails:\n  {note}\n"
+    return _dispatch(subject, body, tag="persona-brier", dry_run=dry_run)
 
 
 # ---------------------------------------------------------------------------
