@@ -1,7 +1,7 @@
 import { useMemo, useState } from "react";
 import { Link, useLocation } from "wouter";
 import { useAuth, useClerk, useUser } from "@clerk/react";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { apiFetch, formatErrorMessage } from "@/lib/api";
 import {
   ApiError,
@@ -33,6 +33,21 @@ function fmtDate(iso: string | null | undefined): string {
   } catch {
     return iso;
   }
+}
+
+function detectDeviceTz(): string {
+  try {
+    return Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
+  } catch {
+    return "UTC";
+  }
+}
+
+function formatHour(h: number): string {
+  const hh = ((h % 24) + 24) % 24;
+  const suffix = hh < 12 ? "AM" : "PM";
+  const display = hh === 0 ? 12 : hh > 12 ? hh - 12 : hh;
+  return `${display} ${suffix}`;
 }
 
 export default function ProfilePage() {
@@ -85,6 +100,115 @@ export default function ProfilePage() {
     enabled: !!isSignedIn,
     staleTime: 60_000,
   });
+
+  type QuietHoursPatch = {
+    quiet_hours_start_hour?: number | null;
+    quiet_hours_start_hour_present?: boolean;
+    quiet_hours_end_hour?: number | null;
+    quiet_hours_end_hour_present?: boolean;
+    quiet_hours_tz?: string | null;
+    quiet_hours_tz_present?: boolean;
+  };
+  type NotificationPrefsView = {
+    prefs: {
+      quiet_hours_start_hour?: number | null;
+      quiet_hours_end_hour?: number | null;
+      quiet_hours_tz?: string | null;
+    } & Record<string, unknown>;
+  };
+  const prefsQueryKey = ["profile", "notification-prefs"] as const;
+  const prefsQuery = useQuery<NotificationPrefsView>({
+    queryKey: prefsQueryKey,
+    queryFn: () =>
+      apiFetch<NotificationPrefsView>("/api/me/notification-prefs", {
+        getToken: tokenGetter,
+      }),
+    enabled: !!isSignedIn,
+    staleTime: 60_000,
+  });
+  const prefsMutation = useMutation<
+    NotificationPrefsView,
+    unknown,
+    QuietHoursPatch
+  >({
+    mutationFn: (patch) =>
+      apiFetch<NotificationPrefsView>("/api/me/notification-prefs", {
+        method: "PUT",
+        getToken: tokenGetter,
+        body: patch,
+      }),
+    onSuccess: (next) => {
+      queryClient.setQueryData(prefsQueryKey, next);
+    },
+  });
+
+  const quietStart =
+    (prefsQuery.data?.prefs?.quiet_hours_start_hour as
+      | number
+      | null
+      | undefined) ?? null;
+  const quietEnd =
+    (prefsQuery.data?.prefs?.quiet_hours_end_hour as
+      | number
+      | null
+      | undefined) ?? null;
+  const quietTz =
+    (prefsQuery.data?.prefs?.quiet_hours_tz as string | null | undefined) ??
+    null;
+  const quietEnabled =
+    quietStart !== null &&
+    quietEnd !== null &&
+    !!quietTz &&
+    quietStart !== quietEnd;
+  const quietBusy = prefsQuery.isLoading || prefsMutation.isPending;
+  const quietError = prefsMutation.isError
+    ? formatErrorMessage(prefsMutation.error, "Failed to save quiet hours.")
+    : prefsQuery.isError
+      ? "Failed to load quiet-hours preferences."
+      : null;
+
+  const enableQuietHours = (on: boolean) => {
+    if (on) {
+      const usableSaved =
+        quietStart !== null && quietEnd !== null && quietStart !== quietEnd;
+      prefsMutation.mutate({
+        quiet_hours_start_hour: usableSaved ? quietStart : 22,
+        quiet_hours_start_hour_present: true,
+        quiet_hours_end_hour: usableSaved ? quietEnd : 7,
+        quiet_hours_end_hour_present: true,
+        quiet_hours_tz: quietTz ?? detectDeviceTz(),
+        quiet_hours_tz_present: true,
+      });
+    } else {
+      prefsMutation.mutate({
+        quiet_hours_tz: null,
+        quiet_hours_tz_present: true,
+      });
+    }
+  };
+
+  const bumpQuietHour = (which: "start" | "end", delta: number) => {
+    const cur = which === "start" ? quietStart ?? 22 : quietEnd ?? 7;
+    const next = (((cur + delta) % 24) + 24) % 24;
+    if (which === "start") {
+      prefsMutation.mutate({
+        quiet_hours_start_hour: next,
+        quiet_hours_start_hour_present: true,
+      });
+    } else {
+      prefsMutation.mutate({
+        quiet_hours_end_hour: next,
+        quiet_hours_end_hour_present: true,
+      });
+    }
+  };
+
+  const useDeviceTz = () => {
+    prefsMutation.mutate({
+      quiet_hours_tz: detectDeviceTz(),
+      quiet_hours_tz_present: true,
+    });
+  };
 
   const subQuery = useGetMySubscription({
     query: { queryKey: getGetMySubscriptionQueryKey() },
@@ -458,6 +582,112 @@ export default function ProfilePage() {
         )}
       </GlassCard>
 
+      <GlassCard tone="solid" padding="md" data-testid="card-profile-quiet-hours">
+        <SectionHeader
+          eyebrow="Notifications"
+          title="Quiet hours"
+          subtitle={
+            quietEnabled
+              ? `Push alerts muted ${formatHour(quietStart!)} – ${formatHour(quietEnd!)} (${quietTz}). Email alerts are unaffected.`
+              : "Mute live-trade and halt pushes during a daily window. Email alerts are unaffected."
+          }
+        />
+
+        {quietError && (
+          <div
+            className="mb-3 border border-destructive p-2 text-xs text-destructive"
+            data-testid="text-quiet-hours-error"
+          >
+            {quietError}
+          </div>
+        )}
+
+        {prefsQuery.isLoading && !prefsQuery.data ? (
+          <div
+            className="text-xs text-muted-foreground"
+            data-testid="text-quiet-hours-loading"
+          >
+            Loading…
+          </div>
+        ) : (
+          <div className="space-y-3 text-xs">
+            <div className="flex items-center justify-between gap-3">
+              <div className="min-w-0">
+                <div className="text-foreground" data-testid="text-quiet-hours-status">
+                  {quietEnabled ? "Enabled" : "Disabled"}
+                </div>
+                <div className="text-[11px] text-muted-foreground">
+                  Affects mobile push only.
+                </div>
+              </div>
+              <button
+                type="button"
+                role="switch"
+                aria-checked={quietEnabled}
+                disabled={quietBusy}
+                onClick={() => enableQuietHours(!quietEnabled)}
+                className={`relative inline-flex h-6 w-11 shrink-0 items-center rounded-full border transition-colors disabled:opacity-50 ${
+                  quietEnabled
+                    ? "border-primary bg-primary/80"
+                    : "border-border bg-muted/40"
+                }`}
+                data-testid="switch-quiet-hours"
+              >
+                <span
+                  className={`inline-block h-4 w-4 transform rounded-full bg-background transition-transform ${
+                    quietEnabled ? "translate-x-6" : "translate-x-1"
+                  }`}
+                />
+              </button>
+            </div>
+
+            {quietEnabled && (
+              <div
+                className="space-y-3 border-t border-border pt-3"
+                data-testid="block-quiet-hours-controls"
+              >
+                <HourPicker
+                  label="Start"
+                  hour={quietStart!}
+                  disabled={quietBusy}
+                  onUp={() => bumpQuietHour("start", 1)}
+                  onDown={() => bumpQuietHour("start", -1)}
+                  testid="quiet-hours-start"
+                />
+                <HourPicker
+                  label="End"
+                  hour={quietEnd!}
+                  disabled={quietBusy}
+                  onUp={() => bumpQuietHour("end", 1)}
+                  onDown={() => bumpQuietHour("end", -1)}
+                  testid="quiet-hours-end"
+                />
+                <div className="flex items-center justify-between gap-3">
+                  <div className="min-w-0">
+                    <div className="text-foreground">Time zone</div>
+                    <div
+                      className="truncate text-[11px] text-muted-foreground"
+                      data-testid="text-quiet-hours-tz"
+                    >
+                      {quietTz}
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={useDeviceTz}
+                    disabled={quietBusy}
+                    className="border border-border px-3 py-1 text-[10px] uppercase tracking-widest text-primary hover:border-primary disabled:opacity-50"
+                    data-testid="button-quiet-hours-use-device-tz"
+                  >
+                    Use device
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+      </GlassCard>
+
       <GlassCard tone="solid" padding="md" data-testid="card-profile-notifications">
         <SectionHeader
           eyebrow="Notifications"
@@ -490,6 +720,54 @@ export default function ProfilePage() {
           {signingOut ? "Signing out…" : "Sign out"}
         </button>
       </GlassCard>
+    </div>
+  );
+}
+
+function HourPicker({
+  label,
+  hour,
+  disabled,
+  onUp,
+  onDown,
+  testid,
+}: {
+  label: string;
+  hour: number;
+  disabled: boolean;
+  onUp: () => void;
+  onDown: () => void;
+  testid: string;
+}) {
+  return (
+    <div className="flex items-center gap-3" data-testid={`row-${testid}`}>
+      <div className="flex-1 text-foreground">{label}</div>
+      <button
+        type="button"
+        onClick={onDown}
+        disabled={disabled}
+        className="flex h-8 w-8 items-center justify-center border border-border text-base text-foreground hover:border-primary disabled:opacity-50"
+        data-testid={`button-${testid}-down`}
+        aria-label={`Decrease ${label.toLowerCase()} hour`}
+      >
+        −
+      </button>
+      <div
+        className="min-w-[64px] text-center font-semibold text-foreground"
+        data-testid={`text-${testid}-value`}
+      >
+        {formatHour(hour)}
+      </div>
+      <button
+        type="button"
+        onClick={onUp}
+        disabled={disabled}
+        className="flex h-8 w-8 items-center justify-center border border-border text-base text-foreground hover:border-primary disabled:opacity-50"
+        data-testid={`button-${testid}-up`}
+        aria-label={`Increase ${label.toLowerCase()} hour`}
+      >
+        +
+      </button>
     </div>
   );
 }
