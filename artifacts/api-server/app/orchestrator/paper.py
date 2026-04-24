@@ -27,6 +27,73 @@ from ..risk.gates import RiskContext
 log = logging.getLogger(__name__)
 
 
+# Cached resolution of the bot's "owning" operator clerk_user_id
+# (task #297). Stamped onto every bot-initiated `OrderRequest.context`
+# so per-user trade-confirmation emails fire end-to-end on live fills.
+# (False, None) = "not yet resolved this process"; (True, x) = resolved
+# (x is None when neither the env var nor the DB fallback yielded one).
+_OPERATOR_USER_ID_CACHE: tuple[bool, str | None] = (False, None)
+
+
+async def _resolve_operator_user_id() -> str | None:
+    """Return the clerk_user_id stamped onto bot-initiated orders.
+
+    Resolution order:
+      1. ``AXIOM_OPERATOR_USER_ID`` env var (preferred — explicit).
+      2. The first ``is_admin = true`` row in ``app_users`` ordered
+         by ``first_seen_at`` — the bootstrap admin is the operator
+         on a single-tenant deployment, so this keeps confirmations
+         flowing on installs that haven't set the env var.
+      3. ``None`` when neither is available — submission still
+         proceeds; the lifecycle's ``handle_ws_fill`` notification
+         path treats a missing ``user_id`` as a silent no-op
+         (covered by the existing trade-confirmation tests).
+
+    Cached for the process lifetime so the bot loop does not re-query
+    the admin table on every cycle. Tests that mutate the env or DB
+    can clear the cache via :func:`_reset_operator_user_id_cache`.
+    """
+    global _OPERATOR_USER_ID_CACHE
+    resolved_flag, cached = _OPERATOR_USER_ID_CACHE
+    if resolved_flag:
+        return cached
+    explicit = (get_settings().operator_user_id or "").strip()
+    if explicit:
+        _OPERATOR_USER_ID_CACHE = (True, explicit)
+        return explicit
+    fallback: str | None = None
+    db_failed = False
+    try:
+        row = await db.fetchval(
+            "SELECT clerk_user_id FROM app_users "
+            "WHERE is_admin = true "
+            "ORDER BY first_seen_at NULLS LAST LIMIT 1"
+        )
+        fallback = str(row) if row else None
+    except Exception as e:  # pragma: no cover — defensive
+        log.debug("operator user_id fallback lookup failed: %s", e)
+        db_failed = True
+    # Only cache when we got an authoritative answer. A transient DB
+    # error must not pin the cache to None for the process lifetime —
+    # the next bot order will retry.
+    if not db_failed:
+        _OPERATOR_USER_ID_CACHE = (True, fallback)
+    if fallback is None:
+        log.warning(
+            "no operator user_id resolved — bot-initiated orders will "
+            "ship without context['user_id'] and trade-confirmation "
+            "emails will not fire. Set AXIOM_OPERATOR_USER_ID or "
+            "promote a row in app_users to is_admin=true."
+        )
+    return fallback
+
+
+def _reset_operator_user_id_cache() -> None:
+    """Test helper — drop the cached operator clerk_user_id."""
+    global _OPERATOR_USER_ID_CACHE
+    _OPERATOR_USER_ID_CACHE = (False, None)
+
+
 def _gen_paper_trade_id() -> str:
     # Distinguish paper trade ids from live ones at a glance.
     return f"paper_{int(datetime.now(timezone.utc).timestamp())}_{secrets.token_hex(4)}"
@@ -92,11 +159,19 @@ async def _dispatch_via_lifecycle(
     # Lifecycle expects integer cents in 1..99 for limit orders.
     cents = int(round(price * 100))
     cents = max(1, min(99, cents))
-    context = {
+    context: dict[str, Any] = {
         "model_consensus": consensus,
         "model_edge": edge,
         "vertical": ctx.vertical or "sports",
     }
+    # Stamp the operator's clerk_user_id so the lifecycle's
+    # `handle_ws_fill` notification path can resolve a recipient and
+    # deliver per-user trade-confirmation emails on bot-driven live
+    # fills (task #297). Resolution is cached for the process lifetime
+    # so this lookup is effectively free after the first call.
+    operator_uid = await _resolve_operator_user_id()
+    if operator_uid:
+        context["user_id"] = operator_uid
     if exchange == "kalshi":
         from ..kalshi import lifecycle as kalshi_lifecycle
 

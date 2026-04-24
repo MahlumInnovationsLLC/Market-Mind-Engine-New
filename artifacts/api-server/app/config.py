@@ -192,6 +192,15 @@ class Settings:
     llm_fallback_alert_min_samples: int
     llm_fallback_alert_interval_seconds: int
 
+    # Operator identity used to stamp bot-initiated `OrderRequest`s with
+    # `context["user_id"]` (task #297). Without this, per-user trade
+    # confirmation emails never fire on bot-driven live fills because
+    # the lifecycle's notification dispatch keys off the operator's
+    # clerk_user_id. Resolution falls back to the first admin in
+    # ``app_users`` when this is unset — see
+    # ``app.orchestrator.paper._resolve_operator_user_id``.
+    operator_user_id: str | None
+
     # Server
     port: int
 
@@ -350,6 +359,9 @@ def get_settings() -> Settings:
         ),
         llm_fallback_alert_interval_seconds=max(
             10, int(os.environ.get("AXIOM_LLM_FALLBACK_ALERT_INTERVAL_SECONDS") or "120")
+        ),
+        operator_user_id=(
+            (os.environ.get("AXIOM_OPERATOR_USER_ID") or "").strip() or None
         ),
         port=int(os.environ.get("PORT", "8080")),
         cors_origins=cors_origins,
