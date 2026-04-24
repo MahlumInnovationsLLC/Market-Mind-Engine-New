@@ -2655,8 +2655,27 @@ function _fmtRelative(iso: string | null): string {
   return `${Math.floor(sec / 86400)}d ago`;
 }
 
+type RcFailedEvent = {
+  event_id: string;
+  event_type: string | null;
+  last_failed_at: string | null;
+  attempts: number;
+  last_error: string | null;
+  raw_available: boolean;
+  user_id: string | null;
+  app_user_id: string | null;
+};
+
+type RcRetryOutcome = {
+  event_id: string;
+  status: "ok" | "failed" | "missing";
+  message: string;
+  at: number;
+};
+
 export function RcWebhookPanel() {
   const { getToken, isSignedIn } = useAuth();
+  const qc = useQueryClient();
   const tokenFn = useMemo(
     () => () => getToken().then((t) => t ?? null),
     [getToken],
@@ -2673,6 +2692,50 @@ export function RcWebhookPanel() {
     placeholderData: (prev) => prev,
   });
 
+  const failedQuery = useQuery<{ items: RcFailedEvent[] }>({
+    queryKey: ["admin", "rc-webhook-failed-events"],
+    queryFn: () =>
+      apiFetch<{ items: RcFailedEvent[] }>(
+        "/api/admin/rc-webhook/failed-events?limit=20",
+        { getToken: tokenFn },
+      ),
+    enabled: !!isSignedIn,
+    refetchInterval: 60_000,
+    placeholderData: (prev) => prev,
+  });
+
+  const [retryOutcome, setRetryOutcome] = useState<RcRetryOutcome | null>(null);
+
+  const retryMutation = useMutation({
+    mutationFn: async (eventId: string) =>
+      apiFetch<{ status: string; event_id: string; event_type?: string | null }>(
+        `/api/admin/rc-webhook/retry/${encodeURIComponent(eventId)}`,
+        { method: "POST", getToken: tokenFn },
+      ),
+    onSuccess: (res, eventId) => {
+      setRetryOutcome({
+        event_id: eventId,
+        status: "ok",
+        message: `Replayed ${res.event_type ?? "event"} successfully.`,
+        at: Date.now(),
+      });
+      qc.invalidateQueries({ queryKey: ["admin", "rc-webhook-failed-events"] });
+      qc.invalidateQueries({ queryKey: ["admin", "rc-webhook-stats"] });
+    },
+    onError: (err: unknown, eventId) => {
+      const msg = (err as Error)?.message ?? "retry failed";
+      setRetryOutcome({
+        event_id: eventId,
+        status: msg.includes("404") ? "missing" : "failed",
+        message: msg,
+        at: Date.now(),
+      });
+      qc.invalidateQueries({ queryKey: ["admin", "rc-webhook-failed-events"] });
+      qc.invalidateQueries({ queryKey: ["admin", "rc-webhook-stats"] });
+    },
+  });
+
+  const failedEvents = failedQuery.data?.items ?? [];
   const data = query.data;
 
   // Bucket the hourly rows by hour key for a 24-column stacked bar.
@@ -2855,6 +2918,140 @@ export function RcWebhookPanel() {
           </div>
         </>
       ) : null}
+
+      <div
+        className="border border-border bg-card p-2"
+        data-testid="panel-rc-failed-events"
+      >
+        <div className="flex items-baseline justify-between gap-2 mb-2">
+          <div>
+            <div className="text-[10px] uppercase tracking-widest text-muted-foreground">
+              Stuck deliveries (last 7d)
+            </div>
+            <div className="text-[11px] text-muted-foreground mt-0.5 normal-case tracking-normal">
+              Events whose latest webhook delivery returned a 5xx. Retry
+              re-runs the stored payload through the same code path the
+              live webhook uses. Each click is recorded as
+              <code className="ml-1">rc_webhook_retry</code> in the admin
+              audit log.
+            </div>
+          </div>
+          {failedQuery.isFetching ? (
+            <span className="text-[10px] uppercase tracking-widest text-muted-foreground">
+              Refreshing…
+            </span>
+          ) : null}
+        </div>
+
+        {retryOutcome ? (
+          <div
+            className={`mb-2 border px-2 py-1 text-[11px] ${
+              retryOutcome.status === "ok"
+                ? "border-emerald-500/40 text-emerald-500"
+                : "border-destructive/50 text-destructive"
+            }`}
+            data-testid="text-rc-retry-outcome"
+          >
+            <span className="font-mono">{retryOutcome.event_id}</span>:{" "}
+            {retryOutcome.message}
+          </div>
+        ) : null}
+
+        {failedQuery.isLoading && !failedQuery.data ? (
+          <div className="h-12 animate-pulse bg-muted/30" />
+        ) : failedQuery.isError ? (
+          <div className="text-xs text-destructive">
+            Failed to load stuck deliveries.{" "}
+            {(failedQuery.error as Error)?.message ?? ""}
+          </div>
+        ) : failedEvents.length === 0 ? (
+          <div className="py-4 text-center text-[11px] text-muted-foreground">
+            No stuck deliveries in the last 7 days.
+          </div>
+        ) : (
+          <div
+            className="overflow-x-auto"
+            data-testid="table-rc-failed-events"
+          >
+            <table className="w-full text-[11px]">
+              <thead className="text-muted-foreground">
+                <tr className="border-b border-border">
+                  <th className="px-2 py-1 text-left font-normal uppercase tracking-widest">
+                    Event
+                  </th>
+                  <th className="px-2 py-1 text-left font-normal uppercase tracking-widest">
+                    Type
+                  </th>
+                  <th className="px-2 py-1 text-right font-normal uppercase tracking-widest">
+                    Tries
+                  </th>
+                  <th className="px-2 py-1 text-left font-normal uppercase tracking-widest">
+                    Last failure
+                  </th>
+                  <th className="px-2 py-1 text-left font-normal uppercase tracking-widest">
+                    Last error
+                  </th>
+                  <th className="px-2 py-1 text-right font-normal uppercase tracking-widest">
+                    Action
+                  </th>
+                </tr>
+              </thead>
+              <tbody>
+                {failedEvents.map((row) => {
+                  const busy =
+                    retryMutation.isPending &&
+                    (retryMutation.variables as string | undefined) ===
+                      row.event_id;
+                  return (
+                    <tr
+                      key={row.event_id}
+                      className="border-b border-border/50 align-top"
+                      data-testid={`row-rc-failed-${row.event_id}`}
+                    >
+                      <td className="px-2 py-1 font-mono text-foreground">
+                        {row.event_id}
+                      </td>
+                      <td className="px-2 py-1 text-muted-foreground">
+                        {row.event_type ?? "—"}
+                      </td>
+                      <td className="px-2 py-1 text-right font-mono">
+                        {row.attempts}
+                      </td>
+                      <td className="px-2 py-1 text-muted-foreground">
+                        {_fmtRelative(row.last_failed_at)}
+                      </td>
+                      <td className="px-2 py-1 text-muted-foreground">
+                        <span
+                          className="block max-w-[28rem] truncate"
+                          title={row.last_error ?? ""}
+                        >
+                          {row.last_error ?? "—"}
+                        </span>
+                      </td>
+                      <td className="px-2 py-1 text-right">
+                        <button
+                          type="button"
+                          onClick={() => retryMutation.mutate(row.event_id)}
+                          disabled={!row.raw_available || busy}
+                          className="border border-border bg-background px-2 py-0.5 text-[11px] uppercase tracking-widest text-foreground disabled:cursor-not-allowed disabled:opacity-40 hover:bg-muted/40"
+                          data-testid={`button-retry-${row.event_id}`}
+                          title={
+                            row.raw_available
+                              ? "Re-run _apply_event with the stored payload"
+                              : "No stored payload — cannot retry"
+                          }
+                        >
+                          {busy ? "Retrying…" : "Retry"}
+                        </button>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
     </main>
   );
 }

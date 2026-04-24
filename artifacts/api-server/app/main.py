@@ -1521,6 +1521,84 @@ async def admin_rc_webhook_stats(
     return await rc_billing.get_webhook_stats(hours=hours)
 
 
+@app.get("/api/admin/rc-webhook/failed-events")
+async def admin_rc_webhook_failed_events(
+    limit: int = 20,
+    actor: AuthedUser = Depends(require_admin),
+) -> dict[str, object]:
+    """Recent RC webhook event_ids whose latest delivery was a 5xx.
+
+    Drives the operator-console retry table — each row carries the last
+    failure time, attempt count, last error message, and whether we
+    have the raw payload stored to feed back into ``_apply_event``.
+    """
+    items = await rc_billing.list_failed_events(limit=limit)
+    return {"items": items}
+
+
+@app.post("/api/admin/rc-webhook/retry/{event_id}")
+async def admin_rc_webhook_retry(
+    event_id: str,
+    actor: AuthedUser = Depends(require_admin),
+) -> dict[str, object]:
+    """Replay a stored RevenueCat webhook event through ``_apply_event``.
+
+    Pulled from the dashboard's failed-events table so an operator can
+    clear a stuck delivery without grepping logs and re-POSTing the
+    payload by hand. The action is recorded in ``admin_audit_log`` with
+    the apply outcome (ok / failed / missing) so it's auditable after
+    the fact.
+    """
+    actor_email = (await check_approval(actor))[1]
+    result = await rc_billing.retry_event(event_id)
+
+    # Audit the action regardless of outcome. ``target_user_id`` is the
+    # Clerk user id from the stored RC subscription when we have it,
+    # otherwise the actor — the audit table requires NOT NULL.
+    target_user_id = (
+        str(result.get("user_id")) if result.get("user_id") else actor.user_id
+    )
+    try:
+        async with db.acquire() as conn:
+            await conn.execute(
+                """
+                INSERT INTO admin_audit_log (
+                    actor_user_id, actor_email,
+                    target_user_id, target_email,
+                    action, before_value, after_value
+                ) VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7::jsonb)
+                """,
+                actor.user_id,
+                actor_email,
+                target_user_id,
+                None,
+                "rc_webhook_retry",
+                json.dumps({"event_id": event_id}),
+                json.dumps(
+                    {
+                        "status": result.get("status"),
+                        "event_id": result.get("event_id") or event_id,
+                        "event_type": result.get("event_type"),
+                        "error": result.get("error"),
+                    }
+                ),
+            )
+    except Exception as e:
+        log.warning("rc retry audit log insert failed: %s", e)
+
+    if result.get("status") == "missing":
+        raise HTTPException(
+            status_code=404,
+            detail=str(result.get("error") or "no stored payload for event"),
+        )
+    if result.get("status") == "failed":
+        raise HTTPException(
+            status_code=502,
+            detail=str(result.get("error") or "retry apply failed"),
+        )
+    return result
+
+
 @app.get("/api/admin/users/{clerk_user_id}")
 async def admin_get_user(
     clerk_user_id: str,

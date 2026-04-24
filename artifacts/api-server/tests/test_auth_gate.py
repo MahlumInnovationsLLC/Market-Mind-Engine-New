@@ -60,6 +60,8 @@ PROTECTED_ROUTES: tuple[str, ...] = (
     "/api/admin/users/{clerk_user_id}",
     "/api/admin/watchdog",
     "/api/admin/rc-webhook/stats",
+    # Task #283 — operator-driven retry of stuck mobile IAP webhooks.
+    "/api/admin/rc-webhook/failed-events",
     "/api/admin/audit-log",
     "/api/admin/audit-log/actions",
     "/api/admin/landing-leads",
@@ -186,6 +188,8 @@ PROTECTED_MUTATING_ENDPOINTS: tuple[tuple[str, str], ...] = (
     ("POST", "/api/admin/verticals/{vertical}/resume"),
     # Task #245 — research-directives admin gating + drift rollback workflow.
     ("POST", "/api/research/directives/{directive_id}/decision"),
+    # Task #283 — operator-driven retry of stuck mobile IAP webhooks.
+    ("POST", "/api/admin/rc-webhook/retry/{event_id}"),
 )
 
 # Path-only view of the mutating-endpoint inventory, used by the

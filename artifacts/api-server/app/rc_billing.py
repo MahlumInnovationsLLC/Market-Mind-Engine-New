@@ -681,3 +681,176 @@ async def stop() -> None:
     except (asyncio.CancelledError, Exception):
         pass
     _silence_task = None
+
+
+# ---------------------------------------------------------------------------
+# Operator-driven retry of stuck deliveries (task #283)
+#
+# When `_apply_event` throws repeatedly for the same event_id the operator
+# would otherwise have to grep the raw payload out of logs and re-POST it
+# against the webhook URL by hand. We surface the recent failures on the
+# admin dashboard tile and let the operator re-run them in-place.
+# ---------------------------------------------------------------------------
+
+
+async def list_failed_events(limit: int = 20) -> list[dict[str, Any]]:
+    """Recent webhook events whose *latest* delivery was a 5xx.
+
+    Joined back to ``rc_subscriptions`` so the UI can tell whether the
+    stored raw payload is available — the retry path can only re-run an
+    event when we have the original payload to feed back into
+    ``_apply_event``. ``rc_subscriptions.raw`` is written first inside
+    ``_apply_event`` so most apply-time failures still leave a raw row.
+    """
+    limit = max(1, min(int(limit or 20), 100))
+    sql = """
+        WITH per_event AS (
+            SELECT event_id, max(received_at) AS last_at, count(*) AS attempts
+            FROM rc_webhook_deliveries
+            WHERE event_id IS NOT NULL
+              AND received_at >= now() - interval '7 days'
+            GROUP BY event_id
+        ),
+        latest AS (
+            SELECT DISTINCT ON (event_id)
+                   event_id, status, http_status, event_type, received_at, error
+            FROM rc_webhook_deliveries
+            WHERE event_id IS NOT NULL
+              AND received_at >= now() - interval '7 days'
+            ORDER BY event_id, received_at DESC
+        )
+        SELECT l.event_id,
+               l.event_type,
+               l.received_at AS last_failed_at,
+               p.attempts,
+               l.error AS last_error,
+               (s.raw IS NOT NULL) AS raw_available,
+               s.user_id,
+               s.app_user_id
+        FROM latest l
+        JOIN per_event p USING (event_id)
+        LEFT JOIN LATERAL (
+            SELECT raw, user_id, app_user_id
+            FROM rc_subscriptions
+            WHERE event_id = l.event_id
+            ORDER BY updated_at DESC
+            LIMIT 1
+        ) s ON TRUE
+        WHERE l.status = $1
+        ORDER BY l.received_at DESC
+        LIMIT $2
+    """
+    out: list[dict[str, Any]] = []
+    try:
+        async with db.acquire() as conn:
+            rows = await conn.fetch(sql, DELIVERY_STATUS_5XX, limit)
+            for r in rows:
+                out.append(
+                    {
+                        "event_id": r["event_id"],
+                        "event_type": r["event_type"],
+                        "last_failed_at": (
+                            r["last_failed_at"].isoformat()
+                            if r["last_failed_at"]
+                            else None
+                        ),
+                        "attempts": int(r["attempts"] or 0),
+                        "last_error": r["last_error"],
+                        "raw_available": bool(r["raw_available"]),
+                        "user_id": r["user_id"],
+                        "app_user_id": r["app_user_id"],
+                    }
+                )
+    except Exception as e:
+        log.warning("rc failed-events query failed: %s", e)
+    return out
+
+
+async def _load_raw_event(event_id: str) -> tuple[dict[str, Any] | None, str | None]:
+    """Return ``(event_payload, user_id)`` for a stored event, or ``(None, None)``."""
+    try:
+        async with db.acquire() as conn:
+            row = await conn.fetchrow(
+                """
+                SELECT raw, user_id
+                FROM rc_subscriptions
+                WHERE event_id = $1
+                ORDER BY updated_at DESC
+                LIMIT 1
+                """,
+                event_id,
+            )
+    except Exception as e:
+        log.warning("rc load raw event %s failed: %s", event_id, e)
+        return None, None
+    if not row:
+        return None, None
+    raw = row["raw"]
+    if isinstance(raw, str):
+        try:
+            payload = json.loads(raw)
+        except Exception as e:
+            log.warning("rc raw payload for %s is not json: %s", event_id, e)
+            return None, row.get("user_id")
+    elif isinstance(raw, dict):
+        payload = raw
+    else:
+        return None, row.get("user_id")
+    return payload, row.get("user_id")
+
+
+async def retry_event(event_id: str) -> dict[str, Any]:
+    """Re-run ``_apply_event`` for a previously-failed delivery.
+
+    Returns ``{"status": "ok"|"failed"|"missing", ...}``. The caller is
+    responsible for inserting the admin audit row — this function only
+    touches the webhook plumbing (raw mirror, derived row, delivery
+    audit, idempotency table).
+    """
+    event_id = (event_id or "").strip()
+    if not event_id:
+        return {"status": "missing", "error": "event_id required"}
+
+    payload, user_id = await _load_raw_event(event_id)
+    if payload is None:
+        return {
+            "status": "missing",
+            "error": "no stored payload for event_id",
+            "user_id": user_id,
+        }
+
+    event_type = str(payload.get("type") or "") or None
+    try:
+        await _apply_event(payload)
+    except Exception as e:
+        log.exception("rc webhook retry apply failed for %s: %s", event_id, e)
+        await _record_delivery(
+            status_bucket=DELIVERY_STATUS_5XX,
+            http_status=500,
+            event_id=event_id,
+            event_type=event_type,
+            error=f"retry: {str(e)[:480]}",
+        )
+        await _maybe_alert_failure_spike()
+        return {
+            "status": "failed",
+            "error": str(e)[:500],
+            "event_id": event_id,
+            "event_type": event_type,
+            "user_id": user_id,
+        }
+
+    await _mark_event_processed(event_id, event_type or "", payload)
+    await _record_delivery(
+        status_bucket=DELIVERY_STATUS_OK,
+        http_status=200,
+        event_id=event_id,
+        event_type=event_type,
+        error="retry: applied",
+    )
+    return {
+        "status": "ok",
+        "event_id": event_id,
+        "event_type": event_type,
+        "user_id": user_id,
+    }

@@ -70,6 +70,7 @@ class _FakeDB:
         self.subscriptions: dict[str, dict[str, Any]] = {}
         self.rc_subscriptions: dict[str, dict[str, Any]] = {}
         self.rc_events: dict[str, dict[str, Any]] = {}
+        self.deliveries: list[dict[str, Any]] = []
         self.execute_log: list[tuple[str, tuple]] = []
 
 
@@ -125,8 +126,20 @@ class _FakeConn:
             return "OK"
 
         if q.startswith("INSERT INTO rc_webhook_deliveries"):
-            # Audit-only table — record the call so tests can assert on
-            # it via execute_log but otherwise no derived state.
+            # Audit-only table — capture into self._db.deliveries so the
+            # retry/list-failed-events helpers can be exercised end to end.
+            status_bucket, http_status, event_id, event_type, error = args
+            self._db.deliveries.append(
+                {
+                    "status": status_bucket,
+                    "http_status": http_status,
+                    "event_id": event_id,
+                    "event_type": event_type,
+                    "error": error,
+                    "received_at": datetime.now(tz=timezone.utc)
+                    + timedelta(microseconds=len(self._db.deliveries)),
+                }
+            )
             return "OK"
 
         if q.startswith("INSERT INTO rc_events"):
@@ -177,7 +190,56 @@ class _FakeConn:
         if q.startswith("SELECT * FROM subscriptions WHERE user_id="):
             row = self._db.subscriptions.get(args[0])
             return dict(row) if row else None
+        if q.startswith("SELECT raw, user_id FROM rc_subscriptions WHERE event_id"):
+            (event_id,) = args
+            for row in self._db.rc_subscriptions.values():
+                if row.get("event_id") == event_id:
+                    return {"raw": row.get("raw"), "user_id": row.get("user_id")}
+            return None
         raise AssertionError(f"unhandled fetchrow in fake DB: {q!r}")
+
+    async def fetch(self, query: str, *args: Any) -> list[dict[str, Any]]:
+        q = " ".join(query.split())
+        if q.startswith("WITH per_event AS"):
+            # list_failed_events — synthesise from the in-memory delivery
+            # audit rows the test set up via insert_delivery().
+            limit = args[1] if len(args) >= 2 else 20
+            failed_status = args[0]
+            latest: dict[str, dict[str, Any]] = {}
+            attempts: dict[str, int] = {}
+            for d in getattr(self._db, "deliveries", []):
+                eid = d.get("event_id")
+                if not eid:
+                    continue
+                attempts[eid] = attempts.get(eid, 0) + 1
+                cur = latest.get(eid)
+                if cur is None or d["received_at"] > cur["received_at"]:
+                    latest[eid] = d
+            out: list[dict[str, Any]] = []
+            for eid, d in latest.items():
+                if d["status"] != failed_status:
+                    continue
+                raw_row = None
+                for r in self._db.rc_subscriptions.values():
+                    if r.get("event_id") == eid:
+                        raw_row = r
+                        break
+                out.append(
+                    {
+                        "event_id": eid,
+                        "event_type": d.get("event_type"),
+                        "last_failed_at": d["received_at"],
+                        "attempts": attempts[eid],
+                        "last_error": d.get("error"),
+                        "raw_available": raw_row is not None
+                        and raw_row.get("raw") is not None,
+                        "user_id": raw_row.get("user_id") if raw_row else None,
+                        "app_user_id": raw_row.get("app_user_id") if raw_row else None,
+                    }
+                )
+            out.sort(key=lambda r: r["last_failed_at"], reverse=True)
+            return out[: int(limit)]
+        raise AssertionError(f"unhandled fetch in fake DB: {q!r}")
 
     async def fetchval(self, query: str, *args: Any) -> Any:
         q = " ".join(query.split())
@@ -760,6 +822,157 @@ def _user(uid: str = "user_e2e", email: str | None = "e2e@example.com") -> Authe
     if email:
         claims["email"] = email
     return AuthedUser(user_id=uid, session_id="sess_test", claims=claims)
+
+
+# ---------------------------------------------------------------------------
+# Operator-driven retry of a stuck delivery (task #283)
+# ---------------------------------------------------------------------------
+
+
+def _force_apply_failure(monkeypatch, count: int = 1) -> dict[str, int]:
+    """Make the next ``count`` calls to ``_apply_event`` raise.
+
+    Returns a counter dict the test can read after the run so it can
+    assert how many calls actually went through the failing wrapper.
+    """
+    calls = {"n": 0, "max": int(count)}
+    real_apply = rc_billing._apply_event
+
+    async def _flaky(event):  # type: ignore[no-untyped-def]
+        calls["n"] += 1
+        if calls["n"] <= calls["max"]:
+            raise RuntimeError("simulated apply failure")
+        await real_apply(event)
+
+    monkeypatch.setattr(rc_billing, "_apply_event", _flaky)
+    return calls
+
+
+def test_failed_event_can_be_listed_and_retried_clears_the_stuck_delivery(
+    fake_db, monkeypatch
+):
+    """The full operator path: a delivery 5xxs, the dashboard surfaces
+    it, and retry re-runs the stored payload — clearing the row from
+    the failed-events list and writing the derived subscription."""
+    expires = _future_ms(30)
+    payload = _evt(
+        event_id="evt_stuck",
+        event_type="INITIAL_PURCHASE",
+        app_user_id="user_stuck",
+        product_id="pro_monthly",
+        entitlements=["pro"],
+        expiration_ms=expires,
+    )
+
+    # First delivery: apply fails — but the raw mirror is written by
+    # ``_apply_event`` *before* the derived row, so we still have a
+    # stored payload to retry from. Force a failure inside the derived
+    # write step to exercise that contract.
+    real_apply = rc_billing._apply_event
+
+    async def _apply_then_fail(event):  # type: ignore[no-untyped-def]
+        # Run the real raw-mirror INSERT first by calling the real
+        # function but hijack the second INSERT to throw.
+        original_execute = _FakeConn.execute
+        seen = {"derived": 0}
+
+        async def _flaky_execute(self, query, *args):  # type: ignore[no-untyped-def]
+            q = " ".join(query.split())
+            if q.startswith("INSERT INTO subscriptions ( user_id, tier, status,"):
+                seen["derived"] += 1
+                raise RuntimeError("simulated derived write failure")
+            return await original_execute(self, query, *args)
+
+        monkeypatch.setattr(_FakeConn, "execute", _flaky_execute)
+        try:
+            await real_apply(event)
+        finally:
+            monkeypatch.setattr(_FakeConn, "execute", original_execute)
+
+    monkeypatch.setattr(rc_billing, "_apply_event", _apply_then_fail)
+
+    with pytest.raises(Exception) as exc:
+        _run(rc_billing.handle_webhook(_post(payload)))  # type: ignore[arg-type]
+    assert getattr(exc.value, "status_code", None) == 500
+
+    # Restore the real apply so retry can succeed.
+    monkeypatch.setattr(rc_billing, "_apply_event", real_apply)
+
+    # Dashboard sees the stuck event.
+    failed = _run(rc_billing.list_failed_events(limit=10))
+    assert any(r["event_id"] == "evt_stuck" for r in failed)
+    row = next(r for r in failed if r["event_id"] == "evt_stuck")
+    assert row["raw_available"] is True
+    assert row["event_type"] == "INITIAL_PURCHASE"
+    assert row["attempts"] >= 1
+
+    # Retry runs the same code path — derived row is now written and
+    # the idempotency table is populated.
+    result = _run(rc_billing.retry_event("evt_stuck"))
+    assert result["status"] == "ok"
+    assert result["event_id"] == "evt_stuck"
+    assert "user_stuck" in fake_db.subscriptions
+    assert fake_db.subscriptions["user_stuck"]["tier"] == billing.TIER_PRO
+    assert "evt_stuck" in fake_db.rc_events
+
+    # The retry wrote an `ok` delivery row so the failed-events list no
+    # longer surfaces this event.
+    cleared = _run(rc_billing.list_failed_events(limit=10))
+    assert all(r["event_id"] != "evt_stuck" for r in cleared)
+
+
+def test_retry_event_with_no_stored_payload_returns_missing(fake_db):
+    """If we only have the delivery audit row but no raw payload (e.g.
+    the very first INSERT into rc_subscriptions failed), retry must
+    not silently no-op — it returns ``status=missing`` so the operator
+    sees a clear error in the UI."""
+    fake_db.deliveries.append(
+        {
+            "status": rc_billing.DELIVERY_STATUS_5XX,
+            "http_status": 500,
+            "event_id": "evt_no_raw",
+            "event_type": "INITIAL_PURCHASE",
+            "error": "boom",
+            "received_at": datetime.now(tz=timezone.utc),
+        }
+    )
+    result = _run(rc_billing.retry_event("evt_no_raw"))
+    assert result["status"] == "missing"
+    assert "no stored payload" in (result.get("error") or "").lower()
+
+
+def test_retry_event_records_failure_and_increments_attempts_when_apply_still_throws(
+    fake_db, monkeypatch
+):
+    """A retry that itself throws must produce a fresh 5xx delivery
+    row so the operator can see the new attempt and the latest error."""
+    # Seed a stored raw payload by running a successful initial purchase.
+    payload = _evt(
+        event_id="evt_retry_fail",
+        event_type="INITIAL_PURCHASE",
+        app_user_id="user_retry_fail",
+        expiration_ms=_future_ms(30),
+    )
+    _run(rc_billing.handle_webhook(_post(payload)))  # type: ignore[arg-type]
+    assert "evt_retry_fail" in fake_db.rc_events
+
+    # Make the next apply throw.
+    _force_apply_failure(monkeypatch, count=1)
+
+    result = _run(rc_billing.retry_event("evt_retry_fail"))
+    assert result["status"] == "failed"
+    assert "simulated apply failure" in (result.get("error") or "")
+
+    # The 5xx delivery row from the retry attempt is recorded with
+    # the marker so it's distinguishable in the audit log.
+    retry_5xx = [
+        d
+        for d in fake_db.deliveries
+        if d["event_id"] == "evt_retry_fail"
+        and d["status"] == rc_billing.DELIVERY_STATUS_5XX
+    ]
+    assert retry_5xx, "expected a 5xx delivery row from the retry"
+    assert any("retry:" in (d.get("error") or "") for d in retry_5xx)
 
 
 def test_initial_purchase_surfaces_through_me_subscription_endpoint(fake_db):
