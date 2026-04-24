@@ -823,33 +823,100 @@ async def _poll_hrrr() -> int:
 # ---------------------------------------------------------------------------
 
 
+def _accuweather_api_key() -> str | None:
+    """Return the AccuWeather Core API key.
+
+    Accepts either ``ACCU_API`` (the operator's preferred name) or the
+    legacy ``ACCUWEATHER_API_KEY``.  ``ACCU_API`` wins if both are set.
+    """
+    return (
+        os.environ.get("ACCU_API")
+        or os.environ.get("ACCUWEATHER_API_KEY")
+    )
+
+
+_ACCU_LOCATION_KEYS: dict[str, str] = {}
+
+
+async def _resolve_accu_location_key(
+    client: httpx.AsyncClient, key: str, city: City,
+) -> str | None:
+    """Resolve & cache the AccuWeather location key for a city.
+
+    Geoposition search is a Core-plan endpoint and only needs to run
+    once per (lat,lon) per process lifetime — keys are stable.
+    """
+    cached = _ACCU_LOCATION_KEYS.get(city.code)
+    if cached:
+        return cached
+    try:
+        r = await client.get(
+            "https://dataservice.accuweather.com/locations/v1/cities/geoposition/search",
+            params={"apikey": key, "q": f"{city.lat},{city.lon}"},
+        )
+    except httpx.HTTPError as e:
+        log.warning("accuweather geoposition %s failed: %s", city.code, e)
+        return None
+    _check_429(r, "accuweather")
+    if r.status_code >= 400:
+        log.warning("accuweather geoposition %s -> %s %s",
+                    city.code, r.status_code, r.text[:160])
+        return None
+    try:
+        loc_key = str((r.json() or {}).get("Key") or "") or None
+    except Exception:
+        loc_key = None
+    if loc_key:
+        _ACCU_LOCATION_KEYS[city.code] = loc_key
+    return loc_key
+
+
 async def _poll_accuweather_minutecast() -> int:
-    key = os.environ.get("ACCUWEATHER_API_KEY")
+    """Poll AccuWeather *Current Conditions* (Core/Standard plan).
+
+    The descriptor is still named ``minutecast`` for metric continuity,
+    but MinuteCast itself requires the MinuteCast Lite/Full plan.  On
+    a Core-plan key the MinuteCast endpoint returns 403; this poller
+    instead uses ``/currentconditions/v1/{locationKey}`` (allowed on
+    Core) and writes into ``weather_minutecast`` so the existing
+    freshness card stays green.
+    """
+    key = _accuweather_api_key()
     if not key:
-        raise RuntimeError("ACCUWEATHER_API_KEY not set")
+        raise RuntimeError("ACCU_API / ACCUWEATHER_API_KEY not set")
     written = 0
     timeout = httpx.Timeout(10.0, connect=5.0)
-    # AccuWeather minutecast accepts geoposition (`q=lat,lon`) directly — no
-    # need for a separate location-key lookup, which doubles the quota burn.
     async with httpx.AsyncClient(timeout=timeout) as client:
         for city in _selected_cities():
+            loc_key = await _resolve_accu_location_key(client, key, city)
+            if not loc_key:
+                continue
             try:
                 m = await client.get(
-                    "https://dataservice.accuweather.com/forecasts/v1/minute/1minute",
-                    params={"apikey": key, "q": f"{city.lat},{city.lon}"},
+                    f"https://dataservice.accuweather.com/currentconditions/v1/{loc_key}",
+                    params={"apikey": key, "details": "true"},
                 )
             except httpx.HTTPError as e:
-                log.warning("accuweather %s failed: %s", city.code, e)
+                log.warning("accuweather current %s failed: %s", city.code, e)
                 continue
             _check_429(m, "accuweather")
             if m.status_code >= 400:
-                log.warning("accuweather minute %s -> %s", city.code, m.status_code)
+                log.warning("accuweather current %s -> %s %s",
+                            city.code, m.status_code, m.text[:160])
                 continue
             try:
-                payload = m.json() or {}
+                payload = m.json() or []
             except Exception:
                 continue
-            summary = payload.get("Summary") or {}
+            if not isinstance(payload, list) or not payload:
+                continue
+            obs = payload[0] or {}
+            weather_text = str(obs.get("WeatherText") or "")[:240] or None
+            precip_type = str(obs.get("PrecipitationType") or "")[:60] or None
+            has_precip = bool(obs.get("HasPrecipitation"))
+            # Surface either the precip kind or a "no precip" sentinel so
+            # the freshness card has a non-NULL precip_intensity.
+            intensity = (precip_type or ("none" if not has_precip else "trace"))[:60]
             try:
                 await db.fetchval(
                     """
@@ -860,10 +927,10 @@ async def _poll_accuweather_minutecast() -> int:
                     RETURNING id
                     """,
                     city.code,
-                    str(summary.get("LongPhrase") or summary.get("Phrase") or "")[:240] or None,
-                    str(summary.get("Type") or "")[:60] or None,
-                    str(summary.get("Phrase60") or "")[:60] or None,
-                    int(summary.get("BeginMinute")) if summary.get("BeginMinute") is not None else None,
+                    weather_text,
+                    precip_type,
+                    intensity,
+                    None,
                 )
                 written += 1
             except Exception as e:
@@ -1081,13 +1148,14 @@ def register_weather_feeds() -> None:
         poll=_poll_hrrr,
         enabled=True,
     ))
-    accu_key = os.environ.get("ACCUWEATHER_API_KEY")
+    accu_key = _accuweather_api_key()
     registry.register(Feed(
         name="weather_accuweather_minutecast",
-        cadence_seconds=60.0,
+        # Core/Standard-plan-friendly: ~1 city per minute @ 5min cadence.
+        cadence_seconds=5 * 60.0,
         poll=_poll_accuweather_minutecast,
         enabled=bool(accu_key),
-        skipped_reason=None if accu_key else "ACCUWEATHER_API_KEY not set",
+        skipped_reason=None if accu_key else "ACCU_API / ACCUWEATHER_API_KEY not set",
     ))
     tio_key = os.environ.get("TOMORROW_IO_API_KEY")
     registry.register(Feed(
