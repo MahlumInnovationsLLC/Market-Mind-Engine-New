@@ -345,6 +345,75 @@ export interface OverFilledOrdersToday {
   items: OverFilledOrder[];
 }
 
+/**
+ * Per-granularity row deletions on the most recent sweep.
+ */
+export type CryptoOhlcvRetentionStatusLastDeletedByGranularity = {
+  [key: string]: number;
+};
+
+/**
+ * Resolved per-granularity retention windows in days.
+ */
+export type CryptoOhlcvRetentionStatusRetentionDays = { [key: string]: number };
+
+/**
+ * Rolled-up health verdict the dashboard uses to color the panel:
+`ok` — running and ticked within `2 * interval_seconds`.
+`stale` — meant to be running but hasn't ticked in time.
+`error` — most recent sweep raised; the loop will retry next tick.
+`disabled` — turned off by AXIOM_CRYPTO_OHLCV_RETENTION_ENABLED=0.
+
+ */
+export type CryptoOhlcvRetentionStatusHealth =
+  (typeof CryptoOhlcvRetentionStatusHealth)[keyof typeof CryptoOhlcvRetentionStatusHealth];
+
+export const CryptoOhlcvRetentionStatusHealth = {
+  ok: "ok",
+  stale: "stale",
+  error: "error",
+  disabled: "disabled",
+} as const;
+
+/**
+ * Operator-facing snapshot of the periodic `crypto_ohlcv` retention
+sweep (`app.crypto_ohlcv_retention`). Mirrors the loop's internal
+`state()` plus two derived freshness fields the dashboard uses to
+flag a stalled or errored sweep.
+
+ */
+export interface CryptoOhlcvRetentionStatus {
+  /** Whether the asyncio task is currently alive. */
+  running: boolean;
+  /** Whether the loop is allowed to run per AXIOM_CRYPTO_OHLCV_RETENTION_ENABLED. */
+  enabled: boolean;
+  /** Unix timestamp (seconds) when the loop was started. */
+  started_at?: number | null;
+  /** Unix timestamp (seconds) of the most recent sweep. */
+  last_tick_at?: number | null;
+  /** Most recent sweep error, or null. */
+  last_error?: string | null;
+  /** Rows deleted on the most recent sweep across all granularities. */
+  last_deleted: number;
+  /** Lifetime rows deleted since the loop started. */
+  total_deleted: number;
+  /** Per-granularity row deletions on the most recent sweep. */
+  last_deleted_by_granularity: CryptoOhlcvRetentionStatusLastDeletedByGranularity;
+  /** Resolved per-granularity retention windows in days. */
+  retention_days: CryptoOhlcvRetentionStatusRetentionDays;
+  /** Sweep cadence in seconds. */
+  interval_seconds: number;
+  /** Wall-clock seconds since `last_tick_at`, or null if the loop has never ticked. */
+  seconds_since_last_tick?: number | null;
+  /** Rolled-up health verdict the dashboard uses to color the panel:
+`ok` — running and ticked within `2 * interval_seconds`.
+`stale` — meant to be running but hasn't ticked in time.
+`error` — most recent sweep raised; the loop will retry next tick.
+`disabled` — turned off by AXIOM_CRYPTO_OHLCV_RETENTION_ENABLED=0.
+ */
+  health: CryptoOhlcvRetentionStatusHealth;
+}
+
 export interface SlippageGuardReject {
   id: number;
   market_ticker?: string | null;

@@ -4641,6 +4641,22 @@ async def dashboard_over_filled_orders_today(
     return await dashboard.get_over_filled_orders_today()
 
 
+@app.get("/api/dashboard/crypto-ohlcv-retention")
+async def dashboard_crypto_ohlcv_retention(
+    _: object = Depends(require_approved_user),
+) -> dict[str, object]:
+    """Operator-facing snapshot of the ``crypto_ohlcv`` retention sweep.
+
+    Surfaces the same ``state()`` the loop tracks internally
+    (running/enabled flags, last tick, last error, total + last + per-
+    granularity deletion counts, and the resolved retention windows)
+    plus two derived fields the dashboard uses to flag a misbehaving
+    sweep at a glance: ``seconds_since_last_tick`` and ``health``
+    (``ok`` / ``stale`` / ``error`` / ``disabled``).
+    """
+    return await dashboard.get_crypto_ohlcv_retention_status()
+
+
 @app.get("/api/dashboard/bankroll/recent")
 async def dashboard_bankroll_recent(
     limit: int = 200,

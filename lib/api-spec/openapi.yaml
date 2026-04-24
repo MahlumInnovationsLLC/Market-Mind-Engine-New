@@ -217,6 +217,18 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/OverFilledOrdersToday" }
 
+  /dashboard/crypto-ohlcv-retention:
+    get:
+      operationId: getCryptoOhlcvRetentionStatus
+      tags: [dashboard]
+      summary: Health snapshot of the crypto_ohlcv bar-table retention sweep
+      responses:
+        "200":
+          description: Retention loop state (running/enabled, last tick, errors, deletion counts, retention windows)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CryptoOhlcvRetentionStatus" }
+
   /dashboard/slippage-guard-rejects:
     get:
       operationId: getSlippageGuardRejects
@@ -1245,6 +1257,57 @@ components:
           type: array
           items: { $ref: "#/components/schemas/OverFilledOrder" }
       required: [date_utc, count, items]
+
+    CryptoOhlcvRetentionStatus:
+      type: object
+      description: |
+        Operator-facing snapshot of the periodic `crypto_ohlcv` retention
+        sweep (`app.crypto_ohlcv_retention`). Mirrors the loop's internal
+        `state()` plus two derived freshness fields the dashboard uses to
+        flag a stalled or errored sweep.
+      properties:
+        running:
+          type: boolean
+          description: Whether the asyncio task is currently alive.
+        enabled:
+          type: boolean
+          description: Whether the loop is allowed to run per AXIOM_CRYPTO_OHLCV_RETENTION_ENABLED.
+        started_at: { type: number, nullable: true, description: "Unix timestamp (seconds) when the loop was started." }
+        last_tick_at: { type: number, nullable: true, description: "Unix timestamp (seconds) of the most recent sweep." }
+        last_error: { type: string, nullable: true, description: "Most recent sweep error, or null." }
+        last_deleted: { type: integer, description: "Rows deleted on the most recent sweep across all granularities." }
+        total_deleted: { type: integer, description: "Lifetime rows deleted since the loop started." }
+        last_deleted_by_granularity:
+          type: object
+          additionalProperties: { type: integer }
+          description: Per-granularity row deletions on the most recent sweep.
+        retention_days:
+          type: object
+          additionalProperties: { type: integer }
+          description: Resolved per-granularity retention windows in days.
+        interval_seconds: { type: number, description: "Sweep cadence in seconds." }
+        seconds_since_last_tick:
+          type: number
+          nullable: true
+          description: Wall-clock seconds since `last_tick_at`, or null if the loop has never ticked.
+        health:
+          type: string
+          enum: [ok, stale, error, disabled]
+          description: |
+            Rolled-up health verdict the dashboard uses to color the panel:
+            `ok` — running and ticked within `2 * interval_seconds`.
+            `stale` — meant to be running but hasn't ticked in time.
+            `error` — most recent sweep raised; the loop will retry next tick.
+            `disabled` — turned off by AXIOM_CRYPTO_OHLCV_RETENTION_ENABLED=0.
+      required:
+        - running
+        - enabled
+        - last_deleted
+        - total_deleted
+        - last_deleted_by_granularity
+        - retention_days
+        - interval_seconds
+        - health
 
     SlippageGuardReject:
       type: object

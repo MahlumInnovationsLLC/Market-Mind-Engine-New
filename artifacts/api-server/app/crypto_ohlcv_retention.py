@@ -89,9 +89,19 @@ _total_deleted: int = 0
 _last_deleted_by_granularity: dict[str, int] = {}
 
 
+def _enabled_env() -> bool:
+    """Whether the loop is allowed to run per ``AXIOM_CRYPTO_OHLCV_RETENTION_ENABLED``.
+
+    Mirrors the check ``start()`` performs so the operator dashboard can
+    distinguish "disabled by config" from "intended to run but crashed".
+    """
+    return (os.environ.get("AXIOM_CRYPTO_OHLCV_RETENTION_ENABLED", "1") or "").strip() != "0"
+
+
 def state() -> dict[str, Any]:
     return {
         "running": _task is not None and not _task.done(),
+        "enabled": _enabled_env(),
         "started_at": _started_at,
         "last_tick_at": _last_tick_at,
         "last_error": _last_error,

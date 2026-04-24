@@ -5,6 +5,7 @@ import {
 import { useFocusFromQuery } from "@/hooks/use-focus-from-query";
 import ActivePositions from "@/components/dashboard/active-positions";
 import BankrollPanel from "@/components/dashboard/bankroll-panel";
+import CryptoOhlcvRetentionPanel from "@/components/dashboard/crypto-ohlcv-retention-panel";
 import EquityCharts from "@/components/dashboard/equity-charts";
 import HighlightsPanel from "@/components/dashboard/highlights-panel";
 import KpiSummaryBar from "@/components/dashboard/kpi-summary-bar";
@@ -134,6 +135,8 @@ export default function Dashboard() {
             <HealthSnapshot />
           </GlassCard>
         </div>
+
+        <CryptoOhlcvRetentionPanel />
 
         <GlassCard tone="solid" padding="md" data-testid="card-swarm-debates">
           <SectionHeader

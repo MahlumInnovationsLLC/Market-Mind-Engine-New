@@ -522,6 +522,62 @@ export const GetOverFilledOrdersTodayResponse = zod.object({
 });
 
 /**
+ * @summary Health snapshot of the crypto_ohlcv bar-table retention sweep
+ */
+export const GetCryptoOhlcvRetentionStatusResponse = zod
+  .object({
+    running: zod
+      .boolean()
+      .describe("Whether the asyncio task is currently alive."),
+    enabled: zod
+      .boolean()
+      .describe(
+        "Whether the loop is allowed to run per AXIOM_CRYPTO_OHLCV_RETENTION_ENABLED.",
+      ),
+    started_at: zod
+      .number()
+      .nullish()
+      .describe("Unix timestamp (seconds) when the loop was started."),
+    last_tick_at: zod
+      .number()
+      .nullish()
+      .describe("Unix timestamp (seconds) of the most recent sweep."),
+    last_error: zod
+      .string()
+      .nullish()
+      .describe("Most recent sweep error, or null."),
+    last_deleted: zod
+      .number()
+      .describe(
+        "Rows deleted on the most recent sweep across all granularities.",
+      ),
+    total_deleted: zod
+      .number()
+      .describe("Lifetime rows deleted since the loop started."),
+    last_deleted_by_granularity: zod
+      .record(zod.string(), zod.number())
+      .describe("Per-granularity row deletions on the most recent sweep."),
+    retention_days: zod
+      .record(zod.string(), zod.number())
+      .describe("Resolved per-granularity retention windows in days."),
+    interval_seconds: zod.number().describe("Sweep cadence in seconds."),
+    seconds_since_last_tick: zod
+      .number()
+      .nullish()
+      .describe(
+        "Wall-clock seconds since `last_tick_at`, or null if the loop has never ticked.",
+      ),
+    health: zod
+      .enum(["ok", "stale", "error", "disabled"])
+      .describe(
+        "Rolled-up health verdict the dashboard uses to color the panel:\n`ok` — running and ticked within `2 \* interval_seconds`.\n`stale` — meant to be running but hasn't ticked in time.\n`error` — most recent sweep raised; the loop will retry next tick.\n`disabled` — turned off by AXIOM_CRYPTO_OHLCV_RETENTION_ENABLED=0.\n",
+      ),
+  })
+  .describe(
+    "Operator-facing snapshot of the periodic `crypto_ohlcv` retention\nsweep (`app.crypto_ohlcv_retention`). Mirrors the loop's internal\n`state()` plus two derived freshness fields the dashboard uses to\nflag a stalled or errored sweep.\n",
+  );
+
+/**
  * @summary Detail rows for trades the pre-submit slippage guard rejected
  */
 export const getSlippageGuardRejectsQuerySinceHoursDefault = 24;

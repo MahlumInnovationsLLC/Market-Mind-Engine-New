@@ -39,6 +39,7 @@ import type {
   BankrollRecent,
   CheckoutSessionRequest,
   CheckoutSessionResult,
+  CryptoOhlcvRetentionStatus,
   DashboardOverview,
   EmergencyStopRequest,
   EmergencyStopResult,
@@ -1121,6 +1122,86 @@ export function useGetOverFilledOrdersToday<
   request?: SecondParameter<typeof customFetch>;
 }): UseQueryResult<TData, TError> & { queryKey: QueryKey } {
   const queryOptions = getGetOverFilledOrdersTodayQueryOptions(options);
+
+  const query = useQuery(queryOptions) as UseQueryResult<TData, TError> & {
+    queryKey: QueryKey;
+  };
+
+  return { ...query, queryKey: queryOptions.queryKey };
+}
+
+/**
+ * @summary Health snapshot of the crypto_ohlcv bar-table retention sweep
+ */
+export const getGetCryptoOhlcvRetentionStatusUrl = () => {
+  return `/api/dashboard/crypto-ohlcv-retention`;
+};
+
+export const getCryptoOhlcvRetentionStatus = async (
+  options?: RequestInit,
+): Promise<CryptoOhlcvRetentionStatus> => {
+  return customFetch<CryptoOhlcvRetentionStatus>(
+    getGetCryptoOhlcvRetentionStatusUrl(),
+    {
+      ...options,
+      method: "GET",
+    },
+  );
+};
+
+export const getGetCryptoOhlcvRetentionStatusQueryKey = () => {
+  return [`/api/dashboard/crypto-ohlcv-retention`] as const;
+};
+
+export const getGetCryptoOhlcvRetentionStatusQueryOptions = <
+  TData = Awaited<ReturnType<typeof getCryptoOhlcvRetentionStatus>>,
+  TError = ErrorType<unknown>,
+>(options?: {
+  query?: UseQueryOptions<
+    Awaited<ReturnType<typeof getCryptoOhlcvRetentionStatus>>,
+    TError,
+    TData
+  >;
+  request?: SecondParameter<typeof customFetch>;
+}) => {
+  const { query: queryOptions, request: requestOptions } = options ?? {};
+
+  const queryKey =
+    queryOptions?.queryKey ?? getGetCryptoOhlcvRetentionStatusQueryKey();
+
+  const queryFn: QueryFunction<
+    Awaited<ReturnType<typeof getCryptoOhlcvRetentionStatus>>
+  > = ({ signal }) =>
+    getCryptoOhlcvRetentionStatus({ signal, ...requestOptions });
+
+  return { queryKey, queryFn, ...queryOptions } as UseQueryOptions<
+    Awaited<ReturnType<typeof getCryptoOhlcvRetentionStatus>>,
+    TError,
+    TData
+  > & { queryKey: QueryKey };
+};
+
+export type GetCryptoOhlcvRetentionStatusQueryResult = NonNullable<
+  Awaited<ReturnType<typeof getCryptoOhlcvRetentionStatus>>
+>;
+export type GetCryptoOhlcvRetentionStatusQueryError = ErrorType<unknown>;
+
+/**
+ * @summary Health snapshot of the crypto_ohlcv bar-table retention sweep
+ */
+
+export function useGetCryptoOhlcvRetentionStatus<
+  TData = Awaited<ReturnType<typeof getCryptoOhlcvRetentionStatus>>,
+  TError = ErrorType<unknown>,
+>(options?: {
+  query?: UseQueryOptions<
+    Awaited<ReturnType<typeof getCryptoOhlcvRetentionStatus>>,
+    TError,
+    TData
+  >;
+  request?: SecondParameter<typeof customFetch>;
+}): UseQueryResult<TData, TError> & { queryKey: QueryKey } {
+  const queryOptions = getGetCryptoOhlcvRetentionStatusQueryOptions(options);
 
   const query = useQuery(queryOptions) as UseQueryResult<TData, TError> & {
     queryKey: QueryKey;
