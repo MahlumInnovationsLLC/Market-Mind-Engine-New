@@ -30,6 +30,7 @@ class FeedStatus:
     last_error_at: float | None = None
     last_error: str | None = None
     last_records_written: int | None = None
+    records_written_total: int = 0
     success_count: int = 0
     failure_count: int = 0
     poll_count: int = 0
@@ -49,6 +50,7 @@ class FeedStatus:
             "last_error_at": _ts(self.last_error_at),
             "last_error": _truncate(self.last_error),
             "last_records_written": self.last_records_written,
+            "records_written_total": self.records_written_total,
             "success_count": self.success_count,
             "failure_count": self.failure_count,
             "poll_count": self.poll_count,
@@ -153,6 +155,8 @@ class FeedRegistry:
             st.last_ok_at = now
             st.last_duration_ms = round((now - started_at) * 1000.0, 1)
             st.last_records_written = written
+            if written > 0:
+                st.records_written_total += written
             st.last_error = None
             st.success_count += 1
 

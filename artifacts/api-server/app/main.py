@@ -3061,6 +3061,7 @@ async def health_full(_: object = Depends(require_approved_user)) -> dict[str, o
                     "last_error_at": s.get("last_error_at"),
                     "last_error": s.get("last_error"),
                     "last_records_written": s.get("last_records_written"),
+                    "records_written_total": s.get("records_written_total") or 0,
                     "rate_limited_until": s.get("rate_limited_until"),
                     "rate_limited_count": s.get("rate_limited_count"),
                     # Per-feed counters so the Health page can render

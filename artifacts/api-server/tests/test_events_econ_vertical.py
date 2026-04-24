@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 
@@ -624,3 +625,169 @@ def test_promotion_eligible_when_thresholds_met():
         status = asyncio.run(promotion_mod.evaluate_promotion())
     assert status.eligible is True
     assert status.reason == "eligible"
+
+
+# ---------------------------------------------------------------------------
+# Per-feed `records_written_total` cumulative counter (task #223)
+# ---------------------------------------------------------------------------
+
+
+def test_registry_tracks_records_written_total():
+    """Cumulative `records_written_total` increments across successful polls,
+    so the dashboard can spot a degraded source whose per-poll count drops
+    to zero even while `success_count` keeps climbing."""
+    from app.feeds.registry import Feed, FeedRegistry
+
+    reg = FeedRegistry()
+
+    async def _noop():
+        return 0
+
+    reg.register(Feed(name="econ_calendar.test", cadence_seconds=60.0, poll=_noop))
+
+    async def _drive():
+        for written in (3, 5, 0, 2):
+            started = await reg.record_start("econ_calendar.test")
+            await reg.record_success("econ_calendar.test", started, written)
+
+    asyncio.run(_drive())
+    snap = {s["name"]: s for s in reg.snapshot()}["econ_calendar.test"]
+    assert snap["records_written_total"] == 10
+    assert snap["last_records_written"] == 2
+    assert snap["success_count"] == 4
+
+
+def test_feeds_status_route_exposes_econ_counters():
+    """`/api/feeds/status` must surface both the per-poll `last_records_written`
+    AND the cumulative `records_written_total` for every econ feed so the
+    operator dashboard can spot a degraded source even when the feed keeps
+    polling successfully but stops writing rows."""
+    from fastapi.testclient import TestClient
+    from app.main import app
+    from app.auth import require_auth
+    from app.feeds.registry import registry as live_registry, Feed
+
+    # Drop in three test econ feeds so we don't depend on lifespan having
+    # actually wired up the real ones (some are env-gated).
+    async def _noop():
+        return 0
+
+    test_names = (
+        "econ_calendar.calendar.test",
+        "econ_calendar.actuals.test",
+        "econ_calendar.fred.test",
+    )
+    for n in test_names:
+        try:
+            live_registry.register(Feed(name=n, cadence_seconds=60.0, poll=_noop))
+        except ValueError:
+            pass
+
+    async def _drive():
+        for n in test_names:
+            started = await live_registry.record_start(n)
+            await live_registry.record_success(n, started, 4)
+
+    asyncio.run(_drive())
+
+    app.dependency_overrides[require_auth] = lambda: {"id": "test", "role": "admin"}
+    try:
+        client = TestClient(app)
+        resp = client.get("/api/feeds/status")
+    finally:
+        app.dependency_overrides.pop(require_auth, None)
+
+    assert resp.status_code == 200
+    body = resp.json()
+    by_name = {it["name"]: it for it in body["items"]}
+    for n in test_names:
+        assert n in by_name, f"missing {n} in /api/feeds/status"
+        item = by_name[n]
+        assert "last_records_written" in item
+        assert "records_written_total" in item
+        assert item["last_records_written"] == 4
+        assert item["records_written_total"] == 4
+
+
+# ---------------------------------------------------------------------------
+# Live integration: hit the 3 real upstream econ feeds (network-gated).
+#
+# Skipped by default so CI without internet stays green.  Opt in with
+# `AXIOM_RUN_LIVE_FEED_TESTS=1` to run a smoke check against the real
+# Trading Economics RSS, BLS RSS, and FRED CSV endpoints.  Each upstream
+# is asserted independently so a single source going down only fails one
+# sub-assertion, not the entire test.
+# ---------------------------------------------------------------------------
+
+
+pytestmark_live = pytest.mark.skipif(
+    os.environ.get("AXIOM_RUN_LIVE_FEED_TESTS", "").lower() not in {"1", "true", "yes", "on"},
+    reason="live upstream feed test; set AXIOM_RUN_LIVE_FEED_TESTS=1 to run",
+)
+
+
+_REQUIRED_KEYS = {"source", "signal_id", "release_type", "release_at"}
+
+
+def _assert_econ_release_shape(rows: list[dict]) -> None:
+    assert len(rows) >= 1, "no rows parsed from upstream"
+    sample = rows[0]
+    missing = _REQUIRED_KEYS - sample.keys()
+    assert not missing, f"row missing required keys: {missing}; row={sample}"
+    assert isinstance(sample["release_at"], datetime)
+    assert sample["release_at"].tzinfo is not None
+    assert isinstance(sample["release_type"], str) and sample["release_type"]
+    assert isinstance(sample["signal_id"], str) and sample["signal_id"]
+
+
+@pytestmark_live
+def test_live_trading_economics_rss_parses_at_least_one_row():
+    from app.feeds import econ_calendar as ec
+
+    rows = asyncio.run(ec._fetch_calendar_rss())
+    _assert_econ_release_shape(rows)
+    assert all(r["source"] == "trading_economics_rss" for r in rows)
+
+
+@pytestmark_live
+def test_live_bls_releases_rss_parses_at_least_one_row():
+    """Drives `poll_actuals` end-to-end but stubs the DB upsert so the
+    parser is exercised against the real BLS RSS without any side effect."""
+    from app.feeds import econ_calendar as ec
+
+    captured: list[dict] = []
+
+    async def _capture(rows):
+        for r in rows:
+            captured.append(r)
+        return len(captured)
+
+    with patch.object(ec, "upsert_releases", side_effect=_capture):
+        asyncio.run(ec.poll_actuals())
+
+    _assert_econ_release_shape(captured)
+    assert all(r["source"] == "bls_releases_rss" for r in captured)
+
+
+@pytestmark_live
+def test_live_fred_backfill_parses_at_least_one_row():
+    """Drives `poll_fred_backfill` against the real FRED CSV endpoint with
+    the DB upsert stubbed so we only verify the parser shape."""
+    from app.feeds import econ_calendar as ec
+
+    captured: list[dict] = []
+
+    async def _capture(rows):
+        for r in rows:
+            captured.append(r)
+        return len(captured)
+
+    with patch.object(ec, "upsert_releases", side_effect=_capture):
+        asyncio.run(ec.poll_fred_backfill())
+
+    _assert_econ_release_shape(captured)
+    assert all(r["source"] == "fred" for r in captured)
+    # FRED back-fill carries actuals + naive-consensus payload tag.
+    sample = captured[0]
+    assert sample.get("actual") is not None
+    assert sample.get("payload", {}).get("naive_consensus") is True
