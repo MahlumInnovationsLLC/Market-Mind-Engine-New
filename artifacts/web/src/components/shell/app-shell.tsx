@@ -9,6 +9,7 @@ import { RealtimeNotifications } from "@/components/realtime/realtime-notificati
 import { ShellSidebar } from "./sidebar";
 import { ShellHeader } from "./header";
 import { DegradedModeBanner } from "./degraded-mode-banner";
+import { StuckWsBanner } from "./stuck-ws-banner";
 import { TradingAlertsBanner } from "./trading-alerts-banner";
 
 interface AppShellProps {
@@ -46,6 +47,7 @@ function AppShellInner({ isAdmin, operatorEmail, children }: AppShellProps) {
       <SidebarInset className="flex flex-col min-h-[100dvh] bg-background">
         <DegradedModeBanner />
         <TradingAlertsBanner />
+        <StuckWsBanner />
         <ShellHeader operatorEmail={operatorEmail} />
         <main
           id="main-content"

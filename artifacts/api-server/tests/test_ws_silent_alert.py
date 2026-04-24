@@ -180,3 +180,47 @@ def test_healthy_subscriber_never_alerts(
     for _ in range(5):
         health_mod._probe_ws_subscribers()
     assert fake_pipe.dispatched == []
+
+
+def test_snapshot_exposes_stuck_subscribers_for_banner(
+    fake_pipe: _FakeDedupe, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The /api/health/snapshot card must surface the same "stuck"
+    list that drives the email alert so the operator dashboard banner
+    can render it without re-implementing the threshold logic."""
+    monkeypatch.setattr(health_mod, "WS_SILENT_ALERT_THRESHOLD", 2)
+    sub = _stuck_sub(sid=66, hub="pipeline_event_hub", label="positions")
+    _set_summary(monkeypatch, [sub])
+
+    # Below threshold — banner should see no stuck subs yet.
+    card = health_mod._probe_ws_subscribers()
+    extras = card["extras"]
+    assert extras["silent_alert_threshold"] == 2
+    assert extras["stuck_subscribers"] == []
+
+    # Crossing the threshold surfaces the offending sub on the snapshot.
+    card = health_mod._probe_ws_subscribers()
+    extras = card["extras"]
+    stuck = extras["stuck_subscribers"]
+    assert len(stuck) == 1
+    assert stuck[0]["hub"] == "pipeline_event_hub"
+    assert stuck[0]["label"] == "positions"
+    assert stuck[0]["consecutive_snapshots"] >= 2
+
+
+def test_snapshot_clears_stuck_when_subscriber_recovers(
+    fake_pipe: _FakeDedupe, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(health_mod, "WS_SILENT_ALERT_THRESHOLD", 2)
+    bad = _stuck_sub(sid=77, hub="kalshi_bus", label="ws-stream")
+    _set_summary(monkeypatch, [bad])
+    health_mod._probe_ws_subscribers()
+    card = health_mod._probe_ws_subscribers()
+    assert len(card["extras"]["stuck_subscribers"]) == 1
+
+    healthy = _stuck_sub(
+        sid=77, hub="kalshi_bus", label="ws-stream", qsize=10,
+    )
+    _set_summary(monkeypatch, [healthy])
+    card = health_mod._probe_ws_subscribers()
+    assert card["extras"]["stuck_subscribers"] == []

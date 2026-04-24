@@ -919,6 +919,19 @@ def _probe_ws_subscribers() -> dict:
     ]
     bad_subs = [s for s in subs if _is_ws_subscriber_bad(s)]
     _maybe_dispatch_ws_silent_alert(bad_subs)
+    # Surface the per-subscriber consecutive-bad counts on the snapshot
+    # so the operator dashboard banner can render the same "stuck"
+    # signal that drives the Postmark alert. ``stuck_subscribers`` only
+    # contains subs that have already crossed the alert threshold so
+    # the banner mirrors the email path 1:1.
+    snap["silent_alert_threshold"] = WS_SILENT_ALERT_THRESHOLD
+    stuck: list[dict] = []
+    for s in bad_subs:
+        sid = int(s.get("id") or 0)
+        cnt = _ws_bad_snapshot_counts.get(sid, 0)
+        if cnt >= WS_SILENT_ALERT_THRESHOLD:
+            stuck.append({**s, "consecutive_snapshots": cnt})
+    snap["stuck_subscribers"] = stuck
     if overflowed:
         status = "degraded"
         detail = f"{overflowed} subscriber(s) closed on overflow"
