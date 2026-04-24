@@ -125,6 +125,16 @@ Axiom Predict is a pnpm workspace monorepo hosting a prediction-market trading p
 - Employs a generation-guarded mount for WebSockets to prevent leaks.
 - Integrates with RevenueCat for mobile in-app subscriptions, with robust webhook entitlement-plumbing.
 
+## Operations Runbook — quick links
+
+For incident response and the live cutover, see [`docs/runbook.md`](docs/runbook.md). Direct links to the on-call sections:
+
+- [Postgres outage](docs/runbook.md#7-postgres-outage) — symptoms, confirming it's the DB (not auth / not network), how the orchestrator parks itself, draining in-flight resting orders, and recovering from corrupted `system_settings` / `app_users`.
+- [Clerk / auth provider outage](docs/runbook.md#8-clerk--auth-provider-outage) — what still works, the auth-free "bareback halt" flow, and how to verify ops alerts are still landing.
+- [Halt a single vertical](docs/runbook.md#9-halt-a-single-vertical) — dashboard, API, and SQL fallbacks for stopping one vertical (e.g. weather or baseball) without taking the whole system down.
+- [Cutover go/no-go checklist (paper → tiny live → full live)](docs/runbook.md#10-cutover-gono-go-checklist-paper--tiny-live--full-live) — phased ramp-up checklist used during the paper → live transition.
+- [First 24 hours live](docs/runbook.md#11-first-24-hours-live) — dashboards to watch and the alerts worth being paged on.
+
 ## External Dependencies
 
 - **Database:** Supabase Postgres (project `frwhxftngijwcujqhltf`, accessed via `asyncpg`).
