@@ -84,6 +84,11 @@ class Settings:
     # AI keys (note APY typo in user's secrets)
     openai_api_key: str | None
     anthropic_api_key: str | None
+    # Google AI Studio key.  Accepted under either ``GEMINI_API_KEY`` (the
+    # name google-genai prefers) or ``GOOGLE_API_KEY`` so operators don't
+    # have to remember which variant the SDK wants.  Optional — only the
+    # gatekeeper model selector reads it today.
+    google_api_key: str | None
 
     # Trading
     kalshi_api_key_id: str | None
@@ -298,6 +303,11 @@ def get_settings() -> Settings:
         supabase_bucket=SUPABASE_BUCKET,
         openai_api_key=os.environ.get("OPENAI_API_KEY") or os.environ.get("OPENAI_APY_KEY"),
         anthropic_api_key=os.environ.get("ANTHROPIC_API_KEY"),
+        google_api_key=(
+            os.environ.get("GEMINI_API_KEY")
+            or os.environ.get("GOOGLE_API_KEY")
+            or os.environ.get("GOOGLE_GENAI_API_KEY")
+        ),
         kalshi_api_key_id=os.environ.get("KALSHI_API_KEY_ID"),
         kalshi_private_key=os.environ.get("KALSHI_API_PRIVATE_KEY"),
         kalshi_env=kalshi_env,

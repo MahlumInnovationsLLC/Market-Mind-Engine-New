@@ -16,6 +16,7 @@ import {
   AuditLogPanel,
   CryptoBacktestPanel,
   EloUpdaterPanel,
+  GatekeeperModelPanel,
   GithubMirrorPanel,
   LeadsPanel,
   ModelsPanel,
@@ -172,6 +173,13 @@ export default function SystemPage() {
               Runtime mode
             </div>
             <RuntimePanel />
+          </GlassCard>
+
+          <GlassCard tone="solid" padding="md">
+            <div className="mb-3 text-[11px] font-semibold uppercase tracking-[0.18em] text-accent-cyan/80">
+              Gatekeeper model
+            </div>
+            <GatekeeperModelPanel />
           </GlassCard>
 
           <GlassCard tone="solid" padding="md">

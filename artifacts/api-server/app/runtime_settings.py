@@ -27,6 +27,289 @@ VALID_MODES: tuple[str, ...] = ("conservative", "balanced", "aggressive")
 DEFAULT_MODE = "balanced"
 
 
+# ---------------------------------------------------------------------------
+# Gatekeeper model selector (operator-tunable per task).
+#
+# The LLM gatekeeper is the last veto in front of the order pipe (see
+# ``app.swarm.runner._call_persona`` for the GATEKEEPER call site).  By
+# default it uses the model baked into ``personas.GATEKEEPER`` —
+# ``anthropic/claude-sonnet-4-5-20250929``.  Operators can switch to any
+# of the most-capable models from the providers that have a configured
+# API key without redeploying:
+#
+#   * Anthropic   → claude-sonnet-4-5-20250929 (default; provider-pinned
+#                   to the persona's baseline)
+#   * OpenAI      → gpt-5
+#   * Google      → gemini-2.5-pro
+#
+# The override is stored as two ``runtime_settings`` rows
+# (``gatekeeper_provider`` and ``gatekeeper_model_id``).  Both must be
+# present together; deleting them reverts to the persona default.
+# ---------------------------------------------------------------------------
+GATEKEEPER_PROVIDER_KEY = "gatekeeper_provider"
+GATEKEEPER_MODEL_KEY = "gatekeeper_model_id"
+
+
+# Catalogue of operator-selectable gatekeeper models.  Each entry is the
+# *most capable* current-generation reasoning model that the relevant
+# provider exposes — picked here rather than in a free-form text box so
+# the dropdown stays curated and the cost / latency profile is
+# predictable.  Updating this list is the only place an operator-facing
+# new model needs to be added.
+GATEKEEPER_MODEL_CATALOG: tuple[dict[str, str], ...] = (
+    {
+        "provider": "anthropic",
+        "model_id": "claude-sonnet-4-5-20250929",
+        "label": "Claude Sonnet 4.5 (Anthropic)",
+        "secret_env": "ANTHROPIC_API_KEY",
+    },
+    {
+        "provider": "openai",
+        "model_id": "gpt-5",
+        "label": "GPT-5 (OpenAI)",
+        "secret_env": "OPENAI_API_KEY",
+    },
+    {
+        "provider": "google",
+        "model_id": "gemini-2.5-pro",
+        "label": "Gemini 2.5 Pro (Google)",
+        "secret_env": "GEMINI_API_KEY",
+    },
+)
+
+
+def _provider_has_key(provider: str) -> bool:
+    """True when the API key for ``provider`` is configured.
+
+    Reads from ``os.environ`` directly (rather than the lru-cached
+    ``get_settings()``) so flipping a secret in the Replit UI is picked
+    up on the next request without a process restart.  Catalogue's
+    ``secret_env`` is the canonical name; we also accept the legacy
+    ``GOOGLE_API_KEY`` alias for the Google provider.
+    """
+    import os
+
+    if provider == "anthropic":
+        return bool(os.environ.get("ANTHROPIC_API_KEY", "").strip())
+    if provider == "openai":
+        return bool(os.environ.get("OPENAI_API_KEY", "").strip())
+    if provider == "google":
+        return bool(
+            os.environ.get("GEMINI_API_KEY", "").strip()
+            or os.environ.get("GOOGLE_API_KEY", "").strip()
+        )
+    return False
+
+
+def gatekeeper_model_options() -> list[dict[str, Any]]:
+    """The catalogue with an `available` flag per entry.
+
+    Surfaces in the admin UI dropdown so operators see *why* a provider
+    is greyed out (missing key) rather than getting a 400 on save.
+    """
+    out: list[dict[str, Any]] = []
+    for entry in GATEKEEPER_MODEL_CATALOG:
+        out.append(
+            {
+                "provider": entry["provider"],
+                "model_id": entry["model_id"],
+                "label": entry["label"],
+                "secret_env": entry["secret_env"],
+                "available": _provider_has_key(entry["provider"]),
+            }
+        )
+    return out
+
+
+def _catalog_lookup(provider: str, model_id: str) -> dict[str, str] | None:
+    p = (provider or "").strip().lower()
+    m = (model_id or "").strip()
+    for entry in GATEKEEPER_MODEL_CATALOG:
+        if entry["provider"] == p and entry["model_id"] == m:
+            return entry
+    return None
+
+
+async def get_gatekeeper_model_override() -> tuple[str, str] | None:
+    """Return ``(provider, model_id)`` if an override is set, else ``None``.
+
+    Hot path: called on every gatekeeper invocation.  Best-effort — any
+    DB hiccup falls back to the persona default rather than blocking
+    trades.
+    """
+    try:
+        rows = await db.fetch(
+            """
+            SELECT key, value
+              FROM runtime_settings
+             WHERE key IN ($1, $2)
+            """,
+            GATEKEEPER_PROVIDER_KEY,
+            GATEKEEPER_MODEL_KEY,
+        )
+    except Exception as e:
+        log.debug("get_gatekeeper_model_override read failed: %s", e)
+        return None
+    kv = {r["key"]: (r["value"] or "").strip() for r in rows}
+    provider = kv.get(GATEKEEPER_PROVIDER_KEY) or ""
+    model_id = kv.get(GATEKEEPER_MODEL_KEY) or ""
+    if not provider or not model_id:
+        return None
+    if _catalog_lookup(provider, model_id) is None:
+        # Stale / unsafe value — log and fall back to persona default.
+        log.warning(
+            "gatekeeper override %s/%s not in catalogue; using persona default",
+            provider, model_id,
+        )
+        return None
+    return provider, model_id
+
+
+async def get_gatekeeper_model_state() -> dict[str, Any]:
+    """Snapshot for the admin panel: current selection + catalogue."""
+    override = await get_gatekeeper_model_override()
+    updated_at: str | None = None
+    updated_by: str | None = None
+    if override is not None:
+        try:
+            row = await db.fetchrow(
+                """
+                SELECT to_char(updated_at, 'YYYY-MM-DD"T"HH24:MI:SSZ') AS updated_at,
+                       updated_by
+                  FROM runtime_settings
+                 WHERE key = $1
+                """,
+                GATEKEEPER_MODEL_KEY,
+            )
+            if row is not None:
+                updated_at = row["updated_at"]
+                updated_by = row["updated_by"]
+        except Exception as e:
+            log.debug("gatekeeper meta read failed: %s", e)
+    # Persona default — kept in sync with `personas.GATEKEEPER` so the
+    # UI can show "(default)" next to the same option the runner falls
+    # back to.
+    from .swarm.personas import GATEKEEPER as _GK
+
+    return {
+        "selected_provider": override[0] if override else None,
+        "selected_model_id": override[1] if override else None,
+        "default_provider": _GK.provider,
+        "default_model_id": _GK.model_id,
+        "options": gatekeeper_model_options(),
+        "updated_at": updated_at,
+        "updated_by": updated_by,
+    }
+
+
+async def set_gatekeeper_model(
+    provider: str | None,
+    model_id: str | None,
+    *,
+    actor_user_id: str | None,
+    actor_email: str | None = None,
+) -> dict[str, Any]:
+    """Upsert (or clear) the gatekeeper override.
+
+    Pass ``provider=None`` (or empty) to revert to the persona default.
+    Otherwise both ``provider`` and ``model_id`` must match a catalogue
+    entry whose API key is currently configured.  Audited under
+    ``set_gatekeeper_model``.
+    """
+    import json as _json
+
+    before = await get_gatekeeper_model_override()
+
+    clearing = not provider or not model_id
+    if clearing:
+        async with db.acquire() as c:
+            await c.execute(
+                "DELETE FROM runtime_settings WHERE key IN ($1, $2)",
+                GATEKEEPER_PROVIDER_KEY,
+                GATEKEEPER_MODEL_KEY,
+            )
+        try:
+            async with db.acquire() as c:
+                await c.execute(
+                    """
+                    INSERT INTO admin_audit_log (
+                        actor_user_id, actor_email,
+                        target_user_id, target_email,
+                        action, before_value, after_value
+                    ) VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7::jsonb)
+                    """,
+                    actor_user_id or "system",
+                    actor_email,
+                    "system",
+                    None,
+                    "set_gatekeeper_model",
+                    _json.dumps(
+                        {
+                            "provider": before[0] if before else None,
+                            "model_id": before[1] if before else None,
+                        }
+                    ),
+                    _json.dumps({"provider": None, "model_id": None}),
+                )
+        except Exception as e:
+            log.warning("audit log insert (clear gatekeeper model) failed: %s", e)
+        return await get_gatekeeper_model_state()
+
+    p = (provider or "").strip().lower()
+    m = (model_id or "").strip()
+    entry = _catalog_lookup(p, m)
+    if entry is None:
+        raise ValueError(
+            f"gatekeeper model {p}/{m} not in catalogue; "
+            f"valid options: {[(e['provider'], e['model_id']) for e in GATEKEEPER_MODEL_CATALOG]}"
+        )
+    if not _provider_has_key(p):
+        raise ValueError(
+            f"{entry['secret_env']} is not configured; cannot select {p}/{m}"
+        )
+
+    async with db.acquire() as c:
+        await c.execute(
+            """
+            INSERT INTO runtime_settings (key, value, updated_at, updated_by)
+            VALUES ($1, $2, now(), $3),
+                   ($4, $5, now(), $3)
+            ON CONFLICT (key) DO UPDATE SET
+                value      = EXCLUDED.value,
+                updated_at = now(),
+                updated_by = EXCLUDED.updated_by
+            """,
+            GATEKEEPER_PROVIDER_KEY, p, actor_user_id,
+            GATEKEEPER_MODEL_KEY, m,
+        )
+    try:
+        async with db.acquire() as c:
+            await c.execute(
+                """
+                INSERT INTO admin_audit_log (
+                    actor_user_id, actor_email,
+                    target_user_id, target_email,
+                    action, before_value, after_value
+                ) VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7::jsonb)
+                """,
+                actor_user_id or "system",
+                actor_email,
+                "system",
+                None,
+                "set_gatekeeper_model",
+                _json.dumps(
+                    {
+                        "provider": before[0] if before else None,
+                        "model_id": before[1] if before else None,
+                    }
+                ),
+                _json.dumps({"provider": p, "model_id": m}),
+            )
+    except Exception as e:
+        log.warning("audit log insert (set gatekeeper model) failed: %s", e)
+    return await get_gatekeeper_model_state()
+
+
 # Profile values applied as gate defaults when no explicit
 # `system_settings` override is present.  Mirrors the moderator /
 # gatekeeper textual rules in `app/swarm/personas.py` so the LLM bias
@@ -1170,7 +1453,6 @@ def _normalize_preset_record(raw: Any) -> dict[str, Any] | None:
 
 
 async def list_aggression_presets() -> list[dict[str, Any]]:
-    await ensure_schema()
     try:
         v = await db.fetchval(
             "SELECT value FROM runtime_settings WHERE key = $1",

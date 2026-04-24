@@ -837,6 +837,277 @@ export function RuntimePanel() {
   );
 }
 
+type GatekeeperModelOption = {
+  provider: string;
+  model_id: string;
+  label: string;
+  secret_env: string;
+  available: boolean;
+};
+
+type GatekeeperModelState = {
+  selected_provider: string | null;
+  selected_model_id: string | null;
+  default_provider: string;
+  default_model_id: string;
+  options: GatekeeperModelOption[];
+  updated_at: string | null;
+  updated_by: string | null;
+};
+
+function optionKey(o: { provider: string; model_id: string }): string {
+  return `${o.provider}::${o.model_id}`;
+}
+
+export function GatekeeperModelPanel() {
+  const { getToken, isSignedIn } = useAuth();
+  const tokenFn = useMemo(
+    () => () => getToken().then((t) => t ?? null),
+    [getToken],
+  );
+  const queryClient = useQueryClient();
+  const queryKey = ["admin", "runtime-settings", "gatekeeper-model"] as const;
+
+  const { data, isLoading, error } = useQuery<GatekeeperModelState>({
+    queryKey,
+    queryFn: () =>
+      apiFetch<GatekeeperModelState>(
+        "/api/admin/runtime-settings/gatekeeper-model",
+        { getToken: tokenFn },
+      ),
+    enabled: !!isSignedIn,
+    refetchInterval: 30_000,
+  });
+
+  // Prefer the active override; fall back to the persona default so the
+  // dropdown always reflects what the runner will *actually* use on the
+  // next debate.
+  const effectiveKey =
+    data == null
+      ? ""
+      : optionKey({
+          provider: data.selected_provider ?? data.default_provider,
+          model_id: data.selected_model_id ?? data.default_model_id,
+        });
+  const [pendingKey, setPendingKey] = useState<string>("");
+
+  // Reset the staged selection whenever the server snapshot changes so
+  // the form doesn't show a stale value after another operator's save.
+  useEffect(() => {
+    setPendingKey(effectiveKey);
+  }, [effectiveKey]);
+
+  const mutation = useMutation({
+    mutationFn: (key: string) => {
+      const opt = data?.options.find((o) => optionKey(o) === key);
+      // Empty key (or "default") clears the override.
+      const isDefault =
+        !opt ||
+        (opt.provider === data?.default_provider &&
+          opt.model_id === data?.default_model_id);
+      const body = isDefault
+        ? { provider: null, model_id: null }
+        : { provider: opt.provider, model_id: opt.model_id };
+      return apiFetch<GatekeeperModelState>(
+        "/api/admin/runtime-settings/gatekeeper-model",
+        { method: "POST", body, getToken: tokenFn },
+      );
+    },
+    onSuccess: (next) => {
+      queryClient.setQueryData(queryKey, next);
+    },
+  });
+
+  if (!isSignedIn) return null;
+
+  return (
+    <main className="terminal-screen px-6 pt-6 pb-12">
+      <section
+        className="terminal-card p-6 max-w-3xl"
+        data-testid="panel-gatekeeper-model"
+      >
+        <header className="border-b border-border pb-3 mb-4">
+          <div className="flex items-baseline justify-between">
+            <h2 className="text-xs uppercase tracking-widest text-muted-foreground">
+              Gatekeeper Model
+            </h2>
+            {data ? (
+              <div className="text-[10px] uppercase tracking-widest text-muted-foreground font-mono">
+                {data.selected_provider ? "OVERRIDE ACTIVE" : "DEFAULT"}
+              </div>
+            ) : null}
+          </div>
+          <p className="text-xs text-muted-foreground normal-case tracking-normal mt-2">
+            Picks the LLM that vetoes trades before they reach the order
+            pipe. Switching takes effect on the next debate — no
+            restart. Providers without a configured API key are
+            disabled.
+          </p>
+        </header>
+
+        {isLoading ? (
+          <div className="text-xs text-muted-foreground">Loading…</div>
+        ) : error ? (
+          <div
+            className="text-xs text-destructive"
+            data-testid="text-gatekeeper-model-error"
+          >
+            Failed to load gatekeeper model state.
+          </div>
+        ) : data ? (
+          <div className="space-y-4">
+            {(() => {
+              if (!data.selected_provider || !data.selected_model_id) return null;
+              const active = data.options.find(
+                (o) =>
+                  o.provider === data.selected_provider &&
+                  o.model_id === data.selected_model_id,
+              );
+              if (!active || active.available) return null;
+              return (
+                <div
+                  className="border border-destructive/60 bg-destructive/10 px-3 py-2 text-xs font-mono"
+                  data-testid="banner-gatekeeper-override-unavailable"
+                >
+                  <div className="uppercase tracking-widest text-destructive text-[10px] mb-1">
+                    Override unavailable — gatekeeper will fail closed
+                  </div>
+                  <div className="text-foreground normal-case tracking-normal">
+                    The active override <span className="text-primary">{data.selected_provider}/{data.selected_model_id}</span>{" "}
+                    has no API key configured ({active.secret_env}).
+                    Every debate will fail closed (no trades) until you
+                    revert to the persona default or add the key.
+                  </div>
+                  <button
+                    type="button"
+                    data-testid="button-force-revert-gatekeeper-model"
+                    disabled={mutation.isPending}
+                    onClick={() => {
+                      const defKey = optionKey({
+                        provider: data.default_provider,
+                        model_id: data.default_model_id,
+                      });
+                      setPendingKey(defKey);
+                      mutation.mutate(defKey);
+                    }}
+                    className="mt-2 terminal-button-primary px-3 py-1 text-[10px] uppercase tracking-widest disabled:opacity-50"
+                  >
+                    Revert to default now
+                  </button>
+                </div>
+              );
+            })()}
+            <div>
+              <label
+                htmlFor="gatekeeper-model-select"
+                className="text-[10px] uppercase tracking-widest text-muted-foreground block mb-2"
+              >
+                Active model
+              </label>
+              <select
+                id="gatekeeper-model-select"
+                data-testid="select-gatekeeper-model"
+                className="w-full bg-background border border-border px-3 py-2 text-sm font-mono"
+                value={pendingKey}
+                onChange={(e) => setPendingKey(e.target.value)}
+              >
+                {data.options.map((o) => {
+                  const isDefault =
+                    o.provider === data.default_provider &&
+                    o.model_id === data.default_model_id;
+                  const suffix = !o.available
+                    ? `  (${o.secret_env} not configured)`
+                    : isDefault
+                    ? "  (default)"
+                    : "";
+                  return (
+                    <option
+                      key={optionKey(o)}
+                      value={optionKey(o)}
+                      disabled={!o.available}
+                      data-testid={`option-gatekeeper-${o.provider}-${o.model_id}`}
+                    >
+                      {o.label}
+                      {suffix}
+                    </option>
+                  );
+                })}
+              </select>
+            </div>
+
+            <div className="text-xs text-muted-foreground font-mono normal-case tracking-normal">
+              <span className="uppercase text-[10px] tracking-widest">
+                Currently active:
+              </span>{" "}
+              <span className="text-primary">
+                {data.selected_provider ?? data.default_provider}
+              </span>
+              {" / "}
+              <span className="text-primary">
+                {data.selected_model_id ?? data.default_model_id}
+              </span>
+              {data.selected_provider ? null : (
+                <span className="ml-2 text-[10px] uppercase tracking-widest">
+                  (persona default)
+                </span>
+              )}
+            </div>
+
+            <div className="flex gap-2">
+              <button
+                type="button"
+                data-testid="button-save-gatekeeper-model"
+                disabled={
+                  mutation.isPending || pendingKey === effectiveKey
+                }
+                onClick={() => mutation.mutate(pendingKey)}
+                className="terminal-button-primary px-4 py-2 text-xs uppercase tracking-widest disabled:opacity-50"
+              >
+                {mutation.isPending ? "Saving…" : "Save"}
+              </button>
+              {data.selected_provider ? (
+                <button
+                  type="button"
+                  data-testid="button-reset-gatekeeper-model"
+                  disabled={mutation.isPending}
+                  onClick={() => {
+                    const defKey = optionKey({
+                      provider: data.default_provider,
+                      model_id: data.default_model_id,
+                    });
+                    setPendingKey(defKey);
+                    mutation.mutate(defKey);
+                  }}
+                  className="terminal-button px-4 py-2 text-xs uppercase tracking-widest disabled:opacity-50"
+                >
+                  Revert to default
+                </button>
+              ) : null}
+            </div>
+
+            {mutation.isError ? (
+              <div
+                className="text-xs text-destructive"
+                data-testid="text-gatekeeper-model-save-error"
+              >
+                Save failed:{" "}
+                {(mutation.error as Error | undefined)?.message ?? "unknown"}
+              </div>
+            ) : null}
+
+            {data.updated_at ? (
+              <div className="text-[10px] uppercase tracking-widest text-muted-foreground border-t border-border pt-3">
+                Updated {data.updated_at}
+                {data.updated_by ? ` by ${data.updated_by}` : ""}
+              </div>
+            ) : null}
+          </div>
+        ) : null}
+      </section>
+    </main>
+  );
+}
+
 type TechAiPromotionStatus = {
   settled_count: number;
   brier: number | null;

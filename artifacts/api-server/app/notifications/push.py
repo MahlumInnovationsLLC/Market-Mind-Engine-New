@@ -959,7 +959,6 @@ async def delete_notification(
     SQL so a user can never delete another user's notification by
     guessing its id (task #347).
     """
-    await ensure_schema()
     try:
         nid = int(notification_id)
     except (TypeError, ValueError):
@@ -985,7 +984,6 @@ async def delete_all_notifications(clerk_user_id: str) -> int:
     Returns the number of rows removed. Used by the mobile "Clear all"
     affordance (task #347); never raises so the UI can always proceed.
     """
-    await ensure_schema()
     try:
         res = await db.execute(
             "DELETE FROM mobile_notification_log WHERE clerk_user_id = $1",

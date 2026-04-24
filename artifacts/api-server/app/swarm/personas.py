@@ -233,7 +233,9 @@ MODEL_PRICES_PER_M: dict[str, tuple[float, float]] = {
     # model_id -> (input $/1M, output $/1M)
     "gpt-4o-mini":            (0.15, 0.60),
     "gpt-4o":                 (2.50, 10.00),
+    "gpt-5":                  (1.25, 10.00),
     "claude-sonnet-4-5-20250929": (3.00, 15.00),
+    "gemini-2.5-pro":         (1.25, 10.00),
 }
 
 

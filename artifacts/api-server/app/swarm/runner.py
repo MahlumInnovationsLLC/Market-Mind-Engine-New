@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import contextvars
+import dataclasses
 import json
 import logging
 import re
@@ -115,6 +116,27 @@ def _get_anthropic():
     return _anthropic_client
 
 
+_google_client: Any = None
+
+
+def _get_google():
+    """Lazy-init Google GenAI client.
+
+    Used only by the gatekeeper-model selector when the operator chooses
+    a Gemini model.  We import inside the function so projects that
+    never select Google don't pay for the SDK install / import cost.
+    """
+    global _google_client
+    if _google_client is None:
+        from google import genai  # type: ignore
+
+        key = get_settings().google_api_key
+        if not key:
+            raise RuntimeError("GEMINI_API_KEY not configured")
+        _google_client = genai.Client(api_key=key)
+    return _google_client
+
+
 # ---------------------------------------------------------------------------
 # JSON extraction (LLMs sometimes wrap output in fences or chatter)
 # ---------------------------------------------------------------------------
@@ -204,6 +226,60 @@ async def _stream_anthropic(
     return "".join(chunks), in_tok, out_tok
 
 
+async def _stream_google(
+    persona_id: str, model_id: str, system: str, user: str, temperature: float
+) -> tuple[str, int, int]:
+    """Streaming dispatch for Google Gemini.
+
+    Mirrors the OpenAI / Anthropic helpers: emits ``persona_delta`` hub
+    events as tokens arrive and returns ``(text, input_tokens,
+    output_tokens)`` for the cost ledger.  Uses the new ``google-genai``
+    SDK (the legacy ``google-generativeai`` package is not installed).
+    """
+    client = _get_google()
+    chunks: list[str] = []
+    in_tok = out_tok = 0
+    # ``generate_content_stream`` is sync-iterable; wrap it through
+    # ``asyncio.to_thread`` so we don't block the event loop on each
+    # chunk.  google-genai v1.x exposes the streaming method on
+    # ``client.models`` rather than on a model handle.
+    import asyncio as _asyncio
+
+    def _open():
+        return client.models.generate_content_stream(
+            model=model_id,
+            contents=user,
+            config={
+                "system_instruction": system,
+                "temperature": temperature,
+                "max_output_tokens": 600,
+            },
+        )
+
+    stream = await _asyncio.to_thread(_open)
+    final_chunk: Any = None
+    while True:
+        try:
+            chunk = await _asyncio.to_thread(next, stream, None)
+        except StopIteration:
+            break
+        if chunk is None:
+            break
+        final_chunk = chunk
+        text = getattr(chunk, "text", "") or ""
+        if text:
+            chunks.append(text)
+            await _publish(
+                {"type": "persona_delta", "persona": persona_id, "text": text}
+            )
+    if final_chunk is not None:
+        usage = getattr(final_chunk, "usage_metadata", None)
+        if usage is not None:
+            in_tok = int(getattr(usage, "prompt_token_count", 0) or 0)
+            out_tok = int(getattr(usage, "candidates_token_count", 0) or 0)
+    return "".join(chunks), in_tok, out_tok
+
+
 def _is_retryable_provider_error(exc: BaseException) -> bool:
     """True for rate-limit (HTTP 429) or 5xx upstream failures.
 
@@ -234,6 +310,8 @@ async def _invoke_provider(
         return await _stream_openai(persona_id, model_id, system, user, temperature)
     if provider == "anthropic":
         return await _stream_anthropic(persona_id, model_id, system, user, temperature)
+    if provider == "google":
+        return await _stream_google(persona_id, model_id, system, user, temperature)
     raise RuntimeError(f"unknown provider {provider!r}")
 
 
@@ -611,8 +689,34 @@ async def _run_debate_inner(
     # risk gates the moderator does not see.
     gk_failed_closed = False
     gk_failure_reason: str | None = None
+    # Resolve operator-tunable gatekeeper model override (admin UI knob).
+    # `runtime_settings.get_gatekeeper_model_override()` returns None when
+    # no override is set OR when the stored value is no longer in the
+    # catalogue, so we fall back to the persona default in that case.
+    # Failures are non-fatal — we never let a settings-table hiccup
+    # silence the gatekeeper.
+    gk_persona = GATEKEEPER
     try:
-        gk_verdict = await _call_persona(GATEKEEPER, gk_input)
+        from .. import runtime_settings as _rs
+
+        override = await _rs.get_gatekeeper_model_override()
+    except Exception as e:  # noqa: BLE001
+        log.debug("gatekeeper override lookup failed; using default: %s", e)
+        override = None
+    if override is not None:
+        ov_provider, ov_model = override
+        gk_persona = dataclasses.replace(
+            GATEKEEPER,
+            provider=ov_provider,
+            model_id=ov_model,
+            # Disable cross-provider fallback for the operator-selected
+            # model so the verdict reflects the chosen provider — the
+            # outer `try/except` already fail-closes on any error.
+            fallback_provider="",
+            fallback_model_id="",
+        )
+    try:
+        gk_verdict = await _call_persona(gk_persona, gk_input)
     except Exception as e:  # noqa: BLE001 — fail-closed by design
         log.warning("gatekeeper call failed; forcing PASS: %s", e)
         _GATEKEEPER_FAILURES["call_error"] = _GATEKEEPER_FAILURES.get("call_error", 0) + 1

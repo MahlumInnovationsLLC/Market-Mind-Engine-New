@@ -98,6 +98,8 @@ PROTECTED_ROUTES: tuple[str, ...] = (
     "/api/polymarket/markets",
     "/api/polymarket/orders/resting",
     "/api/admin/runtime-settings",
+    # Operator-tunable LLM gatekeeper provider/model selector.
+    "/api/admin/runtime-settings/gatekeeper-model",
     "/api/admin/tech-ai/promotion-status",
     "/api/dashboard/tech-ai/markets/{ticker}/evidence",
     "/api/admin/elections/promotion-status",

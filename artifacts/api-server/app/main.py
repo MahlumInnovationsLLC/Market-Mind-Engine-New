@@ -1841,6 +1841,51 @@ async def admin_cancel_aggression_revert(
     return await runtime_settings_mod.get_state()
 
 
+# ---------------------------------------------------------------------------
+# Gatekeeper model selector — operator picks which provider/model the LLM
+# gatekeeper uses without redeploying.  Read by `swarm.runner` on every
+# debate; falls back to the persona default when no override is set.
+# ---------------------------------------------------------------------------
+class AdminSetGatekeeperModelRequest(BaseModel):
+    # Empty string / null on either field reverts to the persona default.
+    provider: str | None = Field(default=None, max_length=32)
+    model_id: str | None = Field(default=None, max_length=128)
+
+
+@app.get("/api/admin/runtime-settings/gatekeeper-model")
+async def admin_get_gatekeeper_model(
+    actor: AuthedUser = Depends(require_admin),
+) -> dict[str, object]:
+    """Current gatekeeper model + the available catalogue (with
+    per-provider availability flags so the UI can grey out options
+    whose API key is not configured)."""
+    return await runtime_settings_mod.get_gatekeeper_model_state()
+
+
+@app.post("/api/admin/runtime-settings/gatekeeper-model")
+async def admin_set_gatekeeper_model(
+    body: AdminSetGatekeeperModelRequest,
+    actor: AuthedUser = Depends(require_admin),
+) -> dict[str, object]:
+    """Set or clear the gatekeeper model override.
+
+    Pass an empty/null ``provider`` (or ``model_id``) to revert to the
+    persona default.  Otherwise the pair must be a curated catalogue
+    entry whose API key is currently configured — anything else returns
+    400 so a misconfiguration cannot silently disable the gatekeeper.
+    """
+    actor_email = (await check_approval(actor))[1]
+    try:
+        return await runtime_settings_mod.set_gatekeeper_model(
+            body.provider,
+            body.model_id,
+            actor_user_id=actor.user_id,
+            actor_email=actor_email,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
 class AdminAggressionPresetRequest(BaseModel):
     label: str = Field(..., min_length=1, max_length=60)
     target_mode: str = Field(
