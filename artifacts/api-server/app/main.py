@@ -3933,8 +3933,28 @@ async def features_drift(
 
 
 @app.get("/api/dashboard/overview")
-async def dashboard_overview(_: object = Depends(require_approved_user)) -> dict[str, object]:
-    return await dashboard.get_overview()
+async def dashboard_overview(
+    user: AuthedUser = Depends(require_approved_user),
+) -> dict[str, object]:
+    """Aggregate counts and headline stats for the dashboard landing tab.
+
+    Free callers don't have anything time-sensitive redacted here (the
+    overview is a rolled-up snapshot, not a live feed), but we still
+    emit the same ``tier`` / ``delayed`` / ``delay_minutes`` shape that
+    the list endpoints return so the mobile and web dashboards can
+    render the free-tier upsell banner on the very first screen.
+    """
+    overview = await dashboard.get_overview()
+    sub = await billing.get_user_subscription(user)
+    delayed = (
+        billing._TIER_RANK[sub.tier] < billing._TIER_RANK[billing.TIER_PRO]
+    )
+    overview["tier"] = sub.tier
+    overview["delayed"] = delayed
+    overview["delay_minutes"] = (
+        free_tier.FREE_TIER_DELAY_MINUTES if delayed else 0
+    )
+    return overview
 
 
 @app.get("/api/dashboard/recent-trades")

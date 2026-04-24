@@ -14,6 +14,7 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 import type { VerticalsOverview } from "@workspace/api-client-react";
 
 import { Card, SectionHeader, StatTile } from "@/components/Card";
+import DelayedSignalsBanner from "@/components/DelayedSignalsBanner";
 import { useColors } from "@/hooks/useColors";
 import { apiFetch } from "@/lib/api";
 import { useSelectedVerticals } from "@/lib/vertical-filter";
@@ -33,6 +34,12 @@ type Overview = {
   realized_pnl?: number | null;
   win_rate?: number | null;
   open_positions?: number | null;
+  // Set by the backend for free-tier callers so the dashboard tab can
+  // render the same upsell banner the list tabs (positions / research /
+  // pipeline) already show. Pro+ responses set ``delayed: false``.
+  tier?: string | null;
+  delayed?: boolean;
+  delay_minutes?: number;
 };
 
 type SubInfo = {
@@ -183,6 +190,13 @@ export default function DashboardScreen() {
       }
     >
       <SectionHeader>OPERATOR :: {sub.data?.email ?? "—"}</SectionHeader>
+
+      {data.delayed ? (
+        <DelayedSignalsBanner
+          delayMinutes={data.delay_minutes}
+          testID="banner-dashboard-delayed"
+        />
+      ) : null}
 
       {sub.data?.quota ? (
         <View

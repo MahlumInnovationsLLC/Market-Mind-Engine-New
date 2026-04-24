@@ -465,6 +465,59 @@ def test_trade_detail_filters_sub_15_minute_series_for_free_callers(
     assert body["delay_minutes"] == 15
 
 
+# ---------------------------------------------------------------------------
+# Dashboard landing tab — emit ``delayed``/``delay_minutes``/``tier`` so the
+# mobile + web dashboards can render the upgrade banner on the very first
+# screen, before the user navigates to a list endpoint.
+# ---------------------------------------------------------------------------
+
+
+def _stub_overview(monkeypatch) -> None:
+    async def _fake_overview() -> dict[str, Any]:
+        return {
+            "counts": {"trades": 0},
+            "latest_cycle_at": None,
+            "latest_trade_at": None,
+            "realized_pnl": 0.0,
+            "win_rate": None,
+            "open_positions": 0,
+            "verticals": [],
+            "active_verticals": [],
+        }
+
+    monkeypatch.setattr(dashboard, "get_overview", _fake_overview)
+
+
+def test_dashboard_overview_marks_free_caller_as_delayed(
+    monkeypatch, patch_subscription, override_auth
+):
+    _stub_overview(monkeypatch)
+    patch_subscription["value"] = _sub(billing.TIER_FREE)
+
+    client = TestClient(app)
+    resp = client.get("/api/dashboard/overview")
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["delayed"] is True
+    assert body["delay_minutes"] == free_tier.FREE_TIER_DELAY_MINUTES
+    assert body["tier"] == billing.TIER_FREE
+
+
+def test_dashboard_overview_does_not_mark_pro_caller_as_delayed(
+    monkeypatch, patch_subscription, override_auth
+):
+    _stub_overview(monkeypatch)
+    patch_subscription["value"] = _sub(billing.TIER_PRO)
+
+    client = TestClient(app)
+    resp = client.get("/api/dashboard/overview")
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["delayed"] is False
+    assert body["delay_minutes"] == 0
+    assert body["tier"] == billing.TIER_PRO
+
+
 def test_trade_detail_404s_when_trade_itself_is_too_fresh_for_free(
     monkeypatch, patch_subscription, override_auth, fake_quota_db
 ):
