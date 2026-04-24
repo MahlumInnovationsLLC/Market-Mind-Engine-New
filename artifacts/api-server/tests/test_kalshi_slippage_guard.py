@@ -698,19 +698,27 @@ def test_slippage_guard_rest_fallback_failure_degraded_allows(monkeypatch, _rese
 def test_slippage_guard_refreshes_stale_cache_via_rest(monkeypatch, _reset):
     """Cache has data but it's older than the configured max age:
     the guard bypasses the stale view and pulls fresh data via REST.
+
+    The fresh REST book is too thin to fill the full requested size
+    inside the slippage budget, so the guard slices the order down to
+    the largest count that still fits (here: 1 contract at the limit
+    price, 0¢ slippage).  Asserting on the slice metadata is the
+    durable shape of "REST refresh happened and changed the answer".
     """
     monkeypatch.setattr(
         lifecycle, "get_settings",
         lambda: _settings(threshold_pct=50.0, rest_fallback=True, max_age_secs=1.0),
     )
 
-    # REST returns a much thinner book that should trip the guard.
+    # REST returns a much thinner book than the (stale) cache.
     rest_body = {"orderbook": {"yes": [[40, 999]], "no": [[60, 1], [50, 100]]}}
     _FakeKalshiClient.instances.clear()
     monkeypatch.setattr(
         lifecycle.kalshi_client, "KalshiClient",
         lambda **kw: _FakeKalshiClient(response=rest_body),
     )
+
+    submitted: list[dict[str, Any]] = []
 
     async def go():
         # Seed a deep, fresh-looking cache then backdate its timestamp
@@ -724,10 +732,16 @@ def test_slippage_guard_refreshes_stale_cache_via_rest(monkeypatch, _reset):
             limit_price_cents=40, client_order_id="stale-1",
             context={"model_edge_cents": 4.0},
         )
+        async def _capture(req_, **kw):
+            submitted.append({"req": req_, **kw})
+        monkeypatch.setattr(lifecycle, "_record", _capture)
         return await lifecycle.submit_order(req)
 
-    with pytest.raises(lifecycle.OrderRejected, match="slippage guard"):
-        _run(go())
+    rec = _run(go())
+    # Order went through but at a reduced size: the REST refresh forced
+    # the guard to slice 10 → 1.
+    assert rec.state == "filled"
+    assert rec.filled_count == 1
     assert _FakeKalshiClient.instances and _FakeKalshiClient.instances[0].calls == ["X-STALE"]
     state = lifecycle.orderbook_guard_state()
     assert state["rest_fallback"] == 1

@@ -68,6 +68,12 @@ class _FakeDB:
         if q.startswith("SELECT * FROM telegram_bindings WHERE clerk_user_id"):
             row = self.bindings.get(args[0])
             return row
+        if q.startswith("SELECT * FROM telegram_bindings WHERE telegram_user_id"):
+            target = int(args[0])
+            for row in self.bindings.values():
+                if int(row.get("telegram_user_id") or 0) == target:
+                    return row
+            return None
         return None
 
     async def fetchval(self, *_a, **_kw):
