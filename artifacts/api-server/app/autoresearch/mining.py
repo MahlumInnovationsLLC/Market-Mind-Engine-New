@@ -151,7 +151,7 @@ async def _settled_trades(vertical: str, lookback_days: int) -> list[dict[str, A
                 """
                 SELECT
                   coalesce(t.trade_id, t.id::text) AS trade_id,
-                  t.created_at                     AS created_at,
+                  t.executed_at                    AS created_at,
                   lower(coalesce(t.side, ''))      AS side_lc,
                   t.model_prob                     AS model_prob,
                   t.market_id                      AS market_id,
@@ -164,7 +164,7 @@ async def _settled_trades(vertical: str, lookback_days: int) -> list[dict[str, A
                    AND t.settled_at > now() - ($2::int || ' days')::interval
                    AND t.model_prob IS NOT NULL
                    AND pm.actual_outcome IS NOT NULL
-                   AND t.created_at IS NOT NULL
+                   AND t.executed_at IS NOT NULL
                 """,
                 vertical, lookback_days,
             )

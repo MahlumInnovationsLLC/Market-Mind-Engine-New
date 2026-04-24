@@ -428,6 +428,51 @@ def test_run_mining_per_ticker_falls_back_when_no_ticker(
 
 
 # ---------------------------------------------------------------------------
+# Regression: the SQL in _settled_trades must reference real columns on
+# the ``trades`` table. Previously the query said ``t.created_at`` — a
+# column that does not exist on ``trades`` (only ``executed_at`` /
+# ``settled_at`` are defined) — so every vertical fell through the bare
+# ``except Exception`` and the panel reported NO_CANDIDATES_DISCOVERED.
+# ---------------------------------------------------------------------------
+
+
+def test_settled_trades_sql_references_real_trade_columns(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Capture the exact SQL the mining job sends to asyncpg and assert
+    it does not reference ``t.created_at`` (not a column on ``trades``)
+    and does reference ``t.executed_at`` (the actual trade-entry
+    timestamp). Catches the column-name regression that silently
+    emptied ``autoresearch_features``."""
+    captured: list[str] = []
+
+    class _CapturingConn:
+        async def fetch(self, query: str, *_args: Any) -> list[dict[str, Any]]:
+            captured.append(query)
+            return []
+
+    @asynccontextmanager
+    async def fake_acquire():
+        yield _CapturingConn()
+
+    monkeypatch.setattr(mining.db, "acquire", fake_acquire)
+    asyncio.run(mining._settled_trades("crypto", 30))
+
+    assert captured, "expected _settled_trades to issue a SQL query"
+    sql = captured[0]
+    # The historical bug: SELECT t.created_at FROM trades — ``trades``
+    # has no ``created_at`` column, only ``executed_at``.
+    assert "t.created_at" not in sql, (
+        "mining query references t.created_at which does not exist on "
+        "the trades table; use t.executed_at instead"
+    )
+    assert "t.executed_at" in sql, (
+        "mining query must read the trade-entry timestamp from "
+        "t.executed_at (aliased to created_at for the in-memory dict)"
+    )
+
+
+# ---------------------------------------------------------------------------
 # Sanity: live registry production count is unchanged by adding the shadow
 # capability (no rows registered as shadow yet — keeps trained model aligned).
 # ---------------------------------------------------------------------------
