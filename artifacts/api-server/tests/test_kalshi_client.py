@@ -382,6 +382,114 @@ def test_cluster_probe_missing_credentials(monkeypatch):
     assert "missing" in out["error"].lower()
     assert kalshi_client.cluster_probe_state()["checked"] is True
 
+
+def test_cluster_probe_records_checked_at_timestamp(monkeypatch, rsa_key):
+    """Every probe stamps the cached state with ``checked_at`` (ISO) +
+    ``checked_at_epoch`` so /api/health can show how stale the verdict is."""
+    _patch_cluster_probe(
+        monkeypatch,
+        rsa_key,
+        kalshi_env="prod",
+        responses={
+            kalshi_client.KALSHI_PROD_BASE: httpx.Response(200, json={"balance": 1}),
+        },
+    )
+    out = _run(kalshi_client.cluster_probe(force=True))
+    assert isinstance(out.get("checked_at"), str) and out["checked_at"].endswith("+00:00")
+    assert isinstance(out.get("checked_at_epoch"), float)
+    state = kalshi_client.cluster_probe_state()
+    assert state["checked_at"] == out["checked_at"]
+    assert state["checked_at_epoch"] == out["checked_at_epoch"]
+
+
+def test_cluster_probe_rate_limited_unless_forced(monkeypatch, rsa_key):
+    """The default ``cluster_probe()`` call respects a min-interval floor:
+    a second call within the window returns the cached state without
+    hitting the wire. ``force=True`` bypasses the floor."""
+    seen = _patch_cluster_probe(
+        monkeypatch,
+        rsa_key,
+        kalshi_env="prod",
+        responses={
+            kalshi_client.KALSHI_PROD_BASE: httpx.Response(200, json={"balance": 1}),
+        },
+    )
+    # First call (forced) populates the cache.
+    first = _run(kalshi_client.cluster_probe(force=True))
+    assert first["ok"] is True
+    assert seen == [kalshi_client.KALSHI_PROD_BASE]
+    epoch_first = first["checked_at_epoch"]
+
+    # Second call within the min-interval window should be a no-op:
+    # same checked_at_epoch and no new wire call.
+    second = _run(kalshi_client.cluster_probe())
+    assert second["checked_at_epoch"] == epoch_first
+    assert seen == [kalshi_client.KALSHI_PROD_BASE]
+
+    # Forcing bypasses the floor.
+    third = _run(kalshi_client.cluster_probe(force=True))
+    assert third["checked_at_epoch"] >= epoch_first
+    assert seen == [kalshi_client.KALSHI_PROD_BASE, kalshi_client.KALSHI_PROD_BASE]
+
+
+def test_cluster_probe_loop_runs_periodically(monkeypatch, rsa_key):
+    """The background loop should keep refreshing the cached state on its
+    configured cadence so mid-session credential drift is caught."""
+    seen = _patch_cluster_probe(
+        monkeypatch,
+        rsa_key,
+        kalshi_env="prod",
+        responses={
+            kalshi_client.KALSHI_PROD_BASE: httpx.Response(200, json={"balance": 1}),
+        },
+    )
+    # Tight interval so the test runs fast; min-interval also tightened so
+    # the loop's force=True calls aren't gated by it.
+    monkeypatch.setattr(kalshi_client, "KALSHI_CLUSTER_PROBE_INTERVAL_SECONDS", 0.05)
+    monkeypatch.setattr(kalshi_client, "KALSHI_CLUSTER_PROBE_MIN_INTERVAL_SECONDS", 0.01)
+
+    async def _scenario():
+        await kalshi_client.start_cluster_probe_loop()
+        try:
+            # Wait until the loop has run at least twice.
+            for _ in range(40):
+                await asyncio.sleep(0.05)
+                if len(seen) >= 2:
+                    break
+        finally:
+            await kalshi_client.stop_cluster_probe_loop()
+
+    _run(_scenario())
+    assert len(seen) >= 2, f"loop only fired {len(seen)} time(s)"
+    state = kalshi_client.cluster_probe_state()
+    assert state["ok"] is True
+    assert isinstance(state["checked_at_epoch"], float)
+
+
+def test_cluster_probe_loop_start_is_idempotent(monkeypatch, rsa_key):
+    """Calling start twice should not stack a second background task."""
+    _patch_cluster_probe(
+        monkeypatch,
+        rsa_key,
+        kalshi_env="prod",
+        responses={
+            kalshi_client.KALSHI_PROD_BASE: httpx.Response(200, json={"balance": 1}),
+        },
+    )
+    monkeypatch.setattr(kalshi_client, "KALSHI_CLUSTER_PROBE_INTERVAL_SECONDS", 60)
+
+    async def _scenario():
+        await kalshi_client.start_cluster_probe_loop()
+        first_task = kalshi_client._cluster_probe_task
+        try:
+            await kalshi_client.start_cluster_probe_loop()
+            assert kalshi_client._cluster_probe_task is first_task
+        finally:
+            await kalshi_client.stop_cluster_probe_loop()
+
+    _run(_scenario())
+    assert kalshi_client._cluster_probe_task is None
+
 # ---------------------------------------------------------------------------
 # get_market_candlesticks
 # ---------------------------------------------------------------------------

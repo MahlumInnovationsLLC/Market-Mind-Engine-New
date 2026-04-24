@@ -267,9 +267,13 @@ async def lifespan(_: FastAPI):
     # configured Kalshi cluster so a wrong-environment mistake (prod
     # creds pointed at demo, or vice versa) is loud at boot instead of
     # silently 401'ing the WS reconnect loop and balance/position polls.
-    # See `app.kalshi.client.cluster_probe` for the policy.
+    # See `app.kalshi.client.cluster_probe` for the policy.  We then
+    # start a slow background loop (default every 10 minutes) so a
+    # mid-session credential rotation or KALSHI_ENV flip is also
+    # caught — the boot result alone went stale the moment anything
+    # changed underneath us.
     try:
-        cluster_check = await kalshi_client_mod.cluster_probe()
+        cluster_check = await kalshi_client_mod.cluster_probe(force=True)
         if cluster_check.get("ok"):
             log.info(
                 "Kalshi cluster auth probe OK (env=%s, key_belongs_to=%s)",
@@ -282,6 +286,10 @@ async def lifespan(_: FastAPI):
             )
     except Exception as e:
         log.warning("Kalshi cluster auth probe raised: %s", e)
+    try:
+        await kalshi_client_mod.start_cluster_probe_loop()
+    except Exception as e:
+        log.warning("Kalshi cluster re-probe loop start failed: %s", e)
 
     # Start WS subscriber + bus->lifecycle bridge if creds are present.
     fill_task = None
@@ -637,6 +645,10 @@ async def lifespan(_: FastAPI):
                 await ready_watcher_task
             except (asyncio.CancelledError, Exception):
                 pass
+        try:
+            await kalshi_client_mod.stop_cluster_probe_loop()
+        except Exception as e:
+            log.warning("kalshi cluster re-probe loop stop error: %s", e)
         try:
             await kalshi_ws.stop_ws()
         except Exception:

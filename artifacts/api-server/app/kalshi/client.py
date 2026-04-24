@@ -9,8 +9,12 @@ where Kalshi may add fields, and small typed dataclasses for the bits we need
 """
 from __future__ import annotations
 
+import asyncio
 import logging
+import os
+import time
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -369,12 +373,49 @@ async def health_probe() -> dict[str, Any]:
 KALSHI_PROD_BASE = "https://api.elections.kalshi.com/trade-api/v2"
 KALSHI_DEMO_BASE = "https://demo-api.kalshi.co/trade-api/v2"
 
+# Cadence for the background re-probe loop.  10 minutes by default —
+# slow enough to add no meaningful load to Kalshi, fast enough to catch
+# mid-session credential drift (rotated keys, KALSHI_ENV flipped on a
+# running instance) within a short window.
+KALSHI_CLUSTER_PROBE_INTERVAL_SECONDS = max(
+    60, int(os.environ.get("AXIOM_KALSHI_CLUSTER_PROBE_INTERVAL_SECONDS") or "600")
+)
+# Hard floor on how often the probe will actually hit the wire — even
+# if a caller invokes ``cluster_probe()`` directly (e.g. from a debug
+# endpoint) we never re-probe more than once per this window.  The
+# boot path bypasses this with ``force=True``.
+KALSHI_CLUSTER_PROBE_MIN_INTERVAL_SECONDS = max(
+    10, int(os.environ.get("AXIOM_KALSHI_CLUSTER_PROBE_MIN_INTERVAL_SECONDS") or "60")
+)
+
 _cluster_probe_state: dict[str, Any] = {"checked": False}
+_cluster_probe_lock = asyncio.Lock()
+_cluster_probe_task: asyncio.Task | None = None
+_cluster_probe_stop = asyncio.Event()
 
 
 def cluster_probe_state() -> dict[str, Any]:
     """Return the latest cluster-probe result (empty until probe has run)."""
     return dict(_cluster_probe_state)
+
+
+def _iso_utc(epoch: float) -> str:
+    return datetime.fromtimestamp(epoch, tz=timezone.utc).isoformat(timespec="seconds")
+
+
+def _record_cluster_probe_result(result: dict[str, Any]) -> dict[str, Any]:
+    """Stamp ``result`` with ``checked_at`` / ``checked_at_epoch`` and
+    publish it as the new ``_cluster_probe_state``."""
+    now = time.time()
+    stamped = {
+        **result,
+        "checked": True,
+        "checked_at_epoch": now,
+        "checked_at": _iso_utc(now),
+    }
+    _cluster_probe_state.clear()
+    _cluster_probe_state.update(stamped)
+    return stamped
 
 
 async def _signed_balance_call(base_url: str) -> dict[str, Any]:
@@ -403,68 +444,97 @@ async def _signed_balance_call(base_url: str) -> dict[str, Any]:
     return {"status": r.status_code, "body": body}
 
 
-async def cluster_probe() -> dict[str, Any]:
-    """Authenticated cluster check. Runs once at boot.
+async def cluster_probe(*, force: bool = False) -> dict[str, Any]:
+    """Authenticated cluster check.
+
+    Runs once at boot and then on a slow cadence (see
+    :func:`start_cluster_probe_loop`) so mid-session credential drift
+    — a rotated key, ``KALSHI_ENV`` changed without a full restart —
+    is caught instead of silently 401'ing the WS reconnect loop.
 
     Returns a dict with at least: ``ok``, ``configured_env``,
-    ``key_belongs_to`` (``"prod"|"demo"|None``), and either ``detail``
-    or ``error``. Never raises. The result is cached in
-    :func:`cluster_probe_state` so /api/health can surface it.
+    ``key_belongs_to`` (``"prod"|"demo"|None``), ``checked``,
+    ``checked_at`` (ISO-8601 UTC), ``checked_at_epoch`` (float), and
+    either ``detail`` or ``error``. Never raises. The result is
+    cached in :func:`cluster_probe_state` so /api/health can surface
+    the latest snapshot.
+
+    ``force=False`` (the default) honors a hard floor on how often the
+    probe will actually hit the wire
+    (``AXIOM_KALSHI_CLUSTER_PROBE_MIN_INTERVAL_SECONDS``, default 60s)
+    so a chatty caller can't add meaningful load to Kalshi. The boot
+    path passes ``force=True`` so the first check runs unconditionally.
     """
+    # Short-circuit if a recent result is still warm.  This is the
+    # rate-limit promised by the task: even if many callers invoke
+    # ``cluster_probe()`` at once, we re-probe at most once per
+    # min-interval window.  The periodic loop sleeps for much longer
+    # than this, so it is unaffected.
+    last_at = _cluster_probe_state.get("checked_at_epoch")
+    if (
+        not force
+        and isinstance(last_at, (int, float))
+        and (time.time() - float(last_at)) < KALSHI_CLUSTER_PROBE_MIN_INTERVAL_SECONDS
+    ):
+        return dict(_cluster_probe_state)
+
+    async with _cluster_probe_lock:
+        # Re-check inside the lock: another waiter may have just
+        # refreshed the state while we queued.
+        last_at = _cluster_probe_state.get("checked_at_epoch")
+        if (
+            not force
+            and isinstance(last_at, (int, float))
+            and (time.time() - float(last_at)) < KALSHI_CLUSTER_PROBE_MIN_INTERVAL_SECONDS
+        ):
+            return dict(_cluster_probe_state)
+        return await _run_cluster_probe()
+
+
+async def _run_cluster_probe() -> dict[str, Any]:
+    """Actually hit the wire.  Caller is responsible for rate-limiting."""
     s = get_settings()
     if not s.kalshi_api_key_id or not s.kalshi_private_key:
-        result = {
+        return _record_cluster_probe_result({
             "ok": False,
             "configured_env": s.kalshi_env,
             "key_belongs_to": None,
             "error": "missing KALSHI_API_KEY_ID or KALSHI_API_PRIVATE_KEY",
-        }
-        _cluster_probe_state.clear()
-        _cluster_probe_state.update({"checked": True, **result})
-        return result
+        })
 
     configured_env = s.kalshi_env
     configured_url = s.kalshi_api_base_url
     try:
         primary = await _signed_balance_call(configured_url)
     except Exception as e:
-        result = {
+        return _record_cluster_probe_result({
             "ok": False,
             "configured_env": configured_env,
             "key_belongs_to": None,
             "error": f"network error probing {configured_env!r}: {e}"[:300],
-        }
-        _cluster_probe_state.clear()
-        _cluster_probe_state.update({"checked": True, **result})
-        return result
+        })
 
     status = int(primary.get("status") or 0)
     if 200 <= status < 300:
-        result = {
+        return _record_cluster_probe_result({
             "ok": True,
             "configured_env": configured_env,
             "key_belongs_to": configured_env,
             "status": status,
             "detail": f"authenticated against cluster {configured_env!r}",
-        }
-        _cluster_probe_state.clear()
-        _cluster_probe_state.update({"checked": True, **result})
-        return result
+        })
 
     # Anything other than an auth-rejection: don't mislabel as
     # wrong-cluster. The operator likely has a different problem
     # (network, 5xx, expired key id, etc).
     if status not in (401, 403, 404):
-        result = {
+        return _record_cluster_probe_result({
             "ok": False,
             "configured_env": configured_env,
             "key_belongs_to": None,
             "status": status,
             "error": f"http {status} from cluster {configured_env!r}: {str(primary.get('body'))[:200]}",
-        }
-        _cluster_probe_state.clear()
-        _cluster_probe_state.update({"checked": True, **result})
-        return result
+        })
 
     # Auth rejected on the configured cluster. Probe the OTHER cluster
     # to see if the key actually belongs there.
@@ -484,27 +554,95 @@ async def cluster_probe() -> dict[str, Any]:
             f"{configured_env!r} — the key authenticates against "
             f"{other_env!r}. Set KALSHI_ENV={other_env}."
         )
-        result = {
+        return _record_cluster_probe_result({
             "ok": False,
             "configured_env": configured_env,
             "key_belongs_to": other_env,
             "status": status,
             "error": msg,
-        }
-    else:
-        msg = (
-            f"Kalshi credentials rejected by cluster {configured_env!r} "
-            f"(http {status}); the other cluster {other_env!r} also "
-            f"returned http {sec_status}. Check KALSHI_API_KEY_ID and "
-            f"KALSHI_API_PRIVATE_KEY."
-        )
-        result = {
-            "ok": False,
-            "configured_env": configured_env,
-            "key_belongs_to": None,
-            "status": status,
-            "error": msg,
-        }
-    _cluster_probe_state.clear()
-    _cluster_probe_state.update({"checked": True, **result})
-    return result
+        })
+    msg = (
+        f"Kalshi credentials rejected by cluster {configured_env!r} "
+        f"(http {status}); the other cluster {other_env!r} also "
+        f"returned http {sec_status}. Check KALSHI_API_KEY_ID and "
+        f"KALSHI_API_PRIVATE_KEY."
+    )
+    return _record_cluster_probe_result({
+        "ok": False,
+        "configured_env": configured_env,
+        "key_belongs_to": None,
+        "status": status,
+        "error": msg,
+    })
+
+
+# ---------------------------------------------------------------------------
+# Background re-probe loop
+# ---------------------------------------------------------------------------
+#
+# Task #311: the boot probe is not enough — if Kalshi rotates a key
+# mid-session or KALSHI_ENV is flipped on a running instance, the
+# cached "ok" verdict will keep reporting healthy while live calls
+# 401.  A slow background re-probe keeps the cached state honest and
+# refreshes the /api/health card without adding meaningful Kalshi
+# load (one signed GET every 10 minutes by default).
+
+
+async def _cluster_probe_loop() -> None:
+    while not _cluster_probe_stop.is_set():
+        try:
+            await asyncio.wait_for(
+                _cluster_probe_stop.wait(),
+                timeout=KALSHI_CLUSTER_PROBE_INTERVAL_SECONDS,
+            )
+        except asyncio.TimeoutError:
+            pass
+        else:
+            return
+        try:
+            res = await cluster_probe(force=True)
+            if res.get("ok"):
+                log.debug(
+                    "kalshi cluster re-probe ok (env=%s)", res.get("configured_env")
+                )
+            else:
+                log.warning(
+                    "kalshi cluster re-probe FAILED: %s", res.get("error")
+                )
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:  # noqa: BLE001 — never let the loop die
+            log.warning("kalshi cluster re-probe raised: %s", e)
+
+
+async def start_cluster_probe_loop() -> None:
+    """Kick off the background re-probe loop.
+
+    Idempotent: a second call while the loop is already running is a
+    no-op. The boot-time one-shot probe in ``app.main`` runs separately
+    so the cached state is populated before this loop's first sleep.
+    """
+    global _cluster_probe_task
+    if _cluster_probe_task and not _cluster_probe_task.done():
+        return
+    _cluster_probe_stop.clear()
+    _cluster_probe_task = asyncio.create_task(
+        _cluster_probe_loop(), name="kalshi-cluster-probe"
+    )
+    log.info(
+        "kalshi cluster re-probe loop started (interval=%ss)",
+        KALSHI_CLUSTER_PROBE_INTERVAL_SECONDS,
+    )
+
+
+async def stop_cluster_probe_loop() -> None:
+    """Signal the re-probe loop to exit and wait for it."""
+    global _cluster_probe_task
+    _cluster_probe_stop.set()
+    if _cluster_probe_task:
+        _cluster_probe_task.cancel()
+        try:
+            await _cluster_probe_task
+        except (asyncio.CancelledError, Exception):
+            pass
+    _cluster_probe_task = None
