@@ -537,6 +537,79 @@ def test_calendar_route_populates_model_prob():
     assert item["kalshi_ticker_prefix"].startswith("KXCPI-")
 
 
+def test_release_history_route_returns_settled_with_surprise():
+    """`/api/events-econ/release-history` returns settled prints (actual
+    set) with the computed surprise (actual − consensus) and a colored
+    direction tag the dashboard uses."""
+    from fastapi.testclient import TestClient
+    from app.main import app
+    from app.events_econ import calendar as ee_cal
+
+    settled = [
+        ReleaseRow(
+            source="te", signal_id="te/CPI/2025-03-12", release_type="CPI",
+            release_at=datetime.now(timezone.utc) - timedelta(days=2),
+            consensus=2.7, previous=2.5, actual=2.9,
+            revised_previous=None, payload={},
+        ),
+        ReleaseRow(
+            source="te", signal_id="te/NFP/2025-03-07", release_type="NFP",
+            release_at=datetime.now(timezone.utc) - timedelta(days=7),
+            consensus=180.0, previous=175.0, actual=150.0,
+            revised_previous=None, payload={},
+        ),
+        ReleaseRow(
+            source="te", signal_id="te/PPI/2025-03-05", release_type="PPI",
+            release_at=datetime.now(timezone.utc) - timedelta(days=9),
+            consensus=0.3, previous=0.2, actual=0.3,
+            revised_previous=None, payload={},
+        ),
+    ]
+
+    async def _fake_recent(*, lookback_days=90, limit=20):
+        return settled
+
+    with patch.object(ee_cal, "recent_releases", side_effect=_fake_recent):
+        client = TestClient(app)
+        resp = client.get("/api/events-econ/release-history?limit=20")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert "items" in body and len(body["items"]) == 3
+    by_type = {it["release_type"]: it for it in body["items"]}
+
+    assert by_type["CPI"]["actual"] == 2.9
+    assert by_type["CPI"]["consensus"] == 2.7
+    assert abs(by_type["CPI"]["surprise"] - 0.2) < 1e-6
+    assert by_type["CPI"]["direction"] == "above"
+
+    assert by_type["NFP"]["surprise"] == -30.0
+    assert by_type["NFP"]["direction"] == "below"
+
+    assert by_type["PPI"]["surprise"] == 0.0
+    assert by_type["PPI"]["direction"] == "inline"
+
+
+def test_recent_releases_only_returns_settled_rows():
+    """`recent_releases()` must filter on actual IS NOT NULL — verified
+    by inspecting the SQL passed to db.fetch."""
+    from app.events_econ import calendar as ee_cal
+
+    captured: dict[str, object] = {}
+
+    async def _fake_fetch(query, *args):
+        captured["query"] = query
+        captured["args"] = args
+        return []
+
+    with patch.object(ee_cal.db, "fetch", side_effect=_fake_fetch):
+        rows = asyncio.run(ee_cal.recent_releases(lookback_days=30, limit=10))
+
+    assert rows == []
+    assert "actual IS NOT NULL" in captured["query"]
+    assert "ORDER BY release_at DESC" in captured["query"]
+
+
 def test_promotion_eligible_when_thresholds_met():
     async def _fake_read_mult():
         return promotion_mod.DEFAULT_MULTIPLIER

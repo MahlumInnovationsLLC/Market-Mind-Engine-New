@@ -214,6 +214,9 @@ OTHER_PUBLIC_ROUTES: tuple[str, ...] = (
     # Events / macro-economics upcoming-release calendar — surfaces only
     # public release schedule + consensus, no auth required (task #202).
     "/api/events-econ/calendar",
+    # Settled macro release surprises (task #222) — actual vs consensus
+    # for the dashboard panel; release prints are public information.
+    "/api/events-econ/release-history",
     # Entertainment vertical (task #203) — public release calendar
     # + awards leaderboard.  No auth: schedule + scores are public.
     "/api/entertainment/calendar",

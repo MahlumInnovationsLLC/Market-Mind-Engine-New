@@ -378,6 +378,62 @@ async def upcoming_releases(
     return out
 
 
+async def recent_releases(
+    *,
+    lookback_days: int = 90,
+    limit: int = 20,
+) -> list[ReleaseRow]:
+    """Return the most recently *settled* macro releases across all types.
+
+    Used by the dashboard "release surprises" panel so traders can see
+    how each print landed vs consensus.  Only rows where ``actual IS
+    NOT NULL`` are returned, ordered newest-first.
+    """
+    now = datetime.now(timezone.utc)
+    start = now - timedelta(days=max(1, lookback_days))
+    try:
+        rows = await db.fetch(
+            """
+            SELECT source, signal_id, release_type, release_at,
+                   consensus, previous, actual, revised_previous, payload
+              FROM econ_releases
+             WHERE actual IS NOT NULL
+               AND release_at >= $1
+             ORDER BY release_at DESC
+             LIMIT $2
+            """,
+            start, int(limit),
+        )
+    except Exception as e:
+        log.debug("recent releases read failed: %s", e)
+        return []
+    out: list[ReleaseRow] = []
+    for r in rows:
+        payload = r["payload"]
+        if isinstance(payload, str):
+            try:
+                import json as _json
+                payload = _json.loads(payload)
+            except Exception:
+                payload = {}
+        out.append(
+            ReleaseRow(
+                source=str(r["source"]),
+                signal_id=str(r["signal_id"]),
+                release_type=str(r["release_type"]),
+                release_at=r["release_at"],
+                consensus=(float(r["consensus"]) if r["consensus"] is not None else None),
+                previous=(float(r["previous"]) if r["previous"] is not None else None),
+                actual=(float(r["actual"]) if r["actual"] is not None else None),
+                revised_previous=(
+                    float(r["revised_previous"]) if r["revised_previous"] is not None else None
+                ),
+                payload=dict(payload or {}),
+            )
+        )
+    return out
+
+
 async def next_release_at(release_type: str) -> datetime | None:
     """Return the next scheduled release time for the given type, or None."""
     try:

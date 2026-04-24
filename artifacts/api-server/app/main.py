@@ -2159,6 +2159,53 @@ async def events_econ_calendar(within_hours: float = 168.0, limit: int = 50) -> 
     return {"items": items}
 
 
+@app.get("/api/events-econ/release-history")
+async def events_econ_release_history(
+    lookback_days: int = 90,
+    limit: int = 20,
+) -> dict[str, object]:
+    """Recent *settled* macro releases with surprise vs consensus.
+
+    Public: no auth — release schedule and prints are public information.
+    Each item carries the actual print, consensus, surprise (actual −
+    consensus), and the release timestamp so the dashboard can render
+    a "release surprises" panel.
+    """
+    from .events_econ.calendar import recent_releases
+
+    rows = await recent_releases(
+        lookback_days=max(1, int(lookback_days)),
+        limit=max(1, min(100, int(limit))),
+    )
+    items: list[dict[str, object]] = []
+    for r in rows:
+        surprise: float | None = None
+        if r.actual is not None and r.consensus is not None:
+            surprise = round(float(r.actual) - float(r.consensus), 6)
+        direction: str
+        if surprise is None:
+            direction = "unknown"
+        elif surprise > 0:
+            direction = "above"
+        elif surprise < 0:
+            direction = "below"
+        else:
+            direction = "inline"
+        items.append({
+            "source": r.source,
+            "signal_id": r.signal_id,
+            "release_type": r.release_type,
+            "release_at": r.release_at.isoformat() if r.release_at else None,
+            "consensus": r.consensus,
+            "previous": r.previous,
+            "actual": r.actual,
+            "revised_previous": r.revised_previous,
+            "surprise": surprise,
+            "direction": direction,
+        })
+    return {"items": items}
+
+
 # ---------------------------------------------------------------------------
 # Entertainment vertical (task #203) — admin promotion + public weekend
 # release calendar / awards leaderboard.

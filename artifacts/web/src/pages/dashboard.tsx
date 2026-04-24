@@ -9,6 +9,7 @@ import BankrollPanel from "@/components/dashboard/bankroll-panel";
 import EquityCharts from "@/components/dashboard/equity-charts";
 import HighlightsPanel from "@/components/dashboard/highlights-panel";
 import KpiSummaryBar from "@/components/dashboard/kpi-summary-bar";
+import MacroReleaseSurprises from "@/components/dashboard/macro-release-surprises";
 import NflExposurePanel from "@/components/dashboard/nfl-exposure-panel";
 import OperatorControls from "@/components/dashboard/operator-controls";
 import OverFilledOrdersBadge from "@/components/dashboard/over-filled-orders-badge";
@@ -139,6 +140,8 @@ export default function Dashboard() {
         <NflExposurePanel />
 
         <PerLeagueCalibration />
+
+        <MacroReleaseSurprises />
 
         <VerticalPerformance />
 
