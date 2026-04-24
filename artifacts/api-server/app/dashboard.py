@@ -1655,9 +1655,19 @@ async def get_verticals_overview(days: int = 7) -> dict[str, Any]:
     hidden = set(visibility.get("hidden") or [])
     pinned = list(visibility.get("pinned") or [])
 
+    # Halts are a public read-only signal on this endpoint (task #302) so
+    # non-admins viewing the dashboard can see which verticals are sat
+    # out. The full halt-toggle controls remain admin-only on /system.
+    try:
+        halts = await _runtime_settings.get_vertical_halts()
+    except Exception as e:
+        log.warning("verticals_overview halts read failed: %s", e)
+        halts = {}
+
     out: list[dict[str, Any]] = []
     for spec in _vertical_registry.all_specs():
         vertical = spec.name
+        halt_meta = halts.get(vertical)
         entry: dict[str, Any] = {
             "vertical": vertical,
             "description": spec.description,
@@ -1666,6 +1676,8 @@ async def get_verticals_overview(days: int = 7) -> dict[str, Any]:
             "enabled": spec.enabled,
             "hidden": vertical in hidden,
             "pinned": vertical in pinned,
+            "halted": halt_meta is not None,
+            "halt": halt_meta,
             "trades": 0,
             "wins": 0,
             "losses": 0,
@@ -1838,6 +1850,7 @@ async def get_verticals_overview(days: int = 7) -> dict[str, Any]:
             "hidden": sorted(hidden),
             "pinned": list(pinned),
         },
+        "halts": halts,
     }
 
 

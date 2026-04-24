@@ -201,6 +201,19 @@ export interface VerticalLastCycle {
   completed_at?: string | null;
 }
 
+/**
+ * Metadata describing who halted a vertical and when. Surfaced
+read-only on the operator dashboard so non-admins can see why
+the vertical is sat out without needing /system access.
+
+ */
+export interface VerticalHaltMeta {
+  by_user_id?: string | null;
+  by_email?: string | null;
+  at?: string | null;
+  reason?: string | null;
+}
+
 export interface VerticalsOverviewEntry {
   vertical: string;
   description?: string | null;
@@ -209,6 +222,8 @@ export interface VerticalsOverviewEntry {
   enabled: boolean;
   hidden: boolean;
   pinned: boolean;
+  halted: boolean;
+  halt?: VerticalHaltMeta | null;
   trades: number;
   wins: number;
   losses: number;
@@ -227,10 +242,23 @@ export interface VerticalVisibility {
   pinned: string[];
 }
 
+/**
+ * Map of halted vertical name to halt metadata. Read-only on
+the dashboard so non-admins can see which verticals are
+currently sat out.
+
+ */
+export type VerticalsOverviewHalts = { [key: string]: VerticalHaltMeta };
+
 export interface VerticalsOverview {
   days: number;
   verticals: VerticalsOverviewEntry[];
   visibility: VerticalVisibility;
+  /** Map of halted vertical name to halt metadata. Read-only on
+the dashboard so non-admins can see which verticals are
+currently sat out.
+ */
+  halts: VerticalsOverviewHalts;
 }
 
 export interface AdminSetVerticalVisibilityRequest {

@@ -6,10 +6,16 @@
  * OpenAPI spec version: 0.1.0
  */
 import type { VerticalsOverviewEntry } from "./verticalsOverviewEntry";
+import type { VerticalsOverviewHalts } from "./verticalsOverviewHalts";
 import type { VerticalVisibility } from "./verticalVisibility";
 
 export interface VerticalsOverview {
   days: number;
   verticals: VerticalsOverviewEntry[];
   visibility: VerticalVisibility;
+  /** Map of halted vertical name to halt metadata. Read-only on
+the dashboard so non-admins can see which verticals are
+currently sat out.
+ */
+  halts: VerticalsOverviewHalts;
 }

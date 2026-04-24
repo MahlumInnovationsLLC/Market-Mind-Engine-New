@@ -5,6 +5,7 @@
  * Axiom-Predict API — backend for the prediction-market trading platform.
  * OpenAPI spec version: 0.1.0
  */
+import type { VerticalHaltMeta } from "./verticalHaltMeta";
 import type { VerticalLastCycle } from "./verticalLastCycle";
 
 export interface VerticalsOverviewEntry {
@@ -15,6 +16,8 @@ export interface VerticalsOverviewEntry {
   enabled: boolean;
   hidden: boolean;
   pinned: boolean;
+  halted: boolean;
+  halt?: VerticalHaltMeta | null;
   trades: number;
   wins: number;
   losses: number;

@@ -7,6 +7,7 @@ import {
   getGetVerticalsOverviewQueryKey,
   useGetMyAccess,
   useGetVerticalsOverview,
+  type VerticalHaltMeta,
   type VerticalsOverviewEntry,
 } from "@workspace/api-client-react";
 import { apiFetch } from "@/lib/api";
@@ -86,6 +87,28 @@ function pnlClass(n: number | null | undefined): string {
   return "text-foreground";
 }
 
+function fmtRelativePast(iso: string | null | undefined): string {
+  if (!iso) return "unknown time";
+  const t = new Date(iso).getTime();
+  if (!Number.isFinite(t)) return iso;
+  const delta = Math.max(0, Date.now() - t);
+  const sec = Math.round(delta / 1000);
+  if (sec < 60) return `${sec}s ago`;
+  const min = Math.round(sec / 60);
+  if (min < 60) return `${min}m ago`;
+  const hr = Math.round(min / 60);
+  if (hr < 48) return `${hr}h ago`;
+  const day = Math.round(hr / 24);
+  return `${day}d ago`;
+}
+
+function buildHaltTooltip(meta: VerticalHaltMeta): string {
+  const who = meta.by_email || meta.by_user_id || "an admin";
+  const when = meta.at ? `${fmtRelativePast(meta.at)} (${meta.at})` : "an unknown time";
+  const reason = meta.reason ? ` — “${meta.reason}”` : "";
+  return `Halted by ${who} ${when}${reason}`;
+}
+
 function VerticalCard({
   entry,
   disabledPersonas,
@@ -96,6 +119,8 @@ function VerticalCard({
   const isPnlPos = entry.pnl > 0;
   const isPnlNeg = entry.pnl < 0;
   const slug = entry.vertical;
+  const haltMeta = entry.halt ?? null;
+  const isHalted = !!entry.halted;
 
   return (
     <Link
@@ -108,13 +133,24 @@ function VerticalCard({
         padding="sm"
         className={`flex h-full flex-col gap-2 transition-colors hover:[border-color:hsl(var(--primary)/0.5)] ${
           entry.pinned ? "[border-color:hsl(var(--primary)/0.4)]" : ""
-        } ${entry.hidden ? "opacity-60" : ""}`}
+        } ${entry.hidden ? "opacity-60" : ""} ${
+          isHalted ? "[border-color:hsl(var(--destructive)/0.6)]" : ""
+        }`}
       >
         <div className="flex items-baseline justify-between gap-2">
           <span className="truncate text-xs font-bold uppercase tracking-widest text-primary">
             {slug}
           </span>
           <div className="flex shrink-0 items-center gap-1 text-[9px] uppercase tracking-widest">
+            {isHalted ? (
+              <span
+                className="border border-destructive bg-destructive/10 px-1 font-bold text-destructive"
+                title={haltMeta ? buildHaltTooltip(haltMeta) : "Halted"}
+                data-testid={`badge-vertical-halted-${slug}`}
+              >
+                HALTED
+              </span>
+            ) : null}
             {entry.pinned ? (
               <span className="border border-primary/60 px-1 text-primary">
                 PIN
@@ -212,6 +248,10 @@ export default function VerticalCards() {
     });
 
   const overrideCount = personaSummary?.totalVerticalsWithOverrides ?? 0;
+  const haltedEntries = useMemo(
+    () => all.filter((v) => v.halted),
+    [all],
+  );
 
   return (
     <div data-testid="vertical-cards">
@@ -220,6 +260,40 @@ export default function VerticalCards() {
         title="Per-vertical performance"
         subtitle="Click a card to drill into intelligence + calibration."
       />
+      {haltedEntries.length > 0 ? (
+        <div
+          className="mb-3 flex flex-wrap items-center gap-2 border border-destructive/50 bg-destructive/5 px-3 py-2 text-[11px]"
+          data-testid="halted-verticals-banner"
+        >
+          <span className="font-bold uppercase tracking-widest text-destructive">
+            Halted
+          </span>
+          <span className="text-muted-foreground normal-case tracking-normal">
+            {haltedEntries.length === 1
+              ? "1 vertical is currently sat out — risk gates will reject its candidates next cycle."
+              : `${haltedEntries.length} verticals are currently sat out — risk gates will reject their candidates next cycle.`}
+          </span>
+          {haltedEntries.map((v) => (
+            <span
+              key={v.vertical}
+              title={v.halt ? buildHaltTooltip(v.halt) : "Halted"}
+              className="border border-destructive/60 bg-destructive/10 px-1.5 py-0.5 font-bold uppercase tracking-widest text-destructive"
+              data-testid={`halted-banner-chip-${v.vertical}`}
+            >
+              {v.vertical}
+            </span>
+          ))}
+          {isAdmin ? (
+            <Link
+              href="/system?tab=controls"
+              className="ml-auto border border-destructive/60 px-1.5 py-0.5 uppercase tracking-widest text-destructive hover:bg-destructive/10"
+              data-testid="halted-banner-manage"
+            >
+              Manage
+            </Link>
+          ) : null}
+        </div>
+      ) : null}
       {isAdmin && overrideCount > 0 ? (
         <div
           className="mb-3 flex flex-wrap items-center gap-2 border border-accent-warning/40 bg-accent-warning/5 px-3 py-2 text-[11px]"

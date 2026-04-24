@@ -114,10 +114,12 @@ def test_overview_emits_one_entry_per_registered_vertical(stub_db):
     assert out["days"] == 7
     assert {e["vertical"] for e in out["verticals"]} == set(spec_names)
     assert out["visibility"] == {"hidden": [], "pinned": []}
+    # Empty DB → no halts surfaced on the public overview.
+    assert out["halts"] == {}
     # Every entry must carry the contract keys, even when DB returned nothing.
     for e in out["verticals"]:
         for k in ("trades", "wins", "losses", "pnl", "open_positions",
-                  "hidden", "pinned", "leagues", "enabled"):
+                  "hidden", "pinned", "leagues", "enabled", "halted", "halt"):
             assert k in e
         # Empty DB → safe defaults
         assert e["trades"] == 0
@@ -126,6 +128,42 @@ def test_overview_emits_one_entry_per_registered_vertical(stub_db):
         assert e["sharpe"] is None
         assert e["brier"] is None
         assert e["last_cycle"] is None
+        assert e["halted"] is False
+        assert e["halt"] is None
+
+
+def test_overview_surfaces_halts_to_non_admin_consumers(stub_db):
+    """The dashboard endpoint must include halt metadata so non-admin
+    operators can see which verticals are currently sat out without
+    needing /system access (Task #302)."""
+    from app import verticals as _verticals
+
+    target = _verticals.all_specs()[0].name
+    halt_meta = {
+        "by_user_id": "user_abc",
+        "by_email": "ops@example.com",
+        "at": "2026-04-22T12:34:56Z",
+        "reason": "primetime drift",
+    }
+    stub_db.visibility_rows = [
+        {
+            "key": f"{runtime_settings_mod.VERTICAL_HALT_KEY_PREFIX}{target}",
+            "value": json.dumps(halt_meta),
+        },
+    ]
+
+    out = asyncio.run(dashboard.get_verticals_overview(days=7))
+    assert target in out["halts"]
+    assert out["halts"][target]["by_email"] == "ops@example.com"
+
+    halted_entry = next(e for e in out["verticals"] if e["vertical"] == target)
+    assert halted_entry["halted"] is True
+    assert halted_entry["halt"] == halt_meta
+
+    # Other entries stay non-halted.
+    other = next(e for e in out["verticals"] if e["vertical"] != target)
+    assert other["halted"] is False
+    assert other["halt"] is None
 
 
 def test_overview_populates_metrics_from_stubbed_db(stub_db, monkeypatch):

@@ -1037,6 +1037,18 @@ components:
         completed_at: { type: string, nullable: true }
       required: [id]
 
+    VerticalHaltMeta:
+      type: object
+      description: |
+        Metadata describing who halted a vertical and when. Surfaced
+        read-only on the operator dashboard so non-admins can see why
+        the vertical is sat out without needing /system access.
+      properties:
+        by_user_id: { type: string, nullable: true }
+        by_email: { type: string, nullable: true }
+        at: { type: string, nullable: true }
+        reason: { type: string, nullable: true }
+
     VerticalsOverviewEntry:
       type: object
       properties:
@@ -1049,6 +1061,11 @@ components:
         enabled: { type: boolean }
         hidden: { type: boolean }
         pinned: { type: boolean }
+        halted: { type: boolean }
+        halt:
+          oneOf:
+            - { $ref: "#/components/schemas/VerticalHaltMeta" }
+            - { type: "null" }
         trades: { type: integer }
         wins: { type: integer }
         losses: { type: integer }
@@ -1064,7 +1081,7 @@ components:
             - { $ref: "#/components/schemas/VerticalLastCycle" }
             - { type: "null" }
       required:
-        [vertical, leagues, enabled, hidden, pinned,
+        [vertical, leagues, enabled, hidden, pinned, halted,
          trades, wins, losses, pnl, open_positions]
 
     VerticalVisibility:
@@ -1086,7 +1103,15 @@ components:
           type: array
           items: { $ref: "#/components/schemas/VerticalsOverviewEntry" }
         visibility: { $ref: "#/components/schemas/VerticalVisibility" }
-      required: [days, verticals, visibility]
+        halts:
+          type: object
+          description: |
+            Map of halted vertical name to halt metadata. Read-only on
+            the dashboard so non-admins can see which verticals are
+            currently sat out.
+          additionalProperties:
+            $ref: "#/components/schemas/VerticalHaltMeta"
+      required: [days, verticals, visibility, halts]
 
     AdminSetVerticalVisibilityRequest:
       type: object

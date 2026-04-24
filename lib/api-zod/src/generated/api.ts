@@ -1217,6 +1217,22 @@ export const GetVerticalsOverviewResponse = zod.object({
       enabled: zod.boolean(),
       hidden: zod.boolean(),
       pinned: zod.boolean(),
+      halted: zod.boolean(),
+      halt: zod
+        .union([
+          zod
+            .object({
+              by_user_id: zod.string().nullish(),
+              by_email: zod.string().nullish(),
+              at: zod.string().nullish(),
+              reason: zod.string().nullish(),
+            })
+            .describe(
+              "Metadata describing who halted a vertical and when. Surfaced\nread-only on the operator dashboard so non-admins can see why\nthe vertical is sat out without needing \/system access.\n",
+            ),
+          zod.null(),
+        ])
+        .optional(),
       trades: zod.number(),
       wins: zod.number(),
       losses: zod.number(),
@@ -1246,6 +1262,23 @@ export const GetVerticalsOverviewResponse = zod.object({
     hidden: zod.array(zod.string()),
     pinned: zod.array(zod.string()),
   }),
+  halts: zod
+    .record(
+      zod.string(),
+      zod
+        .object({
+          by_user_id: zod.string().nullish(),
+          by_email: zod.string().nullish(),
+          at: zod.string().nullish(),
+          reason: zod.string().nullish(),
+        })
+        .describe(
+          "Metadata describing who halted a vertical and when. Surfaced\nread-only on the operator dashboard so non-admins can see why\nthe vertical is sat out without needing \/system access.\n",
+        ),
+    )
+    .describe(
+      "Map of halted vertical name to halt metadata. Read-only on\nthe dashboard so non-admins can see which verticals are\ncurrently sat out.\n",
+    ),
 });
 
 /**
