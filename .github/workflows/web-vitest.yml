@@ -1,0 +1,84 @@
+name: web-vitest
+
+# Runs the web artifact's vitest unit suite with V8 coverage. The raw
+# `coverage-summary.json` is uploaded as a workflow artifact; the
+# companion `frontend-coverage-comment` workflow downloads it via
+# `workflow_run`, computes a delta vs. the baseline stored on the
+# `js-coverage-data` branch, and posts / updates a sticky PR comment.
+#
+# Splitting the comment into a `workflow_run`-triggered job mirrors the
+# pattern we use for `api-pytest` and is required for safety on PRs from
+# forks (where `pull-requests: write` is not granted to the original PR
+# run, but IS granted to the privileged `workflow_run` followup).
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: web-vitest-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  vitest:
+    name: Vitest (web unit + coverage)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    env:
+      CI: "true"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node 24
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          run_install: false
+
+      - name: Cache pnpm store
+        uses: actions/cache@v4
+        with:
+          path: ~/.local/share/pnpm/store
+          key: ${{ runner.os }}-pnpm-${{ hashFiles('pnpm-lock.yaml') }}
+          restore-keys: ${{ runner.os }}-pnpm-
+
+      - name: Install JS deps
+        run: pnpm install --frozen-lockfile
+
+      - name: Run vitest with coverage
+        run: pnpm --filter @workspace/web run test:coverage
+
+      - name: Upload coverage summary for the commenter workflow
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          # The commenter workflow keys off this artifact name to know
+          # which artifact (web vs. mobile) the run produced.
+          name: web-vitest-coverage
+          path: |
+            artifacts/web/coverage/coverage-summary.json
+            artifacts/web/coverage/coverage-final.json
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Upload HTML coverage report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: web-vitest-coverage-html
+          path: artifacts/web/coverage
+          if-no-files-found: ignore
+          retention-days: 14

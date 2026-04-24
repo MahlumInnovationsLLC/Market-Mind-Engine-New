@@ -126,5 +126,5 @@ Axiom Predict is a pnpm workspace monorepo hosting a prediction-market trading p
 - **Push Notifications:** Expo (for mobile app).
 - **Webhooks:** Svix (for Clerk webhooks).
 - **HTTP Client:** httpx (for outbound REST calls).
-- **Testing:** Playwright (e2e tests); Jest + React Native Testing Library (mobile component tests, run via the `mobile-tests` workflow).
+- **Testing:** Playwright (e2e tests), Vitest (web unit tests with V8 coverage), Jest with `jest-expo` preset (mobile unit + component tests with Istanbul coverage; component tests use React Native Testing Library and run via the `mobile-tests` workflow). Frontend coverage trends are posted as a sticky PR comment by the `frontend-coverage-comment` workflow, which compares against baselines stored on the `js-coverage-data` branch.
 - **Accessibility Auditing:** axe-core.

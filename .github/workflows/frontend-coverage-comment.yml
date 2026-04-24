@@ -1,0 +1,251 @@
+name: frontend coverage comment
+
+# Triggered when either `web-vitest` or `mobile-jest` finishes. Two
+# reasons we listen for both pull_request and push events from each
+# upstream workflow:
+#   - pull_request runs: post / update the coverage delta comment on
+#     the PR using the baseline stored on `js-coverage-data`.
+#   - push (to main) runs: refresh the baseline coverage stored on the
+#     `js-coverage-data` branch so future PR deltas are compared
+#     against an up-to-date main.
+#
+# This split-job design mirrors the api-pytest-coverage-comment.yml
+# pattern: the test workflow runs at PR-author privilege (no write
+# access on forks), and this followup runs at base-repo privilege so
+# it can push to the data branch and post the comment safely.
+
+on:
+  workflow_run:
+    workflows: ["web-vitest", "mobile-jest"]
+    types: [completed]
+
+permissions:
+  contents: write
+  pull-requests: write
+  actions: read
+
+jobs:
+  comment:
+    name: Comment coverage delta
+    runs-on: ubuntu-latest
+    if: ${{ github.event.workflow_run.event == 'pull_request' || github.event.workflow_run.event == 'push' }}
+
+    env:
+      # Branch where per-artifact baselines are stored. One file per
+      # artifact: `web/coverage-summary.json`, `mobile/coverage-summary.json`.
+      COVERAGE_DATA_BRANCH: js-coverage-data
+
+    steps:
+      - name: Checkout (for the helper script)
+        uses: actions/checkout@v4
+
+      - name: Resolve artifact name from upstream workflow
+        id: ctx
+        env:
+          UPSTREAM: ${{ github.event.workflow_run.name }}
+        run: |
+          set -euo pipefail
+          case "${UPSTREAM}" in
+            web-vitest)
+              echo "artifact_name=web-vitest-coverage" >> "$GITHUB_OUTPUT"
+              echo "subdir=web" >> "$GITHUB_OUTPUT"
+              echo "label=Web (vitest)" >> "$GITHUB_OUTPUT"
+              echo "marker=<!-- web-vitest-coverage-comment -->" >> "$GITHUB_OUTPUT"
+              ;;
+            mobile-jest)
+              echo "artifact_name=mobile-jest-coverage" >> "$GITHUB_OUTPUT"
+              echo "subdir=mobile" >> "$GITHUB_OUTPUT"
+              echo "label=Mobile (jest)" >> "$GITHUB_OUTPUT"
+              echo "marker=<!-- mobile-jest-coverage-comment -->" >> "$GITHUB_OUTPUT"
+              ;;
+            *)
+              echo "::warning::Unknown upstream workflow ${UPSTREAM}; skipping."
+              echo "skip=true" >> "$GITHUB_OUTPUT"
+              ;;
+          esac
+
+      - name: Download coverage artifact from triggering run
+        if: steps.ctx.outputs.skip != 'true'
+        id: download
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ steps.ctx.outputs.artifact_name }}
+          path: coverage-artifact
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+        continue-on-error: true
+
+      - name: Stop early if no coverage was uploaded
+        if: steps.ctx.outputs.skip != 'true'
+        id: have_summary
+        run: |
+          if [ -f coverage-artifact/coverage-summary.json ]; then
+            echo "found=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::No coverage-summary.json in the upstream artifact; nothing to comment."
+            echo "found=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Fetch baseline summary from data branch
+        if: steps.have_summary.outputs.found == 'true'
+        id: baseline
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SUBDIR: ${{ steps.ctx.outputs.subdir }}
+        run: |
+          set -euo pipefail
+          REPO_URL="https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          if git ls-remote --exit-code --heads "${REPO_URL}" "${COVERAGE_DATA_BRANCH}" >/dev/null 2>&1; then
+            mkdir -p baseline
+            (
+              cd baseline
+              git init -q
+              git remote add origin "${REPO_URL}"
+              git fetch --depth=1 -q origin "${COVERAGE_DATA_BRANCH}"
+              git checkout -q FETCH_HEAD -- "${SUBDIR}/coverage-summary.json" 2>/dev/null || true
+            )
+            if [ -f "baseline/${SUBDIR}/coverage-summary.json" ]; then
+              cp "baseline/${SUBDIR}/coverage-summary.json" baseline-summary.json
+              echo "have_baseline=true" >> "$GITHUB_OUTPUT"
+            else
+              echo "have_baseline=false" >> "$GITHUB_OUTPUT"
+            fi
+          else
+            echo "have_baseline=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Render coverage comment markdown
+        if: steps.have_summary.outputs.found == 'true'
+        env:
+          LABEL: ${{ steps.ctx.outputs.label }}
+          MARKER: ${{ steps.ctx.outputs.marker }}
+          UPSTREAM_RUN_URL: ${{ github.event.workflow_run.html_url }}
+        run: |
+          set -euo pipefail
+          BASELINE_ARG=""
+          if [ -f baseline-summary.json ]; then
+            BASELINE_ARG="--baseline baseline-summary.json"
+          fi
+          node .github/scripts/post-coverage-comment.mjs \
+            --name "${LABEL}" \
+            --marker "${MARKER}" \
+            --summary coverage-artifact/coverage-summary.json \
+            ${BASELINE_ARG} \
+            --run-url "${UPSTREAM_RUN_URL}" \
+            --out comment-body.md
+          echo "----- comment body -----"
+          cat comment-body.md
+
+      - name: Find PR number from triggering workflow run
+        if: steps.have_summary.outputs.found == 'true' && github.event.workflow_run.event == 'pull_request'
+        id: pr
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const run = context.payload.workflow_run;
+            const prs = run.pull_requests || [];
+            if (prs.length > 0) {
+              core.setOutput('number', prs[0].number);
+              return;
+            }
+            // Fall back to listing PRs whose head matches the run's head SHA.
+            // This covers PRs from forks where `pull_requests` may be empty.
+            const { owner, repo } = context.repo;
+            const list = await github.rest.pulls.list({
+              owner, repo, state: 'open', per_page: 100,
+            });
+            const match = list.data.find(p => p.head.sha === run.head_sha);
+            if (match) {
+              core.setOutput('number', match.number);
+            } else {
+              core.warning(`No open PR found for head SHA ${run.head_sha}; skipping comment.`);
+            }
+
+      - name: Post / update sticky PR comment
+        if: steps.have_summary.outputs.found == 'true' && github.event.workflow_run.event == 'pull_request' && steps.pr.outputs.number != ''
+        uses: actions/github-script@v7
+        env:
+          PR_NUMBER: ${{ steps.pr.outputs.number }}
+          MARKER: ${{ steps.ctx.outputs.marker }}
+        with:
+          script: |
+            const fs = require('fs');
+            const { owner, repo } = context.repo;
+            const prNumber = Number(process.env.PR_NUMBER);
+            const marker = process.env.MARKER;
+            const body = fs.readFileSync('comment-body.md', 'utf8');
+            const { data: comments } = await github.rest.issues.listComments({
+              owner, repo, issue_number: prNumber, per_page: 100,
+            });
+            const existing = comments.find(
+              c => c.body && c.body.startsWith(marker));
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner, repo, comment_id: existing.id, body });
+            } else {
+              await github.rest.issues.createComment({
+                owner, repo, issue_number: prNumber, body });
+            }
+
+      # ----------------------------------------------------------------------
+      # On a successful push to main, refresh the baseline summary stored
+      # on the `js-coverage-data` branch so the next PR's delta is honest.
+      # We only refresh when the upstream test run actually succeeded —
+      # a failed run would push corrupt or zero coverage and poison the
+      # baseline for everyone.
+      # ----------------------------------------------------------------------
+      - name: Refresh baseline on data branch (push to main only)
+        if: |
+          steps.have_summary.outputs.found == 'true' &&
+          github.event.workflow_run.event == 'push' &&
+          github.event.workflow_run.head_branch == 'main' &&
+          github.event.workflow_run.conclusion == 'success'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SUBDIR: ${{ steps.ctx.outputs.subdir }}
+        run: |
+          set -euo pipefail
+          WORK="$(mktemp -d)"
+          REPO_URL="https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          if git ls-remote --exit-code --heads "${REPO_URL}" "${COVERAGE_DATA_BRANCH}" >/dev/null 2>&1; then
+            git clone --depth=1 --branch="${COVERAGE_DATA_BRANCH}" "${REPO_URL}" "${WORK}"
+          else
+            echo "Initializing ${COVERAGE_DATA_BRANCH} branch."
+            git clone --depth=1 "${REPO_URL}" "${WORK}"
+            (
+              cd "${WORK}"
+              git checkout --orphan "${COVERAGE_DATA_BRANCH}"
+              git rm -rf . >/dev/null 2>&1 || true
+              cat > README.md <<'MD'
+          # JS coverage baselines
+
+          This branch stores per-artifact `coverage-summary.json` files keyed by
+          artifact subdirectory (`web/`, `mobile/`). The `frontend-coverage-comment`
+          workflow refreshes them on every successful push to `main`, and reads
+          them when computing the delta for a PR comment. Do not edit by hand.
+          MD
+              git add README.md
+              git -c user.name='github-actions[bot]' \
+                  -c user.email='github-actions[bot]@users.noreply.github.com' \
+                  commit -m "Initialize ${COVERAGE_DATA_BRANCH}"
+              git push -u origin "${COVERAGE_DATA_BRANCH}"
+            )
+          fi
+
+          mkdir -p "${WORK}/${SUBDIR}"
+          cp coverage-artifact/coverage-summary.json "${WORK}/${SUBDIR}/coverage-summary.json"
+          (
+            cd "${WORK}"
+            git add "${SUBDIR}/coverage-summary.json"
+            if git diff --cached --quiet; then
+              echo "Baseline unchanged; nothing to commit."
+              exit 0
+            fi
+            git -c user.name='github-actions[bot]' \
+                -c user.email='github-actions[bot]@users.noreply.github.com' \
+                commit -m "Refresh ${SUBDIR} coverage baseline (run ${{ github.event.workflow_run.id }})"
+            # Retry once if a concurrent push raced us.
+            git push origin "${COVERAGE_DATA_BRANCH}" || \
+              (git pull --rebase origin "${COVERAGE_DATA_BRANCH}" && \
+               git push origin "${COVERAGE_DATA_BRANCH}")
+          )
