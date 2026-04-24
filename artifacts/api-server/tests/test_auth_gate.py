@@ -63,6 +63,7 @@ PROTECTED_ROUTES: tuple[str, ...] = (
     # Task #283 — operator-driven retry of stuck mobile IAP webhooks.
     "/api/admin/rc-webhook/failed-events",
     "/api/admin/audit-log",
+    "/api/admin/audit-log.csv",
     "/api/admin/audit-log/actions",
     "/api/admin/landing-leads",
     "/api/admin/landing-leads.csv",

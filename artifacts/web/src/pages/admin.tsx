@@ -1001,13 +1001,17 @@ export function AuditLogPanel() {
     offset: number;
   };
   const offset = page * pageSize;
-  const buildUrl = () => {
+  const buildFilterParams = () => {
     const qs = new URLSearchParams();
-    qs.set("limit", String(pageSize));
-    qs.set("offset", String(offset));
     if (targetApplied) qs.set("target", targetApplied);
     if (actorApplied) qs.set("actor", actorApplied);
     if (actionApplied) qs.set("action", actionApplied);
+    return qs;
+  };
+  const buildUrl = () => {
+    const qs = buildFilterParams();
+    qs.set("limit", String(pageSize));
+    qs.set("offset", String(offset));
     return `/api/admin/audit-log?${qs.toString()}`;
   };
   const query = useQuery<AuditPage>({
@@ -1047,6 +1051,45 @@ export function AuditLogPanel() {
     total != null ? offset + items.length < total : items.length === pageSize;
   const isLoading = query.isLoading;
   const isError = query.isError;
+
+  const [downloading, setDownloading] = useState(false);
+  const [downloadError, setDownloadError] = useState<string | null>(null);
+  const onDownloadCsv = async () => {
+    setDownloading(true);
+    setDownloadError(null);
+    try {
+      const qs = buildFilterParams();
+      const url = `/api/admin/audit-log.csv${qs.size > 0 ? `?${qs.toString()}` : ""}`;
+      const headers = new Headers({
+        accept: "text/csv",
+        [REQUEST_ID_HEADER]: newRequestId(),
+      });
+      const token = await tokenFn();
+      if (token) headers.set("authorization", `Bearer ${token}`);
+      const res = await fetch(url, { headers });
+      if (!res.ok) {
+        const id = res.headers.get(REQUEST_ID_HEADER);
+        const base = `HTTP ${res.status} ${res.statusText}`;
+        throw new Error(id ? `${base} (Reference: ${id})` : base);
+      }
+      const blob = await res.blob();
+      const dispo = res.headers.get("content-disposition") ?? "";
+      const match = /filename="?([^";]+)"?/i.exec(dispo);
+      const filename = match?.[1] ?? "axiom-audit-log.csv";
+      const objectUrl = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = objectUrl;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(objectUrl);
+    } catch (e) {
+      setDownloadError((e as Error)?.message ?? "Download failed.");
+    } finally {
+      setDownloading(false);
+    }
+  };
 
   const goPrev = () => setPage((p) => Math.max(0, p - 1));
   const goNext = () => {
@@ -1132,6 +1175,15 @@ export function AuditLogPanel() {
         >
           Clear
         </button>
+        <button
+          type="button"
+          onClick={onDownloadCsv}
+          disabled={downloading || isLoading}
+          data-testid="button-audit-download-csv"
+          className="border border-primary px-2 py-1 text-[11px] uppercase tracking-widest text-primary hover:bg-primary/10 disabled:cursor-not-allowed disabled:opacity-40"
+        >
+          {downloading ? "Exporting…" : "Download CSV"}
+        </button>
         {hasActiveFilters ? (
           <span
             className="text-primary text-[10px] tracking-widest"
@@ -1141,6 +1193,14 @@ export function AuditLogPanel() {
           </span>
         ) : null}
       </div>
+      {downloadError ? (
+        <div
+          className="text-destructive text-xs"
+          data-testid="text-audit-download-error"
+        >
+          {downloadError}
+        </div>
+      ) : null}
       <div className="flex flex-wrap items-center justify-between gap-2 text-[11px] uppercase tracking-widest text-muted-foreground">
         <div data-testid="text-audit-range">
           {isLoading && !query.data

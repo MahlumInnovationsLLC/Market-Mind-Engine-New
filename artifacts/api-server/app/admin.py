@@ -756,6 +756,74 @@ def _audit_log_filter_sql(
     return where_sql, params
 
 
+async def export_audit_log_csv(
+    *,
+    target: str | None = None,
+    actor: str | None = None,
+    action: str | None = None,
+    limit: int = 10000,
+) -> str:
+    """Render the (filtered) admin audit log as CSV text.
+
+    Reuses :func:`list_audit_log` so the export honours the exact same
+    filter semantics as the JSON listing the panel is showing.  The row
+    cap is bumped well above the UI's per-page limit (default 10k, hard
+    cap 50k) so an admin can dump a meaningful slice into a compliance
+    ticket without tipping the row reader into a runaway scan.
+    """
+    import csv
+    import io
+    import json as _json
+
+    cap = max(1, min(int(limit), 50000))
+    rows = await list_audit_log(
+        cap, 0, target=target, actor=actor, action=action
+    )
+
+    buf = io.StringIO()
+    writer = csv.writer(buf)
+    writer.writerow(
+        [
+            "created_at",
+            "actor",
+            "target",
+            "action",
+            "before_value",
+            "after_value",
+        ]
+    )
+
+    def _json_cell(value: Any) -> str:
+        # `before_value` / `after_value` may already be parsed dicts
+        # (list_audit_log decodes jsonb strings); fall back to whatever
+        # repr makes the most sense and round-trip everything else
+        # through json.dumps so spreadsheet importers see consistent
+        # quoting.
+        if value is None:
+            return ""
+        if isinstance(value, (dict, list)):
+            try:
+                return _json.dumps(value, sort_keys=True, default=str)
+            except Exception:
+                return str(value)
+        return str(value)
+
+    for r in rows:
+        actor_label = r.get("actor_email") or r.get("actor_user_id") or ""
+        target_label = r.get("target_email") or r.get("target_user_id") or ""
+        writer.writerow(
+            [
+                r.get("created_at") or "",
+                actor_label,
+                target_label,
+                r.get("action") or "",
+                _json_cell(r.get("before_value")),
+                _json_cell(r.get("after_value")),
+            ]
+        )
+    return buf.getvalue()
+
+
 async def list_audit_log(
     limit: int = 100,
     offset: int = 0,

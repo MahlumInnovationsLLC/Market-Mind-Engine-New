@@ -1818,6 +1818,37 @@ async def admin_get_audit_log_actions(
     return {"items": await admin_module.list_audit_log_actions()}
 
 
+@app.get("/api/admin/audit-log.csv")
+async def admin_export_audit_log_csv(
+    target: str | None = None,
+    actor_filter: str | None = Query(default=None, alias="actor"),
+    action: str | None = None,
+    limit: int = 10000,
+    actor: AuthedUser = Depends(require_admin),
+) -> Response:
+    """CSV export of the audit log honouring the same filters as the
+    JSON listing.  Ships a `text/csv` attachment so the browser triggers
+    a download and the operator can attach the slice to a compliance
+    ticket without needing direct DB access (task #292).
+    """
+    csv_text = await admin_module.export_audit_log_csv(
+        target=target,
+        actor=actor_filter,
+        action=action,
+        limit=int(limit),
+    )
+    stamp = datetime.now(tz=timezone.utc).strftime("%Y%m%d-%H%M%S")
+    filename = f"axiom-audit-log-{stamp}.csv"
+    return Response(
+        content=csv_text,
+        media_type="text/csv; charset=utf-8",
+        headers={
+            "content-disposition": f'attachment; filename="{filename}"',
+            "cache-control": "no-store",
+        },
+    )
+
+
 # ---------------------------------------------------------------------------
 # Early-access (landing) leads — admin browse + CSV export (task #125)
 # ---------------------------------------------------------------------------
