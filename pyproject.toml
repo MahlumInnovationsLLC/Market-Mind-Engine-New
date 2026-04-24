@@ -30,4 +30,15 @@ dependencies = [
     "eth-account>=0.10.0",
     "eccodes>=2.46",
     "eccodeslib>=2.46",
+    "lightgbm>=4.6.0",
+    "xgboost>=3.2.0",
+    "torch>=2.11.0",
 ]
+
+[[tool.uv.index]]
+explicit = true
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+
+[tool.uv.sources]
+torch = [{ index = "pytorch-cpu", marker = "platform_system == 'Linux'" }]
