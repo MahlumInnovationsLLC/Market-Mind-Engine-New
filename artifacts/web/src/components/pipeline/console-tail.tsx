@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import type { WSStatus } from "@/hooks/use-websocket";
+import { extractVenuesFromEvent } from "@/lib/venues";
 
 type Event = Record<string, unknown>;
 
@@ -49,11 +50,13 @@ function summarize(ev: Event): string {
   const stage = pickStr(ev, "stage");
   const reason = pickStr(ev, "reason") ?? pickStr(ev, "message");
   const prob = pickNum(ev, "model_prob") ?? pickNum(ev, "probability");
+  const venues = extractVenuesFromEvent(ev);
   const parts: string[] = [type.toUpperCase()];
   if (stage) parts.push(`stage=${stage}`);
   if (cycle) parts.push(`cycle=${cycle.slice(0, 8)}`);
   if (market) parts.push(`mkt=${market}`);
   if (prob !== null) parts.push(`p=${(prob * 100).toFixed(1)}%`);
+  if (venues.length > 0) parts.push(`venue=${venues.join("+")}`);
   if (reason) parts.push(`· ${reason}`);
   return parts.join(" ");
 }

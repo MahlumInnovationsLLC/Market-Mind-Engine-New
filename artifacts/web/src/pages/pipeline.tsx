@@ -14,6 +14,7 @@ import ConsoleTail from "@/components/pipeline/console-tail";
 import TradeTrainTicker from "@/components/pipeline/trade-train-ticker";
 import BackfillPanel from "@/components/pipeline/backfill-panel";
 import RecentRetrains from "@/components/telemetry/recent-retrains";
+import { extractVenuesFromEvent, venueDisplayLabel } from "@/lib/venues";
 
 /**
  * Pipeline-page-local rolling buffer of pipeline-WS frames. The
@@ -257,6 +258,56 @@ function fmtPct(v: number | null | undefined): string {
   return `${(v * 100).toFixed(1)}%`;
 }
 
+// Pull the routed venues out of the candidate's terminal event. The
+// orchestrator emits both a single `placement` (legacy single-venue) and
+// `placements` / `venues` arrays once fan-out is in play (see
+// `cycle.py` candidate_complete payload). The shared helper handles
+// all three shapes.
+function extractCandidateVenues(events: Record<string, unknown>[]): string[] {
+  const last = events[events.length - 1];
+  if (!last || pickStr(last, "type") !== "candidate_complete") return [];
+  if (pickStr(last, "outcome") !== "placed") return [];
+  return extractVenuesFromEvent(last);
+}
+
+function venueClass(raw: string): string {
+  if (raw === "kalshi") return "border-primary/60 bg-primary/10 text-primary";
+  if (raw === "polymarket") return "border-warning/60 bg-warning/10 text-warning";
+  return "border-border bg-card/40 text-muted-foreground";
+}
+
+function VenueChips({ venues }: { venues: string[] }) {
+  if (venues.length === 0) return null;
+  // Single-venue placements get a single chip; fan-out shows the
+  // primary venue + a "+N venue" overflow chip so the row stays tidy
+  // when the orchestrator routes to both Kalshi and Polymarket.
+  const primary = venues[0]!;
+  const extra = venues.length - 1;
+  return (
+    <span
+      className="inline-flex items-center gap-1"
+      data-testid="candidate-venues"
+      data-venue-count={venues.length}
+    >
+      <span
+        className={`inline-flex items-center border px-1.5 py-px text-[9px] uppercase tracking-wider ${venueClass(primary)}`}
+        data-testid="candidate-venue-primary"
+      >
+        {venueDisplayLabel(primary)}
+      </span>
+      {extra > 0 && (
+        <span
+          className="inline-flex items-center border border-border bg-card/40 px-1.5 py-px text-[9px] uppercase tracking-wider text-muted-foreground"
+          data-testid="candidate-venue-overflow"
+          title={`Also routed to: ${venues.slice(1).map(venueDisplayLabel).join(", ")}`}
+        >
+          +{extra} venue{extra === 1 ? "" : "s"}
+        </span>
+      )}
+    </span>
+  );
+}
+
 function CandidateBlock({
   candidateId,
   events,
@@ -270,6 +321,7 @@ function CandidateBlock({
       ? pickStr(last, "outcome") ?? pickStr(last, "status") ?? "complete"
       : "in-progress";
   const market = pickStr(events[0] ?? {}, "market_id") ?? candidateId;
+  const venues = extractCandidateVenues(events);
   // The candidate_start event carries both probabilities so the dashboard
   // can show the live model number alongside the cached swarm consensus.
   const startEv =
@@ -308,16 +360,19 @@ function CandidateBlock({
     baselineProb >= 0.5 !== blendedForFlip >= 0.5;
   return (
     <div className="border border-border/60 bg-background/40 p-2 text-[10px]">
-      <div className="flex items-center justify-between mb-1">
+      <div className="flex items-center justify-between mb-1 gap-2">
         <MarketLabel
           ticker={market}
           className="font-bold text-foreground truncate max-w-[260px]"
         />
-        <span
-          className={`uppercase tracking-wider ${final === "placed" ? "text-success" : final === "in-progress" ? "text-primary" : "text-muted-foreground"}`}
-        >
-          {final}
-        </span>
+        <div className="flex items-center gap-2">
+          <VenueChips venues={venues} />
+          <span
+            className={`uppercase tracking-wider ${final === "placed" ? "text-success" : final === "in-progress" ? "text-primary" : "text-muted-foreground"}`}
+          >
+            {final}
+          </span>
+        </div>
       </div>
       <div
         className="flex items-center gap-3 mb-1 text-[10px] uppercase tracking-wider"

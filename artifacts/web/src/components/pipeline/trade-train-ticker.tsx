@@ -3,6 +3,7 @@ import { Link } from "wouter";
 import { GlassCard } from "@/components/ui/glass-card";
 import { SectionHeader } from "@/components/ui/section-header";
 import { usePipelineSubscription } from "@/components/realtime/websocket-provider";
+import { extractVenuesFromEvent, venueDisplayLabel } from "@/lib/venues";
 
 /**
  * Per-trade pipeline ticker.
@@ -107,6 +108,10 @@ interface TradeTrain {
   currentPrice?: number;
   liveModelName?: string;
   placement?: Record<string, unknown>;
+  // Lower-cased venue tags ("kalshi" / "polymarket") collected from the
+  // candidate_complete payload — single-venue placements yield one
+  // entry, fan-out yields one per venue.
+  venues?: string[];
   stages: Record<StageKey, StageState>;
 }
 
@@ -260,6 +265,10 @@ function applyEvent(
       ts: Date.now(),
     };
     train.placement = (ev.placement as Record<string, unknown> | undefined) ?? undefined;
+    // Collect venue tags (lower-cased, deduped, primary-first) so the
+    // train row can render `KALSHI · +1 venue` for fan-out placements.
+    const venues = extractVenuesFromEvent(ev);
+    if (venues.length > 0) train.venues = venues;
   } else if (outcome === "rejected") {
     train.rejectingGate = getStr(ev.rejecting_gate);
     train.reason = getStr(ev.reason);
@@ -414,6 +423,44 @@ export default function TradeTrainTicker() {
   );
 }
 
+function venueBadgeClass(raw: string): string {
+  if (raw === "kalshi") return "border-primary/60 bg-primary/10 text-primary";
+  if (raw === "polymarket") return "border-warning/60 bg-warning/10 text-warning";
+  return "border-border bg-card/40 text-muted-foreground";
+}
+
+// Compact venue chip for the train row. Single-venue placements show
+// just the routed exchange; fan-out adds a "+N venue" overflow chip so
+// operators can see at a glance that the trade landed on both books.
+function VenueBadge({ venues }: { venues: string[] }) {
+  if (venues.length === 0) return null;
+  const primary = venues[0]!;
+  const extra = venues.length - 1;
+  return (
+    <span
+      className="inline-flex items-center gap-1"
+      data-testid="train-venues"
+      data-venue-count={venues.length}
+    >
+      <span
+        className={`rounded border px-1.5 py-0.5 text-[10px] uppercase tracking-wider ${venueBadgeClass(primary)}`}
+        data-testid="train-venue-primary"
+      >
+        {venueDisplayLabel(primary)}
+      </span>
+      {extra > 0 ? (
+        <span
+          className="rounded border border-border bg-card/40 px-1.5 py-0.5 text-[10px] uppercase tracking-wider text-muted-foreground"
+          data-testid="train-venue-overflow"
+          title={`Also routed to: ${venues.slice(1).map(venueDisplayLabel).join(", ")}`}
+        >
+          +{extra} venue{extra === 1 ? "" : "s"}
+        </span>
+      ) : null}
+    </span>
+  );
+}
+
 interface TrainRowProps {
   train: TradeTrain;
   onDrill: (stage: StageKey) => void;
@@ -464,6 +511,9 @@ function TrainRow({ train, onDrill }: TrainRowProps) {
           </span>
         ) : null}
         <span className="ml-auto flex items-center gap-2">
+          {train.outcome === "placed" && train.venues && train.venues.length > 0 ? (
+            <VenueBadge venues={train.venues} />
+          ) : null}
           <span
             className={`rounded border px-1.5 py-0.5 text-[10px] uppercase tracking-wider ${outcomeBadge.className}`}
             data-testid="text-train-outcome"
