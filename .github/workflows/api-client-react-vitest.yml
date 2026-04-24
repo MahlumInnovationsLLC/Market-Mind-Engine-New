@@ -1,0 +1,59 @@
+name: api-client-react-vitest
+
+# Runs the @workspace/api-client-react vitest suite (covers the silent
+# token refresh in custom-fetch.ts and anything else that lands under
+# lib/api-client-react). A failure here blocks the merge.
+#
+# This intentionally stays narrow: the lib has no coverage reporter
+# wired up, so we just run `vitest run` and let GitHub surface the
+# pass/fail status.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: api-client-react-vitest-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  vitest:
+    name: Vitest (lib/api-client-react)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    env:
+      CI: "true"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node 24
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          run_install: false
+
+      - name: Cache pnpm store
+        uses: actions/cache@v4
+        with:
+          path: ~/.local/share/pnpm/store
+          key: ${{ runner.os }}-pnpm-${{ hashFiles('pnpm-lock.yaml') }}
+          restore-keys: ${{ runner.os }}-pnpm-
+
+      - name: Install JS deps
+        run: pnpm install --frozen-lockfile
+
+      - name: Run vitest
+        run: pnpm --filter @workspace/api-client-react run test

@@ -24,6 +24,10 @@ args = "api-auth-tests"
 task = "workflow.run"
 args = "mobile-tests"
 
+[[workflows.workflow.tasks]]
+task = "workflow.run"
+args = "api-client-react-tests"
+
 [[workflows.workflow]]
 name = "api-auth-tests"
 author = "agent"
@@ -42,6 +46,17 @@ author = "agent"
 [[workflows.workflow.tasks]]
 task = "shell.exec"
 args = "pnpm --filter @workspace/mobile run test"
+
+[workflows.workflow.metadata]
+isValidation = true
+
+[[workflows.workflow]]
+name = "api-client-react-tests"
+author = "agent"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "pnpm --filter @workspace/api-client-react run test"
 
 [workflows.workflow.metadata]
 isValidation = true
