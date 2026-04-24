@@ -728,9 +728,8 @@ async def _persist_precip_emos_coefficients(
         # ``system_settings.value`` is TEXT (see runtime_settings.py),
         # so we serialize the refit payload to JSON ourselves and let
         # the load path parse it back. Matches the convention every
-        # other consumer of this table uses.
-        from .. import runtime_settings as _rs
-        await _rs._ensure_system_settings_schema()
+        # other consumer of this table uses. The table itself is owned
+        # by Alembic (revision 0018_lazy_ddl_relocation).
         await db.execute(
             """
             INSERT INTO system_settings (key, value, updated_at)

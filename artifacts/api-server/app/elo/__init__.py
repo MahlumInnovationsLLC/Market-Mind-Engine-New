@@ -65,70 +65,6 @@ HFA_BY_LEAGUE: dict[str, float] = {
 RECENT_FORM_N: int = 10
 
 
-_schema_lock = asyncio.Lock()
-_schema_ready = False
-
-
-# ---------------------------------------------------------------------------
-# Schema bootstrap (lazy, idempotent — same pattern as billing/admin)
-# ---------------------------------------------------------------------------
-
-
-_DDL_TEAM_ELO = """
-CREATE TABLE IF NOT EXISTS team_elo (
-    league         text        NOT NULL,
-    team           text        NOT NULL,
-    rating         real        NOT NULL DEFAULT 1500.0,
-    games_played   int         NOT NULL DEFAULT 0,
-    last_updated   timestamptz NOT NULL DEFAULT now(),
-    PRIMARY KEY (league, team)
-)
-"""
-
-_DDL_TEAM_ELO_HISTORY = """
-CREATE TABLE IF NOT EXISTS team_elo_history (
-    id                       bigserial   PRIMARY KEY,
-    league                   text        NOT NULL,
-    team                     text        NOT NULL,
-    opponent                 text        NOT NULL,
-    game_id                  text        NOT NULL,
-    played_at                timestamptz NOT NULL,
-    rating_before            real        NOT NULL,
-    rating_after             real        NOT NULL,
-    opponent_rating_before   real        NOT NULL,
-    k_factor                 real        NOT NULL,
-    score                    real        NOT NULL,
-    expected                 real        NOT NULL,
-    is_home                  boolean     NOT NULL,
-    created_at               timestamptz NOT NULL DEFAULT now(),
-    UNIQUE (league, team, game_id)
-)
-"""
-
-_DDL_HISTORY_INDEX = """
-CREATE INDEX IF NOT EXISTS team_elo_history_team_played_idx
-    ON team_elo_history (league, team, played_at DESC)
-"""
-
-
-async def ensure_schema() -> None:
-    """Create the elo tables on first use.  Cheap on subsequent calls."""
-    global _schema_ready
-    if _schema_ready:
-        return
-    async with _schema_lock:
-        if _schema_ready:
-            return
-        try:
-            await db.execute(_DDL_TEAM_ELO)
-            await db.execute(_DDL_TEAM_ELO_HISTORY)
-            await db.execute(_DDL_HISTORY_INDEX)
-            _schema_ready = True
-        except Exception as e:
-            log.warning("team_elo schema bootstrap failed: %s", e)
-            raise
-
-
 # ---------------------------------------------------------------------------
 # Math helpers
 # ---------------------------------------------------------------------------
@@ -176,7 +112,6 @@ class TeamRating:
 async def get_rating(league: str, team: str) -> TeamRating:
     """Return the current rating for (league, team), defaulting to
     `INITIAL_RATING` with 0 games played when the team is unknown."""
-    await ensure_schema()
     try:
         row = await db.fetchrow(
             "SELECT rating::float AS rating, games_played::int AS games_played "
@@ -201,7 +136,6 @@ async def recent_form_delta(league: str, team: str, n: int = RECENT_FORM_N) -> f
 
     Returns 0.0 when no history exists.
     """
-    await ensure_schema()
     try:
         rows = await db.fetch(
             """
@@ -310,7 +244,6 @@ async def record_game(
     """
     if not (league and home_team and away_team and game_id):
         raise ValueError("league, home_team, away_team, game_id are required")
-    await ensure_schema()
     played_at = played_at or datetime.now(timezone.utc)
     k = float(k_override) if k_override is not None else k_factor(league)
 
@@ -476,7 +409,6 @@ __all__ = [
     "TeamRating",
     "GameUpdate",
     "SeedResult",
-    "ensure_schema",
     "k_factor",
     "hfa",
     "expected_score",

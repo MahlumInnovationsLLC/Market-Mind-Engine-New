@@ -25,7 +25,6 @@ import pytest
 from app import db as _db
 from app.kalshi import lifecycle as _lc
 from app.notifications import alerts as _alerts
-from app.notifications import push as _push
 
 
 # ---------------------------------------------------------------------------
@@ -77,13 +76,6 @@ class _Harness:
 @pytest.fixture
 def harness(monkeypatch: pytest.MonkeyPatch) -> _Harness:
     h = _Harness()
-
-    # push.ensure_schema is still real DDL bootstrap; stub it so the
-    # in-memory test harness doesn't try to talk to a real database.
-    async def _noop_ensure() -> None:
-        return None
-
-    monkeypatch.setattr(_push, "ensure_schema", _noop_ensure)
 
     monkeypatch.setattr(_db, "fetchrow", h.fetchrow)
     monkeypatch.setattr(_db, "fetch", h.fetch)

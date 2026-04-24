@@ -142,13 +142,6 @@ def store(monkeypatch: pytest.MonkeyPatch) -> _FakeStore:
     monkeypatch.setattr(_db, "fetchrow", s.fetchrow)
     monkeypatch.setattr(_db, "execute", s.execute)
     monkeypatch.setattr(_db, "get_pool", s.get_pool)
-
-    async def _noop_schema() -> None:
-        return None
-
-    monkeypatch.setattr(_elo, "ensure_schema", _noop_schema)
-    monkeypatch.setattr(elo_scheduler, "ensure_schema", _noop_schema)
-    _elo._schema_ready = False
     return s
 
 

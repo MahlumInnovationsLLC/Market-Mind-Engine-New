@@ -294,8 +294,6 @@ def _wire_env(monkeypatch: pytest.MonkeyPatch, _keypair, store: FakeStore):
 
     # Force the schema-bootstrap guards to "already ran" so we don't have
     # to script the CREATE TABLE round-trip for every test.
-    runtime_settings_mod._ready = True
-    runtime_settings_mod._system_settings_ready = True
 
     # Ensure the predictor override is clean for each test.
     predictor_module.set_active_override(None)

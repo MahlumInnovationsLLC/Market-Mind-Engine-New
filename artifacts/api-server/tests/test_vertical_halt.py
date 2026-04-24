@@ -109,7 +109,6 @@ class _MemoryDb:
 def mem_db(monkeypatch):
     db = _MemoryDb()
     monkeypatch.setattr(runtime_settings_mod, "db", db, raising=True)
-    runtime_settings_mod._system_settings_ready = True
     return db
 
 

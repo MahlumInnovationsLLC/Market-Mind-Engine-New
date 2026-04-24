@@ -17,7 +17,6 @@ Feeds whose API key is missing register as `enabled=false` with a
 """
 from __future__ import annotations
 
-import asyncio
 import logging
 import os
 from datetime import datetime, timezone
@@ -37,98 +36,6 @@ from .scheduler import RateLimited
 
 
 log = logging.getLogger("axiom.feeds.sportradar")
-
-
-# ---------------------------------------------------------------------------
-# Schema bootstrap (idempotent — called once at app startup)
-# ---------------------------------------------------------------------------
-
-
-_SCHEMA_LOCK = asyncio.Lock()
-_SCHEMA_READY = False
-
-_SCHEMA_SQL = """
-CREATE TABLE IF NOT EXISTS sportradar_schedules (
-    league       text        NOT NULL,
-    game_id      text        NOT NULL,
-    home_team    text,
-    away_team    text,
-    scheduled    timestamptz,
-    status       text,
-    venue        text,
-    payload      jsonb,
-    updated_at   timestamptz NOT NULL DEFAULT now(),
-    PRIMARY KEY (league, game_id)
-);
-CREATE INDEX IF NOT EXISTS sportradar_schedules_when_idx
-    ON sportradar_schedules (league, scheduled);
-
-CREATE TABLE IF NOT EXISTS sportradar_rosters (
-    league       text        NOT NULL,
-    team_id      text        NOT NULL,
-    team_name    text,
-    player_id    text        NOT NULL,
-    player_name  text,
-    position     text,
-    jersey       text,
-    status       text,
-    height       text,
-    weight       text,
-    updated_at   timestamptz NOT NULL DEFAULT now(),
-    PRIMARY KEY (league, team_id, player_id)
-);
-CREATE INDEX IF NOT EXISTS sportradar_rosters_team_idx
-    ON sportradar_rosters (league, team_id);
-
-CREATE TABLE IF NOT EXISTS sportradar_injuries (
-    league       text        NOT NULL,
-    player_id    text        NOT NULL,
-    player_name  text,
-    team_id      text,
-    team_name    text,
-    position     text,
-    status       text,
-    description  text,
-    updated_at   timestamptz,
-    fetched_at   timestamptz NOT NULL DEFAULT now(),
-    PRIMARY KEY (league, player_id)
-);
-CREATE INDEX IF NOT EXISTS sportradar_injuries_team_idx
-    ON sportradar_injuries (league, team_id);
-
-CREATE TABLE IF NOT EXISTS sportradar_live_state (
-    league       text        NOT NULL,
-    game_id      text        NOT NULL,
-    status       text,
-    home_score   integer,
-    away_score   integer,
-    period       text,
-    clock        text,
-    scheduled    timestamptz,
-    payload      jsonb,
-    fetched_at   timestamptz NOT NULL DEFAULT now(),
-    PRIMARY KEY (league, game_id)
-);
-CREATE INDEX IF NOT EXISTS sportradar_live_state_status_idx
-    ON sportradar_live_state (league, status);
-"""
-
-
-async def ensure_schema() -> None:
-    """Create the two cache tables if missing.  Idempotent and best-effort."""
-    global _SCHEMA_READY
-    if _SCHEMA_READY:
-        return
-    async with _SCHEMA_LOCK:
-        if _SCHEMA_READY:
-            return
-        try:
-            async with db.acquire() as conn:
-                await conn.execute(_SCHEMA_SQL)
-            _SCHEMA_READY = True
-            log.info("sportradar_* schema ready")
-        except Exception as e:
-            log.warning("sportradar schema bootstrap failed: %s", e)
 
 
 # ---------------------------------------------------------------------------

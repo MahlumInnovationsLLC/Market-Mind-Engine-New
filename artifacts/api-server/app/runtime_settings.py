@@ -4,11 +4,12 @@ Currently a single row: the global ``aggression_mode`` (Conservative /
 Balanced / Aggressive) which scales the moderator + gatekeeper bias and
 the default min-edge / Kelly fraction caps used by the risk gates.
 
-The table is `runtime_settings(key, value, updated_at, updated_by)` and
-is bootstrapped lazily on first read/write so a brand new database
-doesn't need a separate migration step. Per-key explicit
-`system_settings` overrides (e.g. `risk.min_edge_pp`) still win — this
-module only changes the *defaults* that the gates fall back to.
+The ``runtime_settings(key, value, updated_at, updated_by)`` table and
+the companion ``system_settings`` table are owned by Alembic (revision
+``0018_lazy_ddl_relocation``); this module assumes they exist. Per-key
+explicit ``system_settings`` overrides (e.g. ``risk.min_edge_pp``) still
+win — this module only changes the *defaults* that the gates fall back
+to.
 """
 from __future__ import annotations
 
@@ -52,30 +53,6 @@ MODE_PROFILES: dict[str, dict[str, float]] = {
 }
 
 
-_SCHEMA_SQL = """
-CREATE TABLE IF NOT EXISTS runtime_settings (
-    key         text PRIMARY KEY,
-    value       text,
-    updated_at  timestamptz NOT NULL DEFAULT now(),
-    updated_by  text
-);
-"""
-
-_ready = False
-
-
-async def ensure_schema() -> None:
-    global _ready
-    if _ready:
-        return
-    try:
-        async with db.acquire() as c:
-            await c.execute(_SCHEMA_SQL)
-        _ready = True
-    except Exception as e:  # pragma: no cover - exercised on prod boot
-        log.warning("runtime_settings ensure_schema failed: %s", e)
-
-
 def normalize_mode(mode: str | None) -> str:
     m = (mode or DEFAULT_MODE).strip().lower()
     return m if m in VALID_MODES else DEFAULT_MODE
@@ -86,7 +63,6 @@ def profile_for(mode: str | None) -> dict[str, float]:
 
 
 async def get_aggression_mode() -> str:
-    await ensure_schema()
     try:
         v = await db.fetchval(
             "SELECT value FROM runtime_settings WHERE key = 'aggression_mode'"
@@ -105,7 +81,6 @@ async def get_trading_halted() -> bool:
     is treated as ``False``). Surfaces in the operator dashboard pill
     (DRY-RUN state) and the trading-alerts banner.
     """
-    await ensure_schema()
     try:
         v = await db.fetchval(
             "SELECT value FROM runtime_settings WHERE key = 'trading_halted'"
@@ -179,7 +154,6 @@ async def set_aggression_mode(
     before_mode = await get_aggression_mode()
     before_revert = await get_pending_revert()
 
-    await ensure_schema()
     async with db.acquire() as c:
         await c.execute(
             """
@@ -266,7 +240,6 @@ async def set_aggression_mode(
 
 async def get_pending_revert() -> dict[str, Any] | None:
     """Return the scheduled auto-revert (if any), or ``None``."""
-    await ensure_schema()
     try:
         v = await db.fetchval(
             "SELECT value FROM runtime_settings WHERE key = $1",
@@ -519,29 +492,6 @@ RISK_KNOB_KEYS: frozenset[str] = frozenset(s.key for s in RISK_KNOB_SPECS)
 _KNOB_BY_KEY: dict[str, _KnobSpec] = {s.key: s for s in RISK_KNOB_SPECS}
 
 
-_SYSTEM_SETTINGS_SCHEMA_SQL = """
-CREATE TABLE IF NOT EXISTS system_settings (
-    key         text PRIMARY KEY,
-    value       text,
-    updated_at  timestamptz NOT NULL DEFAULT now()
-);
-"""
-
-_system_settings_ready = False
-
-
-async def _ensure_system_settings_schema() -> None:
-    global _system_settings_ready
-    if _system_settings_ready:
-        return
-    try:
-        async with db.acquire() as c:
-            await c.execute(_SYSTEM_SETTINGS_SCHEMA_SQL)
-        _system_settings_ready = True
-    except Exception as e:
-        log.warning("system_settings ensure_schema failed: %s", e)
-
-
 def _coerce_knob_value(spec: "_KnobSpec", raw: Any) -> float | int:
     try:
         v = float(raw)
@@ -560,7 +510,6 @@ async def get_risk_knob_overrides() -> dict[str, float | int]:
     """Read every ``risk.<knob>`` row currently in ``system_settings``,
     filtered to the spec keys + coerced to numeric. Missing rows mean
     the gate falls back to the aggression-mode default."""
-    await _ensure_system_settings_schema()
     out: dict[str, float | int] = {}
     try:
         rows = await db.fetch(
@@ -597,7 +546,6 @@ async def set_risk_knob_overrides(
     """
     if not isinstance(updates, dict):
         raise ValueError("updates must be a dict")
-    await _ensure_system_settings_schema()
 
     # Validate everything BEFORE writing so partial failures don't
     # leave the configuration half-applied.
@@ -836,7 +784,6 @@ async def get_vertical_visibility() -> dict[str, list[str]]:
     see them with a "show hidden" toggle).
     ``pinned`` — leads the strip in the supplied order.
     """
-    await _ensure_system_settings_schema()
     out: dict[str, list[str]] = {"hidden": [], "pinned": []}
     try:
         rows = await db.fetch(
@@ -872,7 +819,6 @@ async def set_vertical_visibility(
     """
     if hidden is None and pinned is None:
         raise ValueError("at least one of hidden/pinned must be provided")
-    await _ensure_system_settings_schema()
 
     cleaned_hidden = _coerce_vertical_list(hidden) if hidden is not None else None
     cleaned_pinned = _coerce_vertical_list(pinned) if pinned is not None else None
@@ -982,7 +928,6 @@ async def get_vertical_halts() -> dict[str, dict[str, Any]]:
     Best-effort: a read failure returns an empty dict so the orchestrator
     and dashboard never crash on a sick ``system_settings`` table.
     """
-    await _ensure_system_settings_schema()
     out: dict[str, dict[str, Any]] = {}
     try:
         rows = await db.fetch(
@@ -1031,7 +976,6 @@ async def set_vertical_halted(
     the duplicate audit-log row.
     """
     name = _require_known_vertical(vertical)
-    await _ensure_system_settings_schema()
 
     before = await get_vertical_halts()
     if name in before:
@@ -1102,7 +1046,6 @@ async def clear_vertical_halt(
     can capture *why* something was resumed (matches the halt flow).
     """
     name = _require_known_vertical(vertical)
-    await _ensure_system_settings_schema()
 
     before = await get_vertical_halts()
     if name not in before:
@@ -1153,7 +1096,6 @@ async def get_state() -> dict[str, Any]:
     consistent picture of what the swarm + gates will do on the next
     cycle.
     """
-    await ensure_schema()
     # Apply any due scheduled revert before reporting state so the
     # dashboard, orchestrator, and audit log all see the same mode.
     try:

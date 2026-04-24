@@ -27,7 +27,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from .. import db
-from . import ensure_schema, record_game
+from . import record_game
 
 
 log = logging.getLogger(__name__)
@@ -116,11 +116,6 @@ async def run_cycle(*, batch_limit: int = DEFAULT_BATCH_LIMIT) -> CycleResult:
     """Scan for newly-finished games and call `record_game()` for each."""
     started = datetime.now(timezone.utc)
     cr = CycleResult(started_at=started.isoformat())
-
-    try:
-        await ensure_schema()
-    except Exception as e:
-        cr.errors.append(f"ensure_schema: {e}")
 
     games = await _fetch_unrecorded_finished_games(batch_limit)
     cr.games_examined = len(games)

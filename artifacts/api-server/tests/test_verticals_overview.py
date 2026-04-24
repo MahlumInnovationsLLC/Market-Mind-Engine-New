@@ -99,7 +99,6 @@ def stub_db(monkeypatch):
     stub = _StubDb()
     monkeypatch.setattr(dashboard, "db", stub, raising=True)
     monkeypatch.setattr(runtime_settings_mod, "db", stub, raising=True)
-    runtime_settings_mod._system_settings_ready = True
     return stub
 
 

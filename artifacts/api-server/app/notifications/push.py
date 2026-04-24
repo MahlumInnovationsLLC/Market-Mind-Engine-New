@@ -45,97 +45,6 @@ log = logging.getLogger("axiom.notifications.push")
 EXPO_PUSH_URL = "https://exp.host/--/api/v2/push/send"
 
 
-# ---------------------------------------------------------------------------
-# Schema
-# ---------------------------------------------------------------------------
-
-
-_SCHEMA_SQL = """
-CREATE TABLE IF NOT EXISTS expo_push_tokens (
-    expo_token      text PRIMARY KEY,
-    clerk_user_id   text NOT NULL,
-    platform        text,
-    last_seen_at    timestamptz NOT NULL DEFAULT now(),
-    created_at      timestamptz NOT NULL DEFAULT now()
-);
-
-CREATE INDEX IF NOT EXISTS expo_push_tokens_user_idx
-    ON expo_push_tokens (clerk_user_id);
-
-CREATE TABLE IF NOT EXISTS user_notification_prefs (
-    clerk_user_id     text PRIMARY KEY,
-    notify_live_trade boolean NOT NULL DEFAULT true,
-    notify_halt       boolean NOT NULL DEFAULT true,
-    updated_at        timestamptz NOT NULL DEFAULT now()
-);
-
--- Per-user email channel toggles (task #112). Defaults match the
--- previous "everyone gets every email" behaviour for the standard
--- summaries; the live-trade firehose is opt-in because it is noisy
--- and gated behind the Elite tier.
--- Per-user log of every push we *attempted to deliver* (task #133).
--- One row per recipient per dispatch so the mobile app can show an
--- in-app history beyond what the OS notification tray retains. We
--- only record entries for users with at least one registered device,
--- since logging "would-have-been-sent" rows for desktop-only users
--- would just create unread clutter on devices that never see them.
-CREATE TABLE IF NOT EXISTS mobile_notification_log (
-    id              bigserial PRIMARY KEY,
-    clerk_user_id   text NOT NULL,
-    type            text NOT NULL,
-    title           text NOT NULL,
-    body            text NOT NULL,
-    deep_link       text,
-    data            jsonb NOT NULL DEFAULT '{}'::jsonb,
-    created_at      timestamptz NOT NULL DEFAULT now(),
-    read_at         timestamptz
-);
-
-CREATE INDEX IF NOT EXISTS mobile_notification_log_user_idx
-    ON mobile_notification_log (clerk_user_id, created_at DESC);
-
-CREATE INDEX IF NOT EXISTS mobile_notification_log_unread_idx
-    ON mobile_notification_log (clerk_user_id)
-    WHERE read_at IS NULL;
-
-ALTER TABLE user_notification_prefs
-    ADD COLUMN IF NOT EXISTS email_daily_summary       boolean NOT NULL DEFAULT true,
-    ADD COLUMN IF NOT EXISTS email_drift               boolean NOT NULL DEFAULT true,
-    ADD COLUMN IF NOT EXISTS email_halt                boolean NOT NULL DEFAULT true,
-    ADD COLUMN IF NOT EXISTS email_live_trade          boolean NOT NULL DEFAULT false,
-    ADD COLUMN IF NOT EXISTS email_weekly_roundup      boolean NOT NULL DEFAULT true,
-    ADD COLUMN IF NOT EXISTS email_trade_confirmation  boolean NOT NULL DEFAULT true,
-    ADD COLUMN IF NOT EXISTS digest_partials           boolean NOT NULL DEFAULT false,
-    ADD COLUMN IF NOT EXISTS sms_live_trade            boolean NOT NULL DEFAULT false,
-    ADD COLUMN IF NOT EXISTS telegram_live_trade       boolean NOT NULL DEFAULT false,
-    ADD COLUMN IF NOT EXISTS sms_phone_number          text,
-    -- Per-user "do not disturb" window for mobile push (task #131).
-    -- All three fields must be set for the window to take effect; any
-    -- NULL disables the feature so existing users see no behaviour
-    -- change. `start == end` is also treated as disabled (zero-length).
-    -- Hours are 0-23 in the user's IANA `quiet_hours_tz`. If start <
-    -- end, the window is the same calendar day; if start > end, the
-    -- window wraps midnight (e.g. 22 → 7 = 10pm to 7am).
-    ADD COLUMN IF NOT EXISTS quiet_hours_start_hour    smallint,
-    ADD COLUMN IF NOT EXISTS quiet_hours_end_hour      smallint,
-    ADD COLUMN IF NOT EXISTS quiet_hours_tz            text,
-    -- Mobile push for position settlement (task #132). Default on so the
-    -- natural follow-up to a live-trade fill push (the resolution) is
-    -- delivered without requiring users to opt in.
-    ADD COLUMN IF NOT EXISTS notify_settlement         boolean NOT NULL DEFAULT true,
-    -- One-time SMS verification of the saved phone number (task #191).
-    -- We refuse to dispatch paid Twilio messages until the operator
-    -- confirms ownership of the destination number with a 6-digit code,
-    -- so a typo doesn't quietly burn revenue (or worse, ship trade
-    -- alerts to a stranger). `verified_at` is the proof; `code` +
-    -- `expires_at` track the in-flight challenge and are cleared on
-    -- success or when the phone is changed.
-    ADD COLUMN IF NOT EXISTS sms_phone_verified_at             timestamptz,
-    ADD COLUMN IF NOT EXISTS sms_phone_verification_code       text,
-    ADD COLUMN IF NOT EXISTS sms_phone_verification_expires_at timestamptz;
-"""
-
-
 # Verification challenge lives for ten minutes — long enough that the
 # Twilio relay + a distracted user can complete the round trip, short
 # enough that an old code is useless if the phone leaves their hands.
@@ -193,27 +102,6 @@ ELITE_ONLY_TOGGLES: frozenset[str] = frozenset({
 })
 
 
-_schema_ready = False
-_schema_lock = asyncio.Lock()
-
-
-async def ensure_schema() -> None:
-    """Create the push tables if missing. Idempotent."""
-    global _schema_ready
-    if _schema_ready:
-        return
-    async with _schema_lock:
-        if _schema_ready:
-            return
-        try:
-            async with db.acquire() as c:
-                await c.execute(_SCHEMA_SQL)
-            _schema_ready = True
-            log.info("push schema ready")
-        except Exception as e:
-            log.warning("push schema bootstrap failed: %s", e)
-
-
 # ---------------------------------------------------------------------------
 # Token registration
 # ---------------------------------------------------------------------------
@@ -237,7 +125,6 @@ async def register_token(
     if not _looks_like_expo_token(expo_token):
         return False
     plat = (platform or "").strip()[:32] or None
-    await ensure_schema()
     try:
         await db.execute(
             """
@@ -257,7 +144,6 @@ async def register_token(
 
 
 async def unregister_token(*, clerk_user_id: str, expo_token: str) -> bool:
-    await ensure_schema()
     try:
         result = await db.execute(
             "DELETE FROM expo_push_tokens "
@@ -286,7 +172,6 @@ async def list_user_devices(clerk_user_id: str) -> list[dict[str, object]]:
     leaking raw expo tokens. Each row contains platform + last_seen_at +
     a short masked token suffix so the user can disambiguate devices.
     """
-    await ensure_schema()
     try:
         rows = await db.fetch(
             """
@@ -342,7 +227,6 @@ async def get_prefs(clerk_user_id: str) -> dict[str, object]:
     Missing rows yield the documented defaults so the UI can render
     deterministic state for first-time users.
     """
-    await ensure_schema()
     extra_cols = (
         ["sms_phone_number"]
         + list(QUIET_HOURS_COLUMNS.keys())
@@ -505,7 +389,6 @@ async def issue_phone_verification_code(
     Returns ``(code, phone, expires_at)`` on success, or ``None`` if the
     user has no phone on file (caller should surface a 400 in that case).
     """
-    await ensure_schema()
     try:
         row = await db.fetchrow(
             "SELECT sms_phone_number FROM user_notification_prefs "
@@ -551,7 +434,6 @@ async def confirm_phone_verification_code(
     space. Returns ``False`` for missing / mismatched / expired codes —
     the caller surfaces a generic error so we don't leak which.
     """
-    await ensure_schema()
     submitted = (code or "").strip()
     if len(submitted) != 6 or not submitted.isdigit():
         return False
@@ -658,7 +540,6 @@ _ELITE_TIERS = ("elite", "founder")
 async def _user_rows_for_email(pref_column: str, *, elite_only: bool) -> list[dict[str, object]]:
     if pref_column not in PREF_COLUMNS:
         raise ValueError(f"unknown pref column {pref_column!r}")
-    await ensure_schema()
     # LEFT JOIN so users who never opened /settings/notifications still
     # match — they inherit the documented default for `pref_column`
     # (which is `true` for most email channels). Anyone who has saved
@@ -713,7 +594,6 @@ async def opted_in_sms_phones(pref_column: str = "sms_live_trade") -> list[str]:
     given channel. Always Elite-gated."""
     if pref_column not in PREF_COLUMNS:
         raise ValueError(f"unknown pref column {pref_column!r}")
-    await ensure_schema()
     # `sms_phone_verified_at IS NOT NULL` enforces task #191's
     # ownership-confirmation gate: an opted-in user with an unverified
     # number is silently skipped on dispatch, so a typo can't bill us
@@ -743,7 +623,6 @@ async def opted_in_telegram_chats(pref_column: str = "telegram_live_trade") -> l
     given channel. Skips users who haven't completed the bot binding."""
     if pref_column not in PREF_COLUMNS:
         raise ValueError(f"unknown pref column {pref_column!r}")
-    await ensure_schema()
     sql = f"""
         SELECT t.telegram_chat_id
           FROM user_notification_prefs p
@@ -782,7 +661,6 @@ async def _tokens_for_pref(pref_column: str) -> list[str]:
     """
     if pref_column not in ("notify_live_trade", "notify_halt", "notify_settlement"):
         raise ValueError(f"bad pref column {pref_column!r}")
-    await ensure_schema()
     sql = (
         "SELECT t.expo_token, "
         "       p.quiet_hours_start_hour, "
@@ -1017,7 +895,6 @@ async def _record_dispatch_for_pref(
 async def list_notifications(
     clerk_user_id: str, *, limit: int = 50,
 ) -> list[dict[str, Any]]:
-    await ensure_schema()
     limit = max(1, min(int(limit or 50), 200))
     try:
         rows = await db.fetch(
@@ -1060,7 +937,6 @@ async def list_notifications(
 
 
 async def unread_notification_count(clerk_user_id: str) -> int:
-    await ensure_schema()
     try:
         v = await db.fetchval(
             "SELECT count(*) FROM mobile_notification_log "
@@ -1128,7 +1004,6 @@ async def mark_notifications_read(
     clerk_user_id: str, *, ids: list[int] | None = None,
 ) -> int:
     """Mark notifications as read. If `ids` is None, marks all unread."""
-    await ensure_schema()
     try:
         if ids:
             clean = [int(i) for i in ids if i is not None]

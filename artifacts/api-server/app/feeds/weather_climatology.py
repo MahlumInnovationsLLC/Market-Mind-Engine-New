@@ -107,47 +107,6 @@ def baseline_value(city_code: str, day_of_year: int, metric: str) -> float | Non
 
 
 # ---------------------------------------------------------------------------
-# Schema bootstrap (idempotent — called once at app startup)
-# ---------------------------------------------------------------------------
-
-
-_SCHEMA_LOCK = asyncio.Lock()
-_SCHEMA_READY = False
-
-_SCHEMA_SQL = """
-CREATE TABLE IF NOT EXISTS weather_climatology (
-    location      text        NOT NULL,
-    day_of_year   smallint    NOT NULL,
-    metric        text        NOT NULL,
-    value_f       double precision NOT NULL,
-    source        text        NOT NULL DEFAULT 'sinusoidal_baseline',
-    updated_at    timestamptz NOT NULL DEFAULT now(),
-    PRIMARY KEY (location, day_of_year, metric),
-    CHECK (day_of_year BETWEEN 1 AND 366)
-);
-CREATE INDEX IF NOT EXISTS weather_climatology_lookup_idx
-    ON weather_climatology (location, day_of_year);
-"""
-
-
-async def ensure_schema() -> None:
-    """Create the climatology table if missing.  Best-effort + idempotent."""
-    global _SCHEMA_READY
-    if _SCHEMA_READY:
-        return
-    async with _SCHEMA_LOCK:
-        if _SCHEMA_READY:
-            return
-        try:
-            async with db.acquire() as conn:
-                await conn.execute(_SCHEMA_SQL)
-            _SCHEMA_READY = True
-            log.info("weather_climatology schema ready")
-        except Exception as e:
-            log.warning("weather_climatology schema bootstrap failed: %s", e)
-
-
-# ---------------------------------------------------------------------------
 # Backfill
 # ---------------------------------------------------------------------------
 

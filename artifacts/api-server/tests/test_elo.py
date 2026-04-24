@@ -1,10 +1,11 @@
 """Tests for the internal team-Elo rating engine.
 
-The asyncpg pool is never opened — `app.db` primitives and
-`app.elo.ensure_schema` are monkey-patched onto a tiny in-memory store
-that mirrors the real CRUD semantics for `team_elo` and
-`team_elo_history` (UPSERT on PK, idempotency on (league, team,
-game_id)).
+The asyncpg pool is never opened — `app.db` primitives are
+monkey-patched onto a tiny in-memory store that mirrors the real CRUD
+semantics for `team_elo` and `team_elo_history` (UPSERT on PK,
+idempotency on (league, team, game_id)). The schema itself is owned by
+Alembic (revision 0018_lazy_ddl_relocation), so no schema-bootstrap
+patching is needed.
 """
 from __future__ import annotations
 
@@ -53,7 +54,9 @@ class _FakeStore:
         raise AssertionError(f"unhandled fetch: {query}")
 
     async def execute(self, *_args: Any, **_kw: Any) -> str:
-        # ensure_schema's DDL — we no-op all of them.
+        # Bookkeeping inserts/updates issued through the module-level
+        # ``db.execute`` helper — we no-op all of them; the in-memory
+        # state mutations live in the per-conn ``execute`` below.
         return "OK"
 
     # ---- connection used in transactional record_game ----
@@ -141,13 +144,6 @@ def store(monkeypatch: pytest.MonkeyPatch) -> _FakeStore:
     monkeypatch.setattr(_db, "fetch", s.fetch)
     monkeypatch.setattr(_db, "execute", s.execute)
     monkeypatch.setattr(_db, "get_pool", s.get_pool)
-
-    async def _noop_schema() -> None:
-        return None
-
-    monkeypatch.setattr(_elo, "ensure_schema", _noop_schema)
-    # Reset module-level schema flag in case another test toggled it.
-    _elo._schema_ready = False
     return s
 
 

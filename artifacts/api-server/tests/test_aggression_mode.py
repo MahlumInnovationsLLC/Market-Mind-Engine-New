@@ -228,7 +228,6 @@ def _stub_db(monkeypatch, store: dict[str, Any], audit: list[dict[str, Any]]):
     monkeypatch.setattr(runtime_settings_mod.db, "fetchval", fake_fetchval)
     monkeypatch.setattr(runtime_settings_mod.db, "fetch", fake_fetch)
     monkeypatch.setattr(runtime_settings_mod.db, "fetchrow", fake_fetchrow)
-    runtime_settings_mod._ready = True
 
 
 def test_set_aggression_mode_records_reason_in_audit_log(monkeypatch):

@@ -37,11 +37,6 @@ def elo_store(monkeypatch: pytest.MonkeyPatch) -> _FakeStore:
     monkeypatch.setattr(_db, "execute", s.execute)
     monkeypatch.setattr(_db, "get_pool", s.get_pool)
 
-    async def _noop_schema() -> None:
-        return None
-
-    monkeypatch.setattr(_elo, "ensure_schema", _noop_schema)
-    _elo._schema_ready = False
     # Seed a single game so Lakers' rating drifts off the default 1500.
     asyncio.run(_elo.record_game(
         "NBA", "Lakers", "Celtics", 110, 100,

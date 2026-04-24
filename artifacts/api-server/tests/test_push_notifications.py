@@ -165,11 +165,6 @@ def store(monkeypatch: pytest.MonkeyPatch) -> _Store:
     monkeypatch.setattr(_db, "execute", s.execute)
     monkeypatch.setattr(_db, "fetchrow", s.fetchrow)
     monkeypatch.setattr(_db, "fetch", s.fetch)
-
-    async def _ready() -> None:
-        return None
-
-    monkeypatch.setattr(_push, "ensure_schema", _ready)
     return s
 
 

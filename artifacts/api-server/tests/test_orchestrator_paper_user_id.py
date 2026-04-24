@@ -25,7 +25,6 @@ import pytest
 from app import db as _db
 from app.kalshi import lifecycle as _kalshi_lifecycle
 from app.notifications import alerts as _alerts
-from app.notifications import push as _push
 from app.orchestrator import paper as _paper
 from app.risk.gates import RiskContext
 
@@ -354,10 +353,6 @@ def test_bot_initiated_live_fill_emails_operator(monkeypatch):
     )
 
     # --- Stub Postgres + Postmark like test_trade_confirmation does ---
-    async def _noop_ensure() -> None:
-        return None
-
-    monkeypatch.setattr(_push, "ensure_schema", _noop_ensure)
     monkeypatch.setattr(_db, "fetchrow", harness.fetchrow)
     monkeypatch.setattr(_db, "fetch", harness.fetch)
     monkeypatch.setattr(_db, "execute", harness.execute)

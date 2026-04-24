@@ -111,7 +111,6 @@ def fake_db(monkeypatch: pytest.MonkeyPatch, store: _FakeStore) -> _FakeDB:
     fake = _FakeDB(store)
     monkeypatch.setattr(toggle_store, "db", fake)
     toggle_store.reset_cache()
-    toggle_store._ready = False  # force schema re-init against the fake
     return fake
 
 

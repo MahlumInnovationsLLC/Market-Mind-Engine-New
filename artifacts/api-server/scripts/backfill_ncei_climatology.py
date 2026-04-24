@@ -40,7 +40,6 @@ from app.feeds.weather_climatology import (  # noqa: E402
     METRIC_TAVG,
     METRIC_TMAX,
     METRIC_TMIN,
-    ensure_schema,
     refresh_climatology_cache,
     supported_cities,
 )
@@ -194,7 +193,6 @@ async def _main(args: argparse.Namespace) -> int:
             if args.dry_run:
                 print(f"DRY {city} ({airport}/{station}): parsed {len(rows)} rows")
                 continue
-            await ensure_schema()
             written = await _upsert_rows(rows)
             total_rows += written
             print(f"OK  {city} ({airport}/{station}): upserted {written} rows")

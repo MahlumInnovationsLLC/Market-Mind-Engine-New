@@ -1110,7 +1110,6 @@ async def _resolve_trade_confirmation_recipient(
     can short-circuit.
     """
     from ..notifications import push as _push
-    await _push.ensure_schema()
     default_conf = "true" if _push.PREF_COLUMNS["email_trade_confirmation"] else "false"
     default_digest = "true" if _push.PREF_COLUMNS["digest_partials"] else "false"
     try:

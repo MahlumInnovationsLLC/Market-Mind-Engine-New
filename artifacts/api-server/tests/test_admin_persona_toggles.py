@@ -70,7 +70,6 @@ def _install_fake_db(monkeypatch) -> _FakeDB:
     fake = _FakeDB()
     monkeypatch.setattr(toggle_store, "db", fake)
     toggle_store.reset_cache()
-    toggle_store._ready = False  # force schema re-init against the fake
     return fake
 
 

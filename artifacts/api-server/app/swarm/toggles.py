@@ -22,38 +22,13 @@ from .. import db
 log = logging.getLogger("axiom.swarm.toggles")
 
 
-_SCHEMA_SQL = """
-CREATE TABLE IF NOT EXISTS swarm_persona_toggles (
-    vertical    text NOT NULL,
-    persona     text NOT NULL,
-    enabled     boolean NOT NULL DEFAULT true,
-    updated_at  timestamptz NOT NULL DEFAULT now(),
-    updated_by  text,
-    PRIMARY KEY (vertical, persona)
-);
-"""
-
-_ready = False
 # {vertical: {persona_id: enabled_bool}}
 _cache: dict[str, dict[str, bool]] = {}
 _loaded = False
 
 
-async def ensure_schema() -> None:
-    global _ready
-    if _ready:
-        return
-    try:
-        async with db.acquire() as c:
-            await c.execute(_SCHEMA_SQL)
-        _ready = True
-    except Exception as e:  # pragma: no cover - exercised on prod boot
-        log.warning("swarm_persona_toggles ensure_schema failed: %s", e)
-
-
 async def _refresh_cache() -> None:
     global _cache, _loaded
-    await ensure_schema()
     fresh: dict[str, dict[str, bool]] = {}
     try:
         rows = await db.fetch(
@@ -121,7 +96,6 @@ async def set_toggle(
         raise ValueError("vertical required")
     if not p:
         raise ValueError("persona required")
-    await ensure_schema()
     before = await get_toggles_for_vertical(v)
     async with db.acquire() as c:
         await c.execute(
@@ -164,7 +138,6 @@ async def set_toggle(
 
 async def list_all_overrides() -> list[dict[str, Any]]:
     """Read every stored toggle row (ordered by vertical, persona)."""
-    await ensure_schema()
     try:
         rows = await db.fetch(
             """

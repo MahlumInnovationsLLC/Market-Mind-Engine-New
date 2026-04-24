@@ -66,10 +66,7 @@ from .log_shipper import get_shipper_status
 from . import autoresearch
 from .feeds import registry as feed_registry, scheduler as feed_scheduler
 from .feeds.odds_api import register_odds_feeds
-from .feeds.sportradar import (
-    ensure_schema as _ensure_sportradar_schema,
-    register_sportradar_extra_feeds,
-)
+from .feeds.sportradar import register_sportradar_extra_feeds
 from .feeds.weather import register_weather_feeds
 from .feeds.crypto import register_crypto_feeds
 from .feeds.commodities import register_commodities_feeds
@@ -206,13 +203,11 @@ async def lifespan(_: FastAPI):
         try:
             from .feeds import weather_climatology as _wclim
 
-            await _wclim.ensure_schema()
             await _wclim.backfill_climatology()
             await _wclim.refresh_climatology_cache()
         except Exception as e:
             log.warning("weather_climatology bootstrap failed: %s", e)
         try:
-            await _ensure_sportradar_schema()
             register_sportradar_extra_feeds()
         except Exception as e:
             log.warning("sportradar extra feed registration failed: %s", e)
