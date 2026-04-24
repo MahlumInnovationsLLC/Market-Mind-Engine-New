@@ -333,7 +333,11 @@ export function HealthPanel() {
       passive: [],
       config: [],
     };
-    (snap?.cards ?? []).forEach((c) => out[c.category].push(c));
+    // The crypto freshness card is hoisted into its own dedicated
+    // widget above the grid so it isn't duplicated as a generic tile.
+    (snap?.cards ?? [])
+      .filter((c) => c.key !== "crypto_feed_freshness")
+      .forEach((c) => out[c.category].push(c));
     return out;
   }, [snap]);
 
@@ -387,6 +391,12 @@ export function HealthPanel() {
             built in {snap.duration_ms}ms — auto-refreshes every 15s
           </section>
         )}
+
+        {snap?.cards
+          .filter((c) => c.key === "crypto_feed_freshness")
+          .map((c) => (
+            <CryptoFreshnessWidget key={c.key} card={c} />
+          ))}
 
         {(["live", "passive", "config"] as const).map((cat) => (
           <section key={cat} className="space-y-3">
@@ -1129,6 +1139,142 @@ function KalshiClusterDetails({
         </span>
       </span>
     </div>
+  );
+}
+
+type CryptoPair = {
+  symbol: string;
+  granularity: string;
+  expected_seconds: number;
+  max_ts: string | null;
+  age_seconds: number | null;
+  yellow_threshold_seconds: number;
+  red_threshold_seconds: number;
+  status: "ok" | "degraded" | "down";
+};
+
+const PAIR_STATUS_RANK: Record<CryptoPair["status"], number> = {
+  down: 0,
+  degraded: 1,
+  ok: 2,
+};
+
+const PAIR_STATUS_TEXT: Record<CryptoPair["status"], string> = {
+  ok: "text-success",
+  degraded: "text-warning",
+  down: "text-destructive",
+};
+
+function formatPairAge(seconds: number): string {
+  if (!Number.isFinite(seconds) || seconds < 0) return "—";
+  return formatAge(Math.floor(seconds));
+}
+
+export function CryptoFreshnessWidget({ card }: { card: Card }) {
+  const extras =
+    card.extras && typeof card.extras === "object"
+      ? (card.extras as Record<string, unknown>)
+      : {};
+  const rawPairs = Array.isArray(extras.pairs)
+    ? (extras.pairs as unknown[])
+    : [];
+  const pairs: CryptoPair[] = rawPairs.filter(
+    (p): p is CryptoPair =>
+      !!p &&
+      typeof p === "object" &&
+      typeof (p as CryptoPair).symbol === "string" &&
+      typeof (p as CryptoPair).granularity === "string" &&
+      typeof (p as CryptoPair).status === "string",
+  );
+  if (pairs.length === 0) return null;
+
+  // Worst-first: down → degraded → ok. Within the same status, the
+  // oldest bar bubbles to the top so an operator scanning the table
+  // sees the most-stale pair before anything else.
+  const sorted = [...pairs].sort((a, b) => {
+    const r = PAIR_STATUS_RANK[a.status] - PAIR_STATUS_RANK[b.status];
+    if (r !== 0) return r;
+    const ageA = a.age_seconds ?? Number.POSITIVE_INFINITY;
+    const ageB = b.age_seconds ?? Number.POSITIVE_INFINITY;
+    return ageB - ageA;
+  });
+
+  const fresh =
+    typeof extras.fresh_count === "number" ? extras.fresh_count : null;
+  const total =
+    typeof extras.total_count === "number" ? extras.total_count : pairs.length;
+
+  return (
+    <section className="space-y-3" data-testid="crypto-freshness-widget">
+      <h2 className="text-sm uppercase tracking-widest text-muted-foreground flex items-center gap-2 flex-wrap">
+        <span>Crypto feed freshness</span>
+        <span className="flex items-center gap-1 text-[10px]">
+          <span className={`inline-block w-2 h-2 ${STATUS_DOT[card.status]}`} />
+          {card.status}
+        </span>
+        <span className="text-[10px]">
+          ({fresh ?? pairs.filter((p) => p.status === "ok").length}/{total} fresh)
+        </span>
+        {card.checked_at && (
+          <span className="text-[10px] text-muted-foreground/70 normal-case tracking-normal">
+            checked {card.checked_at}
+          </span>
+        )}
+      </h2>
+      <div className="border border-border bg-card overflow-x-auto text-xs">
+        <table className="w-full">
+          <thead className="text-[10px] uppercase tracking-widest text-muted-foreground">
+            <tr className="border-b border-border">
+              <th className="text-left p-2">status</th>
+              <th className="text-left p-2">symbol</th>
+              <th className="text-left p-2">granularity</th>
+              <th className="text-left p-2">age</th>
+              <th className="text-left p-2">threshold (yellow / red)</th>
+              <th className="text-left p-2">last bar</th>
+            </tr>
+          </thead>
+          <tbody>
+            {sorted.map((p) => (
+              <tr
+                key={`${p.symbol}-${p.granularity}`}
+                className="border-b border-border/40"
+                data-testid={`crypto-pair-${p.symbol}-${p.granularity}`}
+                data-status={p.status}
+              >
+                <td className="p-2 whitespace-nowrap">
+                  <span
+                    className={`inline-flex items-center gap-1 uppercase tracking-widest text-[10px] ${PAIR_STATUS_TEXT[p.status]}`}
+                  >
+                    <span
+                      className={`inline-block w-2 h-2 ${STATUS_DOT[p.status]}`}
+                    />
+                    {p.status}
+                  </span>
+                </td>
+                <td className="p-2 whitespace-nowrap font-bold">{p.symbol}</td>
+                <td className="p-2 whitespace-nowrap text-muted-foreground">
+                  {p.granularity}
+                </td>
+                <td
+                  className={`p-2 whitespace-nowrap ${PAIR_STATUS_TEXT[p.status]}`}
+                  data-testid={`crypto-pair-age-${p.symbol}-${p.granularity}`}
+                >
+                  {p.age_seconds != null
+                    ? formatPairAge(p.age_seconds)
+                    : "no bars"}
+                </td>
+                <td className="p-2 whitespace-nowrap text-muted-foreground">
+                  {p.yellow_threshold_seconds}s / {p.red_threshold_seconds}s
+                </td>
+                <td className="p-2 whitespace-nowrap text-muted-foreground normal-case tracking-normal break-all">
+                  {p.max_ts ?? "—"}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </section>
   );
 }
 

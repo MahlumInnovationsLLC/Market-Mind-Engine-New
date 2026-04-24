@@ -3,7 +3,7 @@ import { cleanup, render, screen } from "@testing-library/react";
 
 // We render CardTile directly so the test only depends on the badge
 // rendering logic, not the full /system page (auth, fetch, polling).
-import { CardTile } from "./health";
+import { CardTile, CryptoFreshnessWidget } from "./health";
 
 afterEach(() => cleanup());
 
@@ -258,5 +258,178 @@ describe("KalshiClusterDetails (rendered via CardTile)", () => {
       />,
     );
     expect(screen.queryByTestId("kalshi-cluster-details")).toBeNull();
+  });
+});
+
+const baseFreshnessCard = {
+  key: "crypto_feed_freshness",
+  label: "Crypto feed freshness",
+  category: "passive" as const,
+  checked_at: "2026-04-24T00:00:00Z",
+  latency_ms: null,
+};
+
+describe("CryptoFreshnessWidget", () => {
+  it("renders one row per (symbol, granularity) pair sorted worst-first", () => {
+    render(
+      <CryptoFreshnessWidget
+        card={{
+          ...baseFreshnessCard,
+          status: "down",
+          detail: "1/3 fresh",
+          extras: {
+            fresh_count: 1,
+            total_count: 3,
+            pairs: [
+              {
+                symbol: "BTC",
+                granularity: "1m",
+                expected_seconds: 60,
+                max_ts: "2026-04-24T00:00:00Z",
+                age_seconds: 30,
+                yellow_threshold_seconds: 180,
+                red_threshold_seconds: 600,
+                status: "ok",
+              },
+              {
+                symbol: "ETH",
+                granularity: "1m",
+                expected_seconds: 60,
+                max_ts: "2026-04-24T00:00:00Z",
+                age_seconds: 250,
+                yellow_threshold_seconds: 180,
+                red_threshold_seconds: 600,
+                status: "degraded",
+              },
+              {
+                symbol: "BTC",
+                granularity: "5m",
+                expected_seconds: 300,
+                max_ts: null,
+                age_seconds: null,
+                yellow_threshold_seconds: 900,
+                red_threshold_seconds: 3000,
+                status: "down",
+              },
+            ],
+          },
+        }}
+      />,
+    );
+
+    const widget = screen.getByTestId("crypto-freshness-widget");
+    expect(widget).toBeTruthy();
+    // Header summarises the fresh count so the operator gets context
+    // without scanning the whole table.
+    expect(widget.textContent).toMatch(/1\/3 fresh/);
+
+    // Worst pair (status=down) must come first, then degraded, then ok.
+    const rows = widget.querySelectorAll("tbody tr");
+    expect(rows.length).toBe(3);
+    expect(rows[0].getAttribute("data-status")).toBe("down");
+    expect(rows[1].getAttribute("data-status")).toBe("degraded");
+    expect(rows[2].getAttribute("data-status")).toBe("ok");
+
+    // The "no bars" pair shows a clear sentinel rather than "0s old".
+    expect(
+      screen.getByTestId("crypto-pair-age-BTC-5m").textContent,
+    ).toMatch(/no bars/);
+    // Fresh BTC/1m bar shows the rounded age.
+    expect(
+      screen.getByTestId("crypto-pair-age-BTC-1m").textContent,
+    ).toMatch(/30s/);
+  });
+
+  it("sorts oldest-first within the same status bucket", () => {
+    render(
+      <CryptoFreshnessWidget
+        card={{
+          ...baseFreshnessCard,
+          status: "degraded",
+          detail: "2/2 degraded",
+          extras: {
+            fresh_count: 0,
+            total_count: 2,
+            pairs: [
+              {
+                symbol: "BTC",
+                granularity: "1m",
+                expected_seconds: 60,
+                max_ts: "2026-04-24T00:00:00Z",
+                age_seconds: 200,
+                yellow_threshold_seconds: 180,
+                red_threshold_seconds: 600,
+                status: "degraded",
+              },
+              {
+                symbol: "ETH",
+                granularity: "1m",
+                expected_seconds: 60,
+                max_ts: "2026-04-24T00:00:00Z",
+                age_seconds: 500,
+                yellow_threshold_seconds: 180,
+                red_threshold_seconds: 600,
+                status: "degraded",
+              },
+            ],
+          },
+        }}
+      />,
+    );
+
+    const rows = screen
+      .getByTestId("crypto-freshness-widget")
+      .querySelectorAll("tbody tr");
+    // Oldest (ETH 500s) bubbles above BTC (200s) so the operator
+    // sees the most-stale pair first.
+    expect(rows[0].getAttribute("data-testid")).toBe("crypto-pair-ETH-1m");
+    expect(rows[1].getAttribute("data-testid")).toBe("crypto-pair-BTC-1m");
+  });
+
+  it("colours the age cell to match the pair status", () => {
+    render(
+      <CryptoFreshnessWidget
+        card={{
+          ...baseFreshnessCard,
+          status: "down",
+          detail: "0/1 fresh",
+          extras: {
+            fresh_count: 0,
+            total_count: 1,
+            pairs: [
+              {
+                symbol: "BTC",
+                granularity: "1m",
+                expected_seconds: 60,
+                max_ts: "2026-04-23T23:00:00Z",
+                age_seconds: 3600,
+                yellow_threshold_seconds: 180,
+                red_threshold_seconds: 600,
+                status: "down",
+              },
+            ],
+          },
+        }}
+      />,
+    );
+    const ageCell = screen.getByTestId("crypto-pair-age-BTC-1m");
+    expect(ageCell.className).toMatch(/destructive/);
+  });
+
+  it("renders nothing when the extras have no pairs (e.g. unconfigured)", () => {
+    const { container } = render(
+      <CryptoFreshnessWidget
+        card={{
+          ...baseFreshnessCard,
+          status: "unconfigured",
+          detail: "COINAPI_API_KEY / COINGECKO_API_KEY not set",
+          extras: {},
+        }}
+      />,
+    );
+    // No pairs ⇒ no widget rendered. The generic card list still
+    // shows the card itself with the unconfigured detail.
+    expect(container.firstChild).toBeNull();
+    expect(screen.queryByTestId("crypto-freshness-widget")).toBeNull();
   });
 });
