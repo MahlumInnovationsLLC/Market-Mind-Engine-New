@@ -80,6 +80,12 @@ REGISTRY.register(VerticalSpec(
     kelly_multiplier=0.15,
     default_allocation_pct=0.10,
     duplicate_trade_exempt=True,
+    # Promoted to the operator dashboard strip in task #218 alongside
+    # `soccer` (#196) and `combat-individual` (#215).  Commodities is now
+    # a first-class vertical that shows live trade count + P&L on the
+    # main strip; the frozen-order test in tests/test_verticals_registry.py
+    # asserts it appears after the legacy three + soccer + combat-individual.
+    include_in_dashboard_strip=True,
     description=(
         "Commodities binary-close markets across WTI, gold, natgas, "
         "corn, soy, wheat, copper, silver, coffee and sugar.  Routed "

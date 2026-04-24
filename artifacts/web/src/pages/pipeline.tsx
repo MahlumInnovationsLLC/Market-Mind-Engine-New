@@ -216,12 +216,33 @@ function GateRow({ ev }: { ev: Record<string, unknown> }) {
   const passed = ev["passed"] === true;
   const gate = pickStr(ev, "gate") ?? pickStr(ev, "name") ?? "gate";
   const reason = pickStr(ev, "reason") ?? "";
+  // Per-vertical-cap (and other composite gates) attach a `sub_check`
+  // field inside `details` that names which internal predicate fired
+  // — e.g. `commodities_correlation` for the commodities cross-symbol
+  // exposure projection.  Surface it inline so operators can see the
+  // root cause without having to drill into the JSON payload.
+  const details =
+    ev["details"] && typeof ev["details"] === "object"
+      ? (ev["details"] as Record<string, unknown>)
+      : null;
+  const subCheck = details ? pickStr(details, "sub_check") : null;
+  const intendedSymbol = details ? pickStr(details, "intended_symbol") : null;
   return (
     <div className="flex items-center gap-2 text-[10px] uppercase">
       <span
         className={`w-1.5 h-1.5 rounded-full ${passed ? "bg-success" : "bg-destructive"}`}
       />
       <span className="text-muted-foreground tracking-wider">{gate}</span>
+      {subCheck && (
+        <span
+          className={`tracking-wider ${passed ? "text-muted-foreground/70" : "text-destructive/80"}`}
+          data-testid="gate-sub-check"
+          title={`sub-check: ${subCheck}${intendedSymbol ? ` · symbol=${intendedSymbol}` : ""}`}
+        >
+          › {subCheck}
+          {intendedSymbol ? ` (${intendedSymbol})` : ""}
+        </span>
+      )}
       {!passed && reason && (
         <span className="text-destructive truncate" title={reason}>
           · {reason}

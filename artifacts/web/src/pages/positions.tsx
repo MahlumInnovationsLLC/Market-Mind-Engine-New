@@ -70,6 +70,65 @@ function fmtAge(seconds: number | null): string {
   return `${Math.round(seconds / 86_400)}d`;
 }
 
+// Commodity-binary ticker parser — mirrors
+// `app/commodities/tickers.py::parse_commodity_ticker` so the
+// positions table can show symbol + timeframe + threshold per row
+// when the row belongs to the `commodities` vertical.  Kept to a
+// best-effort regex match: anything we can't parse just renders as
+// the raw ticker (no breakdown badge).
+const COMMODITY_PREFIX_TO_SYMBOL: Record<string, string> = {
+  OIL: "WTI", WTI: "WTI", GOLD: "GOLD", NATGAS: "NG", NG: "NG",
+  CORN: "CORN", SOY: "SOY", SOYB: "SOY", WHEAT: "WHEAT",
+  COPPER: "COPPER", SILVER: "SILVER", COFFEE: "COFFEE", SUGAR: "SUGAR",
+};
+const COMMODITY_TF_SUFFIXES: Array<[string, string]> = [
+  ["1H", "1h"], ["4H", "4h"], ["1D", "1d"], ["H", "1h"], ["D", "1d"],
+];
+const COMMODITY_BODY_RE =
+  /^(?<sym>[A-Z]+(?:1H|4H|1D|H|D)?)[-_](?<when>[A-Z0-9]+)[-_](?<pfx>[A-Z])(?<k>\d+(?:\.\d+)?)$/;
+
+function parseCommodityTicker(
+  ticker: string,
+): { symbol: string; timeframe: string; threshold: number; direction: "above" | "below" } | null {
+  if (!ticker) return null;
+  const body = ticker.replace(/^kx/i, "").toUpperCase();
+  const m = COMMODITY_BODY_RE.exec(body);
+  if (!m || !m.groups) return null;
+  const symRaw = m.groups.sym;
+  let symbol: string | null = null;
+  let timeframe = "1d";
+  for (const [suf, tf] of COMMODITY_TF_SUFFIXES) {
+    if (symRaw.length > suf.length && symRaw.endsWith(suf)) {
+      const base = symRaw.slice(0, -suf.length);
+      if (COMMODITY_PREFIX_TO_SYMBOL[base]) {
+        symbol = COMMODITY_PREFIX_TO_SYMBOL[base];
+        timeframe = tf;
+        break;
+      }
+    }
+  }
+  if (!symbol) {
+    if (COMMODITY_PREFIX_TO_SYMBOL[symRaw]) {
+      symbol = COMMODITY_PREFIX_TO_SYMBOL[symRaw];
+    } else {
+      const sortedPrefixes = Object.keys(COMMODITY_PREFIX_TO_SYMBOL).sort(
+        (a, b) => b.length - a.length,
+      );
+      for (const p of sortedPrefixes) {
+        if (symRaw.startsWith(p)) {
+          symbol = COMMODITY_PREFIX_TO_SYMBOL[p];
+          break;
+        }
+      }
+    }
+  }
+  if (!symbol) return null;
+  const threshold = Number.parseFloat(m.groups.k);
+  if (!Number.isFinite(threshold) || threshold <= 0) return null;
+  const direction: "above" | "below" = m.groups.pfx.toUpperCase() === "B" ? "below" : "above";
+  return { symbol, timeframe, threshold, direction };
+}
+
 type Row = {
   market: string;
   side: string | null;
@@ -350,15 +409,38 @@ export default function PositionsPage() {
                       role={clickable ? "link" : undefined}
                     >
                       <td
-                        className="py-2 pr-2 max-w-[260px] truncate font-mono text-[11px]"
+                        className="py-2 pr-2 max-w-[260px] font-mono text-[11px]"
                         title={r.market}
                       >
-                        {r.market}
-                        {r.vertical && (
-                          <span className="ml-2 text-[10px] uppercase text-muted-foreground">
-                            {r.vertical}
-                          </span>
-                        )}
+                        <div className="truncate">
+                          {r.market}
+                          {r.vertical && (
+                            <span className="ml-2 text-[10px] uppercase text-muted-foreground">
+                              {r.vertical}
+                            </span>
+                          )}
+                        </div>
+                        {r.vertical === "commodities" && (() => {
+                          const parsed = parseCommodityTicker(r.market);
+                          if (!parsed) return null;
+                          return (
+                            <div
+                              className="mt-0.5 flex flex-wrap items-center gap-1.5 text-[10px] uppercase tracking-widest text-muted-foreground"
+                              data-testid={`row-commodity-breakdown-${r.market}`}
+                            >
+                              <span className="border border-primary/40 bg-primary/5 px-1.5 text-primary">
+                                {parsed.symbol}
+                              </span>
+                              <span className="border border-border px-1.5">
+                                {parsed.timeframe}
+                              </span>
+                              <span className="border border-border px-1.5 normal-case">
+                                {parsed.direction === "above" ? ">" : "<"}{" "}
+                                {parsed.threshold}
+                              </span>
+                            </div>
+                          );
+                        })()}
                       </td>
                       <td className="py-2 uppercase">{r.side ?? "—"}</td>
                       <td className="py-2 text-right tabular-nums">{r.qty}</td>

@@ -597,6 +597,88 @@ function DrillPanel({ train, stageKey, stage, onClose }: DrillPanelProps) {
           </div>
         ) : null}
 
+        {(() => {
+          // Surface the per-vertical-cap `sub_check` payload (e.g.
+          // `commodities_correlation`) inline so operators don't have
+          // to scan the raw JSON to understand why the gate fired.
+          const detail = (stage.detail ?? {}) as Record<string, unknown>;
+          const det =
+            detail["details"] && typeof detail["details"] === "object"
+              ? (detail["details"] as Record<string, unknown>)
+              : detail;
+          const subCheck = typeof det["sub_check"] === "string" ? (det["sub_check"] as string) : null;
+          if (!subCheck) return null;
+          const intendedSymbol =
+            typeof det["intended_symbol"] === "string"
+              ? (det["intended_symbol"] as string)
+              : null;
+          const projected = typeof det["projected"] === "number" ? (det["projected"] as number) : null;
+          const capUsd = typeof det["cap_usd"] === "number" ? (det["cap_usd"] as number) : null;
+          const capPct = typeof det["cap_pct"] === "number" ? (det["cap_pct"] as number) : null;
+          const pairsRaw = det["pair_contributions"];
+          const pairs =
+            Array.isArray(pairsRaw)
+              ? (pairsRaw as Array<Record<string, unknown>>).slice(0, 5)
+              : [];
+          return (
+            <div
+              className="rounded-md border border-warning/50 bg-warning/5 p-3 text-warning"
+              data-testid="panel-gate-sub-check"
+            >
+              <div className="font-semibold uppercase tracking-wider text-[11px]">
+                Sub-check: {subCheck}
+              </div>
+              <div className="mt-2 grid grid-cols-2 gap-2 text-[11px] text-warning/90">
+                {intendedSymbol ? (
+                  <Stat label="Intended symbol" value={intendedSymbol} />
+                ) : null}
+                {projected !== null ? (
+                  <Stat
+                    label="Projected exposure"
+                    value={`$${projected.toFixed(2)}`}
+                  />
+                ) : null}
+                {capUsd !== null ? (
+                  <Stat label="Cap" value={`$${capUsd.toFixed(2)}`} />
+                ) : null}
+                {capPct !== null ? (
+                  <Stat label="Cap %" value={`${(capPct * 100).toFixed(1)}%`} />
+                ) : null}
+              </div>
+              {pairs.length > 0 ? (
+                <div className="mt-3">
+                  <div className="text-[10px] uppercase tracking-wider text-warning/80">
+                    Top correlated pair contributions
+                  </div>
+                  <ul className="mt-1 space-y-0.5 text-[11px]">
+                    {pairs.map((p, i) => {
+                      const sym =
+                        typeof p["symbol"] === "string" ? (p["symbol"] as string) : "—";
+                      const corr =
+                        typeof p["correlation"] === "number"
+                          ? (p["correlation"] as number)
+                          : null;
+                      const contrib =
+                        typeof p["contribution_usd"] === "number"
+                          ? (p["contribution_usd"] as number)
+                          : null;
+                      return (
+                        <li key={`${sym}-${i}`} className="flex justify-between gap-3 font-mono">
+                          <span>{sym}</span>
+                          <span className="text-warning/80">
+                            ρ={corr === null ? "—" : corr.toFixed(2)}
+                            {contrib !== null ? ` · +$${contrib.toFixed(2)}` : ""}
+                          </span>
+                        </li>
+                      );
+                    })}
+                  </ul>
+                </div>
+              ) : null}
+            </div>
+          );
+        })()}
+
         {train.outcome === "place_error" && train.reason ? (
           <div className="rounded-md border border-loss/60 bg-loss/10 p-3 text-loss">
             <div className="font-semibold">Placement failed</div>

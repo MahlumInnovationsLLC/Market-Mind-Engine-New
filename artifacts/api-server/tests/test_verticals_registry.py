@@ -213,6 +213,18 @@ def test_dashboard_strip_preserves_legacy_order() -> None:
     assert strip.index("combat-individual") > strip.index("crypto"), (
         "combat-individual must come after the legacy three (insertion order)"
     )
+    # Task #218 promoted the `commodities` vertical onto the strip so
+    # the operator dashboard shows live commodities trade count + P&L
+    # alongside the other front-of-book verticals.  In
+    # `app/verticals/builtins.py` commodities is registered after
+    # the legacy three but before the later combat-individual / soccer
+    # block, so its position on the strip falls between them.
+    assert "commodities" in strip, (
+        "commodities vertical should appear on the strip after task #218"
+    )
+    assert strip.index("commodities") > strip.index("crypto"), (
+        "commodities must come after the legacy three (insertion order)"
+    )
 
 
 def test_crypto_binary_routes_through_specialist_predictor_hook() -> None:
