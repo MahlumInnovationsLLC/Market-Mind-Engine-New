@@ -13,6 +13,9 @@ type KalshiPosition = {
   market_exposure_cents: number;
   realized_pnl_cents: number;
   fees_paid_cents: number;
+  current_value_cents: number | null;
+  entry_price_cents: number | null;
+  last_price_cents: number | null;
 };
 
 type KalshiPositionsResponse = {
@@ -102,7 +105,13 @@ export default function ActivePositions() {
               <th className="py-1 text-left font-normal">MARKET</th>
               <th className="py-1 text-left font-normal">BET</th>
               <th className="py-1 text-right font-normal">QTY</th>
-              <th className="py-1 text-right font-normal">EXPOSURE</th>
+              <th className="py-1 text-right font-normal">COST</th>
+              <th
+                className="py-1 text-right font-normal"
+                title="Live mark-to-market value of the open position"
+              >
+                VALUE
+              </th>
               <th className="py-1 text-right font-normal">REAL_PNL</th>
             </tr>
           </thead>
@@ -146,8 +155,28 @@ export default function ActivePositions() {
                 <td className="py-1.5 text-right tabular-nums">
                   {Math.abs(p.position)}
                 </td>
-                <td className="py-1.5 text-right tabular-nums text-primary">
+                <td className="py-1.5 text-right tabular-nums text-muted-foreground">
                   {fmtUsd(p.market_exposure_cents)}
+                </td>
+                <td
+                  className="py-1.5 text-right tabular-nums text-primary"
+                  data-testid={`pos-value-${p.market_ticker}`}
+                >
+                  {p.current_value_cents === null
+                    ? "—"
+                    : fmtUsd(p.current_value_cents)}
+                  {p.current_value_cents !== null && (
+                    <div
+                      className={`text-[10px] ${pnlClass(
+                        p.current_value_cents - p.market_exposure_cents,
+                      )}`}
+                    >
+                      {p.current_value_cents - p.market_exposure_cents >= 0
+                        ? "+"
+                        : ""}
+                      {fmtUsd(p.current_value_cents - p.market_exposure_cents)}
+                    </div>
+                  )}
                 </td>
                 <td
                   className={`py-1.5 text-right tabular-nums font-bold ${pnlClass(p.realized_pnl_cents)}`}

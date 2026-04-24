@@ -27,6 +27,54 @@ from . import auth
 log = logging.getLogger(__name__)
 
 
+def _parse_position(row: dict[str, Any]) -> float:
+    """Read a Kalshi position size from a ``/portfolio/positions`` row.
+
+    Kalshi's modern payload uses ``position_fp`` (a string-encoded float
+    that supports fractional contracts via partial-fill aggregation).
+    The legacy ``position`` integer field is left in the response for
+    back-compat but is **always ``0`` for accounts that have any
+    fractional activity** — so reading it first silently hides every
+    open position.  We honour ``position_fp`` first and fall back to
+    the legacy field only when ``position_fp`` is missing.
+    """
+    fp = row.get("position_fp")
+    if fp is not None and fp != "":
+        try:
+            return float(fp)
+        except (TypeError, ValueError):
+            pass
+    legacy = row.get("position")
+    try:
+        return float(legacy or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _dollars_or_cents(
+    row: dict[str, Any], *, dollars_key: str, cents_key: str
+) -> int:
+    """Return a cent-denominated amount from a Kalshi position row.
+
+    Kalshi's modern payload ships dollar-denominated string fields
+    (e.g. ``market_exposure_dollars = "9.620000"``) alongside the
+    legacy integer-cents fields (which are zero for accounts with any
+    fractional activity).  Prefer the dollar field, converting via
+    ``round(dollars * 100)``, and fall back to the legacy cents field
+    when the dollar field is absent.
+    """
+    dval = row.get(dollars_key)
+    if dval is not None and dval != "":
+        try:
+            return int(round(float(dval) * 100))
+        except (TypeError, ValueError):
+            pass
+    try:
+        return int(row.get(cents_key) or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
 class KalshiAPIError(RuntimeError):
     def __init__(self, status: int, body: Any, message: str = "") -> None:
         super().__init__(message or f"Kalshi API error {status}: {body!r}")
@@ -48,7 +96,12 @@ class Balance:
 @dataclass
 class PositionSummary:
     market_ticker: str
-    position: int          # signed contracts (positive=YES, negative=NO)
+    # Signed contracts (positive=YES, negative=NO).  Kalshi's newer payload
+    # uses ``position_fp`` (a string-encoded float to support fractional
+    # contracts), so this field is a float to preserve precision for
+    # markets that sweep partial fills.  Legacy ``position`` (integer)
+    # is honoured as a fallback when ``position_fp`` is absent.
+    position: float
     market_exposure_cents: int
     realized_pnl_cents: int
     fees_paid_cents: int
@@ -148,10 +201,16 @@ class KalshiClient:
             out.append(
                 PositionSummary(
                     market_ticker=row.get("ticker") or row.get("market_ticker") or "",
-                    position=int(row.get("position") or 0),
-                    market_exposure_cents=int(row.get("market_exposure") or 0),
-                    realized_pnl_cents=int(row.get("realized_pnl") or 0),
-                    fees_paid_cents=int(row.get("fees_paid") or 0),
+                    position=_parse_position(row),
+                    market_exposure_cents=_dollars_or_cents(
+                        row, dollars_key="market_exposure_dollars", cents_key="market_exposure"
+                    ),
+                    realized_pnl_cents=_dollars_or_cents(
+                        row, dollars_key="realized_pnl_dollars", cents_key="realized_pnl"
+                    ),
+                    fees_paid_cents=_dollars_or_cents(
+                        row, dollars_key="fees_paid_dollars", cents_key="fees_paid"
+                    ),
                     raw=row,
                 )
             )

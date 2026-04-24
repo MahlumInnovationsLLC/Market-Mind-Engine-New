@@ -5336,25 +5336,178 @@ async def kalshi_balance(_: object = Depends(require_auth)) -> dict[str, object]
     }
 
 
+_KALSHI_MARKET_PRICE_CACHE: dict[str, tuple[float, dict]] = {}
+_KALSHI_MARKET_PRICE_TTL = 10.0  # seconds — short, since this powers live MTM
+
+
+async def _kalshi_fetch_market_cached(
+    client: "kalshi_client_mod.KalshiClient", ticker: str
+) -> dict | None:
+    """Fetch a Kalshi market with a small TTL cache.
+
+    The /api/kalshi/positions endpoint may be polled every few seconds
+    by the dashboard; without a cache we'd hammer Kalshi's per-market
+    endpoint once per ticker per poll.  A 10-second TTL is short enough
+    that mark-to-market remains live and long enough that a rapid poll
+    cycle reuses the previous fetch.
+    """
+    now = time.time()
+    hit = _KALSHI_MARKET_PRICE_CACHE.get(ticker)
+    if hit and now - hit[0] < _KALSHI_MARKET_PRICE_TTL:
+        return hit[1]
+    try:
+        data = await client.get_market(ticker)
+    except Exception as e:
+        log.debug("kalshi market fetch failed for %s: %s", ticker, e)
+        return None
+    market = data.get("market") if isinstance(data, dict) else None
+    if isinstance(market, dict):
+        _KALSHI_MARKET_PRICE_CACHE[ticker] = (now, market)
+        return market
+    return None
+
+
+async def _kalshi_resolve_market_prices(
+    client: "kalshi_client_mod.KalshiClient", tickers: list[str]
+) -> dict[str, dict]:
+    """Concurrently fetch live market data for a batch of tickers."""
+    sem = asyncio.Semaphore(8)
+    out: dict[str, dict] = {}
+
+    async def one(t: str) -> None:
+        async with sem:
+            m = await _kalshi_fetch_market_cached(client, t)
+            if m is not None:
+                out[t] = m
+
+    await asyncio.gather(*[one(t) for t in tickers])
+    return out
+
+
+def _kalshi_yes_mid_cents(market: dict | None) -> float | None:
+    """Read the live YES-leg mid-price for a Kalshi market, in cents 0..100.
+
+    Kalshi's modern ``/markets/{ticker}`` payload uses dollar-denominated
+    string fields (``yes_bid_dollars``, ``yes_ask_dollars``,
+    ``last_price_dollars``) — the legacy integer-cent fields
+    (``yes_bid``, ``yes_ask``, ``last_price``) are present but
+    **always None** on accounts that have any fractional activity.
+    We prefer the dollar fields, falling back to the legacy fields and
+    the previous-tick fields so a thinly-quoted market still shows
+    *something*.
+    """
+    if not market:
+        return None
+
+    def _dollars_to_cents(x) -> float | None:
+        if x is None or x == "":
+            return None
+        try:
+            return float(x) * 100.0
+        except (TypeError, ValueError):
+            return None
+
+    def _cents(x) -> float | None:
+        if x is None or x == "":
+            return None
+        try:
+            return float(x)
+        except (TypeError, ValueError):
+            return None
+
+    def _first_present(*candidates: float | None) -> float | None:
+        # Explicit ``is not None`` so a legitimate 0.0¢ quote (deep
+        # out-of-the-money or freshly-resolved leg) isn't silently
+        # discarded by Python's ``or`` truthiness — that would mark
+        # near-100¢ NO positions at the previous tick rather than the
+        # actual 0.0¢ YES quote.
+        for c in candidates:
+            if c is not None:
+                return c
+        return None
+
+    # Modern (dollar-suffixed) first, then legacy integer cents,
+    # then previous-tick fallbacks.
+    yb = _first_present(
+        _dollars_to_cents(market.get("yes_bid_dollars")),
+        _cents(market.get("yes_bid")),
+        _dollars_to_cents(market.get("previous_yes_bid_dollars")),
+    )
+    ya = _first_present(
+        _dollars_to_cents(market.get("yes_ask_dollars")),
+        _cents(market.get("yes_ask")),
+        _dollars_to_cents(market.get("previous_yes_ask_dollars")),
+    )
+    last = _first_present(
+        _dollars_to_cents(market.get("last_price_dollars")),
+        _cents(market.get("last_price")),
+        _dollars_to_cents(market.get("previous_price_dollars")),
+    )
+    if yb is not None and ya is not None:
+        return (yb + ya) / 2.0
+    if last is not None:
+        return last
+    if yb is not None:
+        return yb
+    if ya is not None:
+        return ya
+    return None
+
+
+def _kalshi_current_value_cents(position: float, market: dict | None) -> int | None:
+    """Mark-to-market value in cents for a Kalshi position.
+
+    YES contracts pay $1 if the market resolves YES; NO contracts pay
+    $1 if NO.  We mark each side at its current mid-price (or last
+    price as a fallback), so:
+
+    * YES position: ``position * yes_mid_cents``
+    * NO  position: ``|position| * (100 - yes_mid_cents)``
+
+    Returns ``None`` when the position is flat or no live price is
+    available, signalling the UI to hide the mark instead of showing
+    a misleading zero.
+    """
+    if position == 0:
+        return None
+    yes_price = _kalshi_yes_mid_cents(market)
+    if yes_price is None:
+        return None
+    if position > 0:
+        return int(round(position * yes_price))
+    return int(round(abs(position) * (100.0 - yes_price)))
+
+
 @app.get("/api/kalshi/positions")
 async def kalshi_positions(limit: int = 100, _: object = Depends(require_auth)) -> dict[str, object]:
     limit = max(1, min(500, int(limit)))
     try:
         async with kalshi_client_mod.KalshiClient() as c:
             pos = await c.get_positions(limit=limit)
+            # Enrich each position with a human-readable market title (cached
+            # in `market_title_cache`, falls back to Kalshi `/markets/{ticker}`)
+            # and a derived bet_type. The UI shows the title prominently and
+            # keeps the raw ticker as a small secondary line.
+            tickers = [p.market_ticker for p in pos if p.market_ticker]
+            titles: dict[str, str] = {}
+            if tickers:
+                try:
+                    titles = await kalshi_market_titles.resolve_titles(tickers)
+                except Exception as e:
+                    log.warning("market title enrichment failed for /api/kalshi/positions: %s", e)
+            # Live mark-to-market: only fetch prices for positions with
+            # non-zero size to avoid pointless round-trips for flat markets.
+            open_tickers = [
+                p.market_ticker for p in pos if p.market_ticker and p.position != 0
+            ]
+            markets: dict[str, dict] = {}
+            if open_tickers:
+                try:
+                    markets = await _kalshi_resolve_market_prices(c, open_tickers)
+                except Exception as e:
+                    log.warning("kalshi market price enrichment failed: %s", e)
     except Exception as e:
         raise _kalshi_error_to_http(e)
-    # Enrich each position with a human-readable market title (cached
-    # in `market_title_cache`, falls back to Kalshi `/markets/{ticker}`)
-    # and a derived bet_type. The UI shows the title prominently and
-    # keeps the raw ticker as a small secondary line.
-    tickers = [p.market_ticker for p in pos if p.market_ticker]
-    titles: dict[str, str] = {}
-    if tickers:
-        try:
-            titles = await kalshi_market_titles.resolve_titles(tickers)
-        except Exception as e:
-            log.warning("market title enrichment failed for /api/kalshi/positions: %s", e)
     items: list[dict[str, object]] = []
     for p in pos:
         if p.position > 0:
@@ -5363,6 +5516,25 @@ async def kalshi_positions(limit: int = 100, _: object = Depends(require_auth)) 
             bet_type = "NO"
         else:
             bet_type = "FLAT"
+        market = markets.get(p.market_ticker)
+        cv = _kalshi_current_value_cents(p.position, market)
+        # Entry-side reference (cents 0..100) — used by the UI as the
+        # entry/cost basis for the position's chosen side.  Cost basis
+        # per contract = market_exposure_cents / |position|.
+        entry_per_contract: int | None = None
+        if p.position != 0 and p.market_exposure_cents:
+            try:
+                entry_per_contract = int(round(
+                    p.market_exposure_cents / abs(p.position)
+                ))
+            except (ZeroDivisionError, TypeError):
+                entry_per_contract = None
+        # Live mid-price for the YES leg in cents (for chart/diagnostic
+        # use).  Uses the same dollar-suffixed-first resolution as
+        # _kalshi_yes_mid_cents so the UI's per-contract Mark column
+        # stays in sync with the live MTM.
+        yes_mid = _kalshi_yes_mid_cents(market) if market is not None else None
+        last_price_cents = int(round(yes_mid)) if yes_mid is not None else None
         items.append({
             "market_ticker": p.market_ticker,
             "market_title": titles.get(p.market_ticker),
@@ -5371,6 +5543,9 @@ async def kalshi_positions(limit: int = 100, _: object = Depends(require_auth)) 
             "market_exposure_cents": p.market_exposure_cents,
             "realized_pnl_cents": p.realized_pnl_cents,
             "fees_paid_cents": p.fees_paid_cents,
+            "current_value_cents": cv,
+            "entry_price_cents": entry_per_contract,
+            "last_price_cents": last_price_cents,
         })
     return {"items": items, "count": len(pos)}
 

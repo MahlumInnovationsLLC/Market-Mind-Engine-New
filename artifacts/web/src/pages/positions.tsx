@@ -18,6 +18,13 @@ type KalshiPosition = {
   market_exposure_cents: number;
   realized_pnl_cents: number;
   fees_paid_cents: number;
+  // Live mark-to-market: dollar value of the open position at current
+  // mid/last market price (null when flat or no live quote available).
+  current_value_cents: number | null;
+  // Cost basis per contract, in cents 0..100 (avg entry on the chosen side).
+  entry_price_cents: number | null;
+  // Live YES-leg per-contract price in cents (mark for the YES side).
+  last_price_cents: number | null;
 };
 
 type KalshiPositionsResponse = {
@@ -31,6 +38,7 @@ type SortKey =
   | "qty"
   | "entry"
   | "mark"
+  | "value"
   | "pnl"
   | "edge"
   | "age";
@@ -140,6 +148,12 @@ type Row = {
   entry: number | null;
   mark: number | null;
   pnlCents: number;
+  // Live mark-to-market dollar value of the open position, in cents.
+  // null when the position is flat or no live quote is available.
+  currentValueCents: number | null;
+  // Unrealized P&L in cents = current_value - cost_basis.  null when
+  // either side is missing.
+  unrealizedPnlCents: number | null;
   edge: number | null;
   ageSeconds: number | null;
   vertical: string | null;
@@ -209,11 +223,29 @@ export default function PositionsPage() {
       // the **latest** matching fill — we don't have positional avg-cost
       // basis on /api/kalshi/positions, so the latest fill is the
       // closest signal we can surface without a new endpoint.
+      // Prefer the API-derived cost basis (avg entry on the chosen side,
+      // computed from market_exposure_cents / |position|) over the latest
+      // fill price — the latter only reflects the most recent partial fill
+      // and can disagree with the averaged cost basis after multiple fills.
       const entry =
-        latest && typeof latest.price === "number" ? latest.price : null;
+        p.entry_price_cents ??
+        (latest && typeof latest.price === "number" ? latest.price : null);
       const ageSeconds = latest?.executed_at
         ? Math.max(0, (now - new Date(latest.executed_at).getTime()) / 1000)
         : null;
+      // Mark = per-contract live price for the position's chosen side.
+      // For a YES position that's the YES mid; for NO it's (100 - YES mid).
+      // The backend ships YES-leg `last_price_cents`; flip for NO so the
+      // Mark column always shows the live price of the side actually held.
+      let mark: number | null = null;
+      if (p.last_price_cents !== null && p.last_price_cents !== undefined) {
+        mark = p.position < 0 ? 100 - p.last_price_cents : p.last_price_cents;
+      }
+      const currentValueCents = p.current_value_cents ?? null;
+      const unrealizedPnlCents =
+        currentValueCents !== null && p.market_exposure_cents !== null
+          ? currentValueCents - p.market_exposure_cents
+          : null;
       return {
         market: p.market_ticker,
         marketTitle: p.market_title ?? null,
@@ -221,8 +253,10 @@ export default function PositionsPage() {
         side: latest?.side ?? null,
         qty: p.position,
         entry,
-        mark: null, // No live mark — see /trade/:ref for chart.
+        mark,
         pnlCents: p.realized_pnl_cents,
+        currentValueCents,
+        unrealizedPnlCents,
         edge: null, // Edge not surfaced on /api/kalshi/positions; per-trade only.
         ageSeconds,
         vertical: latest?.vertical ?? null,
@@ -268,6 +302,8 @@ export default function PositionsPage() {
           return r.entry ?? -Infinity;
         case "mark":
           return r.mark ?? -Infinity;
+        case "value":
+          return r.currentValueCents ?? -Infinity;
         case "pnl":
           return r.pnlCents;
         case "edge":
@@ -381,7 +417,8 @@ export default function PositionsPage() {
                   <Th label="Side" k="side" sortKey={sortKey} sortDir={sortDir} onClick={toggleSort} align="left" />
                   <Th label="Qty" k="qty" sortKey={sortKey} sortDir={sortDir} onClick={toggleSort} align="right" />
                   <Th label="Entry" k="entry" sortKey={sortKey} sortDir={sortDir} onClick={toggleSort} align="right" />
-                  <Th label="Mark" k="mark" sortKey={sortKey} sortDir={sortDir} onClick={toggleSort} align="right" disabled title="Mark not surfaced on positions endpoint" />
+                  <Th label="Mark" k="mark" sortKey={sortKey} sortDir={sortDir} onClick={toggleSort} align="right" title="Live per-contract mid for the side held (YES mid for YES; 100 - YES mid for NO)" />
+                  <Th label="Value" k="value" sortKey={sortKey} sortDir={sortDir} onClick={toggleSort} align="right" title="Live mark-to-market value of the open position" />
                   <Th label="P&L" k="pnl" sortKey={sortKey} sortDir={sortDir} onClick={toggleSort} align="right" />
                   <Th label="Edge" k="edge" sortKey={sortKey} sortDir={sortDir} onClick={toggleSort} align="right" disabled title="Edge is per-trade — open a row to view" />
                   <Th label="Age" k="age" sortKey={sortKey} sortDir={sortDir} onClick={toggleSort} align="right" />
@@ -476,8 +513,34 @@ export default function PositionsPage() {
                       <td className="py-2 text-right tabular-nums">
                         {fmtMoney(r.entry)}
                       </td>
-                      <td className="py-2 text-right tabular-nums text-muted-foreground">
-                        {r.mark === null ? "—" : fmtMoney(r.mark)}
+                      <td
+                        className="py-2 text-right tabular-nums text-muted-foreground"
+                        data-testid={`pos-row-mark-${r.market}`}
+                      >
+                        {r.mark === null ? "—" : `${r.mark.toFixed(0)}¢`}
+                      </td>
+                      <td
+                        className="py-2 text-right tabular-nums"
+                        data-testid={`pos-row-value-${r.market}`}
+                      >
+                        {r.currentValueCents === null ? (
+                          <span className="text-muted-foreground">—</span>
+                        ) : (
+                          <div>
+                            <div className="text-foreground">
+                              {fmtUsd(r.currentValueCents)}
+                            </div>
+                            {r.unrealizedPnlCents !== null && (
+                              <div
+                                className={`text-[10px] ${pnlClass(r.unrealizedPnlCents)}`}
+                                data-testid={`pos-row-unrealized-${r.market}`}
+                              >
+                                {r.unrealizedPnlCents >= 0 ? "+" : ""}
+                                {fmtUsd(r.unrealizedPnlCents)}
+                              </div>
+                            )}
+                          </div>
+                        )}
                       </td>
                       <td
                         className={`py-2 text-right tabular-nums font-bold ${pnlClass(r.pnlCents)}`}
