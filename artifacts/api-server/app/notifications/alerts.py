@@ -1975,4 +1975,66 @@ def weekly_roundup(
     )
     if notes:
         body += f"\nNotes:\n  {notes}\n"
-    return _dispatch(subject, body, tag="weekly-roundup", dry_run=dry_run)
+    html_body = _render_weekly_roundup_html(
+        week_ending_utc=week_ending_utc,
+        summary_rows=rows,
+        notes=notes,
+    )
+    return _dispatch(
+        subject, body, tag="weekly-roundup", dry_run=dry_run, html_body=html_body
+    )
+
+
+def _render_weekly_roundup_html(
+    *,
+    week_ending_utc: str,
+    summary_rows: list[tuple[str, Any]],
+    notes: str | None,
+) -> str:
+    overview_headers = [("Metric", "left"), ("Value", "right")]
+    overview_rows = []
+    for k, v in summary_rows:
+        if k in ("realized_pnl", "unrealized_pnl") and isinstance(v, str):
+            color = "#047857" if v.startswith("+") else "#B91C1C"
+            value_html = f'<span style="color:{color};">{_html_escape(v)}</span>'
+        else:
+            value_html = _html_escape(v)
+        overview_rows.append([_html_escape(k), value_html])
+    overview_html = _html_table(overview_headers, overview_rows)
+
+    notes_html = ""
+    if notes:
+        notes_html = (
+            '<h3 style="margin:24px 0 8px 0;font-size:14px;color:#111827;">Notes</h3>'
+            f'<p style="margin:0;color:#374151;font-size:13px;line-height:1.5;'
+            f'white-space:pre-wrap;">{_html_escape(notes)}</p>'
+        )
+
+    return f"""<!DOCTYPE html>
+<html>
+<body style="margin:0;padding:0;background:#F9FAFB;{_HTML_SANS}">
+  <table width="100%" cellpadding="0" cellspacing="0" style="background:#F9FAFB;padding:24px 0;">
+    <tr><td align="center">
+      <table width="640" cellpadding="0" cellspacing="0" style="background:#FFFFFF;border:1px solid #E5E7EB;border-radius:8px;overflow:hidden;max-width:640px;width:100%;">
+        <tr>
+          <td style="background:#111827;color:#F9FAFB;padding:20px 24px;">
+            <div style="font-size:11px;letter-spacing:0.16em;text-transform:uppercase;color:#9CA3AF;">Axiom Predict</div>
+            <div style="font-size:20px;font-weight:700;margin-top:4px;">Weekly roundup &middot; w/e {_html_escape(week_ending_utc)}</div>
+          </td>
+        </tr>
+        <tr>
+          <td style="padding:20px 24px;">
+            {overview_html}
+            {notes_html}
+          </td>
+        </tr>
+        <tr>
+          <td style="padding:12px 24px 20px 24px;border-top:1px solid #E5E7EB;color:#6B7280;font-size:11px;line-height:1.5;">
+            Sent automatically once per ISO week. A plain-text copy is included for clients that don't render HTML.
+          </td>
+        </tr>
+      </table>
+    </td></tr>
+  </table>
+</body>
+</html>"""
