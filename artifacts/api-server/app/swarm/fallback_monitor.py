@@ -61,6 +61,46 @@ GROUP BY metadata ->> 'primary_provider'
 """
 
 
+async def fetch_provider_stats(window_minutes: int) -> list[dict[str, Any]]:
+    """Return per-primary-provider fallback stats over the trailing window.
+
+    Each entry is ``{"provider", "total", "fallback", "rate", "reasons"}``
+    where ``rate`` is ``fallback / total`` in [0, 1]. The list is sorted
+    by ``rate`` descending (with ``total`` as the tiebreaker) so callers
+    that only care about the worst offenders can trim from the head.
+
+    Errors are logged and swallowed (returns ``[]``) so the dashboard
+    endpoint and the alert loop both stay resilient against a transient
+    DB hiccup.
+    """
+    window = max(1, int(window_minutes))
+    from .. import db
+    try:
+        rows = await db.fetch(_QUERY, window)
+    except Exception as e:
+        log.warning("fallback monitor query failed: %s", e)
+        return []
+
+    out: list[dict[str, Any]] = []
+    for r in rows:
+        provider = r["provider"] or "unknown"
+        total = int(r["total"] or 0)
+        fallback = int(r["fallback"] or 0)
+        rate = (fallback / total) if total else 0.0
+        reasons = list(r["reasons"] or [])
+        out.append(
+            {
+                "provider": provider,
+                "total": total,
+                "fallback": fallback,
+                "rate": rate,
+                "reasons": reasons,
+            }
+        )
+    out.sort(key=lambda s: (-s["rate"], -s["total"], s["provider"]))
+    return out
+
+
 async def check_once() -> list[dict[str, Any]]:
     """Run one fallback-rate check and dispatch alerts as needed.
 
@@ -76,21 +116,16 @@ async def check_once() -> list[dict[str, Any]]:
     threshold = s.llm_fallback_alert_threshold_pct / 100.0
     min_samples = s.llm_fallback_alert_min_samples
 
-    from .. import db
-    try:
-        rows = await db.fetch(_QUERY, window)
-    except Exception as e:
-        log.warning("fallback monitor query failed: %s", e)
-        return []
+    rows = await fetch_provider_stats(window)
 
     out: list[dict[str, Any]] = []
     from ..notifications import alerts as _alerts
     for r in rows:
-        provider = r["provider"] or "unknown"
-        total = int(r["total"] or 0)
-        fallback = int(r["fallback"] or 0)
-        rate = (fallback / total) if total else 0.0
-        reasons = list(r["reasons"] or [])
+        provider = r["provider"]
+        total = int(r["total"])
+        fallback = int(r["fallback"])
+        rate = float(r["rate"])
+        reasons = list(r["reasons"])
         stats = {
             "provider": provider,
             "total": total,

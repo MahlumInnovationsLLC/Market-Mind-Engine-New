@@ -28,6 +28,7 @@ import TradingCycles from "@/components/telemetry/trading-cycles";
 import SwarmAnalysts from "@/components/telemetry/swarm-analysts";
 import SwarmPersonasToday from "@/components/telemetry/swarm-personas-today";
 import SwarmFallbacksToday from "@/components/telemetry/swarm-fallbacks-today";
+import ProviderFallbackRates from "@/components/telemetry/provider-fallback-rates";
 import SwarmDebates from "@/components/telemetry/swarm-debates";
 import VerticalPerformance from "@/components/telemetry/vertical-performance";
 import VerticalPicker from "@/components/telemetry/vertical-picker";
@@ -162,14 +163,24 @@ export default function Dashboard() {
           </GlassCard>
         </div>
 
-        <GlassCard tone="solid" padding="md" data-testid="card-swarm-fallbacks-today">
-          <SectionHeader
-            eyebrow="SWARM"
-            title="Provider fallbacks today"
-            subtitle="Per-persona count of cross-provider LLM fallbacks (UTC). A spike means a primary model is failing."
-          />
-          <SwarmFallbacksToday />
-        </GlassCard>
+        <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
+          <GlassCard tone="solid" padding="md" data-testid="card-llm-fallback-rates-wrap">
+            <SectionHeader
+              eyebrow="SWARM"
+              title="Provider fallback rate"
+              subtitle="Per-provider LLM fallback rate over the same trailing window the alert uses. Watch a row creep up before it pages."
+            />
+            <ProviderFallbackRates />
+          </GlassCard>
+          <GlassCard tone="solid" padding="md" data-testid="card-swarm-fallbacks-today">
+            <SectionHeader
+              eyebrow="SWARM"
+              title="Provider fallbacks today"
+              subtitle="Per-persona count of cross-provider LLM fallbacks (UTC). A spike means a primary model is failing."
+            />
+            <SwarmFallbacksToday />
+          </GlassCard>
+        </div>
 
         <TelegramConcierge />
 

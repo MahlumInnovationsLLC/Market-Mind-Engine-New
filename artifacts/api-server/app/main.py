@@ -4223,6 +4223,20 @@ async def dashboard_swarm_fallbacks_today(
     return await dashboard.get_swarm_fallbacks_today()
 
 
+@app.get("/api/dashboard/llm-fallback-rates")
+async def dashboard_llm_fallback_rates(
+    _: object = Depends(require_approved_user),
+) -> dict[str, object]:
+    """Per-provider LLM fallback rate over the alert's trailing window.
+
+    Surfaces the same data the ``llm-fallback-spike`` alert evaluates so
+    operators can watch a provider's failure rate creep up *before* the
+    alert actually pages, and confirm "things are healthy" again after
+    an incident clears without waiting for the next alert tick.
+    """
+    return await dashboard.get_provider_fallback_rates()
+
+
 @app.get("/api/market-title/{ticker}")
 async def market_title_lookup(
     ticker: str,

@@ -252,6 +252,59 @@ async def get_swarm_fallbacks_today(date_utc: str | None = None) -> dict[str, An
     return {"date_utc": date_utc, "items": items}
 
 
+async def get_provider_fallback_rates() -> dict[str, Any]:
+    """Per-provider LLM fallback rate over the alert's trailing window.
+
+    Operators use this panel to spot a primary provider whose failure
+    rate is creeping up *before* the alert in
+    :mod:`app.swarm.fallback_monitor` actually fires.  We surface the
+    same window / threshold / min-sample knobs so the panel and the
+    alert never disagree.
+
+    Returns ``{window_minutes, threshold_pct, min_samples, alert_enabled,
+    items: [{provider, total, fallback, rate, reasons, would_alert}]}``.
+    The ``rate`` is a fraction in ``[0, 1]``.  ``would_alert`` is true
+    iff the row has enough samples *and* its rate is over the threshold,
+    so the UI can colour it red even when the alert was deduped.
+    """
+    from .config import get_settings as _get_settings
+    from .swarm.fallback_monitor import fetch_provider_stats
+
+    s = _get_settings()
+    window = s.llm_fallback_alert_window_minutes
+    threshold_pct = float(s.llm_fallback_alert_threshold_pct)
+    min_samples = int(s.llm_fallback_alert_min_samples)
+    threshold = threshold_pct / 100.0
+
+    try:
+        stats = await fetch_provider_stats(window)
+    except Exception as e:
+        log.warning("provider_fallback_rates failed: %s", e)
+        stats = []
+
+    items: list[dict[str, Any]] = []
+    for r in stats:
+        total = int(r["total"])
+        rate = float(r["rate"])
+        items.append(
+            {
+                "provider": r["provider"],
+                "total": total,
+                "fallback": int(r["fallback"]),
+                "rate": rate,
+                "reasons": list(r["reasons"]),
+                "would_alert": total >= min_samples and rate > threshold,
+            }
+        )
+    return {
+        "window_minutes": int(window),
+        "threshold_pct": threshold_pct,
+        "min_samples": min_samples,
+        "alert_enabled": bool(s.llm_fallback_alert_enabled),
+        "items": items,
+    }
+
+
 async def get_recent_cycles(limit: int = 10) -> list[dict[str, Any]]:
     try:
         rows = await db.fetch(

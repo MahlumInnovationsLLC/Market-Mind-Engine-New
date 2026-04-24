@@ -44,6 +44,8 @@ PROTECTED_ROUTES: tuple[str, ...] = (
     "/api/dashboard/swarm-personas",
     "/api/dashboard/swarm-personas-today",
     "/api/dashboard/swarm-fallbacks-today",
+    # Task #361 — per-provider LLM fallback rate panel on the operator dashboard.
+    "/api/dashboard/llm-fallback-rates",
     "/api/dashboard/recent-cycles",
     "/api/dashboard/vertical-performance",
     "/api/dashboard/over-filled-orders-today",
