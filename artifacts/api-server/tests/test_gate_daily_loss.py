@@ -71,18 +71,16 @@ class _Patcher:
         self.halt_calls: list[str] = []
         self.alerts: list[dict] = []
 
-    async def _fake_sum_realized(self, today, tz_name="UTC"):
+    async def _fake_fetch_inputs(self, today, tz_name="UTC"):
+        # Mirrors the old per-helper bookkeeping so the existing TZ
+        # assertions (last_tz_realized / last_tz_bankroll) still work
+        # with the collapsed single-query aggregate.
+        self.fetch_inputs_calls += 1
         self.last_tz_realized = tz_name
         self.last_date_realized = today
-        return float(self.realized)
-
-    async def _fake_sum_unrealized(self):
-        return float(self.unrealized)
-
-    async def _fake_start_of_day(self, today, tz_name="UTC"):
         self.last_tz_bankroll = tz_name
         self.last_date_bankroll = today
-        return self.bankroll
+        return float(self.realized), float(self.unrealized), self.bankroll
 
     async def _fake_current_mode(self):
         return self.trading_mode
@@ -109,13 +107,12 @@ class _Patcher:
 
     def __enter__(self):
         self._dedupe_seen: set[tuple] = set()
+        self.fetch_inputs_calls = 0
         _dl.invalidate_cache()
         self._patches = [
             patch.object(_dl, "_today_utc", lambda: self.today),
             patch.object(_dl, "_today_in_tz", lambda tz: self.today),
-            patch.object(_dl, "_sum_realized_today", self._fake_sum_realized),
-            patch.object(_dl, "_sum_unrealized", self._fake_sum_unrealized),
-            patch.object(_dl, "_start_of_day_bankroll", self._fake_start_of_day),
+            patch.object(_dl, "_fetch_snapshot_inputs", self._fake_fetch_inputs),
             patch.object(_dl, "_current_trading_mode", self._fake_current_mode),
             patch.object(_dl, "_persist_halt", self._fake_persist),
             patch(
@@ -402,3 +399,39 @@ def test_snapshot_green_day_reports_zero_loss(monkeypatch):
     assert snap.net_pnl_usd == 350.0
     assert snap.loss_usd == 0.0
     assert snap.tripped is False
+
+
+def test_snapshot_uses_single_db_round_trip(monkeypatch):
+    """Cache-miss path must hit the DB exactly once — realized + unrealized
+    + start-of-day bankroll are collapsed into a single CTE aggregate
+    (task #285) instead of three separate fetchrow/fetchval calls."""
+    monkeypatch.delenv("AXIOM_DAILY_LOSS_HALT_USD", raising=False)
+    monkeypatch.delenv("AXIOM_DAILY_LOSS_HALT_PCT", raising=False)
+    db_calls: list[tuple[str, tuple]] = []
+
+    async def _spy_fetchrow(query, *args):
+        db_calls.append(("fetchrow", args))
+        return {
+            "realized": -100.0,
+            "unrealized": -25.0,
+            "sod_balance_cents": 250_000,  # $2,500.00
+        }
+
+    async def _spy_fetchval(query, *args):
+        db_calls.append(("fetchval", args))
+        return None
+
+    _dl.invalidate_cache()
+    from app import db as _db
+
+    with patch.object(_db, "fetchrow", _spy_fetchrow), \
+         patch.object(_db, "fetchval", _spy_fetchval):
+        snap = asyncio.run(_dl.compute_snapshot(None))
+
+    # Exactly one DB round-trip per snapshot — no per-input fetches.
+    assert len(db_calls) == 1
+    assert db_calls[0][0] == "fetchrow"
+    assert snap.realized_pnl_usd == -100.0
+    assert snap.unrealized_pnl_usd == -25.0
+    assert snap.start_of_day_bankroll_usd == 2500.0
+    _dl.invalidate_cache()

@@ -140,76 +140,79 @@ def _read_threshold_pct(overrides: dict[str, Any] | None) -> float | None:
         return None
 
 
-async def _sum_realized_today(today: date, tz_name: str = DEFAULT_TZ) -> float:
-    try:
-        row = await db.fetchrow(
-            """
-            SELECT coalesce(sum(realized_pnl), 0)::float AS realized
-              FROM trades
-             WHERE settled_at IS NOT NULL
-               AND ((settled_at at time zone $2)::date) = $1
-            """,
-            today,
-            tz_name,
-        )
-        return float(row["realized"] or 0.0) if row else 0.0
-    except Exception as e:
-        log.warning("daily_loss realized query failed: %s", e)
-        return 0.0
-
-
-async def _sum_unrealized() -> float:
-    try:
-        row = await db.fetchrow(
-            """
-            SELECT coalesce(sum(unrealized_pnl), 0)::float AS unr
-              FROM positions
-             WHERE coalesce(status, 'open') = 'open'
-            """,
-        )
-        return float(row["unr"] or 0.0) if row else 0.0
-    except Exception as e:
-        log.warning("daily_loss unrealized query failed: %s", e)
-        return 0.0
-
-
-async def _start_of_day_bankroll(
+async def _fetch_snapshot_inputs(
     today: date, tz_name: str = DEFAULT_TZ
-) -> float | None:
-    """Balance before the first bankroll_events row of ``today``
-    (expressed in the configured trading-day timezone).
+) -> tuple[float, float, float | None]:
+    """Aggregate the three snapshot inputs in a single round-trip.
 
-    Falls back to the latest bankroll_events balance, which is correct
-    on a quiet day — if there were no bankroll changes yet today, the
-    latest balance IS the start-of-day balance.
+    Returns ``(realized_pnl_today_usd, unrealized_pnl_open_usd,
+    start_of_day_bankroll_usd_or_None)``.
+
+    The CTEs preserve the exact semantics of the older per-query helpers:
+
+    * ``realized`` sums settled trades whose ``settled_at`` falls on
+      ``$1`` when projected into ``$2`` (the configured trading-day TZ).
+    * ``unrealized`` sums open positions' ``unrealized_pnl``.
+    * Start-of-day bankroll is the latest ``bankroll_events.balance_cents``
+      strictly before ``$1`` in the same TZ, falling back to the earliest
+      row ever recorded so the pct threshold still has a denominator on
+      day-1 deploys when no prior-day rows exist.
+
+    A failure returns the same safe defaults the per-query paths used so
+    the gate keeps passing rather than blocking trades on a transient DB
+    error — the 5s snapshot cache absorbs a brief outage.
     """
     try:
-        v = await db.fetchval(
+        row = await db.fetchrow(
             """
-            SELECT balance_cents FROM bankroll_events
-             WHERE ((created_at at time zone $2)::date) < $1
-             ORDER BY id DESC
-             LIMIT 1
+            WITH realized AS (
+                SELECT coalesce(sum(realized_pnl), 0)::float AS v
+                  FROM trades
+                 WHERE settled_at IS NOT NULL
+                   AND ((settled_at at time zone $2)::date) = $1
+            ),
+            unrealized AS (
+                SELECT coalesce(sum(unrealized_pnl), 0)::float AS v
+                  FROM positions
+                 WHERE coalesce(status, 'open') = 'open'
+            ),
+            sod_primary AS (
+                SELECT balance_cents
+                  FROM bankroll_events
+                 WHERE ((created_at at time zone $2)::date) < $1
+                 ORDER BY id DESC
+                 LIMIT 1
+            ),
+            sod_fallback AS (
+                SELECT balance_cents
+                  FROM bankroll_events
+                 ORDER BY id ASC
+                 LIMIT 1
+            )
+            SELECT
+                (SELECT v FROM realized) AS realized,
+                (SELECT v FROM unrealized) AS unrealized,
+                COALESCE(
+                    (SELECT balance_cents FROM sod_primary),
+                    (SELECT balance_cents FROM sod_fallback)
+                ) AS sod_balance_cents
             """,
             today,
             tz_name,
         )
-        if v is not None:
-            return float(int(v)) / 100.0
     except Exception as e:
-        log.debug("daily_loss start-of-day query failed: %s", e)
-    # No rows before today — use the earliest row as a proxy (first ever
-    # recorded balance) rather than nothing, so the pct threshold still
-    # has a denominator on day-1 deploys.
-    try:
-        v = await db.fetchval(
-            "SELECT balance_cents FROM bankroll_events ORDER BY id ASC LIMIT 1"
-        )
-        if v is not None:
-            return float(int(v)) / 100.0
-    except Exception as e:
-        log.debug("daily_loss fallback bankroll query failed: %s", e)
-    return None
+        log.warning("daily_loss snapshot aggregate query failed: %s", e)
+        return 0.0, 0.0, None
+
+    if row is None:
+        return 0.0, 0.0, None
+    realized = float(row["realized"] or 0.0)
+    unrealized = float(row["unrealized"] or 0.0)
+    sod_cents = row["sod_balance_cents"]
+    bankroll = (
+        float(int(sod_cents)) / 100.0 if sod_cents is not None else None
+    )
+    return realized, unrealized, bankroll
 
 
 async def compute_snapshot(
@@ -246,10 +249,8 @@ async def compute_snapshot(
             ):
                 return snap
         today = _today_in_tz(tz)
-        realized, unrealized, bankroll = await asyncio.gather(
-            _sum_realized_today(today, tz_name),
-            _sum_unrealized(),
-            _start_of_day_bankroll(today, tz_name),
+        realized, unrealized, bankroll = await _fetch_snapshot_inputs(
+            today, tz_name
         )
         net = float(realized) + float(unrealized)
         loss = -net if net < 0 else 0.0
