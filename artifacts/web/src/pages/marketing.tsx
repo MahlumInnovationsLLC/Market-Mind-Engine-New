@@ -721,14 +721,26 @@ export default function MarketingPage() {
             <PhoneFrame
               src={`${import.meta.env.BASE_URL}app-screens/signin.jpg`}
               alt="Axiom_Predict mobile operator sign-in screen"
-              className="hidden sm:block translate-y-4 rotate-[-3deg] opacity-90"
+              className="hidden lg:block translate-y-6 rotate-[-6deg] opacity-80"
               testId="phone-frame-signin"
             />
             <PhoneFrame
-              src={`${import.meta.env.BASE_URL}app-screens/request-access.jpg`}
-              alt="Axiom_Predict mobile request-access screen"
-              className="rotate-[2deg]"
-              testId="phone-frame-request-access"
+              src={`${import.meta.env.BASE_URL}app-screens/overview-dark.jpg`}
+              alt="Axiom_Predict mobile operator overview dashboard with realized P&L, win rate, and swarm activity"
+              className="z-10 -translate-y-2 shadow-primary/20"
+              testId="phone-frame-overview"
+            />
+            <PhoneFrame
+              src={`${import.meta.env.BASE_URL}app-screens/positions-dark.jpg`}
+              alt="Axiom_Predict mobile positions tab listing live trades with prices and P&L"
+              className="hidden sm:block translate-y-4 rotate-[5deg] opacity-90"
+              testId="phone-frame-positions"
+            />
+            <PhoneFrame
+              src={`${import.meta.env.BASE_URL}app-screens/pipeline-dark.jpg`}
+              alt="Axiom_Predict mobile pipeline tab showing recent trading cycles"
+              className="hidden xl:block translate-y-6 rotate-[8deg] opacity-80"
+              testId="phone-frame-pipeline"
             />
           </div>
         </div>

@@ -1,0 +1,20 @@
+uploads = []
+generated = []
+
+[[outputs]]
+id = "CmVmUwFtJmC-a-l6DeYmS"
+uri = "file://artifacts/web/public/app-screens/overview-dark.jpg"
+type = "image"
+title = "overview dark"
+
+[[outputs]]
+id = "tZoGhEFG3THGG68QdbiQu"
+uri = "file://artifacts/web/public/app-screens/pipeline-light.jpg"
+type = "image"
+title = "pipeline light"
+
+[[outputs]]
+id = "QCrDHzV2tX_jqCWSnhvjq"
+uri = "file://artifacts/web/public/app-screens/positions-dark.jpg"
+type = "image"
+title = "positions dark"

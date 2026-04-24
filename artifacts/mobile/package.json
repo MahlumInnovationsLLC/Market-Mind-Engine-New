@@ -10,7 +10,8 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "jest",
     "test:coverage": "jest --coverage",
-    "test:e2e": "playwright test"
+    "test:e2e": "playwright test",
+    "capture:app-screens": "node scripts/capture-app-screens.js"
   },
   "dependencies": {
     "@clerk/expo": "^3.2.1",
