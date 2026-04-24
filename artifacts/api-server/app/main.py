@@ -3811,8 +3811,18 @@ async def dashboard_swarm_personas(
     return {"items": await dashboard.get_swarm_personas()}
 
 
+SWARM_PERSONAS_TODAY_LOOKBACK_DAYS = 14
+
+
 @app.get("/api/dashboard/swarm-personas-today")
 async def dashboard_swarm_personas_today(
+    date_utc: str | None = Query(
+        default=None,
+        description=(
+            "Optional UTC calendar day (YYYY-MM-DD) to aggregate. "
+            f"Bounded to today and the previous {SWARM_PERSONAS_TODAY_LOOKBACK_DAYS} days."
+        ),
+    ),
     _: object = Depends(require_approved_user),
 ) -> dict[str, object]:
     """Today's per-persona aggregate (debates, Brier, accuracy, lean
@@ -3820,7 +3830,33 @@ async def dashboard_swarm_personas_today(
 
     Shares the same aggregator as the daily summary email so operators
     can spot a misbehaving persona before the morning digest arrives.
+
+    Accepts an optional ``date_utc=YYYY-MM-DD`` so operators can scrub
+    through recent days inline without waiting for the morning email.
+    The window is bounded to today and the previous
+    ``SWARM_PERSONAS_TODAY_LOOKBACK_DAYS`` calendar days (UTC).
     """
+    from datetime import date, datetime, timedelta, timezone
+
+    if date_utc is not None:
+        try:
+            requested = datetime.strptime(date_utc, "%Y-%m-%d").date()
+        except ValueError:
+            raise HTTPException(
+                status_code=400,
+                detail="date_utc must be formatted as YYYY-MM-DD",
+            )
+        today: date = datetime.now(tz=timezone.utc).date()
+        earliest = today - timedelta(days=SWARM_PERSONAS_TODAY_LOOKBACK_DAYS)
+        if requested > today or requested < earliest:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"date_utc must be between {earliest.isoformat()} "
+                    f"and {today.isoformat()} (inclusive)"
+                ),
+            )
+        return await dashboard.get_swarm_personas_today(requested.isoformat())
     return await dashboard.get_swarm_personas_today()
 
 

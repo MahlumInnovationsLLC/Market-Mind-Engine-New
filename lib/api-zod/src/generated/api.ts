@@ -189,8 +189,22 @@ export const GetSwarmPersonasResponse = zod.object({
 });
 
 /**
- * @summary Today's per-persona Brier / accuracy / lean breakdown (UTC)
+ * @summary Per-persona Brier / accuracy / lean breakdown for a UTC day
  */
+export const getSwarmPersonasTodayQueryDateUtcRegExp = new RegExp(
+  "^\\d{4}-\\d{2}-\\d{2}$",
+);
+
+export const GetSwarmPersonasTodayQueryParams = zod.object({
+  date_utc: zod.coerce
+    .string()
+    .regex(getSwarmPersonasTodayQueryDateUtcRegExp)
+    .optional()
+    .describe(
+      "Optional UTC calendar day (YYYY-MM-DD) to aggregate. Defaults to today; bounded to the previous 14 days so operators can scrub through recent days inline.",
+    ),
+});
+
 export const GetSwarmPersonasTodayResponse = zod.object({
   date_utc: zod.string(),
   items: zod.array(

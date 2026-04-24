@@ -1037,6 +1037,14 @@ export type GetRecentTradesParams = {
   limit?: number;
 };
 
+export type GetSwarmPersonasTodayParams = {
+  /**
+   * Optional UTC calendar day (YYYY-MM-DD) to aggregate. Defaults to today; bounded to the previous 14 days so operators can scrub through recent days inline.
+   * @pattern ^\d{4}-\d{2}-\d{2}$
+   */
+  date_utc?: string;
+};
+
 export type SearchAllParams = {
   /**
    * Ticker, market id, or ISO date (YYYY-MM-DD)

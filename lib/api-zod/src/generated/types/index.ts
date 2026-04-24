@@ -60,6 +60,7 @@ export * from "./getRecentCyclesParams";
 export * from "./getRecentDebatesParams";
 export * from "./getRecentTradesParams";
 export * from "./getSlippageGuardRejectsParams";
+export * from "./getSwarmPersonasTodayParams";
 export * from "./getVerticalPerformanceParams";
 export * from "./getVerticalsOverviewParams";
 export * from "./healthStatus";
