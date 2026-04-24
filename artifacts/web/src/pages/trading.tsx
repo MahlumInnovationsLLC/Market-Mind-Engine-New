@@ -14,6 +14,10 @@ import TradingCycles from "@/components/telemetry/trading-cycles";
 import ActivePositions from "@/components/dashboard/active-positions";
 import TradeStatsPanel from "@/components/dashboard/trade-stats-panel";
 import PnlSparkline from "@/components/dashboard/pnl-sparkline";
+import {
+  PeriodProvider,
+  PeriodStrip,
+} from "@/components/dashboard/period-context";
 
 const TAB_KEYS = ["live", "feed"] as const;
 type TabKey = (typeof TAB_KEYS)[number];
@@ -39,32 +43,37 @@ export default function TradingPage() {
   );
 
   return (
-    <div className="space-y-5 font-mono" data-testid="page-trading">
-      <header className="flex flex-col gap-2">
-        <div>
-          <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-accent-cyan/80">
-            EXECUTION
+    <PeriodProvider>
+      <div className="space-y-5 font-mono" data-testid="page-trading">
+        <header className="flex flex-col gap-2">
+          <div className="flex items-start justify-between gap-3">
+            <div>
+              <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-accent-cyan/80">
+                EXECUTION
+              </div>
+              <h1 className="text-xl font-bold uppercase tracking-tight text-foreground lg:text-2xl">
+                Trading
+              </h1>
+              <p className="mt-1 text-xs text-muted-foreground">{subtitle}</p>
+            </div>
+            <PeriodStrip />
           </div>
-          <h1 className="text-xl font-bold uppercase tracking-tight text-foreground lg:text-2xl">
-            Trading
-          </h1>
-          <p className="mt-1 text-xs text-muted-foreground">{subtitle}</p>
-        </div>
-        <TabBar
-          tabs={TABS}
-          active={tab}
-          onSelect={setTab}
-          ariaLabel="Trading view"
-          testIdPrefix="trading"
-        />
-      </header>
+          <TabBar
+            tabs={TABS}
+            active={tab}
+            onSelect={setTab}
+            ariaLabel="Trading view"
+            testIdPrefix="trading"
+          />
+        </header>
 
-      {tab === "live" ? (
-        <LiveTab isAdmin={isAdmin} />
-      ) : (
-        <FeedTab />
-      )}
-    </div>
+        {tab === "live" ? (
+          <LiveTab isAdmin={isAdmin} />
+        ) : (
+          <FeedTab />
+        )}
+      </div>
+    </PeriodProvider>
   );
 }
 
