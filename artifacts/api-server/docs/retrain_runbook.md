@@ -142,3 +142,45 @@ production-relevant pieces of this script are:
 Anything that produces a sklearn-compatible classifier with the
 right `n_features_in_` and column order can be dropped in for the
 synthetic matrix block without further changes.
+
+## 6. Manifest signature enforcement
+
+The model loader downloads `models_manifest.json` together with a
+detached ed25519 signature (`models_manifest.json.sig`) and verifies
+the signature on every cold boot before predictors are loaded. The
+verification step is gated by the `AXIOM_MANIFEST_PUBLIC_KEY`
+environment variable.
+
+**`AXIOM_MANIFEST_PUBLIC_KEY` set** — the loader treats a missing or
+mismatched signature as a hard failure. `manifest_check.signature`
+on `/api/health.models` is `"ok"` on success or `"invalid"` on
+failure (with `manifest_check.reason = "signature_invalid"` and the
+underlying error in `manifest_check.error`). The operator dashboard
+shows a green **Verified** badge on the "Model artifacts" card when
+the signature checks out, or a red **Invalid** badge with the error
+message when it does not.
+
+**`AXIOM_MANIFEST_PUBLIC_KEY` unset** — the loader logs a warning
+and continues without verifying the signature. This is the
+"legacy" / development mode and `manifest_check.signature` is
+reported as `"skipped"`. The dashboard shows a muted **Not
+enforced** badge so operators know the deployment is not protected
+against manifest tampering.
+
+To enable enforcement on a deployment, set the environment variable
+to the base64-encoded ed25519 public key that pairs with the
+`--sign-key` private key used by `build_models_manifest.py`:
+
+```bash
+# from the same keypair used to sign the manifest:
+python -c "from cryptography.hazmat.primitives.serialization import load_pem_private_key; \
+import base64, sys; \
+sk = load_pem_private_key(open(sys.argv[1],'rb').read(), password=None); \
+print(base64.b64encode(sk.public_key().public_bytes_raw()).decode())" \
+  /secure/axiom_manifest_signing.pem
+```
+
+Set the resulting string as `AXIOM_MANIFEST_PUBLIC_KEY` (Replit
+secret in production; `.env` for local dev) and restart the API
+workflow. The next boot will surface `signature = "ok"` on the
+dashboard.

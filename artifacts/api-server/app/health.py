@@ -779,6 +779,12 @@ def _probe_models() -> dict:
             "manifest_ok": manifest_ok,
             "manifest_missing": len(mcheck.get("missing", [])),
             "manifest_mismatch": len(mcheck.get("mismatch", [])),
+            # Surface signature/reason/error so the operator dashboard
+            # can render a verification badge ("Verified" / "Not
+            # enforced" / "Invalid") without re-deriving from raw JSON.
+            "manifest_signature": mcheck.get("signature"),
+            "manifest_reason": mcheck.get("reason"),
+            "manifest_error": mcheck.get("error"),
         },
     )
 

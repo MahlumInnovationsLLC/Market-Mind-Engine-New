@@ -845,33 +845,114 @@ function SummaryStat({
   );
 }
 
-function CardTile({ card }: { card: Card }) {
+// URL the "Not enforced" / "Invalid" manifest signature badge links
+// to. Points at the section in the retrain runbook that explains how
+// to set `AXIOM_MANIFEST_PUBLIC_KEY` so operators have a self-serve
+// path to enforce signature verification on a deployment.
+const MANIFEST_SIGNATURE_DOCS_URL =
+  "/docs/retrain_runbook.md#manifest-signature-enforcement";
+
+function ManifestSignatureBadge({ extras }: { extras: Record<string, unknown> }) {
+  const sig = extras.manifest_signature;
+  // Loader hasn't reported yet (boot in progress, or pre-manifest
+  // versions of the API). Render nothing rather than guessing.
+  if (sig !== "ok" && sig !== "skipped" && sig !== "invalid") return null;
+
+  if (sig === "ok") {
+    return (
+      <span
+        className="inline-flex items-center gap-1 px-2 py-0.5 border border-success/60 bg-success/10 text-success text-[10px] uppercase tracking-widest"
+        data-testid="manifest-signature-badge"
+        data-signature="ok"
+        title="Manifest ed25519 signature verified against AXIOM_MANIFEST_PUBLIC_KEY."
+      >
+        <span className="inline-block w-1.5 h-1.5 bg-success" />
+        sig: verified
+      </span>
+    );
+  }
+
+  if (sig === "skipped") {
+    return (
+      <a
+        href={MANIFEST_SIGNATURE_DOCS_URL}
+        target="_blank"
+        rel="noreferrer"
+        className="inline-flex items-center gap-1 px-2 py-0.5 border border-muted-foreground/40 bg-muted/30 text-muted-foreground hover:text-foreground hover:bg-muted/50 text-[10px] uppercase tracking-widest"
+        data-testid="manifest-signature-badge"
+        data-signature="skipped"
+        title="AXIOM_MANIFEST_PUBLIC_KEY is not set — signature checks are skipped. Click for docs."
+      >
+        <span className="inline-block w-1.5 h-1.5 bg-muted-foreground/60" />
+        sig: not enforced
+      </a>
+    );
+  }
+
+  // sig === "invalid" — this is loud on purpose. Show the underlying
+  // error so the operator can tell tampering ("ed25519 verification
+  // failed") apart from a transient download problem.
+  const err =
+    typeof extras.manifest_error === "string" && extras.manifest_error
+      ? extras.manifest_error
+      : "signature verification failed";
+  return (
+    <a
+      href={MANIFEST_SIGNATURE_DOCS_URL}
+      target="_blank"
+      rel="noreferrer"
+      className="inline-flex flex-col items-start gap-0.5 px-2 py-0.5 border border-destructive bg-destructive/15 text-destructive hover:bg-destructive/25 text-[10px] uppercase tracking-widest max-w-full"
+      data-testid="manifest-signature-badge"
+      data-signature="invalid"
+      title={err}
+    >
+      <span className="flex items-center gap-1">
+        <span className="inline-block w-1.5 h-1.5 bg-destructive" />
+        sig: invalid
+      </span>
+      <span
+        className="normal-case tracking-normal break-all max-w-[220px] line-clamp-2"
+        data-testid="manifest-signature-error"
+      >
+        {err}
+      </span>
+    </a>
+  );
+}
+
+export function CardTile({ card }: { card: Card }) {
   const isFeed = card.key.startsWith("feed:");
-  const lastPull =
-    isFeed && card.extras && typeof card.extras === "object"
-      ? ((card.extras as Record<string, unknown>).last_pull as string | null) ?? null
-      : null;
-  const errorRate =
-    isFeed && card.extras && typeof card.extras === "object"
-      ? ((card.extras as Record<string, unknown>).error_rate as number | null) ?? null
-      : null;
-  const polls =
-    isFeed && card.extras && typeof card.extras === "object"
-      ? ((card.extras as Record<string, unknown>).poll_count as number | null) ?? null
-      : null;
-  const fails =
-    isFeed && card.extras && typeof card.extras === "object"
-      ? ((card.extras as Record<string, unknown>).failure_count as number | null) ?? null
-      : null;
+  const isModels = card.key === "models";
+  const extras =
+    card.extras && typeof card.extras === "object"
+      ? (card.extras as Record<string, unknown>)
+      : {};
+  const lastPull = isFeed
+    ? ((extras.last_pull as string | null) ?? null)
+    : null;
+  const errorRate = isFeed
+    ? ((extras.error_rate as number | null) ?? null)
+    : null;
+  const polls = isFeed
+    ? ((extras.poll_count as number | null) ?? null)
+    : null;
+  const fails = isFeed
+    ? ((extras.failure_count as number | null) ?? null)
+    : null;
   return (
     <div className={`border ${STATUS_COLOR[card.status]} p-3 text-xs space-y-1`}>
-      <div className="flex items-center justify-between">
+      <div className="flex items-center justify-between gap-2">
         <span className="font-bold uppercase tracking-widest">{card.label}</span>
         <span className="flex items-center gap-1 text-[10px] uppercase tracking-widest">
           <span className={`inline-block w-2 h-2 ${STATUS_DOT[card.status]}`} />
           {card.status}
         </span>
       </div>
+      {isModels && (
+        <div className="flex flex-wrap gap-1">
+          <ManifestSignatureBadge extras={extras} />
+        </div>
+      )}
       {isFeed && (
         <div
           className="grid grid-cols-2 gap-1 text-[10px] uppercase tracking-widest text-muted-foreground"
