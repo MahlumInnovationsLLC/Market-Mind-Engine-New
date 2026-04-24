@@ -101,6 +101,45 @@ def stale_resting_cancelled_state() -> dict[str, Any]:
     return dict(_stale_resting)
 
 
+# --- duplicate client_order_id rejection counters (surfaced on /api/health) -
+#
+# ``submit_order`` short-circuits a second submission that re-uses a
+# ``client_order_id`` already resting (or in-flight on another task) — the
+# call never reaches the wire and a ``rejected`` lifecycle row is written
+# with reason ``duplicate_client_order_id``. These counters give operators
+# a read on how often the dedupe gate fires; a sustained non-zero rate is
+# an early signal of a buggy upstream caller re-using ids.
+_submit_dedupe: dict[str, int | str | float | None] = {
+    "rejected": 0,            # total dedupe rejections
+    "last_rejected_at": None, # unix timestamp of the most recent rejection
+    "last_client_order_id": None,
+}
+
+
+def submit_dedupe_state() -> dict[str, Any]:
+    """JSON-safe copy of the dedupe-rejection counters for health snapshots."""
+    return dict(_submit_dedupe)
+
+
+def _reset_submit_dedupe_state() -> None:
+    """Test helper — clears every counter."""
+    _submit_dedupe.update(
+        {
+            "rejected": 0,
+            "last_rejected_at": None,
+            "last_client_order_id": None,
+        }
+    )
+
+
+def _record_submit_dedupe_rejection(client_order_id: str) -> None:
+    """Called by ``submit_order`` when the in-process dedupe gate fires."""
+    import time as _time
+    _submit_dedupe["rejected"] = int(_submit_dedupe["rejected"]) + 1  # type: ignore[arg-type]
+    _submit_dedupe["last_rejected_at"] = _time.time()
+    _submit_dedupe["last_client_order_id"] = str(client_order_id)[:120]
+
+
 # --- orderbook freshness / fallback counters (surfaced on /api/health) ---
 #
 # The slippage guard reads the in-process orderbook cache that the WS
@@ -517,6 +556,7 @@ async def submit_order(req: OrderRequest, *, force_paper: bool | None = None) ->
             _in_flight.add(req.client_order_id)
             duplicate = False
     if duplicate:
+        _record_submit_dedupe_rejection(req.client_order_id)
         await _record(
             req, paper=paper, state="rejected",
             price=req.limit_price_cents or 0,

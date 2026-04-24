@@ -413,6 +413,42 @@ def _probe_stale_resting_cancelled() -> dict:
     )
 
 
+def _probe_submit_dedupe() -> dict:
+    """Surface the in-process duplicate-client_order_id rejection counters.
+
+    ``submit_order`` short-circuits a second submission re-using a
+    ``client_order_id`` already resting (or in-flight on another task).
+    The call never reaches the wire and a ``rejected`` lifecycle row is
+    written with reason ``duplicate_client_order_id``. A non-zero count
+    here is an early signal that an upstream caller is re-using ids
+    instead of minting fresh ones.
+
+    Status policy: ``ok`` when the counter is zero. ``degraded`` once
+    *any* dedupe rejection has been observed — the gate firing means a
+    bug somewhere upstream has tried to double-submit, and an operator
+    should look at the lifecycle audit trail to find the offender.
+    """
+    s = kalshi_lifecycle.submit_dedupe_state()
+    rejected = int(s.get("rejected") or 0)
+    last_coid = s.get("last_client_order_id")
+    if rejected == 0:
+        status = "ok"
+        detail = "no in-process duplicate-client_order_id rejections observed"
+    else:
+        status = "degraded"
+        detail = (
+            f"rejected={rejected} last_client_order_id={last_coid or '—'}"
+        )
+    return _card(
+        key="order_submit_dedupe",
+        label="Duplicate order dedupe",
+        category="passive",
+        status=status,
+        detail=detail,
+        extras={**s, "duplicate_client_order_id_rejected": rejected},
+    )
+
+
 def _probe_orderbook_guard() -> dict:
     """Surface the slippage-guard orderbook freshness counters.
 
@@ -1287,6 +1323,7 @@ async def _build_snapshot() -> _Snapshot:
         _probe_kalshi_reconciler(),
         _probe_submit_recovery(),
         _probe_stale_resting_cancelled(),
+        _probe_submit_dedupe(),
         _probe_orderbook_guard(),
         *_probe_feeds(),
     ]

@@ -40,6 +40,10 @@ def _reset_lifecycle(monkeypatch):
     # Drain the resting book.
     lifecycle._resting.clear()
     lifecycle._in_flight.clear()
+    # Aggregate counters surfaced on /api/health/snapshot leak across
+    # tests by design (they're module-level). Reset the dedupe counter so
+    # assertions on its value start from a known-empty state.
+    lifecycle._reset_submit_dedupe_state()
     # Reset the kill switch to a known clean state.
     lifecycle._kill._halted = False
     lifecycle._kill._reason = None
@@ -445,6 +449,73 @@ def test_live_collision_against_in_memory_resting(monkeypatch, _reset_lifecycle)
     assert len(rejects) == 1
     submitted = [w for w in _reset_lifecycle if w["event_type"] == "submitted"]
     assert len(submitted) == 1
+
+    # The aggregate dedupe-rejection counter (surfaced on
+    # /api/health/snapshot) ticks up exactly once per blocked submission
+    # and remembers the offending client_order_id + when it last fired.
+    state = lifecycle.submit_dedupe_state()
+    assert state["rejected"] == 1
+    assert state["last_client_order_id"] == "coll-1"
+    assert isinstance(state["last_rejected_at"], float)
+    assert state["last_rejected_at"] > 0
+
+
+def test_submit_dedupe_counter_accumulates_across_rejections(
+    monkeypatch, _reset_lifecycle,
+):
+    """Each blocked duplicate ticks the counter and refreshes the last-id stamp."""
+    monkeypatch.setattr(lifecycle, "get_settings", lambda: _make_settings("live"))
+    lifecycle._reset_submit_dedupe_state()
+
+    accept = _FakeKalshiClient(ack={"order": {"order_id": "exo-Z"}})
+    seq = iter([accept])
+    monkeypatch.setattr(lifecycle.kalshi_client, "KalshiClient", lambda **kw: next(seq))
+
+    base = lifecycle.OrderRequest(
+        market_ticker="X-1", side="yes", action="buy", count=1,
+        limit_price_cents=50, client_order_id="dedupe-1",
+    )
+    rec = _run(lifecycle.submit_order(base))
+    assert rec.state == "resting"
+
+    # Three subsequent attempts all hit the dedupe gate. The first reuses
+    # the resting id; the next two reuse it again. None of them should
+    # construct another KalshiClient (the iter is exhausted) — so if any
+    # leaked through, StopIteration would surface here.
+    for _ in range(3):
+        with pytest.raises(lifecycle.OrderRejected, match="duplicate client_order_id"):
+            _run(lifecycle.submit_order(
+                lifecycle.OrderRequest(
+                    market_ticker="X-1", side="yes", action="buy", count=1,
+                    limit_price_cents=50, client_order_id="dedupe-1",
+                )
+            ))
+
+    state = lifecycle.submit_dedupe_state()
+    assert state["rejected"] == 3
+    assert state["last_client_order_id"] == "dedupe-1"
+
+    # A non-colliding submission must NOT bump the counter.
+    other = lifecycle.OrderRequest(
+        market_ticker="X-2", side="yes", action="buy", count=1,
+        limit_price_cents=50, client_order_id="dedupe-other",
+    )
+    # Force-paper to short-circuit before any wire call (no fake client queued).
+    _run(lifecycle.submit_order(other, force_paper=True))
+    assert lifecycle.submit_dedupe_state()["rejected"] == 3
+
+
+def test_submit_dedupe_counter_starts_clean():
+    """The reset helper zeroes every field for deterministic test runs."""
+    lifecycle._submit_dedupe.update(
+        {"rejected": 7, "last_rejected_at": 123.0, "last_client_order_id": "x"}
+    )
+    lifecycle._reset_submit_dedupe_state()
+    assert lifecycle.submit_dedupe_state() == {
+        "rejected": 0,
+        "last_rejected_at": None,
+        "last_client_order_id": None,
+    }
 
 
 # ---------------------------------------------------------------------------
