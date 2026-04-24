@@ -438,11 +438,15 @@ jobs:
       E2E_CLERK_USER_PASSWORD: ${{ secrets.E2E_CLERK_USER_PASSWORD }}
 
       # Tells the mobile bundle where the API lives. `lib/api.ts`
-      # consumes EXPO_PUBLIC_DOMAIN as a bare host and prepends the
-      # scheme. Auth-gated tests skip themselves if the dashboard
-      # never renders (e.g. unapproved user), so the public smoke
-      # test still runs even when these aren't reachable.
-      EXPO_PUBLIC_DOMAIN: "localhost:8080"
+      # respects an explicit `http://` / `https://` scheme prefix
+      # (mirroring `lib/use-websocket.ts`) and only prepends `https://`
+      # for bare hosts, so we point it at the plain-HTTP API the
+      # workflow boots on `localhost:8080`. Without the explicit
+      # `http://` prefix the bundle would try `https://localhost:8080`,
+      # the dashboard fetches would fail TLS, and the auth-gated
+      # mobile dashboard test would skip (or fail flakily) on the
+      # "awaiting approval" fallback.
+      EXPO_PUBLIC_DOMAIN: "http://localhost:8080"
 
       # Backend secrets the API server needs to come up + serve auth-
       # gated dashboard data. Auth-gated tests skip themselves if the

@@ -1,5 +1,27 @@
 const DOMAIN = process.env.EXPO_PUBLIC_DOMAIN;
-const BASE_URL = DOMAIN ? `https://${DOMAIN}` : "";
+
+/**
+ * Resolve `EXPO_PUBLIC_DOMAIN` into an HTTP base URL.
+ *
+ * `EXPO_PUBLIC_DOMAIN` can come in three forms in this monorepo
+ * (mirrors what `lib/use-websocket.ts` accepts):
+ *   - bare host:    "<id>.replit.dev"      (REPLIT_DEV_DOMAIN)
+ *   - http origin:  "http://localhost:8080"
+ *   - https origin: "https://app.example.com"
+ *
+ * On Replit the dev domain serves HTTPS so a bare host is upgraded to
+ * `https://`. CI boots the API on plain `http://localhost:8080`, so
+ * an explicit scheme prefix has to be respected verbatim — otherwise
+ * we'd double-prefix and get `https://http://localhost:8080`, which
+ * fails TLS and wedges the mobile dashboard tests.
+ */
+function resolveBaseUrl(domain: string | undefined): string {
+  if (!domain) return "";
+  if (/^https?:\/\//i.test(domain)) return domain.replace(/\/$/, "");
+  return `https://${domain}`;
+}
+
+const BASE_URL = resolveBaseUrl(DOMAIN);
 
 let _tokenGetter: (() => Promise<string | null | undefined>) | null = null;
 
