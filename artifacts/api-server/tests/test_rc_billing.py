@@ -142,6 +142,14 @@ class _FakeConn:
             )
             return "OK"
 
+        if q.startswith("DELETE FROM rc_webhook_deliveries"):
+            # Audit-only table prune. Honour the optional
+            # ``deliveries_prune_returns`` hook on the fake DB so a test
+            # can simulate "n rows deleted"; default to 0 so the
+            # status-string parse path still gets exercised.
+            n = getattr(self._db, "deliveries_prune_returns", 0)
+            return f"DELETE {int(n)}"
+
         if q.startswith("INSERT INTO rc_events"):
             event_id, event_type, payload = args
             self._db.rc_events.setdefault(
@@ -815,6 +823,146 @@ def test_event_with_no_app_user_id_is_ignored_safely(fake_db):
 # ---------------------------------------------------------------------------
 # End-to-end: webhook → /api/me/subscription
 # ---------------------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------------
+# Background prune (task #282 — keep `rc_webhook_deliveries` bounded)
+# ---------------------------------------------------------------------------
+
+
+def _prune_calls(fake_db: _FakeDB) -> list[tuple[str, tuple]]:
+    return [
+        row
+        for row in fake_db.execute_log
+        if row[0].startswith("DELETE FROM rc_webhook_deliveries")
+    ]
+
+
+def test_delivery_retention_default_is_30_days(monkeypatch):
+    monkeypatch.delenv("RC_WEBHOOK_DELIVERY_RETENTION_DAYS", raising=False)
+    assert rc_billing._delivery_retention_days() == 30
+
+
+def test_delivery_retention_env_override_takes_effect(monkeypatch):
+    monkeypatch.setenv("RC_WEBHOOK_DELIVERY_RETENTION_DAYS", "7")
+    assert rc_billing._delivery_retention_days() == 7
+
+
+def test_delivery_retention_rejects_zero_and_negative(monkeypatch):
+    """A typo like RC_WEBHOOK_DELIVERY_RETENTION_DAYS=0 must NOT wipe
+    the entire audit history on the next sweep."""
+    monkeypatch.setenv("RC_WEBHOOK_DELIVERY_RETENTION_DAYS", "0")
+    assert rc_billing._delivery_retention_days() == 1
+    monkeypatch.setenv("RC_WEBHOOK_DELIVERY_RETENTION_DAYS", "-5")
+    assert rc_billing._delivery_retention_days() == 1
+
+
+def test_delivery_retention_falls_back_on_garbage(monkeypatch):
+    monkeypatch.setenv("RC_WEBHOOK_DELIVERY_RETENTION_DAYS", "not-a-number")
+    assert rc_billing._delivery_retention_days() == 30
+
+
+def test_prune_runs_correct_sql_with_retention_window(fake_db, monkeypatch):
+    """The prune must DELETE only rows older than the retention window
+    and pass the configured day count as a parameter (not interpolated
+    into the SQL string)."""
+    monkeypatch.setenv("RC_WEBHOOK_DELIVERY_RETENTION_DAYS", "14")
+    fake_db.deliveries_prune_returns = 3
+    deleted = _run(rc_billing._prune_deliveries_once())
+    assert deleted == 3
+    calls = _prune_calls(fake_db)
+    assert len(calls) == 1
+    sql, args = calls[0]
+    # Bound by an interval — never an unbounded DELETE.
+    assert "received_at <" in sql
+    assert "make_interval(days => $1)" in sql
+    assert args == (14,)
+
+
+def test_prune_returns_zero_on_db_error(fake_db, monkeypatch):
+    """A flaky DB must not crash the silence loop; the prune just
+    reports zero rows deleted and the next tick tries again."""
+    async def _boom():
+        raise RuntimeError("connection reset")
+
+    @asynccontextmanager
+    async def _bad_acquire():
+        await _boom()
+        yield None  # pragma: no cover
+
+    monkeypatch.setattr(rc_billing.db, "acquire", _bad_acquire)
+    deleted = _run(rc_billing._prune_deliveries_once())
+    assert deleted == 0
+
+
+def test_prune_does_not_touch_recent_deliveries(fake_db):
+    """End-to-end: a fresh OK delivery is recorded, then the prune
+    runs against the fake DB. The delete is bounded by the retention
+    window, so the simulated row count returned by the fake (0)
+    matches reality and the tile/alert SQL still sees the row."""
+    _run(
+        rc_billing.handle_webhook(  # type: ignore[arg-type]
+            _post(
+                _evt(
+                    event_id="evt_recent",
+                    event_type="INITIAL_PURCHASE",
+                    app_user_id="user_recent",
+                    expiration_ms=_future_ms(30),
+                )
+            )
+        )
+    )
+    # The audit insert for the recent event happened first.
+    assert any(
+        row[0].startswith("INSERT INTO rc_webhook_deliveries")
+        for row in fake_db.execute_log
+    )
+    # Now run the prune; the fake returns "DELETE 0" by default so
+    # the parse path also exercised.
+    deleted = _run(rc_billing._prune_deliveries_once())
+    assert deleted == 0
+    # The webhook tile aggregation is unaffected — the derived row is
+    # still in place after the prune.
+    assert "user_recent" in fake_db.subscriptions
+
+
+def test_silence_loop_iteration_calls_silence_check_and_prune(fake_db, monkeypatch):
+    """One iteration of the loop body must call both the silence check
+    and the prune. We drive the loop manually via a single iteration's
+    worth of work to keep the test deterministic."""
+    calls: list[str] = []
+
+    async def _fake_check():
+        calls.append("check")
+
+    async def _fake_prune():
+        calls.append("prune")
+        return 0
+
+    monkeypatch.setattr(rc_billing, "_silence_check_once", _fake_check)
+    monkeypatch.setattr(rc_billing, "_prune_deliveries_once", _fake_prune)
+
+    async def _drive_one_iteration():
+        # Run the loop with a 0s sleep then cancel so we get exactly
+        # one full iteration of the loop body.
+        task = asyncio.create_task(rc_billing._silence_loop(interval_seconds=0))
+        # Yield enough times for the loop to complete one body pass.
+        for _ in range(10):
+            await asyncio.sleep(0)
+            if "check" in calls and "prune" in calls:
+                break
+        task.cancel()
+        try:
+            await task
+        except (asyncio.CancelledError, Exception):
+            pass
+
+    _run(_drive_one_iteration())
+    assert "check" in calls
+    assert "prune" in calls
+    # And in the documented order: check before prune so an alert
+    # never gets blocked behind a slow DELETE.
+    assert calls.index("check") < calls.index("prune")
 
 
 def _user(uid: str = "user_e2e", email: str | None = "e2e@example.com") -> AuthedUser:

@@ -84,6 +84,25 @@ def _silence_threshold_seconds() -> int:
         return 3600
 
 
+def _delivery_retention_days() -> int:
+    """How many days of `rc_webhook_deliveries` history to keep.
+
+    The dashboard tile only ever queries the last 24h and the silence
+    detector only reads ``max(received_at)``, so anything older than
+    the retention window is dead weight that would otherwise grow the
+    audit table unboundedly. Default 30 days — comfortably wider than
+    any rolling-window report we'd ever want to run off this table
+    while still bounding growth. Refuse 0/negative so a typo can't
+    immediately wipe the entire audit history.
+    """
+    raw = os.environ.get("RC_WEBHOOK_DELIVERY_RETENTION_DAYS")
+    try:
+        v = int(float(raw)) if raw is not None else 30
+    except (TypeError, ValueError):
+        v = 30
+    return max(1, v)
+
+
 def _business_hours_utc() -> tuple[int, int]:
     """Inclusive [start_hour, end_hour) range, in UTC, when silence alerts fire."""
     raw = os.environ.get("RC_WEBHOOK_BUSINESS_HOURS_UTC", "13-23")
@@ -609,7 +628,15 @@ async def get_webhook_stats(*, hours: int = 24) -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
-# Silence detector (cron-style background loop)
+# Silence detector + delivery audit prune (cron-style background loop)
+#
+# A single asyncio task runs both:
+#   * `_silence_check_once` — fires an alert when no webhook events have
+#     arrived during business hours.
+#   * `_prune_deliveries_once` — deletes `rc_webhook_deliveries` rows
+#     older than `RC_WEBHOOK_DELIVERY_RETENTION_DAYS` (default 30) so
+#     the audit table stays bounded the way the alert dedupe table now
+#     does.
 # ---------------------------------------------------------------------------
 
 
@@ -652,12 +679,57 @@ async def _silence_check_once() -> None:
         log.warning("rc webhook silence alert dispatch failed: %s", e)
 
 
+async def _prune_deliveries_once() -> int:
+    """Delete `rc_webhook_deliveries` rows older than the retention window.
+
+    Co-located with the silence detector because both run on the same
+    cadence and both only need ``rc_webhook_deliveries`` to be cheap to
+    query. The dashboard tile only reads the last 24h and the silence
+    detector only reads ``max(received_at)``, so dropping anything past
+    the retention horizon has no effect on either consumer.
+
+    Returns the number of rows deleted (0 on DB error so a flaky
+    connection can't make the loop look like it's silently winning).
+    """
+    days = _delivery_retention_days()
+    try:
+        async with db.acquire() as conn:
+            status_str = await conn.execute(
+                """
+                DELETE FROM rc_webhook_deliveries
+                WHERE received_at < now() - make_interval(days => $1)
+                """,
+                days,
+            )
+    except Exception as e:
+        log.warning("rc_webhook_deliveries prune failed: %s", e)
+        return 0
+    deleted = 0
+    try:
+        parts = (status_str or "").split()
+        if len(parts) >= 2 and parts[0].upper() == "DELETE":
+            deleted = int(parts[1])
+    except (ValueError, AttributeError, TypeError):
+        deleted = 0
+    if deleted:
+        log.info(
+            "rc_webhook_deliveries prune: deleted %d row(s) older than %d day(s)",
+            deleted,
+            days,
+        )
+    return deleted
+
+
 async def _silence_loop(interval_seconds: int = 600) -> None:
     while True:
         try:
             await _silence_check_once()
         except Exception as e:  # pragma: no cover
             log.warning("rc webhook silence loop iteration failed: %s", e)
+        try:
+            await _prune_deliveries_once()
+        except Exception as e:  # pragma: no cover
+            log.warning("rc webhook delivery prune iteration failed: %s", e)
         await asyncio.sleep(interval_seconds)
 
 
