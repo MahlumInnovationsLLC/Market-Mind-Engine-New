@@ -481,6 +481,102 @@ def test_kalshi_mid_blend_pulls_probability_toward_market():
 
 
 # ---------------------------------------------------------------------------
+# Cycle dispatcher: Kalshi mid is sourced from cand even when not on
+# top-level current_price (regression — earlier wiring only inspected
+# `current_price`, leaving the predictor's log-odds blend dormant in
+# live cycle flow).  Mirrors the entertainment-vertical regression
+# tests in test_entertainment_vertical.py.
+# ---------------------------------------------------------------------------
+
+
+def test_cycle_predictor_sources_kalshi_mid_from_current_price_field():
+    from app.orchestrator import cycle as cycle_mod
+
+    captured: dict[str, object] = {}
+
+    class _FakePred:
+        def as_dict(self):
+            return {
+                "probability": 0.5,
+                "raw": {"features": {}, "feature_count": 0},
+            }
+
+    async def _fake_predict(ticker, *, league=None, kalshi_mid=None):
+        captured["kalshi_mid"] = kalshi_mid
+        return _FakePred()
+
+    with patch(
+        "app.events_econ.predictor.predict_events_econ_binary",
+        side_effect=_fake_predict,
+    ):
+        cand = {
+            "kalshi_market_id": "KXCPI-24DEC-ABOVE3",
+            "current_price": 0.37,
+            "league": "EVENTS_ECON",
+        }
+        asyncio.run(cycle_mod._predict_for_events_econ_binary(cand))
+    assert captured.get("kalshi_mid") == pytest.approx(0.37)
+
+
+def test_cycle_predictor_sources_kalshi_mid_from_kalshi_price_field():
+    from app.orchestrator import cycle as cycle_mod
+
+    captured: dict[str, object] = {}
+
+    class _FakePred:
+        def as_dict(self):
+            return {
+                "probability": 0.5,
+                "raw": {"features": {}, "feature_count": 0},
+            }
+
+    async def _fake_predict(ticker, *, league=None, kalshi_mid=None):
+        captured["kalshi_mid"] = kalshi_mid
+        return _FakePred()
+
+    with patch(
+        "app.events_econ.predictor.predict_events_econ_binary",
+        side_effect=_fake_predict,
+    ):
+        cand = {
+            "kalshi_market_id": "KXCPI-24DEC-ABOVE3",
+            "kalshi_price": 0.42,
+            "league": "EVENTS_ECON",
+        }
+        asyncio.run(cycle_mod._predict_for_events_econ_binary(cand))
+    assert captured.get("kalshi_mid") == pytest.approx(0.42)
+
+
+def test_cycle_predictor_sources_kalshi_mid_from_game_context():
+    from app.orchestrator import cycle as cycle_mod
+
+    captured: dict[str, object] = {}
+
+    class _FakePred:
+        def as_dict(self):
+            return {
+                "probability": 0.5,
+                "raw": {"features": {}, "feature_count": 0},
+            }
+
+    async def _fake_predict(ticker, *, league=None, kalshi_mid=None):
+        captured["kalshi_mid"] = kalshi_mid
+        return _FakePred()
+
+    with patch(
+        "app.events_econ.predictor.predict_events_econ_binary",
+        side_effect=_fake_predict,
+    ):
+        cand = {
+            "kalshi_market_id": "KXCPI-24DEC-ABOVE3",
+            "league": "EVENTS_ECON",
+            "game_context": {"kalshi_price": 0.61},
+        }
+        asyncio.run(cycle_mod._predict_for_events_econ_binary(cand))
+    assert captured.get("kalshi_mid") == pytest.approx(0.61)
+
+
+# ---------------------------------------------------------------------------
 # /api/events-econ/calendar route
 # ---------------------------------------------------------------------------
 

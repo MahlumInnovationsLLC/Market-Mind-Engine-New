@@ -826,8 +826,24 @@ async def _predict_for_events_econ_binary(cand: dict[str, Any]) -> dict[str, Any
         return None
     # Pass the candidate's current Kalshi YES mid into the predictor
     # so it can fold the pre-release market into the consensus-prior
-    # probability via a log-odds Bayesian blend.
-    kalshi_mid_raw = cand.get("current_price")
+    # probability via a log-odds Bayesian blend.  Source the mid from
+    # any of: top-level current_price (set on fresh debate inputs),
+    # top-level kalshi_price (set on cached candidate rows from
+    # `_candidate_predictions`), or game_context blob (set when the
+    # candidate was assembled from a fresh debate).  Without this
+    # fall-through the log-odds blend in `predict_events_econ_binary`
+    # never fires in live cycle flow — same regression we fixed in
+    # `_predict_for_entertainment_binary`.
+    kalshi_mid_raw = cand.get("current_price") or cand.get("kalshi_price")
+    if kalshi_mid_raw is None:
+        ctx_blob = cand.get("game_context") or {}
+        if isinstance(ctx_blob, str):
+            try:
+                ctx_blob = json.loads(ctx_blob)
+            except Exception:
+                ctx_blob = {}
+        if isinstance(ctx_blob, dict):
+            kalshi_mid_raw = ctx_blob.get("kalshi_price")
     try:
         kalshi_mid = float(kalshi_mid_raw) if kalshi_mid_raw is not None else None
     except (TypeError, ValueError):
