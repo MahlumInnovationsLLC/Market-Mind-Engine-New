@@ -18,11 +18,14 @@ Six sources are wired:
 4. **Industry-analyst RSS** — SemiAnalysis + The Information public RSS
    feeds, parsed for headline/title and routed onto a symbol class via
    keyword heuristics.
-5. **MLPerf snapshot** — placeholder poller (results land via manual
-   pull by the ops team; the table & poller wiring exist so the
-   resolver can pick rows up immediately when they do).
-6. **Earnings calendar** — placeholder poller for NVDA / TSMC report
-   dates.
+5. **MLPerf rounds** — lists the public `mlcommons` GitHub org and
+   detects new `*_results_v*` benchmark-round repos (inference,
+   training, tiny, mobile, storage, client tracks).  No auth required;
+   honors `GITHUB_TOKEN` for the higher rate limit.
+6. **Earnings calendar** — Yahoo Finance `quoteSummary` for the next
+   scheduled NVDA / TSMC (TSM ADR) earnings date, with a SEC EDGAR
+   8-K Atom-feed backstop for historical earnings press releases so
+   the table is never empty when Yahoo throttles us.
 
 Every poller is *idempotent*: it upserts into `tech_evidence` keyed by
 `(source, signal_id)` so overlapping polls are harmless.
@@ -433,27 +436,241 @@ async def poll_industry_rss() -> int:
     return await upsert_evidence(rows)
 
 
-# --- Placeholder pollers -----------------------------------------------------
+# --- MLPerf benchmark rounds -------------------------------------------------
+
+
+# MLCommons publishes each MLPerf round as a public results repository
+# under github.com/mlcommons (e.g. inference_results_v4.1,
+# training_results_v4.0).  Listing the org's repos and filtering to
+# the `<track>_results_v<...>` pattern is a reliable, no-auth signal
+# that a new round has dropped — the (heavy, JS-rendered) public
+# results page would otherwise need a headless browser to scrape.
+_MLPERF_REPO_RE = re.compile(
+    r"^(?P<track>inference|training|tiny|mobile|storage|client)_results_v[\w.\-]+$",
+    re.IGNORECASE,
+)
 
 
 async def poll_mlperf() -> int:
-    """Placeholder for the MLPerf results poller.
+    """Detect new MLPerf benchmark rounds via the public mlcommons GitHub org.
 
-    MLPerf does not expose a stable JSON endpoint; results land via
-    manual pull by the ops team.  The poller exists here so a future
-    upgrade can land a real fetch without changing the wiring.
+    Each `<track>_results_v<version>` repo represents one published
+    round (inference, training, tiny, mobile, storage, client).  Rows
+    are tagged `kind="benchmark"` against the `MLPERF` symbol class.
     """
-    return 0
+    url = (
+        "https://api.github.com/orgs/mlcommons/repos"
+        "?per_page=100&type=public&sort=updated"
+    )
+    payload = await _http_get_json(url, headers=_github_headers())
+    if not isinstance(payload, list):
+        return 0
+    rows: list[dict[str, Any]] = []
+    for item in payload:
+        try:
+            name = str(item.get("name") or "")
+            m = _MLPERF_REPO_RE.match(name)
+            if not m:
+                continue
+            published = (
+                item.get("pushed_at")
+                or item.get("updated_at")
+                or item.get("created_at")
+            )
+            if not published:
+                continue
+            ts = datetime.fromisoformat(str(published).replace("Z", "+00:00"))
+            track = m.group("track").lower()
+            rows.append({
+                "source": "mlperf_results",
+                "signal_id": name,
+                "symbol": "MLPERF",
+                "kind": KIND_BENCHMARK,
+                "observed_at": ts,
+                "weight": 1.0,
+                "payload": {
+                    "track": track,
+                    "repo": item.get("full_name") or f"mlcommons/{name}",
+                    "html_url": item.get("html_url"),
+                    "description": (item.get("description") or "")[:300],
+                },
+            })
+        except Exception as e:
+            log.debug("mlperf parse failed: %s", e)
+    return await upsert_evidence(rows)
+
+
+# --- Earnings calendar (NVDA / TSMC) -----------------------------------------
+
+
+# Yahoo Finance quoteSummary endpoint exposes the next scheduled
+# earnings date for a ticker.  TSMC's US ADR trades as TSM.
+_EARNINGS_TICKERS: tuple[tuple[str, str], ...] = (
+    ("NVDA", "NVDA"),
+    ("TSM",  "TSMC"),
+)
+
+
+# SEC EDGAR Atom feed of recent 8-K filings (earnings press releases
+# arrive on item 2.02 8-Ks).  Used as a historical backstop so the
+# table is never empty when Yahoo throttles us.
+_EDGAR_CIKS: tuple[tuple[str, str], ...] = (
+    ("0001045810", "NVDA"),   # NVIDIA Corp
+    ("0001046179", "TSMC"),   # Taiwan Semiconductor Mfg Co Ltd
+)
+
+
+_EDGAR_ENTRY_RE = re.compile(r"<entry>(.*?)</entry>", re.DOTALL | re.IGNORECASE)
+_EDGAR_FIELD_RE = re.compile(
+    r"<(id|title|updated|summary)>(.*?)</\1>", re.DOTALL | re.IGNORECASE
+)
+
+
+# Earnings press releases are 8-Ks reporting under Item 2.02 ("Results
+# of Operations and Financial Condition").  Filtering on these markers
+# keeps the EDGAR backstop from polluting the cache with unrelated
+# 8-Ks (officer departures, M&A, regulation FD disclosures, etc.).
+_EDGAR_EARNINGS_TOKENS: tuple[str, ...] = (
+    "results of operations",
+    "item 2.02",
+    "earnings",
+    "financial results",
+)
+
+
+def _is_earnings_8k(title: str, summary: str) -> bool:
+    blob = f"{title}\n{summary}".lower()
+    return any(tok in blob for tok in _EDGAR_EARNINGS_TOKENS)
+
+
+def _yahoo_headers() -> dict[str, str]:
+    return {
+        "User-Agent": (
+            "Mozilla/5.0 (compatible; AxiomEvidenceBot/1.0; "
+            "+https://axiom.app/bot)"
+        ),
+        "Accept": "application/json",
+    }
+
+
+def _edgar_headers() -> dict[str, str]:
+    # SEC requires a contact-bearing User-Agent.  Operators can override
+    # via SEC_EDGAR_UA to satisfy their own fair-access policy.
+    return {
+        "User-Agent": os.environ.get(
+            "SEC_EDGAR_UA",
+            "Axiom Evidence Bot evidence@axiom.app",
+        ),
+        "Accept": "application/atom+xml",
+    }
+
+
+async def _fetch_yahoo_earnings(yticker: str, symbol: str) -> list[dict[str, Any]]:
+    url = (
+        f"https://query1.finance.yahoo.com/v10/finance/quoteSummary/{yticker}"
+        "?modules=calendarEvents,earnings"
+    )
+    payload = await _http_get_json(url, headers=_yahoo_headers())
+    if not isinstance(payload, dict):
+        return []
+    try:
+        result = (payload.get("quoteSummary") or {}).get("result") or []
+        if not result:
+            return []
+        block = result[0] or {}
+        events = (block.get("calendarEvents") or {}).get("earnings") or {}
+        dates = events.get("earningsDate") or []
+    except Exception as e:
+        log.debug("yahoo earnings shape unexpected for %s: %s", yticker, e)
+        return []
+    out: list[dict[str, Any]] = []
+    for entry in dates:
+        raw = entry.get("raw") if isinstance(entry, dict) else entry
+        if raw is None:
+            continue
+        try:
+            ts = datetime.fromtimestamp(int(raw), tz=timezone.utc)
+        except (TypeError, ValueError):
+            continue
+        out.append({
+            "source": "yahoo_earnings",
+            "signal_id": f"{yticker}@{ts.date().isoformat()}",
+            "symbol": symbol,
+            "kind": KIND_EARNINGS,
+            "observed_at": ts,
+            "weight": 1.0,
+            "payload": {
+                "yahoo_ticker": yticker,
+                "earnings_date": ts.isoformat(),
+                "fmt": entry.get("fmt") if isinstance(entry, dict) else None,
+            },
+        })
+    return out
+
+
+async def _fetch_edgar_8k(cik: str, symbol: str) -> list[dict[str, Any]]:
+    url = (
+        "https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany"
+        f"&CIK={cik}&type=8-K&dateb=&owner=include&count=10&output=atom"
+    )
+    body = await _http_get_text(url, headers=_edgar_headers())
+    if not body:
+        return []
+    out: list[dict[str, Any]] = []
+    for entry_match in _EDGAR_ENTRY_RE.finditer(body):
+        entry = entry_match.group(1)
+        fields: dict[str, str] = {}
+        for fm in _EDGAR_FIELD_RE.finditer(entry):
+            fields[fm.group(1).lower()] = fm.group(2).strip()
+        eid = fields.get("id", "")
+        title = fields.get("title", "")
+        summary = fields.get("summary", "")
+        updated = fields.get("updated", "")
+        if not (eid and updated):
+            continue
+        # Skip non-earnings 8-Ks (officer changes, M&A, Reg-FD, etc.).
+        if not _is_earnings_8k(title, summary):
+            continue
+        try:
+            ts = datetime.fromisoformat(updated.replace("Z", "+00:00"))
+        except Exception:
+            continue
+        out.append({
+            "source": "edgar_8k",
+            "signal_id": eid[:300],
+            "symbol": symbol,
+            "kind": KIND_EARNINGS,
+            "observed_at": ts,
+            # Past-filing 8-Ks are weaker signal than a confirmed
+            # forward-looking earnings date, so they get a lower weight.
+            "weight": 0.6,
+            "payload": {
+                "cik": cik,
+                "title": title[:300],
+                "url": eid,
+            },
+        })
+    return out
 
 
 async def poll_earnings_calendar() -> int:
-    """Placeholder for the NVDA / TSMC earnings calendar poller.
+    """Poll NVDA / TSMC earnings dates from Yahoo Finance with an EDGAR backstop.
 
-    A real implementation hits a paid feed (FMP / Polygon).  Until
-    operations approves billing, this no-ops so the registration
-    doesn't spam the scheduler with errors.
+    Both sources are tried so a single flaky upstream doesn't leave
+    the cache empty.  All rows are tagged `kind="earnings"`.
     """
-    return 0
+    rows: list[dict[str, Any]] = []
+    for yticker, symbol in _EARNINGS_TICKERS:
+        try:
+            rows.extend(await _fetch_yahoo_earnings(yticker, symbol))
+        except Exception as e:
+            log.debug("yahoo earnings fetch failed for %s: %s", yticker, e)
+    for cik, symbol in _EDGAR_CIKS:
+        try:
+            rows.extend(await _fetch_edgar_8k(cik, symbol))
+        except Exception as e:
+            log.debug("edgar fetch failed for %s: %s", cik, e)
+    return await upsert_evidence(rows)
 
 
 # --- Feed registration -------------------------------------------------------

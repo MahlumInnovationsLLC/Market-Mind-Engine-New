@@ -314,3 +314,183 @@ def test_promotion_skipped_when_already_at_target(monkeypatch):
     status = asyncio.run(promotion_mod.evaluate_promotion())
     assert not status.eligible
     assert status.current_multiplier == pytest.approx(0.10)
+
+
+# ---------------------------------------------------------------------------
+# Real MLPerf + earnings-calendar pollers (task #219)
+# ---------------------------------------------------------------------------
+
+
+def test_poll_mlperf_writes_benchmark_rows(monkeypatch):
+    """The MLPerf poller filters mlcommons repos to `<track>_results_v*`
+    and emits one `benchmark` row per round, idempotently."""
+    from app.feeds import tech_evidence as te
+
+    sample_repos = [
+        {
+            "name": "inference_results_v4.1",
+            "full_name": "mlcommons/inference_results_v4.1",
+            "html_url": "https://github.com/mlcommons/inference_results_v4.1",
+            "description": "MLPerf Inference v4.1 results.",
+            "pushed_at": "2025-09-15T12:00:00Z",
+        },
+        {
+            "name": "training_results_v4.0",
+            "full_name": "mlcommons/training_results_v4.0",
+            "html_url": "https://github.com/mlcommons/training_results_v4.0",
+            "description": "MLPerf Training v4.0 results.",
+            "pushed_at": "2025-06-01T00:00:00Z",
+        },
+        # Non-results repo should be skipped.
+        {
+            "name": "inference",
+            "full_name": "mlcommons/inference",
+            "pushed_at": "2025-10-01T00:00:00Z",
+        },
+        # Malformed entry should not crash the loop.
+        {"name": "training_results_vX", "pushed_at": None},
+    ]
+
+    async def fake_get_json(url, *, headers=None, timeout=10.0):
+        assert "mlcommons/repos" in url
+        return sample_repos
+
+    captured: list[dict[str, Any]] = []
+
+    async def fake_upsert(rows):
+        rows = list(rows)
+        captured.extend(rows)
+        return len(rows)
+
+    monkeypatch.setattr(te, "_http_get_json", fake_get_json)
+    monkeypatch.setattr(te, "upsert_evidence", fake_upsert)
+
+    n = asyncio.run(te.poll_mlperf())
+    assert n == 2
+    kinds = {r["kind"] for r in captured}
+    symbols = {r["symbol"] for r in captured}
+    sources = {r["source"] for r in captured}
+    assert kinds == {"benchmark"}
+    assert symbols == {"MLPERF"}
+    assert sources == {"mlperf_results"}
+    tracks = sorted(r["payload"]["track"] for r in captured)
+    assert tracks == ["inference", "training"]
+
+
+def test_poll_mlperf_handles_unreachable_upstream(monkeypatch):
+    from app.feeds import tech_evidence as te
+
+    async def fake_get_json(url, *, headers=None, timeout=10.0):
+        return None
+
+    monkeypatch.setattr(te, "_http_get_json", fake_get_json)
+    # No upstream -> no rows, no exception.
+    n = asyncio.run(te.poll_mlperf())
+    assert n == 0
+
+
+def test_poll_earnings_calendar_combines_yahoo_and_edgar(monkeypatch):
+    """Earnings poller pulls upcoming dates from Yahoo and historical
+    8-Ks from EDGAR, tagging each row `kind="earnings"`."""
+    from app.feeds import tech_evidence as te
+
+    yahoo_payload = {
+        "quoteSummary": {
+            "result": [
+                {
+                    "calendarEvents": {
+                        "earnings": {
+                            "earningsDate": [
+                                {"raw": 1779292800, "fmt": "2026-05-21"}
+                            ]
+                        }
+                    }
+                }
+            ]
+        }
+    }
+
+    edgar_atom = (
+        "<feed>"
+        "<entry>"
+        "<id>https://www.sec.gov/Archives/edgar/data/1045810/000104581025000123/0001045810-25-000123-index.htm</id>"
+        "<title>8-K - Results of Operations and Financial Condition</title>"
+        "<updated>2025-08-27T20:05:00-04:00</updated>"
+        "<summary>Item 2.02 earnings release.</summary>"
+        "</entry>"
+        # Non-earnings 8-K (officer departure) — must be filtered out.
+        "<entry>"
+        "<id>https://www.sec.gov/Archives/edgar/data/1045810/000104581025000999/index.htm</id>"
+        "<title>8-K - Departure of Directors</title>"
+        "<updated>2025-07-15T16:00:00-04:00</updated>"
+        "<summary>Item 5.02 announcement.</summary>"
+        "</entry>"
+        "</feed>"
+    )
+
+    async def fake_get_json(url, *, headers=None, timeout=10.0):
+        assert "query1.finance.yahoo.com" in url
+        return yahoo_payload
+
+    async def fake_get_text(url, *, headers=None, timeout=10.0):
+        assert "sec.gov" in url
+        return edgar_atom
+
+    captured: list[dict[str, Any]] = []
+
+    async def fake_upsert(rows):
+        rows = list(rows)
+        captured.extend(rows)
+        return len(rows)
+
+    monkeypatch.setattr(te, "_http_get_json", fake_get_json)
+    monkeypatch.setattr(te, "_http_get_text", fake_get_text)
+    monkeypatch.setattr(te, "upsert_evidence", fake_upsert)
+
+    n = asyncio.run(te.poll_earnings_calendar())
+    # Yahoo: 2 tickers x 1 date = 2 rows; EDGAR: 2 CIKs x 1 entry = 2 rows.
+    assert n == 4
+    assert {r["kind"] for r in captured} == {"earnings"}
+    assert {r["symbol"] for r in captured} == {"NVDA", "TSMC"}
+    assert {r["source"] for r in captured} == {"yahoo_earnings", "edgar_8k"}
+
+
+def test_poll_earnings_calendar_resilient_to_upstream_failure(monkeypatch):
+    """If both upstreams fail, the poller returns 0 rather than raising."""
+    from app.feeds import tech_evidence as te
+
+    async def fake_get_json(url, *, headers=None, timeout=10.0):
+        return None
+
+    async def fake_get_text(url, *, headers=None, timeout=10.0):
+        return None
+
+    monkeypatch.setattr(te, "_http_get_json", fake_get_json)
+    monkeypatch.setattr(te, "_http_get_text", fake_get_text)
+    n = asyncio.run(te.poll_earnings_calendar())
+    assert n == 0
+
+
+def test_register_tech_evidence_feeds_includes_mlperf_and_earnings(monkeypatch):
+    """`register_tech_evidence_feeds()` registers the real `mlperf` and
+    `earnings` pollers — so a misconfiguration of the production wiring
+    would surface here."""
+    from app.feeds.registry import FeedRegistry
+    from app.feeds import tech_evidence as te
+
+    # Swap the module-global registry for a fresh one so we don't
+    # collide with the process-wide singleton that other tests / app
+    # boot may have populated.
+    fresh = FeedRegistry()
+    monkeypatch.setattr(te, "registry", fresh)
+
+    te.register_tech_evidence_feeds()
+
+    names = {f.name for f in fresh.feeds()}
+    assert "tech_evidence.mlperf" in names
+    assert "tech_evidence.earnings" in names
+
+    # Confirm the registered callables are the real pollers, not stubs.
+    by_name = {f.name: f.poll for f in fresh.feeds()}
+    assert by_name["tech_evidence.mlperf"] is te.poll_mlperf
+    assert by_name["tech_evidence.earnings"] is te.poll_earnings_calendar
