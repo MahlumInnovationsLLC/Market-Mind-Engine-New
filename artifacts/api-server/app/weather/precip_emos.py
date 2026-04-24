@@ -43,8 +43,10 @@ from typing import Sequence
 class PrecipEMOSCoefficients:
     a: float = 0.0       # mean intercept (inches)
     b: float = 1.0       # ensemble-mean slope
+    b_g: float = 0.30    # GRU point-bias slope (additive, non-negative)
     c: float = 0.04      # variance intercept (inches^2) — small but non-zero
     d: float = 1.20      # variance slope on ensemble variance
+    d_g: float = 0.40    # variance slope on GRU spread^2
     # Logistic-link scale used for the K=0 ("any precip") contract.
     # Chosen so a 0.05" forecast already maps to ~0.62 P(any precip)
     # — i.e. the operator-perceptible "rain is on the way" threshold.
@@ -66,8 +68,10 @@ def coefficients_from_env() -> PrecipEMOSCoefficients:
     return PrecipEMOSCoefficients(
         a=f("AXIOM_PRECIP_EMOS_A", 0.0),
         b=f("AXIOM_PRECIP_EMOS_B", 1.0),
+        b_g=f("AXIOM_PRECIP_EMOS_BG", 0.30),
         c=f("AXIOM_PRECIP_EMOS_C", 0.04),
         d=f("AXIOM_PRECIP_EMOS_D", 1.20),
+        d_g=f("AXIOM_PRECIP_EMOS_DG", 0.40),
         logistic_scale=f("AXIOM_PRECIP_EMOS_LOGISTIC", 5.0),
         sigma2_floor=f("AXIOM_PRECIP_EMOS_SIGMA2_FLOOR", 0.01),
     )
@@ -201,6 +205,8 @@ def apply_precip_emos(
     *,
     ensemble: Sequence[float],
     threshold_in: float,
+    gru_point_in: float | None = None,
+    gru_spread_in: float | None = None,
     coefficients: PrecipEMOSCoefficients | None = None,
 ) -> PrecipEMOSResult:
     """Run the gamma / logistic EMOS on a precipitation ensemble.
@@ -209,6 +215,15 @@ def apply_precip_emos(
     forecasts in inches.  Negative or NaN values are dropped.  Returns
     a flat, EMOS-style result so the predictor downstream looks
     identical to the temperature path.
+
+    ``gru_point_in`` is a non-negative additive bias (inches) the
+    precipitation GRU recommends on top of the ensemble mean —
+    HRRR / Open-Meteo systematically under-predict heavy events, and
+    a non-negative bias head is the right correction.  ``gru_spread_in``
+    is the GRU's spread proxy (inches) folded into the EMOS variance
+    so a too-tight ensemble doesn't saturate the gamma tail.  Either
+    may be ``None`` when the GRU couldn't run, in which case EMOS
+    falls back to the pure-ensemble fit.
     """
     coef = coefficients or coefficients_from_env()
     em_mean, em_var = _ensemble_stats(ensemble)
@@ -225,8 +240,13 @@ def apply_precip_emos(
             link="degenerate",
         )
 
-    mu = max(0.0, coef.a + coef.b * em_mean)
-    sigma2 = max(coef.sigma2_floor, coef.c + coef.d * em_var)
+    g_point = max(0.0, float(gru_point_in)) if gru_point_in is not None else 0.0
+    g_var = (
+        max(0.0, float(gru_spread_in)) ** 2 if gru_spread_in is not None else 0.0
+    )
+
+    mu = max(0.0, coef.a + coef.b * em_mean + coef.b_g * g_point)
+    sigma2 = max(coef.sigma2_floor, coef.c + coef.d * em_var + coef.d_g * g_var)
     sigma = math.sqrt(sigma2)
 
     if threshold_in <= 0.0:

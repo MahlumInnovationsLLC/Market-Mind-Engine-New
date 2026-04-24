@@ -83,6 +83,7 @@ CANONICAL_PREDICTORS: tuple[str, ...] = (
     "models/saved/meta_model.pkl",
     "models/saved/calibrator_isotonic.joblib",
     "models/saved/temperature_gru.pkl",
+    "models/saved/precip_gru.pkl",
     "models/archive/meta_model.pkl",
     "models/archive/calibrator.pkl",
 )
