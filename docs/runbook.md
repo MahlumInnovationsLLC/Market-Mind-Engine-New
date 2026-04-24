@@ -18,6 +18,7 @@ the change, and the rollback path if you need to undo it.
 9. [Halt a single vertical](#9-halt-a-single-vertical)
 10. [Cutover go/no-go checklist (paper → tiny live → full live)](#10-cutover-gono-go-checklist-paper--tiny-live--full-live)
 11. [First 24 hours live](#11-first-24-hours-live)
+12. [Tune WebSocket subscriber queue sizes](#12-tune-websocket-subscriber-queue-sizes)
 
 ---
 
@@ -850,5 +851,121 @@ Do **not** page on:
 - `info`-severity alerts — those collect in
   `/system → health → Alerts` for end-of-day review, not the
   middle-of-the-night pager.
+
+---
+
+## 12. Tune WebSocket subscriber queue sizes
+
+Every in-process fan-out hub (`pipeline`, `settlement`, `kalshi`,
+`polymarket`, `llm-logs`) hands each WebSocket subscriber its own
+bounded `asyncio.Queue` so a slow / stuck client cannot pin
+unbounded memory on the publisher (see
+`artifacts/api-server/app/ws_backpressure.py`). The per-subscriber
+ceiling is configurable per-deployment without a code change.
+
+### Env vars
+
+| Var | Scope | Default |
+| --- | --- | --- |
+| `AXIOM_WS_QUEUE_MAXSIZE` | Global default for every hub. | `256` (legacy hard-coded ceiling) |
+| `AXIOM_WS_QUEUE_MAXSIZE_PIPELINE` | Per-hub override for `pipeline_event_hub` (`/api/ws/pipeline`; also one of the two hubs behind `/api/ws/positions`, `/api/ws/trades`, `/api/ws/alerts`). | unset |
+| `AXIOM_WS_QUEUE_MAXSIZE_SETTLEMENT` | Per-hub override for `settlement_event_hub` (`/api/ws/settlement`; also the second hub behind `/api/ws/positions`, `/api/ws/trades`, `/api/ws/alerts`). | unset |
+| `AXIOM_WS_QUEUE_MAXSIZE_KALSHI` | Per-hub override for the Kalshi market-data bus (`/api/ws/kalshi` and the per-ticker `/api/ws/orderbook/{ticker}` stream — orderbook clients subscribe to this hub, not `pipeline`). | unset |
+| `AXIOM_WS_QUEUE_MAXSIZE_POLYMARKET` | Per-hub override for the Polymarket market-data bus (`/api/ws/polymarket`). | unset |
+| `AXIOM_WS_QUEUE_MAXSIZE_LLM_LOGS` | Per-hub override for `/api/ws/llm-logs` (Pro+ only). | unset |
+
+`/api/ws/temperature/{city}` is a polling loop on the WS thread, not
+a hub fan-out, so none of these knobs apply to it.
+
+**Precedence:** per-hub override > global > legacy default of `256`.
+A value < 1 or non-integer is logged once and ignored (the hub
+falls back to the next level), so a typo can't take the API down at
+import time.
+
+### Setting a value
+
+The variables are read on startup. Update them in Replit Secrets
+and **restart** the API workflow (`artifacts/api-server: API Server`)
+— each hub captures its ceiling on construction during the
+lifespan hook, so changes do **not** take effect on existing
+subscribers until restart. New WebSocket connections after restart
+use the new value.
+
+```bash
+# Example: bump the orderbook (kalshi/polymarket) hubs to 1024 slots,
+# leave the rest at the 256 default.
+# In Replit: Tools -> Secrets
+AXIOM_WS_QUEUE_MAXSIZE_KALSHI=1024
+AXIOM_WS_QUEUE_MAXSIZE_POLYMARKET=1024
+```
+
+### Verify the override took effect
+
+`/api/health/snapshot` exposes the resolved per-hub ceiling under
+the `WebSocket subscribers` card → `extras.queue_config`:
+
+```bash
+curl -s "https://YOUR_HOST/api/health/snapshot" \
+  | jq '.cards[] | select(.key=="ws_backpressure").extras.queue_config'
+# {
+#   "default": 256,
+#   "global_env": "AXIOM_WS_QUEUE_MAXSIZE",
+#   "global_env_set": false,
+#   "by_hub": {
+#     "pipeline":   {"maxsize": 256,  "env": "AXIOM_WS_QUEUE_MAXSIZE_PIPELINE",   "env_set": false},
+#     "settlement": {"maxsize": 256,  "env": "AXIOM_WS_QUEUE_MAXSIZE_SETTLEMENT", "env_set": false},
+#     "kalshi":     {"maxsize": 1024, "env": "AXIOM_WS_QUEUE_MAXSIZE_KALSHI",     "env_set": true},
+#     "polymarket": {"maxsize": 1024, "env": "AXIOM_WS_QUEUE_MAXSIZE_POLYMARKET", "env_set": true},
+#     "llm-logs":   {"maxsize": 256,  "env": "AXIOM_WS_QUEUE_MAXSIZE_LLM_LOGS",   "env_set": false}
+#   }
+# }
+```
+
+If `env_set` is `true` but `maxsize` is the legacy default, the
+value failed validation (not an integer, or < 1) — re-check the
+secret and look for a `ignoring AXIOM_WS_QUEUE_MAXSIZE_*` warning
+in the API workflow logs.
+
+### When to tune this
+
+The default of 256 is sized for a steady human-operator audience.
+Bump it when `/api/health/snapshot` shows the
+`WebSocket subscribers` card going `degraded` for either of these
+reasons under normal load (i.e. not because one client is actually
+broken):
+
+- **Near-full queue depth** — the card detail reads
+  `N subscriber(s) >=90% full (largest=…)`. Look at
+  `extras.subscribers[]` for the offending hub: if multiple healthy
+  clients on the same hub hover near the ceiling during bursty
+  publish traffic (e.g. a fast-moving Kalshi orderbook), the hub
+  needs more headroom.
+- **Overflow closes** — the card detail reads
+  `N subscriber(s) closed on overflow`. On `policy: "close"` hubs
+  (live orderbook channels, where stale events are worse than no
+  events) an overflow tears the connection down with close code
+  `1011 / subscriber_backlog_overflow`. A trickle is normal during
+  a publisher burst; a steady stream means the ceiling is too tight
+  for the publish rate and clients are flapping.
+
+Suggested starting points when bumping: double the current value
+(256 → 512 → 1024). Keep an eye on API memory after the restart —
+worst case is `subscribers × maxsize × avg_event_bytes` per hub.
+Reverse the change (delete the secret, restart) if memory pressure
+shows up on the API workflow.
+
+Don't bump it as a reflex when a single subscriber is pinned at
+`overflowed=true` or `qsize=maxsize` — that is the symptom of one
+broken client, not a misconfiguration. Identify the client from
+`extras.subscribers[].label` and disconnect it (or wait for the
+silent-subscriber alert to fire and follow the alert's runbook
+link).
+
+### Rollback
+
+Delete the per-hub override (or `AXIOM_WS_QUEUE_MAXSIZE`) from
+Replit Secrets and restart the API workflow. The next snapshot
+will show the resolved `maxsize` falling back through the
+precedence chain to `256`.
 
 ---
