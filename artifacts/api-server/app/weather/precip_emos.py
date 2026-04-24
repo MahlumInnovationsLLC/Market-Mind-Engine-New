@@ -23,15 +23,25 @@ non-negative, right-skewed quantity:
   Numerical-Recipes series + continued-fraction expansions so the call
   stays pure-Python (no SciPy dependency in the trading loop).
 
-Operators can override the EMOS coefficients via
-``AXIOM_PRECIP_EMOS_*`` environment variables when a refit lands.
+Coefficient resolution order (highest precedence first):
+
+  1. Persisted refit cache (``set_persisted_coefficients`` — populated
+     by the nightly retrain loop in :mod:`app.settlement.retrain` once
+     enough KXRAIN markets have settled to drive a maximum-likelihood
+     refit of (a, b, c, d, logistic_scale)).
+  2. ``AXIOM_PRECIP_EMOS_*`` environment variables (operator override).
+  3. The shipped, sanity-checked defaults below.
 """
 from __future__ import annotations
 
+import logging
 import math
 import os
-from dataclasses import dataclass
-from typing import Sequence
+from dataclasses import dataclass, asdict
+from typing import Iterable, Sequence
+
+
+log = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -57,6 +67,21 @@ class PrecipEMOSCoefficients:
 
 
 def coefficients_from_env() -> PrecipEMOSCoefficients:
+    """Resolve the active EMOS coefficients.
+
+    Resolution order (first hit wins):
+
+      1. The persisted refit cache populated by the retrain loop —
+         ``set_persisted_coefficients`` calls store the most recent
+         max-likelihood fit here so the trading loop picks it up
+         without restarting the API.
+      2. ``AXIOM_PRECIP_EMOS_*`` environment variables.
+      3. Hand-picked defaults on :class:`PrecipEMOSCoefficients`.
+    """
+    cached = _persisted_coefficients()
+    if cached is not None:
+        return cached
+
     def f(key: str, default: float) -> float:
         raw = os.environ.get(key)
         if raw is None or raw == "":
@@ -74,6 +99,62 @@ def coefficients_from_env() -> PrecipEMOSCoefficients:
         d_g=f("AXIOM_PRECIP_EMOS_DG", 0.40),
         logistic_scale=f("AXIOM_PRECIP_EMOS_LOGISTIC", 5.0),
         sigma2_floor=f("AXIOM_PRECIP_EMOS_SIGMA2_FLOOR", 0.01),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Persisted-refit cache
+# ---------------------------------------------------------------------------
+# The nightly retrain loop refits (a, b, c, d, logistic_scale) on real
+# settled KXRAIN markets and stores the result here so the trading loop
+# stops using the shipped defaults the moment a fit lands. The cache is
+# process-local — :mod:`app.settlement.retrain` is responsible for
+# hydrating it from ``system_settings.precipitation_emos_coefficients``
+# at boot and updating it whenever a fresh fit is persisted.
+
+_PERSISTED: PrecipEMOSCoefficients | None = None
+
+
+def _persisted_coefficients() -> PrecipEMOSCoefficients | None:
+    return _PERSISTED
+
+
+def set_persisted_coefficients(coef: PrecipEMOSCoefficients | None) -> None:
+    """Install (or clear) the in-memory refit cache.
+
+    ``None`` reverts to env / default resolution and is the right call
+    for tests that want a clean baseline.
+    """
+    global _PERSISTED
+    _PERSISTED = coef
+
+
+def coefficients_to_dict(coef: PrecipEMOSCoefficients) -> dict[str, float]:
+    """Plain-dict serialization for the system_settings JSON payload."""
+    return {k: float(v) for k, v in asdict(coef).items()}
+
+
+def coefficients_from_dict(payload: dict[str, float | int]) -> PrecipEMOSCoefficients:
+    """Inverse of :func:`coefficients_to_dict`. Unknown keys are ignored
+    and any missing key falls back to the dataclass default so a
+    forward-compatible JSON payload from a future fitter still loads.
+    """
+    defaults = PrecipEMOSCoefficients()
+    def _g(key: str, fallback: float) -> float:
+        v = payload.get(key)
+        if v is None:
+            return fallback
+        try:
+            return float(v)
+        except (TypeError, ValueError):
+            return fallback
+    return PrecipEMOSCoefficients(
+        a=_g("a", defaults.a),
+        b=_g("b", defaults.b),
+        c=_g("c", defaults.c),
+        d=_g("d", defaults.d),
+        logistic_scale=_g("logistic_scale", defaults.logistic_scale),
+        sigma2_floor=_g("sigma2_floor", defaults.sigma2_floor),
     )
 
 
@@ -278,10 +359,218 @@ def apply_precip_emos(
     )
 
 
+# ---------------------------------------------------------------------------
+# Maximum-likelihood refit
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class PrecipEMOSTrainingSample:
+    """Single (observation, outcome) row consumed by the fitter.
+
+    ``ensemble_mean`` and ``ensemble_var`` are the EMOS inputs the
+    predictor cached at trade-creation time. ``threshold_in`` is the
+    Kalshi K (in inches). ``y_above`` is the realized binary outcome
+    *for the canonical "P(precip > K)" prediction* — callers that
+    persisted a `direction='below'` row must flip the YES outcome
+    before constructing the sample.
+    """
+    ensemble_mean: float
+    ensemble_var: float
+    threshold_in: float
+    y_above: int
+
+
+@dataclass(frozen=True)
+class PrecipEMOSFitResult:
+    coefficients: PrecipEMOSCoefficients
+    n_samples: int
+    log_likelihood: float
+    brier: float
+    brier_baseline: float
+    converged: bool
+
+
+def _predict_p_above_with(coef: PrecipEMOSCoefficients,
+                          em_mean: float, em_var: float,
+                          threshold_in: float) -> float:
+    """Same math as :func:`apply_precip_emos` but inlined so the fitter
+    can drive it tens of thousands of times without re-allocating the
+    full ``PrecipEMOSResult`` shape on every call.
+    """
+    mu = max(0.0, coef.a + coef.b * float(em_mean))
+    sigma2 = max(coef.sigma2_floor, coef.c + coef.d * float(em_var))
+    if threshold_in <= 0.0:
+        z = mu * coef.logistic_scale
+        return _clamp_prob(_sigmoid(z))
+    if mu <= 0.0 or sigma2 <= 0.0:
+        # mu==0 collapses the gamma to a delta at 0 — P(Y > K) = 0.
+        return _clamp_prob(0.0)
+    theta = sigma2 / mu
+    alpha = (mu * mu) / sigma2
+    return _clamp_prob(gamma_sf(threshold_in, alpha, theta))
+
+
+def _neg_log_likelihood(
+    samples: Sequence[PrecipEMOSTrainingSample],
+    coef: PrecipEMOSCoefficients,
+) -> float:
+    nll = 0.0
+    for s in samples:
+        p_above = _predict_p_above_with(
+            coef, s.ensemble_mean, s.ensemble_var, s.threshold_in
+        )
+        if s.y_above:
+            nll -= math.log(p_above)
+        else:
+            nll -= math.log(1.0 - p_above)
+    return nll
+
+
+def _brier_for(coef: PrecipEMOSCoefficients,
+               samples: Sequence[PrecipEMOSTrainingSample]) -> float:
+    if not samples:
+        return 0.0
+    se = 0.0
+    for s in samples:
+        p = _predict_p_above_with(
+            coef, s.ensemble_mean, s.ensemble_var, s.threshold_in
+        )
+        se += (p - float(s.y_above)) ** 2
+    return se / len(samples)
+
+
+# Minimum samples below which we refuse to refit (the optimizer is
+# unstable on tiny / single-class folds, and a partial refit could
+# regress the live coefficients).
+MIN_REFIT_SAMPLES = 50
+
+
+def to_training_sample(
+    *, ensemble_mean: float, ensemble_var: float,
+    threshold_in: float, direction: str, actual_outcome_yes: int,
+) -> PrecipEMOSTrainingSample:
+    """Canonicalize a stored observation onto the gamma-SF axis the
+    fitter operates on. Above-direction tickers store ``y_above``
+    directly; below-direction tickers flip the YES outcome so the
+    fitter sees a single "did precip exceed K" target across the
+    whole dataset.
+    """
+    y = int(actual_outcome_yes)
+    d = str(direction).lower().strip()
+    if d == "below":
+        y = 1 - y
+    return PrecipEMOSTrainingSample(
+        ensemble_mean=float(ensemble_mean),
+        ensemble_var=float(ensemble_var),
+        threshold_in=float(threshold_in),
+        y_above=int(y),
+    )
+
+
+def fit_precip_emos_coefficients(
+    samples: Iterable[PrecipEMOSTrainingSample],
+    *,
+    initial: PrecipEMOSCoefficients | None = None,
+    max_iter: int = 400,
+) -> PrecipEMOSFitResult:
+    """Refit (a, b, c, d, logistic_scale) by maximizing the binary
+    log-likelihood of the gamma / logistic EMOS link against settled
+    KXRAIN outcomes.
+
+    Implementation notes:
+
+    * (b, c, d, logistic_scale) are positivity-preserved via an
+      ``exp`` reparam so the optimizer can never push the variance
+      slope or the logistic scale below zero (which would invert
+      the link).
+    * ``a`` is unconstrained (the EMOS intercept is allowed to be
+      slightly negative for sources that systematically over-read).
+    * ``sigma2_floor`` is held fixed at the shipped default so the
+      optimizer doesn't trade the floor off against ``c`` and produce
+      a degenerate gamma on dry days.
+    * Falls back to scipy's ``minimize`` (Nelder-Mead, no gradients)
+      when scipy is available; otherwise raises so the caller can
+      decline the refit rather than ship a broken fit.
+    """
+    sample_list = list(samples)
+    if len(sample_list) < MIN_REFIT_SAMPLES:
+        raise ValueError(
+            f"need at least {MIN_REFIT_SAMPLES} samples to refit, "
+            f"got {len(sample_list)}"
+        )
+    # Single-class fold (every outcome 0 or every outcome 1) breaks the
+    # log-likelihood since either log(p) or log(1-p) saturates against
+    # any informative coefficients. Fall back to a Bayesian-prior fit.
+    n_pos = sum(1 for s in sample_list if s.y_above)
+    if n_pos == 0 or n_pos == len(sample_list):
+        raise ValueError(
+            "training set is single-class (all YES or all NO); refit "
+            "would be degenerate"
+        )
+
+    base = initial or coefficients_from_env()
+
+    # Reparam: theta = (a, log_b, log_c, log_d, log_logistic).
+    def _unpack(theta: Sequence[float]) -> PrecipEMOSCoefficients:
+        a, lb, lc, ld, lL = theta
+        return PrecipEMOSCoefficients(
+            a=float(a),
+            b=float(math.exp(lb)),
+            c=float(math.exp(lc)),
+            d=float(math.exp(ld)),
+            logistic_scale=float(math.exp(lL)),
+            sigma2_floor=base.sigma2_floor,
+        )
+
+    def _objective(theta: Sequence[float]) -> float:
+        coef = _unpack(theta)
+        return _neg_log_likelihood(sample_list, coef)
+
+    x0 = (
+        base.a,
+        math.log(max(1e-3, base.b)),
+        math.log(max(1e-3, base.c)),
+        math.log(max(1e-3, base.d)),
+        math.log(max(1e-3, base.logistic_scale)),
+    )
+
+    try:
+        from scipy.optimize import minimize  # type: ignore
+    except Exception as e:
+        raise RuntimeError(
+            "scipy.optimize.minimize is required for the EMOS refit "
+            f"but is unavailable: {e}"
+        )
+
+    res = minimize(
+        _objective, list(x0),
+        method="Nelder-Mead",
+        options={"xatol": 1e-4, "fatol": 1e-4, "maxiter": max_iter},
+    )
+    fitted = _unpack(res.x)
+    return PrecipEMOSFitResult(
+        coefficients=fitted,
+        n_samples=len(sample_list),
+        log_likelihood=float(-res.fun),
+        brier=_brier_for(fitted, sample_list),
+        brier_baseline=_brier_for(base, sample_list),
+        converged=bool(getattr(res, "success", False)),
+    )
+
+
 __all__ = [
+    "MIN_REFIT_SAMPLES",
     "PrecipEMOSCoefficients",
+    "PrecipEMOSFitResult",
     "PrecipEMOSResult",
+    "PrecipEMOSTrainingSample",
     "apply_precip_emos",
+    "coefficients_from_dict",
     "coefficients_from_env",
+    "coefficients_to_dict",
+    "fit_precip_emos_coefficients",
     "gamma_sf",
+    "set_persisted_coefficients",
+    "to_training_sample",
 ]

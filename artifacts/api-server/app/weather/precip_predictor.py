@@ -21,7 +21,7 @@ import time
 from datetime import datetime, timezone
 from typing import Any
 
-from .. import calibrators, models_loader
+from .. import calibrators, db, models_loader
 from ..feeds.weather_payload import build_weather_payload
 from ..predictor import Prediction
 from . import precip_emos, precip_gru
@@ -35,6 +35,58 @@ log = logging.getLogger(__name__)
 
 
 CANONICAL_PRECIP_GRU_PATH = "models/saved/precip_gru.pkl"
+
+
+# ---------------------------------------------------------------------------
+# Observation persistence (for the EMOS refit loop, task #280)
+# ---------------------------------------------------------------------------
+
+
+async def _record_observation(
+    parsed: PrecipitationTicker,
+    *,
+    ensemble_mean: float,
+    ensemble_var: float,
+    ensemble_n: int,
+    p_above: float,
+) -> None:
+    """Best-effort UPSERT of the per-market EMOS inputs.
+
+    The retrain loop in :mod:`app.settlement.retrain` joins this table
+    against `actual_outcome_yes` (stamped at settlement time) to refit
+    the gamma / logistic EMOS coefficients. We deliberately swallow
+    any DB error here — a transient outage on the observability side
+    must never block the actual prediction returning to the trader.
+    """
+    try:
+        await db.execute(
+            """
+            INSERT INTO precip_emos_observations (
+                market_id, city, threshold_in, direction,
+                ensemble_mean, ensemble_var, ensemble_n,
+                predicted_p_above, updated_at
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, now())
+            ON CONFLICT (market_id) DO UPDATE
+               SET city              = EXCLUDED.city,
+                   threshold_in      = EXCLUDED.threshold_in,
+                   direction         = EXCLUDED.direction,
+                   ensemble_mean     = EXCLUDED.ensemble_mean,
+                   ensemble_var      = EXCLUDED.ensemble_var,
+                   ensemble_n        = EXCLUDED.ensemble_n,
+                   predicted_p_above = EXCLUDED.predicted_p_above,
+                   updated_at        = now()
+             WHERE precip_emos_observations.settled_at IS NULL
+            """,
+            parsed.raw, parsed.city, float(parsed.threshold_in),
+            parsed.direction,
+            float(ensemble_mean), float(ensemble_var), int(ensemble_n),
+            float(p_above),
+        )
+    except Exception as e:
+        log.debug(
+            "precip_emos_observations upsert failed for %s: %s",
+            parsed.raw, e,
+        )
 
 
 class PrecipitationPredictionError(RuntimeError):
@@ -287,11 +339,17 @@ async def predict_precipitation_binary(
     *,
     league: str | None = "WEATHER",
     payload_override: dict[str, Any] | None = None,
+    record_observation: bool = True,
 ) -> Prediction:
     """Live prediction for a Kalshi KXRAIN precipitation contract.
 
     ``payload_override`` is a test seam — production callers leave it
     None and let the predictor pull the unified weather payload itself.
+
+    ``record_observation`` (default True) controls whether the predictor
+    snapshots the ensemble mean / variance into
+    ``precip_emos_observations`` for the EMOS refit loop. Tests and
+    admin probe paths can pass False to skip the side effect.
     """
     parsed = (
         ticker if isinstance(ticker, PrecipitationTicker)
@@ -336,6 +394,15 @@ async def predict_precipitation_binary(
     else:
         probability = raw_p
         cal_extra = {}
+
+    if record_observation:
+        await _record_observation(
+            parsed,
+            ensemble_mean=emos_result.ensemble_mean,
+            ensemble_var=emos_result.ensemble_var,
+            ensemble_n=len(ensemble),
+            p_above=emos_result.p_above,
+        )
 
     raw: dict[str, Any] = {
         "ticker": {

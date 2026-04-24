@@ -478,6 +478,17 @@ async def lifespan(_: FastAPI):
     except Exception as e:
         log.warning("margin regressor bootstrap failed: %s", e)
 
+    # Hydrate the persisted KXRAIN EMOS coefficients (task #280) so a
+    # restarted API picks the most-recent nightly refit back up
+    # instead of dropping to the shipped defaults until the next
+    # retrain cycle lands. Best-effort — a missing settings row just
+    # leaves the env / default coefficients in place.
+    try:
+        from .settlement import retrain as _retrain
+        await _retrain.load_persisted_precip_emos_coefficients()
+    except Exception as e:
+        log.warning("precip EMOS coefficient bootstrap failed: %s", e)
+
     # Per-vertical retrained calibrator listener (task #88).  The
     # online-learning worker writes fresh isotonic snapshots tagged
     # `drift_status.status='retrained'`; this listener invalidates

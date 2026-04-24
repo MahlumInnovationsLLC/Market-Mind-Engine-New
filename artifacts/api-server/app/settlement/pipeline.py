@@ -280,6 +280,41 @@ async def _settle_one_trade(
     }
 
 
+async def _stamp_precip_emos_observation(
+    market_id: str, outcome_yes: int,
+) -> None:
+    """Stamp the realized YES/NO outcome onto a KXRAIN observation row.
+
+    The predictor (``app.weather.precip_predictor``) snapshots the
+    ensemble mean / variance into ``precip_emos_observations`` at
+    trade-creation time. At settlement we close the loop by marking
+    the row settled with the canonical Kalshi YES outcome — the EMOS
+    refit fitter handles the above/below direction flip itself, so
+    here we just record the raw market-level outcome.
+
+    Best-effort: this table only feeds the offline refit loop and the
+    settlement path must never fail because of an observability write.
+    The UPDATE is a no-op for any market we never logged a prediction
+    for (older markets, non-KXRAIN, etc.) — the WHERE clause below
+    only matches actual KXRAIN observation rows.
+    """
+    try:
+        await db.execute(
+            """
+            UPDATE precip_emos_observations
+               SET actual_outcome_yes = $2,
+                   settled_at         = COALESCE(settled_at, now()),
+                   updated_at         = now()
+             WHERE market_id = $1
+            """,
+            market_id, int(outcome_yes),
+        )
+    except Exception as e:
+        log.debug(
+            "precip_emos_observations stamp failed for %s: %s", market_id, e
+        )
+
+
 async def _close_position(market_id: str, outcome_yes: int) -> None:
     """Mark all open positions on this market as closed."""
     try:
@@ -831,6 +866,11 @@ async def settle_market(
         # so a market with mixed legs (which shouldn't happen but might
         # under data drift) errs on the safer side of recording a WIN.
         persona_outcome_yes = max(outcome_counts.items(), key=lambda kv: (kv[1], kv[0]))[0]
+    # Close the EMOS observation loop for KXRAIN markets — see
+    # task #280. This UPDATE is a no-op for any market the predictor
+    # never logged, so it's safe to call unconditionally and avoids
+    # leaking the KXRAIN ticker shape into the settlement path.
+    await _stamp_precip_emos_observation(market_id, outcome_yes)
     await _close_position(market_id, persona_outcome_yes)
     persona_touched = await _update_personas_for_market(
         market_id, persona_outcome_yes, result_3way=result_3way,

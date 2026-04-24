@@ -32,6 +32,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from .. import db
+from ..weather import precip_emos
 from .pipeline import BRIER_DRIFT_CRIT, BRIER_DRIFT_WARN
 from .streams import settlement_event_hub
 
@@ -73,6 +74,10 @@ class RetrainCycleResult:
     rollbacks: int = 0
     details: list[VerticalRetrainResult] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
+    # Status of the precipitation EMOS coefficient refit (task #280).
+    # Empty dict means the refit step didn't run (the cycle's hook is
+    # additive — see ``_refit_precip_emos_from_observations``).
+    precip_emos_status: dict[str, Any] = field(default_factory=dict)
 
 
 # Tolerance band: refits whose post-fit Brier exceeds the pre-fit
@@ -543,6 +548,18 @@ async def run_retrain_cycle() -> RetrainCycleResult:
             log.warning("retrain: weather temp refit raised: %s", e)
             cr.errors.append(f"weather_temp: {e}")
 
+    # Best-effort precipitation EMOS refit (task #280). The result
+    # rides the same cycle the isotonic refits run on so operators
+    # see "EMOS refit happened" in the same dashboard event stream.
+    # Failures here NEVER abort the cycle — the trading loop keeps
+    # using whatever coefficients are currently active.
+    try:
+        emos_status = await _refit_precip_emos_from_observations()
+        cr.precip_emos_status = emos_status
+    except Exception as e:
+        log.warning("precip_emos refit raised: %s", e)
+        cr.precip_emos_status = {"status": "error", "reason": str(e)}
+
     cr.duration_seconds = round(time.perf_counter() - started, 3)
     cr.completed_at = datetime.now(timezone.utc).isoformat()
     await _publish({
@@ -626,3 +643,246 @@ async def _run_weather_temp_retrain(cr: RetrainCycleResult) -> None:
     # ``run_retrain_cycle`` return value carries weather signal too.
     cr.verticals_examined += len(results)
     cr.verticals_retrained += promoted
+
+
+# ---------------------------------------------------------------------------
+# Precipitation EMOS coefficient refit (task #280)
+# ---------------------------------------------------------------------------
+#
+# The KXRAIN predictor ships with hand-picked EMOS coefficients
+# (a=0, b=1, c=0.04, d=1.20, logistic_scale=5.0) sanity-checked
+# against synthetic gamma draws. Once enough KXRAIN markets have
+# settled, we refit these coefficients by maximising the binary
+# log-likelihood of the gamma / logistic link against the realised
+# YES/NO outcomes the predictor stored in `precip_emos_observations`.
+#
+# Done = the nightly refit happens AND the Brier on recent N markets
+# is materially lower than the shipped defaults. The Brier-improvement
+# gate below enforces the second half of "done" — we only promote the
+# new coefficients when they actually beat the active baseline by more
+# than `_PRECIP_EMOS_BRIER_TOLERANCE`.
+
+# Pull at most this many recent observations into a single refit so
+# the optimizer doesn't grind on a year of data when only the tail
+# is statistically relevant.
+PRECIP_EMOS_MAX_SAMPLES = 5_000
+
+# Don't promote a refit unless its in-sample Brier improves on the
+# active coefficients by more than this margin (tiny improvements are
+# noise from the optimizer's terminal ftol).
+_PRECIP_EMOS_BRIER_TOLERANCE = 1e-4
+
+# Persisted-coefficients key for `system_settings`.
+_PRECIP_EMOS_SETTINGS_KEY = "precipitation_emos_coefficients"
+
+
+async def _load_precip_emos_observations(limit: int) -> list[dict[str, Any]]:
+    try:
+        rows = await db.fetch(
+            """
+            SELECT market_id,
+                   threshold_in::float  AS threshold_in,
+                   direction,
+                   ensemble_mean::float AS ensemble_mean,
+                   ensemble_var::float  AS ensemble_var,
+                   actual_outcome_yes::int AS actual_outcome_yes
+              FROM precip_emos_observations
+             WHERE settled_at IS NOT NULL
+               AND actual_outcome_yes IS NOT NULL
+               AND ensemble_mean IS NOT NULL
+               AND ensemble_var IS NOT NULL
+             ORDER BY settled_at DESC
+             LIMIT $1
+            """,
+            int(limit),
+        )
+    except Exception as e:
+        log.debug("precip_emos: observation fetch failed: %s", e)
+        return []
+    return [dict(r) for r in rows]
+
+
+async def _persist_precip_emos_coefficients(
+    coef: precip_emos.PrecipEMOSCoefficients,
+    *,
+    n: int,
+    brier_after: float,
+    brier_baseline: float,
+) -> bool:
+    """Write the refit JSON into ``system_settings`` so a fresh API
+    process picks the new coefficients up via
+    ``load_persisted_precip_emos_coefficients`` at boot.
+
+    Returns True on success. Failures are logged and signalled — the
+    caller still installs the cache locally so the live process gets
+    the benefit, but the next cold start would lose the fit.
+    """
+    payload = {
+        "coefficients": precip_emos.coefficients_to_dict(coef),
+        "n": int(n),
+        "brier_after": float(brier_after),
+        "brier_baseline": float(brier_baseline),
+        "fit_at": datetime.now(timezone.utc).isoformat(),
+    }
+    try:
+        # ``system_settings.value`` is TEXT (see runtime_settings.py),
+        # so we serialize the refit payload to JSON ourselves and let
+        # the load path parse it back. Matches the convention every
+        # other consumer of this table uses.
+        from .. import runtime_settings as _rs
+        await _rs._ensure_system_settings_schema()
+        await db.execute(
+            """
+            INSERT INTO system_settings (key, value, updated_at)
+            VALUES ($1, $2, now())
+            ON CONFLICT (key) DO UPDATE
+               SET value = EXCLUDED.value,
+                   updated_at = now()
+            """,
+            _PRECIP_EMOS_SETTINGS_KEY, json.dumps(payload),
+        )
+        return True
+    except Exception as e:
+        log.warning("precip_emos: settings persist failed: %s", e)
+        return False
+
+
+async def load_persisted_precip_emos_coefficients() -> bool:
+    """Hydrate the in-process EMOS cache from ``system_settings``.
+
+    Called from API startup so the trading loop doesn't drop back to
+    the shipped defaults across a deploy. Returns True iff a row was
+    found and installed; False (silently) when no refit has landed yet
+    or the row can't be read.
+    """
+    try:
+        raw = await db.fetchval(
+            "SELECT value FROM system_settings WHERE key = $1",
+            _PRECIP_EMOS_SETTINGS_KEY,
+        )
+    except Exception as e:
+        log.debug("precip_emos: settings load failed: %s", e)
+        return False
+    if raw is None:
+        return False
+    try:
+        payload = json.loads(raw) if isinstance(raw, str) else dict(raw)
+        coef_dict = payload.get("coefficients") or {}
+        coef = precip_emos.coefficients_from_dict(coef_dict)
+    except Exception as e:
+        log.warning("precip_emos: settings parse failed: %s", e)
+        return False
+    precip_emos.set_persisted_coefficients(coef)
+    return True
+
+
+async def _refit_precip_emos_from_observations() -> dict[str, Any]:
+    """Refit the precipitation EMOS coefficients on settled KXRAIN
+    markets. Best-effort: returns a status dict and never raises.
+
+    Status shape::
+
+        {"status": "skipped"   | "fit"    | "rejected"  | "error",
+         "n":              int,
+         "brier_baseline": float | None,
+         "brier_after":    float | None,
+         "reason":         str   | None,
+         "promoted":       bool}
+    """
+    rows = await _load_precip_emos_observations(PRECIP_EMOS_MAX_SAMPLES)
+    if len(rows) < precip_emos.MIN_REFIT_SAMPLES:
+        return {
+            "status": "skipped",
+            "n": len(rows),
+            "reason": "not_enough_settled_observations",
+            "promoted": False,
+        }
+
+    # Canonicalize (above/below) onto the gamma-SF axis the fitter wants.
+    samples: list[precip_emos.PrecipEMOSTrainingSample] = []
+    for r in rows:
+        try:
+            samples.append(precip_emos.to_training_sample(
+                ensemble_mean=r["ensemble_mean"],
+                ensemble_var=r["ensemble_var"],
+                threshold_in=r["threshold_in"],
+                direction=r["direction"],
+                actual_outcome_yes=r["actual_outcome_yes"],
+            ))
+        except Exception as e:
+            log.debug("precip_emos: skipping malformed obs %s: %s",
+                      r.get("market_id"), e)
+
+    if len(samples) < precip_emos.MIN_REFIT_SAMPLES:
+        return {
+            "status": "skipped",
+            "n": len(samples),
+            "reason": "not_enough_clean_samples",
+            "promoted": False,
+        }
+
+    # Run the (CPU-bound) fit off the event loop.
+    import asyncio
+    try:
+        baseline = precip_emos.coefficients_from_env()
+        fit = await asyncio.to_thread(
+            precip_emos.fit_precip_emos_coefficients,
+            samples, initial=baseline,
+        )
+    except Exception as e:
+        log.warning("precip_emos: fit raised: %s", e)
+        return {
+            "status": "error",
+            "n": len(samples),
+            "reason": f"{type(e).__name__}: {e}",
+            "promoted": False,
+        }
+
+    improved = (fit.brier_baseline - fit.brier) > _PRECIP_EMOS_BRIER_TOLERANCE
+    if not improved:
+        await _publish({
+            "type": "precip_emos_refit",
+            "promoted": False,
+            "n": fit.n_samples,
+            "brier_baseline": fit.brier_baseline,
+            "brier_after": fit.brier,
+            "reason": "no_brier_improvement",
+        })
+        return {
+            "status": "rejected",
+            "n": fit.n_samples,
+            "brier_baseline": fit.brier_baseline,
+            "brier_after": fit.brier,
+            "reason": "no_brier_improvement",
+            "promoted": False,
+        }
+
+    # Promote: cache locally so the very next predict picks it up,
+    # then persist for the next cold start.
+    precip_emos.set_persisted_coefficients(fit.coefficients)
+    persisted = await _persist_precip_emos_coefficients(
+        fit.coefficients,
+        n=fit.n_samples,
+        brier_after=fit.brier,
+        brier_baseline=fit.brier_baseline,
+    )
+
+    await _publish({
+        "type": "precip_emos_refit",
+        "promoted": True,
+        "persisted": persisted,
+        "n": fit.n_samples,
+        "brier_baseline": fit.brier_baseline,
+        "brier_after": fit.brier,
+        "log_likelihood": fit.log_likelihood,
+        "converged": fit.converged,
+    })
+    return {
+        "status": "fit",
+        "n": fit.n_samples,
+        "brier_baseline": fit.brier_baseline,
+        "brier_after": fit.brier,
+        "reason": None,
+        "promoted": True,
+        "persisted": persisted,
+    }
