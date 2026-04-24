@@ -21,6 +21,7 @@ import {
   RcWebhookPanel,
   RiskKnobsPanel,
   RuntimePanel,
+  TechAiPromotionPanel,
   TriggerCyclePanel,
   UserManagementPanel,
   VerticalHaltsPanel,
@@ -244,6 +245,12 @@ export default function SystemPage() {
               knobs above so you can tune the swarm and gating together.
             </p>
             <PersonasPanel />
+          </GlassCard>
+          <GlassCard tone="solid" padding="md">
+            <div className="mb-3 text-[11px] font-semibold uppercase tracking-[0.18em] text-accent-cyan/80">
+              Tech-AI Kelly promotion
+            </div>
+            <TechAiPromotionPanel />
           </GlassCard>
         </div>
       )}

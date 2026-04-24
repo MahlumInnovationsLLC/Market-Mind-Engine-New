@@ -526,6 +526,175 @@ export function RuntimePanel() {
   );
 }
 
+type TechAiPromotionStatus = {
+  settled_count: number;
+  brier: number | null;
+  eligible: boolean;
+  current_multiplier: number;
+  reason: string;
+};
+
+export function TechAiPromotionPanel() {
+  const { getToken, isSignedIn } = useAuth();
+  const tokenFn = useMemo(
+    () => () => getToken().then((t) => t ?? null),
+    [getToken],
+  );
+  const queryClient = useQueryClient();
+  const queryKey = ["admin", "tech-ai", "promotion-status"] as const;
+
+  const { data, isLoading, error } = useQuery<TechAiPromotionStatus>({
+    queryKey,
+    queryFn: () =>
+      apiFetch<TechAiPromotionStatus>(
+        "/api/admin/tech-ai/promotion-status",
+        { getToken: tokenFn },
+      ),
+    enabled: !!isSignedIn,
+    refetchInterval: 60_000,
+  });
+
+  const promote = useMutation({
+    mutationFn: () =>
+      apiFetch<TechAiPromotionStatus>("/api/admin/tech-ai/promote-kelly", {
+        method: "POST",
+        getToken: tokenFn,
+      }),
+    onSuccess: (next) => {
+      queryClient.setQueryData(queryKey, next);
+    },
+  });
+
+  const onPromote = () => {
+    if (!data?.eligible) return;
+    if (
+      !window.confirm(
+        "Promote tech-AI Kelly multiplier from 0.06 to 0.10? This change is logged.",
+      )
+    ) {
+      return;
+    }
+    promote.mutate();
+  };
+
+  const brierText =
+    data?.brier === null || data?.brier === undefined
+      ? "—"
+      : data.brier.toFixed(4);
+  const multiplierText =
+    data?.current_multiplier === undefined
+      ? "—"
+      : data.current_multiplier.toFixed(2);
+
+  return (
+    <div
+      className="space-y-3"
+      data-testid="panel-tech-ai-promotion"
+    >
+      <p className="text-[11px] text-muted-foreground leading-snug">
+        Tech-AI ships at a paper-grade Kelly multiplier of <code>0.06</code>.
+        Promotion to the production multiplier <code>0.10</code> unlocks once
+        the rolling Brier on the latest settled trades clears the threshold
+        (≥30 settled trades, Brier &lt; 0.20).
+      </p>
+
+      {isLoading ? (
+        <div className="h-10 animate-pulse bg-muted/30" />
+      ) : error || !data ? (
+        <div
+          className="text-loss text-xs"
+          data-testid="text-tech-ai-promotion-error"
+        >
+          Failed to load tech-AI promotion status.
+        </div>
+      ) : (
+        <>
+          <div className="grid grid-cols-2 gap-3 text-[11px] md:grid-cols-4">
+            <div data-testid="tech-ai-settled-count">
+              <div className="text-muted-foreground uppercase tracking-wider">
+                Settled trades
+              </div>
+              <div className="font-mono text-sm">{data.settled_count}</div>
+              <div className="text-[10px] text-muted-foreground">
+                need ≥ 30
+              </div>
+            </div>
+            <div data-testid="tech-ai-brier">
+              <div className="text-muted-foreground uppercase tracking-wider">
+                Rolling Brier
+              </div>
+              <div className="font-mono text-sm">{brierText}</div>
+              <div className="text-[10px] text-muted-foreground">
+                need &lt; 0.20
+              </div>
+            </div>
+            <div data-testid="tech-ai-current-multiplier">
+              <div className="text-muted-foreground uppercase tracking-wider">
+                Kelly multiplier
+              </div>
+              <div className="font-mono text-sm">{multiplierText}</div>
+              <div className="text-[10px] text-muted-foreground">
+                target 0.10
+              </div>
+            </div>
+            <div data-testid="tech-ai-eligibility">
+              <div className="text-muted-foreground uppercase tracking-wider">
+                Eligibility
+              </div>
+              <div
+                className={`font-mono text-sm ${
+                  data.eligible ? "text-accent-cyan" : "text-muted-foreground"
+                }`}
+              >
+                {data.eligible ? "ELIGIBLE" : "NOT YET"}
+              </div>
+            </div>
+          </div>
+
+          <div
+            className="border border-border bg-background/40 px-3 py-2 text-[11px] text-muted-foreground normal-case tracking-normal"
+            data-testid="tech-ai-reason"
+          >
+            {data.reason}
+          </div>
+
+          <div className="flex flex-wrap items-center gap-3">
+            <button
+              type="button"
+              onClick={onPromote}
+              disabled={!data.eligible || promote.isPending}
+              data-testid="button-tech-ai-promote"
+              className={`border px-4 py-2 uppercase text-xs tracking-widest ${
+                data.eligible
+                  ? "border-primary text-primary hover:bg-primary/10"
+                  : "border-border text-muted-foreground cursor-not-allowed"
+              } ${promote.isPending ? "opacity-50" : ""}`}
+            >
+              {promote.isPending ? "Promoting…" : "Promote to 0.10"}
+            </button>
+            {promote.isError ? (
+              <span
+                className="text-loss text-xs"
+                data-testid="text-tech-ai-promote-error"
+              >
+                Promotion failed.
+              </span>
+            ) : null}
+            {promote.isSuccess && data.current_multiplier >= 0.10 ? (
+              <span
+                className="text-accent-cyan text-xs"
+                data-testid="text-tech-ai-promote-success"
+              >
+                Promoted.
+              </span>
+            ) : null}
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
 function StatTile({
   label,
   value,
