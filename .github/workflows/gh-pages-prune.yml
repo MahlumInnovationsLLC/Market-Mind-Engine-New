@@ -1,18 +1,24 @@
 name: gh-pages-prune
 
-# Prune old Playwright HTML reports from the `gh-pages` branch so it doesn't
-# grow unboundedly. The companion publisher (`web-e2e.yml`) writes reports
-# under:
-#   pr-<number>/run-<runid>/        # for pull-request runs
-#   branch-<sanitized>/run-<runid>/ # for push / workflow_dispatch runs
+# Prune old CI failure HTML reports from the `gh-pages` branch so it doesn't
+# grow unboundedly. The companion publishers write reports under:
+#   pr-<number>/run-<runid>/            # web Playwright (web-e2e.yml)
+#   branch-<sanitized>/run-<runid>/     # web Playwright (push / workflow_dispatch)
+#   api/pr-<number>/run-<runid>/        # API pytest (api-pytest.yml)
+#   api/branch-<sanitized>/run-<runid>/ # API pytest (push / workflow_dispatch)
 #
 # This workflow:
-#   * Removes `pr-<n>/` directories for PRs that were merged or closed
-#     more than PR_MAX_AGE_DAYS ago (default: 14).
-#   * Caps each `pr-<n>/` and `branch-<name>/` directory to the most recent
-#     RUNS_PER_DIR run subdirectories (default: 20), deleting older ones.
-#   * Can also be triggered when a PR is closed, to immediately schedule
-#     that PR's directory for cleanup on the next run-age sweep.
+#   * On `pull_request.closed`, immediately deletes `pr-<n>/` and
+#     `api/pr-<n>/` for the PR that just closed — no age gating.
+#   * On the daily schedule, also removes `pr-<n>/` and `api/pr-<n>/`
+#     directories for PRs that were merged or closed more than
+#     PR_MAX_AGE_DAYS ago (default: 14). This catches PRs whose close
+#     event was missed (e.g. if this workflow was disabled at the time).
+#   * Caps each `pr-<n>/`, `branch-<name>/`, `api/pr-<n>/` and
+#     `api/branch-<name>/` directory to the most recent RUNS_PER_DIR run
+#     subdirectories (default: 20), deleting older ones.
+#   * Re-renders the gh-pages landing-page `index.html` so it no longer
+#     points at any reports that were just pruned.
 
 on:
   schedule:
@@ -43,7 +49,7 @@ permissions:
 
 jobs:
   prune:
-    name: Prune old Playwright reports
+    name: Prune old CI reports
     runs-on: ubuntu-latest
     timeout-minutes: 15
 
@@ -51,6 +57,11 @@ jobs:
       PR_MAX_AGE_DAYS: ${{ github.event.inputs.pr_max_age_days || '14' }}
       RUNS_PER_DIR: ${{ github.event.inputs.runs_per_dir || '20' }}
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      # When this run was triggered by a PR being closed/merged, the
+      # PR number is exposed here so the prune step can immediately
+      # delete `pr-<n>/` and `api/pr-<n>/` for that PR (bypassing the
+      # PR_MAX_AGE_DAYS gate). Empty for scheduled / manual runs.
+      CLOSED_PR_NUMBER: ${{ github.event_name == 'pull_request' && github.event.action == 'closed' && github.event.pull_request.number || '' }}
 
     steps:
       - name: Check out repo (for the index renderer)
@@ -90,7 +101,7 @@ jobs:
           # reset-to-origin retry, since the deletions are deterministic
           # against the fresh state.
           prune_and_commit() {
-            local NOW_TS MAX_AGE_SEC dir pr_num api_path resp state closed_at \
+            local NOW_TS MAX_AGE_SEC dir base pr_num api_path resp state closed_at \
                   closed_ts age parent runs count i victim CHANGES=0 \
                   HAD_DIFF
             NOW_TS="$(date -u +%s)"
@@ -99,14 +110,31 @@ jobs:
             pushd "${WORK}" >/dev/null
             shopt -s nullglob
 
+            # ---- 0. Immediate cleanup for the PR that just closed ----
+            # When triggered by a `pull_request.closed` event, drop the
+            # closing PR's report dirs right away — no age gating. This
+            # keeps merged-PR reports from sitting around for up to
+            # PR_MAX_AGE_DAYS before the scheduled sweep notices them.
+            if [ -n "${CLOSED_PR_NUMBER:-}" ]; then
+              for dir in "pr-${CLOSED_PR_NUMBER}/" "api/pr-${CLOSED_PR_NUMBER}/"; do
+                if [ -d "${dir}" ]; then
+                  echo "Removing ${dir} (PR #${CLOSED_PR_NUMBER} just closed)."
+                  git rm -rf --quiet "${dir}"
+                  CHANGES=$(( CHANGES + 1 ))
+                fi
+              done
+            fi
+
             # ---- 1. Prune pr-<n>/ dirs for old closed/merged PRs ------
             # Ask the GitHub API for each PR's state + closed_at. If
             # the PR is closed/merged and was closed more than
             # PR_MAX_AGE_DAYS ago, delete the whole pr-<n>/ tree. Open
-            # or unknown PRs are left alone.
-            for dir in pr-*/; do
-              pr_num="${dir#pr-}"
-              pr_num="${pr_num%/}"
+            # or unknown PRs are left alone. Both web (`pr-<n>/`) and
+            # API (`api/pr-<n>/`) report trees are walked.
+            for dir in pr-*/ api/pr-*/; do
+              [ -d "${dir}" ] || continue
+              base="${dir%/}"             # strip trailing slash
+              pr_num="${base##*pr-}"      # strip everything up to "pr-"
               case "${pr_num}" in
                 ''|*[!0-9]*)
                   echo "Skipping non-numeric PR dir: ${dir}"
@@ -130,7 +158,7 @@ jobs:
               closed_ts="$(date -u -d "${closed_at}" +%s 2>/dev/null || echo 0)"
               age=$(( NOW_TS - closed_ts ))
               if [ "${age}" -lt "${MAX_AGE_SEC}" ]; then
-                echo "PR #${pr_num} closed ${age}s ago (< ${MAX_AGE_SEC}s); keeping."
+                echo "PR #${pr_num} closed ${age}s ago (< ${MAX_AGE_SEC}s); keeping ${dir}."
                 continue
               fi
 
@@ -139,8 +167,10 @@ jobs:
               CHANGES=$(( CHANGES + 1 ))
             done
 
-            # ---- 2. Cap pr-/branch- dirs to RUNS_PER_DIR --------------
-            for parent in pr-*/ branch-*/; do
+            # ---- 2. Cap each remaining pr-/branch- dir to RUNS_PER_DIR ----
+            # Same treatment for both web (`pr-*/`, `branch-*/`) and API
+            # (`api/pr-*/`, `api/branch-*/`) report roots.
+            for parent in pr-*/ branch-*/ api/pr-*/ api/branch-*/; do
               [ -d "${parent}" ] || continue
               # List run-<id>/ subdirs sorted by id descending. Run
               # IDs are monotonically increasing per repo, so newest
@@ -168,6 +198,13 @@ jobs:
               fi
             done
 
+            # If the `api/` namespace directory itself is now empty,
+            # drop it too so the gh-pages root stays tidy.
+            if [ -d api ] && [ -z "$(ls -A api 2>/dev/null)" ]; then
+              echo "  api/ is now empty; removing."
+              rmdir api 2>/dev/null || true
+            fi
+
             shopt -u nullglob
             popd >/dev/null
 
@@ -188,7 +225,7 @@ jobs:
             else
               git -c user.name='github-actions[bot]' \
                   -c user.email='github-actions[bot]@users.noreply.github.com' \
-                  commit -m "Prune old Playwright reports (${CHANGES} entries)"
+                  commit -m "Prune old CI reports (${CHANGES} entries)"
               HAD_DIFF=1
             fi
             popd >/dev/null
