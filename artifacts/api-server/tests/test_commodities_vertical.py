@@ -350,6 +350,305 @@ def test_upsert_bars_writes_rows(monkeypatch):
     assert args0[8] == "test"
 
 
+def test_eia_fetch_bars_parses_daily_series(monkeypatch):
+    """Live-shape EIA payload → oldest-first OHLCV bars with synthesised
+    O==H==L==C and zero volume.  Skips intraday gracefully."""
+    from app.feeds import commodities as feed
+    import httpx
+
+    captured: dict[str, str] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["url"] = str(request.url)
+        return httpx.Response(200, json={
+            "response": {
+                "data": [
+                    {"period": "2026-04-22", "value": 81.34},
+                    {"period": "2026-04-21", "value": 80.91},
+                    {"period": "2026-04-20", "value": 80.55},
+                ]
+            }
+        })
+
+    transport = httpx.MockTransport(handler)
+    real_client = httpx.AsyncClient
+
+    def fake_client(*args, **kwargs):
+        kwargs["transport"] = transport
+        return real_client(*args, **kwargs)
+
+    monkeypatch.setenv("EIA_API_KEY", "test-eia")
+    monkeypatch.setattr(feed.httpx, "AsyncClient", fake_client)
+
+    bars = asyncio.run(feed._eia_fetch_bars("WTI", "1d"))
+    assert len(bars) == 3
+    # Oldest-first
+    assert bars[0]["ts"] < bars[-1]["ts"]
+    assert bars[-1]["c"] == pytest.approx(81.34)
+    # OHLC collapsed onto the single daily settlement value.
+    assert bars[0]["o"] == bars[0]["h"] == bars[0]["l"] == bars[0]["c"]
+    assert bars[0]["v"] == 0.0
+    # Confirms we hit the right series id.
+    assert "PET.RWTC.D" in captured["url"]
+    # Intraday is intentionally not served by EIA.
+    assert asyncio.run(feed._eia_fetch_bars("WTI", "1h")) == []
+
+
+def test_alphavantage_fetch_bars_parses_daily_payload(monkeypatch):
+    """AlphaVantage TIME_SERIES_DAILY → ETF OHLCV bars, oldest-first."""
+    from app.feeds import commodities as feed
+    import httpx
+
+    captured: dict[str, str] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["url"] = str(request.url)
+        return httpx.Response(200, json={
+            "Meta Data": {"2. Symbol": "GLD"},
+            "Time Series (Daily)": {
+                "2026-04-22": {"1. open": "215.10", "2. high": "216.40",
+                               "3. low": "214.55", "4. close": "215.92",
+                               "5. volume": "5421000"},
+                "2026-04-21": {"1. open": "213.80", "2. high": "215.20",
+                               "3. low": "213.50", "4. close": "214.95",
+                               "5. volume": "4980000"},
+            },
+        })
+
+    transport = httpx.MockTransport(handler)
+    real_client = httpx.AsyncClient
+
+    def fake_client(*args, **kwargs):
+        kwargs["transport"] = transport
+        return real_client(*args, **kwargs)
+
+    monkeypatch.setenv("ALPHAVANTAGE_API_KEY", "test-av")
+    monkeypatch.setattr(feed.httpx, "AsyncClient", fake_client)
+
+    bars = asyncio.run(feed._alphavantage_fetch_bars("GOLD", "1d"))
+    assert len(bars) == 2
+    assert bars[0]["ts"] < bars[-1]["ts"]
+    assert bars[-1]["c"] == pytest.approx(215.92)
+    assert bars[-1]["v"] == pytest.approx(5421000.0)
+    # Confirm we routed via the GLD proxy ticker.
+    assert "symbol=GLD" in captured["url"]
+    assert "function=TIME_SERIES_DAILY" in captured["url"]
+
+
+def test_alphavantage_soft_error_returns_empty(monkeypatch):
+    """AlphaVantage rate-limit notes must yield zero bars (so the
+    fallback can take over) instead of crashing."""
+    from app.feeds import commodities as feed
+    import httpx
+
+    transport = httpx.MockTransport(lambda r: httpx.Response(
+        200, json={"Note": "rate limit, slow down"}
+    ))
+    real_client = httpx.AsyncClient
+
+    def fake_client(*args, **kwargs):
+        kwargs["transport"] = transport
+        return real_client(*args, **kwargs)
+
+    monkeypatch.setenv("ALPHAVANTAGE_API_KEY", "test-av")
+    monkeypatch.setattr(feed.httpx, "AsyncClient", fake_client)
+    assert asyncio.run(feed._alphavantage_fetch_bars("GOLD", "1d")) == []
+
+
+def test_alphavantage_4h_aggregates_intraday_into_buckets(monkeypatch):
+    """4h granularity is synthesised by bucketing the 60min intraday
+    series — open=first, high=max, low=min, close=last, vol=sum."""
+    from app.feeds import commodities as feed
+    import httpx
+
+    # Eight consecutive hourly bars starting 2026-04-22 12:00Z.
+    series: dict[str, dict[str, str]] = {}
+    base_ts = datetime(2026, 4, 22, 12, 0, 0)
+    for i in range(8):
+        ts = base_ts + timedelta(hours=i)
+        series[ts.strftime("%Y-%m-%d %H:%M:%S")] = {
+            "1. open": f"{100 + i}.00",
+            "2. high": f"{100 + i + 1}.00",
+            "3. low":  f"{100 + i - 1}.00",
+            "4. close": f"{100 + i}.50",
+            "5. volume": f"{1000 + i}",
+        }
+    transport = httpx.MockTransport(lambda r: httpx.Response(
+        200, json={"Time Series (60min)": series}
+    ))
+    real_client = httpx.AsyncClient
+
+    def fake_client(*args, **kwargs):
+        kwargs["transport"] = transport
+        return real_client(*args, **kwargs)
+
+    monkeypatch.setenv("ALPHAVANTAGE_API_KEY", "test-av")
+    monkeypatch.setattr(feed.httpx, "AsyncClient", fake_client)
+
+    bars = asyncio.run(feed._alphavantage_fetch_bars("COPPER", "4h"))
+    # 8 hourly bars → 2 four-hour buckets.
+    assert len(bars) == 2
+    assert all(b["ts"].minute == 0 and b["ts"].hour % 4 == 0 for b in bars)
+    # First bucket spans hours 0..3 of the synthesised series; volume sums.
+    assert bars[0]["v"] == pytest.approx(sum(1000 + i for i in range(4)))
+
+
+def test_eia_skips_grains_by_design(monkeypatch):
+    """EIA's series-id endpoint has no grain spot prices, so the EIA
+    fetcher must return [] for CORN/SOY/WHEAT and let AlphaVantage take
+    over.  Routing reflects this: grains have alphavantage as primary."""
+    from app.feeds import commodities as feed
+    monkeypatch.setenv("EIA_API_KEY", "test-eia")
+    for sym in ("CORN", "SOY", "WHEAT"):
+        assert asyncio.run(feed._eia_fetch_bars(sym, "1d")) == []
+        assert feed._PROVIDER_FOR_SYMBOL[sym] == "alphavantage"
+
+
+def test_grain_ingest_via_alphavantage_writes_rows(monkeypatch):
+    """End-to-end ingest cycle for CORN: AlphaVantage TIME_SERIES_DAILY
+    on the CORN ETF proxy should produce real OHLCV bars and the
+    `_make_poller` cycle should write them with source='alphavantage'."""
+    from app.feeds import commodities as feed
+    from app import db as app_db
+    import httpx
+
+    captured: dict[str, str] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["url"] = str(request.url)
+        return httpx.Response(200, json={
+            "Meta Data": {"2. Symbol": "CORN"},
+            "Time Series (Daily)": {
+                "2026-04-22": {"1. open": "21.10", "2. high": "21.40",
+                               "3. low": "20.90", "4. close": "21.25",
+                               "5. volume": "120000"},
+                "2026-04-21": {"1. open": "20.95", "2. high": "21.15",
+                               "3. low": "20.80", "4. close": "21.05",
+                               "5. volume": "118000"},
+            },
+        })
+
+    transport = httpx.MockTransport(handler)
+    real_client = httpx.AsyncClient
+
+    def fake_client(*args, **kwargs):
+        kwargs["transport"] = transport
+        return real_client(*args, **kwargs)
+
+    monkeypatch.setenv("ALPHAVANTAGE_API_KEY", "test-av")
+    # Ensure EIA is configured too — proves grains intentionally skip
+    # EIA via _eia_fetch_bars even when the key is present.
+    monkeypatch.setenv("EIA_API_KEY", "test-eia")
+    monkeypatch.setattr(feed.httpx, "AsyncClient", fake_client)
+
+    written: list[tuple] = []
+
+    async def fake_execute(query, *args, **kwargs):
+        written.append(args)
+
+    monkeypatch.setattr(app_db, "execute", fake_execute)
+
+    poll = feed._make_poller("CORN", "1d")
+    result = asyncio.run(poll())
+    assert result["ok"] is True
+    assert result["source"] == "alphavantage"
+    assert result["rows"] == 2
+    assert "symbol=CORN" in captured["url"]
+    # Each upsert call carries source='alphavantage' as the last arg.
+    assert all(call[-1] == "alphavantage" for call in written)
+
+
+def test_no_api_keys_returns_empty(monkeypatch):
+    """With neither key configured, both providers must no-op cleanly."""
+    from app.feeds import commodities as feed
+
+    monkeypatch.delenv("EIA_API_KEY", raising=False)
+    monkeypatch.delenv("ALPHAVANTAGE_API_KEY", raising=False)
+    assert asyncio.run(feed._eia_fetch_bars("WTI", "1d")) == []
+    assert asyncio.run(feed._alphavantage_fetch_bars("GOLD", "1d")) == []
+
+
+def test_end_to_end_eia_ingest_then_predict(monkeypatch):
+    """Full cold-path integration: EIA HTTP → upsert_bars → predictor.
+
+    Validates that real-shape EIA payloads, ingested through the live
+    `_eia_fetch_bars` path and persisted via `upsert_bars`, surface in
+    the predictor as a non-default probability (i.e. the feature
+    pipeline actually saw the bars).
+    """
+    from app.feeds import commodities as feed
+    from app.commodities import predictor as cp
+    from app import db as app_db
+    import httpx
+
+    # Build 60 daily WTI bars walking $70 → $82 so the trend-aware
+    # baseline stack must produce something other than the cold-start
+    # midpoint when asked about a $75 strike.
+    eia_data = []
+    base_day = datetime(2026, 2, 22)
+    for i in range(60):
+        eia_data.append({
+            "period": (base_day + timedelta(days=i)).strftime("%Y-%m-%d"),
+            "value": round(70.0 + (12.0 * i / 59.0), 2),
+        })
+    # EIA returns newest-first when we ask for desc sort.
+    eia_data.reverse()
+
+    transport = httpx.MockTransport(lambda r: httpx.Response(
+        200, json={"response": {"data": eia_data}}
+    ))
+    real_client = httpx.AsyncClient
+
+    def fake_client(*args, **kwargs):
+        kwargs["transport"] = transport
+        return real_client(*args, **kwargs)
+
+    monkeypatch.setenv("EIA_API_KEY", "test-eia")
+    monkeypatch.setattr(feed.httpx, "AsyncClient", fake_client)
+
+    # In-memory store mimicking commodities_ohlcv.
+    store: list[dict] = []
+
+    async def fake_execute(query, *args, **kwargs):
+        # Args mirror the ordering in upsert_bars()'s INSERT.
+        symbol, granularity, ts, o, h, l, c, v, source = args
+        for row in store:
+            if (row["symbol"] == symbol
+                    and row["granularity"] == granularity
+                    and row["ts"] == ts):
+                row.update(o=o, h=h, l=l, c=c, v=v)
+                return
+        store.append(dict(symbol=symbol, granularity=granularity, ts=ts,
+                          o=o, h=h, l=l, c=c, v=v))
+
+    async def fake_fetch(query, *args, **kwargs):
+        symbol, granularity, limit = args
+        rows = [r for r in store
+                if r["symbol"] == symbol and r["granularity"] == granularity]
+        rows.sort(key=lambda r: r["ts"], reverse=True)
+        return rows[:limit]
+
+    monkeypatch.setattr(app_db, "execute", fake_execute)
+    monkeypatch.setattr(app_db, "fetch", fake_fetch)
+
+    # Drive one poll cycle through the live provider routing.
+    poll = feed._make_poller("WTI", "1d")
+    poll_result = asyncio.run(poll())
+    assert poll_result["ok"] is True
+    assert poll_result["source"] == "eia"
+    assert poll_result["rows"] == 60
+    assert len(store) == 60
+
+    # Now run the cold-path predictor against the freshly-populated
+    # store — should produce a real probability, not the 0.50 default.
+    pred = asyncio.run(cp.predict_commodity_binary("KXOIL-26MAY-T75"))
+    assert pred.model_name.startswith("commodities:1d:")
+    assert 0.0 < pred.probability < 1.0
+    assert pred.probability != pytest.approx(0.5, abs=1e-6)
+    raw = pred.raw or {}
+    assert raw["feature_present"] == 60
+
+
 def test_per_vertical_cap_correlation_ignores_uncorrelated_sym():
     """Heavy COFFEE exposure must NOT trip a GOLD candidate (rho=0)."""
     ctx = _commodities_ctx(
