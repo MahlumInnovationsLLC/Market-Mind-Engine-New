@@ -42,9 +42,21 @@ def fake_pipe(monkeypatch: pytest.MonkeyPatch) -> _FakeDedupe:
         return {"tag": tag, "dispatched": True}
 
     monkeypatch.setattr(_alerts, "_dispatch", _fake_dispatch)
-    # Reset per-test consecutive counters on the health module.
+    # Reset per-test consecutive counters on the health module.  Both
+    # the per-subscriber and the per-hub counters live here; clearing
+    # both keeps the per-subscriber assertions below decoupled from the
+    # per-hub alert path covered by ``test_ws_hub_overflow_alert.py``.
     health_mod._ws_bad_snapshot_counts.clear()
+    health_mod._ws_hub_bad_snapshot_counts.clear()
     return fake
+
+
+def _subscriber_alerts(fake: _FakeDedupe) -> list[dict[str, Any]]:
+    """The per-hub alert path can fire from the same probe call when
+    its own threshold is also met; these tests target the per-subscriber
+    path specifically, so filter by tag.
+    """
+    return [d for d in fake.dispatched if d["tag"] == "ws-subscriber-silent"]
 
 
 def _set_summary(monkeypatch: pytest.MonkeyPatch, subs: list[dict]) -> None:
@@ -93,12 +105,13 @@ def test_alert_fires_after_threshold_consecutive_snapshots(
     # First two snapshots: counter increments, no alert.
     health_mod._probe_ws_subscribers()
     health_mod._probe_ws_subscribers()
-    assert fake_pipe.dispatched == []
+    assert _subscriber_alerts(fake_pipe) == []
 
     # Third snapshot crosses the threshold -> one alert.
     health_mod._probe_ws_subscribers()
-    assert len(fake_pipe.dispatched) == 1
-    msg = fake_pipe.dispatched[0]
+    msgs = _subscriber_alerts(fake_pipe)
+    assert len(msgs) == 1
+    msg = msgs[0]
     assert msg["tag"] == "ws-subscriber-silent"
     assert "pipeline_event_hub" in msg["subject"]
     assert "positions" in msg["subject"]
@@ -116,7 +129,7 @@ def test_alert_dedupes_within_ttl(
     # Cross the threshold once.
     health_mod._probe_ws_subscribers()
     health_mod._probe_ws_subscribers()
-    assert len(fake_pipe.dispatched) == 1
+    assert len(_subscriber_alerts(fake_pipe)) == 1
 
     # Subscriber reconnects with a new id but same (hub, label) — the
     # counter restarts and would re-trigger but the dedupe key suppresses.
@@ -125,7 +138,7 @@ def test_alert_dedupes_within_ttl(
     _set_summary(monkeypatch, [sub2])
     health_mod._probe_ws_subscribers()
     health_mod._probe_ws_subscribers()
-    assert len(fake_pipe.dispatched) == 1
+    assert len(_subscriber_alerts(fake_pipe)) == 1
 
 
 def test_recovery_resets_counter(
@@ -136,7 +149,7 @@ def test_recovery_resets_counter(
     _set_summary(monkeypatch, [bad])
     health_mod._probe_ws_subscribers()
     health_mod._probe_ws_subscribers()
-    assert fake_pipe.dispatched == []
+    assert _subscriber_alerts(fake_pipe) == []
 
     # Subscriber drains.
     healthy = _stuck_sub(
@@ -150,9 +163,9 @@ def test_recovery_resets_counter(
     _set_summary(monkeypatch, [bad])
     health_mod._probe_ws_subscribers()
     health_mod._probe_ws_subscribers()
-    assert fake_pipe.dispatched == []
+    assert _subscriber_alerts(fake_pipe) == []
     health_mod._probe_ws_subscribers()
-    assert len(fake_pipe.dispatched) == 1
+    assert len(_subscriber_alerts(fake_pipe)) == 1
 
 
 def test_overflowed_subscriber_triggers_alert(
@@ -165,8 +178,9 @@ def test_overflowed_subscriber_triggers_alert(
     )
     _set_summary(monkeypatch, [sub])
     health_mod._probe_ws_subscribers()
-    assert len(fake_pipe.dispatched) == 1
-    assert "overflowed" in fake_pipe.dispatched[0]["subject"]
+    msgs = _subscriber_alerts(fake_pipe)
+    assert len(msgs) == 1
+    assert "overflowed" in msgs[0]["subject"]
 
 
 def test_healthy_subscriber_never_alerts(

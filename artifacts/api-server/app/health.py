@@ -796,6 +796,13 @@ def _probe_calibration() -> dict:
 # is dropped so the dict can't grow without bound.
 _ws_bad_snapshot_counts: dict[int, int] = {}
 
+# Per-hub consecutive "bad snapshot" counters.  Keyed by hub name.
+# Distinct from ``_ws_bad_snapshot_counts`` because subscribers reconnect
+# with fresh ids — a misconfigured ceiling on a bursty hub (kalshi /
+# polymarket orderbooks) sees overflow churn that the per-id counter
+# can never accumulate.  The hub-level counter survives reconnect.
+_ws_hub_bad_snapshot_counts: dict[str, int] = {}
+
 # How many consecutive snapshots a subscriber must stay >=90% full /
 # overflowed before we fan out an operator alert.  Default 3 — at the
 # 30s health interval that's ~90s of being stuck.
@@ -808,6 +815,21 @@ WS_SILENT_ALERT_THRESHOLD = max(
 # alert per (hub, label) per hour is plenty for a stuck-client signal.
 WS_SILENT_ALERT_TTL_SECONDS = max(
     60, int(os.environ.get("AXIOM_WS_SILENT_ALERT_TTL_SECONDS") or "3600")
+)
+
+# Per-hub overflow alert: how many consecutive snapshots a hub must
+# show overflowed-or-near-full subscribers before paging.  Default 3
+# matches the per-subscriber alert so both signals are observable on
+# the same ~90s timescale.
+WS_HUB_OVERFLOW_ALERT_THRESHOLD = max(
+    1, int(os.environ.get("AXIOM_WS_HUB_OVERFLOW_ALERT_SNAPSHOTS") or "3")
+)
+
+# Per-hub overflow alert dedupe TTL — one alert per hub per hour by
+# default; bumping the ceiling is a deliberate ops action so we don't
+# need to re-page the on-call sooner.
+WS_HUB_OVERFLOW_ALERT_TTL_SECONDS = max(
+    60, int(os.environ.get("AXIOM_WS_HUB_OVERFLOW_ALERT_TTL_SECONDS") or "3600")
 )
 
 
@@ -888,6 +910,123 @@ def _maybe_dispatch_ws_silent_alert(bad_subs: list[dict]) -> list[dict]:
     return triggered
 
 
+def _compute_bad_hubs(
+    subs: list[dict], queue_config: dict
+) -> list[dict]:
+    """Aggregate per-hub overflow / near-full stats from the subscriber
+    snapshot.  Returns one entry per hub that has at least one
+    overflowed subscriber or at least one subscriber >=90% full.
+
+    Each entry carries the resolved maxsize and override env name (so
+    the alert can tell the on-call what to bump) plus the counters the
+    alert body renders.
+    """
+    by_hub_cfg = (queue_config or {}).get("by_hub") or {}
+    bad: dict[str, dict] = {}
+    for sub in subs:
+        if not _is_ws_subscriber_bad(sub):
+            continue
+        hub = str(sub.get("hub") or "?")
+        entry = bad.setdefault(
+            hub,
+            {
+                "hub": hub,
+                "overflowed": 0,
+                "near_full": 0,
+                "max_qsize": 0,
+            },
+        )
+        if sub.get("overflowed"):
+            entry["overflowed"] += 1
+        else:
+            entry["near_full"] += 1
+        entry["max_qsize"] = max(entry["max_qsize"], int(sub.get("qsize") or 0))
+
+    # Annotate with totals + resolved ceiling so the alert payload is
+    # self-contained (the dispatcher doesn't need queue_config again).
+    totals_by_hub: dict[str, int] = {}
+    for sub in subs:
+        h = str(sub.get("hub") or "?")
+        totals_by_hub[h] = totals_by_hub.get(h, 0) + 1
+    for hub, entry in bad.items():
+        cfg = by_hub_cfg.get(hub) or {}
+        entry["total_subscribers"] = totals_by_hub.get(hub, entry["overflowed"] + entry["near_full"])
+        entry["maxsize"] = cfg.get("maxsize")
+        entry["env_var"] = cfg.get("env")
+    return list(bad.values())
+
+
+def _maybe_dispatch_ws_hub_overflow_alert(
+    bad_hubs: list[dict],
+) -> list[dict]:
+    """Update per-hub consecutive-bad counters and fire alerts for any
+    hub that just crossed the threshold this snapshot.  Returns the
+    list of hub stat dicts that triggered an alert (used by tests).
+    """
+    seen: set[str] = set()
+    triggered: list[dict] = []
+    for entry in bad_hubs:
+        hub = str(entry.get("hub") or "?")
+        seen.add(hub)
+        prev = _ws_hub_bad_snapshot_counts.get(hub, 0)
+        cur = prev + 1
+        _ws_hub_bad_snapshot_counts[hub] = cur
+        if cur == WS_HUB_OVERFLOW_ALERT_THRESHOLD:
+            triggered.append({**entry, "consecutive_snapshots": cur})
+
+    # Drop counters for hubs that recovered (not in the bad list this
+    # snapshot) so a future spike has to climb the threshold again.
+    stale = [k for k in _ws_hub_bad_snapshot_counts if k not in seen]
+    for k in stale:
+        _ws_hub_bad_snapshot_counts.pop(k, None)
+
+    if not triggered:
+        return []
+
+    from .notifications import alerts as _alerts
+
+    async def _runner() -> None:
+        for entry in triggered:
+            hub = str(entry.get("hub") or "?")
+            try:
+                ok = await _alerts.dedupe_or_skip(
+                    "ws_hub_overflowing",
+                    hub,
+                    ttl_seconds=WS_HUB_OVERFLOW_ALERT_TTL_SECONDS,
+                )
+            except Exception as e:  # pragma: no cover — fail-open
+                log.warning("ws-hub-overflow dedupe failed: %s", e)
+                ok = True
+            if not ok:
+                continue
+            try:
+                _alerts.ws_hub_overflowing(
+                    hub=hub,
+                    maxsize=int(entry.get("maxsize") or 0),
+                    env_var=str(entry.get("env_var") or "AXIOM_WS_QUEUE_MAXSIZE"),
+                    overflowed_subscribers=int(entry.get("overflowed") or 0),
+                    near_full_subscribers=int(entry.get("near_full") or 0),
+                    total_subscribers=int(entry.get("total_subscribers") or 0),
+                    max_qsize=int(entry.get("max_qsize") or 0),
+                    consecutive_snapshots=int(entry["consecutive_snapshots"]),
+                )
+            except Exception as e:  # pragma: no cover
+                log.warning("ws-hub-overflow alert dispatch failed: %s", e)
+
+    try:
+        loop = asyncio.get_running_loop()
+        loop.create_task(_runner())
+    except RuntimeError:
+        # No running loop (sync test context) — run inline so the test
+        # can observe the dispatch.
+        try:
+            asyncio.run(_runner())
+        except Exception as e:  # pragma: no cover
+            log.warning("inline ws-hub-overflow dispatch failed: %s", e)
+
+    return triggered
+
+
 def _probe_ws_subscribers() -> dict:
     """WebSocket subscriber backpressure card.
 
@@ -908,7 +1047,8 @@ def _probe_ws_subscribers() -> dict:
     # Surface the resolved per-hub queue ceiling (set by
     # AXIOM_WS_QUEUE_MAXSIZE / AXIOM_WS_QUEUE_MAXSIZE_<HUB>) so operators
     # can confirm an env-var override actually took effect.
-    snap["queue_config"] = queue_config_snapshot()
+    queue_config = queue_config_snapshot()
+    snap["queue_config"] = queue_config
     subs = snap["subscribers"]
     by_hub = snap["by_hub"]
     total = snap["total_subscribers"]
@@ -932,6 +1072,14 @@ def _probe_ws_subscribers() -> dict:
         if cnt >= WS_SILENT_ALERT_THRESHOLD:
             stuck.append({**s, "consecutive_snapshots": cnt})
     snap["stuck_subscribers"] = stuck
+    # Hub-level alert: catches misconfigured ceilings on bursty hubs
+    # where short-lived subscribers reconnect faster than the per-id
+    # counter can accumulate.  Run *after* the per-subscriber dispatch
+    # and ``stuck_subscribers`` accounting so the snapshot stays
+    # consistent: the banner reflects the per-id signal, the per-hub
+    # alert handles the reconnect-churn case the banner can't catch.
+    bad_hubs = _compute_bad_hubs(subs, queue_config)
+    _maybe_dispatch_ws_hub_overflow_alert(bad_hubs)
     if overflowed:
         status = "degraded"
         detail = f"{overflowed} subscriber(s) closed on overflow"

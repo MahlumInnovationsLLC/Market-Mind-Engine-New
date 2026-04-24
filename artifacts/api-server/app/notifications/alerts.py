@@ -1173,6 +1173,67 @@ def ws_subscriber_silent(
     return _dispatch(subject, body, tag="ws-subscriber-silent", dry_run=dry_run)
 
 
+def ws_hub_overflowing(
+    *,
+    hub: str,
+    maxsize: int,
+    env_var: str,
+    overflowed_subscribers: int,
+    near_full_subscribers: int,
+    total_subscribers: int,
+    max_qsize: int,
+    consecutive_snapshots: int,
+    dry_run: bool = False,
+) -> dict[str, Any]:
+    """Operator alert: a whole WS fan-out hub keeps pinning at its
+    queue ceiling.
+
+    Distinct from :func:`ws_subscriber_silent`, which fingerprints a
+    single stuck connection by its subscription id. The per-hub view
+    catches the misconfigured-ceiling case (typically kalshi /
+    polymarket orderbooks) where a bursty hub sees subscribers
+    overflow and reconnect faster than the per-id counter can
+    accumulate. The body advertises the resolved ``maxsize`` and the
+    env var that overrides it so the on-call knows whether to bump
+    the ceiling or hunt for a stuck consumer.
+    """
+    if overflowed_subscribers > 0:
+        state = (
+            f"{overflowed_subscribers}/{total_subscribers} "
+            "subscriber(s) overflowed (closed)"
+        )
+    else:
+        state = (
+            f"{near_full_subscribers}/{total_subscribers} "
+            f"subscriber(s) >=90% full (max qsize {max_qsize}/{maxsize})"
+        )
+    subject = f"[axiom] WS hub overflowing: {hub} ({state})"
+    body = (
+        f"WebSocket fan-out hub '{hub}' has had at least one subscriber "
+        "overflowed or pinned at >=90% queue depth for "
+        f"{consecutive_snapshots} consecutive health snapshots.\n\n"
+        "If this hub is bursty by design (e.g. kalshi/polymarket "
+        f"orderbooks), bump the ceiling via the {env_var} env var. "
+        "Otherwise, investigate which subscriber stopped reading from "
+        "the hub.\n\n"
+        + _format_lines(
+            [
+                ("hub", hub),
+                ("resolved_maxsize", maxsize),
+                ("override_env", env_var),
+                ("overflowed_subscribers", overflowed_subscribers),
+                ("near_full_subscribers", near_full_subscribers),
+                ("total_subscribers", total_subscribers),
+                ("max_qsize_observed", max_qsize),
+                ("consecutive_snapshots", consecutive_snapshots),
+                ("at", _utc_now_iso()),
+            ]
+        )
+        + "\n"
+    )
+    return _dispatch(subject, body, tag="ws-hub-overflowing", dry_run=dry_run)
+
+
 # ---------------------------------------------------------------------------
 # RevenueCat (mobile IAP) webhook health
 # ---------------------------------------------------------------------------
