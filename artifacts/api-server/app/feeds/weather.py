@@ -432,7 +432,9 @@ def _hrrr_idx_url(date_dir: str, cycle: str, fhour: int) -> str:
 async def _discover_latest_hrrr_run(client: httpx.AsyncClient) -> dict[str, Any] | None:
     """Find the most recent HRRR cycle that has F00 published on NOMADS.
 
-    Returns a dict with ``run_time`` (UTC ISO), ``cycle`` ("HH"),
+    Returns a dict with ``run_time`` (timezone-aware datetime, UTC),
+    ``run_time_iso`` (UTC ISO string for JSON-friendly logging),
+    ``cycle`` ("HH"),
     ``date`` ("YYYYMMDD"), ``inventory_url`` and the parsed F00
     inventory (a list of {record, byte_start, byte_len, var, level,
     fhour}).  Returns ``None`` if no run in the last few hours can be
@@ -458,7 +460,8 @@ async def _discover_latest_hrrr_run(client: httpx.AsyncClient) -> dict[str, Any]
             log.debug("nomads hrrr inventory %s -> HTTP %s", idx_url, r.status_code)
             continue
         return {
-            "run_time": candidate.isoformat(),
+            "run_time": candidate,
+            "run_time_iso": candidate.isoformat(),
             "cycle": cycle,
             "date": date_dir,
             "inventory_url": idx_url,
