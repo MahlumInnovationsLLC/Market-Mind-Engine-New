@@ -526,6 +526,23 @@ async def run_retrain_cycle() -> RetrainCycleResult:
             "ok": snap_id is not None and not rolled_back,
         })
 
+    # Task #254: opportunistic refit of the temperature vertical's
+    # per-(city, metric) GRU output head + EMOS coefficients.  This is
+    # gated on the operator opt-in env var because a full sweep across
+    # every supported city/metric (~21 fits) takes several seconds and
+    # we don't want to insert that latency into the calibrator-only
+    # retrain path on every cycle.  When enabled the refit is
+    # non-fatal: a failure here never breaks the surrounding isotonic
+    # refits or the cycle event stream.
+    if os.environ.get("AXIOM_RETRAIN_WEATHER_TEMP", "").strip().lower() in (
+        "1", "true", "yes", "on",
+    ):
+        try:
+            await _run_weather_temp_retrain(cr)
+        except Exception as e:  # pragma: no cover — defensive
+            log.warning("retrain: weather temp refit raised: %s", e)
+            cr.errors.append(f"weather_temp: {e}")
+
     cr.duration_seconds = round(time.perf_counter() - started, 3)
     cr.completed_at = datetime.now(timezone.utc).isoformat()
     await _publish({
@@ -548,3 +565,64 @@ async def _fit_isotonic_async(
     """Run the (small but CPU-bound) sklearn fit off the event loop."""
     import asyncio
     return await asyncio.to_thread(_fit_isotonic, probs, outcomes)
+
+
+async def _run_weather_temp_retrain(cr: RetrainCycleResult) -> None:
+    """Refit per-(city, metric) GRU + EMOS coefficients for the
+    temperature vertical and clear the predictor's process-local
+    bundle cache so the next call picks up the freshly persisted
+    weights.  Each promoted fit is published on the settlement event
+    hub so the operator dashboard can show which (city, metric) pairs
+    moved.
+
+    Per-pair errors are swallowed (they're surfaced in the
+    ``TrainResult.error`` field on the event payload) so a single
+    bad fit doesn't take down the entire weather refit sweep.
+    """
+    from ..weather import training as weather_training
+    from ..weather import predictor as weather_predictor
+
+    started_at = datetime.now(timezone.utc).isoformat()
+    await _publish({
+        "type": "weather_temp_retrain_start",
+        "started_at": started_at,
+    })
+    results = await weather_training.train_all()
+    promoted = 0
+    skipped = 0
+    pair_summaries: list[dict[str, Any]] = []
+    for r in results:
+        promoted += int(r.promoted)
+        skipped += int(not r.promoted)
+        pair_summaries.append({
+            "city": r.city,
+            "metric": r.metric,
+            "promoted": r.promoted,
+            "n_samples": r.n_samples,
+            "n_holdout": r.n_holdout,
+            "baseline_brier": r.baseline_brier,
+            "holdout_brier": r.holdout_brier,
+            "error": r.error,
+        })
+
+    if promoted > 0:
+        # Drop the predictor's bundle cache so the next prediction
+        # pulls the freshly persisted coefficients from the DB.
+        try:
+            weather_predictor._trained_cache_clear()  # noqa: SLF001
+        except Exception:  # pragma: no cover — defensive
+            log.debug("weather_temp: predictor cache invalidation failed")
+
+    await _publish({
+        "type": "weather_temp_retrain_complete",
+        "started_at": started_at,
+        "completed_at": datetime.now(timezone.utc).isoformat(),
+        "promoted": promoted,
+        "skipped": skipped,
+        "pairs": pair_summaries,
+    })
+
+    # Make the result visible on the parent cycle stats so the
+    # ``run_retrain_cycle`` return value carries weather signal too.
+    cr.verticals_examined += len(results)
+    cr.verticals_retrained += promoted

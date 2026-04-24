@@ -34,7 +34,7 @@ from typing import Any
 from .. import calibrators, models_loader
 from ..feeds.weather_payload import build_weather_payload
 from ..predictor import Prediction
-from . import emos, gru
+from . import emos, gru, training as weather_training
 from .tickers import TemperatureTicker, parse_temperature_ticker
 
 
@@ -222,6 +222,52 @@ async def _resolve_gru_weights() -> tuple[gru.GRUWeights, str, str]:
 
 
 # ---------------------------------------------------------------------------
+# Trained per-(city, metric) coefficient resolver (task #254).
+#
+# The retrain job persists trained ``GRUWeights`` + ``EMOSCoefficients``
+# rows in ``weather_temp_trained_models`` keyed on (city_code, metric).
+# We cache the deserialized objects in process for ``_TRAINED_TTL_S``
+# seconds so the live trading loop never pays the DB round-trip on
+# every prediction.
+# ---------------------------------------------------------------------------
+
+
+_TRAINED_TTL_S = 60.0
+_trained_cache: dict[tuple[str, str], tuple[float, "weather_training.TrainedRecord | None"]] = {}
+
+
+def _trained_cache_clear() -> None:
+    """Test-only seam: drop the in-process trained bundle cache."""
+    _trained_cache.clear()
+
+
+async def _resolve_trained_bundle(
+    city: str, metric: str,
+) -> "weather_training.TrainedRecord | None":
+    """Return the latest trained ``(GRUWeights, EMOSCoefficients)`` pair
+    for ``(city, metric)`` or ``None`` if none has been promoted yet.
+
+    Cached for a minute so a high-frequency trading loop doesn't ping
+    the DB for every Kalshi market scan.  Cache misses (DB down,
+    table missing on a cold install) are also cached as ``None`` for
+    the TTL so we don't hammer a sick DB.
+    """
+    key = (city.upper(), metric.upper())
+    now = time.monotonic()
+    cached = _trained_cache.get(key)
+    if cached is not None and (now - cached[0]) < _TRAINED_TTL_S:
+        return cached[1]
+    try:
+        rec = await weather_training.load_from_db(key[0], key[1])
+    except Exception as e:  # pragma: no cover — defensive
+        log.debug("[temperature] trained bundle load failed (%s/%s): %s",
+                  key[0], key[1], e)
+        rec = None
+    _trained_cache[key] = (now, rec)
+    return rec
+
+
+# ---------------------------------------------------------------------------
 # Public entry point
 # ---------------------------------------------------------------------------
 
@@ -260,7 +306,25 @@ async def predict_temperature_binary(
         )
 
     sequence = _build_sequence(payload)
-    weights, weight_name, weight_version = await _resolve_gru_weights()
+
+    # Per-(city, metric) trained bundle wins.  Falls back to the
+    # canonical pickled GRUWeights + env-default EMOSCoefficients when
+    # the retrain hasn't produced a row for this pair yet (cold
+    # install).
+    trained = await _resolve_trained_bundle(parsed.city, parsed.metric)
+    if trained is not None:
+        weights = trained.weights
+        weight_name = "weather_temp_trained_per_city_metric"
+        weight_version = (
+            trained.fit_at.isoformat()
+            if isinstance(trained.fit_at, datetime) else "trained"
+        )
+        coefficients = trained.coefficients
+        coef_source = "trained"
+    else:
+        weights, weight_name, weight_version = await _resolve_gru_weights()
+        coefficients = emos.coefficients_from_env()
+        coef_source = "env"
 
     t0 = time.monotonic()
     gru_out = gru.forward(sequence, weights)
@@ -269,6 +333,7 @@ async def predict_temperature_binary(
         threshold_f=parsed.threshold,
         gru_point_f=gru_out["point_bias_f"],
         gru_spread_f=gru_out["spread_f"],
+        coefficients=coefficients,
     )
     elapsed_ms = (time.monotonic() - t0) * 1000.0
 
@@ -307,6 +372,16 @@ async def predict_temperature_binary(
             "sigma": emos_result.sigma,
             "p_above": emos_result.p_above,
             "p_below": emos_result.p_below,
+            "coefficients_source": coef_source,
+            "coefficients": {
+                "a": coefficients.a, "b": coefficients.b, "b_g": coefficients.b_g,
+                "c": coefficients.c, "d": coefficients.d, "d_g": coefficients.d_g,
+            },
+            **({
+                "trained_n_samples": trained.n_samples,
+                "trained_holdout_brier": trained.holdout_brier,
+                "trained_baseline_brier": trained.baseline_brier,
+            } if trained is not None else {}),
         },
         "calibration": {**cal_info, **cal_extra},
     }
@@ -327,4 +402,6 @@ __all__ = [
     "CANONICAL_GRU_PATH",
     "TemperaturePredictionError",
     "predict_temperature_binary",
+    "_resolve_trained_bundle",
+    "_trained_cache_clear",
 ]
