@@ -1073,6 +1073,57 @@ async def unread_notification_count(clerk_user_id: str) -> int:
         return 0
 
 
+async def delete_notification(
+    clerk_user_id: str, notification_id: int,
+) -> bool:
+    """Remove a single in-app notification row owned by ``clerk_user_id``.
+
+    Returns ``True`` when a row was deleted, ``False`` otherwise (unknown
+    id, wrong owner, or DB error). The owner predicate is part of the
+    SQL so a user can never delete another user's notification by
+    guessing its id (task #347).
+    """
+    await ensure_schema()
+    try:
+        nid = int(notification_id)
+    except (TypeError, ValueError):
+        return False
+    try:
+        res = await db.execute(
+            "DELETE FROM mobile_notification_log "
+            "WHERE clerk_user_id = $1 AND id = $2",
+            clerk_user_id, nid,
+        )
+    except Exception as e:
+        log.warning("delete_notification failed for %s: %s", clerk_user_id, e)
+        return False
+    try:
+        return int(str(res).split()[-1]) > 0
+    except Exception:
+        return False
+
+
+async def delete_all_notifications(clerk_user_id: str) -> int:
+    """Drop every in-app notification row for ``clerk_user_id``.
+
+    Returns the number of rows removed. Used by the mobile "Clear all"
+    affordance (task #347); never raises so the UI can always proceed.
+    """
+    await ensure_schema()
+    try:
+        res = await db.execute(
+            "DELETE FROM mobile_notification_log WHERE clerk_user_id = $1",
+            clerk_user_id,
+        )
+    except Exception as e:
+        log.warning("delete_all_notifications failed for %s: %s", clerk_user_id, e)
+        return 0
+    try:
+        return int(str(res).split()[-1])
+    except Exception:
+        return 0
+
+
 async def mark_notifications_read(
     clerk_user_id: str, *, ids: list[int] | None = None,
 ) -> int:

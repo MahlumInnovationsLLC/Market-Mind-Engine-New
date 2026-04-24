@@ -40,9 +40,26 @@ class _Store:
         self.tokens: dict[str, dict[str, Any]] = {}
         # user_id -> dict of every pref column + sms_phone_number
         self.prefs: dict[str, dict[str, Any]] = {}
+        # id -> {"clerk_user_id": ..., ...}. Used by the swipe-to-dismiss
+        # tests for `delete_notification` / `delete_all_notifications`.
+        self.notification_log: dict[int, dict[str, Any]] = {}
 
     async def execute(self, query: str, *args: Any) -> str:
         q = " ".join(query.split())
+        if q.startswith("DELETE FROM mobile_notification_log WHERE clerk_user_id = $1 AND id = $2"):
+            uid, nid = args
+            removed = 0
+            row = self.notification_log.get(int(nid))
+            if row and row["clerk_user_id"] == uid:
+                del self.notification_log[int(nid)]
+                removed = 1
+            return f"DELETE {removed}"
+        if q.startswith("DELETE FROM mobile_notification_log WHERE clerk_user_id = $1"):
+            (uid,) = args
+            ids = [i for i, r in self.notification_log.items() if r["clerk_user_id"] == uid]
+            for i in ids:
+                del self.notification_log[i]
+            return f"DELETE {len(ids)}"
         if q.startswith("INSERT INTO expo_push_tokens"):
             tok, uid, plat = args
             self.tokens[tok] = {"clerk_user_id": uid, "platform": plat}
@@ -790,3 +807,46 @@ def test_push_settlement_dispatches_to_opted_in_tokens(
     assert msgs[0]["channelId"] == "settlement"
     assert msgs[0]["data"]["deep_link"] == "/positions"
     assert msgs[0]["data"]["type"] == "settlement"
+
+
+# ---------------------------------------------------------------------------
+# Swipe-to-dismiss helpers (task #347)
+# ---------------------------------------------------------------------------
+
+
+def test_delete_notification_removes_only_owners_row(store: _Store) -> None:
+    store.notification_log[1] = {"clerk_user_id": "user_a"}
+    store.notification_log[2] = {"clerk_user_id": "user_b"}
+
+    # Owner can delete their row.
+    assert _run(_push.delete_notification("user_a", 1)) is True
+    assert 1 not in store.notification_log
+
+    # Non-owner cannot delete someone else's row, even when guessing the id.
+    assert _run(_push.delete_notification("user_a", 2)) is False
+    assert 2 in store.notification_log
+
+    # Unknown ids return False, never raise.
+    assert _run(_push.delete_notification("user_a", 9999)) is False
+
+
+def test_delete_notification_rejects_non_int_id(store: _Store) -> None:
+    store.notification_log[5] = {"clerk_user_id": "user_a"}
+    # Garbage ids never reach the DB layer.
+    assert _run(_push.delete_notification("user_a", "not-a-number")) is False  # type: ignore[arg-type]
+    assert 5 in store.notification_log
+
+
+def test_delete_all_notifications_clears_only_caller(store: _Store) -> None:
+    store.notification_log[1] = {"clerk_user_id": "user_a"}
+    store.notification_log[2] = {"clerk_user_id": "user_a"}
+    store.notification_log[3] = {"clerk_user_id": "user_b"}
+
+    removed = _run(_push.delete_all_notifications("user_a"))
+    assert removed == 2
+    # Other users' rows are untouched.
+    assert 3 in store.notification_log
+    assert all(r["clerk_user_id"] != "user_a" for r in store.notification_log.values())
+
+    # Idempotent: calling again on an empty feed returns 0 cleanly.
+    assert _run(_push.delete_all_notifications("user_a")) == 0

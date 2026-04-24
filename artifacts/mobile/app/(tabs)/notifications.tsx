@@ -1,8 +1,9 @@
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useRouter } from "expo-router";
-import React, { useEffect } from "react";
+import React, { useCallback, useEffect } from "react";
 import {
   ActivityIndicator,
+  Alert,
   FlatList,
   Pressable,
   RefreshControl,
@@ -10,6 +11,7 @@ import {
   Text,
   View,
 } from "react-native";
+import ReanimatedSwipeable from "react-native-gesture-handler/ReanimatedSwipeable";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
 import { useColors } from "@/hooks/useColors";
@@ -84,6 +86,74 @@ export default function NotificationsScreen() {
     },
   });
 
+  const dismissOne = useMutation({
+    mutationFn: (id: number) =>
+      apiFetch<{ unread_count: number }>(`/api/me/notifications/${id}`, {
+        method: "DELETE",
+      }),
+    // Optimistic remove so the row vanishes immediately when the swipe
+    // commits. The server roundtrip then reconciles unread counts on
+    // success or restores the cache on error.
+    onMutate: async (id: number) => {
+      await queryClient.cancelQueries({ queryKey: ["me", "notifications"] });
+      const previous = queryClient.getQueryData<NotificationsResponse>([
+        "me",
+        "notifications",
+      ]);
+      if (previous) {
+        const removed = previous.items.find((n) => n.id === id);
+        const wasUnread = removed && !removed.read_at;
+        queryClient.setQueryData<NotificationsResponse>(
+          ["me", "notifications"],
+          {
+            items: previous.items.filter((n) => n.id !== id),
+            unread_count: Math.max(
+              0,
+              (previous.unread_count ?? 0) - (wasUnread ? 1 : 0),
+            ),
+          },
+        );
+      }
+      return { previous };
+    },
+    onError: (_err, _id, ctx) => {
+      if (ctx?.previous) {
+        queryClient.setQueryData(["me", "notifications"], ctx.previous);
+      }
+    },
+    onSettled: () => {
+      queryClient.invalidateQueries({ queryKey: ["me", "notifications"] });
+    },
+  });
+
+  const clearAll = useMutation({
+    mutationFn: () =>
+      apiFetch<{ deleted: number; unread_count: number }>(
+        "/api/me/notifications",
+        { method: "DELETE" },
+      ),
+    onMutate: async () => {
+      await queryClient.cancelQueries({ queryKey: ["me", "notifications"] });
+      const previous = queryClient.getQueryData<NotificationsResponse>([
+        "me",
+        "notifications",
+      ]);
+      queryClient.setQueryData<NotificationsResponse>(
+        ["me", "notifications"],
+        { items: [], unread_count: 0 },
+      );
+      return { previous };
+    },
+    onError: (_err, _vars, ctx) => {
+      if (ctx?.previous) {
+        queryClient.setQueryData(["me", "notifications"], ctx.previous);
+      }
+    },
+    onSettled: () => {
+      queryClient.invalidateQueries({ queryKey: ["me", "notifications"] });
+    },
+  });
+
   const items = data?.items ?? [];
   const unread = data?.unread_count ?? 0;
 
@@ -95,6 +165,22 @@ export default function NotificationsScreen() {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [unread]);
+
+  const onConfirmClearAll = useCallback(() => {
+    if (!items.length || clearAll.isPending) return;
+    Alert.alert(
+      "Clear all notifications?",
+      "This permanently removes every notification from this feed.",
+      [
+        { text: "Cancel", style: "cancel" },
+        {
+          text: "Clear all",
+          style: "destructive",
+          onPress: () => clearAll.mutate(),
+        },
+      ],
+    );
+  }, [items.length, clearAll]);
 
   if (isLoading) {
     return (
@@ -122,11 +208,23 @@ export default function NotificationsScreen() {
     );
   }
 
+  const renderRightActions = () => (
+    <View
+      style={[
+        styles.swipeAction,
+        { backgroundColor: colors.destructive },
+      ]}
+    >
+      <Text style={styles.swipeActionText}>DISMISS</Text>
+    </View>
+  );
+
   return (
     <FlatList
       style={{ backgroundColor: colors.background }}
       contentContainerStyle={{
-        padding: 16,
+        paddingHorizontal: 16,
+        paddingTop: 12,
         paddingBottom: insets.bottom + 100,
         gap: 8,
         flexGrow: 1,
@@ -139,6 +237,52 @@ export default function NotificationsScreen() {
           onRefresh={refetch}
           tintColor={colors.primary}
         />
+      }
+      ListHeaderComponent={
+        <View
+          style={[
+            styles.header,
+            { borderBottomColor: colors.border },
+          ]}
+        >
+          <Text style={[styles.headerLabel, { color: colors.mutedForeground }]}>
+            {items.length === 0
+              ? "EMPTY"
+              : `${items.length} ${items.length === 1 ? "ALERT" : "ALERTS"}`}
+          </Text>
+          <Pressable
+            onPress={onConfirmClearAll}
+            disabled={items.length === 0 || clearAll.isPending}
+            testID="clear-all-notifications"
+            hitSlop={8}
+            style={({ pressed }) => [
+              styles.clearAllBtn,
+              {
+                borderColor:
+                  items.length === 0
+                    ? colors.border
+                    : colors.destructive,
+                opacity: items.length === 0 || clearAll.isPending
+                  ? 0.4
+                  : pressed ? 0.6 : 1,
+              },
+            ]}
+          >
+            <Text
+              style={[
+                styles.clearAllText,
+                {
+                  color:
+                    items.length === 0
+                      ? colors.mutedForeground
+                      : colors.destructive,
+                },
+              ]}
+            >
+              CLEAR ALL
+            </Text>
+          </Pressable>
+        </View>
       }
       ListEmptyComponent={
         <View style={styles.empty}>
@@ -163,66 +307,82 @@ export default function NotificationsScreen() {
           );
         const unreadRow = !item.read_at;
         return (
-          <Pressable
-            onPress={() => {
-              if (unreadRow) markRead.mutate([item.id]);
-              if (link) router.push(link as never);
+          <ReanimatedSwipeable
+            friction={2}
+            rightThreshold={48}
+            overshootRight={false}
+            renderRightActions={renderRightActions}
+            // Fires once the swipe crosses the open threshold. The
+            // optimistic mutation immediately drops the row from the
+            // cache, so by the time the animation settles the FlatList
+            // has already removed this Swipeable from the tree — no
+            // need to call `close()` ourselves.
+            onSwipeableOpen={() => {
+              dismissOne.mutate(item.id);
             }}
-            testID={`notification-${item.id}`}
-            style={[
-              styles.row,
-              {
-                backgroundColor: colors.card,
-                borderColor: unreadRow ? colors.primary : colors.border,
-              },
-            ]}
+            testID={`notification-swipe-${item.id}`}
           >
-            <View style={styles.rowHead}>
-              <View style={styles.rowHeadLeft}>
-                <View
-                  style={[
-                    styles.dot,
-                    { backgroundColor: badgeColor(item.type, colors) },
-                  ]}
-                />
+            <Pressable
+              onPress={() => {
+                if (unreadRow) markRead.mutate([item.id]);
+                if (link) router.push(link as never);
+              }}
+              testID={`notification-${item.id}`}
+              style={[
+                styles.row,
+                {
+                  backgroundColor: colors.card,
+                  borderColor: unreadRow ? colors.primary : colors.border,
+                },
+              ]}
+            >
+              <View style={styles.rowHead}>
+                <View style={styles.rowHeadLeft}>
+                  <View
+                    style={[
+                      styles.dot,
+                      { backgroundColor: badgeColor(item.type, colors) },
+                    ]}
+                  />
+                  <Text
+                    style={[styles.title, { color: colors.foreground }]}
+                    numberOfLines={1}
+                  >
+                    {item.title}
+                  </Text>
+                </View>
                 <Text
-                  style={[styles.title, { color: colors.foreground }]}
-                  numberOfLines={1}
+                  style={[styles.timestamp, { color: colors.mutedForeground }]}
                 >
-                  {item.title}
+                  {fmtTime(item.created_at)}
                 </Text>
               </View>
               <Text
-                style={[styles.timestamp, { color: colors.mutedForeground }]}
+                style={[styles.body, { color: colors.mutedForeground }]}
+                numberOfLines={3}
               >
-                {fmtTime(item.created_at)}
+                {item.body}
               </Text>
-            </View>
-            <Text
-              style={[styles.body, { color: colors.mutedForeground }]}
-              numberOfLines={3}
-            >
-              {item.body}
-            </Text>
-            <View style={styles.metaRow}>
-              <Text
-                style={[
-                  styles.tag,
-                  {
-                    color: badgeColor(item.type, colors),
-                    borderColor: colors.border,
-                  },
-                ]}
-              >
-                {item.type.replace(/_/g, " ").toUpperCase()}
-              </Text>
-              {link ? (
-                <Text style={[styles.link, { color: colors.primary }]}>
-                  OPEN →
+              <View style={styles.metaRow}>
+                <Text
+                  style={[
+                    styles.tag,
+                    {
+                      color: badgeColor(item.type, colors),
+                      borderColor: colors.border,
+                    },
+                  ]}
+                >
+                  {item.type.replace(/_/g, " ").toUpperCase()}
                 </Text>
-              ) : null}
-            </View>
-          </Pressable>
+                {link ? (
+                  <Text style={[styles.link, { color: colors.primary }]}>
+                    OPEN →
+                  </Text>
+                ) : null}
+              </View>
+            </Pressable>
+          </ReanimatedSwipeable>
         );
       }}
     />
@@ -234,10 +394,45 @@ const styles = StyleSheet.create({
   muted: { fontSize: 13, fontFamily: "Inter_400Regular" },
   mutedSmall: { fontSize: 11, fontFamily: "Inter_400Regular" },
   empty: { paddingVertical: 60, alignItems: "center" },
+  header: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    paddingBottom: 10,
+    marginBottom: 4,
+    borderBottomWidth: 1,
+  },
+  headerLabel: {
+    fontSize: 11,
+    letterSpacing: 1.5,
+    fontFamily: "Inter_600SemiBold",
+  },
+  clearAllBtn: {
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    borderWidth: 1,
+  },
+  clearAllText: {
+    fontSize: 10,
+    letterSpacing: 1.5,
+    fontFamily: "Inter_700Bold",
+  },
   row: {
     borderWidth: 1,
     padding: 12,
     gap: 6,
+  },
+  swipeAction: {
+    justifyContent: "center",
+    alignItems: "flex-end",
+    paddingHorizontal: 20,
+    width: "100%",
+  },
+  swipeActionText: {
+    color: "#fff",
+    fontFamily: "Inter_700Bold",
+    fontSize: 12,
+    letterSpacing: 1.5,
   },
   rowHead: {
     flexDirection: "row",

@@ -1233,6 +1233,39 @@ async def me_notifications_mark_read(
     return {"ok": True, "updated": updated, "unread_count": unread}
 
 
+@app.delete("/api/me/notifications/{notification_id}")
+async def me_notifications_delete(
+    notification_id: int,
+    user: AuthedUser = Depends(require_auth),
+) -> dict[str, object]:
+    """Remove a single in-app notification row owned by the caller.
+
+    Powers the swipe-to-dismiss gesture on the mobile alerts feed
+    (task #347). Returns 404 when the row does not exist or belongs to
+    a different user — the latter is intentionally indistinguishable to
+    avoid leaking which ids are valid for other accounts.
+    """
+    deleted = await notif_push.delete_notification(user.user_id, notification_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="notification not found")
+    unread = await notif_push.unread_notification_count(user.user_id)
+    return {"ok": True, "unread_count": unread}
+
+
+@app.delete("/api/me/notifications")
+async def me_notifications_clear_all(
+    user: AuthedUser = Depends(require_auth),
+) -> dict[str, object]:
+    """Drop every in-app notification row for the caller.
+
+    Backs the "Clear all" header affordance on the mobile alerts feed
+    (task #347). Always returns 200 so the UI can collapse the list
+    without special-casing the empty state.
+    """
+    deleted = await notif_push.delete_all_notifications(user.user_id)
+    return {"ok": True, "deleted": deleted, "unread_count": 0}
+
+
 @app.get("/api/me/notification-history")
 async def me_notification_history(
     limit: int = 30,
