@@ -372,6 +372,207 @@ def _probe_kalshi_reconciler() -> dict:
     )
 
 
+# ---------------------------------------------------------------------------
+# Bankroll-sync silence detector
+#
+# The continuous Kalshi balance -> bankroll_events sync (`app.bankroll_sync`)
+# already tracks `running`, `last_tick_at`, and `last_error`. Surfacing
+# that state as a passive health card means a stalled sync flips the
+# overall snapshot to `down` (and so any external readiness probe
+# alongside it), and a small consecutive-snapshot counter + dedupe
+# debounces the resulting Postmark page exactly the same way the WS
+# silent-subscriber alert does.
+# ---------------------------------------------------------------------------
+
+
+# Per-incident consecutive-bad snapshot counter, keyed by a stable
+# label so a sync that recovers and then re-stalls has to climb the
+# threshold again.
+_bankroll_sync_bad_snapshot_counts: dict[str, int] = {}
+
+# How many consecutive snapshots the bankroll sync must look stalled
+# before paging.  Default 3 -> ~90s at the standard 30s health cadence.
+BANKROLL_SYNC_ALERT_THRESHOLD = max(
+    1, int(os.environ.get("AXIOM_BANKROLL_SYNC_ALERT_SNAPSHOTS") or "3")
+)
+
+# Dedupe TTL for the resulting Postmark alert.  One page per incident
+# per hour is plenty — the on-call is looking for the *first* notice,
+# not a flood.
+BANKROLL_SYNC_ALERT_TTL_SECONDS = max(
+    60, int(os.environ.get("AXIOM_BANKROLL_SYNC_ALERT_TTL_SECONDS") or "3600")
+)
+
+
+def _bankroll_sync_status(state: dict) -> tuple[str, str, dict]:
+    """Classify a `bankroll_sync.state()` snapshot.
+
+    Returns ``(status, detail, signals)`` where ``status`` is one of
+    ``ok | degraded | down``, ``detail`` is the human-readable card
+    blurb, and ``signals`` carries the derived numbers (age + threshold)
+    the alert + dashboard banner both want without re-deriving them.
+    """
+    interval = float(state.get("interval_seconds") or 60.0)
+    threshold = max(interval * 3.0, 60.0)
+    last_tick = state.get("last_tick_at")
+    age = (time.time() - float(last_tick)) if last_tick else None
+    running = bool(state.get("running"))
+    last_err = state.get("last_error")
+    signals = {
+        "interval_seconds": interval,
+        "threshold_seconds": threshold,
+        "age_seconds": round(age, 1) if age is not None else None,
+    }
+    if not running:
+        return (
+            "down",
+            "bankroll sync loop is not running",
+            signals,
+        )
+    if age is None:
+        # Loop is up but hasn't completed a single tick yet — the boot
+        # window is short enough (default 60s interval) that a missing
+        # first tick after the snapshot interval is a real signal.
+        return (
+            "degraded",
+            "no bankroll sync tick observed since boot",
+            signals,
+        )
+    if age > threshold:
+        detail = (
+            f"stale: last tick {age:.0f}s ago "
+            f"(>{threshold:.0f}s threshold)"
+        )
+        if last_err:
+            detail += f" | last_error={str(last_err)[:160]}"
+        return ("down", detail, signals)
+    if last_err:
+        return (
+            "degraded",
+            f"recovering: last tick {age:.0f}s ago | last_error={str(last_err)[:160]}",
+            signals,
+        )
+    return ("ok", f"last tick {age:.0f}s ago (<= {threshold:.0f}s)", signals)
+
+
+def _maybe_dispatch_bankroll_sync_alert(
+    *, state: dict, status: str, detail: str, signals: dict
+) -> dict | None:
+    """Update the consecutive-bad counter and fire one Postmark alert
+    per incident when the count crosses the threshold.
+
+    Returns the triggered payload (used by tests) or None when this
+    snapshot was healthy or below the threshold.
+    """
+    label = "bankroll_sync"
+    # The task spec defines "silent" narrowly as `running is False` or
+    # `last_tick_at` older than `interval_seconds * 3`. The probe maps
+    # both of those onto the `down` status; a `degraded` snapshot
+    # (recovering from a transient REST error, or awaiting first tick)
+    # is real but not page-worthy on its own. Gate the counter so a
+    # flaky sync that ticks-then-errors doesn't accumulate toward a
+    # page that misrepresents the failure mode.
+    if status != "down":
+        _bankroll_sync_bad_snapshot_counts.pop(label, None)
+        return None
+    cur = _bankroll_sync_bad_snapshot_counts.get(label, 0) + 1
+    _bankroll_sync_bad_snapshot_counts[label] = cur
+    if cur != BANKROLL_SYNC_ALERT_THRESHOLD:
+        return None
+
+    triggered = {
+        "label": label,
+        "status": status,
+        "detail": detail,
+        "consecutive_snapshots": cur,
+        "running": bool(state.get("running")),
+        "last_tick_at": _iso(state.get("last_tick_at")) if state.get("last_tick_at") else None,
+        "last_error": state.get("last_error"),
+        "last_balance_cents": state.get("last_balance_cents"),
+        "interval_seconds": signals["interval_seconds"],
+        "threshold_seconds": signals["threshold_seconds"],
+        "age_seconds": signals["age_seconds"],
+    }
+
+    from .notifications import alerts as _alerts
+
+    async def _runner() -> None:
+        try:
+            ok = await _alerts.dedupe_or_skip(
+                "bankroll_sync_silent",
+                label,
+                ttl_seconds=BANKROLL_SYNC_ALERT_TTL_SECONDS,
+            )
+        except Exception as e:  # pragma: no cover — fail-open
+            log.warning("bankroll-sync dedupe failed: %s", e)
+            ok = True
+        if not ok:
+            return
+        try:
+            _alerts.bankroll_sync_silent(
+                last_tick_at=triggered["last_tick_at"],
+                age_seconds=triggered["age_seconds"],
+                interval_seconds=triggered["interval_seconds"],
+                threshold_seconds=triggered["threshold_seconds"],
+                running=triggered["running"],
+                last_error=triggered["last_error"],
+                last_balance_cents=triggered["last_balance_cents"],
+                consecutive_snapshots=triggered["consecutive_snapshots"],
+            )
+        except Exception as e:  # pragma: no cover
+            log.warning("bankroll-sync alert dispatch failed: %s", e)
+
+    try:
+        loop = asyncio.get_running_loop()
+        loop.create_task(_runner())
+    except RuntimeError:
+        # Sync test context — run inline so the test can observe it.
+        try:
+            asyncio.run(_runner())
+        except Exception as e:  # pragma: no cover
+            log.warning("inline bankroll-sync dispatch failed: %s", e)
+
+    return triggered
+
+
+def _probe_bankroll_sync() -> dict:
+    """Surface ``bankroll_sync.state()`` as a passive health card.
+
+    `down` when the loop is stopped or the last tick is older than
+    ``interval_seconds * 3`` (capped at >=60s so a 5s test interval
+    can't trigger on noise). `degraded` when the loop is up but
+    recovering from an error or hasn't yet produced a first tick.
+    `ok` otherwise. The card itself is what flips the snapshot
+    `summary.overall` to `down`, and a separate Postmark alert is
+    debounced via the shared notification dedupe table.
+    """
+    from . import bankroll_sync as _bankroll_sync  # local import to avoid cycle
+    state = _bankroll_sync.state()
+    status, detail, signals = _bankroll_sync_status(state)
+    triggered = _maybe_dispatch_bankroll_sync_alert(
+        state=state, status=status, detail=detail, signals=signals
+    )
+    if status != "ok":
+        error_log("bankroll_sync", detail[:240])
+    extras = {
+        **state,
+        **signals,
+        "alert_threshold_snapshots": BANKROLL_SYNC_ALERT_THRESHOLD,
+        "consecutive_bad_snapshots": _bankroll_sync_bad_snapshot_counts.get(
+            "bankroll_sync", 0
+        ),
+        "alert_triggered_this_snapshot": triggered is not None,
+    }
+    return _card(
+        key="bankroll_sync",
+        label="Kalshi bankroll sync",
+        category="passive",
+        status=status,
+        detail=detail,
+        extras=extras,
+    )
+
+
 def _probe_submit_recovery() -> dict:
     """Surface the order-submit recovery path (client_order_id lookup).
 
@@ -1501,6 +1702,7 @@ async def _build_snapshot() -> _Snapshot:
         _probe_calibration(),
         _probe_ws_subscribers(),
         _probe_kalshi_reconciler(),
+        _probe_bankroll_sync(),
         _probe_submit_recovery(),
         _probe_stale_resting_cancelled(),
         _probe_submit_dedupe(),

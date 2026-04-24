@@ -1409,6 +1409,72 @@ def rc_webhook_failure_rate(
     return _dispatch(subject, body, tag="rc-webhook-failures", dry_run=dry_run)
 
 
+def bankroll_sync_silent(
+    *,
+    last_tick_at: str | None,
+    age_seconds: float | None,
+    interval_seconds: float,
+    threshold_seconds: float,
+    running: bool,
+    last_error: str | None,
+    last_balance_cents: int | None,
+    consecutive_snapshots: int,
+    dry_run: bool = False,
+) -> dict[str, Any]:
+    """Operator alert: the Kalshi exchange balance sync has gone silent.
+
+    Fired by the health collector when ``bankroll_sync.state()`` shows
+    either a stopped loop (``running is False``) or a ``last_tick_at``
+    older than ``interval_seconds * 3``. The bankroll-floor risk gate
+    and equity curve both read from ``bankroll_events``, so a silent
+    sync means risk decisions are flying on a stale balance — which is
+    exactly the kind of failure that needs to page the on-call rather
+    than wait for someone to open the dashboard.
+
+    Caller debounces via ``dedupe_or_skip`` keyed on a stable incident
+    label so a sync that stays silent for hours generates one page,
+    not one per snapshot.
+    """
+    if not running:
+        state_summary = "loop is not running"
+    elif age_seconds is None:
+        state_summary = "no tick observed since boot"
+    else:
+        state_summary = f"last tick {age_seconds:.0f}s ago"
+    subject = (
+        f"[axiom][BANKROLL] Kalshi balance sync silent ({state_summary})"
+    )
+    body = (
+        "The continuous Kalshi balance -> bankroll_events sync has gone "
+        "silent.\n"
+        "The bankroll-floor risk gate and equity curve both read from "
+        "bankroll_events, so a stalled sync means trading decisions are\n"
+        "flying on a stale exchange balance. Investigate the api-server\n"
+        "logs and Kalshi REST availability before resuming live trading.\n\n"
+        + _format_lines(
+            [
+                ("running", "yes" if running else "no"),
+                ("last_tick_at", last_tick_at or "(never)"),
+                (
+                    "age_seconds",
+                    f"{age_seconds:.0f}" if age_seconds is not None else "(n/a)",
+                ),
+                ("interval_seconds", f"{interval_seconds:.0f}"),
+                ("threshold_seconds", f"{threshold_seconds:.0f}"),
+                ("last_error", (last_error or "(none)")[:200]),
+                (
+                    "last_balance_cents",
+                    last_balance_cents if last_balance_cents is not None else "(unknown)",
+                ),
+                ("consecutive_snapshots", consecutive_snapshots),
+                ("at", _utc_now_iso()),
+            ]
+        )
+        + "\n"
+    )
+    return _dispatch(subject, body, tag="bankroll-sync-silent", dry_run=dry_run)
+
+
 def rc_webhook_silence(
     *,
     silence_seconds: int,
