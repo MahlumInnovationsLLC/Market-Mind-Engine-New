@@ -3732,6 +3732,56 @@ async def notifications_test(
     return await daily_summary.fire_now(dry_run=body.dry_run)
 
 
+@app.get("/api/notifications/daily-summary/preview")
+async def notifications_daily_summary_preview(
+    date: str | None = None,
+    _: object = Depends(require_approved_user),
+) -> dict[str, object]:
+    """Render today's (or a past day's) daily-summary email as HTML for
+    the operator console preview pane.
+
+    Re-uses the same `collect_summary` + `daily_pnl_summary(dry_run=True)`
+    pipeline the scheduler invokes, so the iframe shows operators the
+    exact body subscribers would receive — no out-of-band template
+    rendering that could drift from production.
+
+    `date` is an optional `YYYY-MM-DD` (UTC) — defaults to today UTC.
+    Past dates simply re-aggregate from the historical tables;
+    aggregations that have no data for that day collapse to the same
+    "no rows" placeholders the email itself would render, so the
+    preview never errors on a quiet day.
+    """
+    import datetime as _dt
+    if date is None or not date.strip():
+        target = _dt.datetime.now(tz=_dt.timezone.utc).date()
+    else:
+        try:
+            target = _dt.date.fromisoformat(date.strip())
+        except ValueError:
+            raise HTTPException(
+                status_code=400,
+                detail="date must be YYYY-MM-DD",
+            )
+    today_utc = _dt.datetime.now(tz=_dt.timezone.utc).date()
+    if target > today_utc:
+        raise HTTPException(
+            status_code=400,
+            detail="date cannot be in the future",
+        )
+    summary = await daily_summary.collect_summary(target.isoformat())
+    rendered = notif_alerts.daily_pnl_summary(**summary, dry_run=True)
+    return {
+        "date_utc": target.isoformat(),
+        "is_today": target == today_utc,
+        "subject": rendered.get("subject"),
+        "body_preview": rendered.get("body_preview"),
+        "html_preview": rendered.get("html_preview"),
+        "generated_at": _dt.datetime.now(tz=_dt.timezone.utc).isoformat(
+            timespec="seconds"
+        ),
+    }
+
+
 @app.get("/api/feeds/status")
 async def feeds_status(_: object = Depends(require_auth)) -> dict[str, object]:
     """Per-feed liveness snapshot for the operator console."""

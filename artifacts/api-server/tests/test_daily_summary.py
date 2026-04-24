@@ -524,3 +524,64 @@ def test_collect_summary_degrades_when_no_rows(monkeypatch: pytest.MonkeyPatch) 
     body = alerts.daily_pnl_summary(**{**_BASE_KW, **summary})["body_preview"]
     assert "(no settled trades by vertical today)" in body
     assert "(no settled swarm debates from today)" in body
+
+
+# ---------------------------------------------------------------------------
+# /api/notifications/daily-summary/preview — operator console preview pane.
+# ---------------------------------------------------------------------------
+
+
+def test_daily_summary_preview_endpoint(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The preview endpoint composes collect_summary + dry_run dispatch
+    so the operator console can render the exact email subscribers
+    would receive, without sending. Past dates work; an unknown date
+    still returns a usable HTML body via the graceful-degrade path."""
+    from fastapi.testclient import TestClient
+
+    from app import main as _main
+    from app.auth import require_approved_user
+
+    monkeypatch.setattr(daily_summary, "db", _FakeDB({}))
+
+    _main.app.dependency_overrides[require_approved_user] = lambda: {
+        "clerk_user_id": "user_op",
+        "is_admin": True,
+    }
+    try:
+        client = TestClient(_main.app)
+        # Past date — should re-aggregate without error.
+        resp = client.get(
+            "/api/notifications/daily-summary/preview?date=2026-04-21"
+        )
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["date_utc"] == "2026-04-21"
+        assert body["is_today"] is False
+        assert isinstance(body["html_preview"], str)
+        assert body["html_preview"].startswith("<!DOCTYPE html>")
+        # The subject embeds the rendered date so operators can sanity-check
+        # the iframe is showing the day they asked for.
+        assert "2026-04-21" in (body["subject"] or "")
+        # Plain-text preview is always populated alongside the HTML body.
+        assert "Daily Axiom-Predict summary" in (body["body_preview"] or "")
+
+        # No date = today UTC (is_today=True).
+        resp = client.get("/api/notifications/daily-summary/preview")
+        assert resp.status_code == 200
+        assert resp.json()["is_today"] is True
+
+        # Bad date format -> 400 with a helpful detail.
+        resp = client.get(
+            "/api/notifications/daily-summary/preview?date=not-a-date"
+        )
+        assert resp.status_code == 400
+        assert "YYYY-MM-DD" in resp.json()["detail"]
+
+        # Future date -> 400 (we only render today / historical).
+        resp = client.get(
+            "/api/notifications/daily-summary/preview?date=2099-01-01"
+        )
+        assert resp.status_code == 400
+        assert "future" in resp.json()["detail"]
+    finally:
+        _main.app.dependency_overrides.pop(require_approved_user, None)

@@ -76,6 +76,15 @@ type NotificationsStatus = {
   dedupe_suppressions?: Record<string, number>;
 };
 
+type DailySummaryPreview = {
+  date_utc: string;
+  is_today: boolean;
+  subject: string | null;
+  body_preview: string | null;
+  html_preview: string | null;
+  generated_at: string;
+};
+
 const STATUS_COLOR: Record<Card["status"], string> = {
   ok: "text-success border-success/40 bg-success/5",
   degraded: "text-warning border-warning/40 bg-warning/5",
@@ -164,6 +173,12 @@ export function HealthPanel() {
   const [testing, setTesting] = useState<AlertType | null>(null);
   const [testResult, setTestResult] = useState<unknown>(null);
   const [dryRun, setDryRun] = useState(true);
+  const [previewDate, setPreviewDate] = useState<string>(() =>
+    new Date().toISOString().slice(0, 10),
+  );
+  const [preview, setPreview] = useState<DailySummaryPreview | null>(null);
+  const [previewLoading, setPreviewLoading] = useState(false);
+  const [previewError, setPreviewError] = useState<string | null>(null);
 
   const token = useMemo(() => () => getToken().then((t) => t ?? null), [getToken]);
 
@@ -257,6 +272,40 @@ export function HealthPanel() {
       setAlertBusy(null);
     }
   }
+
+  async function loadPreview(date: string) {
+    setPreviewLoading(true);
+    setPreviewError(null);
+    try {
+      const params = new URLSearchParams({ date });
+      const res = await apiFetch<DailySummaryPreview>(
+        `/api/notifications/daily-summary/preview?${params.toString()}`,
+        { getToken: token },
+      );
+      setPreview(res);
+    } catch (e: unknown) {
+      setPreview(null);
+      setPreviewError(
+        formatErrorMessage(
+          e,
+          e instanceof ApiError ? `HTTP ${e.status} :: ${e.message}` : undefined,
+        ),
+      );
+    } finally {
+      setPreviewLoading(false);
+    }
+  }
+
+  // Auto-load today's preview the first time the panel mounts so
+  // operators don't have to click "Load" just to see the current
+  // draft. Re-loads are explicit (button) so we don't re-render the
+  // sandboxed iframe on every 15s refresh tick.
+  useEffect(() => {
+    if (!isSignedIn) return;
+    if (preview !== null || previewLoading) return;
+    loadPreview(previewDate);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isSignedIn]);
 
   async function fireTest(type: AlertType) {
     setTesting(type);
@@ -699,6 +748,120 @@ export function HealthPanel() {
                   ))}
                 </tbody>
               </table>
+            </div>
+          )}
+        </section>
+
+        <section
+          className="space-y-3 border-t border-border pt-4"
+          data-testid="panel-daily-summary-preview"
+        >
+          <div className="flex items-baseline justify-between gap-3 flex-wrap">
+            <h2 className="text-sm uppercase tracking-widest text-muted-foreground">
+              Daily summary preview
+            </h2>
+            {preview && (
+              <span className="text-[10px] uppercase tracking-widest text-muted-foreground/70">
+                rendered {preview.generated_at}
+              </span>
+            )}
+          </div>
+          <p className="text-[11px] text-muted-foreground">
+            Re-renders the exact HTML email subscribers would receive for the
+            chosen UTC date. Pick a past day to inspect a historical send;
+            today reflects the live draft the scheduler will fire next.
+          </p>
+          <div className="flex flex-wrap items-center gap-2 text-xs">
+            <label
+              htmlFor="daily-summary-preview-date"
+              className="text-muted-foreground uppercase tracking-widest"
+            >
+              Date (UTC)
+            </label>
+            <input
+              id="daily-summary-preview-date"
+              type="date"
+              value={previewDate}
+              max={new Date().toISOString().slice(0, 10)}
+              onChange={(e) => setPreviewDate(e.target.value)}
+              data-testid="input-preview-date"
+              className="border border-border bg-card px-2 py-1 font-mono"
+            />
+            <button
+              onClick={() => loadPreview(previewDate)}
+              disabled={previewLoading || !previewDate}
+              data-testid="button-load-preview"
+              className="border border-border bg-card hover:bg-muted px-3 py-1 uppercase tracking-widest disabled:opacity-50"
+            >
+              {previewLoading ? "Loading…" : "Load"}
+            </button>
+            <button
+              onClick={() => {
+                const today = new Date().toISOString().slice(0, 10);
+                setPreviewDate(today);
+                loadPreview(today);
+              }}
+              disabled={previewLoading}
+              data-testid="button-preview-today"
+              className="border border-border bg-card hover:bg-muted px-3 py-1 uppercase tracking-widest disabled:opacity-50"
+            >
+              Today
+            </button>
+          </div>
+
+          {previewError && (
+            <div
+              className="border border-destructive bg-destructive/10 text-destructive p-2 text-xs"
+              data-testid="preview-error"
+            >
+              {previewError}
+            </div>
+          )}
+
+          {preview && (
+            <div className="space-y-2">
+              <div className="text-[11px] text-muted-foreground space-y-0.5">
+                <div>
+                  <span className="uppercase tracking-widest">date</span> ::{" "}
+                  <span className="font-mono text-foreground">
+                    {preview.date_utc}
+                  </span>
+                  {preview.is_today && (
+                    <span className="ml-2 text-[10px] uppercase tracking-widest text-accent-cyan/80">
+                      today
+                    </span>
+                  )}
+                </div>
+                <div className="break-all">
+                  <span className="uppercase tracking-widest">subject</span> ::{" "}
+                  <span className="font-mono text-foreground">
+                    {preview.subject ?? "(no subject)"}
+                  </span>
+                </div>
+              </div>
+              {preview.html_preview ? (
+                <iframe
+                  title="Daily summary HTML preview"
+                  data-testid="iframe-daily-summary-preview"
+                  sandbox=""
+                  srcDoc={preview.html_preview}
+                  className="w-full border border-border bg-white"
+                  style={{ height: "640px" }}
+                />
+              ) : (
+                <div
+                  className="border border-border bg-card p-3 text-xs text-muted-foreground"
+                  data-testid="preview-empty"
+                >
+                  No HTML body was rendered for this date.
+                </div>
+              )}
+            </div>
+          )}
+
+          {!preview && !previewError && !previewLoading && (
+            <div className="text-xs text-muted-foreground">
+              No preview loaded yet — pick a date and click Load.
             </div>
           )}
         </section>
