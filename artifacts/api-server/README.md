@@ -198,6 +198,16 @@ In Replit Deployments, set the env vars above on the deployed app
 the next time the deployment boots; no code change is needed when
 rotating the token or pointing at a different intake.
 
+## Manifest signing key rotation
+
+The model manifest published to `<bucket>/exports/models_manifest.json`
+is signed with an offline ed25519 keypair (task #73). The matching
+public key is configured on the API as `AXIOM_MANIFEST_PUBLIC_KEY` and
+verified on every boot / `/api/models/reload` by
+`app/models_loader.py`. To rotate the keypair (scheduled rotation or
+suspected compromise) without a readiness gap, follow
+[`docs/manifest_signing_runbook.md`](docs/manifest_signing_runbook.md).
+
 ## Database migrations (Alembic)
 
 All schema is owned by Alembic revisions under `migrations/versions/`.
