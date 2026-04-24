@@ -481,17 +481,21 @@ def live_trade(
     order_id: str | None = None,
     fill_id: str | None = None,
     vertical: str | None = None,
+    exchange: str = "kalshi",
     dry_run: bool = False,
 ) -> dict[str, Any]:
     px = f"{price_cents}¢" if price_cents is not None else "(market)"
+    venue = (exchange or "kalshi").lower()
+    venue_label = venue.title()
     subject = (
-        f"[axiom][LIVE] {action.upper()} {side.upper()} {contracts}x "
+        f"[axiom][LIVE {venue}] {action.upper()} {side.upper()} {contracts}x "
         f"{market_ticker} @ {px}"
     )
     body = (
-        "A LIVE Kalshi order filled (not paper).\n\n"
+        f"A LIVE {venue_label} order filled (not paper).\n\n"
         + _format_lines(
             [
+                ("exchange", venue),
                 ("market", market_ticker),
                 ("side", side),
                 ("action", action),
@@ -523,7 +527,7 @@ def live_trade(
         # opted-in user who's on an active Elite/Founder plan.
         try:
             _schedule_premium_live_trade(subject=subject, body_short=(
-                f"LIVE {action.upper()} {side.upper()} {contracts}x "
+                f"LIVE {venue} {action.upper()} {side.upper()} {contracts}x "
                 f"{market_ticker} @ {px}"
             ))
         except Exception as e:  # pragma: no cover

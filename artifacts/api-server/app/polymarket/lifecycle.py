@@ -600,6 +600,7 @@ async def _apply_fill(
                 order_id=rec.order_id,
                 fill_id=fill_id,
                 vertical=rec.request.vertical,
+                exchange="polymarket",
             )
     except Exception as e:  # pragma: no cover — alerting must not break fills
         log.warning("polymarket live_trade alert dispatch failed: %s", e)

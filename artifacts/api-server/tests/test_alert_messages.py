@@ -155,13 +155,40 @@ def test_live_trade_dry_run_subject_and_body() -> None:
     )
     assert out["dry_run"] is True
     assert out["tag"] == "live-trade"
-    assert "[LIVE]" in out["subject"]
+    # Default exchange is kalshi — venue tag appears in the subject
+    # bracket and the human-readable body preamble.
+    assert "[LIVE kalshi]" in out["subject"]
     assert "BUY YES 12x MKT-X @ 42¢" in out["subject"]
     body = out["body_preview"]
+    assert "A LIVE Kalshi order filled" in body
     for token in (
         "market", "MKT-X", "ord_99", "fill_1", "sports", "42¢",
+        "exchange", "kalshi",
     ):
         assert token in body, token
+
+
+def test_live_trade_polymarket_exchange_in_subject_and_body() -> None:
+    out = _alerts.live_trade(
+        market_ticker="0xCOND",
+        side="yes",
+        action="buy",
+        contracts=5,
+        price_cents=45,
+        order_id="cli-1",
+        fill_id="trade-A",
+        vertical="sports",
+        exchange="polymarket",
+        dry_run=True,
+    )
+    assert "[LIVE polymarket]" in out["subject"]
+    body = out["body_preview"]
+    # The Polymarket-flavoured preamble replaces the old hard-coded
+    # "A LIVE Kalshi order filled." copy so on-call operators paged on
+    # a Polymarket fill see the right venue immediately.
+    assert "A LIVE Polymarket order filled" in body
+    assert "Kalshi" not in body
+    assert "exchange" in body and "polymarket" in body
 
 
 def test_live_trade_market_price_when_no_price_cents() -> None:
@@ -184,7 +211,27 @@ def test_live_trade_live_path_queues_send(
     assert out["queued"] is True
     assert len(captured_sends) == 1
     assert captured_sends[0]["tag"] == "live-trade"
+    assert "[LIVE kalshi]" in captured_sends[0]["subject"]
     assert "BUY YES 1x MKT-Z @ 10¢" in captured_sends[0]["subject"]
+    assert "A LIVE Kalshi order filled" in captured_sends[0]["text_body"]
+
+
+def test_live_trade_live_path_queues_polymarket_send(
+    captured_sends: list[dict[str, Any]],
+) -> None:
+    out = _alerts.live_trade(
+        market_ticker="0xCOND", side="no", action="sell",
+        contracts=2, price_cents=55,
+        order_id="cli-2", fill_id="trade-B",
+        exchange="polymarket",
+    )
+    assert out["queued"] is True
+    assert len(captured_sends) == 1
+    sent = captured_sends[0]
+    assert sent["tag"] == "live-trade"
+    assert "[LIVE polymarket]" in sent["subject"]
+    assert "A LIVE Polymarket order filled" in sent["text_body"]
+    assert "Kalshi" not in sent["text_body"]
 
 
 # ---------------------------------------------------------------------------
