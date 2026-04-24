@@ -153,6 +153,48 @@ def test_gate_no_thresholds_is_noop(monkeypatch):
     assert p.alerts == []
 
 
+def test_gate_no_thresholds_warning_is_throttled(monkeypatch, caplog):
+    """When neither threshold is configured, the safety-net reminder
+    must surface at most once per throttle window — not per candidate.
+    A single orchestrator cycle may evaluate dozens of candidates and
+    operators only need the hint once."""
+    import logging
+
+    monkeypatch.delenv("AXIOM_DAILY_LOSS_HALT_USD", raising=False)
+    monkeypatch.delenv("AXIOM_DAILY_LOSS_HALT_PCT", raising=False)
+    _gates._reset_no_thresholds_warning_throttle()
+    caplog.set_level(logging.WARNING, logger="app.risk.gates")
+
+    with _Patcher(realized=-100.0, unrealized=0.0) as _p:
+        # Simulate a burst of 5 candidate evaluations within the same cycle.
+        for _ in range(5):
+            _dl.invalidate_cache()
+            res = asyncio.run(_gates.gate_daily_loss(_make_ctx()))
+            assert res.passed is True
+
+    matching = [
+        r for r in caplog.records
+        if "no thresholds set" in r.getMessage()
+    ]
+    assert len(matching) == 1, (
+        f"expected exactly one throttled warning, got {len(matching)}: "
+        f"{[r.getMessage() for r in matching]}"
+    )
+
+    # After clearing the throttle, the next evaluation re-emits exactly once.
+    caplog.clear()
+    _gates._reset_no_thresholds_warning_throttle()
+    with _Patcher(realized=-100.0, unrealized=0.0):
+        for _ in range(3):
+            _dl.invalidate_cache()
+            asyncio.run(_gates.gate_daily_loss(_make_ctx()))
+    matching = [
+        r for r in caplog.records
+        if "no thresholds set" in r.getMessage()
+    ]
+    assert len(matching) == 1
+
+
 def test_gate_under_threshold_passes(monkeypatch):
     """Loss under both caps: passes, details carry the loss snapshot."""
     monkeypatch.setenv("AXIOM_DAILY_LOSS_HALT_USD", "500")

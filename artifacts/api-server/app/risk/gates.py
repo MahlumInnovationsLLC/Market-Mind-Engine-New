@@ -8,6 +8,7 @@ dashboard can render the same column across cycles.
 from __future__ import annotations
 
 import logging
+import time
 from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
 from typing import Any, Awaitable, Callable
@@ -23,6 +24,25 @@ from ..sports import (
 
 
 log = logging.getLogger(__name__)
+
+
+# Throttle window for the "no daily-loss thresholds configured" reminder.
+# The gate is evaluated per-candidate (potentially many per orchestrator
+# cycle), so a stock `log.warning` would emit dozens of identical lines per
+# cycle when neither AXIOM_DAILY_LOSS_HALT_USD nor _PCT is set. Operators
+# only need the reminder once per cycle — 60s is comfortably longer than a
+# normal cycle and short enough that a fresh deploy still prints the
+# safety-net hint promptly.
+_NO_THRESHOLDS_WARNING_THROTTLE_SECONDS = 60.0
+# `-inf` (rather than 0.0) guarantees the first warning fires immediately,
+# even on processes whose monotonic clock starts below 60s.
+_last_no_thresholds_warning_at: float = float("-inf")
+
+
+def _reset_no_thresholds_warning_throttle() -> None:
+    """Test hook: clear the throttle so the next call re-emits the warning."""
+    global _last_no_thresholds_warning_at
+    _last_no_thresholds_warning_at = float("-inf")
 
 
 def _mode_default(ctx: "RiskContext", key: str, fallback: float) -> float:
@@ -239,10 +259,18 @@ async def gate_daily_loss(ctx: RiskContext) -> GateResult:
         "start_of_day_bankroll_usd": snap.start_of_day_bankroll_usd,
     }
     if snap.threshold_usd is None and snap.threshold_pct is None:
-        log.warning(
-            "gate_daily_loss configured but no thresholds set "
-            "(AXIOM_DAILY_LOSS_HALT_USD / _PCT) — gate is a no-op"
-        )
+        # Throttled so a per-cycle burst of candidates only logs once.
+        global _last_no_thresholds_warning_at
+        now_m = time.monotonic()
+        if (
+            now_m - _last_no_thresholds_warning_at
+            >= _NO_THRESHOLDS_WARNING_THROTTLE_SECONDS
+        ):
+            _last_no_thresholds_warning_at = now_m
+            log.warning(
+                "gate_daily_loss configured but no thresholds set "
+                "(AXIOM_DAILY_LOSS_HALT_USD / _PCT) — gate is a no-op"
+            )
         return GateResult("daily_loss", True, "no thresholds configured", details)
     if not snap.tripped:
         return GateResult("daily_loss", True, "", details)
