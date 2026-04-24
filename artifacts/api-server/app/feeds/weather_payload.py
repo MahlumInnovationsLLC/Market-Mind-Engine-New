@@ -251,7 +251,8 @@ async def build_weather_payload(
                 """
                 SELECT wind_mph, humidity_pct, uv_index, dewpoint_f,
                        pressure_in, visibility_mi, cloud_cover_pct,
-                       precip_1hr_in, wind_gust_mph, observed_at
+                       precip_1hr_in, precip_today_in, wind_gust_mph,
+                       observed_at
                 FROM weather_extended
                 WHERE city_code = $1 AND source = 'open-meteo'
                 ORDER BY observed_at DESC
@@ -266,9 +267,13 @@ async def build_weather_payload(
             for col in (
                 "wind_mph", "humidity_pct", "uv_index", "dewpoint_f",
                 "pressure_in", "visibility_mi", "cloud_cover_pct",
-                "precip_1hr_in", "wind_gust_mph",
+                "precip_1hr_in", "precip_today_in", "wind_gust_mph",
             ):
-                v = _f(ext[col])
+                # ``ext.get`` keeps the SELECT and the test fixtures
+                # decoupled — a column that wasn't selected (legacy
+                # schemas) or wasn't included in a test mock simply
+                # surfaces as None and is dropped from the payload.
+                v = _f(_record_get(ext, col))
                 if v is not None:
                     payload[f"om_{col}"] = v
 
@@ -290,6 +295,31 @@ async def build_weather_payload(
     if obs_nws is not None and _is_fresh(obs_nws["observed_at"], "nws", now=now):
         payload["nws_temperature_f"] = _f(obs_nws["temperature_f"])
         payload["nws_observed_at"] = _iso(obs_nws["observed_at"])
+
+    # NWS daily QPF (gridpoint-derived) --------------------------------------
+    # The QPF poller writes ``precip_today_in`` into ``weather_extended``
+    # under the ``'nws'`` source tag.  We surface it independently of
+    # the METAR observation so a stale METAR doesn't blank the QPF (the
+    # QPF freshness window is also wider — gridpoint forecasts are
+    # republished a few times a day, not every five minutes).
+    try:
+        ext_nws = await db.fetchrow(
+            """
+            SELECT precip_today_in, observed_at
+            FROM weather_extended
+            WHERE city_code = $1 AND source = 'nws'
+            ORDER BY observed_at DESC
+            LIMIT 1
+            """,
+            city,
+        )
+    except Exception as e:
+        log.debug("payload nws extended fetch failed for %s: %s", city, e)
+        ext_nws = None
+    if ext_nws is not None and _is_fresh(ext_nws["observed_at"], "nws", now=now):
+        v = _f(_record_get(ext_nws, "precip_today_in"))
+        if v is not None:
+            payload["nws_precip_today_in"] = v
 
     # Tomorrow.io realtime observation --------------------------------------
     # Surfaces the third independent point-forecast required by the GRU+EMOS
@@ -319,7 +349,8 @@ async def build_weather_payload(
                 """
                 SELECT wind_mph, humidity_pct, uv_index, dewpoint_f,
                        pressure_in, visibility_mi, cloud_cover_pct,
-                       precip_1hr_in, wind_gust_mph, observed_at
+                       precip_1hr_in, precip_today_in, wind_gust_mph,
+                       observed_at
                 FROM weather_extended
                 WHERE city_code = $1 AND source = 'tomorrow.io'
                 ORDER BY observed_at DESC
@@ -334,9 +365,9 @@ async def build_weather_payload(
             for col in (
                 "wind_mph", "humidity_pct", "uv_index", "dewpoint_f",
                 "pressure_in", "visibility_mi", "cloud_cover_pct",
-                "precip_1hr_in", "wind_gust_mph",
+                "precip_1hr_in", "precip_today_in", "wind_gust_mph",
             ):
-                v = _f(ext_tio[col])
+                v = _f(_record_get(ext_tio, col))
                 if v is not None:
                     payload[f"tio_{col}"] = v
 
@@ -390,6 +421,15 @@ async def build_weather_payload(
                 payload["hrrr_t2m_f"] = _f(t2m)
             if tmin is not None:
                 payload["hrrr_tmin_f"] = _f(tmin)
+            # Daily QPF accumulated by the HRRR cycle, in inches.
+            # Persisted by the GRIB2 ingester as ``precip_in`` inside
+            # the same JSONB blob; the precipitation predictor's
+            # ensemble extractor consumes it as ``hrrr_precip_in``.
+            precip = body.get("precip_in")
+            if precip is not None:
+                p = _f(precip)
+                if p is not None and p >= 0:
+                    payload["hrrr_precip_in"] = p
             # Surface the HRRR hourly trace so the GRU sees a real
             # multi-step temperature sequence (task #246).  The poller
             # writes `samples = [{"t": ts, "f": temp_f}, ...]` into
@@ -440,6 +480,31 @@ def _f(x: Any) -> float | None:
     try:
         return float(x) if x is not None else None
     except (TypeError, ValueError):
+        return None
+
+
+def _record_get(row: Any, key: str) -> Any:
+    """Defensive ``row[key]``-style lookup that tolerates both
+    ``asyncpg.Record`` and plain ``dict`` rows (the latter is what
+    test fixtures inject) and returns ``None`` for absent keys
+    instead of raising ``KeyError``.
+
+    This keeps the SELECT column list and any test fixtures decoupled:
+    a column added to the schema after a fixture was written, or
+    selected here but absent from a deliberately-thin mock, simply
+    surfaces as ``None`` and the payload omits the key.
+    """
+    if row is None:
+        return None
+    getter = getattr(row, "get", None)
+    if callable(getter):
+        try:
+            return getter(key)
+        except (TypeError, KeyError):
+            pass
+    try:
+        return row[key]
+    except (KeyError, IndexError, TypeError):
         return None
 
 

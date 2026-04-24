@@ -122,6 +122,14 @@ async def _poll_open_meteo() -> int:
                             "wind_speed_10m,wind_gusts_10m,pressure_msl,"
                             "cloud_cover,visibility,precipitation,uv_index"
                         ),
+                        # Daily QPF (today's accumulated precipitation in
+                        # inches) for the KXRAIN predictor (task #279).
+                        # ``timezone=auto`` aligns the daily bucket with
+                        # the city's local civil day, which is what
+                        # KXRAIN contracts settle on.
+                        "daily": "precipitation_sum",
+                        "timezone": "auto",
+                        "forecast_days": 1,
                         "temperature_unit": "fahrenheit",
                         "wind_speed_unit": "mph",
                         "precipitation_unit": "inch",
@@ -135,11 +143,13 @@ async def _poll_open_meteo() -> int:
                 log.warning("open-meteo %s -> HTTP %s", city.code, r.status_code)
                 continue
             try:
-                payload = r.json().get("current") or {}
+                body = r.json() or {}
             except Exception:
                 continue
+            payload = body.get("current") or {}
             if not payload:
                 continue
+            precip_today_in = _first_daily_value(body.get("daily"), "precipitation_sum")
 
             t = payload.get("temperature_2m")
             try:
@@ -158,10 +168,10 @@ async def _poll_open_meteo() -> int:
                         INSERT INTO weather_extended
                           (city_code, source, observed_at, wind_mph, humidity_pct,
                            uv_index, dewpoint_f, pressure_in, visibility_mi,
-                           cloud_cover_pct, precip_1hr_in, wind_gust_mph,
-                           created_at)
+                           cloud_cover_pct, precip_1hr_in, precip_today_in,
+                           wind_gust_mph, created_at)
                         VALUES ($1, 'open-meteo', NOW(), $2, $3, $4, $5, $6, $7,
-                                $8, $9, $10, NOW())
+                                $8, $9, $10, $11, NOW())
                         """,
                         city.code,
                         _f(payload.get("wind_speed_10m")),
@@ -172,6 +182,7 @@ async def _poll_open_meteo() -> int:
                         _m_to_mi(payload.get("visibility")),
                         _f(payload.get("cloud_cover")),
                         _f(payload.get("precipitation")),
+                        precip_today_in,
                         _f(payload.get("wind_gusts_10m")),
                     )
                     written += 2
@@ -180,9 +191,144 @@ async def _poll_open_meteo() -> int:
     return written
 
 
+def _first_daily_value(daily: Any, key: str) -> float | None:
+    """Open-Meteo returns daily fields as parallel arrays:
+
+        ``daily = {"time": ["2026-04-24"], "precipitation_sum": [0.42]}``
+
+    Pull the first entry for ``key`` defensively — a missing or empty
+    list collapses to ``None`` so the caller leaves the column NULL.
+    """
+    if not isinstance(daily, dict):
+        return None
+    arr = daily.get(key)
+    if not isinstance(arr, list) or not arr:
+        return None
+    return _f(arr[0])
+
+
 # ---------------------------------------------------------------------------
 # NWS (free, no key but a User-Agent is required) — metar observations.
 # ---------------------------------------------------------------------------
+
+
+# In-process cache of NWS gridpoint URLs keyed by city code.  The
+# per-city ``/points/{lat,lon}`` lookup is a constant for the lifetime
+# of the process, so we memoise it instead of paying the round-trip on
+# every poll.  ``None`` is a sentinel for "tried and failed" — we
+# revisit on the next process start.
+_NWS_GRIDPOINT_URLS: dict[str, str | None] = {}
+
+
+async def _resolve_nws_gridpoint_url(
+    client: httpx.AsyncClient, city: City,
+) -> str | None:
+    """Resolve the ``forecastGridData`` URL for ``city`` via NWS's
+    ``/points/{lat,lon}`` endpoint, with an in-process cache so the
+    discovery only fires once per city per process."""
+    cached = _NWS_GRIDPOINT_URLS.get(city.code, ...)  # type: ignore[arg-type]
+    if cached is not ...:  # type: ignore[comparison-overlap]
+        return cached  # type: ignore[return-value]
+    url = f"https://api.weather.gov/points/{city.lat},{city.lon}"
+    try:
+        r = await client.get(url)
+    except httpx.HTTPError as e:
+        log.debug("nws points fetch failed for %s: %s", city.code, e)
+        _NWS_GRIDPOINT_URLS[city.code] = None
+        return None
+    if r.status_code >= 400:
+        log.debug("nws points %s -> HTTP %s", city.code, r.status_code)
+        _NWS_GRIDPOINT_URLS[city.code] = None
+        return None
+    try:
+        props = (r.json() or {}).get("properties") or {}
+    except Exception:
+        _NWS_GRIDPOINT_URLS[city.code] = None
+        return None
+    grid_url = props.get("forecastGridData")
+    grid_url = str(grid_url) if grid_url else None
+    _NWS_GRIDPOINT_URLS[city.code] = grid_url
+    return grid_url
+
+
+def _sum_nws_qpf_today(values: Any, today_utc: Any) -> float | None:
+    """Sum NWS gridpoint ``quantitativePrecipitation.values`` entries
+    that overlap today's UTC date.
+
+    Each entry has the shape::
+
+        {"validTime": "2026-04-24T00:00:00+00:00/PT6H", "value": 12.7}
+
+    where ``value`` is in millimetres.  The validTime is an ISO-8601
+    interval (``<start>/<duration>``).  We attribute the entire
+    accumulation to ``today`` whenever the interval starts on the same
+    UTC date as ``today_utc`` — this is the convention NWS QPF tables
+    use and avoids fractional bucket arithmetic that doesn't actually
+    improve accuracy.
+
+    Returns ``None`` if no usable entries are found, otherwise the sum
+    converted to inches.
+    """
+    if not isinstance(values, list) or not values:
+        return None
+    from datetime import datetime
+    total_mm = 0.0
+    matched = 0
+    for entry in values:
+        if not isinstance(entry, dict):
+            continue
+        valid = entry.get("validTime")
+        v = entry.get("value")
+        if not isinstance(valid, str) or v is None:
+            continue
+        start = valid.split("/", 1)[0]
+        try:
+            start_dt = datetime.fromisoformat(start.replace("Z", "+00:00"))
+        except ValueError:
+            continue
+        if start_dt.date() != today_utc:
+            continue
+        try:
+            mm = float(v)
+        except (TypeError, ValueError):
+            continue
+        if mm < 0:
+            continue
+        total_mm += mm
+        matched += 1
+    if matched == 0:
+        return None
+    return total_mm / 25.4
+
+
+async def _fetch_nws_daily_qpf(
+    client: httpx.AsyncClient, city: City,
+) -> float | None:
+    """Pull today's accumulated quantitative precipitation forecast
+    (inches) from NWS's gridpoint endpoint.  Returns ``None`` whenever
+    the lookup or the daily sum cannot be derived."""
+    grid_url = await _resolve_nws_gridpoint_url(client, city)
+    if not grid_url:
+        return None
+    try:
+        r = await client.get(grid_url)
+    except httpx.HTTPError as e:
+        log.debug("nws gridpoint fetch failed for %s: %s", city.code, e)
+        return None
+    if r.status_code == 429:
+        log.warning("nws gridpoint %s -> HTTP 429", city.code)
+        return None
+    if r.status_code >= 400:
+        log.debug("nws gridpoint %s -> HTTP %s", city.code, r.status_code)
+        return None
+    try:
+        props = (r.json() or {}).get("properties") or {}
+    except Exception:
+        return None
+    qpf = props.get("quantitativePrecipitation") or {}
+    from datetime import datetime, timezone as _tz
+    today_utc = datetime.now(_tz.utc).date()
+    return _sum_nws_qpf_today(qpf.get("values"), today_utc)
 
 
 async def _poll_nws() -> int:
@@ -216,17 +362,37 @@ async def _poll_nws() -> int:
             if temp is None:
                 continue
             f_temp = temp * 9 / 5 + 32
+
+            # Pull today's QPF from the gridpoint endpoint and persist
+            # it as a 'nws'-source row in weather_extended so the
+            # KXRAIN payload (task #279) can surface it as
+            # ``nws_precip_today_in``.  This is best-effort; a NULL
+            # result still produces an extended row keyed by today's
+            # observation timestamp so freshness windows still apply.
+            precip_today_in = await _fetch_nws_daily_qpf(client, city)
             try:
-                await db.fetchval(
-                    """
-                    INSERT INTO weather_observations
-                      (city_code, temperature_f, observed_at, source)
-                    VALUES ($1, $2, NOW(), 'nws')
-                    RETURNING id
-                    """,
-                    city.code,
-                    float(f_temp),
-                )
+                async with db.acquire() as conn, conn.transaction():
+                    await conn.execute(
+                        """
+                        INSERT INTO weather_observations
+                          (city_code, temperature_f, observed_at, source)
+                        VALUES ($1, $2, NOW(), 'nws')
+                        """,
+                        city.code,
+                        float(f_temp),
+                    )
+                    if precip_today_in is not None:
+                        await conn.execute(
+                            """
+                            INSERT INTO weather_extended
+                              (city_code, source, observed_at,
+                               precip_today_in, created_at)
+                            VALUES ($1, 'nws', NOW(), $2, NOW())
+                            """,
+                            city.code,
+                            precip_today_in,
+                        )
+                        written += 1
                 written += 1
             except Exception as e:
                 log.warning("nws persist for %s failed: %s", city.code, e)
@@ -332,11 +498,17 @@ def _parse_hrrr_inventory(text: str) -> list[dict[str, Any]]:
 
         <record>:<byte_offset>:d=<YYYYMMDDHH>:<var>:<level>:<fhour>:
 
-    We only keep the fields the v6 ensemble cares about (TMP at 2 m
-    above ground and the daily TMAX/TMIN at 2 m above ground), which
-    keeps the persisted provenance blob tiny.
+    We keep the fields the v6 ensemble cares about (TMP at 2 m above
+    ground, the daily TMAX/TMIN at 2 m above ground, and the surface
+    accumulated precipitation APCP for the KXRAIN predictor — task
+    #279), which keeps the persisted provenance blob tiny.
     """
-    keep = ("TMP:2 m above ground", "TMAX:2 m above ground", "TMIN:2 m above ground")
+    keep = (
+        "TMP:2 m above ground",
+        "TMAX:2 m above ground",
+        "TMIN:2 m above ground",
+        "APCP:surface",
+    )
     out: list[dict[str, Any]] = []
     prev: dict[str, Any] | None = None
     for raw in text.splitlines():
@@ -363,7 +535,7 @@ def _parse_hrrr_inventory(text: str) -> list[dict[str, Any]]:
             prev["entry"]["byte_len"] = byte_start - prev["entry"]["byte_start"]
             out.append(prev["entry"])
         prev = {"full": f"{var}:{level}", "entry": record}
-    if prev is not None and any(prev["full"].startswith(k) for k in ("TMP:2 m above ground", "TMAX:2 m above ground", "TMIN:2 m above ground")):
+    if prev is not None and any(prev["full"].startswith(k) for k in keep):
         out.append(prev["entry"])
     return out
 
@@ -393,6 +565,16 @@ async def _fetch_grib2_range(
         log.debug("grib2 range %s @ %s -> HTTP %s", url, byte_start, r.status_code)
         return None
     return r.content
+
+
+def _decode_grib2_point_value(
+    grib_bytes: bytes, lat: float, lon: float
+) -> float | None:
+    """Unit-agnostic GRIB2 point decoder.  Returns the raw value in
+    whatever units the encoded message uses (Kelvin for TMP/TMAX/TMIN,
+    kg/m^2 — equivalent to mm — for APCP).  Callers do their own unit
+    conversion."""
+    return _decode_grib2_point_kelvin(grib_bytes, lat, lon)
 
 
 def _decode_grib2_point_kelvin(
@@ -444,15 +626,19 @@ def _decode_grib2_point_kelvin(
 
 
 def _select_records(
-    inventories: dict[int, list[dict[str, Any]]], var_prefix: str
+    inventories: dict[int, list[dict[str, Any]]],
+    var_prefix: str,
+    *,
+    level: str = "2 m above ground",
 ) -> list[tuple[int, dict[str, Any]]]:
     """Return ``[(fhour, record), ...]`` for every record across all
-    fetched inventories whose ``var`` matches and whose level is the
-    2 m above ground level we care about."""
+    fetched inventories whose ``var`` matches and whose ``level``
+    matches the requested HRRR level (defaults to 2 m above ground for
+    temperature; APCP records live at ``surface``)."""
     out: list[tuple[int, dict[str, Any]]] = []
     for fh, records in inventories.items():
         for rec in records:
-            if rec["var"] == var_prefix and rec["level"] == "2 m above ground":
+            if rec["var"] == var_prefix and rec["level"] == level:
                 out.append((fh, rec))
     return out
 
@@ -522,10 +708,38 @@ async def _decode_hrrr_for_city(
     tmax_f = max([t2m_f, *tmax_values])
     tmin_f = min([t2m_f, *tmin_values])
 
+    # APCP at the surface — accumulated precipitation since the cycle
+    # start, in kg/m^2 (≡ mm).  HRRR publishes APCP only at forecast
+    # hours ≥ 1, and the value at F=N is the running total over the
+    # 0..N hour window.  The KXRAIN predictor (task #279) wants a
+    # *daily* total, so we take the maximum across the forecast hours
+    # we fetched (which is monotonically the largest accumulation
+    # window the cycle exposes) and convert mm → inches.  A missing
+    # APCP message degrades cleanly to ``None``: the precipitation
+    # predictor's per-source preference list will then fall through to
+    # whatever the other providers contributed.
+    apcp_mm: float | None = None
+    apcp_fhour: int | None = None
+    for fh, rec in _select_records(inventories, "APCP", level="surface"):
+        url = _hrrr_grib2_url(run_meta["date"], run_meta["cycle"], fh)
+        body = await _fetch_grib2_range(
+            client, url, rec["byte_start"], rec.get("byte_len")
+        )
+        mm = _decode_grib2_point_value(body or b"", city.lat, city.lon)
+        if mm is None or mm < 0:
+            continue
+        samples.append({"fhour": fh, "var": "APCP", "mm": mm})
+        if apcp_mm is None or fh > (apcp_fhour or -1):
+            apcp_mm = mm
+            apcp_fhour = fh
+    precip_in: float | None = (apcp_mm / 25.4) if apcp_mm is not None else None
+
     return {
         "t2m_f": t2m_f,
         "tmax_f": tmax_f,
         "tmin_f": tmin_f,
+        "precip_in": precip_in,
+        "apcp_fhour": apcp_fhour,
         "samples": samples,
     }
 
@@ -569,6 +783,13 @@ async def _poll_hrrr() -> int:
                     "fhours": sorted(inventories.keys()),
                 },
             }
+            # Daily QPF (inches) accumulated by the cycle — surfaces as
+            # ``hrrr_precip_in`` in the unified weather payload.  Only
+            # written when the GRIB2 decoder produced an APCP value;
+            # missing keys are tolerated by the payload reader.
+            if decoded.get("precip_in") is not None:
+                hourly_payload["precip_in"] = decoded["precip_in"]
+                hourly_payload["precip_apcp_fhour"] = decoded.get("apcp_fhour")
 
             try:
                 await db.fetchval(
@@ -687,6 +908,12 @@ async def _poll_tomorrow_io() -> int:
     rate limits; we cadence at 30 minutes (configured in
     ``register_weather_feeds``) so the pollers across N cities still
     fit comfortably under quota for N ≤ 12.
+
+    A second call to ``/v4/weather/forecast?timesteps=1d`` is issued
+    per city so the KXRAIN predictor (task #279) gets a real *daily*
+    QPF instead of the 1-hour rate proxy.  The daily call is
+    best-effort — a failure leaves ``precip_today_in`` NULL and the
+    realtime row still lands.
     """
     key = os.environ.get("TOMORROW_IO_API_KEY")
     if not key:
@@ -724,6 +951,8 @@ async def _poll_tomorrow_io() -> int:
             if not values:
                 continue
             t = values.get("temperature")
+
+            precip_today_in = await _fetch_tomorrow_io_daily_precip(client, key, city)
             try:
                 async with db.acquire() as conn, conn.transaction():
                     await conn.execute(
@@ -740,10 +969,10 @@ async def _poll_tomorrow_io() -> int:
                         INSERT INTO weather_extended
                           (city_code, source, observed_at, wind_mph, humidity_pct,
                            uv_index, dewpoint_f, pressure_in, visibility_mi,
-                           cloud_cover_pct, precip_1hr_in, wind_gust_mph,
-                           created_at)
+                           cloud_cover_pct, precip_1hr_in, precip_today_in,
+                           wind_gust_mph, created_at)
                         VALUES ($1, 'tomorrow.io', NOW(), $2, $3, $4, $5, $6,
-                                $7, $8, $9, $10, NOW())
+                                $7, $8, $9, $10, $11, NOW())
                         """,
                         city.code,
                         _f(values.get("windSpeed")),
@@ -755,12 +984,79 @@ async def _poll_tomorrow_io() -> int:
                         _f(values.get("visibility")),
                         _f(values.get("cloudCover")),
                         _f(values.get("precipitationIntensity")),
+                        precip_today_in,
                         _f(values.get("windGust")),
                     )
                     written += 2
             except Exception as e:
                 log.warning("tomorrow.io persist for %s failed: %s", city.code, e)
     return written
+
+
+async def _fetch_tomorrow_io_daily_precip(
+    client: httpx.AsyncClient, key: str, city: City,
+) -> float | None:
+    """Pull today's accumulated precipitation (inches) from
+    Tomorrow.io's daily forecast.  Returns ``None`` whenever the call
+    fails or the response doesn't carry a usable accumulation field —
+    the caller persists ``NULL`` so downstream consumers know the
+    daily forecast is unavailable for this poll.
+    """
+    try:
+        r = await client.get(
+            "https://api.tomorrow.io/v4/weather/forecast",
+            params={
+                "location": f"{city.lat},{city.lon}",
+                "timesteps": "1d",
+                "units": "imperial",
+                "apikey": key,
+            },
+        )
+    except httpx.HTTPError as e:
+        log.debug("tomorrow.io daily fetch failed for %s: %s", city.code, e)
+        return None
+    if r.status_code == 429:
+        # Daily call is best-effort — surface the 429 in logs but do
+        # not raise (the realtime row should still be persisted).
+        log.warning("tomorrow.io daily %s -> HTTP 429", city.code)
+        return None
+    if r.status_code >= 400:
+        log.debug(
+            "tomorrow.io daily %s -> HTTP %s: %s",
+            city.code, r.status_code, r.text[:120],
+        )
+        return None
+    try:
+        body = r.json() or {}
+    except Exception:
+        return None
+    timelines = body.get("timelines") if isinstance(body, dict) else None
+    daily = timelines.get("daily") if isinstance(timelines, dict) else None
+    if not isinstance(daily, list) or not daily:
+        return None
+    first = daily[0]
+    values = first.get("values") if isinstance(first, dict) else None
+    if not isinstance(values, dict):
+        return None
+    # Tomorrow.io's daily payload exposes accumulation under a few
+    # different keys depending on the API tier; prefer rainAccumulationSum
+    # (cumulative inches in imperial mode), fall back to a couple of
+    # well-known aliases, and finally degrade to averaging the intensity
+    # across the day.
+    for key_name in (
+        "rainAccumulationSum",
+        "precipitationAccumulationSum",
+        "rainAccumulationAvg",
+        "precipitationAccumulationAvg",
+    ):
+        v = _f(values.get(key_name))
+        if v is not None and v >= 0:
+            return v
+    # Fallback: in/hr average × 24h gives a coarse daily total.
+    intensity_avg = _f(values.get("precipitationIntensityAvg"))
+    if intensity_avg is not None and intensity_avg >= 0:
+        return intensity_avg * 24.0
+    return None
 
 
 def register_weather_feeds() -> None:

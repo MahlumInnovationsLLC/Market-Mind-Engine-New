@@ -46,31 +46,47 @@ class PrecipitationPredictionError(RuntimeError):
 # ---------------------------------------------------------------------------
 
 
-# Keys we treat as "expected daily precipitation in inches" point
-# forecasts from the unified weather payload.  Each source is folded
-# in only when present so a single-source degradation doesn't kill the
-# call — the EMOS layer handles a thin (or empty) ensemble gracefully.
-_PRECIP_KEYS: tuple[str, ...] = (
-    "om_precip_1hr_in",      # Open-Meteo precipitation last hour (inches)
-    "tio_precip_1hr_in",     # Tomorrow.io precipitation last hour (inches)
-    "hrrr_precip_in",        # Optional HRRR daily QPF (inches), if surfaced
-    "accu_precip_intensity",  # AccuWeather minutecast intensity proxy
+# Per-source preference lists for "expected daily precipitation in
+# inches" point forecasts from the unified weather payload.  We prefer
+# each provider's *daily* QPF when surfaced, and fall back to the
+# 1-hour rate (multiplied implicitly through the EMOS variance term)
+# when the daily field is absent.  KXRAIN contracts settle on daily
+# accumulation, so daily fields are dramatically more useful than the
+# 1-hour proxy whenever the provider exposes them.
+#
+# The AccuWeather minutecast intensity proxy has no daily equivalent
+# from that provider — it's kept as its own single-key entry.
+_PRECIP_SOURCES: tuple[tuple[str, ...], ...] = (
+    ("om_precip_today_in", "om_precip_1hr_in"),
+    ("tio_precip_today_in", "tio_precip_1hr_in"),
+    ("nws_precip_today_in",),
+    ("hrrr_precip_in",),
+    ("accu_precip_intensity",),
 )
+
+# Backwards-compat alias for any external callers introspecting the
+# legacy flat key list.
+_PRECIP_KEYS: tuple[str, ...] = tuple(k for group in _PRECIP_SOURCES for k in group)
 
 
 def _ensemble_for_precip(payload: dict[str, Any]) -> list[float]:
     out: list[float] = []
-    for k in _PRECIP_KEYS:
-        v = payload.get(k)
-        if v is None:
-            continue
-        try:
-            fv = float(v)
-        except (TypeError, ValueError):
-            continue
-        if fv < 0:
-            continue
-        out.append(fv)
+    for keys in _PRECIP_SOURCES:
+        # Per source, take the first numerically-valid forecast in the
+        # preference order (daily first, hourly fallback) so we never
+        # double-count a single provider in the ensemble.
+        for k in keys:
+            v = payload.get(k)
+            if v is None:
+                continue
+            try:
+                fv = float(v)
+            except (TypeError, ValueError):
+                continue
+            if fv < 0:
+                continue
+            out.append(fv)
+            break
     return out
 
 
