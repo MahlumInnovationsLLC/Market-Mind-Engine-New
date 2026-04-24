@@ -3942,6 +3942,40 @@ async def feeds_status(_: object = Depends(require_auth)) -> dict[str, object]:
     return {"items": feed_registry.snapshot()}
 
 
+@app.post("/api/admin/feeds/{name}/poll-now")
+async def admin_feeds_poll_now(
+    name: str,
+    actor: AuthedUser = Depends(require_admin),
+) -> dict[str, object]:
+    """Run a single feed poll out-of-band, bypassing the cadence wait.
+
+    Useful after rotating a key or fixing a configuration: the operator
+    no longer has to wait up to ``cadence_seconds`` for the freshness
+    card to refresh.  Wraps the poll with the same ``record_start`` /
+    ``record_success`` / ``record_failure`` accounting the scheduler
+    uses, so metrics stay coherent.
+    """
+    feed = next(
+        (f for f in feed_registry.feeds() if f.name == name),
+        None,
+    )
+    if feed is None:
+        raise HTTPException(status_code=404, detail=f"unknown feed {name!r}")
+    if not feed.enabled:
+        raise HTTPException(
+            status_code=409,
+            detail=f"feed {name!r} disabled: {feed.skipped_reason or 'unknown reason'}",
+        )
+    started = await feed_registry.record_start(name)
+    try:
+        written = await feed.poll()
+    except Exception as e:  # noqa: BLE001
+        await feed_registry.record_failure(name, started, e)
+        raise HTTPException(status_code=502, detail=f"poll failed: {e}") from e
+    await feed_registry.record_success(name, started, int(written or 0))
+    return {"name": name, "written": int(written or 0)}
+
+
 @app.get("/api/features/registry")
 async def features_registry(
     _: object = Depends(require_auth),

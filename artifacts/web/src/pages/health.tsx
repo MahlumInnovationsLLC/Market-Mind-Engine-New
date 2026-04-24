@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { Redirect } from "wouter";
 import { useAuth } from "@clerk/react";
+import { useGetMyAccess } from "@workspace/api-client-react";
 import { apiFetch, ApiError, formatErrorMessage } from "@/lib/api";
 
 export default function HealthPage() {
@@ -1151,6 +1152,33 @@ export function CardTile({ card }: { card: Card }) {
   const fails = isFeed
     ? ((extras.failure_count as number | null) ?? null)
     : null;
+  const access = useGetMyAccess();
+  const { getToken } = useAuth();
+  const isAdmin = !!access.data?.is_admin;
+  const feedName = isFeed ? card.key.slice("feed:".length) : null;
+  const [pollBusy, setPollBusy] = useState(false);
+  const [pollResult, setPollResult] = useState<string | null>(null);
+  async function pollNow() {
+    if (!feedName) return;
+    setPollBusy(true);
+    setPollResult(null);
+    try {
+      const res = await apiFetch<{ name: string; written: number }>(
+        `/api/admin/feeds/${encodeURIComponent(feedName)}/poll-now`,
+        { method: "POST", body: {}, getToken },
+      );
+      setPollResult(`wrote ${res.written}`);
+    } catch (e: unknown) {
+      setPollResult(
+        formatErrorMessage(
+          e,
+          e instanceof ApiError ? `HTTP ${e.status} :: ${e.message}` : undefined,
+        ),
+      );
+    } finally {
+      setPollBusy(false);
+    }
+  }
   return (
     <div className={`border ${STATUS_COLOR[card.status]} p-3 text-xs space-y-1`}>
       <div className="flex items-center justify-between gap-2">
@@ -1184,6 +1212,24 @@ export function CardTile({ card }: { card: Card }) {
               {polls != null && fails != null ? ` (${fails}/${polls})` : ""}
             </span>
           </span>
+        </div>
+      )}
+      {isFeed && isAdmin && feedName && (
+        <div className="flex items-center gap-2 pt-1">
+          <button
+            type="button"
+            onClick={pollNow}
+            disabled={pollBusy}
+            className="border border-foreground/40 px-2 py-0.5 text-[10px] uppercase tracking-widest hover:bg-foreground hover:text-background disabled:opacity-50"
+            data-testid={`feed-poll-now-${card.key}`}
+          >
+            {pollBusy ? "polling…" : "poll now"}
+          </button>
+          {pollResult && (
+            <span className="text-[10px] normal-case tracking-normal text-muted-foreground">
+              {pollResult}
+            </span>
+          )}
         </div>
       )}
       <div className="text-muted-foreground break-all">
