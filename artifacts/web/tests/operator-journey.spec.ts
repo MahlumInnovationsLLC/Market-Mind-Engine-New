@@ -282,4 +282,228 @@ test.describe("operator journey — authenticated walk-through", () => {
       await expect(tile).not.toHaveClass(/ring-destructive/);
     }
   });
+
+  /**
+   * Free-tier upsell coverage (Task #393).
+   *
+   * The upgrade modal and the inline delayed-signals banner were wired
+   * onto the dashboard / trade-detail surfaces without an automated
+   * test, because exercising them end-to-end normally requires a
+   * free-tier fixture user that has burned the daily distinct-market
+   * quota or is currently throttled by the 15-minute delay path.
+   *
+   * To keep the test hermetic (and runnable against any deployment, not
+   * just one with a fully provisioned free-tier user), we mock the
+   * relevant backend endpoints to return the exact payload shape the
+   * frontend reads from. That locks down both the payload contract and
+   * the rendering — a future regen of `@workspace/api-client-react` or
+   * a refactor of the dashboard that drops the structural cast on
+   * `delayed` / `delay_minutes` will fail this suite immediately.
+   */
+  test("opening a 6th distinct market triggers the upgrade modal with a working pricing link", async ({
+    page,
+  }) => {
+    // Walk through the real free-tier journey: a caller opens 6
+    // distinct markets in a UTC day. The first 5 must succeed (no
+    // upsell), and the 6th must 402 with the FastAPI HTTPException
+    // shape that `FreeTierQuotaError` raises in
+    // artifacts/api-server/app/free_tier.py.
+    //
+    // We can't rely on a real free-tier fixture user (the operator
+    // account that drives the rest of this suite is approved/Pro and
+    // bypasses the gate server-side), so we install a route handler
+    // that simulates the backend's distinct-market accounting: it
+    // tracks the set of refs the page has requested and 402s the 6th.
+    // That keeps the assertion driven by the same trade-detail
+    // navigation an end-user would do, while staying hermetic.
+    const REFS = ["m1", "m2", "m3", "m4", "m5", "m6"] as const;
+    const seen = new Set<string>();
+    let lastBlockedRef: string | null = null;
+
+    await page.route("**/api/dashboard/trades/**", async (route) => {
+      const url = new URL(route.request().url());
+      // Path is /api/dashboard/trades/{trade_ref}
+      const ref = decodeURIComponent(url.pathname.split("/").pop() ?? "");
+      seen.add(ref);
+
+      if (seen.size > 5 && !["m1", "m2", "m3", "m4", "m5"].includes(ref)) {
+        // 6th distinct market — fail closed with the upgrade payload.
+        lastBlockedRef = ref;
+        await route.fulfill({
+          status: 402,
+          contentType: "application/json",
+          body: JSON.stringify({
+            detail: {
+              error: "upgrade_required",
+              reason: "free_tier_daily_market_limit",
+              limit: 5,
+              viewed_today: 5,
+              market_id: ref,
+              resets_at: "00:00 UTC",
+            },
+          }),
+        });
+        return;
+      }
+
+      // First 5 distinct markets succeed with a minimal TradeDetail
+      // payload. The detail page only needs `trade.id` + `series` to
+      // render successfully without throwing, which is enough to
+      // confirm the upsell does NOT appear on those visits.
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          trade: {
+            id: 1000 + REFS.indexOf(ref as (typeof REFS)[number]),
+            trade_id: ref,
+            market_id: ref,
+            market_title: `Test market ${ref}`,
+            vertical: "test",
+            league: "TEST",
+            side: "yes",
+            action: "buy",
+            quantity: 1,
+            price: 0.5,
+            pnl: 0,
+            model_prob: 0.6,
+            model_edge: 0.05,
+            kelly_fraction: 0.02,
+            trading_mode: "paper",
+            exchange: "kalshi",
+            executed_at: new Date().toISOString(),
+          },
+          series: [],
+        }),
+      });
+    });
+
+    // First market: confirm sign-in + shell are reachable before we
+    // sink time into 5 more navigations. Skip the whole block if the
+    // operator account isn't approved (matching the rest of the suite).
+    await page.goto(`/trade/${REFS[0]}`);
+    const shell = page.getByTestId("shell-main");
+    if ((await shell.count()) === 0) test.skip(true, "user not approved — shell not rendered");
+
+    // The trade-detail page renders its title from `trade.market_title`
+    // when the request succeeds. No upgrade modal should appear on the
+    // first 5 visits.
+    await expect(page.getByTestId("text-trade-title")).toBeVisible({
+      timeout: 15_000,
+    });
+    await expect(page.getByTestId("modal-upgrade-required")).toHaveCount(0);
+
+    for (const ref of REFS.slice(1, 5)) {
+      await page.goto(`/trade/${ref}`);
+      await expect(page.getByTestId("text-trade-title")).toBeVisible({
+        timeout: 15_000,
+      });
+      await expect(page.getByTestId("modal-upgrade-required")).toHaveCount(0);
+    }
+
+    // 6th distinct market — the route handler returns 402 and the
+    // dashboard must surface both the inline upsell card and the
+    // dialog with the limit / reset copy from the payload.
+    await page.goto(`/trade/${REFS[5]}`);
+    await expect(page.getByTestId("text-upgrade-required")).toBeVisible({
+      timeout: 15_000,
+    });
+    const modal = page.getByTestId("modal-upgrade-required");
+    await expect(modal).toBeVisible({ timeout: 15_000 });
+
+    // Copy contract: a regen of @workspace/api-client-react that drops
+    // one of these payload fields would surface as "undefined" in the
+    // dialog body, so we lock each one down explicitly.
+    await expect(modal).toContainText("5 distinct markets");
+    await expect(modal).toContainText("opened 5 today");
+    await expect(modal).toContainText("00:00 UTC");
+
+    // Confirms our route handler actually 402'd on the 6th distinct
+    // ref (and not on, say, an unrelated dashboard subscription poll
+    // that happened to share the URL prefix).
+    expect(lastBlockedRef).toBe("m6");
+    expect(seen.size).toBeGreaterThanOrEqual(6);
+
+    const pricingLink = page.getByTestId("link-upgrade-pricing");
+    await expect(pricingLink).toBeVisible();
+    await expect(pricingLink).toHaveAttribute("href", /\/pricing$/);
+
+    // Stop intercepting before the navigation so the pricing page can
+    // hit its real backend (tier catalog fetch) without 402-ing on a
+    // shared URL prefix.
+    await page.unroute("**/api/dashboard/trades/**");
+
+    await pricingLink.click();
+    await expect(page).toHaveURL(/\/pricing$/, { timeout: 15_000 });
+    await expect(page.getByTestId("text-pricing-title")).toBeVisible({
+      timeout: 15_000,
+    });
+  });
+
+  test("dashboard renders delayed-signals banners above Recent Fills and Recent Debates", async ({
+    page,
+  }) => {
+    // The frontend reads `delayed` / `delay_minutes` off the top-level
+    // response object via a structural cast (see recent-trades.tsx and
+    // swarm-debates.tsx). Mock both list endpoints to assert the
+    // banner-rendering branch fires for both panels simultaneously.
+    await page.route("**/api/dashboard/recent-trades**", async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          items: [],
+          delayed: true,
+          delay_minutes: 15,
+        }),
+      });
+    });
+    await page.route("**/api/dashboard/recent-debates**", async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          items: [],
+          tier: "free",
+          delayed: true,
+          delay_minutes: 15,
+        }),
+      });
+    });
+
+    await page.goto("/app");
+    const shell = page.getByTestId("shell-main");
+    if ((await shell.count()) === 0) test.skip(true, "user not approved — shell not rendered");
+
+    // Both panels must mount before we can assert the banners; their
+    // GlassCard wrappers are the closest stable selectors.
+    await expect(page.getByTestId("card-recent-trades")).toBeVisible({
+      timeout: 15_000,
+    });
+    await expect(page.getByTestId("card-swarm-debates")).toBeVisible({
+      timeout: 15_000,
+    });
+
+    // The banners are rendered as the first child of each panel body
+    // (above the table / debate rows), with stable per-panel test ids.
+    const tradesBanner = page.getByTestId("banner-recent-trades-delayed");
+    await expect(tradesBanner).toBeVisible({ timeout: 15_000 });
+    await expect(tradesBanner).toContainText(/15-min delay/i);
+    await expect(tradesBanner).toContainText(/upgrade to pro/i);
+
+    const debatesBanner = page.getByTestId("banner-recent-debates-delayed");
+    await expect(debatesBanner).toBeVisible({ timeout: 15_000 });
+    await expect(debatesBanner).toContainText(/15-min delay/i);
+
+    // Each banner ships its own pricing CTA. Anchor on the trades
+    // banner's link to keep the assertion deterministic even though
+    // both share the `link-delayed-upgrade` testid.
+    const tradesUpgradeLink = tradesBanner.getByTestId("link-delayed-upgrade");
+    await expect(tradesUpgradeLink).toBeVisible();
+    await expect(tradesUpgradeLink).toHaveAttribute("href", /\/pricing$/);
+
+    const debatesUpgradeLink = debatesBanner.getByTestId("link-delayed-upgrade");
+    await expect(debatesUpgradeLink).toBeVisible();
+    await expect(debatesUpgradeLink).toHaveAttribute("href", /\/pricing$/);
+  });
 });
