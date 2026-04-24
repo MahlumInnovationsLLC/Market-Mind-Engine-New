@@ -1083,9 +1083,58 @@ function ManifestSignatureBadge({ extras }: { extras: Record<string, unknown> })
   );
 }
 
+function KalshiClusterDetails({
+  extras,
+}: {
+  extras: Record<string, unknown>;
+}) {
+  const checked = extras.checked === true;
+  const configuredEnv =
+    typeof extras.configured_env === "string" ? extras.configured_env : null;
+  const keyBelongsTo =
+    typeof extras.key_belongs_to === "string" ? extras.key_belongs_to : null;
+  // The probe writes "key_belongs_to: <other env>" only when the keys
+  // verifiably authenticate against the wrong cluster. Highlight that
+  // mismatch loudly so the operator can fix KALSHI_ENV in one glance.
+  const mismatch =
+    checked &&
+    configuredEnv !== null &&
+    keyBelongsTo !== null &&
+    keyBelongsTo !== configuredEnv;
+
+  return (
+    <div
+      className="grid grid-cols-2 gap-1 text-[10px] uppercase tracking-widest"
+      data-testid="kalshi-cluster-details"
+    >
+      <span>
+        configured_env:{" "}
+        <span
+          className="text-foreground normal-case tracking-normal"
+          data-testid="kalshi-cluster-configured-env"
+        >
+          {configuredEnv ?? "—"}
+        </span>
+      </span>
+      <span>
+        key_belongs_to:{" "}
+        <span
+          className={`normal-case tracking-normal ${
+            mismatch ? "text-destructive font-bold" : "text-foreground"
+          }`}
+          data-testid="kalshi-cluster-key-belongs-to"
+        >
+          {keyBelongsTo ?? (checked ? "unknown" : "—")}
+        </span>
+      </span>
+    </div>
+  );
+}
+
 export function CardTile({ card }: { card: Card }) {
   const isFeed = card.key.startsWith("feed:");
   const isModels = card.key === "models";
+  const isKalshiCluster = card.key === "kalshi_cluster";
   const extras =
     card.extras && typeof card.extras === "object"
       ? (card.extras as Record<string, unknown>)
@@ -1116,6 +1165,7 @@ export function CardTile({ card }: { card: Card }) {
           <ManifestSignatureBadge extras={extras} />
         </div>
       )}
+      {isKalshiCluster && <KalshiClusterDetails extras={extras} />}
       {isFeed && (
         <div
           className="grid grid-cols-2 gap-1 text-[10px] uppercase tracking-widest text-muted-foreground"

@@ -269,6 +269,45 @@ def _probe_kalshi_ws() -> dict:
     )
 
 
+def _probe_kalshi_cluster() -> dict:
+    """Surface the boot-time Kalshi cluster auth probe.
+
+    The probe runs once at startup and signs an authenticated request
+    against the configured cluster. If the key actually belongs to the
+    *other* cluster, the operator sees a loud "set KALSHI_ENV=X"
+    message here instead of having to grep startup logs.  Reads the
+    cached state — does not re-issue the network call.
+    """
+    state = kalshi_client_mod.cluster_probe_state()
+    if not state.get("checked"):
+        return _card(
+            key="kalshi_cluster",
+            label="Kalshi cluster auth",
+            category="passive",
+            status="unconfigured",
+            detail="cluster probe has not run yet",
+            extras=state,
+        )
+    ok = bool(state.get("ok"))
+    if ok:
+        return _card(
+            key="kalshi_cluster",
+            label="Kalshi cluster auth",
+            category="passive",
+            status="ok",
+            detail=str(state.get("detail") or "authenticated")[:240],
+            extras=state,
+        )
+    return _card(
+        key="kalshi_cluster",
+        label="Kalshi cluster auth",
+        category="passive",
+        status="down",
+        detail=str(state.get("error") or "cluster probe failed")[:240],
+        extras=state,
+    )
+
+
 def _probe_kalshi_reconciler() -> dict:
     """Surface the Kalshi position+fill reconciler's last-tick state.
 
@@ -1320,6 +1359,7 @@ async def _build_snapshot() -> _Snapshot:
     )
     passive = [
         _probe_kalshi_ws(),
+        _probe_kalshi_cluster(),
         _probe_kill_switch(),
         _probe_orchestrator(),
         _probe_settlement(),

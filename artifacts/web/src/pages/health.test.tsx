@@ -149,3 +149,114 @@ describe("ManifestSignatureBadge (rendered via CardTile)", () => {
     expect(screen.queryByTestId("manifest-signature-badge")).toBeNull();
   });
 });
+
+const baseClusterCard = {
+  key: "kalshi_cluster",
+  label: "Kalshi cluster auth",
+  category: "passive" as const,
+  checked_at: "2026-04-24T00:00:00Z",
+  latency_ms: null,
+};
+
+describe("KalshiClusterDetails (rendered via CardTile)", () => {
+  it("renders configured_env and key_belongs_to in green when the probe passed", () => {
+    render(
+      <CardTile
+        card={{
+          ...baseClusterCard,
+          status: "ok",
+          detail: "authenticated against cluster 'prod'",
+          extras: {
+            checked: true,
+            ok: true,
+            configured_env: "prod",
+            key_belongs_to: "prod",
+            detail: "authenticated against cluster 'prod'",
+          },
+        }}
+      />,
+    );
+    const tile = screen.getByTestId("kalshi-cluster-details").closest("div")!
+      .parentElement!;
+    expect(tile.className).toMatch(/success/);
+    expect(
+      screen.getByTestId("kalshi-cluster-configured-env").textContent,
+    ).toBe("prod");
+    const belongs = screen.getByTestId("kalshi-cluster-key-belongs-to");
+    expect(belongs.textContent).toBe("prod");
+    // No mismatch — no destructive highlight.
+    expect(belongs.className).not.toMatch(/destructive/);
+  });
+
+  it("renders red and surfaces the wrong-cluster error when the key belongs elsewhere", () => {
+    const errMsg =
+      "Kalshi credentials look valid but were rejected by cluster 'prod' — the key authenticates against 'demo'. Set KALSHI_ENV=demo.";
+    render(
+      <CardTile
+        card={{
+          ...baseClusterCard,
+          status: "down",
+          detail: errMsg,
+          extras: {
+            checked: true,
+            ok: false,
+            configured_env: "prod",
+            key_belongs_to: "demo",
+            error: errMsg,
+          },
+        }}
+      />,
+    );
+    const tile = screen.getByTestId("kalshi-cluster-details").closest("div")!
+      .parentElement!;
+    // Red border / destructive palette signals the failure.
+    expect(tile.className).toMatch(/destructive/);
+    expect(
+      screen.getByTestId("kalshi-cluster-configured-env").textContent,
+    ).toBe("prod");
+    const belongs = screen.getByTestId("kalshi-cluster-key-belongs-to");
+    expect(belongs.textContent).toBe("demo");
+    // The mismatch must be highlighted in destructive color so the
+    // operator sees it without reading the error text.
+    expect(belongs.className).toMatch(/destructive/);
+    // The full human-readable error appears in the card's detail row.
+    expect(screen.getByText(errMsg)).toBeTruthy();
+  });
+
+  it("renders an unconfigured placeholder when the probe has not run yet", () => {
+    render(
+      <CardTile
+        card={{
+          ...baseClusterCard,
+          status: "unconfigured",
+          detail: "cluster probe has not run yet",
+          extras: { checked: false },
+        }}
+      />,
+    );
+    expect(
+      screen.getByTestId("kalshi-cluster-configured-env").textContent,
+    ).toBe("—");
+    expect(
+      screen.getByTestId("kalshi-cluster-key-belongs-to").textContent,
+    ).toBe("—");
+  });
+
+  it("does not render the kalshi-cluster details on unrelated cards", () => {
+    render(
+      <CardTile
+        card={{
+          key: "kalshi_ws",
+          label: "Kalshi WebSocket",
+          category: "passive",
+          status: "ok",
+          detail: "connected",
+          checked_at: null,
+          latency_ms: null,
+          extras: { configured_env: "prod", key_belongs_to: "prod" },
+        }}
+      />,
+    );
+    expect(screen.queryByTestId("kalshi-cluster-details")).toBeNull();
+  });
+});
