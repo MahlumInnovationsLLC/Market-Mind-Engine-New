@@ -53,6 +53,13 @@ jobs:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
     steps:
+      - name: Check out repo (for the index renderer)
+        uses: actions/checkout@v4
+        with:
+          # We only need .github/scripts/render-gh-pages-index.py; a shallow
+          # clone of the default branch is plenty.
+          fetch-depth: 1
+
       - name: Check out gh-pages (if it exists)
         id: checkout
         run: |
@@ -68,105 +75,155 @@ jobs:
           echo "exists=true" >> "$GITHUB_OUTPUT"
           echo "work=${WORK}" >> "$GITHUB_OUTPUT"
 
-      - name: Prune
+      - name: Prune + render + push
         if: steps.checkout.outputs.exists == 'true'
-        id: prune
         env:
           WORK: ${{ steps.checkout.outputs.work }}
         run: |
           set -euo pipefail
-          cd "${WORK}"
 
-          CHANGES=0
-          NOW_TS="$(date -u +%s)"
-          MAX_AGE_SEC=$(( PR_MAX_AGE_DAYS * 86400 ))
+          # Compute the prune deletions against whatever is currently on
+          # disk in ${WORK}, then re-render the landing-page index so it
+          # no longer points at removed reports. Returns 0 (truthy) if a
+          # commit was created and needs pushing, 1 otherwise. Called
+          # once before the first push and again after each
+          # reset-to-origin retry, since the deletions are deterministic
+          # against the fresh state.
+          prune_and_commit() {
+            local NOW_TS MAX_AGE_SEC dir pr_num api_path resp state closed_at \
+                  closed_ts age parent runs count i victim CHANGES=0 \
+                  HAD_DIFF
+            NOW_TS="$(date -u +%s)"
+            MAX_AGE_SEC=$(( PR_MAX_AGE_DAYS * 86400 ))
 
-          # ---- 1. Prune pr-<n>/ dirs for old closed/merged PRs --------------
-          # We ask the GitHub API for each PR's state + closed_at. If the
-          # PR is closed/merged and was closed more than PR_MAX_AGE_DAYS
-          # ago, delete the whole pr-<n>/ tree. Open or unknown PRs are
-          # left alone.
-          shopt -s nullglob
-          for dir in pr-*/; do
-            pr_num="${dir#pr-}"
-            pr_num="${pr_num%/}"
-            case "${pr_num}" in
-              ''|*[!0-9]*)
-                echo "Skipping non-numeric PR dir: ${dir}"
+            pushd "${WORK}" >/dev/null
+            shopt -s nullglob
+
+            # ---- 1. Prune pr-<n>/ dirs for old closed/merged PRs ------
+            # Ask the GitHub API for each PR's state + closed_at. If
+            # the PR is closed/merged and was closed more than
+            # PR_MAX_AGE_DAYS ago, delete the whole pr-<n>/ tree. Open
+            # or unknown PRs are left alone.
+            for dir in pr-*/; do
+              pr_num="${dir#pr-}"
+              pr_num="${pr_num%/}"
+              case "${pr_num}" in
+                ''|*[!0-9]*)
+                  echo "Skipping non-numeric PR dir: ${dir}"
+                  continue
+                  ;;
+              esac
+
+              api_path="repos/${GITHUB_REPOSITORY}/pulls/${pr_num}"
+              if ! resp="$(gh api "${api_path}" 2>/dev/null)"; then
+                echo "Could not fetch PR #${pr_num}; leaving ${dir} in place."
                 continue
-                ;;
-            esac
+              fi
 
-            api_path="repos/${GITHUB_REPOSITORY}/pulls/${pr_num}"
-            if ! resp="$(gh api "${api_path}" 2>/dev/null)"; then
-              echo "Could not fetch PR #${pr_num}; leaving ${dir} in place."
-              continue
-            fi
+              state="$(printf '%s' "${resp}" | jq -r '.state // "unknown"')"
+              closed_at="$(printf '%s' "${resp}" | jq -r '.closed_at // empty')"
 
-            state="$(printf '%s' "${resp}" | jq -r '.state // "unknown"')"
-            closed_at="$(printf '%s' "${resp}" | jq -r '.closed_at // empty')"
+              if [ "${state}" != "closed" ] || [ -z "${closed_at}" ]; then
+                continue
+              fi
 
-            if [ "${state}" != "closed" ] || [ -z "${closed_at}" ]; then
-              continue
-            fi
+              closed_ts="$(date -u -d "${closed_at}" +%s 2>/dev/null || echo 0)"
+              age=$(( NOW_TS - closed_ts ))
+              if [ "${age}" -lt "${MAX_AGE_SEC}" ]; then
+                echo "PR #${pr_num} closed ${age}s ago (< ${MAX_AGE_SEC}s); keeping."
+                continue
+              fi
 
-            closed_ts="$(date -u -d "${closed_at}" +%s 2>/dev/null || echo 0)"
-            age=$(( NOW_TS - closed_ts ))
-            if [ "${age}" -lt "${MAX_AGE_SEC}" ]; then
-              echo "PR #${pr_num} closed ${age}s ago (< ${MAX_AGE_SEC}s); keeping."
-              continue
-            fi
-
-            echo "Removing ${dir} (PR #${pr_num} closed ${age}s ago)."
-            git rm -rf --quiet "${dir}"
-            CHANGES=$(( CHANGES + 1 ))
-          done
-
-          # ---- 2. Cap each remaining pr-/branch- dir to RUNS_PER_DIR runs ---
-          for parent in pr-*/ branch-*/; do
-            [ -d "${parent}" ] || continue
-            # List run-<id>/ subdirs sorted by id descending. Run IDs are
-            # monotonically increasing per repo, so newest IDs == newest runs.
-            mapfile -t runs < <(
-              find "${parent}" -mindepth 1 -maxdepth 1 -type d -name 'run-*' \
-                -printf '%f\n' \
-                | sort -t- -k2,2nr
-            )
-            count="${#runs[@]}"
-            if [ "${count}" -le "${RUNS_PER_DIR}" ]; then
-              continue
-            fi
-            echo "${parent}: ${count} runs > cap ${RUNS_PER_DIR}; trimming."
-            for ((i = RUNS_PER_DIR; i < count; i++)); do
-              victim="${parent}${runs[$i]}"
-              echo "  remove ${victim}"
-              git rm -rf --quiet "${victim}"
+              echo "Removing ${dir} (PR #${pr_num} closed ${age}s ago)."
+              git rm -rf --quiet "${dir}"
               CHANGES=$(( CHANGES + 1 ))
             done
 
-            # If we just emptied the parent, drop it too.
-            if [ -z "$(ls -A "${parent}" 2>/dev/null)" ]; then
-              echo "  parent ${parent} is now empty; removing."
-              rmdir "${parent}" 2>/dev/null || true
+            # ---- 2. Cap pr-/branch- dirs to RUNS_PER_DIR --------------
+            for parent in pr-*/ branch-*/; do
+              [ -d "${parent}" ] || continue
+              # List run-<id>/ subdirs sorted by id descending. Run
+              # IDs are monotonically increasing per repo, so newest
+              # IDs == newest runs.
+              mapfile -t runs < <(
+                find "${parent}" -mindepth 1 -maxdepth 1 -type d -name 'run-*' \
+                  -printf '%f\n' \
+                  | sort -t- -k2,2nr
+              )
+              count="${#runs[@]}"
+              if [ "${count}" -le "${RUNS_PER_DIR}" ]; then
+                continue
+              fi
+              echo "${parent}: ${count} runs > cap ${RUNS_PER_DIR}; trimming."
+              for ((i = RUNS_PER_DIR; i < count; i++)); do
+                victim="${parent}${runs[$i]}"
+                echo "  remove ${victim}"
+                git rm -rf --quiet "${victim}"
+                CHANGES=$(( CHANGES + 1 ))
+              done
+
+              if [ -z "$(ls -A "${parent}" 2>/dev/null)" ]; then
+                echo "  parent ${parent} is now empty; removing."
+                rmdir "${parent}" 2>/dev/null || true
+              fi
+            done
+
+            shopt -u nullglob
+            popd >/dev/null
+
+            if [ "${CHANGES}" -eq 0 ]; then
+              echo "No reports needed pruning."
+              return 0
             fi
+
+            # Re-render the index against the post-prune tree.
+            python3 "${GITHUB_WORKSPACE}/.github/scripts/render-gh-pages-index.py" "${WORK}"
+
+            pushd "${WORK}" >/dev/null
+            git add index.html
+            if git diff --cached --quiet; then
+              # No staged changes after all (deletions and re-render
+              # cancelled out). Nothing to commit.
+              HAD_DIFF=0
+            else
+              git -c user.name='github-actions[bot]' \
+                  -c user.email='github-actions[bot]@users.noreply.github.com' \
+                  commit -m "Prune old Playwright reports (${CHANGES} entries)"
+              HAD_DIFF=1
+            fi
+            popd >/dev/null
+
+            [ "${HAD_DIFF}" -eq 1 ]
+          }
+
+          # First pass: nothing to commit means nothing to push.
+          if ! prune_and_commit; then
+            echo "Index already in sync; nothing to push."
+            exit 0
+          fi
+
+          # Push with retry-on-conflict. Re-fetch + reset + re-prune
+          # against the new origin tip rather than rebasing generated
+          # HTML on top of someone else's generated HTML.
+          attempt=0
+          MAX_ATTEMPTS=5
+          until (cd "${WORK}" && git push origin gh-pages); do
+            attempt=$((attempt + 1))
+            if [ "${attempt}" -ge "${MAX_ATTEMPTS}" ]; then
+              echo "::error::Failed to push gh-pages after ${attempt} attempts."
+              exit 1
+            fi
+            echo "::warning::Push attempt ${attempt} failed; resyncing with origin/gh-pages."
+            (
+              cd "${WORK}"
+              git fetch --depth=1 origin gh-pages
+              git reset --hard FETCH_HEAD
+            )
+            if ! prune_and_commit; then
+              # Nothing left to prune after the resync; the concurrent
+              # publisher already left us in a consistent state.
+              echo "Nothing left to prune after resync; done."
+              exit 0
+            fi
+            sleep $(( attempt * 2 ))
           done
-
-          echo "changes=${CHANGES}" >> "$GITHUB_OUTPUT"
-
-      - name: Commit + push
-        if: steps.checkout.outputs.exists == 'true' && steps.prune.outputs.changes != '0'
-        env:
-          WORK: ${{ steps.checkout.outputs.work }}
-        run: |
-          set -euo pipefail
-          cd "${WORK}"
-          git -c user.name='github-actions[bot]' \
-              -c user.email='github-actions[bot]@users.noreply.github.com' \
-              commit -m "Prune old Playwright reports (${{ steps.prune.outputs.changes }} entries)"
-          # Retry once if a publisher pushed concurrently.
-          git push origin gh-pages \
-            || (git pull --rebase origin gh-pages && git push origin gh-pages)
-
-      - name: Nothing to do
-        if: steps.checkout.outputs.exists == 'true' && steps.prune.outputs.changes == '0'
-        run: echo "No reports needed pruning."

@@ -236,6 +236,8 @@ jobs:
               cd "${WORK}"
               git checkout --orphan gh-pages
               git rm -rf . >/dev/null 2>&1 || true
+              # Placeholder index; the renderer below will overwrite it once
+              # the first report is copied in.
               cat > index.html <<'HTML'
           <!doctype html>
           <meta charset="utf-8">
@@ -252,22 +254,83 @@ jobs:
             )
           fi
 
-          mkdir -p "${WORK}/${SUBDIR}"
-          cp -R artifacts/web/playwright-report/. "${WORK}/${SUBDIR}/"
-
-          (
-            cd "${WORK}"
-            git add "${SUBDIR}"
-            git -c user.name='github-actions[bot]' \
-                -c user.email='github-actions[bot]@users.noreply.github.com' \
-                commit -m "Publish Playwright report: ${SUBDIR}"
-            # Retry the push once if a concurrent run raced us.
-            git push origin gh-pages || (git pull --rebase origin gh-pages && git push origin gh-pages)
-          )
-
           OWNER="${GITHUB_REPOSITORY%%/*}"
           REPO="${GITHUB_REPOSITORY##*/}"
           REPORT_URL="https://${OWNER}.github.io/${REPO}/${SUBDIR}/"
+          RUN_URL="https://github.com/${GITHUB_REPOSITORY}/actions/runs/${RUN_ID}"
+          PUBLISHED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+          # Build the metadata file once (in the runner workspace, not in
+          # the gh-pages clone) so we can re-apply it verbatim if we have
+          # to reset the gh-pages clone after a concurrent push.
+          META_TMP="$(mktemp)"
+          jq -n \
+            --arg run_id        "${RUN_ID}" \
+            --arg run_attempt   "${GITHUB_RUN_ATTEMPT:-}" \
+            --arg published_at  "${PUBLISHED_AT}" \
+            --arg ref           "${GITHUB_REF:-}" \
+            --arg ref_name      "${REF_NAME}" \
+            --arg sha           "${GITHUB_SHA:-}" \
+            --arg pr_number     "${PR_NUMBER:-}" \
+            --arg run_url       "${RUN_URL}" \
+            --arg report_url    "${REPORT_URL}" \
+            --arg actor         "${GITHUB_ACTOR:-}" \
+            '{run_id: $run_id, run_attempt: $run_attempt,
+              published_at: $published_at,
+              ref: $ref, ref_name: $ref_name, sha: $sha,
+              pr_number: $pr_number,
+              run_url: $run_url, report_url: $report_url,
+              actor: $actor}' \
+            > "${META_TMP}"
+
+          # Build the commit on top of whatever HEAD currently is. Called
+          # once before the first push; called again after each
+          # reset-to-origin retry so the report + metadata + rendered
+          # index are reapplied cleanly on top of any concurrent commits.
+          build_publish_commit() {
+            mkdir -p "${WORK}/${SUBDIR}"
+            cp -R artifacts/web/playwright-report/. "${WORK}/${SUBDIR}/"
+            cp "${META_TMP}" "${WORK}/${SUBDIR}/_meta.json"
+            python3 "${GITHUB_WORKSPACE}/.github/scripts/render-gh-pages-index.py" "${WORK}"
+            (
+              cd "${WORK}"
+              git add "${SUBDIR}" index.html
+              if git diff --cached --quiet; then
+                # Nothing changed (e.g. the concurrent push already
+                # contained an identical state). Nothing to commit.
+                return 0
+              fi
+              git -c user.name='github-actions[bot]' \
+                  -c user.email='github-actions[bot]@users.noreply.github.com' \
+                  commit -m "Publish Playwright report: ${SUBDIR}"
+            )
+          }
+
+          build_publish_commit
+
+          # Push with retry-on-conflict. A concurrent publisher might have
+          # pushed between our clone and our push, in which case the
+          # rebased tree has a different `index.html`; rather than risk a
+          # rebase conflict on generated HTML, hard-reset to the new
+          # origin tip and re-render the index against the merged tree.
+          attempt=0
+          MAX_ATTEMPTS=5
+          until (cd "${WORK}" && git push origin gh-pages); do
+            attempt=$((attempt + 1))
+            if [ "${attempt}" -ge "${MAX_ATTEMPTS}" ]; then
+              echo "::error::Failed to push gh-pages after ${attempt} attempts."
+              exit 1
+            fi
+            echo "::warning::Push attempt ${attempt} failed; resyncing with origin/gh-pages."
+            (
+              cd "${WORK}"
+              git fetch --depth=1 origin gh-pages
+              git reset --hard FETCH_HEAD
+            )
+            build_publish_commit
+            sleep $(( attempt * 2 ))
+          done
+
           echo "Report published to: ${REPORT_URL}"
           echo "published=true" >> "$GITHUB_OUTPUT"
           echo "report_url=${REPORT_URL}" >> "$GITHUB_OUTPUT"
