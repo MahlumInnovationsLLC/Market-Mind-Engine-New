@@ -362,3 +362,180 @@ def test_get_aggression_mode_history_returns_recent(monkeypatch):
     assert rows[0]["reason"] == "r2"
     assert rows[1]["to_mode"] == "aggressive"
     assert rows[1]["reason"] == "r1"
+
+
+# ---------------------------------------------------------------------------
+# Task #356: aggression-mode presets
+# ---------------------------------------------------------------------------
+
+
+def test_add_aggression_preset_round_trip(monkeypatch):
+    store: dict[str, Any] = {}
+    audit: list[dict[str, Any]] = []
+    _stub_db(monkeypatch, store, audit)
+
+    async def go():
+        created = await runtime_settings_mod.add_aggression_preset(
+            label="NFL primetime",
+            target_mode="aggressive",
+            reason="NFL primetime — tighten bias for the next 4 hours",
+            revert_minutes=240,
+            actor_user_id="user-1",
+            actor_email="op@example.com",
+        )
+        listed = await runtime_settings_mod.list_aggression_presets()
+        return created, listed
+
+    created, listed = asyncio.run(go())
+    assert created["target_mode"] == "aggressive"
+    assert created["revert_minutes"] == 240
+    assert created["reason"].startswith("NFL primetime")
+    assert created["created_by_email"] == "op@example.com"
+    assert created["id"]
+    assert len(listed) == 1
+    assert listed[0]["id"] == created["id"]
+    assert listed[0]["label"] == "NFL primetime"
+    # Audit row written with action add_aggression_mode_preset.
+    assert any(
+        a["action"] == "add_aggression_mode_preset" for a in audit
+    ), "expected audit row for preset creation"
+
+
+def test_add_aggression_preset_rejects_duplicate_label(monkeypatch):
+    store: dict[str, Any] = {}
+    audit: list[dict[str, Any]] = []
+    _stub_db(monkeypatch, store, audit)
+
+    async def go():
+        await runtime_settings_mod.add_aggression_preset(
+            label="Quiet hours",
+            target_mode="conservative",
+            reason=None,
+            revert_minutes=None,
+            actor_user_id="u",
+            actor_email=None,
+        )
+        # Same label, different case — must still trip the dedupe check
+        # so operators can't end up with two confusingly named presets.
+        await runtime_settings_mod.add_aggression_preset(
+            label="quiet HOURS",
+            target_mode="balanced",
+            reason=None,
+            revert_minutes=None,
+            actor_user_id="u",
+            actor_email=None,
+        )
+
+    import pytest
+
+    with pytest.raises(ValueError):
+        asyncio.run(go())
+
+
+def test_add_aggression_preset_validates_target_mode(monkeypatch):
+    store: dict[str, Any] = {}
+    audit: list[dict[str, Any]] = []
+    _stub_db(monkeypatch, store, audit)
+
+    async def go():
+        await runtime_settings_mod.add_aggression_preset(
+            label="Bogus",
+            target_mode="ludicrous",
+            reason=None,
+            revert_minutes=None,
+            actor_user_id="u",
+            actor_email=None,
+        )
+
+    import pytest
+
+    with pytest.raises(ValueError):
+        asyncio.run(go())
+
+
+def test_add_aggression_preset_validates_revert_minutes(monkeypatch):
+    store: dict[str, Any] = {}
+    audit: list[dict[str, Any]] = []
+    _stub_db(monkeypatch, store, audit)
+
+    async def go():
+        await runtime_settings_mod.add_aggression_preset(
+            label="Forever",
+            target_mode="aggressive",
+            reason=None,
+            revert_minutes=10**9,
+            actor_user_id="u",
+            actor_email=None,
+        )
+
+    import pytest
+
+    with pytest.raises(ValueError):
+        asyncio.run(go())
+
+
+def test_delete_aggression_preset_removes_and_audits(monkeypatch):
+    store: dict[str, Any] = {}
+    audit: list[dict[str, Any]] = []
+    _stub_db(monkeypatch, store, audit)
+
+    async def go():
+        created = await runtime_settings_mod.add_aggression_preset(
+            label="Drift suspected",
+            target_mode="conservative",
+            reason="model drift suspected",
+            revert_minutes=120,
+            actor_user_id="u",
+            actor_email=None,
+        )
+        removed = await runtime_settings_mod.delete_aggression_preset(
+            created["id"], actor_user_id="u", actor_email=None
+        )
+        listed = await runtime_settings_mod.list_aggression_presets()
+        return removed, listed
+
+    removed, listed = asyncio.run(go())
+    assert removed is not None
+    assert removed["label"] == "Drift suspected"
+    assert listed == []
+    assert any(
+        a["action"] == "delete_aggression_mode_preset" for a in audit
+    ), "expected audit row for preset deletion"
+
+
+def test_delete_aggression_preset_missing_returns_none(monkeypatch):
+    store: dict[str, Any] = {}
+    audit: list[dict[str, Any]] = []
+    _stub_db(monkeypatch, store, audit)
+
+    async def go():
+        return await runtime_settings_mod.delete_aggression_preset(
+            "no-such-id", actor_user_id="u", actor_email=None
+        )
+
+    assert asyncio.run(go()) is None
+
+
+def test_get_state_includes_presets(monkeypatch):
+    store: dict[str, Any] = {}
+    audit: list[dict[str, Any]] = []
+    _stub_db(monkeypatch, store, audit)
+
+    async def go():
+        await runtime_settings_mod.add_aggression_preset(
+            label="NFL primetime",
+            target_mode="aggressive",
+            reason="primetime",
+            revert_minutes=240,
+            actor_user_id="u",
+            actor_email=None,
+        )
+        return await runtime_settings_mod.get_state()
+
+    state = asyncio.run(go())
+    assert "presets" in state
+    assert isinstance(state["presets"], list)
+    assert len(state["presets"]) == 1
+    assert state["presets"][0]["label"] == "NFL primetime"
+    assert state["presets"][0]["target_mode"] == "aggressive"
+    assert state["presets"][0]["revert_minutes"] == 240

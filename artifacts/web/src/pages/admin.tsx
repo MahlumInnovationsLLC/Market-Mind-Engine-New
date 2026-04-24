@@ -208,6 +208,17 @@ type AggressionHistoryEntry = {
   scheduled_revert: AggressionPendingRevert | null;
 };
 
+type AggressionPreset = {
+  id: string;
+  label: string;
+  target_mode: string;
+  reason: string | null;
+  revert_minutes: number | null;
+  created_at?: string | null;
+  created_by_user_id?: string | null;
+  created_by_email?: string | null;
+};
+
 type RuntimeSettings = {
   aggression_mode: string;
   thresholds: {
@@ -221,7 +232,28 @@ type RuntimeSettings = {
   updated_by: string | null;
   history?: AggressionHistoryEntry[];
   pending_revert?: AggressionPendingRevert | null;
+  presets?: AggressionPreset[];
 };
+
+function formatRevertMinutes(minutes: number | null | undefined): string {
+  if (!minutes || minutes <= 0) return "no auto-revert";
+  if (minutes < 60) return `${minutes}m`;
+  const hours = minutes / 60;
+  if (hours < 24) {
+    return Number.isInteger(hours) ? `${hours}h` : `${hours.toFixed(1)}h`;
+  }
+  const days = hours / 24;
+  return Number.isInteger(days) ? `${days}d` : `${days.toFixed(1)}d`;
+}
+
+function localDatetimeInput(date: Date): string {
+  // datetime-local expects YYYY-MM-DDTHH:MM in browser-local time.
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return (
+    `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}` +
+    `T${pad(date.getHours())}:${pad(date.getMinutes())}`
+  );
+}
 
 export function RuntimePanel() {
   const { getToken, isSignedIn } = useAuth();
@@ -235,6 +267,20 @@ export function RuntimePanel() {
   const [scheduleEnabled, setScheduleEnabled] = useState(false);
   const [revertAt, setRevertAt] = useState("");
   const [revertTo, setRevertTo] = useState("balanced");
+  // Highlight + suggested-mode hint after the operator picks a preset.
+  // The preset doesn't auto-apply; clicking the hinted mode button
+  // remains the explicit submit so they can still tweak the reason.
+  const [pendingPresetMode, setPendingPresetMode] = useState<string | null>(
+    null,
+  );
+  const [pendingPresetLabel, setPendingPresetLabel] = useState<string | null>(
+    null,
+  );
+  // "Save current as preset" form state.
+  const [presetFormOpen, setPresetFormOpen] = useState(false);
+  const [presetLabel, setPresetLabel] = useState("");
+  const [presetTargetMode, setPresetTargetMode] = useState("balanced");
+  const [presetRevertMinutes, setPresetRevertMinutes] = useState("");
 
   const { data, isLoading, error } = useQuery<RuntimeSettings>({
     queryKey,
@@ -274,6 +320,8 @@ export function RuntimePanel() {
       setReason("");
       setScheduleEnabled(false);
       setRevertAt("");
+      setPendingPresetMode(null);
+      setPendingPresetLabel(null);
     },
   });
 
@@ -290,6 +338,82 @@ export function RuntimePanel() {
       });
     },
   });
+
+  const savePreset = useMutation({
+    mutationFn: (body: {
+      label: string;
+      target_mode: string;
+      reason?: string;
+      revert_minutes?: number;
+    }) =>
+      apiFetch<RuntimeSettings>("/api/admin/runtime-settings/presets", {
+        method: "POST",
+        body,
+        getToken: tokenFn,
+      }),
+    onSuccess: (next) => {
+      queryClient.setQueryData(queryKey, next);
+      setPresetFormOpen(false);
+      setPresetLabel("");
+      setPresetRevertMinutes("");
+    },
+  });
+
+  const deletePreset = useMutation({
+    mutationFn: (presetId: string) =>
+      apiFetch<RuntimeSettings>(
+        `/api/admin/runtime-settings/presets/${encodeURIComponent(presetId)}`,
+        {
+          method: "DELETE",
+          getToken: tokenFn,
+        },
+      ),
+    onSuccess: (next) => {
+      queryClient.setQueryData(queryKey, next);
+    },
+  });
+
+  const applyPreset = (preset: AggressionPreset) => {
+    setReason(preset.reason ?? "");
+    if (preset.revert_minutes && preset.revert_minutes > 0) {
+      const target = new Date(Date.now() + preset.revert_minutes * 60_000);
+      setRevertAt(localDatetimeInput(target));
+      // Default the auto-revert target to balanced unless the preset
+      // already targets balanced (then revert to conservative).
+      setRevertTo(preset.target_mode === "balanced" ? "conservative" : "balanced");
+      setScheduleEnabled(true);
+    } else {
+      setScheduleEnabled(false);
+      setRevertAt("");
+    }
+    setPendingPresetMode(preset.target_mode);
+    setPendingPresetLabel(preset.label);
+  };
+
+  const onSavePresetSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    const label = presetLabel.trim();
+    if (!label) return;
+    const body: {
+      label: string;
+      target_mode: string;
+      reason?: string;
+      revert_minutes?: number;
+    } = {
+      label,
+      target_mode: presetTargetMode,
+    };
+    const trimmedReason = reason.trim();
+    if (trimmedReason) body.reason = trimmedReason;
+    const minutesRaw = presetRevertMinutes.trim();
+    if (minutesRaw) {
+      const m = Math.floor(Number(minutesRaw));
+      if (Number.isFinite(m) && m > 0) {
+        body.revert_minutes = m;
+      }
+    }
+    savePreset.mutate(body);
+  };
 
   return (
     <main className="grid grid-cols-1 lg:grid-cols-12 gap-6">
@@ -318,6 +442,8 @@ export function RuntimePanel() {
               <div className="flex flex-wrap gap-2">
                 {data.available_modes.map((m) => {
                   const active = data.aggression_mode === m;
+                  const suggested =
+                    pendingPresetMode === m && !active;
                   return (
                     <button
                       key={m}
@@ -328,13 +454,198 @@ export function RuntimePanel() {
                       className={`border px-4 py-2 uppercase text-xs tracking-widest ${
                         active
                           ? "border-primary text-primary bg-primary/10"
-                          : "border-border text-muted-foreground hover:text-foreground hover:border-foreground"
+                          : suggested
+                            ? "border-accent-cyan text-accent-cyan bg-accent-cyan/10"
+                            : "border-border text-muted-foreground hover:text-foreground hover:border-foreground"
                       } ${mutation.isPending ? "opacity-50" : ""}`}
                     >
                       {m}
                     </button>
                   );
                 })}
+              </div>
+              <div
+                className="space-y-2 border-t border-border pt-3"
+                data-testid="panel-aggression-presets"
+              >
+                <div className="flex items-center justify-between gap-2">
+                  <h3 className="text-[10px] uppercase tracking-widest text-muted-foreground">
+                    Presets
+                  </h3>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setPresetFormOpen((open) => !open);
+                      // Default the preset's target mode to the operator's
+                      // most recent intent: the active mode if no preset
+                      // is loaded, otherwise the loaded preset's target.
+                      setPresetTargetMode(
+                        pendingPresetMode ?? data.aggression_mode,
+                      );
+                    }}
+                    data-testid="button-toggle-save-preset"
+                    className="text-[10px] uppercase tracking-widest border border-border px-2 py-0.5 hover:border-foreground"
+                  >
+                    {presetFormOpen ? "Cancel" : "Save current as preset"}
+                  </button>
+                </div>
+                {data.presets && data.presets.length > 0 ? (
+                  <div className="flex flex-wrap gap-2">
+                    {data.presets.map((p) => (
+                      <div
+                        key={p.id}
+                        className="inline-flex items-stretch border border-border bg-background/40"
+                        data-testid={`preset-${p.id}`}
+                      >
+                        <button
+                          type="button"
+                          onClick={() => applyPreset(p)}
+                          data-testid={`button-apply-preset-${p.id}`}
+                          title={[
+                            `Target: ${p.target_mode.toUpperCase()}`,
+                            p.reason ? `Reason: ${p.reason}` : null,
+                            `Revert: ${formatRevertMinutes(p.revert_minutes)}`,
+                          ]
+                            .filter(Boolean)
+                            .join("\n")}
+                          className="px-3 py-1.5 text-xs hover:bg-primary/10 text-left"
+                        >
+                          <span className="block font-mono">{p.label}</span>
+                          <span className="block text-[9px] uppercase tracking-widest text-muted-foreground">
+                            {p.target_mode}
+                            {p.revert_minutes
+                              ? ` · ${formatRevertMinutes(p.revert_minutes)}`
+                              : ""}
+                          </span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            if (
+                              window.confirm(
+                                `Delete preset "${p.label}"? This cannot be undone.`,
+                              )
+                            ) {
+                              deletePreset.mutate(p.id);
+                            }
+                          }}
+                          disabled={deletePreset.isPending}
+                          data-testid={`button-delete-preset-${p.id}`}
+                          className="border-l border-border px-2 text-muted-foreground hover:text-loss text-xs"
+                          aria-label={`Delete preset ${p.label}`}
+                        >
+                          ×
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <div className="text-[11px] text-muted-foreground normal-case tracking-normal">
+                    No presets saved yet. Save the routine ones (e.g. “NFL
+                    primetime”, “Low liquidity overnight”) so the next
+                    operator can apply them in one click.
+                  </div>
+                )}
+                {pendingPresetLabel && pendingPresetMode ? (
+                  <div
+                    className="text-[11px] text-accent-cyan normal-case tracking-normal"
+                    data-testid="text-preset-loaded"
+                  >
+                    Preset “{pendingPresetLabel}” loaded — review the form
+                    below, then click{" "}
+                    <span className="uppercase font-mono">
+                      {pendingPresetMode}
+                    </span>{" "}
+                    above to apply.
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setPendingPresetMode(null);
+                        setPendingPresetLabel(null);
+                      }}
+                      className="ml-2 underline text-muted-foreground hover:text-foreground"
+                      data-testid="button-clear-preset-hint"
+                    >
+                      clear
+                    </button>
+                  </div>
+                ) : null}
+                {presetFormOpen ? (
+                  <form
+                    onSubmit={onSavePresetSubmit}
+                    className="border border-border/60 bg-background/40 p-2 space-y-2"
+                    data-testid="form-save-preset"
+                  >
+                    <div className="flex flex-wrap items-center gap-2">
+                      <input
+                        type="text"
+                        value={presetLabel}
+                        onChange={(e) => setPresetLabel(e.target.value)}
+                        maxLength={60}
+                        placeholder="Preset name (e.g. NFL primetime)"
+                        data-testid="input-preset-label"
+                        className="flex-1 min-w-[12rem] bg-background border border-border px-2 py-1 text-xs font-mono"
+                      />
+                      <select
+                        value={presetTargetMode}
+                        onChange={(e) => setPresetTargetMode(e.target.value)}
+                        data-testid="select-preset-target-mode"
+                        className="bg-background border border-border px-2 py-1 text-xs uppercase tracking-widest"
+                      >
+                        {data.available_modes.map((m) => (
+                          <option key={m} value={m}>
+                            {m}
+                          </option>
+                        ))}
+                      </select>
+                      <input
+                        type="number"
+                        min={1}
+                        max={14 * 24 * 60}
+                        step={1}
+                        value={presetRevertMinutes}
+                        onChange={(e) =>
+                          setPresetRevertMinutes(e.target.value)
+                        }
+                        placeholder="Revert in (min)"
+                        data-testid="input-preset-revert-minutes"
+                        className="w-32 bg-background border border-border px-2 py-1 text-xs font-mono"
+                      />
+                      <button
+                        type="submit"
+                        disabled={
+                          savePreset.isPending || !presetLabel.trim()
+                        }
+                        data-testid="button-save-preset"
+                        className="border border-primary text-primary px-3 py-1 text-xs uppercase tracking-widest hover:bg-primary/10 disabled:opacity-50"
+                      >
+                        {savePreset.isPending ? "Saving…" : "Save"}
+                      </button>
+                    </div>
+                    <p className="text-[10px] text-muted-foreground normal-case tracking-normal">
+                      The reason text in the form below is captured with the
+                      preset so it auto-fills next time you apply it.
+                    </p>
+                    {savePreset.isError ? (
+                      <div
+                        className="text-loss text-[11px]"
+                        data-testid="text-save-preset-error"
+                      >
+                        {savePreset.error instanceof Error
+                          ? savePreset.error.message
+                          : "Failed to save preset."}
+                      </div>
+                    ) : null}
+                  </form>
+                ) : null}
+                {deletePreset.isError ? (
+                  <div
+                    className="text-loss text-[11px]"
+                    data-testid="text-delete-preset-error"
+                  >
+                    Failed to delete preset.
+                  </div>
+                ) : null}
               </div>
               <div className="space-y-2 border-t border-border pt-3">
                 <label

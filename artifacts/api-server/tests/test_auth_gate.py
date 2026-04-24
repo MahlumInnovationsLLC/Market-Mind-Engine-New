@@ -171,6 +171,9 @@ PROTECTED_MUTATING_ENDPOINTS: tuple[tuple[str, str], ...] = (
     ("POST", "/api/polymarket/paper-order"),
     ("POST", "/api/admin/runtime-settings"),
     ("DELETE", "/api/admin/runtime-settings/revert"),
+    # Task #356 — saved aggression-mode reason presets.
+    ("POST", "/api/admin/runtime-settings/presets"),
+    ("DELETE", "/api/admin/runtime-settings/presets/{preset_id}"),
     ("POST", "/api/admin/risk-knobs"),
     ("POST", "/api/admin/vertical-visibility"),
     ("POST", "/api/admin/tech-ai/promote-kelly"),

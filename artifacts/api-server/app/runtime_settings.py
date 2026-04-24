@@ -1089,6 +1089,255 @@ async def clear_vertical_halt(
     return prev_meta, True
 
 
+# ---------------------------------------------------------------------------
+# Aggression-mode presets — Task #356
+#
+# Operators repeatedly type the same handful of reasons ("NFL primetime",
+# "low liquidity overnight", "model drift suspected") when flipping the
+# aggression mode. Saving them as labelled one-click presets — paired
+# with a target mode and an optional revert-duration in minutes — keeps
+# the audit log consistent and shaves a few seconds off every routine
+# change.
+#
+# Persisted as a single JSON-array row in ``runtime_settings`` under the
+# key ``aggression_mode_presets`` so the existing key/value table can
+# carry it without a dedicated migration. Each entry:
+#   {id, label, target_mode, reason, revert_minutes,
+#    created_at, created_by_user_id, created_by_email}
+# ---------------------------------------------------------------------------
+
+
+AGGRESSION_PRESETS_KEY = "aggression_mode_presets"
+_PRESET_LABEL_MAX = 60
+_PRESET_REASON_MAX = 500
+_PRESET_REVERT_MINUTES_MAX = 14 * 24 * 60  # 2 weeks
+_PRESET_MAX_COUNT = 25
+
+
+def _coerce_preset_revert_minutes(raw: Any) -> int | None:
+    if raw is None:
+        return None
+    if isinstance(raw, str) and not raw.strip():
+        return None
+    try:
+        v = int(float(raw))
+    except (TypeError, ValueError) as e:
+        raise ValueError(f"invalid revert_minutes: {raw!r}") from e
+    if v <= 0:
+        raise ValueError("revert_minutes must be positive")
+    if v > _PRESET_REVERT_MINUTES_MAX:
+        raise ValueError(
+            f"revert_minutes {v} exceeds maximum {_PRESET_REVERT_MINUTES_MAX}"
+        )
+    return v
+
+
+def _normalize_preset_record(raw: Any) -> dict[str, Any] | None:
+    """Defensive coercion for a single stored preset.
+
+    Returns ``None`` when the row is too malformed to surface (e.g.
+    missing label or target_mode) so a single bad entry can't break the
+    whole list for the operator.
+    """
+    if not isinstance(raw, dict):
+        return None
+    pid = str(raw.get("id") or "").strip()
+    label = str(raw.get("label") or "").strip()
+    target = str(raw.get("target_mode") or "").strip().lower()
+    if not pid or not label or target not in VALID_MODES:
+        return None
+    reason_raw = raw.get("reason")
+    reason = (
+        str(reason_raw).strip()[:_PRESET_REASON_MAX]
+        if isinstance(reason_raw, str) and reason_raw.strip()
+        else None
+    )
+    revert_minutes_raw = raw.get("revert_minutes")
+    try:
+        revert_minutes = _coerce_preset_revert_minutes(revert_minutes_raw)
+    except ValueError:
+        revert_minutes = None
+    return {
+        "id": pid,
+        "label": label[:_PRESET_LABEL_MAX],
+        "target_mode": target,
+        "reason": reason,
+        "revert_minutes": revert_minutes,
+        "created_at": raw.get("created_at"),
+        "created_by_user_id": raw.get("created_by_user_id"),
+        "created_by_email": raw.get("created_by_email"),
+    }
+
+
+async def list_aggression_presets() -> list[dict[str, Any]]:
+    await ensure_schema()
+    try:
+        v = await db.fetchval(
+            "SELECT value FROM runtime_settings WHERE key = $1",
+            AGGRESSION_PRESETS_KEY,
+        )
+    except Exception as e:
+        log.debug("list_aggression_presets read failed: %s", e)
+        return []
+    if not v:
+        return []
+    import json as _json
+
+    try:
+        parsed = _json.loads(v)
+    except Exception:
+        return []
+    if not isinstance(parsed, list):
+        return []
+    out: list[dict[str, Any]] = []
+    for item in parsed:
+        norm = _normalize_preset_record(item)
+        if norm is not None:
+            out.append(norm)
+    return out
+
+
+async def _write_aggression_presets(presets: list[dict[str, Any]], *, actor_user_id: str | None) -> None:
+    import json as _json
+
+    async with db.acquire() as c:
+        await c.execute(
+            """
+            INSERT INTO runtime_settings (key, value, updated_at, updated_by)
+            VALUES ($1, $2, now(), $3)
+            ON CONFLICT (key) DO UPDATE SET
+                value      = EXCLUDED.value,
+                updated_at = now(),
+                updated_by = EXCLUDED.updated_by
+            """,
+            AGGRESSION_PRESETS_KEY,
+            _json.dumps(presets),
+            actor_user_id,
+        )
+
+
+async def add_aggression_preset(
+    *,
+    label: str,
+    target_mode: str,
+    reason: str | None,
+    revert_minutes: Any | None,
+    actor_user_id: str,
+    actor_email: str | None,
+) -> dict[str, Any]:
+    """Append a labelled preset.  Raises ``ValueError`` on bad input or
+    when the preset cap / duplicate-label rule trips."""
+    cleaned_label = (label or "").strip()
+    if not cleaned_label:
+        raise ValueError("label is required")
+    if len(cleaned_label) > _PRESET_LABEL_MAX:
+        raise ValueError(f"label too long (max {_PRESET_LABEL_MAX})")
+    target = (target_mode or "").strip().lower()
+    if target not in VALID_MODES:
+        raise ValueError(
+            f"invalid target_mode {target_mode!r}; expected one of {list(VALID_MODES)}"
+        )
+    cleaned_reason = (reason or "").strip()[:_PRESET_REASON_MAX] or None
+    cleaned_minutes = _coerce_preset_revert_minutes(revert_minutes)
+
+    existing = await list_aggression_presets()
+    if len(existing) >= _PRESET_MAX_COUNT:
+        raise ValueError(
+            f"preset limit reached ({_PRESET_MAX_COUNT}); delete one first"
+        )
+    lower_label = cleaned_label.lower()
+    if any((p.get("label") or "").strip().lower() == lower_label for p in existing):
+        raise ValueError(f"a preset named {cleaned_label!r} already exists")
+
+    from datetime import datetime, timezone
+    import uuid as _uuid
+
+    record: dict[str, Any] = {
+        "id": _uuid.uuid4().hex,
+        "label": cleaned_label,
+        "target_mode": target,
+        "reason": cleaned_reason,
+        "revert_minutes": cleaned_minutes,
+        "created_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "created_by_user_id": actor_user_id,
+        "created_by_email": actor_email,
+    }
+
+    next_list = existing + [record]
+    await _write_aggression_presets(next_list, actor_user_id=actor_user_id)
+
+    try:
+        import json as _json
+
+        async with db.acquire() as c:
+            await c.execute(
+                """
+                INSERT INTO admin_audit_log (
+                    actor_user_id, actor_email,
+                    target_user_id, target_email,
+                    action, before_value, after_value
+                ) VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7::jsonb)
+                """,
+                actor_user_id,
+                actor_email,
+                "system",
+                None,
+                "add_aggression_mode_preset",
+                _json.dumps({"presets": existing}),
+                _json.dumps({"preset": record}),
+            )
+    except Exception as e:
+        log.warning("audit log insert (add preset) failed: %s", e)
+    return record
+
+
+async def delete_aggression_preset(
+    preset_id: str,
+    *,
+    actor_user_id: str,
+    actor_email: str | None,
+) -> dict[str, Any] | None:
+    """Remove a preset by id.  Returns the removed record (or ``None``
+    if no preset matched)."""
+    pid = (preset_id or "").strip()
+    if not pid:
+        raise ValueError("preset_id is required")
+    existing = await list_aggression_presets()
+    removed: dict[str, Any] | None = None
+    remaining: list[dict[str, Any]] = []
+    for p in existing:
+        if removed is None and p.get("id") == pid:
+            removed = p
+            continue
+        remaining.append(p)
+    if removed is None:
+        return None
+    await _write_aggression_presets(remaining, actor_user_id=actor_user_id)
+    try:
+        import json as _json
+
+        async with db.acquire() as c:
+            await c.execute(
+                """
+                INSERT INTO admin_audit_log (
+                    actor_user_id, actor_email,
+                    target_user_id, target_email,
+                    action, before_value, after_value
+                ) VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7::jsonb)
+                """,
+                actor_user_id,
+                actor_email,
+                "system",
+                None,
+                "delete_aggression_mode_preset",
+                _json.dumps({"preset": removed}),
+                _json.dumps({"preset": None}),
+            )
+    except Exception as e:
+        log.warning("audit log insert (delete preset) failed: %s", e)
+    return removed
+
+
 async def get_state() -> dict[str, Any]:
     """Snapshot of the active mode + its derived gate defaults.
 
@@ -1122,6 +1371,7 @@ async def get_state() -> dict[str, Any]:
     trading_halted = await get_trading_halted()
     history = await get_aggression_mode_history(limit=5)
     pending_revert = await get_pending_revert()
+    presets = await list_aggression_presets()
     return {
         "aggression_mode": mode,
         "trading_halted": trading_halted,
@@ -1131,4 +1381,5 @@ async def get_state() -> dict[str, Any]:
         "updated_by": updated_by,
         "history": history,
         "pending_revert": pending_revert,
+        "presets": presets,
     }

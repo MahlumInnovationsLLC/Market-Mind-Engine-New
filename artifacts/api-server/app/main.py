@@ -1841,6 +1841,60 @@ async def admin_cancel_aggression_revert(
     return await runtime_settings_mod.get_state()
 
 
+class AdminAggressionPresetRequest(BaseModel):
+    label: str = Field(..., min_length=1, max_length=60)
+    target_mode: str = Field(
+        ..., pattern="^(conservative|balanced|aggressive)$"
+    )
+    reason: str | None = Field(default=None, max_length=500)
+    # Optional auto-revert window expressed in minutes so a preset can
+    # carry "go aggressive for 4h" without re-deriving a wall-clock
+    # timestamp every time it's applied.
+    revert_minutes: int | None = Field(default=None, ge=1, le=14 * 24 * 60)
+
+
+@app.post("/api/admin/runtime-settings/presets")
+async def admin_add_aggression_preset(
+    body: AdminAggressionPresetRequest,
+    actor: AuthedUser = Depends(require_admin),
+) -> dict[str, object]:
+    """Save a one-click preset (label + target mode + reason + optional
+    revert duration) the runtime panel can apply with a single tap."""
+    actor_email = (await check_approval(actor))[1]
+    try:
+        await runtime_settings_mod.add_aggression_preset(
+            label=body.label,
+            target_mode=body.target_mode,
+            reason=body.reason,
+            revert_minutes=body.revert_minutes,
+            actor_user_id=actor.user_id,
+            actor_email=actor_email,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return await runtime_settings_mod.get_state()
+
+
+@app.delete("/api/admin/runtime-settings/presets/{preset_id}")
+async def admin_delete_aggression_preset(
+    preset_id: str,
+    actor: AuthedUser = Depends(require_admin),
+) -> dict[str, object]:
+    """Remove a saved aggression-mode preset by id."""
+    actor_email = (await check_approval(actor))[1]
+    try:
+        removed = await runtime_settings_mod.delete_aggression_preset(
+            preset_id,
+            actor_user_id=actor.user_id,
+            actor_email=actor_email,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    if removed is None:
+        raise HTTPException(status_code=404, detail="preset not found")
+    return await runtime_settings_mod.get_state()
+
+
 @app.get("/api/admin/audit-log")
 async def admin_get_audit_log(
     limit: int = 100,
