@@ -1092,11 +1092,14 @@ async def clear_vertical_halt(
     *,
     actor_user_id: str,
     actor_email: str | None,
+    reason: str | None = None,
 ) -> tuple[dict[str, Any] | None, bool]:
     """Resume ``vertical``.
 
     Returns ``(previous_meta_or_None, changed)`` — ``changed`` is
     ``False`` when the vertical wasn't halted (idempotent resume).
+    The optional ``reason`` is recorded in the audit log so operators
+    can capture *why* something was resumed (matches the halt flow).
     """
     name = _require_known_vertical(vertical)
     await _ensure_system_settings_schema()
@@ -1106,6 +1109,7 @@ async def clear_vertical_halt(
         return None, False
 
     prev_meta = before[name]
+    cleaned_reason = (reason or "").strip()[:500] or None
 
     async with db.acquire() as c:
         await c.execute(
@@ -1114,6 +1118,10 @@ async def clear_vertical_halt(
         )
 
     import json as _json
+
+    after_payload: dict[str, Any] = {"vertical": name, "halted": False}
+    if cleaned_reason:
+        after_payload["reason"] = cleaned_reason
 
     try:
         async with db.acquire() as c:
@@ -1131,7 +1139,7 @@ async def clear_vertical_halt(
                 None,
                 "resume_vertical",
                 _json.dumps({"vertical": name, "halted": True, "meta": prev_meta}),
-                _json.dumps({"vertical": name, "halted": False}),
+                _json.dumps(after_payload),
             )
     except Exception as e:
         log.warning("audit log insert (resume_vertical) failed: %s", e)

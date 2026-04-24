@@ -4081,6 +4081,13 @@ class AdminHaltVerticalRequest(BaseModel):
     )
 
 
+class AdminResumeVerticalRequest(BaseModel):
+    reason: str | None = Field(
+        default=None,
+        description="Optional free-text reason recorded in the audit log.",
+    )
+
+
 async def _cancel_resting_for_vertical(vertical: str) -> dict[str, int]:
     """Cancel every resting Kalshi order attached to ``vertical``.
 
@@ -4178,19 +4185,26 @@ async def admin_halt_vertical(
 @app.post("/api/admin/verticals/{vertical}/resume")
 async def admin_resume_vertical(
     vertical: str,
+    body: AdminResumeVerticalRequest | None = None,
     actor: AuthedUser = Depends(require_admin),
 ) -> dict[str, object]:
-    """Resume a single vertical. Idempotent — no-op when already live."""
+    """Resume a single vertical. Idempotent — no-op when already live.
+
+    Accepts an optional ``reason`` (mirrors the halt flow) so operators
+    can capture *why* something was resumed in the audit trail.
+    """
     actor_email: str | None = None
     try:
         actor_email = (await check_approval(actor))[1]
     except Exception:
         pass
+    reason = body.reason if body else None
     try:
         prev_meta, changed = await runtime_settings_mod.clear_vertical_halt(
             vertical,
             actor_user_id=actor.user_id,
             actor_email=actor_email,
+            reason=reason,
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))

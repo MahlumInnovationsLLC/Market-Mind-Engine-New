@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { Link, Redirect } from "wouter";
 import { useAuth } from "@clerk/react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
@@ -3191,40 +3191,60 @@ export function VerticalHaltsPanel() {
   const [lastCancel, setLastCancel] = useState<
     { vertical: string; summary: HaltCancelSummary } | null
   >(null);
+  const [pending, setPending] = useState<
+    { vertical: string; action: "halt" | "resume"; reason: string } | null
+  >(null);
 
   const haltMutation = useMutation({
-    mutationFn: async (vertical: string) =>
+    mutationFn: async (vars: { vertical: string; reason: string | null }) =>
       apiFetch<{ resting_orders: HaltCancelSummary; changed: boolean }>(
-        `/api/admin/verticals/${encodeURIComponent(vertical)}/halt`,
+        `/api/admin/verticals/${encodeURIComponent(vars.vertical)}/halt`,
         {
           method: "POST",
           getToken: tokenFn,
-          body: JSON.stringify({ reason: null }),
+          body: JSON.stringify({ reason: vars.reason }),
           headers: { "Content-Type": "application/json" },
         },
       ),
-    onSuccess: (result, vertical) => {
-      setLastCancel({ vertical, summary: result.resting_orders });
+    onSuccess: (result, vars) => {
+      setLastCancel({ vertical: vars.vertical, summary: result.resting_orders });
+      setPending(null);
       qc.invalidateQueries({ queryKey: ["admin", "vertical-halts"] });
     },
   });
 
   const resumeMutation = useMutation({
-    mutationFn: async (vertical: string) =>
+    mutationFn: async (vars: { vertical: string; reason: string | null }) =>
       apiFetch<{ changed: boolean }>(
-        `/api/admin/verticals/${encodeURIComponent(vertical)}/resume`,
-        { method: "POST", getToken: tokenFn },
+        `/api/admin/verticals/${encodeURIComponent(vars.vertical)}/resume`,
+        {
+          method: "POST",
+          getToken: tokenFn,
+          body: JSON.stringify({ reason: vars.reason }),
+          headers: { "Content-Type": "application/json" },
+        },
       ),
     onSuccess: () => {
       setLastCancel(null);
+      setPending(null);
       qc.invalidateQueries({ queryKey: ["admin", "vertical-halts"] });
     },
   });
 
   const busyVertical =
-    (haltMutation.isPending && (haltMutation.variables as string | undefined)) ||
-    (resumeMutation.isPending && (resumeMutation.variables as string | undefined)) ||
+    (haltMutation.isPending &&
+      (haltMutation.variables as { vertical: string } | undefined)?.vertical) ||
+    (resumeMutation.isPending &&
+      (resumeMutation.variables as { vertical: string } | undefined)?.vertical) ||
     null;
+
+  const submitPending = () => {
+    if (!pending) return;
+    const reason = pending.reason.trim() || null;
+    const vars = { vertical: pending.vertical, reason };
+    if (pending.action === "halt") haltMutation.mutate(vars);
+    else resumeMutation.mutate(vars);
+  };
 
   const halts = haltsQuery.data?.halts ?? {};
   const rows = overview.data?.verticals ?? [];
@@ -3259,57 +3279,154 @@ export function VerticalHaltsPanel() {
             const meta = halts[entry.vertical];
             const isHalted = !!meta;
             const busy = busyVertical === entry.vertical;
+            const isPrompting = pending?.vertical === entry.vertical;
             return (
-              <tr
-                key={entry.vertical}
-                className="border-t border-border"
-                data-testid={`row-vertical-halt-${entry.vertical}`}
-              >
-                <td className="p-2 uppercase font-bold text-primary">
-                  {entry.vertical}
-                </td>
-                <td className="p-2">
-                  <span
-                    className={`px-2 py-0.5 border text-[10px] uppercase tracking-widest ${
-                      isHalted
-                        ? "border-destructive text-destructive"
-                        : "border-emerald-500/60 text-emerald-500"
-                    }`}
-                    data-testid={`state-vertical-halt-${entry.vertical}`}
+              <Fragment key={entry.vertical}>
+                <tr
+                  className="border-t border-border"
+                  data-testid={`row-vertical-halt-${entry.vertical}`}
+                >
+                  <td className="p-2 uppercase font-bold text-primary">
+                    {entry.vertical}
+                  </td>
+                  <td className="p-2">
+                    <span
+                      className={`px-2 py-0.5 border text-[10px] uppercase tracking-widest ${
+                        isHalted
+                          ? "border-destructive text-destructive"
+                          : "border-emerald-500/60 text-emerald-500"
+                      }`}
+                      data-testid={`state-vertical-halt-${entry.vertical}`}
+                    >
+                      {isHalted ? "Halted" : "Live"}
+                    </span>
+                  </td>
+                  <td className="p-2 text-muted-foreground">
+                    <div>{meta?.by_email ?? meta?.by_user_id ?? "—"}</div>
+                    {meta?.reason ? (
+                      <div
+                        className="mt-1 text-foreground italic normal-case tracking-normal"
+                        data-testid={`reason-vertical-halt-${entry.vertical}`}
+                      >
+                        “{meta.reason}”
+                      </div>
+                    ) : null}
+                  </td>
+                  <td className="p-2 text-muted-foreground">
+                    {meta?.at ? _fmtRelative(meta.at) : "—"}
+                  </td>
+                  <td className="p-2">
+                    {isHalted ? (
+                      <button
+                        type="button"
+                        disabled={busy || isPrompting}
+                        onClick={() =>
+                          setPending({
+                            vertical: entry.vertical,
+                            action: "resume",
+                            reason: "",
+                          })
+                        }
+                        className="px-2 py-0.5 border border-emerald-500/60 text-emerald-500 text-[10px] uppercase tracking-widest hover:bg-emerald-500/10 disabled:opacity-50"
+                        data-testid={`button-resume-${entry.vertical}`}
+                      >
+                        {busy ? "…" : "Resume"}
+                      </button>
+                    ) : (
+                      <button
+                        type="button"
+                        disabled={busy || isPrompting}
+                        onClick={() =>
+                          setPending({
+                            vertical: entry.vertical,
+                            action: "halt",
+                            reason: "",
+                          })
+                        }
+                        className="px-2 py-0.5 border border-destructive text-destructive text-[10px] uppercase tracking-widest hover:bg-destructive/10 disabled:opacity-50"
+                        data-testid={`button-halt-${entry.vertical}`}
+                      >
+                        {busy ? "…" : "Halt"}
+                      </button>
+                    )}
+                  </td>
+                </tr>
+                {isPrompting && pending ? (
+                  <tr
+                    className="border-t border-border bg-muted/10"
+                    data-testid={`prompt-vertical-${pending.action}-${entry.vertical}`}
                   >
-                    {isHalted ? "Halted" : "Live"}
-                  </span>
-                </td>
-                <td className="p-2 text-muted-foreground">
-                  {meta?.by_email ?? meta?.by_user_id ?? "—"}
-                </td>
-                <td className="p-2 text-muted-foreground">
-                  {meta?.at ? _fmtRelative(meta.at) : "—"}
-                </td>
-                <td className="p-2">
-                  {isHalted ? (
-                    <button
-                      type="button"
-                      disabled={busy}
-                      onClick={() => resumeMutation.mutate(entry.vertical)}
-                      className="px-2 py-0.5 border border-emerald-500/60 text-emerald-500 text-[10px] uppercase tracking-widest hover:bg-emerald-500/10 disabled:opacity-50"
-                      data-testid={`button-resume-${entry.vertical}`}
-                    >
-                      {busy ? "…" : "Resume"}
-                    </button>
-                  ) : (
-                    <button
-                      type="button"
-                      disabled={busy}
-                      onClick={() => haltMutation.mutate(entry.vertical)}
-                      className="px-2 py-0.5 border border-destructive text-destructive text-[10px] uppercase tracking-widest hover:bg-destructive/10 disabled:opacity-50"
-                      data-testid={`button-halt-${entry.vertical}`}
-                    >
-                      {busy ? "…" : "Halt"}
-                    </button>
-                  )}
-                </td>
-              </tr>
+                    <td colSpan={5} className="p-2">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <label
+                          className="text-[10px] uppercase tracking-widest text-muted-foreground"
+                          htmlFor={`reason-${entry.vertical}`}
+                        >
+                          {pending.action === "halt"
+                            ? "Halt reason"
+                            : "Resume note"}{" "}
+                          (optional)
+                        </label>
+                        <input
+                          id={`reason-${entry.vertical}`}
+                          type="text"
+                          autoFocus
+                          maxLength={500}
+                          value={pending.reason}
+                          onChange={(e) =>
+                            setPending({
+                              ...pending,
+                              reason: e.target.value,
+                            })
+                          }
+                          onKeyDown={(e) => {
+                            if (e.key === "Enter") {
+                              e.preventDefault();
+                              submitPending();
+                            } else if (e.key === "Escape") {
+                              e.preventDefault();
+                              setPending(null);
+                            }
+                          }}
+                          placeholder={
+                            pending.action === "halt"
+                              ? "e.g. EIA print pending, sit out NGAS"
+                              : "e.g. EIA print done, resuming NGAS"
+                          }
+                          className="flex-1 min-w-[240px] bg-background border border-border px-2 py-1 text-xs font-mono"
+                          data-testid={`input-reason-${entry.vertical}`}
+                        />
+                        <button
+                          type="button"
+                          disabled={busy}
+                          onClick={submitPending}
+                          className={`px-2 py-1 border text-[10px] uppercase tracking-widest disabled:opacity-50 ${
+                            pending.action === "halt"
+                              ? "border-destructive text-destructive hover:bg-destructive/10"
+                              : "border-emerald-500/60 text-emerald-500 hover:bg-emerald-500/10"
+                          }`}
+                          data-testid={`button-confirm-${pending.action}-${entry.vertical}`}
+                        >
+                          {busy
+                            ? "…"
+                            : pending.action === "halt"
+                              ? "Confirm halt"
+                              : "Confirm resume"}
+                        </button>
+                        <button
+                          type="button"
+                          disabled={busy}
+                          onClick={() => setPending(null)}
+                          className="px-2 py-1 border border-border text-muted-foreground text-[10px] uppercase tracking-widest hover:text-foreground disabled:opacity-50"
+                          data-testid={`button-cancel-${pending.action}-${entry.vertical}`}
+                        >
+                          Cancel
+                        </button>
+                      </div>
+                    </td>
+                  </tr>
+                ) : null}
+              </Fragment>
             );
           })}
         </tbody>

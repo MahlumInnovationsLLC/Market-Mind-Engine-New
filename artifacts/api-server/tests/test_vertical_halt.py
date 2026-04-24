@@ -177,6 +177,30 @@ def test_halt_writes_audit_log(mem_db):
     assert halt_row["after"]["vertical"] == target
 
 
+def test_resume_with_reason_writes_audit_log(mem_db):
+    """Operators can capture *why* something was resumed, mirroring halt."""
+    target = _first_known_vertical()
+    asyncio.run(
+        runtime_settings_mod.set_vertical_halted(
+            target,
+            actor_user_id="u1",
+            actor_email="u1@example.com",
+            reason="EIA print pending",
+        )
+    )
+    asyncio.run(
+        runtime_settings_mod.clear_vertical_halt(
+            target,
+            actor_user_id="u1",
+            actor_email="u1@example.com",
+            reason="EIA print done, resuming",
+        )
+    )
+    _, resume_row = next(r for r in mem_db.audit if r[0] == "resume_vertical")
+    assert resume_row["after"]["reason"] == "EIA print done, resuming"
+    assert resume_row["after"]["halted"] is False
+
+
 def test_unknown_vertical_rejected(mem_db):
     with pytest.raises(ValueError, match="unknown vertical"):
         asyncio.run(
