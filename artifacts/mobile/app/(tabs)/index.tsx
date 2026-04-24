@@ -1,4 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
+import { useRouter } from "expo-router";
 import React, { useState } from "react";
 import {
   ActivityIndicator,
@@ -87,6 +88,7 @@ const PERIOD_LABELS: Record<Period, string> = {
 export default function DashboardScreen() {
   const colors = useColors();
   const insets = useSafeAreaInsets();
+  const router = useRouter();
   const [period, setPeriod] = useState<Period>(7);
 
   const overview = useQuery({
@@ -221,6 +223,26 @@ export default function DashboardScreen() {
             RESETS {sub.data.quota.resets_at}
           </Text>
         </View>
+      ) : null}
+
+      {sub.data?.tier === "free" &&
+      sub.data?.quota &&
+      sub.data.quota.viewed_today >= sub.data.quota.limit ? (
+        <Pressable
+          onPress={() => router.push("/(tabs)/subscription")}
+          testID="cta-upgrade-quota"
+          style={({ pressed }) => [
+            styles.upgradeCta,
+            {
+              backgroundColor: colors.primary,
+              opacity: pressed ? 0.85 : 1,
+            },
+          ]}
+        >
+          <Text style={[styles.upgradeCtaText, { color: colors.primaryForeground }]}>
+            UPGRADE FOR UNLIMITED MARKETS
+          </Text>
+        </Pressable>
       ) : null}
 
       <View
@@ -377,6 +399,18 @@ const styles = StyleSheet.create({
     fontSize: 10,
     letterSpacing: 1,
     fontFamily: "Inter_400Regular",
+  },
+  upgradeCta: {
+    paddingVertical: 12,
+    paddingHorizontal: 12,
+    alignItems: "center",
+    marginBottom: 12,
+    marginTop: -4,
+  },
+  upgradeCtaText: {
+    fontSize: 12,
+    letterSpacing: 2,
+    fontFamily: "Inter_700Bold",
   },
   kvVal: { fontSize: 13, fontFamily: "Inter_600SemiBold" },
   eyebrow: { fontSize: 11, letterSpacing: 3, fontFamily: "Inter_500Medium" },
