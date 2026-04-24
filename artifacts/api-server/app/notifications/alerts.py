@@ -1311,6 +1311,63 @@ def ws_hub_overflowing(
 
 
 # ---------------------------------------------------------------------------
+# Crypto OHLCV feed freshness
+# ---------------------------------------------------------------------------
+
+
+def crypto_feed_silent(
+    *,
+    symbol: str,
+    granularity: str,
+    expected_seconds: int,
+    age_seconds: float | None,
+    max_ts: str | None,
+    red_threshold_seconds: int,
+    consecutive_snapshots: int,
+    dry_run: bool = False,
+) -> dict[str, Any]:
+    """Operator alert: a (symbol, granularity) crypto bar pair has been
+    `down` (no fresh bar within the red threshold) for
+    ``consecutive_snapshots`` consecutive health snapshots.
+
+    The body identifies the offending pair so the operator knows which
+    feed/provider to investigate before the predictor starts trading
+    on stale prices.
+    """
+    age_label = (
+        f"{age_seconds:.0f}s old" if age_seconds is not None else "no bars"
+    )
+    subject = (
+        f"[axiom] Crypto feed stale: {symbol}/{granularity} ({age_label})"
+    )
+    body = (
+        f"The crypto bar feed for '{symbol}/{granularity}' has been stale\n"
+        "(older than the red freshness threshold, or missing entirely) for "
+        f"{consecutive_snapshots} consecutive health snapshots.\n\n"
+        "The crypto-OHLCV poller is likely erroring or rate-limited; "
+        "investigate the feed registry and provider keys before the "
+        "predictor starts trading on stale prices.\n\n"
+        + _format_lines(
+            [
+                ("symbol", symbol),
+                ("granularity", granularity),
+                ("expected_cadence_seconds", expected_seconds),
+                ("red_threshold_seconds", red_threshold_seconds),
+                (
+                    "age_seconds",
+                    f"{age_seconds:.0f}" if age_seconds is not None else "(no bars)",
+                ),
+                ("max_ts", max_ts or "(none)"),
+                ("consecutive_snapshots", consecutive_snapshots),
+                ("at", _utc_now_iso()),
+            ]
+        )
+        + "\n"
+    )
+    return _dispatch(subject, body, tag="crypto-feed-silent", dry_run=dry_run)
+
+
+# ---------------------------------------------------------------------------
 # RevenueCat (mobile IAP) webhook health
 # ---------------------------------------------------------------------------
 
