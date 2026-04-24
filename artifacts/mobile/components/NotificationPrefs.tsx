@@ -10,8 +10,10 @@ import {
 } from "react-native";
 
 import { Card, SectionHeader } from "@/components/Card";
+import { TimezonePicker } from "@/components/TimezonePicker";
 import { useColors } from "@/hooks/useColors";
 import { apiFetch } from "@/lib/api";
+import { findTimezone, offsetForZone } from "@/lib/timezones";
 
 type PrefsBody = {
   notify_live_trade: boolean;
@@ -56,9 +58,18 @@ function formatHour(h: number): string {
   return `${display} ${suffix}`;
 }
 
+function tzDisplayLine(zone: string | null): string {
+  if (!zone) return "";
+  const opt = findTimezone(zone);
+  const off = offsetForZone(zone);
+  const city = opt ? opt.city : zone;
+  return off ? `${city} (${off}) · ${zone}` : `${city} · ${zone}`;
+}
+
 export function NotificationPrefs(): React.ReactElement {
   const colors = useColors();
   const qc = useQueryClient();
+  const [tzPickerOpen, setTzPickerOpen] = React.useState(false);
 
   const prefs = useQuery<PrefsResponse>({
     queryKey: ["notification-prefs"],
@@ -154,6 +165,19 @@ export function NotificationPrefs(): React.ReactElement {
     });
   };
 
+  const pickTz = (id: string) => {
+    setTzPickerOpen(false);
+    mutation.mutate({
+      quiet_hours_tz: id,
+      quiet_hours_tz_present: true,
+    });
+  };
+
+  const pickDeviceTz = () => {
+    setTzPickerOpen(false);
+    useDeviceTz();
+  };
+
   return (
     <View>
       <SectionHeader>NOTIFICATIONS</SectionHeader>
@@ -233,37 +257,44 @@ export function NotificationPrefs(): React.ReactElement {
               onDown={() => bumpHour("end", -1)}
               colors={colors}
             />
-            <View style={styles.tzRow}>
+            <Pressable
+              disabled={busy}
+              onPress={() => setTzPickerOpen(true)}
+              testID="open-tz-picker"
+              accessibilityRole="button"
+              accessibilityLabel="Change time zone"
+              style={({ pressed }) => [
+                styles.tzRow,
+                {
+                  opacity: busy ? 0.5 : pressed ? 0.7 : 1,
+                },
+              ]}
+            >
               <View style={{ flex: 1 }}>
                 <Text style={[styles.label, { color: colors.foreground }]}>
                   Time zone
                 </Text>
                 <Text style={[styles.hint, { color: colors.mutedForeground }]}>
-                  {quiet.quiet_hours_tz}
+                  {tzDisplayLine(quiet.quiet_hours_tz)}
                 </Text>
               </View>
-              <Pressable
-                disabled={busy}
-                onPress={useDeviceTz}
-                style={({ pressed }) => [
-                  styles.tzButton,
-                  {
-                    borderColor: colors.border,
-                    opacity: busy ? 0.5 : pressed ? 0.7 : 1,
-                  },
-                ]}
-              >
-                <Text style={[styles.tzButtonText, { color: colors.primary }]}>
-                  Use device
-                </Text>
-              </Pressable>
-            </View>
+              <Text style={[styles.tzButtonText, { color: colors.primary }]}>
+                Change
+              </Text>
+            </Pressable>
           </View>
         ) : null}
         {prefs.isLoading ? (
           <ActivityIndicator color={colors.primary} style={{ marginTop: 8 }} />
         ) : null}
       </Card>
+      <TimezonePicker
+        visible={tzPickerOpen}
+        selected={quiet.quiet_hours_tz}
+        onClose={() => setTzPickerOpen(false)}
+        onSelect={pickTz}
+        onUseDevice={pickDeviceTz}
+      />
     </View>
   );
 }
@@ -373,12 +404,6 @@ const styles = StyleSheet.create({
     fontSize: 14,
     fontFamily: "Inter_600SemiBold",
   },
-  tzRow: { flexDirection: "row", alignItems: "center", paddingVertical: 4 },
-  tzButton: {
-    paddingHorizontal: 12,
-    paddingVertical: 8,
-    borderRadius: 6,
-    borderWidth: StyleSheet.hairlineWidth,
-  },
+  tzRow: { flexDirection: "row", alignItems: "center", paddingVertical: 8 },
   tzButtonText: { fontSize: 13, fontFamily: "Inter_600SemiBold" },
 });
