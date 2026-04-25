@@ -11,6 +11,7 @@ import {
 import { formatErrorMessage } from "@/lib/api";
 import { GlassCard } from "@/components/ui/glass-card";
 import { SectionHeader } from "@/components/ui/section-header";
+import AutoResearchThroughputChart from "./autoresearch-throughput-chart";
 
 function fmtNum(n: number | null | undefined, digits = 3): string {
   if (n === null || n === undefined) return "—";
@@ -281,6 +282,8 @@ export default function AutoResearchPanel({ isAdmin }: { isAdmin: boolean }) {
           {errorMsg}
         </div>
       )}
+
+      <AutoResearchThroughputChart />
 
       {isLoading ? (
         <div
