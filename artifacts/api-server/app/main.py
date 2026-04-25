@@ -247,6 +247,11 @@ async def lifespan(_: FastAPI):
             register_outlier_bet_feed()
         except Exception as e:
             log.warning("outlier_bet feed registration failed: %s", e)
+        try:
+            from .feeds.nfl_backfill import register_nfl_backfill_feed
+            register_nfl_backfill_feed()
+        except Exception as e:
+            log.warning("nfl_backfill feed registration failed: %s", e)
         await feed_scheduler.start()
     except Exception as e:
         log.error("feed scheduler start failed: %s", e)
