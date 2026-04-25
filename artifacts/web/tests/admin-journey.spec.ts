@@ -182,6 +182,137 @@ test.describe("admin journey — vertical toggle propagates to non-admins", () =
   });
 });
 
+/**
+ * Emergency-stop re-arm flow (Task #412).
+ *
+ * The "Re-arm trading (PAPER) / (LIVE)" control on the EmergencyStop
+ * card only appears when `useGetLiveExecuteState().effective_mode ===
+ * "halt"` — which is what `system_settings.risk.trading_mode = 'halt'`
+ * persists after an emergency stop. Rather than mutating real DB rows
+ * (which would require touching production-shaped tables and cleaning
+ * up afterwards), this test mocks the `/api/orchestrator/live-execute`
+ * GET so the dashboard sees a halted state and mocks the
+ * `/api/admin/rearm-trading` POST so we can both assert the dashboard
+ * actually fired the canonical mutation and flip the mocked
+ * live-execute state to `paper` so the badge clears on the post-mutation
+ * refetch. Same `page.route` mocking pattern the operator-journey
+ * suite uses for `/api/health/ready`.
+ */
+test.describe("admin journey — emergency-stop re-arm flow", () => {
+  test.skip(
+    !HAS_CLERK_DEV_KEYS || !ADMIN_EMAIL,
+    "Clerk dev keys (CLERK_PUBLISHABLE_KEY/CLERK_SECRET_KEY) and E2E_CLERK_ADMIN_EMAIL required",
+  );
+
+  test.beforeAll(async () => {
+    await clerkSetup();
+  });
+
+  test("admin re-arms a halted dashboard via PAPER and the HALTED badge clears", async ({
+    page,
+  }) => {
+    // Single source of truth for what the (mocked) live-execute GET
+    // returns. We start in `halt` so the rearm controls render, then
+    // flip to `paper` once the rearm POST fires so the post-mutation
+    // refetch clears the badge.
+    let liveExecuteMode: "halt" | "paper" = "halt";
+    const liveExecutePayload = () => ({
+      enabled: liveExecuteMode === "live",
+      effective_mode: liveExecuteMode,
+      env_mode: "paper",
+      db_mode: liveExecuteMode,
+      source: "db",
+      caller_tier: "elite",
+      can_toggle: true,
+    });
+
+    await page.route("**/api/orchestrator/live-execute", async (route) => {
+      // Only mock the GET — leave any POST (the live-execute toggle)
+      // untouched so we don't accidentally swallow a different mutation.
+      if (route.request().method() !== "GET") {
+        return route.fallback();
+      }
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify(liveExecutePayload()),
+      });
+    });
+
+    // Capture every re-arm POST so we can assert the dashboard fired
+    // the canonical mutation (not, e.g., the live-execute toggle) with
+    // the operator's chosen mode.
+    const rearmCalls: Array<{ method: string; postData: string | null }> = [];
+    await page.route("**/api/admin/rearm-trading", async (route) => {
+      const req = route.request();
+      rearmCalls.push({ method: req.method(), postData: req.postData() });
+      // Flip the live-execute mock so the next refetch (triggered by
+      // the mutation's `invalidateQueries`) clears the HALTED badge.
+      liveExecuteMode = "paper";
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          ok: true,
+          trading_mode: "paper",
+          previous_mode: "halt",
+          kill_switch: { halted: false, reason: null, halted_at: null },
+        }),
+      });
+    });
+
+    await signInAs(page, ADMIN_EMAIL!);
+    await page.goto("/app");
+
+    // If this admin account isn't approved on the test instance the
+    // shell never mounts; skip rather than fail so the suite stays
+    // green when the dev tenant is half-configured.
+    const shell = page.getByTestId("shell-main");
+    if ((await shell.count()) === 0) {
+      test.skip(true, "admin not approved — shell not rendered");
+    }
+    await expect(shell).toBeVisible({ timeout: 15_000 });
+
+    // OperatorControls (admin-only) renders EmergencyStop and is
+    // open-by-default for admins via its `useEffect(setOpen(true))`.
+    const card = page.getByTestId("emergency-stop");
+    await expect(card).toBeVisible({ timeout: 15_000 });
+
+    // Halted state surfaces the HALTED badge + the rearm sub-panel
+    // with both PAPER and LIVE buttons.
+    const stateBadge = page.getByTestId("emergency-stop-state");
+    await expect(stateBadge).toHaveText("HALTED", { timeout: 15_000 });
+    await expect(page.getByTestId("emergency-stop-rearm")).toBeVisible();
+    const paperBtn = page.getByTestId("button-rearm-paper");
+    const liveBtn = page.getByTestId("button-rearm-live");
+    await expect(paperBtn).toBeVisible();
+    await expect(liveBtn).toBeVisible();
+    await expect(paperBtn).toContainText(/Re-arm trading \(PAPER\)/i);
+    await expect(liveBtn).toContainText(/Re-arm trading \(LIVE\)/i);
+
+    // Trip the re-arm. The mutation's onSuccess invalidates the
+    // live-execute query, which re-fetches and (per the mock flip
+    // above) returns `paper`, so the badge swaps back to KILL ALL
+    // and the rearm sub-panel disappears.
+    await paperBtn.click();
+
+    await expect(stateBadge).toHaveText("KILL ALL", { timeout: 15_000 });
+    await expect(page.getByTestId("emergency-stop-rearm")).toHaveCount(0);
+    await expect(page.getByTestId("text-rearm-result")).toContainText(
+      /Re-armed to PAPER/i,
+    );
+
+    // Mutation must have actually fired against /api/admin/rearm-trading
+    // with `mode: "paper"` — guards against a future refactor that
+    // wires the button to a different endpoint or forgets to send the
+    // mode at all.
+    expect(rearmCalls.length).toBeGreaterThanOrEqual(1);
+    const first = rearmCalls[0];
+    expect(first.method).toBe("POST");
+    expect(first.postData ?? "").toContain('"mode":"paper"');
+  });
+});
+
 test.describe("admin journey — non-admin negative path", () => {
   test.skip(
     !HAS_CLERK_DEV_KEYS || !USER_EMAIL,
