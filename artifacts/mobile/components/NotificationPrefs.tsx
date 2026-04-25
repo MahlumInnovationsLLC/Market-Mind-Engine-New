@@ -6,13 +6,14 @@ import {
   StyleSheet,
   Switch,
   Text,
+  TextInput,
   View,
 } from "react-native";
 
 import { Card, SectionHeader } from "@/components/Card";
 import { TimezonePicker } from "@/components/TimezonePicker";
 import { useColors } from "@/hooks/useColors";
-import { apiFetch } from "@/lib/api";
+import { ApiError, apiFetch } from "@/lib/api";
 import { findTimezone, offsetForZone } from "@/lib/timezones";
 
 type PrefsBody = {
@@ -21,18 +22,38 @@ type PrefsBody = {
   notify_settlement: boolean;
   email_trade_confirmation: boolean;
   digest_partials: boolean;
+  sms_live_trade: boolean;
 };
 type QuietHours = {
   quiet_hours_start_hour: number | null;
   quiet_hours_end_hour: number | null;
   quiet_hours_tz: string | null;
 };
+type SmsPhone = {
+  sms_phone_number: string | null;
+  sms_phone_verified: boolean;
+  sms_phone_verification_expires_at: string | null;
+};
 type PrefsResponse = {
-  prefs: PrefsBody & QuietHours & Record<string, unknown>;
+  prefs: PrefsBody & QuietHours & SmsPhone & Record<string, unknown>;
   tier?: string;
   elite_unlocked?: boolean;
   elite_only_toggles?: string[];
 };
+
+function errMsg(e: unknown): string {
+  if (e instanceof ApiError) {
+    const body = e.body as { detail?: { error?: string } | string } | null;
+    if (body && typeof body === "object" && body.detail) {
+      const d = body.detail;
+      if (typeof d === "string") return d;
+      if (d && typeof d === "object" && typeof d.error === "string") return d.error;
+    }
+    return e.message;
+  }
+  if (e instanceof Error) return e.message;
+  return "Unknown error";
+}
 
 type QuietHoursPatch = {
   quiet_hours_start_hour?: number | null;
@@ -41,6 +62,11 @@ type QuietHoursPatch = {
   quiet_hours_end_hour_present?: boolean;
   quiet_hours_tz?: string | null;
   quiet_hours_tz_present?: boolean;
+};
+
+type SmsPhonePatch = {
+  sms_phone_number?: string | null;
+  sms_phone_number_present?: boolean;
 };
 
 function detectDeviceTz(): string {
@@ -70,6 +96,12 @@ export function NotificationPrefs(): React.ReactElement {
   const colors = useColors();
   const qc = useQueryClient();
   const [tzPickerOpen, setTzPickerOpen] = React.useState(false);
+  const [phone, setPhone] = React.useState<string>("");
+  const [phoneDirty, setPhoneDirty] = React.useState(false);
+  const [verifyCode, setVerifyCode] = React.useState<string>("");
+  const [verifyMsg, setVerifyMsg] = React.useState<string | null>(null);
+  const [verifyError, setVerifyError] = React.useState<string | null>(null);
+  const [verifyBusy, setVerifyBusy] = React.useState(false);
 
   const prefs = useQuery<PrefsResponse>({
     queryKey: ["notification-prefs"],
@@ -77,7 +109,7 @@ export function NotificationPrefs(): React.ReactElement {
   });
 
   const mutation = useMutation({
-    mutationFn: (patch: Partial<PrefsBody> & QuietHoursPatch) =>
+    mutationFn: (patch: Partial<PrefsBody> & QuietHoursPatch & SmsPhonePatch) =>
       apiFetch<PrefsResponse>("/api/me/notification-prefs", {
         method: "PUT",
         body: patch,
@@ -96,7 +128,34 @@ export function NotificationPrefs(): React.ReactElement {
       (prefs.data?.prefs?.email_trade_confirmation as boolean | undefined) ?? true,
     digest_partials:
       (prefs.data?.prefs?.digest_partials as boolean | undefined) ?? false,
+    sms_live_trade:
+      (prefs.data?.prefs?.sms_live_trade as boolean | undefined) ?? false,
   };
+  const sms: SmsPhone = {
+    sms_phone_number:
+      (prefs.data?.prefs?.sms_phone_number as string | null | undefined) ?? null,
+    sms_phone_verified:
+      (prefs.data?.prefs?.sms_phone_verified as boolean | undefined) ?? false,
+    sms_phone_verification_expires_at:
+      (prefs.data?.prefs?.sms_phone_verification_expires_at as
+        | string
+        | null
+        | undefined) ?? null,
+  };
+  const eliteUnlocked = !!prefs.data?.elite_unlocked;
+
+  // Keep the local phone input synced with the saved value when the
+  // user hasn't started editing — but don't clobber an in-progress edit
+  // when a background refetch arrives.
+  React.useEffect(() => {
+    if (!phoneDirty) {
+      setPhone(sms.sms_phone_number ?? "");
+    }
+    // Only depend on the saved phone string; phoneDirty changes are
+    // intentional state and shouldn't retrigger this sync.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sms.sms_phone_number]);
+
   const quiet: QuietHours = {
     quiet_hours_start_hour:
       (prefs.data?.prefs?.quiet_hours_start_hour as number | null | undefined) ?? null,
@@ -177,6 +236,78 @@ export function NotificationPrefs(): React.ReactElement {
     setTzPickerOpen(false);
     useDeviceTz();
   };
+
+  const savePhone = () => {
+    const next = phone.trim();
+    setVerifyMsg(null);
+    setVerifyError(null);
+    setVerifyCode("");
+    mutation.mutate(
+      {
+        sms_phone_number_present: true,
+        sms_phone_number: next || null,
+      },
+      {
+        onSuccess: () => {
+          setPhoneDirty(false);
+          if (next) {
+            setVerifyMsg(
+              "We just texted a 6-digit verification code. Enter it below to confirm this number.",
+            );
+          }
+        },
+        onError: (e) => {
+          setVerifyError(errMsg(e));
+        },
+      },
+    );
+  };
+
+  const resendCode = async () => {
+    setVerifyBusy(true);
+    setVerifyMsg(null);
+    setVerifyError(null);
+    try {
+      await apiFetch("/api/me/notification-prefs/sms/start-verification", {
+        method: "POST",
+        body: {},
+      });
+      setVerifyMsg("New code sent. Check your phone.");
+    } catch (e) {
+      setVerifyError(errMsg(e));
+    } finally {
+      setVerifyBusy(false);
+    }
+  };
+
+  const submitCode = async () => {
+    const code = verifyCode.trim();
+    if (!/^\d{6}$/.test(code)) {
+      setVerifyError("Enter the 6-digit code we texted you.");
+      return;
+    }
+    setVerifyBusy(true);
+    setVerifyMsg(null);
+    setVerifyError(null);
+    try {
+      const next = await apiFetch<PrefsResponse>(
+        "/api/me/notification-prefs/sms/verify",
+        { method: "POST", body: { code } },
+      );
+      qc.setQueryData(["notification-prefs"], next);
+      setVerifyCode("");
+      setVerifyMsg("Phone number verified. SMS alerts are unlocked.");
+    } catch (e) {
+      setVerifyError(errMsg(e));
+    } finally {
+      setVerifyBusy(false);
+    }
+  };
+
+  const phoneSavedNonEmpty = !!sms.sms_phone_number;
+  const needsVerification = phoneSavedNonEmpty && !sms.sms_phone_verified;
+  const smsToggleDisabled =
+    busy || !eliteUnlocked || !sms.sms_phone_verified;
 
   return (
     <View>
@@ -288,6 +419,222 @@ export function NotificationPrefs(): React.ReactElement {
           <ActivityIndicator color={colors.primary} style={{ marginTop: 8 }} />
         ) : null}
       </Card>
+
+      <SectionHeader>SMS ALERTS</SectionHeader>
+      <Card>
+        <Row
+          label="Live trades — SMS"
+          hint={
+            !eliteUnlocked
+              ? "Elite tier required to enable SMS alerts."
+              : !sms.sms_phone_verified
+                ? "Verify your phone number below to enable SMS alerts."
+                : "Text-message alert for every live (non-paper) fill."
+          }
+          value={data.sms_live_trade}
+          disabled={smsToggleDisabled}
+          onChange={(v) => mutation.mutate({ sms_live_trade: v })}
+          colors={colors}
+          testID="row-sms-live-trade"
+        />
+        <View style={[styles.divider, { backgroundColor: colors.border }]} />
+        <View style={styles.smsBlock}>
+          <View style={styles.smsHeaderRow}>
+            <Text style={[styles.label, { color: colors.foreground }]}>
+              Phone number
+            </Text>
+            {phoneSavedNonEmpty ? (
+              <View
+                testID="badge-phone-verified-status"
+                style={[
+                  styles.badge,
+                  {
+                    borderColor: sms.sms_phone_verified
+                      ? colors.primary
+                      : colors.destructive,
+                  },
+                ]}
+              >
+                <Text
+                  style={[
+                    styles.badgeText,
+                    {
+                      color: sms.sms_phone_verified
+                        ? colors.primary
+                        : colors.destructive,
+                    },
+                  ]}
+                >
+                  {sms.sms_phone_verified ? "Verified" : "Unverified"}
+                </Text>
+              </View>
+            ) : null}
+          </View>
+          <Text style={[styles.hint, { color: colors.mutedForeground }]}>
+            E.164 format, e.g. +15551234567
+          </Text>
+          <View style={styles.phoneRow}>
+            <TextInput
+              testID="input-sms-phone"
+              value={phone}
+              onChangeText={(v) => {
+                setPhone(v);
+                setPhoneDirty(true);
+              }}
+              placeholder="+15551234567"
+              placeholderTextColor={colors.mutedForeground}
+              autoCapitalize="none"
+              autoCorrect={false}
+              keyboardType="phone-pad"
+              editable={!busy && eliteUnlocked}
+              style={[
+                styles.input,
+                {
+                  borderColor: colors.border,
+                  color: colors.foreground,
+                  backgroundColor: colors.background,
+                  opacity: !eliteUnlocked ? 0.5 : 1,
+                },
+              ]}
+            />
+            <Pressable
+              testID="button-save-phone"
+              onPress={savePhone}
+              disabled={busy || !eliteUnlocked}
+              accessibilityRole="button"
+              accessibilityLabel="Save phone number"
+              style={({ pressed }) => [
+                styles.primaryButton,
+                {
+                  backgroundColor: colors.primary,
+                  opacity: busy || !eliteUnlocked ? 0.5 : pressed ? 0.7 : 1,
+                },
+              ]}
+            >
+              <Text
+                style={[
+                  styles.primaryButtonText,
+                  { color: colors.primaryForeground },
+                ]}
+              >
+                Save
+              </Text>
+            </Pressable>
+          </View>
+
+          {needsVerification ? (
+            <View
+              testID="section-phone-verify"
+              style={[
+                styles.verifyBox,
+                { borderColor: colors.border },
+              ]}
+            >
+              <Text style={[styles.label, { color: colors.foreground }]}>
+                Confirm ownership
+              </Text>
+              <Text style={[styles.hint, { color: colors.mutedForeground }]}>
+                We sent a 6-digit code to {sms.sms_phone_number}. Enter it
+                below to enable paid SMS alerts.
+              </Text>
+              <View style={styles.phoneRow}>
+                <TextInput
+                  testID="input-sms-code"
+                  value={verifyCode}
+                  onChangeText={(v) =>
+                    setVerifyCode(v.replace(/\D/g, "").slice(0, 6))
+                  }
+                  placeholder="123456"
+                  placeholderTextColor={colors.mutedForeground}
+                  keyboardType="number-pad"
+                  maxLength={6}
+                  editable={!verifyBusy && !busy}
+                  textContentType="oneTimeCode"
+                  autoComplete="sms-otp"
+                  style={[
+                    styles.input,
+                    styles.codeInput,
+                    {
+                      borderColor: colors.border,
+                      color: colors.foreground,
+                      backgroundColor: colors.background,
+                    },
+                  ]}
+                />
+                <Pressable
+                  testID="button-verify-code"
+                  onPress={submitCode}
+                  disabled={verifyBusy || busy || verifyCode.length !== 6}
+                  accessibilityRole="button"
+                  accessibilityLabel="Verify code"
+                  style={({ pressed }) => [
+                    styles.primaryButton,
+                    {
+                      backgroundColor: colors.primary,
+                      opacity:
+                        verifyBusy || busy || verifyCode.length !== 6
+                          ? 0.5
+                          : pressed
+                            ? 0.7
+                            : 1,
+                    },
+                  ]}
+                >
+                  <Text
+                    style={[
+                      styles.primaryButtonText,
+                      { color: colors.primaryForeground },
+                    ]}
+                  >
+                    Verify
+                  </Text>
+                </Pressable>
+                <Pressable
+                  testID="button-resend-code"
+                  onPress={resendCode}
+                  disabled={verifyBusy || busy}
+                  accessibilityRole="button"
+                  accessibilityLabel="Resend verification code"
+                  style={({ pressed }) => [
+                    styles.secondaryButton,
+                    {
+                      borderColor: colors.border,
+                      opacity:
+                        verifyBusy || busy ? 0.5 : pressed ? 0.7 : 1,
+                    },
+                  ]}
+                >
+                  <Text
+                    style={[
+                      styles.secondaryButtonText,
+                      { color: colors.foreground },
+                    ]}
+                  >
+                    Resend
+                  </Text>
+                </Pressable>
+              </View>
+            </View>
+          ) : null}
+
+          {verifyMsg ? (
+            <Text
+              testID="text-verify-msg"
+              style={[styles.hint, { color: colors.primary }]}
+            >
+              {verifyMsg}
+            </Text>
+          ) : null}
+          {verifyError ? (
+            <Text
+              testID="text-verify-error"
+              style={[styles.hint, { color: colors.destructive }]}
+            >
+              {verifyError}
+            </Text>
+          ) : null}
+        </View>
+      </Card>
       <TimezonePicker
         visible={tzPickerOpen}
         selected={quiet.quiet_hours_tz}
@@ -353,6 +700,7 @@ function Row({
   disabled,
   onChange,
   colors,
+  testID,
 }: {
   label: string;
   hint: string;
@@ -360,9 +708,10 @@ function Row({
   disabled: boolean;
   onChange: (v: boolean) => void;
   colors: ReturnType<typeof useColors>;
+  testID?: string;
 }): React.ReactElement {
   return (
-    <View style={styles.row}>
+    <View style={styles.row} testID={testID}>
       <View style={{ flex: 1, paddingRight: 12 }}>
         <Text style={[styles.label, { color: colors.foreground }]}>{label}</Text>
         <Text style={[styles.hint, { color: colors.mutedForeground }]}>{hint}</Text>
@@ -406,4 +755,74 @@ const styles = StyleSheet.create({
   },
   tzRow: { flexDirection: "row", alignItems: "center", paddingVertical: 8 },
   tzButtonText: { fontSize: 13, fontFamily: "Inter_600SemiBold" },
+  smsBlock: { paddingTop: 8, paddingBottom: 4, gap: 8 },
+  smsHeaderRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+  },
+  badge: {
+    borderWidth: 1,
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 4,
+  },
+  badgeText: {
+    fontSize: 10,
+    letterSpacing: 1.2,
+    fontFamily: "Inter_600SemiBold",
+    textTransform: "uppercase",
+  },
+  phoneRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+  },
+  input: {
+    flex: 1,
+    borderWidth: 1,
+    borderRadius: 6,
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+    fontSize: 13,
+    fontFamily: "Inter_500Medium",
+  },
+  codeInput: {
+    textAlign: "center",
+    letterSpacing: 4,
+  },
+  primaryButton: {
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    borderRadius: 6,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  primaryButtonText: {
+    fontSize: 12,
+    fontFamily: "Inter_700Bold",
+    textTransform: "uppercase",
+    letterSpacing: 1,
+  },
+  secondaryButton: {
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    borderRadius: 6,
+    borderWidth: 1,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  secondaryButtonText: {
+    fontSize: 12,
+    fontFamily: "Inter_600SemiBold",
+    textTransform: "uppercase",
+    letterSpacing: 1,
+  },
+  verifyBox: {
+    borderWidth: 1,
+    borderRadius: 6,
+    padding: 10,
+    gap: 8,
+    marginTop: 4,
+  },
 });
