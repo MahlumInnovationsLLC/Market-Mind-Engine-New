@@ -40,6 +40,7 @@ dashboard.
 """
 from __future__ import annotations
 
+import json
 import logging
 import math
 from dataclasses import dataclass, field
@@ -190,6 +191,127 @@ def evaluate_against_bars(
         completed_at=datetime.now(timezone.utc).isoformat(),
     )
     return result
+
+
+async def record_run(
+    result: BacktestResult, *, days: int, lookback: int
+) -> None:
+    """Persist a completed backtest into ``crypto_backtest_runs``.
+
+    Best-effort: callers run the backtest synchronously and report the
+    summary to the operator regardless, so a write failure here is
+    logged and swallowed rather than failing the surrounding HTTP call.
+    Empty runs (``n_evaluated == 0`` — no bars matched the requested
+    window) are skipped so the trend chart isn't polluted with
+    meaningless zero rows.
+    """
+    if result.n_evaluated <= 0:
+        return
+    started: datetime | None = None
+    if result.started_at:
+        try:
+            started = datetime.fromisoformat(result.started_at)
+        except ValueError:
+            started = None
+    completed: datetime | None = None
+    if result.completed_at:
+        try:
+            completed = datetime.fromisoformat(result.completed_at)
+        except ValueError:
+            completed = None
+    reliability_json = json.dumps(
+        [
+            {"lo": lo, "hi": hi, "p_mean": p, "actual": a, "n": n}
+            for (lo, hi, p, a, n) in result.reliability
+        ]
+    )
+    try:
+        await db.execute(
+            """
+            INSERT INTO crypto_backtest_runs (
+                symbol, timeframe, days, lookback, n_evaluated,
+                accuracy, brier_score, log_loss, reliability,
+                started_at, completed_at
+            )
+            VALUES (
+                $1, $2, $3, $4, $5,
+                $6, $7, $8, $9::jsonb,
+                COALESCE($10, now()), COALESCE($11, now())
+            )
+            """,
+            result.symbol,
+            result.timeframe,
+            int(days),
+            int(lookback),
+            int(result.n_evaluated),
+            float(result.accuracy),
+            float(result.brier_score),
+            float(result.log_loss),
+            reliability_json,
+            started,
+            completed,
+        )
+    except Exception:  # pragma: no cover — defensive: never fail the caller
+        log.exception(
+            "[crypto.backtest] failed to persist backtest result for %s/%s",
+            result.symbol,
+            result.timeframe,
+        )
+
+
+async def list_history(
+    *, symbol: str, timeframe: str, limit: int = 50
+) -> list[dict[str, Any]]:
+    """Return the most recent ``limit`` persisted runs for the pair.
+
+    Sorted oldest-first so the operator dashboard can plot the
+    returned series straight onto a left-to-right time axis without
+    re-sorting in JS.
+    """
+    capped = max(1, min(int(limit), 500))
+    try:
+        rows = await db.fetch(
+            """
+            SELECT id, symbol, timeframe, days, lookback,
+                   n_evaluated, accuracy, brier_score, log_loss,
+                   started_at, completed_at
+              FROM crypto_backtest_runs
+             WHERE symbol = $1 AND timeframe = $2
+             ORDER BY completed_at DESC
+             LIMIT $3
+            """,
+            symbol,
+            timeframe,
+            capped,
+        )
+    except Exception:
+        log.exception(
+            "[crypto.backtest] failed to list history for %s/%s",
+            symbol,
+            timeframe,
+        )
+        return []
+    items = [
+        {
+            "id": int(r["id"]),
+            "symbol": r["symbol"],
+            "timeframe": r["timeframe"],
+            "days": int(r["days"]),
+            "lookback": int(r["lookback"]),
+            "n_evaluated": int(r["n_evaluated"]),
+            "accuracy": float(r["accuracy"]),
+            "brier_score": float(r["brier_score"]),
+            "log_loss": float(r["log_loss"]),
+            "started_at": r["started_at"].isoformat() if r["started_at"] else None,
+            "completed_at": (
+                r["completed_at"].isoformat() if r["completed_at"] else None
+            ),
+        }
+        for r in rows
+    ]
+    # Reverse to oldest-first so the chart reads left-to-right.
+    items.reverse()
+    return items
 
 
 async def run_backtest(

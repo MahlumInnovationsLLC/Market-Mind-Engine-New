@@ -1,13 +1,15 @@
-"""Persist scheduled crypto-binary backtest results (task #421).
+"""Persist completed crypto-binary backtest runs for trend visualisation.
 
-The new ``crypto_backtest_runs`` table stores one row per scheduled
-``run_backtest`` invocation so the dashboard can chart accuracy /
-Brier / log-loss as a trend, and the drift watcher can compare each
-fresh run against a rolling baseline of prior runs for the same
-``(symbol, timeframe)`` pair.
+Adds:
+  * ``crypto_backtest_runs`` — append-only table of completed
+    expanding-window backtests.  One row per ``run_backtest`` call so
+    the operator console can plot Brier / log-loss / accuracy trend
+    lines per (symbol, timeframe) pair without re-running on demand.
+  * ``crypto_backtest_runs_pair_completed_idx`` — supporting index on
+    (symbol, timeframe, completed_at DESC) so the history endpoint's
+    "most-recent-N rows for a pair" query stays cheap.
 
-Idempotent ``CREATE TABLE IF NOT EXISTS`` so re-running the migration
-on a fork that was created with a hand-rolled DDL is a no-op.
+Per task #422 (Show the crypto backtest history as a trend chart).
 """
 from __future__ import annotations
 
@@ -22,32 +24,25 @@ depends_on = None
 
 _SQL_UP = """
 CREATE TABLE IF NOT EXISTS crypto_backtest_runs (
-    id            BIGSERIAL PRIMARY KEY,
-    symbol        TEXT NOT NULL,
-    timeframe     TEXT NOT NULL,
-    days          INTEGER NOT NULL,
-    lookback      INTEGER NOT NULL,
-    n_evaluated   INTEGER NOT NULL,
-    accuracy      DOUBLE PRECISION NOT NULL,
-    brier_score   DOUBLE PRECISION NOT NULL,
-    log_loss      DOUBLE PRECISION NOT NULL,
-    reliability   JSONB NOT NULL DEFAULT '[]'::jsonb,
-    started_at    TIMESTAMPTZ NOT NULL,
-    completed_at  TIMESTAMPTZ NOT NULL,
-    created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+    id            bigserial         PRIMARY KEY,
+    symbol        text              NOT NULL,
+    timeframe     text              NOT NULL,
+    days          integer           NOT NULL,
+    lookback      integer           NOT NULL,
+    n_evaluated   integer           NOT NULL,
+    accuracy      double precision  NOT NULL,
+    brier_score   double precision  NOT NULL,
+    log_loss      double precision  NOT NULL,
+    started_at    timestamptz,
+    completed_at  timestamptz       NOT NULL DEFAULT now()
 );
 
-CREATE INDEX IF NOT EXISTS crypto_backtest_runs_pair_idx
+CREATE INDEX IF NOT EXISTS crypto_backtest_runs_pair_completed_idx
     ON crypto_backtest_runs (symbol, timeframe, completed_at DESC);
-
-CREATE INDEX IF NOT EXISTS crypto_backtest_runs_completed_idx
-    ON crypto_backtest_runs (completed_at DESC);
 """
 
-
 _SQL_DOWN = """
-DROP INDEX IF EXISTS crypto_backtest_runs_completed_idx;
-DROP INDEX IF EXISTS crypto_backtest_runs_pair_idx;
+DROP INDEX IF EXISTS crypto_backtest_runs_pair_completed_idx;
 DROP TABLE IF EXISTS crypto_backtest_runs;
 """
 

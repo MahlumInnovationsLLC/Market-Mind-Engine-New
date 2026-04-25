@@ -2,6 +2,15 @@ import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { Link, Redirect } from "wouter";
 import { useAuth } from "@clerk/react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import {
+  CartesianGrid,
+  Line,
+  LineChart,
+  ResponsiveContainer,
+  Tooltip,
+  XAxis,
+  YAxis,
+} from "recharts";
 import { apiFetch, REQUEST_ID_HEADER, newRequestId } from "@/lib/api";
 import { usePipelineSubscription } from "@/components/realtime/websocket-provider";
 import {
@@ -4473,6 +4482,26 @@ type CryptoBacktestResult = {
   completed_at: string;
 };
 
+type CryptoBacktestHistoryItem = {
+  id: number;
+  symbol: string;
+  timeframe: string;
+  days: number;
+  lookback: number;
+  n_evaluated: number;
+  accuracy: number;
+  brier_score: number;
+  log_loss: number;
+  started_at: string | null;
+  completed_at: string | null;
+};
+
+type CryptoBacktestHistoryResponse = {
+  symbol: string;
+  timeframe: string;
+  items: CryptoBacktestHistoryItem[];
+};
+
 function fmtMetric(v: number | null | undefined, digits = 4): string {
   if (v === null || v === undefined || Number.isNaN(v)) return "—";
   return v.toFixed(digits);
@@ -4534,11 +4563,56 @@ export function CryptoBacktestPanel() {
     staleTime: 60_000,
   });
 
+  // Persisted backtest history for the *currently-selected* pair
+  // (independent of `pendingParams` — operators can flip the selector
+  // and immediately see the trend without having to press Run first).
+  // Refetches automatically when a new run completes via the
+  // `data?.completed_at` dependency in the queryKey, so the chart
+  // picks up the row this very session just persisted.
+  const historyQuery = useQuery<CryptoBacktestHistoryResponse>({
+    queryKey: [
+      "admin",
+      "crypto-backtest-history",
+      symbol,
+      timeframe,
+      data?.completed_at ?? "",
+    ] as const,
+    queryFn: () => {
+      const qs = new URLSearchParams({
+        symbol,
+        timeframe,
+        limit: "50",
+      });
+      return apiFetch<CryptoBacktestHistoryResponse>(
+        `/api/admin/crypto/backtest/history?${qs.toString()}`,
+        { getToken: tokenFn },
+      );
+    },
+    enabled: !!isSignedIn,
+    refetchOnWindowFocus: false,
+    staleTime: 30_000,
+  });
+
   const handleRun = () => {
     setPendingParams({ symbol, timeframe, days, nonce: Date.now() });
   };
 
   const reliabilityRows = data?.reliability ?? [];
+
+  // Shape the history rows for recharts. Use a 1-based index on the
+  // x-axis (cheap + readable) and surface completed_at via the tooltip
+  // so operators can still see *when* a run happened on hover.
+  const historySeries = useMemo(() => {
+    const items = historyQuery.data?.items ?? [];
+    return items.map((row, i) => ({
+      idx: i + 1,
+      brier: row.brier_score,
+      log_loss: row.log_loss,
+      accuracy: row.accuracy,
+      completed_at: row.completed_at,
+      n_evaluated: row.n_evaluated,
+    }));
+  }, [historyQuery.data]);
 
   return (
     <div className="space-y-3" data-testid="panel-crypto-backtest">
@@ -4647,6 +4721,114 @@ export function CryptoBacktestPanel() {
           Choose a symbol / timeframe / window above and press Run.
         </div>
       )}
+
+      <div
+        className="border border-border bg-card p-3 space-y-2"
+        data-testid="crypto-backtest-history"
+      >
+        <div className="flex items-baseline justify-between">
+          <h3 className="text-[10px] uppercase tracking-widest text-muted-foreground">
+            Trend · {symbol} · {timeframe}
+          </h3>
+          <span className="text-[10px] uppercase tracking-widest text-muted-foreground">
+            {historyQuery.data?.items.length ?? 0} runs
+          </span>
+        </div>
+        {historyQuery.isLoading ? (
+          <div
+            className="h-32 animate-pulse bg-muted/10"
+            data-testid="crypto-backtest-history-loading"
+          />
+        ) : historyQuery.error ? (
+          <div
+            className="text-[11px] text-loss"
+            data-testid="crypto-backtest-history-error"
+          >
+            Failed to load backtest history:{" "}
+            {historyQuery.error instanceof Error
+              ? historyQuery.error.message
+              : String(historyQuery.error)}
+          </div>
+        ) : historySeries.length === 0 ? (
+          <div
+            className="py-6 text-center text-[11px] text-muted-foreground"
+            data-testid="crypto-backtest-history-empty"
+          >
+            No backtest history yet for this pair — run one above to start
+            building a trend.
+          </div>
+        ) : (
+          <div
+            className="h-32 w-full"
+            data-testid="crypto-backtest-history-chart"
+          >
+            <ResponsiveContainer width="100%" height="100%">
+              <LineChart
+                data={historySeries}
+                margin={{ top: 4, right: 8, bottom: 0, left: 0 }}
+              >
+                <CartesianGrid
+                  strokeDasharray="3 3"
+                  stroke="hsl(var(--border))"
+                  opacity={0.3}
+                />
+                <XAxis
+                  dataKey="idx"
+                  tick={{ fontSize: 10, fill: "hsl(var(--muted-foreground))" }}
+                  tickLine={false}
+                  axisLine={false}
+                />
+                <YAxis
+                  tick={{ fontSize: 10, fill: "hsl(var(--muted-foreground))" }}
+                  tickLine={false}
+                  axisLine={false}
+                  width={36}
+                  domain={[0, "auto"]}
+                />
+                <Tooltip
+                  cursor={{ stroke: "hsl(var(--border))" }}
+                  contentStyle={{
+                    background: "hsl(var(--popover))",
+                    border: "1px solid hsl(var(--border))",
+                    fontSize: 11,
+                  }}
+                  labelFormatter={(_v, payload) => {
+                    const completed = payload?.[0]?.payload?.completed_at;
+                    return completed
+                      ? String(completed)
+                          .replace("T", " ")
+                          .replace(/\..*$/, "")
+                      : "";
+                  }}
+                  formatter={(value: number, name: string) => [
+                    typeof value === "number" ? value.toFixed(4) : value,
+                    name,
+                  ]}
+                />
+                <Line
+                  type="monotone"
+                  dataKey="brier"
+                  name="Brier"
+                  stroke="hsl(var(--primary))"
+                  strokeWidth={2}
+                  dot={false}
+                  isAnimationActive={false}
+                />
+                <Line
+                  type="monotone"
+                  dataKey="log_loss"
+                  name="Log loss"
+                  stroke="hsl(var(--accent-cyan, var(--primary)))"
+                  strokeWidth={2}
+                  strokeDasharray="4 2"
+                  dot={false}
+                  isAnimationActive={false}
+                />
+              </LineChart>
+            </ResponsiveContainer>
+          </div>
+        )}
+      </div>
 
       {data && (
         <div className="space-y-3" data-testid="crypto-backtest-result">

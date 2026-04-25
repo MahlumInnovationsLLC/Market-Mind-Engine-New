@@ -3432,7 +3432,51 @@ async def admin_crypto_backtest(
     except Exception:
         log.exception("crypto backtest failed")
         raise HTTPException(status_code=502, detail="backtest failed")
+    # Persist the completed run so the operator console can plot a
+    # Brier / log-loss trend over time without re-running on demand.
+    # Best-effort — the helper swallows DB errors so a flaky write
+    # never masks a successful summary from the operator.
+    await crypto_backtest.record_run(result, days=days, lookback=lookback)
     return result.as_dict()
+
+
+@app.get("/api/admin/crypto/backtest/history")
+async def admin_crypto_backtest_history(
+    symbol: str = Query("BTC"),
+    timeframe: str = Query("1h"),
+    limit: int = Query(50, ge=1, le=500),
+    actor: AuthedUser = Depends(require_admin),
+) -> dict[str, object]:
+    """Return the most recent persisted backtest rows for a pair.
+
+    Drives the trend line in the operator console's Crypto-binary
+    backtest panel — operators can spot Brier / log-loss drift across
+    runs visually instead of comparing raw numbers.
+
+    Symbol / timeframe are validated against the same supported
+    universe as the run endpoint so callers can't smuggle through
+    arbitrary strings.  Returns rows oldest-first (chart-friendly).
+    """
+    sym = symbol.strip().upper()
+    if sym not in _CRYPTO_SYMBOLS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"unsupported symbol {sym!r}; expected one of {list(_CRYPTO_SYMBOLS)}",
+        )
+    tf = timeframe.strip().lower()
+    if tf not in _CRYPTO_TIMEFRAMES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"unsupported timeframe {tf!r}; expected one of {list(_CRYPTO_TIMEFRAMES)}",
+        )
+    items = await crypto_backtest.list_history(
+        symbol=sym, timeframe=tf, limit=limit
+    )
+    return {
+        "symbol": sym,
+        "timeframe": tf,
+        "items": items,
+    }
 
 
 @app.get("/api/health")
