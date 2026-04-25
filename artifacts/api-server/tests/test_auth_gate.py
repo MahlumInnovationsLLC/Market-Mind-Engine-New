@@ -197,6 +197,8 @@ PROTECTED_MUTATING_ENDPOINTS: tuple[tuple[str, str], ...] = (
     ("POST", "/api/admin/models/mirror/push"),
     ("POST", "/api/admin/autoresearch/features/{name}/decision"),
     ("POST", "/api/admin/autoresearch/run"),
+    # Task #425 — operator-triggered backfill of uw_signals.ticker.
+    ("POST", "/api/admin/uw-signals/backfill-ticker"),
     ("POST", "/api/admin/margin-regressor/refit"),
     # Task #271 — per-vertical halt/resume toggles.
     ("POST", "/api/admin/verticals/{vertical}/halt"),

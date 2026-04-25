@@ -2934,6 +2934,28 @@ async def admin_autoresearch_run(
     }
 
 
+@app.post("/api/admin/uw-signals/backfill-ticker")
+async def admin_uw_signals_backfill_ticker(
+    actor: AuthedUser = Depends(require_admin),
+) -> dict[str, object]:
+    """Re-derive + canonicalise ``uw_signals.ticker`` (task #425).
+
+    The per-ticker UW mining (task #189) joins settled trades against
+    ``upper(uw_signals.ticker) = $4``.  Historical rows that landed
+    with a NULL ticker — or with a non-canonical (lowercase /
+    whitespace-padded) one — silently drop out of that join.
+
+    Runs the same idempotent SQL as the
+    ``0022_uw_signals_ticker_backfill`` Alembic migration, but as an
+    on-demand admin action so operators can re-run it after a
+    degraded ingest window without driving the whole migration
+    stack.  Returns the per-pass row counts.
+    """
+    from .feeds.uw_ticker_backfill import backfill_uw_signals_ticker
+    result = await backfill_uw_signals_ticker()
+    return result.as_dict()
+
+
 # ---------------------------------------------------------------------------
 # Margin-regressor status (admin-only)
 # ---------------------------------------------------------------------------
