@@ -108,6 +108,117 @@ def test_html_body_uses_same_table_styling_as_daily_summary() -> None:
         assert needle in daily
 
 
+def test_html_body_renders_top_movers_when_supplied() -> None:
+    movers = [
+        {"market_ticker": "NFLGAME-DET-KC", "realized_pnl_cents": 25000, "position": 12},
+        {"market_ticker": "NBA-LAL-DEN", "realized_pnl_cents": -8000, "position": 4},
+        {"market_ticker": "MLB-LAD-SF", "realized_pnl_cents": 1200, "position": 1},
+    ]
+    res = _result(top_movers=movers)
+    html = res["html_preview"]
+    text = res["body_preview"]
+    assert html is not None
+    assert "Top movers this week" in html
+    assert "NFLGAME-DET-KC" in html
+    assert "NBA-LAL-DEN" in html
+    # Realized P&L is signed and colorised the same as the daily summary.
+    assert "+$250.00" in html
+    assert "-$80.00" in html
+    assert "#047857" in html  # green for the positive mover
+    assert "#B91C1C" in html  # red for the negative mover
+    # Plain-text fallback also lists the movers.
+    assert "Top movers this week:" in text
+    assert "NFLGAME-DET-KC" in text
+
+
+def test_html_body_caps_top_movers_at_five() -> None:
+    movers = [
+        {"market_ticker": f"MKT-{i}", "realized_pnl_cents": 1000 - i, "position": 1}
+        for i in range(8)
+    ]
+    res = _result(top_movers=movers)
+    html = res["html_preview"]
+    assert html is not None
+    assert "MKT-0" in html
+    assert "MKT-4" in html
+    # Anything past the top 5 must be dropped from both bodies.
+    assert "MKT-5" not in html
+    assert "MKT-7" not in html
+    assert "MKT-5" not in res["body_preview"]
+
+
+def test_html_body_renders_per_vertical_breakdown() -> None:
+    rows = [
+        {
+            "vertical": "sports",
+            "trades": 9,
+            "wins": 6,
+            "losses": 3,
+            "pnl_cents": 4321,
+            "win_rate_pct": 66.7,
+            "avg_edge": 0.045,
+            "brier": None,
+        },
+        {
+            "vertical": "elections",
+            "trades": 3,
+            "wins": 1,
+            "losses": 2,
+            "pnl_cents": -1500,
+            "win_rate_pct": 33.3,
+            "avg_edge": -0.012,
+            "brier": None,
+        },
+    ]
+    res = _result(by_vertical=rows)
+    html = res["html_preview"]
+    text = res["body_preview"]
+    assert html is not None
+    assert "By vertical" in html
+    assert "sports" in html
+    assert "elections" in html
+    # Per-vertical PnL is signed and colorised.
+    assert "+$43.21" in html
+    assert "-$15.00" in html
+    # Win-rate % is rendered with one decimal place.
+    assert "66.7%" in html
+    # Plain-text fallback includes the same breakdown.
+    assert "By vertical:" in text
+    assert "sports" in text
+    assert "elections" in text
+
+
+def test_html_body_renders_dashboard_cta() -> None:
+    res = _result(dashboard_url="https://app.example.com/positions")
+    html = res["html_preview"]
+    text = res["body_preview"]
+    assert html is not None
+    assert "View dashboard" in html
+    assert 'href="https://app.example.com/positions"' in html
+    # The CTA uses the same primary-button styling as the trade-confirmation email.
+    assert "background:#2563EB" in html
+    # And the plain-text fallback surfaces the same link.
+    assert "https://app.example.com/positions" in text
+
+
+def test_html_body_falls_back_to_public_positions_url(monkeypatch) -> None:
+    monkeypatch.setattr(alerts, "_public_base_url", lambda: "https://example.com")
+    res = _result()
+    html = res["html_preview"]
+    text = res["body_preview"]
+    assert html is not None
+    assert "https://example.com/positions" in html
+    assert "https://example.com/positions" in text
+
+
+def test_html_body_escapes_dashboard_url() -> None:
+    res = _result(dashboard_url='https://x.com/"><script>alert(1)</script>')
+    html = res["html_preview"]
+    assert html is not None
+    assert "<script>alert(1)</script>" not in html
+    assert "&lt;script&gt;alert(1)&lt;/script&gt;" in html
+
+
 def test_dispatch_passes_html_body_to_postmark(monkeypatch) -> None:
     """Live (non-dry-run) path must hand both TextBody and HtmlBody
     off to Postmark so the dispatched email carries the new HTML."""

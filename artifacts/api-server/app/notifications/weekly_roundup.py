@@ -96,6 +96,8 @@ async def collect_summary(now: "datetime") -> dict[str, Any]:
         "unrealized_pnl_cents": 0,
         "trades_settled": 0,
         "win_rate_pct": None,
+        "by_vertical": [],
+        "top_movers": [],
     }
     # Realized P&L + settled count + win rate over the trailing week.
     try:
@@ -132,6 +134,78 @@ async def collect_summary(now: "datetime") -> dict[str, Any]:
         out["unrealized_pnl_cents"] = int(round(float(unr or 0.0) * 100))
     except Exception as e:
         error_log("weekly_roundup.positions", f"{type(e).__name__}: {e}")
+    # Top 5 movers (markets with the largest absolute realized PnL over the week).
+    try:
+        rows = await db.fetch(
+            """
+            SELECT market_id                         AS market_ticker,
+                   sum(realized_pnl)::float          AS realized_pnl,
+                   sum(quantity)::float              AS position
+              FROM trades
+             WHERE settled_at IS NOT NULL
+               AND settled_at >= $1::timestamptz
+               AND settled_at <  $2::timestamptz
+             GROUP BY market_id
+             ORDER BY abs(sum(realized_pnl)) DESC
+             LIMIT 5
+            """,
+            start_iso, end_iso,
+        )
+        out["top_movers"] = [
+            {
+                "market_ticker": r["market_ticker"],
+                "realized_pnl_cents": int(round(float(r["realized_pnl"] or 0.0) * 100)),
+                "position": float(r["position"] or 0.0),
+            }
+            for r in rows
+        ]
+    except Exception as e:
+        error_log("weekly_roundup.movers", f"{type(e).__name__}: {e}")
+    # Per-vertical P&L breakdown over the 7-day window. We aggregate the
+    # `trades` table directly (rather than the per-day `vertical_daily_pnl`
+    # rollup the daily summary uses) so the totals always reflect the
+    # rolling window the email actually covers, even if a day's rollup
+    # job lagged behind.
+    try:
+        rows = await db.fetch(
+            """
+            SELECT vertical                                              AS vertical,
+                   count(*)::int                                         AS n,
+                   count(*) FILTER (WHERE realized_pnl > 0)::int         AS wins,
+                   count(*) FILTER (WHERE realized_pnl <= 0)::int        AS losses,
+                   coalesce(sum(realized_pnl), 0)::float                 AS pnl,
+                   coalesce(avg(coalesce(model_edge, edge)), 0)::float   AS avg_edge
+              FROM trades
+             WHERE settled_at IS NOT NULL
+               AND settled_at >= $1::timestamptz
+               AND settled_at <  $2::timestamptz
+               AND vertical IS NOT NULL
+             GROUP BY vertical
+             ORDER BY abs(sum(realized_pnl)) DESC
+            """,
+            start_iso, end_iso,
+        )
+        out["by_vertical"] = [
+            {
+                "vertical": r["vertical"],
+                "trades": int(r["n"] or 0),
+                "wins": int(r["wins"] or 0),
+                "losses": int(r["losses"] or 0),
+                "pnl_cents": int(round(float(r["pnl"] or 0.0) * 100)),
+                "win_rate_pct": (
+                    100.0 * int(r["wins"] or 0) / int(r["n"])
+                    if int(r["n"] or 0) else 0.0
+                ),
+                "avg_edge": float(r["avg_edge"] or 0.0),
+                # Brier requires per-trade outcome probabilities and a
+                # rolling window join we don't need for the weekly view —
+                # the renderer collapses None to "—" in the email body.
+                "brier": None,
+            }
+            for r in rows
+        ]
+    except Exception as e:
+        error_log("weekly_roundup.by_vertical", f"{type(e).__name__}: {e}")
     return out
 
 

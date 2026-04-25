@@ -2226,6 +2226,9 @@ def weekly_roundup(
     unrealized_pnl_cents: int,
     trades_settled: int,
     win_rate_pct: float | None = None,
+    by_vertical: list[dict[str, Any]] | None = None,
+    top_movers: list[dict[str, Any]] | None = None,
+    dashboard_url: str | None = None,
     notes: str | None = None,
     dry_run: bool = False,
 ) -> dict[str, Any]:
@@ -2235,6 +2238,10 @@ def weekly_roundup(
     who opted in via ``email_weekly_roundup`` get one too. Tag is
     ``weekly-roundup`` so Postmark dashboards can split the metric out
     from the daily summary.
+
+    The HTML body mirrors the trade-confirmation/daily-summary visual
+    style with a per-vertical breakdown, top movers for the week, and
+    a "View dashboard" CTA back to ``/positions``.
     """
     fmt_cents = lambda c: f"{'+' if c >= 0 else '-'}${abs(c) / 100.0:,.2f}"
     subject = (
@@ -2249,28 +2256,78 @@ def weekly_roundup(
     ]
     if win_rate_pct is not None:
         rows.append(("win_rate_pct", f"{win_rate_pct:.1f}%"))
+    url = dashboard_url or f"{_public_base_url()}/positions"
     body = (
         "Weekly Axiom-Predict P&L roundup.\n\n"
         + _format_lines(rows)
         + "\n"
     )
+    if top_movers:
+        body += "\nTop movers this week:\n"
+        for m in top_movers[:5]:
+            body += (
+                f"  {str(m.get('market_ticker','?')):28s} "
+                f"realized={fmt_cents(int(m.get('realized_pnl_cents') or 0))} "
+                f"position={m.get('position','?')}\n"
+            )
+    body += _render_by_vertical(by_vertical, fmt_cents)
+    body += f"\nView dashboard: {url}\n"
     if notes:
         body += f"\nNotes:\n  {notes}\n"
     html_body = _render_weekly_roundup_html(
         week_ending_utc=week_ending_utc,
         summary_rows=rows,
+        by_vertical=by_vertical,
+        top_movers=top_movers,
+        dashboard_url=url,
         notes=notes,
+        fmt_cents=fmt_cents,
     )
     return _dispatch(
         subject, body, tag="weekly-roundup", dry_run=dry_run, html_body=html_body
     )
 
 
+def _render_weekly_top_movers_html(
+    rows: list[dict[str, Any]] | None,
+    fmt_cents,
+) -> str:
+    title = (
+        '<h3 style="margin:24px 0 8px 0;font-size:14px;color:#111827;">'
+        "Top movers this week</h3>"
+    )
+    if not rows:
+        return (
+            title
+            + '<p style="margin:0;color:#6B7280;font-size:13px;font-style:italic;">'
+              "No settled trades in the past week.</p>"
+        )
+    headers = [
+        ("Market", "left"),
+        ("Realized", "right"),
+        ("Position", "right"),
+    ]
+    body_rows = []
+    for m in rows[:5]:
+        pnl_c = int(m.get("realized_pnl_cents") or 0)
+        color = "#047857" if pnl_c >= 0 else "#B91C1C"
+        body_rows.append([
+            _html_escape(m.get("market_ticker", "?")),
+            f'<span style="color:{color};">{_html_escape(fmt_cents(pnl_c))}</span>',
+            _html_escape(m.get("position", "?")),
+        ])
+    return title + _html_table(headers, body_rows)
+
+
 def _render_weekly_roundup_html(
     *,
     week_ending_utc: str,
     summary_rows: list[tuple[str, Any]],
+    by_vertical: list[dict[str, Any]] | None,
+    top_movers: list[dict[str, Any]] | None,
+    dashboard_url: str,
     notes: str | None,
+    fmt_cents,
 ) -> str:
     overview_headers = [("Metric", "left"), ("Value", "right")]
     overview_rows = []
@@ -2283,6 +2340,9 @@ def _render_weekly_roundup_html(
         overview_rows.append([_html_escape(k), value_html])
     overview_html = _html_table(overview_headers, overview_rows)
 
+    by_vertical_html = _render_by_vertical_html(by_vertical, fmt_cents)
+    top_movers_html = _render_weekly_top_movers_html(top_movers, fmt_cents)
+
     notes_html = ""
     if notes:
         notes_html = (
@@ -2290,6 +2350,13 @@ def _render_weekly_roundup_html(
             f'<p style="margin:0;color:#374151;font-size:13px;line-height:1.5;'
             f'white-space:pre-wrap;">{_html_escape(notes)}</p>'
         )
+
+    cta_html = (
+        f'<a href="{_html_escape(dashboard_url)}" '
+        f'style="display:inline-block;background:#2563EB;color:#FFFFFF;'
+        f'text-decoration:none;padding:10px 16px;border-radius:6px;'
+        f'font-weight:600;font-size:14px;">View dashboard</a>'
+    )
 
     return f"""<!DOCTYPE html>
 <html>
@@ -2306,7 +2373,14 @@ def _render_weekly_roundup_html(
         <tr>
           <td style="padding:20px 24px;">
             {overview_html}
+            {top_movers_html}
+            {by_vertical_html}
             {notes_html}
+          </td>
+        </tr>
+        <tr>
+          <td style="padding:4px 24px 20px 24px;">
+            {cta_html}
           </td>
         </tr>
         <tr>

@@ -123,6 +123,7 @@ PROTECTED_ROUTES: tuple[str, ...] = (
     "/api/admin/models/mirror/status",
     # Task #181 — operator-only crypto-binary backtest panel.
     "/api/admin/crypto/backtest",
+    "/api/admin/crypto/backtest/history",
     "/api/admin/autoresearch/features",
     "/api/admin/margin-regressor/status",
     # Task #245 — operator-only calibration & research dashboards.
