@@ -90,13 +90,21 @@ BEGIN
         RETURN;
     END IF;
 
+    -- Use ``MAX(id) + 1`` with ``is_called=false`` so that:
+    --   1) ``last_value`` is *strictly greater* than ``MAX(id)``
+    --      immediately after this migration runs (the post-condition
+    --      asked for in the task plan — operators can verify the
+    --      repair without waiting for the first nextval()), and
+    --   2) the very next ``nextval()`` returns exactly ``MAX(id)+1``
+    --      (with ``is_called=false`` Postgres returns ``last_value``
+    --      itself on the next call, then advances).
     PERFORM setval(
         'model_health_alerts_id_seq',
         GREATEST(
-            (SELECT COALESCE(MAX(id), 0) FROM model_health_alerts),
+            (SELECT COALESCE(MAX(id), 0) FROM model_health_alerts) + 1,
             1
         ),
-        true
+        false
     );
 END $$;
 """
@@ -107,7 +115,7 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    # Repairing a sequence has no meaningful inverse — rolling the
-    # sequence value backwards would re-introduce the very collision
-    # this migration cured.
-    raise NotImplementedError("destructive down-migration not provided")
+    # No-op per the task plan: rolling the sequence value backwards
+    # would re-introduce the very collision this migration cured, and
+    # there is no meaningful inverse for a one-shot data repair.
+    pass
