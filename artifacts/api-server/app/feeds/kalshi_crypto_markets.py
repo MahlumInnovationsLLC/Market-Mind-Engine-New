@@ -58,6 +58,24 @@ _MAX_PAGES: int = 5
 _DEFAULT_CADENCE_SECS: float = 60.0
 _LEAGUE: str = "CRYPTO"
 
+# Settler tunables.  The settler is intentionally rate-limited: each
+# tick it picks the oldest N unsettled markets and asks Kalshi for the
+# resolved row.  ``_SETTLE_DEFAULT_CADENCE_SECS`` is much slower than
+# the discovery poll because settlements are sticky — once Kalshi
+# stamps a result the row stays settled forever, so re-checking every
+# minute would be pure burn.
+_SETTLE_DEFAULT_BATCH: int = 50
+_SETTLE_DEFAULT_CADENCE_SECS: float = 300.0
+# Kalshi's market lifecycle goes ``open`` → ``closed`` → (briefly)
+# ``determined`` → ``settled`` → ``finalized``.  Any of the latter
+# three carry a final ``result`` we can stamp.
+_SETTLED_STATUSES: frozenset[str] = frozenset({
+    "settled", "finalized", "determined", "resolved",
+})
+# The Kalshi API ships the resolution as ``result`` (modern) or
+# ``settlement`` (older payloads).  Both can be ``yes``/``no``/``void``.
+_VALID_OUTCOMES: frozenset[str] = frozenset({"yes", "no", "void"})
+
 # Series prefixes mapped from the supported base symbols. Kalshi groups
 # every BTC binary under ``KXBTC*`` (5m / 15m / 1h / daily variants
 # share the same series_ticker for the index call), and likewise for
@@ -289,6 +307,201 @@ async def poll_kalshi_crypto_markets() -> int:
     return await _upsert_candidates(rows)
 
 
+# --- Settlement --------------------------------------------------------------
+#
+# The discovery poller above writes live BTC/ETH markets into
+# ``predictions``; the cycle scores them; and once Kalshi resolves a
+# market we want the row stamped with the canonical YES/NO/void
+# outcome so historical accuracy + backtest reporting can join settled
+# predictions to their original prediction without a manual sweep.
+#
+# We deliberately keep this on the same module as discovery: both
+# halves share the Kalshi client, the league filter, and the
+# ``parse_close_time`` helper.  Splitting them across files would
+# fork the credential check and double the surface for the operator
+# console.
+
+
+def _settled_outcome(market: dict[str, Any]) -> str | None:
+    """Extract Kalshi's canonical YES/NO/void result from a market row.
+
+    Kalshi exposes the resolution under either ``result`` (modern) or
+    ``settlement`` (older payloads); both share the same enum.  We
+    require BOTH a settled-looking ``status`` and a valid outcome
+    string so a half-populated payload during the brief
+    ``closed → determined`` window can't trick us into stamping
+    settlement on a market that hasn't actually resolved yet.
+
+    Returns one of ``"yes"`` / ``"no"`` / ``"void"`` when the market is
+    settled, else ``None``.
+    """
+    status = (market.get("status") or "").strip().lower()
+    raw = market.get("result")
+    if raw is None or raw == "":
+        raw = market.get("settlement")
+    outcome = (str(raw) if raw is not None else "").strip().lower()
+    if outcome not in _VALID_OUTCOMES:
+        return None
+    # ``determined`` markets always carry a final result; some Kalshi
+    # responses show ``status='closed'`` alongside a populated result
+    # for a few seconds during the resolution sweep — accept either.
+    if status in _SETTLED_STATUSES or status == "closed":
+        return outcome
+    return None
+
+
+def _settle_price_dollars(outcome: str) -> float | None:
+    """Convenience YES-price for backtest math: 1.0 for YES, 0.0 for NO,
+    NULL for voided markets (those refund every contract)."""
+    if outcome == "yes":
+        return 1.0
+    if outcome == "no":
+        return 0.0
+    return None
+
+
+def _settled_at_for(market: dict[str, Any]) -> datetime:
+    """Pick the best-available settlement timestamp for a market.
+
+    Preference order: explicit ``settled_time`` / ``settlement_time``
+    fields → ``expiration_time`` / ``close_time`` → ``now()``.  We
+    always return a UTC-aware datetime so the UPDATE binds cleanly
+    against the ``timestamptz`` column.
+    """
+    for k in (
+        "settled_time", "settlement_time",
+        "determination_time", "result_time",
+        "expiration_time", "close_time",
+    ):
+        ts = _parse_close_time(market.get(k))
+        if ts is not None:
+            return ts
+    return datetime.now(timezone.utc)
+
+
+_UNSETTLED_SQL = """
+SELECT id, kalshi_market_id, game_time
+  FROM predictions
+ WHERE league = $1
+   AND kalshi_market_id IS NOT NULL
+   AND settled_at IS NULL
+   AND (game_time IS NULL OR game_time < now())
+ ORDER BY coalesce(game_time, created_at) ASC
+ LIMIT $2
+"""
+
+_SETTLE_UPDATE_SQL = """
+UPDATE predictions
+   SET settled_at   = $2,
+       outcome      = $3,
+       settle_price = $4,
+       updated_at   = now()
+ WHERE kalshi_market_id = $1
+   AND settled_at IS NULL
+"""
+
+
+async def _list_unsettled_candidates(limit: int) -> list[dict[str, Any]]:
+    """Read up to ``limit`` unsettled crypto rows whose game_time has
+    passed.  Soft-fails to an empty list so a transient DB hiccup
+    leaves the next tick to retry."""
+    try:
+        rows = await db.fetch(_UNSETTLED_SQL, _LEAGUE, int(limit))
+    except Exception as e:  # noqa: BLE001
+        log.debug("kalshi_crypto_settlements candidate query failed: %s", e)
+        return []
+    return [dict(r) for r in rows]
+
+
+async def _record_settlement(
+    ticker: str, outcome: str, settled_at: datetime, settle_price: float | None,
+) -> bool:
+    """Stamp the settlement onto the matching ``predictions`` row.
+
+    The ``settled_at IS NULL`` guard in the WHERE clause makes the
+    update idempotent: once the row has been stamped, subsequent
+    polls become no-ops (rowcount == 0) so the settler can safely
+    re-poll a sticky settlement window without overwriting the
+    timestamp we already recorded.
+
+    Returns ``True`` when a row was actually updated.
+    """
+    try:
+        result = await db.execute(
+            _SETTLE_UPDATE_SQL, ticker, settled_at, outcome, settle_price,
+        )
+    except Exception as e:  # noqa: BLE001
+        log.warning(
+            "predictions settlement update failed for %s: %s", ticker, e,
+        )
+        return False
+    # asyncpg returns the command tag (e.g. ``"UPDATE 1"``) — a missing
+    # tag still means the statement ran, so be permissive.
+    if isinstance(result, str) and result.startswith("UPDATE "):
+        try:
+            return int(result.split(" ", 1)[1]) > 0
+        except (IndexError, ValueError):
+            return True
+    return True
+
+
+async def poll_kalshi_crypto_settlements() -> int:
+    """One settler tick.
+
+    Pulls a small batch of unsettled crypto predictions, asks Kalshi
+    for the resolved row, and stamps ``settled_at`` / ``outcome`` /
+    ``settle_price`` whenever the market reports a final result.
+    Returns the number of rows freshly settled this tick (so the feed
+    registry's ``records_written_total`` reflects realised closures).
+
+    Soft-fails when Kalshi credentials aren't configured (returns 0)
+    — registration already advertises a clear ``skipped_reason`` in
+    that case.  All per-market errors are swallowed so one bad ticker
+    can't take the rest of the batch down.
+    """
+    settings = get_settings()
+    if not (settings.kalshi_api_key_id and settings.kalshi_private_key):
+        return 0
+
+    candidates = await _list_unsettled_candidates(_settle_batch_size())
+    if not candidates:
+        return 0
+
+    n = 0
+    try:
+        async with kalshi_client_mod.KalshiClient(settings=settings) as client:
+            for row in candidates:
+                ticker = row.get("kalshi_market_id")
+                if not ticker:
+                    continue
+                try:
+                    body = await client.get_market(ticker)
+                except Exception as e:  # noqa: BLE001
+                    # Per-ticker fetch failures are common (network blip,
+                    # 5xx) and the next tick re-picks the same rows, so
+                    # we just log and skip.
+                    log.debug("kalshi get_market failed for %s: %s", ticker, e)
+                    continue
+                market = body.get("market") if isinstance(body, dict) else None
+                if not isinstance(market, dict):
+                    continue
+                outcome = _settled_outcome(market)
+                if outcome is None:
+                    continue
+                settled_at = _settled_at_for(market)
+                settle_price = _settle_price_dollars(outcome)
+                if await _record_settlement(
+                    ticker, outcome, settled_at, settle_price,
+                ):
+                    n += 1
+    except Exception as e:  # noqa: BLE001
+        log.warning("kalshi_crypto_settlements poll crashed: %s", e)
+        return n
+    if n:
+        log.info("kalshi_crypto_settlements stamped %d row(s)", n)
+    return n
+
+
 # --- Registration ------------------------------------------------------------
 
 
@@ -301,6 +514,33 @@ def _cadence_seconds() -> float:
     except ValueError:
         return _DEFAULT_CADENCE_SECS
     return max(15.0, v)
+
+
+def _settle_cadence_seconds() -> float:
+    raw = os.environ.get("AXIOM_KALSHI_CRYPTO_SETTLEMENTS_CADENCE_SECS")
+    if not raw:
+        return _SETTLE_DEFAULT_CADENCE_SECS
+    try:
+        v = float(raw)
+    except ValueError:
+        return _SETTLE_DEFAULT_CADENCE_SECS
+    # Floor at 30s so an over-eager override can't melt the per-market
+    # endpoint; settlements are sticky so anything below this is waste.
+    return max(30.0, v)
+
+
+def _settle_batch_size() -> int:
+    raw = os.environ.get("AXIOM_KALSHI_CRYPTO_SETTLEMENTS_BATCH")
+    if not raw:
+        return _SETTLE_DEFAULT_BATCH
+    try:
+        v = int(raw)
+    except ValueError:
+        return _SETTLE_DEFAULT_BATCH
+    # Clamp to [1, 200] — Kalshi's per-market endpoint is cheap but
+    # not free, and we'd rather walk the backlog over a few ticks than
+    # block the scheduler on a giant burst.
+    return max(1, min(200, v))
 
 
 def register_kalshi_crypto_markets_feed() -> None:
@@ -334,4 +574,38 @@ def register_kalshi_crypto_markets_feed() -> None:
         "kalshi crypto markets feed registered (enabled=%s, cadence=%.1fs)",
         has_creds,
         _cadence_seconds(),
+    )
+
+
+def register_kalshi_crypto_settlements_feed() -> None:
+    """Register the BTC/ETH settlement poller with the global feed
+    registry.
+
+    Mirrors :func:`register_kalshi_crypto_markets_feed`: idempotent on
+    re-import, advertises a clear ``skipped_reason`` when Kalshi
+    credentials are missing, and runs on a much slower cadence
+    (settlements are sticky — once stamped the row never un-settles).
+    """
+    name = "kalshi_crypto_settlements"
+    if registry.status_of(name):
+        return
+    settings = get_settings()
+    has_creds = bool(
+        settings.kalshi_api_key_id and settings.kalshi_private_key
+    )
+    skipped_reason = (
+        None if has_creds
+        else "KALSHI_API_KEY_ID / KALSHI_API_PRIVATE_KEY not set"
+    )
+    registry.register(Feed(
+        name=name,
+        cadence_seconds=_settle_cadence_seconds(),
+        poll=poll_kalshi_crypto_settlements,
+        enabled=has_creds,
+        skipped_reason=skipped_reason,
+    ))
+    log.info(
+        "kalshi crypto settlements feed registered (enabled=%s, cadence=%.1fs)",
+        has_creds,
+        _settle_cadence_seconds(),
     )

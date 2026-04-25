@@ -254,3 +254,245 @@ def test_register_enabled_when_creds_present(monkeypatch):
     status = _registry.status_of("kalshi_crypto_markets")
     assert status is not None
     assert status.to_dict()["enabled"] is True
+
+
+# ---------------------------------------------------------------------------
+# Settler tests (task #424)
+# ---------------------------------------------------------------------------
+
+
+def test_settled_outcome_returns_none_until_resolved():
+    # No status / result yet — open market.
+    assert kcm._settled_outcome({"status": "open"}) is None
+    # Status looks settled but no result attached → still pre-stamp.
+    assert kcm._settled_outcome({"status": "settled"}) is None
+    # Result present but status nowhere near settled → don't stamp.
+    assert kcm._settled_outcome({"status": "open", "result": "yes"}) is None
+
+
+def test_settled_outcome_handles_yes_no_void_and_alt_keys():
+    assert kcm._settled_outcome({"status": "settled", "result": "yes"}) == "yes"
+    assert kcm._settled_outcome({"status": "finalized", "result": "NO"}) == "no"
+    assert kcm._settled_outcome({"status": "determined", "result": "void"}) == "void"
+    # Older payload uses ``settlement`` instead of ``result``.
+    assert kcm._settled_outcome(
+        {"status": "settled", "settlement": "yes"}
+    ) == "yes"
+    # ``closed`` + populated result is the brief resolution-sweep window.
+    assert kcm._settled_outcome({"status": "closed", "result": "no"}) == "no"
+    # Garbage outcome value rejected.
+    assert kcm._settled_outcome({"status": "settled", "result": "maybe"}) is None
+
+
+def test_settle_price_dollars():
+    assert kcm._settle_price_dollars("yes") == 1.0
+    assert kcm._settle_price_dollars("no") == 0.0
+    assert kcm._settle_price_dollars("void") is None
+
+
+def test_settled_at_for_prefers_explicit_timestamp_then_falls_back():
+    # Explicit settled_time wins.
+    assert kcm._settled_at_for(
+        {"settled_time": "2026-04-15T20:00:00Z",
+         "close_time": "2026-04-15T19:00:00Z"}
+    ) == datetime(2026, 4, 15, 20, 0, tzinfo=timezone.utc)
+    # Falls back to close_time when no settlement timestamp is published.
+    assert kcm._settled_at_for(
+        {"close_time": "2026-04-15T19:00:00Z"}
+    ) == datetime(2026, 4, 15, 19, 0, tzinfo=timezone.utc)
+    # Last-resort fallback: now() — just check it's UTC-aware.
+    fallback = kcm._settled_at_for({})
+    assert fallback.tzinfo is not None
+
+
+def test_record_settlement_returns_true_on_update(monkeypatch):
+    captured: dict[str, Any] = {}
+
+    async def fake_execute(sql: str, *args: Any) -> str:
+        captured["sql"] = sql
+        captured["args"] = args
+        return "UPDATE 1"
+
+    monkeypatch.setattr(kcm.db, "execute", fake_execute)
+    ok = asyncio.run(kcm._record_settlement(
+        "KXBTCD-X", "yes",
+        datetime(2026, 4, 15, 20, 0, tzinfo=timezone.utc),
+        1.0,
+    ))
+    assert ok is True
+    assert "UPDATE predictions" in captured["sql"]
+    assert "settled_at IS NULL" in captured["sql"]  # idempotency guard
+    assert captured["args"] == (
+        "KXBTCD-X",
+        datetime(2026, 4, 15, 20, 0, tzinfo=timezone.utc),
+        "yes",
+        1.0,
+    )
+
+
+def test_record_settlement_handles_zero_rowcount(monkeypatch):
+    async def fake_execute(sql: str, *args: Any) -> str:
+        return "UPDATE 0"
+
+    monkeypatch.setattr(kcm.db, "execute", fake_execute)
+    ok = asyncio.run(kcm._record_settlement(
+        "KXBTCD-X", "yes",
+        datetime(2026, 4, 15, 20, 0, tzinfo=timezone.utc),
+        1.0,
+    ))
+    assert ok is False
+
+
+def test_record_settlement_swallows_db_errors(monkeypatch):
+    async def fake_execute(sql: str, *args: Any) -> str:
+        raise RuntimeError("connection lost")
+
+    monkeypatch.setattr(kcm.db, "execute", fake_execute)
+    ok = asyncio.run(kcm._record_settlement(
+        "KXBTCD-X", "no",
+        datetime(2026, 4, 15, 20, 0, tzinfo=timezone.utc),
+        0.0,
+    ))
+    assert ok is False
+
+
+def test_settle_poll_returns_zero_without_creds(monkeypatch):
+    class FakeSettings:
+        kalshi_api_key_id = ""
+        kalshi_private_key = ""
+
+    monkeypatch.setattr(kcm, "get_settings", lambda: FakeSettings())
+    assert asyncio.run(kcm.poll_kalshi_crypto_settlements()) == 0
+
+
+def test_settle_poll_stamps_only_resolved_markets(monkeypatch):
+    class FakeSettings:
+        kalshi_api_key_id = "kid"
+        kalshi_private_key = "pk"
+
+    monkeypatch.setattr(kcm, "get_settings", lambda: FakeSettings())
+
+    candidates = [
+        {"id": 1, "kalshi_market_id": "KXBTCD-DONE-YES", "game_time": None},
+        {"id": 2, "kalshi_market_id": "KXBTCD-OPEN", "game_time": None},
+        {"id": 3, "kalshi_market_id": "KXBTCD-VOID", "game_time": None},
+        {"id": 4, "kalshi_market_id": "KXBTCD-NETWORK-ERR", "game_time": None},
+    ]
+
+    async def fake_fetch(sql: str, *args: Any) -> list[dict[str, Any]]:
+        assert "FROM predictions" in sql
+        assert args[0] == "CRYPTO"
+        return candidates
+
+    monkeypatch.setattr(kcm.db, "fetch", fake_fetch)
+
+    market_responses: dict[str, dict[str, Any]] = {
+        "KXBTCD-DONE-YES": {
+            "market": {
+                "ticker": "KXBTCD-DONE-YES", "status": "settled",
+                "result": "yes",
+                "settled_time": "2026-04-15T20:00:00Z",
+            },
+        },
+        "KXBTCD-OPEN": {
+            "market": {
+                "ticker": "KXBTCD-OPEN", "status": "open",
+            },
+        },
+        "KXBTCD-VOID": {
+            "market": {
+                "ticker": "KXBTCD-VOID", "status": "finalized",
+                "result": "void",
+            },
+        },
+    }
+
+    class FakeClient:
+        def __init__(self, *a, **k):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def get_market(self, ticker: str) -> dict[str, Any]:
+            if ticker == "KXBTCD-NETWORK-ERR":
+                raise RuntimeError("boom")
+            return market_responses[ticker]
+
+    monkeypatch.setattr(kcm.kalshi_client_mod, "KalshiClient", FakeClient)
+
+    updates: list[tuple[str, str, float | None]] = []
+
+    async def fake_execute(sql: str, *args: Any) -> str:
+        # _record_settlement uses execute(); mark every UPDATE as 1 row
+        # touched so the settler increments its return counter.
+        updates.append((args[0], args[2], args[3]))
+        return "UPDATE 1"
+
+    monkeypatch.setattr(kcm.db, "execute", fake_execute)
+
+    n = asyncio.run(kcm.poll_kalshi_crypto_settlements())
+    # Two settled markets (yes + void); the open one is skipped, the
+    # network error short-circuits without raising.
+    assert n == 2
+    seen = sorted((t, o, p) for (t, o, p) in updates)
+    assert seen == [
+        ("KXBTCD-DONE-YES", "yes", 1.0),
+        ("KXBTCD-VOID", "void", None),
+    ]
+
+
+def test_register_settlements_marks_disabled_when_creds_missing(monkeypatch):
+    from app.feeds.registry import registry as _registry
+
+    _registry._feeds.pop("kalshi_crypto_settlements", None)  # type: ignore[attr-defined]
+    _registry._status.pop("kalshi_crypto_settlements", None)  # type: ignore[attr-defined]
+
+    class FakeSettings:
+        kalshi_api_key_id = ""
+        kalshi_private_key = ""
+
+    monkeypatch.setattr(kcm, "get_settings", lambda: FakeSettings())
+    kcm.register_kalshi_crypto_settlements_feed()
+    status = _registry.status_of("kalshi_crypto_settlements")
+    assert status is not None
+    d = status.to_dict()
+    assert d["enabled"] is False
+    assert "KALSHI_API_KEY_ID" in (d.get("skipped_reason") or "")
+
+
+def test_register_settlements_enabled_when_creds_present(monkeypatch):
+    from app.feeds.registry import registry as _registry
+
+    _registry._feeds.pop("kalshi_crypto_settlements", None)  # type: ignore[attr-defined]
+    _registry._status.pop("kalshi_crypto_settlements", None)  # type: ignore[attr-defined]
+
+    class FakeSettings:
+        kalshi_api_key_id = "kid"
+        kalshi_private_key = "pk"
+
+    monkeypatch.setattr(kcm, "get_settings", lambda: FakeSettings())
+    kcm.register_kalshi_crypto_settlements_feed()
+    status = _registry.status_of("kalshi_crypto_settlements")
+    assert status is not None
+    d = status.to_dict()
+    assert d["enabled"] is True
+    # Sanity-check the cadence honours the settler default (much slower
+    # than the discovery feed).
+    assert d["cadence_seconds"] >= 30.0
+
+
+def test_settle_cadence_and_batch_env_overrides(monkeypatch):
+    monkeypatch.setenv("AXIOM_KALSHI_CRYPTO_SETTLEMENTS_CADENCE_SECS", "120")
+    monkeypatch.setenv("AXIOM_KALSHI_CRYPTO_SETTLEMENTS_BATCH", "10")
+    assert kcm._settle_cadence_seconds() == 120.0
+    assert kcm._settle_batch_size() == 10
+    # Floor at 30s so an over-eager override can't melt the API.
+    monkeypatch.setenv("AXIOM_KALSHI_CRYPTO_SETTLEMENTS_CADENCE_SECS", "1")
+    assert kcm._settle_cadence_seconds() == 30.0
+    # Garbage falls back to the default.
+    monkeypatch.setenv("AXIOM_KALSHI_CRYPTO_SETTLEMENTS_BATCH", "junk")
+    assert kcm._settle_batch_size() == kcm._SETTLE_DEFAULT_BATCH
