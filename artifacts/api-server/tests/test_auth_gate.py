@@ -159,6 +159,7 @@ PROTECTED_MUTATING_ENDPOINTS: tuple[tuple[str, str], ...] = (
     ("DELETE", "/api/me/notifications/{notification_id}"),
     ("DELETE", "/api/me/telegram"),
     ("POST", "/api/me/telegram/link"),
+    ("POST", "/api/me/telegram/notify-push"),
     ("POST", "/api/orchestrator/run-cycle"),
     ("POST", "/api/orchestrator/live-execute"),
     ("POST", "/api/settlement/run-cycle"),

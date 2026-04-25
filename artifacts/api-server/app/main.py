@@ -1522,6 +1522,7 @@ def _binding_public_view(row: dict[str, object] | None) -> dict[str, object]:
     if not row:
         return {"linked": False, "bot_username": telegram_bot.bot_username()}
     bound_at = row.get("bound_at")
+    notify_push = row.get("notify_push")
     return {
         "linked": bound_at is not None,
         "telegram_user_id": row.get("telegram_user_id"),
@@ -1532,6 +1533,10 @@ def _binding_public_view(row: dict[str, object] | None) -> dict[str, object]:
         "pending_link_expires_at": (
             row.get("link_code_expires_at") if not bound_at else None
         ),
+        # `notify_push` mirrors the per-binding mute flag toggled by the
+        # bot's /mute and /unmute commands (task #186). Defaults to True
+        # when the column is null so legacy rows behave as opted-in.
+        "notify_push": True if notify_push is None else bool(notify_push),
         "bot_username": telegram_bot.bot_username(),
         "bot_running": telegram_bot.is_running(),
     }
@@ -1573,6 +1578,33 @@ async def me_telegram_unbind(
 ) -> dict[str, object]:
     removed = await telegram_bindings.unbind(user.user_id)
     return {"ok": True, "removed": removed}
+
+
+class TelegramNotifyPushRequest(BaseModel):
+    enabled: bool
+
+
+@app.post("/api/me/telegram/notify-push")
+async def me_telegram_set_notify_push(
+    body: TelegramNotifyPushRequest,
+    user: AuthedUser = Depends(require_approved_user),
+) -> dict[str, object]:
+    """Dashboard equivalent of the bot's /mute and /unmute commands.
+
+    Toggles ``telegram_bindings.notify_push`` for the calling operator's
+    binding (task #186 added the column). Returns the refreshed binding
+    view so the dashboard can re-render without a follow-up GET. Returns
+    HTTP 404 when the operator has no Telegram binding yet — there is
+    nothing to mute until they finish linking via /start.
+    """
+    ok = await telegram_bindings.set_notify_push(user.user_id, body.enabled)
+    if not ok:
+        raise HTTPException(
+            status_code=404,
+            detail={"error": "telegram_binding_not_found"},
+        )
+    row = await telegram_bindings.get_binding_by_clerk(user.user_id)
+    return _binding_public_view(row)
 
 
 # ---------------------------------------------------------------------------

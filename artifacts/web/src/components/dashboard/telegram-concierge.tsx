@@ -13,6 +13,7 @@ type TelegramStatus = {
   last_seen_at?: string | null;
   pending_link_code?: string | null;
   pending_link_expires_at?: string | null;
+  notify_push?: boolean;
   bot_username?: string | null;
   bot_running?: boolean;
 };
@@ -132,6 +133,51 @@ export default function TelegramConcierge() {
     },
   });
 
+  // Mirrors the bot's /mute and /unmute commands — flips the per-binding
+  // notify_push flag so operators can pause proactive halt / emergency-stop
+  // pings without leaving the dashboard. Optimistically updates the cached
+  // status so the toggle doesn't snap back while the request is in flight.
+  const notifyPushMutation = useMutation<TelegramStatus, unknown, boolean>({
+    mutationFn: (enabled: boolean) =>
+      apiFetch<TelegramStatus>("/api/me/telegram/notify-push", {
+        method: "POST",
+        body: { enabled },
+        getToken: tokenGetter,
+      }),
+    onMutate: async (enabled) => {
+      setActionError(null);
+      await queryClient.cancelQueries({ queryKey: TELEGRAM_QUERY_KEY });
+      const previous = queryClient.getQueryData<TelegramStatus>(TELEGRAM_QUERY_KEY);
+      if (previous) {
+        queryClient.setQueryData<TelegramStatus>(TELEGRAM_QUERY_KEY, {
+          ...previous,
+          notify_push: enabled,
+        });
+      }
+      return { previous };
+    },
+    onError: (err, _enabled, ctx) => {
+      const previous = (ctx as { previous?: TelegramStatus } | undefined)?.previous;
+      if (previous) {
+        queryClient.setQueryData<TelegramStatus>(TELEGRAM_QUERY_KEY, previous);
+      }
+      setActionError(
+        formatErrorMessage(
+          err,
+          err instanceof ApiError
+            ? `Update failed (HTTP ${err.status})`
+            : undefined,
+        ),
+      );
+    },
+    onSuccess: (next) => {
+      queryClient.setQueryData<TelegramStatus>(TELEGRAM_QUERY_KEY, next);
+    },
+    onSettled: () => {
+      void queryClient.invalidateQueries({ queryKey: TELEGRAM_QUERY_KEY });
+    },
+  });
+
   const data = statusQuery.data;
   const botUsername = data?.bot_username ?? null;
   const botRunning = data?.bot_running !== false;
@@ -233,6 +279,30 @@ export default function TelegramConcierge() {
               </dd>
             </div>
           </dl>
+          <label
+            className="flex items-start justify-between gap-3 border-t border-border pt-3"
+            data-testid="row-telegram-notify-push"
+          >
+            <span className="flex flex-col">
+              <span className="text-[11px] font-bold uppercase tracking-widest text-foreground">
+                Receive proactive halt pings
+              </span>
+              <span className="text-[11px] text-muted-foreground">
+                Mirrors the bot's /mute and /unmute commands. Turn off to
+                pause halt and emergency-stop notifications in this chat.
+              </span>
+            </span>
+            <input
+              type="checkbox"
+              role="switch"
+              checked={data.notify_push !== false}
+              disabled={notifyPushMutation.isPending}
+              onChange={(e) => notifyPushMutation.mutate(e.target.checked)}
+              className="mt-0.5 h-4 w-4 cursor-pointer accent-primary disabled:cursor-not-allowed disabled:opacity-50"
+              data-testid="switch-telegram-notify-push"
+              aria-label="Receive proactive halt pings"
+            />
+          </label>
           <div className="flex flex-wrap gap-2 border-t border-border pt-3">
             <button
               type="button"
