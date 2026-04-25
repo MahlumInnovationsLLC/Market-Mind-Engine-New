@@ -411,6 +411,7 @@ async def _record_drift_row(*, finding: dict[str, Any], message: str) -> bool:
                 (vertical, alert_type, severity, metric_name,
                  metric_value, threshold, message, acknowledged)
             VALUES ($1, 'crypto_backtest_drift', $2, $3, $4, $5, $6, false)
+            ON CONFLICT (id) DO NOTHING
             """,
             pair_label,
             "warn",

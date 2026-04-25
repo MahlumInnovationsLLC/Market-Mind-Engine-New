@@ -194,6 +194,7 @@ async def _raise_position_drift_alert(
                     (vertical, alert_type, severity, metric_name,
                      metric_value, threshold, message, acknowledged)
                 VALUES ($1, 'position_drift', $2, $3, $4, $5, $6, false)
+                ON CONFLICT (id) DO NOTHING
                 """,
                 "trading",
                 "high" if drift > max(1, tolerance * 5) else "warn",
@@ -316,6 +317,7 @@ async def _record_auto_correction(
                 (vertical, alert_type, severity, metric_name,
                  metric_value, threshold, message, acknowledged)
             VALUES ('trading', 'position_drift', 'info', $1, $2, $3, $4, true)
+            ON CONFLICT (id) DO NOTHING
             """,
             ticker, float(drift), float(tolerance), msg,
         )

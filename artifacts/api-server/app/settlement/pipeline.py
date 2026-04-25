@@ -689,6 +689,7 @@ async def _calibration_and_drift(vertical: str | None) -> int:
                     (vertical, alert_type, severity, metric_name, metric_value,
                      threshold, message, acknowledged)
                 VALUES ($1, 'brier_drift', $2, 'brier_score', $3, $4, $5, false)
+                ON CONFLICT (id) DO NOTHING
                 """,
                 vertical, sev, brier, thr, msg,
             )

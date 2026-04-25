@@ -293,6 +293,7 @@ async def _write_rollback(
                  metric_value, threshold, message, acknowledged)
             VALUES ($1, 'retrain_rollback', 'warning', 'brier_score',
                     $2, $3, $4, false)
+            ON CONFLICT (id) DO NOTHING
             """,
             vertical,
             float(brier_after) if brier_after is not None else None,

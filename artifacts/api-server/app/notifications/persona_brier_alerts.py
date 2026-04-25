@@ -248,6 +248,7 @@ async def _record_alert_row(
                 (vertical, alert_type, severity, metric_name,
                  metric_value, threshold, message, acknowledged)
             VALUES ($1, 'persona_daily_brier', $2, $3, $4, $5, $6, false)
+            ON CONFLICT (id) DO NOTHING
             """,
             pid,
             severity,
