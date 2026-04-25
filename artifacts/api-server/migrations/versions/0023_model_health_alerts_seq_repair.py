@@ -20,14 +20,17 @@ This migration is the canonical Postgres recipe for repairing that:
 
     SELECT setval(
         'model_health_alerts_id_seq',
-        GREATEST((SELECT COALESCE(MAX(id), 0) FROM model_health_alerts), 1),
-        true
+        GREATEST((SELECT COALESCE(MAX(id), 0) FROM model_health_alerts) + 1, 1),
+        false
     );
 
-After this runs, the next ``nextval()`` returns ``MAX(id)+1`` and
-collisions stop.  The third arg ``true`` means ``is_called=true`` so
-the *next* call advances by one (matching the semantics that
-``serial`` columns always assume).
+After this runs, the sequence's ``last_value`` is *strictly greater*
+than the table's ``MAX(id)`` (specifically ``MAX(id)+1``), so an
+operator can verify the repair on the spot without having to wait for
+the next ``nextval()`` call.  The ``+1`` combined with
+``is_called=false`` arranges for the very next ``nextval()`` to return
+exactly ``MAX(id)+1`` — collisions stop immediately and the
+``serial`` column's monotonically-increasing semantics are preserved.
 
 The fix is wrapped in a ``DO`` block guarded by both table-existence
 and sequence-existence checks so a fresh DB (where Alembic has just
