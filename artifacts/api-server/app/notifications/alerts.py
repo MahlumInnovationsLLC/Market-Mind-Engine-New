@@ -45,13 +45,14 @@ log = logging.getLogger("axiom.notifications.alerts")
 
 
 _TAG_TO_USER_PREF: dict[str, str] = {
-    "daily-summary":    "email_daily_summary",
-    "daily-loss-halt":  "email_halt",
-    "drift":            "email_drift",
-    "halt":             "email_halt",
-    "live-trade":       "email_live_trade",
-    "persona-brier":    "email_drift",
-    "weekly-roundup":   "email_weekly_roundup",
+    "daily-summary":         "email_daily_summary",
+    "daily-loss-halt":       "email_halt",
+    "drift":                 "email_drift",
+    "halt":                  "email_halt",
+    "live-trade":            "email_live_trade",
+    "persona-brier":         "email_drift",
+    "crypto-backtest-drift": "email_drift",
+    "weekly-roundup":        "email_weekly_roundup",
 }
 
 
@@ -181,6 +182,11 @@ USER_VISIBLE_ALERTS: dict[str, dict[str, Any]] = {
     },
     "persona_daily_brier": {
         "label": "Persona Brier degradation",
+        "scope": "broadcast",
+        "channels": [("email", "email_drift")],
+    },
+    "crypto_backtest_drift": {
+        "label": "Crypto backtest drift",
         "scope": "broadcast",
         "channels": [("email", "email_drift")],
     },
@@ -1128,6 +1134,82 @@ def persona_brier_drift(
     if note:
         body += f"\nDetails:\n  {note}\n"
     return _dispatch(subject, body, tag="persona-brier", dry_run=dry_run)
+
+
+# ---------------------------------------------------------------------------
+# Crypto-binary scheduled-backtest drift
+# ---------------------------------------------------------------------------
+
+
+def crypto_backtest_drift(
+    *,
+    symbol: str,
+    timeframe: str,
+    metric: str,
+    value: float,
+    threshold: float,
+    reason: str,
+    n_evaluated: int,
+    baseline: float | None = None,
+    baseline_runs: int = 0,
+    jump: float | None = None,
+    jump_threshold: float | None = None,
+    note: str | None = None,
+    dry_run: bool = False,
+) -> dict[str, Any]:
+    """Operator alert: a scheduled crypto-binary backtest crossed one
+    of the configured drift thresholds.
+
+    Fired by `app.crypto.backtest_scheduler` after every persisted
+    `run_backtest` whose Brier or log-loss exceeds the absolute
+    threshold or jumps by more than the configured delta versus the
+    rolling baseline of prior runs for the same `(symbol, timeframe)`
+    pair.
+
+    Caller is responsible for dedupe (`dedupe_or_skip` keyed on
+    `(symbol, timeframe, metric, reason)` with a TTL >= the cadence)
+    so a sustained regression pages once per window, not once per
+    cadence tick.
+    """
+    metric_label = metric.replace("_", " ")
+    subject = (
+        f"[axiom][CRYPTO-BACKTEST-DRIFT] {symbol}/{timeframe} :: "
+        f"{metric_label} {value:.4f} ({reason})"
+    )
+    rows: list[tuple[str, Any]] = [
+        ("symbol", symbol),
+        ("timeframe", timeframe),
+        ("metric", metric),
+        ("value", f"{value:.4f}"),
+        ("abs_threshold", f"{threshold:.4f}"),
+        ("n_evaluated", n_evaluated),
+    ]
+    if baseline is not None:
+        rows.append(("baseline", f"{baseline:.4f}"))
+        rows.append(("baseline_runs", baseline_runs))
+    else:
+        rows.append(("baseline", "(n/a)"))
+    if jump is not None:
+        rows.append(("jump", f"{'+' if jump >= 0 else ''}{jump:.4f}"))
+    else:
+        rows.append(("jump", "(n/a)"))
+    if jump_threshold is not None:
+        rows.append(("jump_threshold", f"{jump_threshold:.4f}"))
+    rows.append(("reason", reason))
+    rows.append(("at", _utc_now_iso()))
+    body = (
+        "A scheduled crypto-binary backtest crossed one of the configured "
+        "drift thresholds. Investigate the predictor, OHLCV freshness, "
+        "and recent retrains before the live trader compounds the "
+        "regression.\n\n"
+        + _format_lines(rows)
+        + "\n"
+    )
+    if note:
+        body += f"\nDetails:\n  {note}\n"
+    return _dispatch(
+        subject, body, tag="crypto-backtest-drift", dry_run=dry_run
+    )
 
 
 # ---------------------------------------------------------------------------

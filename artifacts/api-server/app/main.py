@@ -478,6 +478,18 @@ async def lifespan(_: FastAPI):
     except Exception as e:
         log.warning("autoresearch scheduler start failed: %s", e)
 
+    # Scheduled crypto-binary backtests (task #421). Runs `run_backtest`
+    # on every supported (symbol, timeframe) pair on a regular cadence,
+    # persists each result to `crypto_backtest_runs` so the dashboard
+    # can chart a trend, and pages the operator when Brier / log-loss
+    # crosses the configured absolute threshold or jumps versus the
+    # rolling baseline.
+    try:
+        from .crypto import backtest_scheduler as _crypto_backtest_scheduler
+        await _crypto_backtest_scheduler.start()
+    except Exception as e:
+        log.warning("crypto backtest scheduler start failed: %s", e)
+
     # Kick off model artifact reassembly in the background so a cold cache
     # (~240 MiB download) doesn't block the HTTP server from accepting
     # traffic. Health endpoints surface progress while it warms up.
@@ -561,6 +573,11 @@ async def lifespan(_: FastAPI):
             await notif_persona_brier_alerts.stop()
         except Exception as e:
             log.warning("persona brier alerts stop error: %s", e)
+        try:
+            from .crypto import backtest_scheduler as _crypto_backtest_scheduler
+            await _crypto_backtest_scheduler.stop()
+        except Exception as e:
+            log.warning("crypto backtest scheduler stop error: %s", e)
         try:
             await rc_billing.stop()
         except Exception as e:
