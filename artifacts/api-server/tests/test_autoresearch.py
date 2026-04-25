@@ -222,6 +222,88 @@ def test_group_by_ticker_buckets_and_collects_unparseable_under_none():
     assert len(buckets[None]) == 2
 
 
+def test_map_to_uw_tickers_translates_commodities():
+    # KXOIL is the canonical example: Kalshi prints OIL but UW tracks USO.
+    assert mining.map_to_uw_tickers(
+        "commodities", "KXOIL-25APR2310-T1",
+    ) == ("USO",)
+    # Other commodities translate similarly.
+    assert mining.map_to_uw_tickers(
+        "commodities", "KXGOLD-25DEC01",
+    ) == ("GLD",)
+    assert mining.map_to_uw_tickers(
+        "commodities", "KXNATGAS-25DEC01",
+    ) == ("UNG",)
+
+
+def test_map_to_uw_tickers_expands_entertainment_to_multiple_studios():
+    # KXBOX (box-office) should fan out to the studio tickers UW
+    # actually tracks for the relevant IP.
+    mapped = mining.map_to_uw_tickers("entertainment", "KXBOX-25MAY-DUNE3")
+    assert mapped is not None
+    assert "DIS" in mapped
+    assert len(mapped) >= 2  # multi-target mapping
+    # Spotify-themed prefixes route to the music platform itself.
+    assert mining.map_to_uw_tickers(
+        "entertainment", "KXSPOTIFY-25DEC01",
+    ) == ("SPOT",)
+
+
+def test_map_to_uw_tickers_falls_back_to_naive_for_unknown_prefix():
+    # KXNVDA is in tech-ai but not in the explicit map — the naive
+    # parse should still yield NVDA so direct-name tickers don't need
+    # a redundant entry.
+    assert mining.map_to_uw_tickers(
+        "tech-ai", "KXNVDA-25Q4",
+    ) == ("NVDA",)
+
+
+def test_map_to_uw_tickers_skips_map_for_direct_verticals():
+    # crypto / equities are NOT in MAPPED_VERTICALS — the mapping
+    # table must be ignored even if a name happens to overlap, because
+    # UW already keys those rows under the same symbol Kalshi prints.
+    assert mining.map_to_uw_tickers(
+        "crypto", "KXBTC-25APR2310-T1",
+    ) == ("BTC",)
+    assert mining.map_to_uw_tickers(
+        "equities", "KXAAPL-25Q4",
+    ) == ("AAPL",)
+
+
+def test_map_to_uw_tickers_returns_none_for_unparseable_market_id():
+    assert mining.map_to_uw_tickers("commodities", None) is None
+    assert mining.map_to_uw_tickers("commodities", "") is None
+
+
+def test_group_by_uw_ticker_uses_mapping_for_commodities():
+    base = datetime(2025, 1, 1, tzinfo=timezone.utc)
+    trades = [
+        {"market_id": "KXOIL-1", "created_at": base, "p_side": 0.5, "y_side": 1},
+        {"market_id": "KXOIL-2", "created_at": base, "p_side": 0.5, "y_side": 0},
+        {"market_id": "KXGOLD-1", "created_at": base, "p_side": 0.5, "y_side": 1},
+    ]
+    buckets = mining._group_by_uw_ticker("commodities", trades)
+    # KXOIL → USO, KXGOLD → GLD.  No bare OIL / GOLD buckets.
+    assert "USO" in buckets and len(buckets["USO"]) == 2
+    assert "GLD" in buckets and len(buckets["GLD"]) == 1
+    assert "OIL" not in buckets
+    assert "GOLD" not in buckets
+
+
+def test_group_by_uw_ticker_fans_out_multi_target_mappings():
+    base = datetime(2025, 1, 1, tzinfo=timezone.utc)
+    trades = [
+        {"market_id": "KXBOX-DUNE3", "created_at": base, "p_side": 0.5, "y_side": 1},
+    ]
+    buckets = mining._group_by_uw_ticker("entertainment", trades)
+    # The single KXBOX trade contributes one row to each studio bucket.
+    assert "DIS" in buckets
+    assert "WBD" in buckets
+    assert "NFLX" in buckets
+    for tk in ("DIS", "WBD", "NFLX"):
+        assert len(buckets[tk]) == 1
+
+
 # ---------------------------------------------------------------------------
 # run_mining: global vs per-ticker code paths
 # ---------------------------------------------------------------------------
@@ -388,6 +470,64 @@ def test_run_mining_per_ticker_path_for_crypto(monkeypatch: pytest.MonkeyPatch):
     # Counts: 2 signals × 3 aggregators × 2 tickers = 12 candidates.
     assert res.candidates_evaluated == 12
     assert res.candidates_persisted == 12
+
+
+def test_run_mining_uses_kalshi_to_uw_map_for_commodities(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Commodities trades on KXOIL must aggregate UW rows under USO,
+    not the bare 'OIL' that the naive parse would emit.
+
+    This is the canonical mapping case from task #426: without the
+    Kalshi-prefix → UW-ticker map, KXOIL trades silently fall through
+    the per-ticker join (UW has no rows under 'OIL') and the vertical
+    stops surfacing per-ticker candidates.  Verifies the per-ticker
+    query is issued with the mapped symbol (USO) and the persisted
+    rows carry that mapped ticker.
+    """
+    base = datetime(2025, 1, 1, tzinfo=timezone.utc)
+    trades = {
+        "commodities": _synth_trades(
+            40, market_id="KXOIL-25APR2310-T1",
+            start=base, outcome_pattern=[1, 0],
+        ),
+    }
+    # UW returns counts only when queried for the *mapped* ticker (USO).
+    # Querying the bare 'OIL' would yield zero — proving the mapping is
+    # the only thing keeping the candidate alive.
+    uw = {
+        ("flow_alert", "USO"): 9,
+        ("darkpool_print", "USO"): 4,
+    }
+    fake = _FakeMiningConn(trades=trades, uw_counts=uw)
+
+    @asynccontextmanager
+    async def fake_acquire():
+        yield fake
+
+    monkeypatch.setattr(mining.db, "acquire", fake_acquire)
+    monkeypatch.setattr(store.db, "acquire", fake_acquire)
+    monkeypatch.setenv("AXIOM_AUTORESEARCH_MIN_SAMPLES", "20")
+
+    res = asyncio.run(mining.run_mining(verticals=["commodities"]))
+
+    # Every per-ticker UW aggregate call must use the mapped symbol.
+    assert fake.aggregate_calls
+    seen_tickers = {c["ticker"] for c in fake.aggregate_calls}
+    assert seen_tickers == {"USO"}, (
+        f"expected commodities mining to query UW under the mapped USO "
+        f"ticker, got tickers={seen_tickers}"
+    )
+    # Persisted candidates carry the mapped ticker in both the name
+    # suffix and the metadata blob — the bare 'OIL' must NOT appear.
+    assert res.candidates_persisted > 0
+    names = {row["name"] for row in fake.upserts}
+    assert any(n.endswith("__uso") for n in names)
+    assert not any(n.endswith("__oil") for n in names)
+    import json
+    for row in fake.upserts:
+        md = json.loads(row["metadata"])
+        assert md.get("ticker") == "USO"
 
 
 def test_run_mining_per_ticker_falls_back_when_no_ticker(

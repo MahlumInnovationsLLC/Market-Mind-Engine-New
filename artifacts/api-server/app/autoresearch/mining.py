@@ -52,6 +52,94 @@ TICKER_LINKED_VERTICALS: frozenset[str] = frozenset({
 _TICKER_SPLIT_RE = re.compile(r"[-_.]")
 
 
+# Verticals where the bare Kalshi prefix (e.g. ``OIL``, ``BOX``,
+# ``GPT``) does not match the UW underlying we want to join against
+# (UW tracks ``USO`` for crude, ``DIS`` for box-office, ``MSFT`` for
+# GPT-related news, etc).  For these we consult an explicit mapping
+# below before falling back to the naive parse.  Direct verticals
+# (``crypto`` → BTC/ETH, ``equities`` → AAPL/NVDA/...) are intentionally
+# absent so they keep the cheap naive path — UW already keys those rows
+# under the same symbol Kalshi prints.
+MAPPED_VERTICALS: frozenset[str] = frozenset({
+    "commodities",
+    "entertainment",
+    "tech-ai",
+    "events-econ",
+    "elections",
+})
+
+
+# Static map from the Kalshi prefix (post-``KX`` strip, upper-cased)
+# to the list of UW tickers a candidate trade in that prefix should
+# join against.  Multiple targets are supported because verticals like
+# ``KXBOX`` (box-office) span several studio tickers (DIS / WBD /
+# NFLX) and we want a separate (signal × aggregator × UW-ticker)
+# candidate for each — the operator then promotes the rows that
+# actually carry IC.  When a prefix is missing from the map we fall
+# back to the naive parse so direct-name tickers in mapped verticals
+# (``KXNVDA`` inside ``tech-ai``) still work without an explicit
+# entry.
+KALSHI_PREFIX_TO_UW_TICKERS: dict[str, tuple[str, ...]] = {
+    # Commodities — UW tracks the ETF / futures-proxy ticker.
+    "OIL":     ("USO",),
+    "GOLD":    ("GLD",),
+    "NATGAS":  ("UNG",),
+    "CORN":    ("CORN",),
+    "SOY":     ("SOYB",),
+    "WHEAT":   ("WEAT",),
+    "COPPER":  ("CPER",),
+    "SILVER":  ("SLV",),
+    "COFFEE":  ("JO",),
+    "SUGAR":   ("CANE",),
+
+    # Entertainment — studio / label tickers behind the IP.
+    "BOX":     ("DIS", "WBD", "NFLX"),
+    "OSCAR":   ("DIS", "NFLX"),
+    "EMMY":    ("NFLX", "DIS"),
+    "GRAMMY":  ("SPOT", "WMG"),
+    "SPOTIFY": ("SPOT",),
+    "STREAM":  ("NFLX", "SPOT", "DIS"),
+    "RT":      ("DIS", "NFLX", "WBD"),
+
+    # Tech / AI — vendor / partner tickers carrying the news flow.
+    "LLM":     ("MSFT", "GOOGL", "NVDA"),
+    "GPT":     ("MSFT",),
+    "CLAUDE":  ("AMZN", "GOOGL"),
+    "LLAMA":   ("META",),
+    "AI":      ("NVDA", "MSFT", "GOOGL"),
+    "MLPERF":  ("NVDA", "AMD"),
+    "GPU":     ("NVDA", "AMD"),
+    "TSMC":    ("TSM",),
+    "IPO":     ("SPY",),
+
+    # Events / macro — broad market & rates proxies that absorb the
+    # information-rich macro prints.
+    "CPI":         ("TLT", "SPY"),
+    "PPI":         ("TLT", "SPY"),
+    "GDP":         ("SPY", "TLT"),
+    "FOMC":        ("TLT", "SPY"),
+    "NFP":         ("SPY", "TLT"),
+    "JOBLESS":     ("SPY",),
+    "RETAIL":      ("XRT",),
+    "PCE":         ("TLT", "SPY"),
+    "ISM":         ("SPY",),
+    "CONFIDENCE":  ("SPY",),
+    "HOUSING":     ("XHB", "ITB"),
+
+    # Elections — broad-market / country-ETF reactions.
+    "PRES":    ("SPY",),
+    "GOV":     ("SPY",),
+    "SEN":     ("SPY",),
+    "HOUSE":   ("SPY",),
+    "ELE":     ("SPY",),
+    "FRPRES":  ("EWQ",),
+    "UKPM":    ("EWU",),
+    "DEPM":    ("EWG",),
+    "CAPM":    ("EWC",),
+    "AUPM":    ("EWA",),
+}
+
+
 def is_ticker_linked(vertical: str) -> bool:
     """Whether ``vertical`` should aggregate UW signals per-ticker."""
     return (vertical or "").strip().lower() in TICKER_LINKED_VERTICALS
@@ -76,6 +164,37 @@ def extract_underlying_ticker(market_id: str | None) -> str | None:
     if head.startswith("KX") and len(head) > 2:
         head = head[2:]
     return head or None
+
+
+def map_to_uw_tickers(
+    vertical: str, market_id: str | None
+) -> tuple[str, ...] | None:
+    """Return the UW tickers a Kalshi ``market_id`` should join against.
+
+    Verticals listed in :data:`MAPPED_VERTICALS` first consult
+    :data:`KALSHI_PREFIX_TO_UW_TICKERS` so prefixes whose Kalshi name
+    does not match the UW underlying (``KXOIL`` → ``USO``,
+    ``KXBOX`` → ``DIS / WBD / NFLX``, ...) still resolve to the right
+    rows.  If the prefix is unknown to the map we fall back to the
+    naive parse so direct-name tickers (``KXNVDA`` inside ``tech-ai``)
+    keep working without an explicit entry.
+
+    For other ticker-linked verticals (``crypto``, ``equities``, ...)
+    we use the naive parse only — UW keys those rows under the same
+    symbol Kalshi prints, so an explicit map would be redundant.
+
+    Returns ``None`` when no underlying can be determined so the
+    caller can fall back to the global (ticker-less) aggregation.
+    """
+    naive = extract_underlying_ticker(market_id)
+    if naive is None:
+        return None
+    v = (vertical or "").strip().lower()
+    if v in MAPPED_VERTICALS:
+        mapped = KALSHI_PREFIX_TO_UW_TICKERS.get(naive)
+        if mapped:
+            return mapped
+    return (naive,)
 
 
 log = logging.getLogger("axiom.autoresearch.mining")
@@ -210,6 +329,33 @@ def _group_by_ticker(
     for t in trades:
         tk = extract_underlying_ticker(t.get("market_id"))
         buckets.setdefault(tk, []).append(t)
+    return buckets
+
+
+def _group_by_uw_ticker(
+    vertical: str, trades: Sequence[dict[str, Any]],
+) -> dict[str | None, list[dict[str, Any]]]:
+    """Bucket settled trades by the UW ticker(s) they should join against.
+
+    For verticals whose Kalshi prefix differs from the UW underlying
+    (commodities / entertainment / tech-ai / events-econ / elections,
+    see :data:`MAPPED_VERTICALS`) a single trade may contribute to
+    several buckets — e.g. a ``KXBOX-...`` row enters the ``DIS``,
+    ``WBD`` and ``NFLX`` buckets so each studio ticker becomes its
+    own (signal × aggregator × ticker) candidate.
+
+    Trades whose ``market_id`` cannot be resolved to any UW ticker
+    fall into the ``None`` bucket so the caller can score them via
+    the global aggregation rather than silently dropping them.
+    """
+    buckets: dict[str | None, list[dict[str, Any]]] = {}
+    for t in trades:
+        mapped = map_to_uw_tickers(vertical, t.get("market_id"))
+        if not mapped:
+            buckets.setdefault(None, []).append(t)
+            continue
+        for tk in mapped:
+            buckets.setdefault(tk, []).append(t)
     return buckets
 
 
@@ -412,7 +558,7 @@ async def run_mining(
         # original global-only path.
         buckets: dict[str | None, list[dict[str, Any]]]
         if is_ticker_linked(vertical):
-            buckets = _group_by_ticker(trades)
+            buckets = _group_by_uw_ticker(vertical, trades)
         else:
             buckets = {None: list(trades)}
 
