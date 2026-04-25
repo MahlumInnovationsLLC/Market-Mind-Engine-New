@@ -56,6 +56,12 @@ jest.mock("@/components/NotificationPrefs", () => ({
   NotificationPrefs: () => null,
 }));
 
+// Same story for TelegramConcierge: it queries `/api/me/telegram` on
+// mount and would otherwise pull this test out of its billing focus.
+jest.mock("@/components/TelegramConcierge", () => ({
+  TelegramConcierge: () => null,
+}));
+
 import SubscriptionScreen from "../subscription";
 
 type SubInfo = {
