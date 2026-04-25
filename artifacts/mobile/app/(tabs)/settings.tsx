@@ -42,6 +42,12 @@ type EmergencyStopResult = {
   reason: string;
 };
 
+type RearmTradingResult = {
+  ok: boolean;
+  trading_mode: string;
+  previous_mode: string | null;
+};
+
 export default function SettingsScreen() {
   const colors = useColors();
   const insets = useSafeAreaInsets();
@@ -86,8 +92,22 @@ export default function SettingsScreen() {
     },
   });
 
+  const rearmMutation = useMutation({
+    mutationFn: (mode: "paper" | "live") =>
+      apiFetch<RearmTradingResult>("/api/admin/rearm-trading", {
+        method: "POST",
+        body: { mode },
+      }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({
+        queryKey: ["orchestrator", "live-execute"],
+      });
+    },
+  });
+
   const [reason, setReason] = useState("");
   const [stopResult, setStopResult] = useState<EmergencyStopResult | null>(null);
+  const [rearmResult, setRearmResult] = useState<RearmTradingResult | null>(null);
 
   if (access.isLoading) {
     return (
@@ -120,8 +140,10 @@ export default function SettingsScreen() {
   const halted = (live?.effective_mode ?? "").toLowerCase() === "halt";
   const toggleBusy = toggleMutation.isPending;
   const stopBusy = stopMutation.isPending;
+  const rearmBusy = rearmMutation.isPending;
   const toggleErr = toggleMutation.error as ApiError | undefined;
   const stopErr = stopMutation.error as ApiError | undefined;
+  const rearmErr = rearmMutation.error as ApiError | undefined;
 
   function onArmToggle() {
     if (toggleBusy) return;
@@ -140,6 +162,37 @@ export default function SettingsScreen() {
           text: "Arm LIVE",
           style: "destructive",
           onPress: () => toggleMutation.mutate(true),
+        },
+      ],
+      { cancelable: true },
+    );
+  }
+
+  function onRearm(targetMode: "paper" | "live") {
+    if (rearmBusy) return;
+    const fire = () =>
+      rearmMutation.mutate(targetMode, {
+        onSuccess: (data) => {
+          setRearmResult(data);
+          // Clear the prior halt result so the card doesn't keep
+          // claiming the system is still halted after a successful
+          // re-arm (matches the web behaviour).
+          setStopResult(null);
+        },
+      });
+    if (targetMode === "paper") {
+      fire();
+      return;
+    }
+    Alert.alert(
+      "Re-arm trading LIVE?",
+      "Real money. Trading will resume placing live orders on Kalshi as soon as the cycle gate sees the new mode.",
+      [
+        { text: "Cancel", style: "cancel" },
+        {
+          text: "Re-arm LIVE",
+          style: "destructive",
+          onPress: fire,
         },
       ],
       { cancelable: true },
@@ -292,60 +345,121 @@ export default function SettingsScreen() {
           <Text
             style={[
               styles.badge,
-              { color: colors.destructive, borderColor: colors.destructive },
+              halted
+                ? {
+                    color: colors.background,
+                    borderColor: colors.destructive,
+                    backgroundColor: colors.destructive,
+                  }
+                : {
+                    color: colors.destructive,
+                    borderColor: colors.destructive,
+                  },
             ]}
+            testID="emergency-stop-state"
           >
-            ADMIN
+            {halted ? "HALTED" : "ADMIN"}
           </Text>
         </View>
         <Text style={[styles.muted, { color: colors.mutedForeground }]}>
           Cancels every resting Kalshi order, halts the trading loop, and
           emails the on-call operator. Persists across restarts until an
-          admin re-arms LIVE.
+          admin re-arms.
         </Text>
 
-        <View style={[styles.confirmBox, { borderColor: colors.destructive }]}>
-          <Text style={[styles.label, { color: colors.mutedForeground }]}>
-            REASON (OPTIONAL)
-          </Text>
-          <TextInput
-            value={reason}
-            onChangeText={setReason}
-            placeholder="e.g. settlement feed lag"
-            placeholderTextColor={colors.mutedForeground}
-            maxLength={200}
-            editable={!stopBusy}
-            style={[
-              styles.input,
-              {
-                color: colors.foreground,
-                borderColor: colors.border,
-                backgroundColor: colors.background,
-              },
-            ]}
-            testID="input-emergency-stop-reason"
-          />
-          <TouchableOpacity
-            onPress={() => {
-              setStopResult(null);
-              onEmergencyStop();
-            }}
-            disabled={stopBusy}
-            style={[
-              styles.btn,
-              {
-                borderColor: colors.destructive,
-                backgroundColor: colors.destructive,
-                opacity: stopBusy ? 0.5 : 1,
-              },
-            ]}
-            testID="button-emergency-stop-arm"
+        {halted ? (
+          <View
+            style={[styles.confirmBox, { borderColor: colors.destructive }]}
+            testID="emergency-stop-rearm"
           >
-            <Text style={[styles.btnText, { color: colors.background }]}>
-              {stopBusy ? "…" : "Emergency Stop"}
+            <Text style={[styles.label, { color: colors.destructive }]}>
+              TRADING IS HALTED. RE-ARM TO RESUME THE LOOP.
             </Text>
-          </TouchableOpacity>
-        </View>
+            <TouchableOpacity
+              onPress={() => {
+                setRearmResult(null);
+                onRearm("paper");
+              }}
+              disabled={rearmBusy}
+              style={[
+                styles.btn,
+                {
+                  borderColor: colors.mutedForeground,
+                  opacity: rearmBusy ? 0.5 : 1,
+                },
+              ]}
+              testID="button-rearm-paper"
+            >
+              <Text
+                style={[styles.btnText, { color: colors.mutedForeground }]}
+              >
+                {rearmBusy ? "…" : "Re-arm trading (PAPER)"}
+              </Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              onPress={() => {
+                setRearmResult(null);
+                onRearm("live");
+              }}
+              disabled={rearmBusy}
+              style={[
+                styles.btn,
+                {
+                  borderColor: colors.destructive,
+                  opacity: rearmBusy ? 0.5 : 1,
+                },
+              ]}
+              testID="button-rearm-live"
+            >
+              <Text style={[styles.btnText, { color: colors.destructive }]}>
+                {rearmBusy ? "…" : "Re-arm trading (LIVE)"}
+              </Text>
+            </TouchableOpacity>
+          </View>
+        ) : (
+          <View style={[styles.confirmBox, { borderColor: colors.destructive }]}>
+            <Text style={[styles.label, { color: colors.mutedForeground }]}>
+              REASON (OPTIONAL)
+            </Text>
+            <TextInput
+              value={reason}
+              onChangeText={setReason}
+              placeholder="e.g. settlement feed lag"
+              placeholderTextColor={colors.mutedForeground}
+              maxLength={200}
+              editable={!stopBusy}
+              style={[
+                styles.input,
+                {
+                  color: colors.foreground,
+                  borderColor: colors.border,
+                  backgroundColor: colors.background,
+                },
+              ]}
+              testID="input-emergency-stop-reason"
+            />
+            <TouchableOpacity
+              onPress={() => {
+                setStopResult(null);
+                onEmergencyStop();
+              }}
+              disabled={stopBusy}
+              style={[
+                styles.btn,
+                {
+                  borderColor: colors.destructive,
+                  backgroundColor: colors.destructive,
+                  opacity: stopBusy ? 0.5 : 1,
+                },
+              ]}
+              testID="button-emergency-stop-arm"
+            >
+              <Text style={[styles.btnText, { color: colors.background }]}>
+                {stopBusy ? "…" : "Emergency Stop"}
+              </Text>
+            </TouchableOpacity>
+          </View>
+        )}
 
         {stopErr ? (
           <Text style={[styles.muted, { color: colors.destructive }]}>
@@ -360,6 +474,25 @@ export default function SettingsScreen() {
           >
             Halted. {stopResult.canceled_orders} order
             {stopResult.canceled_orders === 1 ? "" : "s"} canceled.
+          </Text>
+        ) : null}
+        {rearmErr ? (
+          <Text
+            style={[styles.muted, { color: colors.destructive }]}
+            testID="text-rearm-error"
+          >
+            {rearmErr.status === 403
+              ? "Forbidden — admin required"
+              : `Re-arm failed (HTTP ${rearmErr.status ?? "?"})`}
+            {rearmErr.requestId ? `\nrequest_id=${rearmErr.requestId}` : ""}
+          </Text>
+        ) : null}
+        {rearmResult ? (
+          <Text
+            style={[styles.muted, { color: colors.mutedForeground }]}
+            testID="text-rearm-result"
+          >
+            Re-armed to {rearmResult.trading_mode.toUpperCase()}.
           </Text>
         ) : null}
       </Card>
