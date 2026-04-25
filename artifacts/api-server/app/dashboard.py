@@ -2538,6 +2538,178 @@ async def get_nfl_exposure() -> dict[str, Any]:
     }
 
 
+async def get_leagues_exposure() -> dict[str, Any]:
+    """Per-league exposure with cap headroom for every league with an
+    open position.
+
+    Generalises :func:`get_nfl_exposure` to the rest of
+    :data:`app.sports.leagues.LEAGUE_CONFIGS`.  Sources every bucket from
+    the same orchestrator snapshot
+    (:func:`app.orchestrator.cycle._open_position_aggregates`) so the
+    dashboard panel cannot drift from the risk gates' view of cap
+    headroom.
+
+    Each entry in ``leagues`` carries:
+
+    * ``league`` — canonical uppercase league name
+    * ``per_league`` — bucket against ``allocation_pct`` (always present)
+    * ``sunday_window`` — bucket against ``sunday_window_cap_pct`` (only
+      when the league configures a Sunday window — currently NFL)
+    * ``per_event`` — list of event buckets against ``per_event_cap_pct``
+      (only when the league configures a per-event cap — combat /
+      individual sports: UFC, ATP, WTA, F1, PGA, ELECTIONS,
+      EVENTS_ECON, ENTERTAINMENT)
+    * ``per_matchup`` — list of matchup buckets against
+      ``per_game_cap_pct``
+
+    The returned ``leagues`` list is sorted by per-league utilization
+    (highest first) so the operator sees the league closest to its cap
+    at the top.  Leagues with zero open exposure are filtered out so the
+    panel doesn't churn through 20 empty cards.
+    """
+    from .orchestrator.cycle import (
+        _open_position_aggregates,
+        _latest_bankroll,
+    )
+    from .sports.leagues import LEAGUE_CONFIGS, get_league_config
+
+    try:
+        bankroll = await _latest_bankroll()
+    except Exception as e:
+        log.warning("leagues exposure bankroll read failed: %s", e)
+        bankroll = None
+    try:
+        (
+            _open_n,
+            _open_notional,
+            _per_vertical,
+            per_league,
+            per_matchup,
+            per_sunday,
+            per_event,
+        ) = await _open_position_aggregates()
+    except Exception as e:
+        log.warning("leagues exposure aggregate read failed: %s", e)
+        per_league, per_matchup, per_sunday, per_event = {}, {}, {}, {}
+
+    def _bucket(open_usd: float, cap_pct: float | None) -> dict[str, Any]:
+        if cap_pct is None:
+            return {
+                "open_usd": open_usd,
+                "cap_pct": None,
+                "cap_usd": None,
+                "headroom_usd": None,
+                "utilization": None,
+                "warn": False,
+            }
+        if bankroll is None or bankroll <= 0:
+            return {
+                "open_usd": open_usd,
+                "cap_pct": cap_pct,
+                "cap_usd": None,
+                "headroom_usd": None,
+                "utilization": None,
+                "warn": False,
+            }
+        cap_usd = float(bankroll) * float(cap_pct)
+        util = open_usd / cap_usd if cap_usd > 0 else None
+        return {
+            "open_usd": open_usd,
+            "cap_pct": cap_pct,
+            "cap_usd": cap_usd,
+            "headroom_usd": max(0.0, cap_usd - open_usd),
+            "utilization": util,
+            "warn": util is not None and util >= 0.80,
+        }
+
+    # Union of leagues we know about (config) and leagues with open
+    # exposure (snapshot).  This way an unconfigured league with an open
+    # position still surfaces as "open notional, no cap" rather than
+    # silently disappearing — and a configured league with no open
+    # position never spams the panel.
+    candidate_leagues: set[str] = set(LEAGUE_CONFIGS.keys())
+    candidate_leagues.update(str(k).upper() for k in per_league.keys() if k)
+
+    leagues_out: list[dict[str, Any]] = []
+    for league in candidate_leagues:
+        cfg = get_league_config(league)
+        league_open = float(per_league.get(league, 0.0))
+        sunday_open = float(per_sunday.get(league, 0.0))
+
+        prefix = f"{league}:"
+        matchups: list[tuple[str, float]] = sorted(
+            (
+                (k[len(prefix):], float(v))
+                for k, v in per_matchup.items()
+                if k.startswith(prefix)
+            ),
+            key=lambda r: -r[1],
+        )
+        events: list[tuple[str, float]] = sorted(
+            (
+                (k[len(prefix):], float(v))
+                for k, v in per_event.items()
+                if k.startswith(prefix)
+            ),
+            key=lambda r: -r[1],
+        )
+
+        # Skip leagues with no open exposure anywhere — keeps the panel
+        # focused on what the operator actually needs to watch.
+        if (
+            league_open == 0.0
+            and sunday_open == 0.0
+            and not matchups
+            and not events
+        ):
+            continue
+
+        per_game_cap_pct = cfg.per_game_cap_pct if cfg else None
+        per_matchup_buckets: list[dict[str, Any]] = []
+        for matchup, open_usd in matchups:
+            b = _bucket(open_usd, per_game_cap_pct)
+            b["matchup"] = matchup
+            per_matchup_buckets.append(b)
+
+        entry: dict[str, Any] = {
+            "league": league,
+            "per_league": _bucket(
+                league_open, cfg.allocation_pct if cfg else None
+            ),
+            "per_matchup": per_matchup_buckets,
+        }
+        if cfg and cfg.sunday_window_cap_pct is not None:
+            entry["sunday_window"] = _bucket(sunday_open, cfg.sunday_window_cap_pct)
+        if cfg and cfg.per_event_cap_pct is not None:
+            per_event_cap_pct = cfg.per_event_cap_pct
+            event_buckets: list[dict[str, Any]] = []
+            for event_id, open_usd in events:
+                b = _bucket(open_usd, per_event_cap_pct)
+                b["event_id"] = event_id
+                event_buckets.append(b)
+            entry["per_event"] = event_buckets
+        leagues_out.append(entry)
+
+    # Heaviest-utilization league first, falling back to raw open notional
+    # so leagues with no cap configured (utilization == None) sort by
+    # exposure rather than landing in arbitrary dict order.
+    def _sort_key(e: dict[str, Any]) -> tuple[float, float]:
+        pl = e["per_league"]
+        util = pl.get("utilization")
+        return (
+            -(float(util) if util is not None else -1.0),
+            -float(pl.get("open_usd") or 0.0),
+        )
+
+    leagues_out.sort(key=_sort_key)
+
+    return {
+        "bankroll_usd": bankroll,
+        "warn_threshold": 0.80,
+        "leagues": leagues_out,
+    }
+
+
 def redact_swarm_debate_transcripts(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Drop the per-persona reasoning + moderator narrative from each item
     and stamp ``redacted: True`` so the frontend can show an upsell.

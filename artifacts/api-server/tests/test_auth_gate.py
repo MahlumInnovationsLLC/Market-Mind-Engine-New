@@ -133,6 +133,8 @@ PROTECTED_ROUTES: tuple[str, ...] = (
     "/api/dashboard/calibration/per-league",
     # Task #208 — NFL per-league + Sunday-window exposure panel.
     "/api/dashboard/nfl-exposure",
+    # Task #437 — multi-league exposure panel (NFL panel generalised).
+    "/api/dashboard/leagues-exposure",
     # Per-source weather freshness badge — operator dashboard only.
     "/api/weather/freshness",
 )

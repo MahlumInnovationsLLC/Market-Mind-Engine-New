@@ -10,7 +10,7 @@ import EquityCharts from "@/components/dashboard/equity-charts";
 import HighlightsPanel from "@/components/dashboard/highlights-panel";
 import KpiSummaryBar from "@/components/dashboard/kpi-summary-bar";
 import MacroReleaseSurprises from "@/components/dashboard/macro-release-surprises";
-import NflExposurePanel from "@/components/dashboard/nfl-exposure-panel";
+import LeaguesExposurePanel from "@/components/dashboard/leagues-exposure-panel";
 import OperatorControls from "@/components/dashboard/operator-controls";
 import OverFilledOrdersBadge from "@/components/dashboard/over-filled-orders-badge";
 import PerLeagueCalibration from "@/components/dashboard/per-league-calibration";
@@ -98,7 +98,7 @@ export default function Dashboard() {
 
         <VerticalCards />
 
-        <NflExposurePanel />
+        <LeaguesExposurePanel />
 
         <PerLeagueCalibration />
 

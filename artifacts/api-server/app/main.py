@@ -4576,6 +4576,22 @@ async def dashboard_nfl_exposure(
     return await dashboard.get_nfl_exposure()
 
 
+@app.get("/api/dashboard/leagues-exposure")
+async def dashboard_leagues_exposure(
+    _: object = Depends(require_approved_user),
+) -> dict[str, object]:
+    """Per-league + per-game (+ per-event / Sunday-window) exposure
+    headroom for every league with an open position.
+
+    Generalises the NFL exposure panel to the rest of the supported
+    leagues (NBA, MLB, NHL, NCAAF/B, soccer, UFC, ATP/WTA, F1, PGA, …).
+    Sourced from the same `_open_position_aggregates` snapshot the
+    trading cycle uses, so the operator dashboard can see how close
+    every league is to tripping its caps before the next placement.
+    """
+    return await dashboard.get_leagues_exposure()
+
+
 @app.get("/api/dashboard/calibration/per-league")
 async def dashboard_calibration_per_league(
     _: object = Depends(require_approved_user),
