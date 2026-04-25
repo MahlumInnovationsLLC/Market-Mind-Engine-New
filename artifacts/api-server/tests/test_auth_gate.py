@@ -78,6 +78,7 @@ PROTECTED_ROUTES: tuple[str, ...] = (
     "/api/me/notifications",
     "/api/me/telegram",
     "/api/feeds/status",
+    "/api/feeds/kalshi-crypto-candidates",
     "/api/features/registry",
     "/api/features/drift",
     "/api/notifications/status",

@@ -423,6 +423,9 @@ export function HealthPanel() {
           </section>
         ))}
 
+        <KalshiCryptoCandidatesPanel token={token} />
+
+
         <section className="space-y-3">
           <div className="flex items-baseline justify-between gap-3 flex-wrap">
             <h2 className="text-sm uppercase tracking-widest text-muted-foreground">
@@ -1386,6 +1389,156 @@ export function CardTile({ card }: { card: Card }) {
         {card.latency_ms !== null && <span>{card.latency_ms}ms</span>}
       </div>
     </div>
+  );
+}
+
+type KalshiCryptoCandidate = {
+  ticker: string | null;
+  symbol: string | null;
+  title: string | null;
+  mid_price: number | null;
+  close_time: string | null;
+  updated_at: string | null;
+};
+
+type KalshiCryptoCandidatesResponse = {
+  count: number;
+  items: KalshiCryptoCandidate[];
+  limit: number;
+  error?: string | null;
+};
+
+function fmtCryptoTime(iso: string | null): string {
+  if (!iso) return "—";
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return iso;
+  return d.toISOString().replace("T", " ").slice(0, 19) + "Z";
+}
+
+function fmtMidPrice(v: number | null): string {
+  if (v === null || v === undefined || Number.isNaN(v)) return "—";
+  return `${(v * 100).toFixed(1)}¢`;
+}
+
+function KalshiCryptoCandidatesPanel({
+  token,
+}: {
+  token: () => Promise<string | null>;
+}) {
+  const [data, setData] = useState<KalshiCryptoCandidatesResponse | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    async function load() {
+      try {
+        const res = await apiFetch<KalshiCryptoCandidatesResponse>(
+          "/api/feeds/kalshi-crypto-candidates?limit=25",
+          { getToken: token },
+        );
+        if (cancelled) return;
+        setData(res);
+        setError(null);
+      } catch (e: unknown) {
+        if (cancelled) return;
+        setError(
+          formatErrorMessage(
+            e,
+            e instanceof ApiError ? `HTTP ${e.status} :: ${e.message}` : undefined,
+          ),
+        );
+      }
+    }
+    load();
+    const id = setInterval(load, 15_000);
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+    };
+  }, [token]);
+
+  return (
+    <section
+      className="space-y-3"
+      data-testid="panel-kalshi-crypto-candidates"
+    >
+      <div className="flex items-baseline justify-between gap-3 flex-wrap">
+        <h2 className="text-sm uppercase tracking-widest text-muted-foreground">
+          Kalshi crypto candidates
+          <span
+            className="ml-2 text-[10px]"
+            data-testid="kalshi-crypto-candidates-count"
+          >
+            ({data?.count ?? 0})
+          </span>
+        </h2>
+        <span className="text-[10px] uppercase tracking-widest text-muted-foreground/70">
+          feed :: kalshi_crypto_markets · auto-refreshes every 15s
+        </span>
+      </div>
+      <p className="text-[11px] text-muted-foreground">
+        Live BTC/ETH binary markets the discovery feed has upserted into the
+        crypto-binary cycle queue. Confirms the poller is feeding real
+        candidates with prices and close times before a cycle fires.
+      </p>
+      {error && (
+        <div className="border border-destructive bg-destructive/10 text-destructive p-2 text-xs">
+          {error}
+        </div>
+      )}
+      {data?.error && (
+        <div className="border border-warning/40 bg-warning/5 text-warning p-2 text-xs">
+          {data.error}
+        </div>
+      )}
+      <div className="border border-border bg-card max-h-72 overflow-y-auto text-xs">
+        {(data?.items ?? []).length === 0 ? (
+          <div
+            className="p-3 text-muted-foreground"
+            data-testid="kalshi-crypto-candidates-empty"
+          >
+            no crypto candidates queued
+          </div>
+        ) : (
+          <table className="w-full">
+            <thead className="text-[10px] uppercase tracking-widest text-muted-foreground">
+              <tr className="border-b border-border">
+                <th className="text-left p-2">ticker</th>
+                <th className="text-left p-2">symbol</th>
+                <th className="text-right p-2">mid</th>
+                <th className="text-left p-2">close</th>
+                <th className="text-left p-2">updated</th>
+              </tr>
+            </thead>
+            <tbody>
+              {(data?.items ?? []).map((c, i) => (
+                <tr
+                  key={`${c.ticker ?? "row"}-${i}`}
+                  className="border-b border-border/40"
+                  data-testid={`kalshi-crypto-candidate-${i}`}
+                >
+                  <td className="p-2 break-all font-mono">
+                    {c.ticker ?? "—"}
+                  </td>
+                  <td className="p-2 whitespace-nowrap uppercase tracking-widest">
+                    {c.symbol ?? "—"}
+                  </td>
+                  <td className="p-2 text-right whitespace-nowrap font-mono">
+                    {fmtMidPrice(c.mid_price)}
+                  </td>
+                  <td className="p-2 whitespace-nowrap text-muted-foreground">
+                    {fmtCryptoTime(c.close_time)}
+                  </td>
+                  <td className="p-2 whitespace-nowrap text-muted-foreground">
+                    {fmtCryptoTime(c.updated_at)}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </div>
+    </section>
   );
 }
 

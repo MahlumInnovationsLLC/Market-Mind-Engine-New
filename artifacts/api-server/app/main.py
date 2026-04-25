@@ -4104,6 +4104,109 @@ async def feeds_status(_: object = Depends(require_auth)) -> dict[str, object]:
     return {"items": feed_registry.snapshot()}
 
 
+_KALSHI_CRYPTO_CANDIDATES_LIMIT_DEFAULT = 25
+_KALSHI_CRYPTO_CANDIDATES_LIMIT_MAX = 100
+
+
+@app.get("/api/feeds/kalshi-crypto-candidates")
+async def feeds_kalshi_crypto_candidates(
+    limit: int = _KALSHI_CRYPTO_CANDIDATES_LIMIT_DEFAULT,
+    _: object = Depends(require_auth),
+) -> dict[str, object]:
+    """Latest crypto-binary candidates the kalshi_crypto_markets feed
+    has flowed into the cycle.
+
+    Reads straight from the `predictions` table (the same source the
+    crypto-binary cycle SELECT consumes) so the operator console can
+    confirm the discovery feed is actually queueing real markets before
+    a cycle fires.  Returns the row count + a recency-ordered slice
+    capped at `limit` (default 25, max 100).
+
+    Soft-fails to an empty payload if the table is missing — on a fresh
+    install the migration may not have run yet, and we'd rather render
+    "no candidates" than 500 the operator console.
+    """
+    try:
+        n = max(1, min(int(limit), _KALSHI_CRYPTO_CANDIDATES_LIMIT_MAX))
+    except (TypeError, ValueError):
+        n = _KALSHI_CRYPTO_CANDIDATES_LIMIT_DEFAULT
+
+    try:
+        total = await db.fetchval(
+            """
+            SELECT count(*)
+              FROM predictions
+             WHERE league = 'CRYPTO'
+               AND kalshi_market_id IS NOT NULL
+            """
+        )
+    except Exception as e:  # noqa: BLE001
+        log.warning("kalshi crypto candidates count failed: %s", e)
+        return {"count": 0, "items": [], "limit": n, "error": str(e)[:240]}
+
+    try:
+        rows = await db.fetch(
+            """
+            SELECT kalshi_market_id,
+                   kalshi_price,
+                   game_time,
+                   game_context,
+                   updated_at
+              FROM predictions
+             WHERE league = 'CRYPTO'
+               AND kalshi_market_id IS NOT NULL
+             ORDER BY updated_at DESC NULLS LAST
+             LIMIT $1
+            """,
+            n,
+        )
+    except Exception as e:  # noqa: BLE001
+        log.warning("kalshi crypto candidates fetch failed: %s", e)
+        return {
+            "count": int(total or 0),
+            "items": [],
+            "limit": n,
+            "error": str(e)[:240],
+        }
+
+    items: list[dict[str, object]] = []
+    for r in rows:
+        ctx_raw = r["game_context"]
+        if isinstance(ctx_raw, str):
+            try:
+                ctx = json.loads(ctx_raw)
+            except Exception:
+                ctx = {}
+        elif isinstance(ctx_raw, dict):
+            ctx = ctx_raw
+        else:
+            ctx = {}
+        symbol = ctx.get("symbol") if isinstance(ctx, dict) else None
+        title = ctx.get("title") if isinstance(ctx, dict) else None
+        items.append({
+            "ticker": r["kalshi_market_id"],
+            "symbol": symbol,
+            "title": title,
+            "mid_price": (
+                float(r["kalshi_price"])
+                if r["kalshi_price"] is not None else None
+            ),
+            "close_time": (
+                r["game_time"].isoformat()
+                if r["game_time"] is not None else None
+            ),
+            "updated_at": (
+                r["updated_at"].isoformat()
+                if r["updated_at"] is not None else None
+            ),
+        })
+    return {
+        "count": int(total or 0),
+        "items": items,
+        "limit": n,
+    }
+
+
 @app.post("/api/admin/feeds/{name}/poll-now")
 async def admin_feeds_poll_now(
     name: str,
