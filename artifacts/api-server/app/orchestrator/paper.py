@@ -12,6 +12,7 @@ lifecycle rather than silently no-op'ing.
 """
 from __future__ import annotations
 
+import json
 import logging
 import secrets
 import uuid
@@ -22,6 +23,8 @@ from .. import db
 from ..config import get_settings
 from ..kalshi.market_titles import resolve_titles as resolve_market_titles
 from ..risk.gates import RiskContext
+from ..sports.leagues import get_league_config
+from .three_way import derive_three_way_leg
 
 
 log = logging.getLogger(__name__)
@@ -293,6 +296,29 @@ async def place_order(
         except Exception as e:
             log.warning("resolve market title failed for %s: %s", ctx.market_id, e)
 
+    # 3-way (soccer h/d/a) leg derivation (task #444).  Stamp the leg
+    # on the trade's `metadata` jsonb at insert-time so the settlement
+    # pipeline can apply the correct per-leg outcome on a draw — without
+    # this, a 3-way market settled with a draw would silently fall back
+    # to the binary `outcome_yes` and mis-score the home/away legs.
+    # Gated on the league's `three_way_market` flag so non-3-way verticals
+    # (NBA/NFL/etc.) do not get spurious leg tags from titles that happen
+    # to mention "draw" / a team name.
+    metadata: dict[str, Any] = {}
+    try:
+        cfg = get_league_config(ctx.league)
+        if cfg is not None and cfg.three_way_market:
+            leg = derive_three_way_leg(
+                market_title=market_title, candidate=cand,
+            )
+            if leg is not None:
+                metadata["three_way_leg"] = leg
+    except Exception as e:  # pragma: no cover — never let this block insert
+        log.debug(
+            "three_way_leg derivation failed for %s: %s", ctx.market_id, e,
+        )
+    metadata_json = json.dumps(metadata) if metadata else None
+
     # Submit through the chosen venue's lifecycle FIRST so a rejection
     # (slippage, dedupe, kill switch, missing polymarket id) prevents a
     # ghost row in the trades table.
@@ -315,12 +341,14 @@ async def place_order(
                 trade_id, market_id, market_title, vertical, side, action,
                 quantity, price, fees, pnl,
                 trading_mode, exchange, executed_at,
-                model_prob, model_edge, kelly_fraction
+                model_prob, model_edge, kelly_fraction,
+                metadata
             ) VALUES (
                 $1, $2, $3, $4, $5, $6,
                 $7, $8, 0, NULL,
                 $9, $10, now(),
-                $11, $12, $13
+                $11, $12, $13,
+                COALESCE($14::jsonb, '{}'::jsonb)
             )
             RETURNING id
             """,
@@ -337,6 +365,7 @@ async def place_order(
             consensus,
             edge,
             kelly,
+            metadata_json,
         )
     except Exception as e:
         log.error("trade insert failed: %s", e)
@@ -354,4 +383,5 @@ async def place_order(
         "exchange": exchange,
         "debate_id": debate_id,
         "lifecycle": lifecycle_result,
+        "metadata": metadata or None,
     }
