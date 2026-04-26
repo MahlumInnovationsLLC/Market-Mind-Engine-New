@@ -50,11 +50,36 @@ def _api_key_for(sport: str) -> str | None:
     )
 
 
-async def _get_json(provider: str, url: str, api_key: str) -> dict[str, Any] | None:
+class _NotFound:
+    """Singleton sentinel returned by ``_get_json(..., distinguish_404=True)``
+    so callers that need to react to a 404 (e.g. the soccer pollers, which
+    must invalidate a stale cached season id) can tell a "not found"
+    response apart from a successful-but-empty payload."""
+
+    __slots__ = ()
+
+    def __repr__(self) -> str:  # pragma: no cover - debugging only
+        return "<NOT_FOUND>"
+
+
+_NOT_FOUND = _NotFound()
+
+
+async def _get_json(
+    provider: str,
+    url: str,
+    api_key: str,
+    *,
+    distinguish_404: bool = False,
+) -> dict[str, Any] | None | _NotFound:
     """Fetch + JSON-decode a Sportradar URL.  Raises RateLimited on 429.
 
     Returns ``None`` on 4xx other than 429 so callers can degrade gracefully
-    (some leagues don't expose every endpoint on the trial tier).
+    (some leagues don't expose every endpoint on the trial tier).  When
+    ``distinguish_404=True`` is passed, a 404 response returns the
+    ``_NOT_FOUND`` sentinel instead of ``None`` so the caller can
+    differentiate "endpoint not in tier / season rolled over" from a
+    decode failure.
     """
     timeout = httpx.Timeout(10.0, connect=5.0)
     async with httpx.AsyncClient(timeout=timeout) as client:
@@ -76,7 +101,7 @@ async def _get_json(provider: str, url: str, api_key: str) -> dict[str, Any] | N
         raise RateLimited(provider, retry_after=_retry_after_seconds(r) or 60.0)
     if r.status_code == 404:
         # Endpoint not in this sport's tier — caller treats as 0 records.
-        return None
+        return _NOT_FOUND if distinguish_404 else None
     if r.status_code >= 400:
         raise RuntimeError(f"{provider} HTTP {r.status_code}: {r.text[:200]}")
     try:
@@ -390,6 +415,60 @@ async def _resolve_soccer_season_id(
     return _SOCCER_SEASON_CACHE[tid]
 
 
+async def _fetch_soccer_seasoned(
+    sport: str,
+    api_key: str,
+    provider: str,
+    url_template: str,
+) -> dict[str, Any] | None:
+    """Fetch a soccer-extended endpoint that's keyed by ``{season_id}``,
+    transparently refreshing the cached season id if the cached one has
+    expired (Sportradar returns 404 for ``seasons/{stale_id}/...`` once
+    the competition rolls into a new season).
+
+    Returns ``None`` on definitive failure (no season available, repeat
+    404 after refresh, etc.) so callers can short-circuit to 0 rows.
+    """
+    tid = _SOCCER_TOURNAMENTS.get(sport)
+    if not tid:
+        return None
+    season_id = await _resolve_soccer_season_id(sport, api_key)
+    if not season_id:
+        return None
+    payload = await _get_json(
+        provider,
+        url_template.format(season_id=season_id),
+        api_key,
+        distinguish_404=True,
+    )
+    if not isinstance(payload, _NotFound):
+        # _get_json is typed as `dict | None | _NotFound`; the
+        # isinstance narrow leaves the union of `dict | None`, both
+        # of which are valid return values for this helper.
+        return payload
+    # 404 — the cached season id has likely rolled over.  Drop it from
+    # the cache, re-resolve via tournament info, and retry once.  If the
+    # refreshed id matches what we had (or still 404s) we give up rather
+    # than thrash on every poll.
+    log.info(
+        "sportradar %s: cached season id %s returned 404, refreshing", sport,
+        season_id,
+    )
+    _SOCCER_SEASON_CACHE.pop(tid, None)
+    new_season_id = await _resolve_soccer_season_id(sport, api_key, force=True)
+    if not new_season_id or new_season_id == season_id:
+        return None
+    retry = await _get_json(
+        provider,
+        url_template.format(season_id=new_season_id),
+        api_key,
+        distinguish_404=True,
+    )
+    if isinstance(retry, _NotFound):
+        return None
+    return retry
+
+
 def _flatten_soccer_injuries(payload: dict[str, Any]) -> list[dict[str, Any]]:
     """Soccer-extended `seasons/{season_id}/missing_players.json` payload:
 
@@ -446,17 +525,21 @@ def _flatten_soccer_competitor_profile(
 
 
 async def _poll_soccer_rosters(sport: str, api_key: str) -> int:
-    """Two-step soccer roster fetch: season competitors -> per-team profile."""
-    season_id = await _resolve_soccer_season_id(sport, api_key)
-    if not season_id:
-        log.info("sportradar %s rosters: no season id available yet", sport)
-        return 0
-    season_payload = await _get_json(
-        f"sportradar:{sport}:rosters",
-        _SOCCER_SEASON_COMPETITORS_TPL.format(season_id=season_id),
+    """Two-step soccer roster fetch: season competitors -> per-team profile.
+
+    Uses :func:`_fetch_soccer_seasoned` so a stale cached season id is
+    transparently refreshed when the season rolls over (otherwise the
+    cached id would 404 ``seasons/{id}/competitors.json`` for the rest
+    of the process lifetime, silently dropping rosters to zero rows).
+    """
+    season_payload = await _fetch_soccer_seasoned(
+        sport,
         api_key,
+        f"sportradar:{sport}:rosters",
+        _SOCCER_SEASON_COMPETITORS_TPL,
     )
     if not season_payload:
+        log.info("sportradar %s rosters: no season payload available", sport)
         return 0
     competitors = (
         season_payload.get("season_competitors")
@@ -540,14 +623,18 @@ async def _poll_soccer_rosters(sport: str, api_key: str) -> int:
 
 
 async def _poll_soccer_injuries(sport: str, api_key: str) -> int:
-    """Fetch league-wide missing-player list for a soccer competition."""
-    season_id = await _resolve_soccer_season_id(sport, api_key)
-    if not season_id:
-        return 0
-    payload = await _get_json(
-        f"sportradar:{sport}:injuries",
-        _SOCCER_SEASON_MISSING_TPL.format(season_id=season_id),
+    """Fetch league-wide missing-player list for a soccer competition.
+
+    Uses :func:`_fetch_soccer_seasoned` so a stale cached season id is
+    transparently refreshed when the competition rolls into a new season
+    (otherwise the cached id would 404 ``seasons/{id}/missing_players``
+    for the rest of the process lifetime, silently dropping injury rows).
+    """
+    payload = await _fetch_soccer_seasoned(
+        sport,
         api_key,
+        f"sportradar:{sport}:injuries",
+        _SOCCER_SEASON_MISSING_TPL,
     )
     if not payload:
         return 0

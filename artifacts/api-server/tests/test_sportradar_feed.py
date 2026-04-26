@@ -564,7 +564,7 @@ class _CapturingDB:
 
 
 def _install_soccer_http(monkeypatch, *, info, competitors, profile_by_id, missing, live):
-    async def fake_get(name, url, key):
+    async def fake_get(name, url, key, **_kw):
         if "/tournaments/" in url and "/info.json" in url:
             return info
         if "/competitors.json" in url:
@@ -723,7 +723,7 @@ def test_resolve_soccer_season_id_caches_per_tournament(monkeypatch):
     import asyncio
     calls: list[str] = []
 
-    async def fake_get(name, url, key):
+    async def fake_get(name, url, key, **_kw):
         calls.append(url)
         return _soccer_tournament_info_fixture(season_id="sr:season:abc")
 
@@ -734,6 +734,154 @@ def test_resolve_soccer_season_id_caches_per_tournament(monkeypatch):
     assert sid2 == "sr:season:abc"
     # Cached after first lookup.
     assert len(calls) == 1
+
+
+def test_soccer_season_refreshes_on_404_after_rollover(monkeypatch):
+    """When a soccer competition rolls into a new season the cached
+    season id starts 404'ing on the seasons/{id}/missing_players (and
+    competitors) endpoints.  The pollers must drop the cached id,
+    re-resolve via tournaments/{tid}/info.json, and retry once with the
+    fresh id — otherwise injuries/rosters silently flatline to zero
+    rows until the API server restarts.
+
+    First poll: cached old id, succeeds.
+    Second poll: cached id 404s, helper re-resolves and the retry with
+    the new id succeeds.
+    """
+    import asyncio
+    monkeypatch.setenv("SPORTRADAR_API_KEY", "k")
+
+    season_state = {"current": "sr:season:OLD"}
+    info_urls: list[str] = []
+    missing_urls: list[str] = []
+
+    async def fake_get(name, url, key, *, distinguish_404=False, **_kw):
+        if "/tournaments/" in url and "/info.json" in url:
+            info_urls.append(url)
+            return _soccer_tournament_info_fixture(
+                season_id=season_state["current"]
+            )
+        if "/missing_players.json" in url:
+            missing_urls.append(url)
+            if f"/seasons/{season_state['current']}/" in url:
+                return _soccer_missing_players_fixture()
+            # Stale season id -> 404.
+            return sportradar._NOT_FOUND if distinguish_404 else None
+        return None
+
+    monkeypatch.setattr(sportradar, "_get_json", fake_get)
+    fake_db = _CapturingDB()
+    monkeypatch.setattr(sportradar, "db", fake_db)
+
+    # First poll seeds the cache with OLD and writes 3 rows.
+    n1 = asyncio.run(sportradar._poll_soccer_injuries("epl", "k"))
+    assert n1 == 3
+    tid = sportradar._SOCCER_TOURNAMENTS["epl"]
+    assert sportradar._SOCCER_SEASON_CACHE[tid] == "sr:season:OLD"
+    assert len(info_urls) == 1
+    assert len(missing_urls) == 1
+    assert "sr:season:OLD" in missing_urls[0]
+
+    # Season rolls over at the data source.
+    season_state["current"] = "sr:season:NEW"
+
+    # Second poll: cached OLD id 404s -> re-resolve picks up NEW ->
+    # retry with NEW succeeds.  The helper records all three of
+    # "first call cached, second call 404s, third succeeds with new id"
+    # against the missing_players endpoint.
+    n2 = asyncio.run(sportradar._poll_soccer_injuries("epl", "k"))
+    assert n2 == 3, "post-rollover poll should still write rows after refresh"
+    assert sportradar._SOCCER_SEASON_CACHE[tid] == "sr:season:NEW"
+    assert len(missing_urls) == 3
+    assert "sr:season:OLD" in missing_urls[0]
+    assert "sr:season:OLD" in missing_urls[1]  # the 404 attempt
+    assert "sr:season:NEW" in missing_urls[2]  # the successful retry
+    # Exactly one extra tournament-info refresh was performed.
+    assert len(info_urls) == 2
+
+
+def test_soccer_rosters_also_refresh_on_404(monkeypatch):
+    """Same season-rollover behaviour must apply to the rosters poller —
+    its season-keyed competitors.json call has the same failure mode as
+    missing_players.json."""
+    import asyncio
+    monkeypatch.setenv("SPORTRADAR_API_KEY", "k")
+
+    season_state = {"current": "sr:season:OLD"}
+    competitors_urls: list[str] = []
+
+    async def fake_get(name, url, key, *, distinguish_404=False, **_kw):
+        if "/tournaments/" in url and "/info.json" in url:
+            return _soccer_tournament_info_fixture(
+                season_id=season_state["current"]
+            )
+        if "/competitors.json" in url:
+            competitors_urls.append(url)
+            if f"/seasons/{season_state['current']}/" in url:
+                return _soccer_competitors_fixture()
+            return sportradar._NOT_FOUND if distinguish_404 else None
+        if "/competitors/" in url and "/profile.json" in url:
+            # Pull team id out of the url path.
+            for tid in ("sr:competitor:1", "sr:competitor:2"):
+                if f"/competitors/{tid}/" in url:
+                    name_ = "Arsenal" if tid.endswith("1") else "Chelsea"
+                    return _soccer_competitor_profile_fixture(tid, name_)
+            return None
+        return None
+
+    monkeypatch.setattr(sportradar, "_get_json", fake_get)
+    fake_db = _CapturingDB()
+    monkeypatch.setattr(sportradar, "db", fake_db)
+
+    # Seed the cache with OLD via the first poll.
+    n1 = asyncio.run(sportradar._poll_soccer_rosters("epl", "k"))
+    assert n1 == 4
+
+    # Rollover.
+    season_state["current"] = "sr:season:NEW"
+
+    n2 = asyncio.run(sportradar._poll_soccer_rosters("epl", "k"))
+    assert n2 == 4
+    tid = sportradar._SOCCER_TOURNAMENTS["epl"]
+    assert sportradar._SOCCER_SEASON_CACHE[tid] == "sr:season:NEW"
+    # OLD success, OLD 404, NEW success.
+    assert len(competitors_urls) == 3
+    assert "sr:season:OLD" in competitors_urls[0]
+    assert "sr:season:OLD" in competitors_urls[1]
+    assert "sr:season:NEW" in competitors_urls[2]
+
+
+def test_soccer_seasoned_helper_no_thrash_when_refresh_yields_same_id(monkeypatch):
+    """If the cached id 404s but tournament info returns the same id (or
+    nothing), the helper must give up immediately rather than thrashing
+    the API on every poll."""
+    import asyncio
+    monkeypatch.setenv("SPORTRADAR_API_KEY", "k")
+
+    info_calls = 0
+    missing_calls = 0
+
+    async def fake_get(name, url, key, *, distinguish_404=False, **_kw):
+        nonlocal info_calls, missing_calls
+        if "/tournaments/" in url and "/info.json" in url:
+            info_calls += 1
+            return _soccer_tournament_info_fixture(season_id="sr:season:STUCK")
+        if "/missing_players.json" in url:
+            missing_calls += 1
+            return sportradar._NOT_FOUND if distinguish_404 else None
+        return None
+
+    monkeypatch.setattr(sportradar, "_get_json", fake_get)
+    fake_db = _CapturingDB()
+    monkeypatch.setattr(sportradar, "db", fake_db)
+
+    n = asyncio.run(sportradar._poll_soccer_injuries("epl", "k"))
+    assert n == 0
+    # We attempt missing_players exactly once (the refresh resolved the
+    # same id, so we don't retry).
+    assert missing_calls == 1
+    # One initial info lookup + one forced refresh.
+    assert info_calls == 2
 
 
 def test_api_key_for_prefers_per_sport(monkeypatch):
