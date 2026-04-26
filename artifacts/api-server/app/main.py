@@ -5037,6 +5037,28 @@ async def live_games(
     return await dashboard.get_live_games(limit=limit, window_seconds=window_seconds)
 
 
+@app.get("/api/upcoming-games")
+async def upcoming_games(
+    window_hours: int = 24,
+    limit: int = 50,
+    user: AuthedUser = Depends(require_auth),
+) -> dict[str, object]:
+    """Snapshot of today's (and near-future) scheduled sports matchups.
+
+    Reads sportradar_schedules for games whose ``scheduled`` falls
+    inside the supplied window starting from now.  Each item carries a
+    synthetic ``market_id`` of the form ``sched:<league>:<game_id>``
+    that the chatbot endpoint understands — passing it to
+    ``POST /api/live-games/{market_id}/ask`` routes through the
+    pre-game context builder (player_status, intangibles, recent
+    pre-game swarm debate, recent Kalshi line ticks) instead of the
+    live-game one.
+    """
+    return await dashboard.get_upcoming_games(
+        window_hours=window_hours, limit=limit
+    )
+
+
 @app.get("/api/live-games/models")
 async def live_games_models(
     user: AuthedUser = Depends(require_auth),

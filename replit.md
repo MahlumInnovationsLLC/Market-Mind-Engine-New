@@ -125,6 +125,23 @@ Axiom Predict is a pnpm workspace monorepo hosting a prediction-market trading p
 - Employs a generation-guarded mount for WebSockets to prevent leaks.
 - Integrates with RevenueCat for mobile in-app subscriptions, with robust webhook entitlement-plumbing.
 
+**Live Games + Today's Games chatbot (`/live-games`):**
+- Two read-models drive one analyst chatbot. `GET /api/live-games` snapshots
+  in-progress markets (latest tick per `market_id` from `midgame_updates`,
+  joined with the most recent matching `swarm_debates` and the cached
+  Kalshi tick from `market_price_ticks`). `GET /api/upcoming-games` pulls
+  the next 24h from `sportradar_schedules` and tags each row with a
+  synthetic `market_id` of the form `sched:<league>:<game_id>`.
+- `POST /api/live-games/{market_id}/ask` dispatches by prefix: a
+  `sched:` market_id routes to `dashboard.get_upcoming_game_context`
+  (schedule + league-aware player_status + recent intangibles_reports +
+  latest pre-game swarm_debate + last 7d Kalshi line ticks for any
+  matched market_ticker), everything else routes to
+  `dashboard.get_live_game_context` (timeline + swarm_debate + ticks).
+- Model picker is flagships-only: Claude Sonnet 4.5, GPT-5, Gemini 2.5
+  Pro. The catalog (`live_games_chat.AVAILABLE_MODELS`) is mirrored to
+  `swarm/personas.py` pricing — adding a new entry requires both.
+
 ## Operations Runbook — quick links
 
 For incident response and the live cutover, see [`docs/runbook.md`](docs/runbook.md). Direct links to the on-call sections:

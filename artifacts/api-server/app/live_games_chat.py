@@ -31,11 +31,15 @@ log = logging.getLogger(__name__)
 # (provider, model_id, label).  Order is the order we surface in the
 # frontend picker.  ``provider`` is the short key used to find the right
 # API key in ``Settings`` and the right SDK in ``swarm.runner``.
+#
+# Only current-generation flagships — the swarm runner already
+# validates these IDs against the live SDKs and the pricing table in
+# ``app/swarm/personas.py``, so adding a new entry here is safe as
+# long as it's tracked there too.
 
 AVAILABLE_MODELS: tuple[tuple[str, str, str], ...] = (
     ("anthropic", "claude-sonnet-4-5-20250929", "Claude Sonnet 4.5"),
-    ("openai",    "gpt-4o-mini",                "GPT-4o mini"),
-    ("openai",    "gpt-4o",                     "GPT-4o"),
+    ("openai",    "gpt-5",                      "GPT-5"),
     ("google",    "gemini-2.5-pro",             "Gemini 2.5 Pro"),
 )
 
@@ -44,7 +48,7 @@ MAX_QUESTION_LEN = 800
 MAX_ANSWER_TOKENS = 600
 
 
-_SYSTEM_PROMPT = """You are Axiom-Predict's live-game analyst chatbot.
+_LIVE_SYSTEM_PROMPT = """You are Axiom-Predict's live-game analyst chatbot.
 
 You answer questions about a SINGLE in-progress sports market using ONLY
 the JSON context block provided below.  The context contains:
@@ -71,6 +75,47 @@ Hard rules:
   5. NEVER provide gambling advice; describe what the model and the swarm
      think, do NOT instruct the user to bet.
 """
+
+
+_UPCOMING_SYSTEM_PROMPT = """You are Axiom-Predict's pre-game analyst chatbot.
+
+You answer questions about a SINGLE upcoming sports matchup using ONLY
+the JSON context block provided below.  The context contains:
+
+  * schedule   — league, home_team, away_team, scheduled (UTC), venue,
+                 status, plus any structured payload from the schedule feed.
+  * player_status — per-team injury list and snap-count usage when
+                 available (NFL has the richest data; soccer leagues
+                 carry missing-player notes; other leagues may have only
+                 raw sportradar_injuries rows).
+  * intangibles — recent intangibles_reports rows for this matchup with
+                 their fair_prob, edge_pct and free-form payload notes.
+  * recent_swarm_debate — most recent pre-game swarm debate verdict
+                 for this matchup if one has run.
+  * ticks      — most recent Kalshi cached price ticks for any matched
+                 market (cents, 0..100), so you can describe the line
+                 movement leading into the game.
+
+Hard rules:
+  1. NEVER invent injuries, news items, line movements, debate verdicts
+     or any other number that isn't visibly present in the context.
+  2. If the user asks about something the context doesn't cover (e.g.
+     a specific player who isn't in the injury list), say so plainly:
+     "I don't have that in the pre-game feed for this matchup."
+  3. Quote source fields when citing numbers (e.g.
+     "fair_prob = 0.62 (intangibles_reports at 18:42Z)").
+  4. Distinguish current line from model fair value when both are
+     present, and call out edge direction (model > market = YES edge).
+  5. Be concise: 2-4 short paragraphs max, plain text.
+  6. NEVER provide gambling advice; describe what the data shows, do
+     NOT instruct the user to bet.
+"""
+
+
+# Sentinel prefix the frontend uses to flag an upcoming-game context
+# (vs. a kalshi market_id which is the live-game default).  Format:
+# ``sched:<league>:<game_id>``.
+UPCOMING_KEY_PREFIX = "sched:"
 
 
 # ---------------------------------------------------------------------------
@@ -258,8 +303,37 @@ async def answer_question(
         chosen_model = fallback
         provider = _provider_for(chosen_model)
 
-    ctx = await dashboard.get_live_game_context(market_id)
-    has_data = bool(ctx["timeline"] or ctx["swarm_debate"] or ctx["ticks"])
+    is_upcoming = market_id.startswith(UPCOMING_KEY_PREFIX)
+    if is_upcoming:
+        ctx = await dashboard.get_upcoming_game_context(market_id)
+        has_data = bool(
+            ctx.get("schedule")
+            or ctx.get("player_status")
+            or ctx.get("intangibles")
+            or ctx.get("ticks")
+            or ctx.get("recent_swarm_debate")
+        )
+        system_prompt = _UPCOMING_SYSTEM_PROMPT
+        ctx_summary = {
+            "kind": "upcoming",
+            "has_data": has_data,
+            "has_schedule": ctx.get("schedule") is not None,
+            "intangibles_rows": len(ctx.get("intangibles") or []),
+            "ticks_rows": len(ctx.get("ticks") or []),
+            "has_swarm_debate": ctx.get("recent_swarm_debate") is not None,
+            "has_player_status": ctx.get("player_status") is not None,
+        }
+    else:
+        ctx = await dashboard.get_live_game_context(market_id)
+        has_data = bool(ctx["timeline"] or ctx["swarm_debate"] or ctx["ticks"])
+        system_prompt = _LIVE_SYSTEM_PROMPT
+        ctx_summary = {
+            "kind": "live",
+            "has_data": has_data,
+            "timeline_rows": len(ctx["timeline"]),
+            "ticks_rows": len(ctx["ticks"]),
+            "has_swarm_debate": ctx["swarm_debate"] is not None,
+        }
 
     user_block = (
         f"CONTEXT (JSON):\n{_format_context(ctx)}\n\n"
@@ -269,7 +343,7 @@ async def answer_question(
     )
 
     try:
-        answer = await _dispatch(provider, _SYSTEM_PROMPT, user_block, model=chosen_model)
+        answer = await _dispatch(provider, system_prompt, user_block, model=chosen_model)
     except Exception as e:
         log.warning(
             "live_games_chat dispatch failed for %s/%s: %s",
@@ -282,10 +356,5 @@ async def answer_question(
         "answer": answer,
         "model": chosen_model,
         "provider": provider,
-        "context_summary": {
-            "has_data": has_data,
-            "timeline_rows": len(ctx["timeline"]),
-            "ticks_rows": len(ctx["ticks"]),
-            "has_swarm_debate": ctx["swarm_debate"] is not None,
-        },
+        "context_summary": ctx_summary,
     }

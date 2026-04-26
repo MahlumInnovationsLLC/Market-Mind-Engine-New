@@ -5,6 +5,7 @@ doesn't take down the whole response.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from typing import Any
@@ -3241,5 +3242,502 @@ async def get_live_game_context(market_id: str, *, history_limit: int = 12) -> d
         "market_id": market_id,
         "timeline": timeline,
         "swarm_debate": debate,
+        "ticks": ticks,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Upcoming-games (today's matchups + pre-game context for the chatbot)
+# ---------------------------------------------------------------------------
+#
+# These mirror the live-games shape so the frontend can render both
+# sections from one page.  The "market_id" we expose here is a synthetic
+# key of the form ``sched:<league>:<game_id>`` (see
+# ``app.live_games_chat.UPCOMING_KEY_PREFIX``) — the chatbot endpoint
+# detects this prefix and routes to ``get_upcoming_game_context``
+# instead of the live-game one.
+
+_UPCOMING_KEY_PREFIX = "sched:"
+_UPCOMING_DEFAULT_HOURS = 24
+_UPCOMING_INTANGIBLES_HOURS = 48
+
+
+def _build_upcoming_key(league: str, game_id: str) -> str:
+    return f"{_UPCOMING_KEY_PREFIX}{league}:{game_id}"
+
+
+def _parse_upcoming_key(market_id: str) -> tuple[str, str] | None:
+    """Parse ``sched:<league>:<game_id>`` -> (league, game_id).  Returns
+    ``None`` for any other shape so callers can fall back to the live
+    path."""
+    if not market_id or not market_id.startswith(_UPCOMING_KEY_PREFIX):
+        return None
+    rest = market_id[len(_UPCOMING_KEY_PREFIX):]
+    if ":" not in rest:
+        return None
+    league, _, game_id = rest.partition(":")
+    league = (league or "").strip()
+    game_id = (game_id or "").strip()
+    if not league or not game_id:
+        return None
+    return league, game_id
+
+
+async def get_upcoming_games(
+    *,
+    window_hours: int = _UPCOMING_DEFAULT_HOURS,
+    limit: int = 50,
+) -> dict[str, Any]:
+    """Return today's (and near-future) scheduled sports matchups.
+
+    Reads ``sportradar_schedules`` for rows whose ``scheduled`` falls
+    inside the supplied window starting from now.  For each row we
+    attach: how many ``intangibles_reports`` have landed for the
+    matchup in the last 48h, whether a recent pre-game ``swarm_debates``
+    row mentions the matchup, and a synthetic ``market_id`` the
+    chatbot endpoint understands.
+
+    Wrapped in try/except per query so a single missing table can't
+    blank the whole strip — same defensive pattern used by
+    ``get_live_games``.
+    """
+    window_hours = max(1, min(96, int(window_hours)))
+    limit = max(1, min(200, int(limit)))
+    now = datetime.now(timezone.utc)
+    horizon = now + timedelta(hours=window_hours)
+    fetched_at = now.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    items: list[dict[str, Any]] = []
+    try:
+        rows = await db.fetch(
+            """
+            SELECT league, game_id, home_team, away_team,
+                   to_char(scheduled, 'YYYY-MM-DD"T"HH24:MI:SSZ') AS scheduled,
+                   status, venue
+              FROM sportradar_schedules
+             WHERE scheduled >= $1
+               AND scheduled <= $2
+             ORDER BY scheduled ASC
+             LIMIT $3
+            """,
+            now,
+            horizon,
+            limit,
+        )
+    except Exception as e:
+        log.warning("get_upcoming_games schedules query failed: %s", e)
+        rows = []
+
+    # Pre-fetch intangibles counts grouped by (sport ILIKE league, teams
+    # ILIKE either side) — done in a single pass so we don't issue N+1
+    # queries.  We bucket by lower(league) for case-insensitive match.
+    intangibles_by_key: dict[tuple[str, str], int] = {}
+    if rows:
+        intangibles_cutoff = now - timedelta(hours=_UPCOMING_INTANGIBLES_HOURS)
+        try:
+            ir_rows = await db.fetch(
+                """
+                SELECT lower(sport) AS sport, lower(coalesce(teams, '')) AS teams
+                  FROM intangibles_reports
+                 WHERE scanned_at >= $1
+                """,
+                intangibles_cutoff,
+            )
+        except Exception as e:
+            log.debug("get_upcoming_games intangibles query failed: %s", e)
+            ir_rows = []
+        # Bucket per (sport, teams-lower) for fuzzy match below.
+        ir_by_sport: dict[str, list[str]] = {}
+        for ir in ir_rows:
+            ir_by_sport.setdefault(ir["sport"] or "", []).append(ir["teams"] or "")
+        for r in rows:
+            league_l = (r["league"] or "").lower()
+            home_l = (r["home_team"] or "").lower()
+            away_l = (r["away_team"] or "").lower()
+            count = 0
+            for teams_l in ir_by_sport.get(league_l, []):
+                if not teams_l:
+                    continue
+                if (home_l and home_l in teams_l) or (away_l and away_l in teams_l):
+                    count += 1
+            intangibles_by_key[(league_l, r["game_id"])] = count
+
+    for r in rows:
+        league = r["league"] or ""
+        game_id = r["game_id"] or ""
+        if not league or not game_id:
+            continue
+        items.append({
+            "market_id": _build_upcoming_key(league, game_id),
+            "league": league,
+            "home_team": r["home_team"] or "",
+            "away_team": r["away_team"] or "",
+            "scheduled": r["scheduled"],
+            "status": r["status"] or "",
+            "venue": r["venue"] or "",
+            "intangibles_count": intangibles_by_key.get(
+                ((league or "").lower(), game_id), 0
+            ),
+        })
+
+    return {
+        "items": items,
+        "count": len(items),
+        "window_hours": window_hours,
+        "fetched_at": fetched_at,
+    }
+
+
+async def _fetch_team_injuries_generic(
+    league: str, team_name: str
+) -> list[dict[str, Any]]:
+    """League-agnostic injury fetch: pulls the cached
+    ``sportradar_injuries`` rows for ``(league, team_name)`` with no
+    position filtering.  Used as the catch-all for leagues that don't
+    have a dedicated context builder (NBA, MLB, NHL, etc.)."""
+    if not team_name:
+        return []
+    try:
+        rows = await db.fetch(
+            """
+            SELECT player_name, position, status, description
+              FROM sportradar_injuries
+             WHERE league = $1 AND team_name ILIKE $2
+             ORDER BY status, position, player_name
+             LIMIT 30
+            """,
+            league,
+            f"%{team_name}%",
+        )
+    except Exception as e:
+        log.debug(
+            "generic injuries DB read failed for %s/%s: %s",
+            league, team_name, e,
+        )
+        return []
+    out: list[dict[str, Any]] = []
+    for r in rows:
+        status = (r["status"] or "").strip()
+        if not status:
+            continue
+        out.append({
+            "player": r["player_name"] or "",
+            "position": (r["position"] or "").upper(),
+            "status": status,
+            "description": (r["description"] or "")[:200],
+        })
+    return out
+
+
+async def _build_player_status_for_league(
+    league: str, home_team: str, away_team: str
+) -> dict[str, Any] | None:
+    """Dispatch to the league-specific context builder when one exists,
+    otherwise return per-team raw injury lists.  Returns ``None`` when
+    no source has anything to say about the matchup so the chatbot can
+    surface "no player_status block"."""
+    league_norm = (league or "").upper()
+    try:
+        if league_norm == "NFL":
+            from .sports import fetch_nfl_player_status  # noqa: PLC0415
+            return await fetch_nfl_player_status(home_team, away_team)
+        from .sports import is_soccer_league, fetch_soccer_lineup_status  # noqa: PLC0415
+        if is_soccer_league(league):
+            return await fetch_soccer_lineup_status(league, home_team, away_team)
+    except Exception as e:
+        log.debug(
+            "league context builder failed for %s: %s — falling back to generic",
+            league, e,
+        )
+    home_inj, away_inj = await asyncio.gather(
+        _fetch_team_injuries_generic(league, home_team),
+        _fetch_team_injuries_generic(league, away_team),
+    )
+    if not home_inj and not away_inj:
+        return None
+    return {
+        "home": {"team": home_team, "injuries": home_inj},
+        "away": {"team": away_team, "injuries": away_inj},
+    }
+
+
+async def get_upcoming_game_context(market_id: str) -> dict[str, Any]:
+    """Build a pre-game context bundle for the chatbot answering
+    questions about a single upcoming matchup.
+
+    Pulls the schedule row, league-aware player_status (NFL injuries +
+    snap counts, soccer lineup status, generic injuries elsewhere),
+    recent ``intangibles_reports`` rows for the matchup, the most
+    recent pre-game ``swarm_debates`` verdict if one mentions the
+    matchup, and the latest cached Kalshi ticks for any market that
+    looks like it tracks this matchup.
+
+    All four sub-queries are isolated so a single missing source
+    yields ``None``/``[]`` for that field rather than blanking the
+    whole bundle.
+    """
+    parsed = _parse_upcoming_key(market_id)
+    if parsed is None:
+        return {
+            "market_id": market_id,
+            "schedule": None,
+            "player_status": None,
+            "intangibles": [],
+            "recent_swarm_debate": None,
+            "ticks": [],
+            "error": "invalid_upcoming_key",
+        }
+    league, game_id = parsed
+
+    schedule: dict[str, Any] | None = None
+    home_team = away_team = ""
+    try:
+        srow = await db.fetchrow(
+            """
+            SELECT league, game_id, home_team, away_team,
+                   to_char(scheduled, 'YYYY-MM-DD"T"HH24:MI:SSZ') AS scheduled,
+                   status, venue, payload
+              FROM sportradar_schedules
+             WHERE league = $1 AND game_id = $2
+             LIMIT 1
+            """,
+            league, game_id,
+        )
+        if srow:
+            home_team = srow["home_team"] or ""
+            away_team = srow["away_team"] or ""
+            payload = srow["payload"]
+            if isinstance(payload, str):
+                try:
+                    payload = json.loads(payload)
+                except Exception:
+                    payload = None
+            schedule = {
+                "league": srow["league"],
+                "game_id": srow["game_id"],
+                "home_team": home_team,
+                "away_team": away_team,
+                "scheduled": srow["scheduled"],
+                "status": srow["status"],
+                "venue": srow["venue"],
+                "payload": payload if isinstance(payload, dict) else None,
+            }
+    except Exception as e:
+        log.warning(
+            "get_upcoming_game_context schedule query failed for %s/%s: %s",
+            league, game_id, e,
+        )
+
+    player_status = await _build_player_status_for_league(
+        league, home_team, away_team
+    )
+
+    intangibles: list[dict[str, Any]] = []
+    if home_team and away_team:
+        try:
+            cutoff = datetime.now(timezone.utc) - timedelta(
+                hours=_UPCOMING_INTANGIBLES_HOURS
+            )
+            home_l = home_team.lower()
+            away_l = away_team.lower()
+            # Require BOTH team names to appear in the ``teams`` field.
+            # Earlier we used OR which produced false positives — e.g.
+            # the substring ``jets`` could match an unrelated soccer
+            # club called Jets FC, or ``united`` could match dozens of
+            # English clubs.  Pre-game intangibles_reports always carry
+            # both team names in ``teams`` (formatted ``A vs B`` or
+            # ``A @ B`` by the scanner), so AND is the correct join.
+            ir_rows = await db.fetch(
+                """
+                SELECT provider, market_type, side, edge_pct, fair_prob,
+                       book_prob, sportsbook, teams, payload,
+                       to_char(scanned_at, 'YYYY-MM-DD"T"HH24:MI:SSZ') AS scanned_at
+                  FROM intangibles_reports
+                 WHERE lower(sport) = $1
+                   AND scanned_at >= $2
+                   AND coalesce(teams, '') <> ''
+                   AND lower(teams) LIKE '%' || $3 || '%'
+                   AND lower(teams) LIKE '%' || $4 || '%'
+                 ORDER BY scanned_at DESC
+                 LIMIT 25
+                """,
+                (league or "").lower(),
+                cutoff,
+                home_l,
+                away_l,
+            )
+            for r in ir_rows:
+                payload = r["payload"]
+                if isinstance(payload, str):
+                    try:
+                        payload = json.loads(payload)
+                    except Exception:
+                        payload = None
+                intangibles.append({
+                    "provider": r["provider"],
+                    "market_type": r["market_type"],
+                    "side": r["side"],
+                    "edge_pct": (
+                        float(r["edge_pct"]) if r["edge_pct"] is not None else None
+                    ),
+                    "fair_prob": (
+                        float(r["fair_prob"]) if r["fair_prob"] is not None else None
+                    ),
+                    "book_prob": (
+                        float(r["book_prob"]) if r["book_prob"] is not None else None
+                    ),
+                    "sportsbook": r["sportsbook"],
+                    "teams": r["teams"],
+                    "payload": payload if isinstance(payload, dict) else None,
+                    "scanned_at": r["scanned_at"],
+                })
+        except Exception as e:
+            log.warning(
+                "get_upcoming_game_context intangibles failed for %s/%s: %s",
+                league, game_id, e,
+            )
+
+    debate: dict[str, Any] | None = None
+    if home_team and away_team:
+        try:
+            home_l = home_team.lower()
+            away_l = away_team.lower()
+            # Same OR -> AND tightening as above + scope by league so a
+            # cross-league matchup with overlapping team names (e.g.
+            # MLB ``Yankees`` vs minor-league affiliates) can't bleed
+            # the wrong debate into the chatbot.
+            d = await db.fetchrow(
+                """
+                SELECT id, league, matchup, market_type, recommended_action,
+                       consensus_probability, agreement_rate, approved,
+                       confidence_band_low, confidence_band_high,
+                       to_char(created_at, 'YYYY-MM-DD"T"HH24:MI:SSZ') AS created_at,
+                       moderator_synthesis
+                  FROM swarm_debates
+                 WHERE created_at >= now() - interval '7 days'
+                   AND lower(coalesce(matchup, '')) <> ''
+                   AND lower(matchup) LIKE '%' || $1 || '%'
+                   AND lower(matchup) LIKE '%' || $2 || '%'
+                   AND ($3 = '' OR lower(coalesce(league, '')) = $3)
+                 ORDER BY created_at DESC
+                 LIMIT 1
+                """,
+                home_l,
+                away_l,
+                (league or "").lower(),
+            )
+            if d:
+                mod = d["moderator_synthesis"]
+                if isinstance(mod, str):
+                    try:
+                        mod = json.loads(mod)
+                    except Exception:
+                        mod = None
+                debate = {
+                    "id": d["id"],
+                    "matchup": d["matchup"],
+                    "market_type": d["market_type"],
+                    "recommended_action": d["recommended_action"],
+                    "consensus_probability": (
+                        float(d["consensus_probability"])
+                        if d["consensus_probability"] is not None else None
+                    ),
+                    "agreement_rate": (
+                        float(d["agreement_rate"])
+                        if d["agreement_rate"] is not None else None
+                    ),
+                    "approved": (
+                        bool(d["approved"]) if d["approved"] is not None else None
+                    ),
+                    "confidence_band_low": (
+                        float(d["confidence_band_low"])
+                        if d["confidence_band_low"] is not None else None
+                    ),
+                    "confidence_band_high": (
+                        float(d["confidence_band_high"])
+                        if d["confidence_band_high"] is not None else None
+                    ),
+                    "created_at": d["created_at"],
+                    "synthesis": (
+                        mod.get("synthesis") if isinstance(mod, dict) else None
+                    ),
+                }
+        except Exception as e:
+            log.warning(
+                "get_upcoming_game_context debate failed for %s/%s: %s",
+                league, game_id, e,
+            )
+
+    ticks: list[dict[str, Any]] = []
+    if home_team and away_team:
+        try:
+            home_l = home_team.lower()
+            away_l = away_team.lower()
+            # Kalshi tickers are short opaque codes (e.g. ``KXNFLGAME-…-PHIBUF``)
+            # so substring matching ``Eagles`` against the ticker rarely
+            # works.  The ``market_title_cache`` table on the other hand
+            # holds the human-readable Kalshi title (e.g. "Will the
+            # Eagles beat the Bills on Nov 5?") — match BOTH team names
+            # against the title to find the real market for this game,
+            # then pull ticks for those tickers.  We also keep the
+            # legacy ticker-substring fallback (still requiring BOTH
+            # team names) for tickers whose title isn't cached yet.
+            tick_rows = await db.fetch(
+                """
+                WITH title_matched AS (
+                    SELECT ticker AS market_ticker
+                      FROM market_title_cache
+                     WHERE coalesce(title, '') <> ''
+                       AND lower(title) LIKE '%' || $1 || '%'
+                       AND lower(title) LIKE '%' || $2 || '%'
+                     LIMIT 5
+                ),
+                ticker_matched AS (
+                    SELECT DISTINCT market_ticker
+                      FROM market_price_ticks
+                     WHERE bucket_ts >= now() - interval '7 days'
+                       AND lower(market_ticker) LIKE '%' || $1 || '%'
+                       AND lower(market_ticker) LIKE '%' || $2 || '%'
+                     LIMIT 5
+                ),
+                matched_markets AS (
+                    SELECT market_ticker FROM title_matched
+                    UNION
+                    SELECT market_ticker FROM ticker_matched
+                )
+                SELECT t.market_ticker, t.close_cents, t.mean_cents,
+                       to_char(t.bucket_ts, 'YYYY-MM-DD"T"HH24:MI:SSZ') AS bucket_ts
+                  FROM market_price_ticks t
+                  JOIN matched_markets m ON m.market_ticker = t.market_ticker
+                 WHERE t.bucket_ts >= now() - interval '7 days'
+                 ORDER BY t.bucket_ts DESC
+                 LIMIT 30
+                """,
+                home_l,
+                away_l,
+            )
+            for r in tick_rows:
+                ticks.append({
+                    "market_ticker": r["market_ticker"],
+                    "close_cents": (
+                        int(r["close_cents"]) if r["close_cents"] is not None else None
+                    ),
+                    "mean_cents": (
+                        int(r["mean_cents"]) if r["mean_cents"] is not None else None
+                    ),
+                    "bucket_ts": r["bucket_ts"],
+                })
+        except Exception as e:
+            log.warning(
+                "get_upcoming_game_context ticks failed for %s/%s: %s",
+                league, game_id, e,
+            )
+
+    return {
+        "market_id": market_id,
+        "schedule": schedule,
+        "player_status": player_status,
+        "intangibles": intangibles,
+        "recent_swarm_debate": debate,
         "ticks": ticks,
     }

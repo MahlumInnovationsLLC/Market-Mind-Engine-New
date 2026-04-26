@@ -58,6 +58,8 @@ PROTECTED_ROUTES: tuple[str, ...] = (
     "/api/live-games",
     # Live Games chatbot model catalog (per-provider availability).
     "/api/live-games/models",
+    # Today's (and near-future) scheduled sports matchups.
+    "/api/upcoming-games",
     "/api/dashboard/uw-signals",
     "/api/dashboard/trades/{trade_ref}",
     "/api/search",
