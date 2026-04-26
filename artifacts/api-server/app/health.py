@@ -280,6 +280,13 @@ def _probe_kalshi_cluster() -> dict:
     cached state — does not re-issue the network call.
     """
     state = kalshi_client_mod.cluster_probe_state()
+    # Surface the configured re-probe cadence so the dashboard can
+    # decide what counts as a "stale" checked_at without having to
+    # hard-code the interval in the frontend.
+    extras = {
+        **state,
+        "probe_interval_seconds": kalshi_client_mod.KALSHI_CLUSTER_PROBE_INTERVAL_SECONDS,
+    }
     if not state.get("checked"):
         return _card(
             key="kalshi_cluster",
@@ -287,7 +294,7 @@ def _probe_kalshi_cluster() -> dict:
             category="passive",
             status="unconfigured",
             detail="cluster probe has not run yet",
-            extras=state,
+            extras=extras,
         )
     ok = bool(state.get("ok"))
     if ok:
@@ -297,7 +304,7 @@ def _probe_kalshi_cluster() -> dict:
             category="passive",
             status="ok",
             detail=str(state.get("detail") or "authenticated")[:240],
-            extras=state,
+            extras=extras,
         )
     return _card(
         key="kalshi_cluster",
@@ -305,7 +312,7 @@ def _probe_kalshi_cluster() -> dict:
         category="passive",
         status="down",
         detail=str(state.get("error") or "cluster probe failed")[:240],
-        extras=state,
+        extras=extras,
     )
 
 

@@ -253,6 +253,116 @@ describe("KalshiClusterDetails (rendered via CardTile)", () => {
     expect(
       screen.getByTestId("kalshi-cluster-key-belongs-to").textContent,
     ).toBe("—");
+    // Pre-probe: no "last checked" line — there's nothing to render.
+    expect(screen.queryByTestId("kalshi-cluster-last-checked")).toBeNull();
+  });
+
+  it("shows a relative 'last checked' age when the probe has run recently", () => {
+    const epoch = Date.now() / 1000 - 120; // 2 minutes ago
+    render(
+      <CardTile
+        card={{
+          ...baseClusterCard,
+          status: "ok",
+          detail: "authenticated against cluster 'prod'",
+          extras: {
+            checked: true,
+            ok: true,
+            configured_env: "prod",
+            key_belongs_to: "prod",
+            checked_at_epoch: epoch,
+            checked_at: new Date(epoch * 1000).toISOString(),
+            probe_interval_seconds: 600,
+          },
+        }}
+      />,
+    );
+    const last = screen.getByTestId("kalshi-cluster-last-checked");
+    // 2-minute-old probe rendered as "2m ago" (formatAge rounds down).
+    expect(last.textContent).toMatch(/2m ago/);
+    // Fresh result must not be flagged as stale.
+    expect(last.getAttribute("data-stale")).toBe("false");
+    expect(last.className).not.toMatch(/warning/);
+    expect(screen.queryByTestId("kalshi-cluster-stale-warning")).toBeNull();
+  });
+
+  it("flags 'last checked' as stale when older than 3x the probe interval", () => {
+    // 40 minutes old vs 10-minute interval ⇒ > 3x cadence ⇒ stale.
+    const epoch = Date.now() / 1000 - 40 * 60;
+    render(
+      <CardTile
+        card={{
+          ...baseClusterCard,
+          status: "ok",
+          detail: "authenticated against cluster 'prod'",
+          extras: {
+            checked: true,
+            ok: true,
+            configured_env: "prod",
+            key_belongs_to: "prod",
+            checked_at_epoch: epoch,
+            checked_at: new Date(epoch * 1000).toISOString(),
+            probe_interval_seconds: 600,
+          },
+        }}
+      />,
+    );
+    const last = screen.getByTestId("kalshi-cluster-last-checked");
+    expect(last.getAttribute("data-stale")).toBe("true");
+    // Warning palette so a green status doesn't hide a wedged probe.
+    expect(last.className).toMatch(/warning/);
+    const warn = screen.getByTestId("kalshi-cluster-stale-warning");
+    expect(warn.textContent).toMatch(/stale/i);
+  });
+
+  it("uses the API-provided probe interval to decide what counts as stale", () => {
+    // 5-minute-old probe with a 60-second cadence ⇒ also stale (>3x).
+    const epoch = Date.now() / 1000 - 5 * 60;
+    render(
+      <CardTile
+        card={{
+          ...baseClusterCard,
+          status: "ok",
+          detail: "authenticated against cluster 'prod'",
+          extras: {
+            checked: true,
+            ok: true,
+            configured_env: "prod",
+            key_belongs_to: "prod",
+            checked_at_epoch: epoch,
+            checked_at: new Date(epoch * 1000).toISOString(),
+            probe_interval_seconds: 60,
+          },
+        }}
+      />,
+    );
+    const last = screen.getByTestId("kalshi-cluster-last-checked");
+    expect(last.getAttribute("data-stale")).toBe("true");
+  });
+
+  it("falls back to parsing checked_at when the API omits the epoch field", () => {
+    // Older API builds may only send the ISO-8601 string. Make sure we
+    // still surface a relative age and don't render "unknown".
+    const isoTwoMinAgo = new Date(Date.now() - 120_000).toISOString();
+    render(
+      <CardTile
+        card={{
+          ...baseClusterCard,
+          status: "ok",
+          detail: "authenticated against cluster 'prod'",
+          extras: {
+            checked: true,
+            ok: true,
+            configured_env: "prod",
+            key_belongs_to: "prod",
+            checked_at: isoTwoMinAgo,
+          },
+        }}
+      />,
+    );
+    expect(
+      screen.getByTestId("kalshi-cluster-last-checked").textContent,
+    ).toMatch(/m ago/);
   });
 
   it("does not render the kalshi-cluster details on unrelated cards", () => {

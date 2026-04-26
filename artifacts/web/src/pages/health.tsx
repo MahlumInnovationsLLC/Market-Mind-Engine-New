@@ -1097,6 +1097,12 @@ function ManifestSignatureBadge({ extras }: { extras: Record<string, unknown> })
   );
 }
 
+// Default cadence the auto-probe loop runs at when the API hasn't told
+// us otherwise (matches AXIOM_KALSHI_CLUSTER_PROBE_INTERVAL_SECONDS).
+// Used only as a safety net so the "stale" badge still appears on
+// older API builds that don't surface ``probe_interval_seconds``.
+const KALSHI_CLUSTER_DEFAULT_PROBE_INTERVAL_SECONDS = 600;
+
 function KalshiClusterDetails({
   extras,
 }: {
@@ -1116,31 +1122,77 @@ function KalshiClusterDetails({
     keyBelongsTo !== null &&
     keyBelongsTo !== configuredEnv;
 
+  // "last checked Xm ago" — answers "is this status fresh, or a stuck
+  // verdict from a wedged probe loop?". Prefer the epoch the probe
+  // recorded itself; fall back to parsing the ISO-8601 string.
+  const checkedAtEpoch =
+    typeof extras.checked_at_epoch === "number"
+      ? extras.checked_at_epoch * 1000
+      : typeof extras.checked_at === "string"
+        ? Date.parse(extras.checked_at)
+        : NaN;
+  const intervalSeconds =
+    typeof extras.probe_interval_seconds === "number" &&
+    extras.probe_interval_seconds > 0
+      ? extras.probe_interval_seconds
+      : KALSHI_CLUSTER_DEFAULT_PROBE_INTERVAL_SECONDS;
+  const ageSeconds = Number.isFinite(checkedAtEpoch)
+    ? Math.max(0, Math.floor((Date.now() - checkedAtEpoch) / 1000))
+    : null;
+  // Anything older than ~3x the configured cadence means the re-probe
+  // loop has almost certainly stopped firing — surface it so a green
+  // status doesn't hide a wedged probe.
+  const stale = ageSeconds !== null && ageSeconds > intervalSeconds * 3;
+
   return (
-    <div
-      className="grid grid-cols-2 gap-1 text-[10px] uppercase tracking-widest"
-      data-testid="kalshi-cluster-details"
-    >
-      <span>
-        configured_env:{" "}
-        <span
-          className="text-foreground normal-case tracking-normal"
-          data-testid="kalshi-cluster-configured-env"
-        >
-          {configuredEnv ?? "—"}
+    <div className="space-y-1" data-testid="kalshi-cluster-details">
+      <div className="grid grid-cols-2 gap-1 text-[10px] uppercase tracking-widest">
+        <span>
+          configured_env:{" "}
+          <span
+            className="text-foreground normal-case tracking-normal"
+            data-testid="kalshi-cluster-configured-env"
+          >
+            {configuredEnv ?? "—"}
+          </span>
         </span>
-      </span>
-      <span>
-        key_belongs_to:{" "}
-        <span
-          className={`normal-case tracking-normal ${
-            mismatch ? "text-destructive font-bold" : "text-foreground"
-          }`}
-          data-testid="kalshi-cluster-key-belongs-to"
-        >
-          {keyBelongsTo ?? (checked ? "unknown" : "—")}
+        <span>
+          key_belongs_to:{" "}
+          <span
+            className={`normal-case tracking-normal ${
+              mismatch ? "text-destructive font-bold" : "text-foreground"
+            }`}
+            data-testid="kalshi-cluster-key-belongs-to"
+          >
+            {keyBelongsTo ?? (checked ? "unknown" : "—")}
+          </span>
         </span>
-      </span>
+      </div>
+      {checked && ageSeconds !== null && (
+        <div className="text-[10px] uppercase tracking-widest">
+          last checked:{" "}
+          <span
+            className={`normal-case tracking-normal ${
+              stale ? "text-warning font-bold" : "text-foreground"
+            }`}
+            data-testid="kalshi-cluster-last-checked"
+            data-stale={stale ? "true" : "false"}
+            title={
+              typeof extras.checked_at === "string" ? extras.checked_at : ""
+            }
+          >
+            {formatAge(ageSeconds)} ago
+          </span>
+          {stale && (
+            <span
+              className="ml-2 text-warning"
+              data-testid="kalshi-cluster-stale-warning"
+            >
+              · stale (re-probe loop may be stuck)
+            </span>
+          )}
+        </div>
+      )}
     </div>
   );
 }
