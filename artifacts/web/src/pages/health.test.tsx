@@ -733,3 +733,42 @@ describe("Soccer season metadata (rendered via CardTile)", () => {
     ).toBeNull();
   });
 });
+
+import { CryptoOutcomeBadge } from "./health";
+
+describe("CryptoOutcomeBadge", () => {
+  it("renders a green YES badge for a settled YES market", () => {
+    render(<CryptoOutcomeBadge outcome="yes" />);
+    const badge = screen.getByTestId("crypto-outcome-badge");
+    expect(badge.getAttribute("data-outcome")).toBe("yes");
+    expect(badge.textContent).toMatch(/yes/i);
+    expect(badge.className).toMatch(/success/);
+    expect(badge.className).not.toMatch(/destructive/);
+  });
+
+  it("renders a red NO badge for a settled NO market", () => {
+    render(<CryptoOutcomeBadge outcome="NO" />);
+    const badge = screen.getByTestId("crypto-outcome-badge");
+    expect(badge.getAttribute("data-outcome")).toBe("no");
+    expect(badge.textContent).toMatch(/no/i);
+    expect(badge.className).toMatch(/destructive/);
+  });
+
+  it("renders a muted VOID badge for a voided market (refunded — no winning side)", () => {
+    render(<CryptoOutcomeBadge outcome="void" />);
+    const badge = screen.getByTestId("crypto-outcome-badge");
+    expect(badge.getAttribute("data-outcome")).toBe("void");
+    expect(badge.textContent).toMatch(/void/i);
+    // VOID must NOT use the win/loss palette so it doesn't masquerade
+    // as either side.
+    expect(badge.className).not.toMatch(/success/);
+    expect(badge.className).not.toMatch(/destructive/);
+  });
+
+  it("renders 'pending' when the row hasn't been settled yet", () => {
+    render(<CryptoOutcomeBadge outcome={null} />);
+    expect(screen.queryByTestId("crypto-outcome-badge")).toBeNull();
+    const pending = screen.getByTestId("crypto-outcome-pending");
+    expect(pending.textContent).toMatch(/pending/i);
+  });
+});

@@ -1562,14 +1562,64 @@ type KalshiCryptoCandidate = {
   mid_price: number | null;
   close_time: string | null;
   updated_at: string | null;
+  settled_at: string | null;
+  outcome: string | null;
+  settle_price: number | null;
+};
+
+type KalshiCryptoSettledRollup = {
+  today: number;
+  yesterday: number;
 };
 
 type KalshiCryptoCandidatesResponse = {
   count: number;
   items: KalshiCryptoCandidate[];
   limit: number;
+  settled?: KalshiCryptoSettledRollup | null;
   error?: string | null;
 };
+
+function fmtSettlePrice(v: number | null): string {
+  if (v === null || v === undefined || Number.isNaN(v)) return "—";
+  return `${(v * 100).toFixed(0)}¢`;
+}
+
+export function CryptoOutcomeBadge({
+  outcome,
+}: {
+  outcome: string | null;
+}) {
+  if (!outcome) {
+    return (
+      <span
+        className="text-muted-foreground/70"
+        data-testid="crypto-outcome-pending"
+      >
+        pending
+      </span>
+    );
+  }
+  const norm = outcome.toLowerCase();
+  // YES / NO / VOID get distinct, scannable styling so an operator
+  // glancing at the panel can spot the realised side without parsing
+  // the price.  VOID is muted because no contracts paid out.
+  const cls =
+    norm === "yes"
+      ? "border-success/40 bg-success/10 text-success"
+      : norm === "no"
+        ? "border-destructive/40 bg-destructive/10 text-destructive"
+        : "border-border bg-muted/30 text-muted-foreground";
+  return (
+    <span
+      className={`inline-block border px-1.5 py-px text-[10px] uppercase tracking-widest font-bold ${cls}`}
+      data-testid="crypto-outcome-badge"
+      data-outcome={norm}
+    >
+      {norm}
+    </span>
+  );
+}
 
 function fmtCryptoTime(iso: string | null): string {
   if (!iso) return "—";
@@ -1583,7 +1633,7 @@ function fmtMidPrice(v: number | null): string {
   return `${(v * 100).toFixed(1)}¢`;
 }
 
-function KalshiCryptoCandidatesPanel({
+export function KalshiCryptoCandidatesPanel({
   token,
 }: {
   token: () => Promise<string | null>;
@@ -1634,6 +1684,26 @@ function KalshiCryptoCandidatesPanel({
           >
             ({data?.count ?? 0})
           </span>
+          <span
+            className="ml-3 text-[10px] normal-case tracking-normal text-muted-foreground/80"
+            data-testid="kalshi-crypto-settled-rollup"
+            title="Crypto predictions stamped by the kalshi_crypto_settlements settler, bucketed on the UTC day boundary."
+          >
+            settled today:{" "}
+            <span
+              className="font-bold text-foreground tabular-nums"
+              data-testid="kalshi-crypto-settled-today"
+            >
+              {data?.settled?.today ?? 0}
+            </span>{" "}
+            · yesterday:{" "}
+            <span
+              className="font-bold text-foreground tabular-nums"
+              data-testid="kalshi-crypto-settled-yesterday"
+            >
+              {data?.settled?.yesterday ?? 0}
+            </span>
+          </span>
         </h2>
         <span className="text-[10px] uppercase tracking-widest text-muted-foreground/70">
           feed :: kalshi_crypto_markets · auto-refreshes every 15s
@@ -1642,7 +1712,8 @@ function KalshiCryptoCandidatesPanel({
       <p className="text-[11px] text-muted-foreground">
         Live BTC/ETH binary markets the discovery feed has upserted into the
         crypto-binary cycle queue. Confirms the poller is feeding real
-        candidates with prices and close times before a cycle fires.
+        candidates with prices and close times before a cycle fires; settled
+        rows show the realised YES/NO/void outcome the settler stamped.
       </p>
       {error && (
         <div className="border border-destructive bg-destructive/10 text-destructive p-2 text-xs">
@@ -1671,6 +1742,9 @@ function KalshiCryptoCandidatesPanel({
                 <th className="text-right p-2">mid</th>
                 <th className="text-left p-2">close</th>
                 <th className="text-left p-2">updated</th>
+                <th className="text-left p-2">outcome</th>
+                <th className="text-right p-2">settle</th>
+                <th className="text-left p-2">settled</th>
               </tr>
             </thead>
             <tbody>
@@ -1679,6 +1753,7 @@ function KalshiCryptoCandidatesPanel({
                   key={`${c.ticker ?? "row"}-${i}`}
                   className="border-b border-border/40"
                   data-testid={`kalshi-crypto-candidate-${i}`}
+                  data-settled={c.settled_at ? "true" : "false"}
                 >
                   <td className="p-2 break-all font-mono">
                     {c.ticker ?? "—"}
@@ -1694,6 +1769,24 @@ function KalshiCryptoCandidatesPanel({
                   </td>
                   <td className="p-2 whitespace-nowrap text-muted-foreground">
                     {fmtCryptoTime(c.updated_at)}
+                  </td>
+                  <td
+                    className="p-2 whitespace-nowrap"
+                    data-testid={`kalshi-crypto-candidate-${i}-outcome`}
+                  >
+                    <CryptoOutcomeBadge outcome={c.outcome} />
+                  </td>
+                  <td
+                    className="p-2 text-right whitespace-nowrap font-mono text-muted-foreground"
+                    data-testid={`kalshi-crypto-candidate-${i}-settle-price`}
+                  >
+                    {fmtSettlePrice(c.settle_price)}
+                  </td>
+                  <td
+                    className="p-2 whitespace-nowrap text-muted-foreground"
+                    data-testid={`kalshi-crypto-candidate-${i}-settled-at`}
+                  >
+                    {fmtCryptoTime(c.settled_at)}
                   </td>
                 </tr>
               ))}

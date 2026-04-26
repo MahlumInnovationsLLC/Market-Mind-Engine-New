@@ -4356,6 +4356,14 @@ async def feeds_kalshi_crypto_candidates(
     a cycle fires.  Returns the row count + a recency-ordered slice
     capped at `limit` (default 25, max 100).
 
+    Each row also carries the settlement triplet
+    (``settled_at`` / ``outcome`` / ``settle_price``) the
+    ``kalshi_crypto_settlements`` settler stamps once Kalshi resolves
+    the market — so the operator console can render realised outcomes
+    alongside the live edge view.  A small ``settled`` rollup counts
+    how many crypto rows resolved today vs yesterday (UTC), making the
+    settler's work visible without poking at SQL.
+
     Soft-fails to an empty payload if the table is missing — on a fresh
     install the migration may not have run yet, and we'd rather render
     "no candidates" than 500 the operator console.
@@ -4376,7 +4384,45 @@ async def feeds_kalshi_crypto_candidates(
         )
     except Exception as e:  # noqa: BLE001
         log.warning("kalshi crypto candidates count failed: %s", e)
-        return {"count": 0, "items": [], "limit": n, "error": str(e)[:240]}
+        return {
+            "count": 0,
+            "items": [],
+            "limit": n,
+            "settled": {"today": 0, "yesterday": 0},
+            "error": str(e)[:240],
+        }
+
+    # Settled-today / settled-yesterday rollup.  Bucketed on the UTC
+    # day boundary because the settler stamps ``settled_at`` in UTC and
+    # the table renders settlement timestamps in UTC too — using a
+    # local-time bucket here would make the rollup disagree with the
+    # row-level timestamps operators see on the same panel.
+    settled_today = 0
+    settled_yesterday = 0
+    try:
+        srow = await db.fetchrow(
+            """
+            SELECT
+              count(*) FILTER (
+                WHERE (settled_at AT TIME ZONE 'UTC')::date
+                      = (now() AT TIME ZONE 'UTC')::date
+              ) AS today,
+              count(*) FILTER (
+                WHERE (settled_at AT TIME ZONE 'UTC')::date
+                      = ((now() AT TIME ZONE 'UTC')::date - INTERVAL '1 day')
+              ) AS yesterday
+              FROM predictions
+             WHERE league = 'CRYPTO'
+               AND settled_at IS NOT NULL
+            """
+        )
+        if srow is not None:
+            settled_today = int(srow["today"] or 0)
+            settled_yesterday = int(srow["yesterday"] or 0)
+    except Exception as e:  # noqa: BLE001
+        # Soft-fail: a missing column on a not-yet-migrated fork
+        # shouldn't blank the whole panel.  The rollup just shows 0/0.
+        log.debug("kalshi crypto settled rollup failed: %s", e)
 
     try:
         rows = await db.fetch(
@@ -4385,7 +4431,10 @@ async def feeds_kalshi_crypto_candidates(
                    kalshi_price,
                    game_time,
                    game_context,
-                   updated_at
+                   updated_at,
+                   settled_at,
+                   outcome,
+                   settle_price
               FROM predictions
              WHERE league = 'CRYPTO'
                AND kalshi_market_id IS NOT NULL
@@ -4400,6 +4449,10 @@ async def feeds_kalshi_crypto_candidates(
             "count": int(total or 0),
             "items": [],
             "limit": n,
+            "settled": {
+                "today": settled_today,
+                "yesterday": settled_yesterday,
+            },
             "error": str(e)[:240],
         }
 
@@ -4417,6 +4470,12 @@ async def feeds_kalshi_crypto_candidates(
             ctx = {}
         symbol = ctx.get("symbol") if isinstance(ctx, dict) else None
         title = ctx.get("title") if isinstance(ctx, dict) else None
+        # ``settled_at`` / ``outcome`` / ``settle_price`` are always
+        # present in the projection above; if the migration hasn't run
+        # the outer SELECT raises and we never get here.
+        settled_at = r["settled_at"]
+        outcome_raw = r["outcome"]
+        settle_price_raw = r["settle_price"]
         items.append({
             "ticker": r["kalshi_market_id"],
             "symbol": symbol,
@@ -4433,11 +4492,26 @@ async def feeds_kalshi_crypto_candidates(
                 r["updated_at"].isoformat()
                 if r["updated_at"] is not None else None
             ),
+            "settled_at": (
+                settled_at.isoformat()
+                if settled_at is not None else None
+            ),
+            "outcome": (
+                str(outcome_raw) if outcome_raw is not None else None
+            ),
+            "settle_price": (
+                float(settle_price_raw)
+                if settle_price_raw is not None else None
+            ),
         })
     return {
         "count": int(total or 0),
         "items": items,
         "limit": n,
+        "settled": {
+            "today": settled_today,
+            "yesterday": settled_yesterday,
+        },
     }
 
 
