@@ -1353,6 +1353,54 @@ export function CardTile({ card }: { card: Card }) {
   const fails = isFeed
     ? ((extras.failure_count as number | null) ?? null)
     : null;
+  // Soccer pollers stash a `metadata` dict on the feed status with the
+  // currently-cached Sportradar season id and any 404-driven refresh
+  // outcome (rolled over vs. stuck).  Surface those as a dedicated
+  // line on the feed card so an operator can see at a glance which
+  // season a poller is pinned to and whether the rollover handler
+  // managed to recover.
+  const metadata =
+    isFeed && extras.metadata && typeof extras.metadata === "object"
+      ? (extras.metadata as Record<string, unknown>)
+      : null;
+  const seasonId =
+    metadata && typeof metadata.season_id === "string"
+      ? metadata.season_id
+      : null;
+  const seasonResolvedAt =
+    metadata && typeof metadata.season_id_resolved_at === "string"
+      ? metadata.season_id_resolved_at
+      : null;
+  const seasonLastRefreshAt =
+    metadata && typeof metadata.season_last_refresh_at === "string"
+      ? metadata.season_last_refresh_at
+      : null;
+  const seasonLastRefreshOutcome =
+    metadata && typeof metadata.season_last_refresh_outcome === "string"
+      ? metadata.season_last_refresh_outcome
+      : null;
+  const seasonStuck = !!(metadata && metadata.season_stuck === true);
+  const seasonPreviousId =
+    metadata && typeof metadata.season_previous_id === "string"
+      ? metadata.season_previous_id
+      : null;
+  const cadenceSeconds =
+    isFeed && typeof extras.cadence_seconds === "number"
+      ? (extras.cadence_seconds as number)
+      : null;
+  // "At least one polling interval" — show the rolled-over badge for a
+  // window equal to the feed's cadence (with a 60s floor so very fast
+  // pollers still let humans notice it on a manual refresh).
+  const refreshBadgeWindowMs = Math.max((cadenceSeconds ?? 60) * 1000, 60_000);
+  const refreshAgeMs = seasonLastRefreshAt
+    ? Date.now() - Date.parse(seasonLastRefreshAt)
+    : Number.POSITIVE_INFINITY;
+  const showRolledOverBadge =
+    !seasonStuck &&
+    seasonLastRefreshOutcome === "rotated" &&
+    Number.isFinite(refreshAgeMs) &&
+    refreshAgeMs >= 0 &&
+    refreshAgeMs <= refreshBadgeWindowMs;
   const access = useGetMyAccess();
   const { getToken } = useAuth();
   const isAdmin = !!access.data?.is_admin;
@@ -1413,6 +1461,69 @@ export function CardTile({ card }: { card: Card }) {
               {polls != null && fails != null ? ` (${fails}/${polls})` : ""}
             </span>
           </span>
+        </div>
+      )}
+      {isFeed && metadata && (seasonId || seasonStuck) && (
+        <div
+          className="space-y-0.5 text-[10px] uppercase tracking-widest text-muted-foreground"
+          data-testid={`feed-season-${card.key}`}
+        >
+          <div className="flex flex-wrap items-center gap-2">
+            <span>
+              season:{" "}
+              <span
+                className="text-foreground normal-case tracking-normal break-all"
+                data-testid={`feed-season-id-${card.key}`}
+              >
+                {seasonId ?? "n/a"}
+              </span>
+            </span>
+            {seasonResolvedAt && (
+              <span>
+                resolved:{" "}
+                <span className="text-foreground normal-case tracking-normal">
+                  {seasonResolvedAt}
+                </span>
+              </span>
+            )}
+            {showRolledOverBadge && (
+              <span
+                className="border border-warning/60 bg-warning/10 text-warning px-1 py-0.5"
+                data-testid={`feed-season-rolled-over-${card.key}`}
+                title={
+                  seasonPreviousId
+                    ? `Refreshed from ${seasonPreviousId} at ${seasonLastRefreshAt}`
+                    : `Refreshed at ${seasonLastRefreshAt}`
+                }
+              >
+                season rolled over
+              </span>
+            )}
+            {seasonStuck && (
+              <span
+                className="border border-destructive/60 bg-destructive/10 text-destructive px-1 py-0.5"
+                data-testid={`feed-season-stuck-${card.key}`}
+                title={
+                  seasonLastRefreshOutcome
+                    ? `Refresh outcome: ${seasonLastRefreshOutcome}`
+                    : "Season id refresh failed"
+                }
+              >
+                season id stuck
+              </span>
+            )}
+          </div>
+          {seasonLastRefreshAt && (
+            <div>
+              last refresh:{" "}
+              <span className="text-foreground normal-case tracking-normal">
+                {seasonLastRefreshAt}
+                {seasonLastRefreshOutcome
+                  ? ` (${seasonLastRefreshOutcome})`
+                  : ""}
+              </span>
+            </div>
+          )}
         </div>
       )}
       {isFeed && isAdmin && feedName && (

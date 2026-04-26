@@ -586,8 +586,10 @@ def _install_soccer_http(monkeypatch, *, info, competitors, profile_by_id, missi
 @pytest.fixture(autouse=True)
 def _clear_soccer_season_cache():
     sportradar._SOCCER_SEASON_CACHE.clear()
+    sportradar._SOCCER_SEASON_RESOLVED_AT.clear()
     yield
     sportradar._SOCCER_SEASON_CACHE.clear()
+    sportradar._SOCCER_SEASON_RESOLVED_AT.clear()
 
 
 def test_soccer_endpoints_registered_in_path_dicts():
@@ -882,6 +884,180 @@ def test_soccer_seasoned_helper_no_thrash_when_refresh_yields_same_id(monkeypatc
     assert missing_calls == 1
     # One initial info lookup + one forced refresh.
     assert info_calls == 2
+
+
+def test_soccer_pollers_record_season_metadata_on_clean_poll(monkeypatch):
+    """A clean (no rollover) soccer poll must stamp the cached season id
+    onto the feed's `metadata` so the operator console can see *which*
+    season the poller is pinned to even before a 404 ever happens."""
+    import asyncio
+
+    monkeypatch.setenv("SPORTRADAR_API_KEY", "k")
+    reg = _isolated_registry()
+    monkeypatch.setattr(sportradar, "registry", reg)
+    sportradar.register_sportradar_extra_feeds()
+
+    profile_by_id = {
+        "sr:competitor:1": _soccer_competitor_profile_fixture("sr:competitor:1", "Arsenal"),
+        "sr:competitor:2": _soccer_competitor_profile_fixture("sr:competitor:2", "Chelsea"),
+    }
+    _install_soccer_http(
+        monkeypatch,
+        info=_soccer_tournament_info_fixture(season_id="sr:season:CLEAN"),
+        competitors=_soccer_competitors_fixture(),
+        profile_by_id=profile_by_id,
+        missing=_soccer_missing_players_fixture(),
+        live=_soccer_live_schedule_fixture(),
+    )
+    fake_db = _CapturingDB()
+    monkeypatch.setattr(sportradar, "db", fake_db)
+
+    asyncio.run(sportradar._poll_injuries("epl"))
+    asyncio.run(sportradar._poll_rosters("epl"))
+
+    inj = reg.status_of("sportradar_epl_injuries")
+    ros = reg.status_of("sportradar_epl_rosters")
+    assert inj is not None and ros is not None
+    for st in (inj, ros):
+        assert st.metadata.get("season_id") == "sr:season:CLEAN"
+        assert st.metadata.get("season_stuck") is False
+        assert st.metadata.get("tournament_id") == sportradar._SOCCER_TOURNAMENTS["epl"]
+        assert st.metadata.get("season_id_resolved_at"), (
+            "resolved_at must be populated so the UI can show *when* "
+            "the cached id was first picked up"
+        )
+
+
+def test_soccer_poll_metadata_records_rotation_after_404(monkeypatch):
+    """When the cached season id 404s and the refresh yields a *new* id,
+    the feed's metadata must record the rotation outcome + previous id
+    so the operator console can show a "rolled over" badge."""
+    import asyncio
+
+    monkeypatch.setenv("SPORTRADAR_API_KEY", "k")
+    reg = _isolated_registry()
+    monkeypatch.setattr(sportradar, "registry", reg)
+    sportradar.register_sportradar_extra_feeds()
+
+    season_state = {"current": "sr:season:OLD"}
+
+    async def fake_get(name, url, key, *, distinguish_404=False, **_kw):
+        if "/tournaments/" in url and "/info.json" in url:
+            return _soccer_tournament_info_fixture(
+                season_id=season_state["current"]
+            )
+        if "/missing_players.json" in url:
+            if f"/seasons/{season_state['current']}/" in url:
+                return _soccer_missing_players_fixture()
+            return sportradar._NOT_FOUND if distinguish_404 else None
+        return None
+
+    monkeypatch.setattr(sportradar, "_get_json", fake_get)
+    fake_db = _CapturingDB()
+    monkeypatch.setattr(sportradar, "db", fake_db)
+
+    # First poll establishes OLD as the cached id.
+    asyncio.run(sportradar._poll_injuries("epl"))
+    inj = reg.status_of("sportradar_epl_injuries")
+    assert inj is not None
+    assert inj.metadata.get("season_id") == "sr:season:OLD"
+    assert inj.metadata.get("season_stuck") is False
+    # No refresh has happened yet so the rotation fields stay unset.
+    assert inj.metadata.get("season_last_refresh_at") is None
+
+    # Sportradar rolls over.
+    season_state["current"] = "sr:season:NEW"
+    asyncio.run(sportradar._poll_injuries("epl"))
+    assert inj.metadata.get("season_id") == "sr:season:NEW"
+    assert inj.metadata.get("season_previous_id") == "sr:season:OLD"
+    assert inj.metadata.get("season_last_refresh_outcome") == "rotated"
+    assert inj.metadata.get("season_stuck") is False
+    assert inj.metadata.get("season_last_refresh_at"), (
+        "rotation must be timestamped so the UI can decide when to "
+        "stop showing the rolled-over badge"
+    )
+
+
+def test_soccer_poll_metadata_flags_stuck_when_refresh_yields_no_new_id(monkeypatch):
+    """If the cached season id 404s and the refresh re-resolves to the
+    same (still-stale) id, the feed's metadata must flip
+    `season_stuck=True` so the operator console can render a clear
+    warning instead of letting the poll look like a healthy zero-row
+    success."""
+    import asyncio
+
+    monkeypatch.setenv("SPORTRADAR_API_KEY", "k")
+    reg = _isolated_registry()
+    monkeypatch.setattr(sportradar, "registry", reg)
+    sportradar.register_sportradar_extra_feeds()
+
+    async def fake_get(name, url, key, *, distinguish_404=False, **_kw):
+        if "/tournaments/" in url and "/info.json" in url:
+            return _soccer_tournament_info_fixture(season_id="sr:season:STUCK")
+        if "/missing_players.json" in url:
+            return sportradar._NOT_FOUND if distinguish_404 else None
+        return None
+
+    monkeypatch.setattr(sportradar, "_get_json", fake_get)
+    fake_db = _CapturingDB()
+    monkeypatch.setattr(sportradar, "db", fake_db)
+
+    n = asyncio.run(sportradar._poll_injuries("epl"))
+    assert n == 0
+    inj = reg.status_of("sportradar_epl_injuries")
+    assert inj is not None
+    assert inj.metadata.get("season_stuck") is True
+    assert inj.metadata.get("season_last_refresh_outcome") == "same_id"
+    assert inj.metadata.get("season_id") == "sr:season:STUCK"
+
+
+def test_health_probe_renders_stuck_season_as_degraded(monkeypatch):
+    """`_probe_feeds()` must promote a soccer feed whose metadata says
+    `season_stuck=True` to status=degraded with a clear "season id
+    stuck" detail, even if the underlying poll counters look healthy."""
+    from app import health as health_mod
+    from app.feeds.registry import Feed
+
+    reg = _isolated_registry()
+
+    async def _ok():
+        return 0
+
+    reg.register(
+        Feed(
+            name="sportradar_epl_injuries",
+            cadence_seconds=900.0,
+            poll=_ok,
+            enabled=True,
+        )
+    )
+    st = reg._status["sportradar_epl_injuries"]  # type: ignore[attr-defined]
+    # Simulate a healthy-looking poll (one success, no error) but with
+    # the stuck flag set by the soccer helper.
+    st.poll_count = 1
+    st.success_count = 1
+    st.last_ok_at = 1_700_000_100.0
+    st.last_finished_at = 1_700_000_100.0
+    st.metadata = {
+        "season_id": "sr:season:STUCK",
+        "season_stuck": True,
+        "season_last_refresh_outcome": "same_id",
+        "season_last_refresh_at": "2026-04-26T00:00:00+00:00",
+    }
+
+    monkeypatch.setattr(health_mod, "feed_registry", reg)
+    cards = health_mod._probe_feeds()
+    assert len(cards) == 1
+    card = cards[0]
+    assert card["status"] == "degraded"
+    assert "season id stuck" in card["detail"]
+    assert "sr:season:STUCK" in card["detail"]
+    # Metadata must round-trip through the card extras so the React
+    # CardTile can render the "rolled over" / "stuck" badges.
+    extras = card.get("extras") or {}
+    meta = extras.get("metadata") or {}
+    assert meta.get("season_stuck") is True
+    assert meta.get("season_id") == "sr:season:STUCK"
 
 
 def test_api_key_for_prefers_per_sport(monkeypatch):

@@ -36,6 +36,13 @@ class FeedStatus:
     poll_count: int = 0
     rate_limited_count: int = 0
     rate_limited_until: float | None = None
+    # Free-form per-feed metadata that individual pollers can stash
+    # (e.g. soccer pollers record the cached Sportradar season id and
+    # the timestamp of the most recent 404-driven refresh here so the
+    # operator console can render a "rolled over" badge / "season id
+    # stuck" warning).  Always serialised as part of `to_dict()` so it
+    # flows straight into the health-card extras with no extra plumbing.
+    metadata: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -56,6 +63,7 @@ class FeedStatus:
             "poll_count": self.poll_count,
             "rate_limited_count": self.rate_limited_count,
             "rate_limited_until": _ts(self.rate_limited_until),
+            "metadata": dict(self.metadata),
         }
 
     def is_rate_limited(self) -> bool:
@@ -167,6 +175,22 @@ class FeedRegistry:
             st.rate_limited_count += 1
             st.rate_limited_until = time.time() + max(1.0, retry_after_seconds)
             log.warning("feed %s rate-limited; backing off %.1fs", name, retry_after_seconds)
+
+    def set_metadata(self, name: str, **fields: Any) -> None:
+        """Merge ``fields`` into the named feed's metadata dict.
+
+        Synchronous + lock-free on purpose: per-feed metadata is updated
+        from inside the poll body (already serialized by the scheduler's
+        per-feed task) and reads happen via ``snapshot()`` which copies
+        the dict.  Fields whose value is ``None`` are stored as-is so a
+        caller can explicitly null out a previous value.  Silently no-op
+        for unknown feeds so an experimental feed swap can't crash a
+        running poll.
+        """
+        st = self._status.get(name)
+        if st is None:
+            return
+        st.metadata.update(fields)
 
     async def record_failure(self, name: str, started_at: float, err: BaseException) -> None:
         async with self._lock:

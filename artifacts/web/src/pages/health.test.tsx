@@ -556,3 +556,180 @@ describe("CryptoFreshnessWidget", () => {
     expect(screen.queryByTestId("crypto-freshness-widget")).toBeNull();
   });
 });
+
+const baseSoccerFeedCard = {
+  key: "feed:sportradar_epl_injuries",
+  label: "sportradar_epl_injuries",
+  category: "feed" as const,
+  checked_at: "2026-04-26T00:00:00Z",
+  latency_ms: null,
+};
+
+describe("Soccer season metadata (rendered via CardTile)", () => {
+  it("shows the cached season id + resolved-at without any badges on a clean poll", () => {
+    render(
+      <CardTile
+        card={{
+          ...baseSoccerFeedCard,
+          status: "ok",
+          detail: "wrote 0 row(s)",
+          extras: {
+            cadence_seconds: 900,
+            metadata: {
+              season_id: "sr:season:CLEAN",
+              season_id_resolved_at: "2026-04-25T12:00:00+00:00",
+              tournament_id: "sr:tournament:17",
+              season_stuck: false,
+              season_last_refresh_at: null,
+              season_last_refresh_outcome: null,
+            },
+          },
+        }}
+      />,
+    );
+    const wrap = screen.getByTestId("feed-season-feed:sportradar_epl_injuries");
+    expect(wrap).toBeTruthy();
+    expect(
+      screen.getByTestId("feed-season-id-feed:sportradar_epl_injuries")
+        .textContent,
+    ).toBe("sr:season:CLEAN");
+    // Neither badge fires when the season is happily pinned.
+    expect(
+      screen.queryByTestId(
+        "feed-season-rolled-over-feed:sportradar_epl_injuries",
+      ),
+    ).toBeNull();
+    expect(
+      screen.queryByTestId(
+        "feed-season-stuck-feed:sportradar_epl_injuries",
+      ),
+    ).toBeNull();
+  });
+
+  it("shows the 'season rolled over' badge for one polling interval after a fresh rotation", () => {
+    // A rotation that just happened — the badge must be visible so an
+    // operator notices the season-id change on at least one refresh.
+    const justNow = new Date(Date.now() - 5_000).toISOString();
+    render(
+      <CardTile
+        card={{
+          ...baseSoccerFeedCard,
+          status: "ok",
+          detail: "wrote 12 row(s)",
+          extras: {
+            cadence_seconds: 900,
+            metadata: {
+              season_id: "sr:season:NEW",
+              season_previous_id: "sr:season:OLD",
+              season_id_resolved_at: justNow,
+              season_stuck: false,
+              season_last_refresh_at: justNow,
+              season_last_refresh_outcome: "rotated",
+            },
+          },
+        }}
+      />,
+    );
+    const badge = screen.getByTestId(
+      "feed-season-rolled-over-feed:sportradar_epl_injuries",
+    );
+    expect(badge.textContent).toMatch(/rolled over/i);
+    // Tooltip names the previous id so an operator can see the diff.
+    expect(badge.getAttribute("title") ?? "").toMatch(/sr:season:OLD/);
+    expect(
+      screen.queryByTestId(
+        "feed-season-stuck-feed:sportradar_epl_injuries",
+      ),
+    ).toBeNull();
+  });
+
+  it("hides the 'rolled over' badge once the rotation is older than the cadence window", () => {
+    // Rotation happened > 1 polling interval ago — the transient badge
+    // must drop off so it doesn't permanently clutter the card.
+    const oneHourAgo = new Date(Date.now() - 3_600_000).toISOString();
+    render(
+      <CardTile
+        card={{
+          ...baseSoccerFeedCard,
+          status: "ok",
+          detail: "wrote 12 row(s)",
+          extras: {
+            cadence_seconds: 900, // 15min cadence < 1h ago ⇒ badge expired
+            metadata: {
+              season_id: "sr:season:NEW",
+              season_previous_id: "sr:season:OLD",
+              season_id_resolved_at: oneHourAgo,
+              season_stuck: false,
+              season_last_refresh_at: oneHourAgo,
+              season_last_refresh_outcome: "rotated",
+            },
+          },
+        }}
+      />,
+    );
+    expect(
+      screen.queryByTestId(
+        "feed-season-rolled-over-feed:sportradar_epl_injuries",
+      ),
+    ).toBeNull();
+    // Cached id still shown.
+    expect(
+      screen.getByTestId("feed-season-id-feed:sportradar_epl_injuries")
+        .textContent,
+    ).toBe("sr:season:NEW");
+  });
+
+  it("shows the 'season id stuck' badge when the refresh failed to resolve a new id", () => {
+    render(
+      <CardTile
+        card={{
+          ...baseSoccerFeedCard,
+          status: "degraded",
+          detail:
+            "season id stuck (outcome=same_id) :: cached=sr:season:STUCK",
+          extras: {
+            cadence_seconds: 900,
+            metadata: {
+              season_id: "sr:season:STUCK",
+              season_id_resolved_at: "2026-04-20T00:00:00+00:00",
+              season_stuck: true,
+              season_last_refresh_at: "2026-04-26T00:00:00+00:00",
+              season_last_refresh_outcome: "same_id",
+            },
+          },
+        }}
+      />,
+    );
+    const badge = screen.getByTestId(
+      "feed-season-stuck-feed:sportradar_epl_injuries",
+    );
+    expect(badge.textContent).toMatch(/stuck/i);
+    // The stuck badge must NOT also show the (transient) "rolled over"
+    // badge — those two states are mutually exclusive and showing both
+    // would be misleading.
+    expect(
+      screen.queryByTestId(
+        "feed-season-rolled-over-feed:sportradar_epl_injuries",
+      ),
+    ).toBeNull();
+  });
+
+  it("renders no season block on non-feed cards even if extras carry a metadata field", () => {
+    render(
+      <CardTile
+        card={{
+          ...baseModelsCard,
+          extras: {
+            metadata: { season_id: "sr:season:LEAK", season_stuck: true },
+          },
+        }}
+      />,
+    );
+    // Only feed cards render the season metadata block — leaking the
+    // section onto unrelated cards (e.g. models) would confuse
+    // operators.
+    expect(
+      screen.queryByTestId("feed-season-models"),
+    ).toBeNull();
+  });
+});

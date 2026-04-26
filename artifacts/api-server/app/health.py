@@ -1799,6 +1799,7 @@ def _probe_feeds() -> list[dict]:
         # Bound to 4dp so the UI can render `xx.yy%` without further math.
         error_rate = round(fails / polls, 4) if polls > 0 else 0.0
         last_pull = s.get("last_finished_at") or s.get("last_ok_at")
+        meta = s.get("metadata") or {}
 
         if not s.get("enabled"):
             status = "unconfigured"
@@ -1823,6 +1824,24 @@ def _probe_feeds() -> list[dict]:
                 detail = (
                     f"last pull {last_pull} | err {error_rate * 100:.1f}% "
                     f"({fails}/{polls}) | written={s.get('last_records_written')}"
+                )
+            # Soccer pollers stash their cached Sportradar season id (and
+            # any 404-driven refresh outcome) under metadata.season_*.
+            # When the refresh failed to find a usable new id we promote
+            # the card to "degraded" with a clear "season id stuck"
+            # detail instead of leaving the operator to wonder why an
+            # otherwise-green feed has been writing 0 rows for hours.
+            if meta.get("season_stuck"):
+                outcome = meta.get("season_last_refresh_outcome") or "unknown"
+                sid = meta.get("season_id") or "n/a"
+                status = "degraded"
+                detail = (
+                    f"season id stuck ({outcome}) :: cached={sid} :: "
+                    + (detail or "no payload")
+                )
+                error_log(
+                    f"feed:{s['name']}",
+                    f"season id stuck (outcome={outcome}, cached={sid})",
                 )
 
         # Promote last_pull + error_rate into the card extras so the

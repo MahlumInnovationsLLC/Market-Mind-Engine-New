@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import logging
 import os
+import time
 from datetime import datetime, timezone
 from typing import Any
 
@@ -33,6 +34,13 @@ from .odds_api import (
 )
 from .registry import Feed, registry
 from .scheduler import RateLimited
+
+
+def _utc_iso(epoch: float | None = None) -> str:
+    """Render an epoch (defaults to now) as an ISO-8601 UTC string,
+    matching the format the rest of FeedStatus uses (seconds resolution)."""
+    ts = epoch if epoch is not None else time.time()
+    return datetime.fromtimestamp(ts, tz=timezone.utc).isoformat(timespec="seconds")
 
 
 log = logging.getLogger("axiom.feeds.sportradar")
@@ -161,6 +169,12 @@ _SOCCER_DAILY_SCHEDULE_TPL = (
 # Process-level cache: tournament_id -> season_id.  Refreshed lazily if a
 # downstream call returns 404 (season turned over).
 _SOCCER_SEASON_CACHE: dict[str, str] = {}
+
+# Parallel cache: tournament_id -> ISO timestamp of when the *current*
+# cached season id was first resolved (either initial lookup or after a
+# 404-driven refresh).  Surfaced in the operator console so humans can
+# see when a competition rolled into a new season.
+_SOCCER_SEASON_RESOLVED_AT: dict[str, str] = {}
 
 
 _INJURY_PATHS: dict[str, str] = {
@@ -412,6 +426,7 @@ async def _resolve_soccer_season_id(
     if not season_id:
         return None
     _SOCCER_SEASON_CACHE[tid] = str(season_id)
+    _SOCCER_SEASON_RESOLVED_AT[tid] = _utc_iso()
     return _SOCCER_SEASON_CACHE[tid]
 
 
@@ -420,6 +435,8 @@ async def _fetch_soccer_seasoned(
     api_key: str,
     provider: str,
     url_template: str,
+    *,
+    feed_name: str | None = None,
 ) -> dict[str, Any] | None:
     """Fetch a soccer-extended endpoint that's keyed by ``{season_id}``,
     transparently refreshing the cached season id if the cached one has
@@ -434,7 +451,29 @@ async def _fetch_soccer_seasoned(
         return None
     season_id = await _resolve_soccer_season_id(sport, api_key)
     if not season_id:
+        if feed_name:
+            registry.set_metadata(
+                feed_name,
+                season_id=None,
+                season_id_resolved_at=None,
+                tournament_id=tid,
+                season_stuck=True,
+                season_last_refresh_at=_utc_iso(),
+                season_last_refresh_outcome="no_id_available",
+            )
         return None
+    # Always advertise the currently-cached season id so the operator
+    # console can show *which* season the feed is pinned to.  Reset
+    # any previous "stuck" flag whenever we have a usable id; the 404
+    # branch below re-flips it if the refresh yields nothing new.
+    if feed_name:
+        registry.set_metadata(
+            feed_name,
+            season_id=season_id,
+            season_id_resolved_at=_SOCCER_SEASON_RESOLVED_AT.get(tid),
+            tournament_id=tid,
+            season_stuck=False,
+        )
     payload = await _get_json(
         provider,
         url_template.format(season_id=season_id),
@@ -455,8 +494,31 @@ async def _fetch_soccer_seasoned(
         season_id,
     )
     _SOCCER_SEASON_CACHE.pop(tid, None)
+    refresh_at = _utc_iso()
     new_season_id = await _resolve_soccer_season_id(sport, api_key, force=True)
     if not new_season_id or new_season_id == season_id:
+        # Refresh yielded nothing new — Sportradar's tournament info is
+        # also stale, or it pointed back at the same id we just got a
+        # 404 on.  Flag the feed as stuck so the operator console
+        # surfaces a "season id stuck" warning instead of letting the
+        # poll look like a green zero-row success.
+        if feed_name:
+            registry.set_metadata(
+                feed_name,
+                season_id=season_id,
+                season_previous_id=season_id,
+                tournament_id=tid,
+                season_stuck=True,
+                season_last_refresh_at=refresh_at,
+                season_last_refresh_outcome=(
+                    "same_id" if new_season_id == season_id else "no_new_id"
+                ),
+            )
+        # Restore the cached id so we don't thrash tournament_info on
+        # every subsequent poll: we'll keep retrying the seasoned
+        # endpoint with the same (still 404'ing) id and reporting
+        # "stuck" each cycle.
+        _SOCCER_SEASON_CACHE[tid] = season_id
         return None
     retry = await _get_json(
         provider,
@@ -464,9 +526,27 @@ async def _fetch_soccer_seasoned(
         api_key,
         distinguish_404=True,
     )
+    refresh_outcome = "rotated"
+    refresh_payload: dict[str, Any] | None
     if isinstance(retry, _NotFound):
-        return None
-    return retry
+        # New id 404s too — we found a fresh season id but the
+        # downstream endpoint still doesn't have it.  Treat as stuck.
+        refresh_outcome = "rotated_but_404"
+        refresh_payload = None
+    else:
+        refresh_payload = retry
+    if feed_name:
+        registry.set_metadata(
+            feed_name,
+            season_id=new_season_id,
+            season_previous_id=season_id,
+            season_id_resolved_at=_SOCCER_SEASON_RESOLVED_AT.get(tid),
+            tournament_id=tid,
+            season_stuck=(refresh_payload is None),
+            season_last_refresh_at=refresh_at,
+            season_last_refresh_outcome=refresh_outcome,
+        )
+    return refresh_payload
 
 
 def _flatten_soccer_injuries(payload: dict[str, Any]) -> list[dict[str, Any]]:
@@ -537,6 +617,7 @@ async def _poll_soccer_rosters(sport: str, api_key: str) -> int:
         api_key,
         f"sportradar:{sport}:rosters",
         _SOCCER_SEASON_COMPETITORS_TPL,
+        feed_name=f"sportradar_{sport}_rosters",
     )
     if not season_payload:
         log.info("sportradar %s rosters: no season payload available", sport)
@@ -635,6 +716,7 @@ async def _poll_soccer_injuries(sport: str, api_key: str) -> int:
         api_key,
         f"sportradar:{sport}:injuries",
         _SOCCER_SEASON_MISSING_TPL,
+        feed_name=f"sportradar_{sport}_injuries",
     )
     if not payload:
         return 0
