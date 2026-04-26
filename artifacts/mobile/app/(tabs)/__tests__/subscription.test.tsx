@@ -136,6 +136,13 @@ function renderScreen(): ReturnType<typeof render> {
   );
 }
 
+// First render of the subscription screen pulls in fonts, react-query
+// plumbing, and several mocked native modules — on a cold worker the
+// initial frame can land well above the default 5s budget. Bump the
+// per-test timeout to match the sibling dashboard test so a slow CI
+// worker does not flake the upgrade-CTA assertion.
+jest.setTimeout(20_000);
+
 beforeEach(() => {
   jest.clearAllMocks();
   // Default: RC not configured (matches device builds without keys),

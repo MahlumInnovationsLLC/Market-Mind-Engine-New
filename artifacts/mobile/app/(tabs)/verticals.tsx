@@ -4,7 +4,7 @@ import type {
   VerticalsOverview,
   VerticalsOverviewEntry,
 } from "@workspace/api-client-react";
-import React from "react";
+import React, { useMemo } from "react";
 import {
   ActivityIndicator,
   FlatList,
@@ -25,6 +25,16 @@ import {
   setSelectedVerticals,
   useSelectedVerticals,
 } from "@/lib/vertical-filter";
+
+type PersonaTogglesPayload = {
+  items: Array<{
+    vertical: string;
+    vertical_label?: string;
+    persona_profile?: string | null;
+    personas: Array<{ id: string; display?: string; enabled: boolean }>;
+    orphaned?: boolean;
+  }>;
+};
 
 function fmtMoney(n: number | null | undefined): string {
   if (n === null || n === undefined) return "—";
@@ -71,6 +81,30 @@ export default function VerticalsScreen() {
     staleTime: 30_000,
   });
   const isAdmin = !!access.data?.is_admin;
+  // Mirrors the web dashboard's per-vertical persona-override badge
+  // (artifacts/web/src/components/dashboard/vertical-cards.tsx). Admin-
+  // only — non-admins can't read /api/admin/persona-toggles, so we
+  // skip the request entirely instead of letting it 403.
+  const personaToggles = useQuery<PersonaTogglesPayload>({
+    queryKey: ["admin", "persona-toggles", "summary"],
+    queryFn: () =>
+      apiFetch<PersonaTogglesPayload>("/api/admin/persona-toggles"),
+    enabled: isAdmin,
+    staleTime: 60_000,
+    refetchInterval: 120_000,
+  });
+  const disabledByVertical = useMemo<Record<string, string[]>>(() => {
+    const out: Record<string, string[]> = {};
+    const items = personaToggles.data?.items ?? [];
+    for (const v of items) {
+      const off = v.personas
+        .filter((p) => !p.enabled)
+        .map((p) => p.display || p.id);
+      if (off.length > 0) out[v.vertical] = off;
+    }
+    return out;
+  }, [personaToggles.data]);
+  const overrideVerticals = Object.keys(disabledByVertical).sort();
 
   const styles = StyleSheet.create({
     container: { flex: 1, backgroundColor: colors.background },
@@ -156,6 +190,64 @@ export default function VerticalsScreen() {
       marginTop: 40,
       fontSize: 12,
     },
+    overrideBanner: {
+      marginHorizontal: 16,
+      marginTop: 8,
+      borderWidth: 1,
+      borderColor: colors.warning,
+      backgroundColor: colors.warning + "1A",
+      paddingHorizontal: 10,
+      paddingVertical: 8,
+    },
+    overrideTitle: {
+      color: colors.warning,
+      fontSize: 10,
+      letterSpacing: 1.5,
+      textTransform: "uppercase",
+      fontFamily: "Inter_700Bold",
+      marginBottom: 4,
+    },
+    overrideBody: {
+      color: colors.mutedForeground,
+      fontSize: 11,
+      marginBottom: 6,
+    },
+    overrideChipRow: { flexDirection: "row", flexWrap: "wrap", gap: 6 },
+    overrideChip: {
+      borderWidth: 1,
+      borderColor: colors.warning,
+      paddingHorizontal: 6,
+      paddingVertical: 2,
+      marginRight: 6,
+      marginBottom: 4,
+    },
+    overrideChipText: {
+      color: colors.warning,
+      fontSize: 10,
+      letterSpacing: 1.5,
+      textTransform: "uppercase",
+      fontFamily: "Inter_600SemiBold",
+    },
+    cardBadgeRow: {
+      flexDirection: "row",
+      flexWrap: "wrap",
+      gap: 6,
+      marginTop: -2,
+      marginBottom: 6,
+    },
+    personaBadge: {
+      borderWidth: 1,
+      borderColor: colors.warning,
+      paddingHorizontal: 6,
+      paddingVertical: 2,
+    },
+    personaBadgeText: {
+      color: colors.warning,
+      fontSize: 9,
+      letterSpacing: 1.5,
+      textTransform: "uppercase",
+      fontFamily: "Inter_600SemiBold",
+    },
   });
 
   if (query.isLoading) {
@@ -226,6 +318,32 @@ export default function VerticalsScreen() {
           ) : null}
         </ScrollView>
       </View>
+      {isAdmin && overrideVerticals.length > 0 ? (
+        <View
+          style={styles.overrideBanner}
+          testID="persona-override-summary"
+        >
+          <Text style={styles.overrideTitle}>Persona overrides</Text>
+          <Text style={styles.overrideBody}>
+            {overrideVerticals.length}{" "}
+            {overrideVerticals.length === 1 ? "vertical is" : "verticals are"}{" "}
+            running with non-default personas.
+          </Text>
+          <View style={styles.overrideChipRow}>
+            {overrideVerticals.map((v) => (
+              <View
+                key={v}
+                style={styles.overrideChip}
+                testID={`persona-override-chip-${v}`}
+              >
+                <Text style={styles.overrideChipText}>
+                  {v} · {disabledByVertical[v].length} OFF
+                </Text>
+              </View>
+            ))}
+          </View>
+        </View>
+      ) : null}
       <FlatList
         data={items}
         keyExtractor={(e) => e.vertical}
@@ -253,6 +371,22 @@ export default function VerticalsScreen() {
               </Text>
               <Text style={styles.label}>{item.trades} trades</Text>
             </View>
+            {isAdmin && disabledByVertical[item.vertical] ? (
+              <View style={styles.cardBadgeRow}>
+                <View
+                  style={styles.personaBadge}
+                  testID={`badge-persona-override-${item.vertical}`}
+                >
+                  <Text style={styles.personaBadgeText}>
+                    {disabledByVertical[item.vertical].length} persona
+                    {disabledByVertical[item.vertical].length === 1
+                      ? ""
+                      : "s"}{" "}
+                    off
+                  </Text>
+                </View>
+              </View>
+            ) : null}
             {item.description ? (
               <Text style={styles.desc}>{item.description}</Text>
             ) : null}
