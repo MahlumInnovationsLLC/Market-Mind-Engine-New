@@ -23,8 +23,10 @@ from .nfl_stadiums import resolve_stadium as resolve_nfl_stadium
 from .ratings import (
     coerce_to_ratings,
     derive_field_ratings,
+    derive_field_ratings_from_leaderboard,
     get_field,
     set_field,
+    set_field_from_leaderboard,
 )
 from .soccer_context import (
     SOCCER_LEAGUES,
@@ -46,8 +48,10 @@ __all__ = [
     "resolve_nfl_stadium",
     "coerce_to_ratings",
     "derive_field_ratings",
+    "derive_field_ratings_from_leaderboard",
     "get_field",
     "set_field",
+    "set_field_from_leaderboard",
     "SOCCER_LEAGUES",
     "is_soccer_league",
     "build_soccer_game_context",

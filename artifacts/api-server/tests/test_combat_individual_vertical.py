@@ -708,3 +708,354 @@ def test_gates_tuple_still_twelve():
     """Lock the 12-gate invariant — combat-individual sub-checks must
     fold into existing gates rather than adding new entries."""
     assert len(GATES) == 14
+
+
+# ---------------------------------------------------------------------------
+# Tournament leaderboard refresh (task #449)
+# ---------------------------------------------------------------------------
+
+
+def test_derive_field_ratings_from_leaderboard_orders_by_position():
+    """Leaderboard position 1 must beat position 2, etc., reusing the
+    same Elo scale as seed-derived ratings so the Plackett-Luce
+    predictor sees a consistent unit system."""
+    from app.sports.ratings import (
+        derive_field_ratings_from_leaderboard,
+        _rating_from_seed,
+    )
+
+    entries = [
+        {"name": "Scheffler", "position": 1},
+        {"name": "Rahm", "position": 2},
+        {"name": "McIlroy", "position": 5},
+    ]
+    ratings = derive_field_ratings_from_leaderboard(entries)
+    assert ratings == {
+        "Scheffler": _rating_from_seed(1),
+        "Rahm": _rating_from_seed(2),
+        "McIlroy": _rating_from_seed(5),
+    }
+    assert ratings["Scheffler"] > ratings["Rahm"] > ratings["McIlroy"]
+
+
+def test_derive_field_ratings_from_leaderboard_handles_missing_position():
+    """Entries with no `position` field fall back to list order so a
+    sparse / partial payload still yields a usable mapping."""
+    from app.sports.ratings import (
+        derive_field_ratings_from_leaderboard,
+        _rating_from_seed,
+    )
+
+    ratings = derive_field_ratings_from_leaderboard([
+        {"name": "Verstappen"},
+        {"name": "Norris"},
+        {"name": "Leclerc"},
+    ])
+    assert ratings == {
+        "Verstappen": _rating_from_seed(1),
+        "Norris": _rating_from_seed(2),
+        "Leclerc": _rating_from_seed(3),
+    }
+
+
+def test_derive_field_ratings_from_leaderboard_skips_unrankable():
+    """Non-numeric or missing names must be dropped silently rather
+    than collapsing the whole field to a uniform prior."""
+    from app.sports.ratings import derive_field_ratings_from_leaderboard
+
+    ratings = derive_field_ratings_from_leaderboard([
+        {"name": "Verstappen", "position": 1},
+        {"name": "", "position": 2},  # empty name dropped
+        "not a mapping",  # not a dict
+        {"name": "Hamilton", "position": "DNF"},  # un-parseable
+        {"name": "Russell", "position": 0},  # invalid rank
+        {"name": "Norris", "position": 3},
+    ])
+    assert set(ratings.keys()) == {"Verstappen", "Norris"}
+
+
+def test_set_field_from_leaderboard_overwrites_seed_cache():
+    """A live leaderboard refresh must replace the seed-derived ratings
+    cached at schedule-poll time so `get_field()` returns the live
+    field next time the orchestrator looks it up."""
+    from app.sports import (
+        derive_field_ratings,
+        get_field,
+        set_field,
+        set_field_from_leaderboard,
+    )
+    from app.sports import ratings as ratings_mod
+
+    ratings_mod.clear_cache()
+    # Schedule-time seed: Verstappen seed 1, Norris seed 2, Leclerc seed 3
+    set_field("F1-SPA-2026", [
+        {"name": "Verstappen", "seed": 1},
+        {"name": "Norris", "seed": 2},
+        {"name": "Leclerc", "seed": 3},
+    ])
+    seeded = get_field("F1-SPA-2026")
+    assert seeded is not None
+    assert seeded["Verstappen"] > seeded["Norris"] > seeded["Leclerc"]
+
+    # Live mid-race: Leclerc has overtaken everyone.
+    written = set_field_from_leaderboard("F1-SPA-2026", [
+        {"name": "Leclerc", "position": 1},
+        {"name": "Norris", "position": 2},
+        {"name": "Verstappen", "position": 3},
+    ])
+    assert written == 3
+    live = get_field("F1-SPA-2026")
+    assert live is not None
+    # Order has flipped — leader is now top.
+    assert live["Leclerc"] > live["Norris"] > live["Verstappen"]
+    # And we should match the rating a fresh seed-1 entrant would get.
+    assert live["Leclerc"] == derive_field_ratings(
+        [{"name": "Leclerc", "seed": 1}]
+    )["Leclerc"]
+
+
+def test_set_field_from_leaderboard_skips_thin_field():
+    """Single-entrant 'leaderboards' can't drive Plackett-Luce, so the
+    helper must leave the cache untouched (returning 0)."""
+    from app.sports import (
+        get_field,
+        set_field,
+        set_field_from_leaderboard,
+    )
+    from app.sports import ratings as ratings_mod
+
+    ratings_mod.clear_cache()
+    set_field("PGA-MASTERS-2026", [
+        {"name": "Scheffler", "seed": 1},
+        {"name": "Rahm", "seed": 2},
+    ])
+    before = get_field("PGA-MASTERS-2026")
+    written = set_field_from_leaderboard("PGA-MASTERS-2026", [
+        {"name": "Scheffler", "position": 1},
+    ])
+    assert written == 0
+    assert get_field("PGA-MASTERS-2026") == before
+
+
+def test_extract_pga_leaderboard_handles_player_name_shapes():
+    """Sportradar's PGA payload exposes player names either as
+    `first_name`+`last_name` or as `full_name`/`name` — the parser
+    must accept all three shapes and skip withdrawn / cut entries."""
+    from app.feeds.sportradar import _extract_pga_leaderboard
+
+    payload = {
+        "leaderboard": [
+            {"position": 1, "player": {
+                "first_name": "Scottie", "last_name": "Scheffler",
+            }},
+            {"position": 2, "player": {"full_name": "Jon Rahm"}},
+            {"position": 3, "player": {"name": "Rory McIlroy"}},
+            # Withdrawn — must be dropped so the field tightens around
+            # the players still on the course.
+            {"position": 99, "status": "WD", "player": {
+                "first_name": "Tiger", "last_name": "Woods",
+            }},
+            # Garbage entry — non-mapping rows must not crash the parse.
+            "not a row",
+        ],
+    }
+    entries = _extract_pga_leaderboard(payload)
+    names = [e["name"] for e in entries]
+    assert names == ["Scottie Scheffler", "Jon Rahm", "Rory McIlroy"]
+    assert [e["position"] for e in entries] == [1, 2, 3]
+
+
+def test_extract_f1_leaderboard_walks_status_block():
+    """F1 v2 nests live competitors under `sport_event_status`; the
+    parser must surface them with their live `position` so the live
+    rating refresh tracks intra-race position."""
+    from app.feeds.sportradar import _extract_f1_leaderboard
+
+    payload = {
+        "sport_event": {"id": "sr:sport_event:race"},
+        "sport_event_status": {
+            "status": "live",
+            "competitors": [
+                {"id": "c1", "name": "Verstappen", "position": 1},
+                {"id": "c2", "name": "Norris", "position": 2},
+                {"id": "c3", "name": "Leclerc", "position": 3},
+            ],
+        },
+    }
+    entries = _extract_f1_leaderboard(payload)
+    assert [(e["name"], e["position"]) for e in entries] == [
+        ("Verstappen", 1), ("Norris", 2), ("Leclerc", 3),
+    ]
+
+
+def test_extract_f1_leaderboard_falls_back_to_top_level():
+    """When the F1 summary nests competitors at the top level (e.g.
+    pre-grid weekend rollup) the parser must still find them."""
+    from app.feeds.sportradar import _extract_f1_leaderboard
+
+    payload = {
+        "competitors": [
+            {"name": "Hamilton", "result": {"position": 1}},
+            {"name": "Russell", "rank": 2},
+        ],
+    }
+    entries = _extract_f1_leaderboard(payload)
+    assert {(e["name"], e["position"]) for e in entries} == {
+        ("Hamilton", 1), ("Russell", 2),
+    }
+
+
+def test_poll_tournament_leaderboards_refreshes_pga_and_f1(monkeypatch):
+    """End-to-end: an in-progress PGA tournament + F1 race must drive
+    `_poll_tournament_leaderboards` to call the leaderboard endpoint
+    once per event and overwrite the per-event ratings cache."""
+    from app.feeds import sportradar as sr
+    from app.sports import get_field, set_field
+    from app.sports import ratings as ratings_mod
+
+    ratings_mod.clear_cache()
+    # Pre-seed both events so we can prove the live refresh overwrote
+    # the schedule-time rating mapping.
+    set_field("sr:tournament:pga-1", [
+        {"name": "Scheffler", "seed": 1},
+        {"name": "Rahm", "seed": 2},
+        {"name": "McIlroy", "seed": 3},
+    ])
+    set_field("sr:sport_event:f1-1", [
+        {"name": "Verstappen", "seed": 1},
+        {"name": "Norris", "seed": 2},
+        {"name": "Leclerc", "seed": 3},
+    ])
+
+    monkeypatch.setenv("SPORTRADAR_PGA_KEY", "test-pga-key")
+    monkeypatch.setenv("SPORTRADAR_F1_KEY", "test-f1-key")
+
+    async def fake_live_ids(league, statuses=None):
+        if league == "PGA":
+            return ["sr:tournament:pga-1"]
+        if league == "F1":
+            return ["sr:sport_event:f1-1"]
+        return []
+
+    monkeypatch.setattr(sr, "_live_leaderboard_event_ids", fake_live_ids)
+
+    fetched: list[str] = []
+
+    async def fake_get_json(provider, url, api_key):
+        fetched.append(url)
+        if "/golf/" in url:
+            return {"leaderboard": [
+                {"position": 1, "player": {"full_name": "Rahm"}},
+                {"position": 2, "player": {"full_name": "Scheffler"}},
+                {"position": 3, "player": {"full_name": "McIlroy"}},
+            ]}
+        if "/formula1/" in url:
+            return {"sport_event_status": {"status": "live", "competitors": [
+                {"name": "Leclerc", "position": 1},
+                {"name": "Verstappen", "position": 2},
+                {"name": "Norris", "position": 3},
+            ]}}
+        return None
+
+    monkeypatch.setattr(sr, "_get_json", fake_get_json)
+
+    refreshed = asyncio.run(sr._poll_tournament_leaderboards())
+    # 3 PGA + 3 F1 entrants written.
+    assert refreshed == 6
+    # One leaderboard call per event.
+    assert len(fetched) == 2
+    assert any("/golf/" in u for u in fetched)
+    assert any("/formula1/" in u for u in fetched)
+
+    pga = get_field("sr:tournament:pga-1")
+    f1 = get_field("sr:sport_event:f1-1")
+    assert pga is not None and f1 is not None
+    # Live leaders rose to the top; pre-event seed favorites slid down.
+    assert pga["Rahm"] > pga["Scheffler"] > pga["McIlroy"]
+    assert f1["Leclerc"] > f1["Verstappen"] > f1["Norris"]
+
+
+def test_poll_tournament_leaderboards_isolates_per_event_failures(monkeypatch):
+    """One flaky event must not blank the cache for the rest — the
+    poller swallows per-event errors, returns the partial total, and
+    leaves the failed event's prior ratings untouched."""
+    from app.feeds import sportradar as sr
+    from app.sports import get_field, set_field
+    from app.sports import ratings as ratings_mod
+
+    ratings_mod.clear_cache()
+    set_field("sr:tournament:pga-good", [
+        {"name": "A", "seed": 1}, {"name": "B", "seed": 2},
+        {"name": "C", "seed": 3},
+    ])
+    set_field("sr:tournament:pga-bad", [
+        {"name": "X", "seed": 1}, {"name": "Y", "seed": 2},
+        {"name": "Z", "seed": 3},
+    ])
+    bad_before = get_field("sr:tournament:pga-bad")
+
+    monkeypatch.setenv("SPORTRADAR_PGA_KEY", "test-pga-key")
+    monkeypatch.delenv("SPORTRADAR_F1_KEY", raising=False)
+    monkeypatch.delenv("SPORTRADAR_API_KEY", raising=False)
+
+    async def fake_live_ids(league, statuses=None):
+        if league == "PGA":
+            return ["sr:tournament:pga-good", "sr:tournament:pga-bad"]
+        return []
+
+    monkeypatch.setattr(sr, "_live_leaderboard_event_ids", fake_live_ids)
+
+    async def fake_get_json(provider, url, api_key):
+        if "pga-bad" in url:
+            raise RuntimeError("transient upstream error")
+        return {"leaderboard": [
+            {"position": 1, "player": {"full_name": "C"}},
+            {"position": 2, "player": {"full_name": "B"}},
+            {"position": 3, "player": {"full_name": "A"}},
+        ]}
+
+    monkeypatch.setattr(sr, "_get_json", fake_get_json)
+
+    refreshed = asyncio.run(sr._poll_tournament_leaderboards())
+    # Only the good event refreshed; bad event left untouched.
+    assert refreshed == 3
+    assert get_field("sr:tournament:pga-bad") == bad_before
+    good = get_field("sr:tournament:pga-good")
+    assert good is not None and good["C"] > good["B"] > good["A"]
+
+
+def test_poll_tournament_leaderboards_raises_when_no_keys(monkeypatch):
+    """When neither PGA nor F1 keys are set the feed must raise so
+    the scheduler records a real failure (not a silent zero-row
+    'success')."""
+    from app.feeds import sportradar as sr
+
+    monkeypatch.delenv("SPORTRADAR_PGA_KEY", raising=False)
+    monkeypatch.delenv("SPORTRADAR_F1_KEY", raising=False)
+    monkeypatch.delenv("SPORTRADAR_API_KEY", raising=False)
+    with pytest.raises(RuntimeError):
+        asyncio.run(sr._poll_tournament_leaderboards())
+
+
+def test_register_sportradar_extra_feeds_includes_leaderboards(monkeypatch):
+    """The shared registration helper must surface the new
+    cross-sport leaderboard feed exactly once, enabled when either
+    PGA or F1 keys are configured."""
+    from app.feeds.registry import FeedRegistry
+    from app.feeds import sportradar as sr
+
+    monkeypatch.setattr(sr, "registry", FeedRegistry())
+    monkeypatch.setenv("SPORTRADAR_PGA_KEY", "pga-test")
+    monkeypatch.delenv("SPORTRADAR_F1_KEY", raising=False)
+    monkeypatch.delenv("SPORTRADAR_API_KEY", raising=False)
+
+    sr.register_sportradar_extra_feeds()
+    status = sr.registry.status_of("sportradar_tournament_leaderboards")
+    assert status is not None
+    assert status.enabled is True
+    # Cadence honours the env override default — must be at least 30s.
+    feed = next(
+        f for f in sr.registry.feeds()
+        if f.name == "sportradar_tournament_leaderboards"
+    )
+    assert feed.cadence_seconds >= 30.0

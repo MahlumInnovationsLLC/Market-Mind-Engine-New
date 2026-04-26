@@ -78,6 +78,52 @@ def derive_field_ratings(
     return out
 
 
+def derive_field_ratings_from_leaderboard(
+    entries: Iterable[Mapping] | None,
+) -> dict[str, float]:
+    """Convert a live leaderboard payload to a ratings dict (task #449).
+
+    Each entry is expected to be a mapping with a ``name`` key and
+    either an explicit ``position`` field or implicit ordering by list
+    index.  Position 1 (current leader) gets the largest positive
+    rating offset; later positions decay linearly using the same
+    Elo-like step / cap as :func:`_rating_from_seed` so the live
+    field plugs straight into the existing Plackett-Luce predictor.
+
+    Ties (duplicate positions) are honoured: two entrants sharing
+    position 3 both get the position-3 rating.  Entries missing a
+    name or carrying a non-numeric position are dropped silently so
+    a partial leaderboard still yields a usable mapping.
+    """
+    if not entries:
+        return {}
+    out: dict[str, float] = {}
+    fallback_pos = 1
+    for e in entries:
+        if not isinstance(e, Mapping):
+            continue
+        name = e.get("name")
+        if not name:
+            continue
+        raw_pos = e.get("position")
+        if raw_pos is None:
+            pos: int | None = fallback_pos
+        else:
+            try:
+                pos = int(float(raw_pos))
+            except (TypeError, ValueError):
+                pos = None
+        if pos is None or pos < 1:
+            # Skip entries we can't rank — they shouldn't drag the
+            # rest of the field toward a uniform prior.
+            continue
+        # Reuse the seed scale: position N maps to the same rating a
+        # seed-N entrant would receive (lower index → better rating).
+        out[str(name)] = _rating_from_seed(pos)
+        fallback_pos += 1
+    return out
+
+
 def set_field(game_id: str, competitors: Iterable[Mapping] | None) -> None:
     """Cache the rating mapping for an event's field.  No-op when the
     derived mapping has fewer than 2 entries (a 1-entrant 'field'
@@ -88,6 +134,25 @@ def set_field(game_id: str, competitors: Iterable[Mapping] | None) -> None:
     if len(ratings) < 2:
         return
     _FIELD_CACHE[str(game_id)] = ratings
+
+
+def set_field_from_leaderboard(
+    game_id: str, entries: Iterable[Mapping] | None,
+) -> int:
+    """Cache the rating mapping for an event's *live* field (task #449).
+
+    Mirrors :func:`set_field` but routes through
+    :func:`derive_field_ratings_from_leaderboard` so a tournament
+    leaderboard refresh overwrites the seed-derived ratings put in
+    place by the schedule poll.  Returns the number of entrants
+    written (0 when the input is too thin to price)."""
+    if not game_id:
+        return 0
+    ratings = derive_field_ratings_from_leaderboard(entries)
+    if len(ratings) < 2:
+        return 0
+    _FIELD_CACHE[str(game_id)] = ratings
+    return len(ratings)
 
 
 def get_field(game_id: str | None) -> dict[str, float] | None:

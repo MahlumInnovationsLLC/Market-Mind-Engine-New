@@ -954,6 +954,248 @@ async def _poll_live_state(sport: str) -> int:
 
 
 # ---------------------------------------------------------------------------
+# Tournament leaderboards (task #449)
+# ---------------------------------------------------------------------------
+#
+# Sportradar exposes per-event leaderboards for golf and motorsport that
+# stream while the event is live.  We poll those endpoints for any PGA
+# tournament / F1 race weekend whose ``sportradar_schedules.status`` is
+# in-progress, parse the ordered field, and overwrite the per-event
+# entry in ``app.sports.ratings`` so the orchestrator's Plackett-Luce
+# branch prices off live position instead of pre-event seed.  The
+# live-action blackout (``app.sports.leagues.league_blackout_until``)
+# still gates *new* trades on these leagues — refreshed ratings only
+# affect monitoring / pricing.
+
+
+_PGA_LEADERBOARD_TPL = (
+    "https://api.sportradar.us/golf/trial/v3/en/tournaments/"
+    "{tournament_id}/leaderboard.json"
+)
+_F1_RACE_SUMMARY_TPL = (
+    "https://api.sportradar.us/formula1/trial/v2/en/sport_events/"
+    "{event_id}/summary.json"
+)
+
+# Statuses on `sportradar_schedules` that should drive a leaderboard
+# refresh.  Sportradar's golf v3 uses "inprogress" while it's playing
+# and "closed" when the round wraps; F1 v2 uses similar enums.  The
+# poller treats all live-ish enums as eligible so a multi-day PGA
+# tournament gets its leaderboard updated every poll cycle.
+_LEADERBOARD_LIVE_STATUSES = frozenset({
+    "inprogress", "in_progress", "live", "started",
+    "delayed", "halftime", "interrupted",
+})
+
+
+def _extract_pga_leaderboard(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    """Pull an ordered ``[{name, position}]`` list out of a Sportradar
+    PGA leaderboard payload.
+
+    Golf v3 leaderboard shape is roughly::
+
+        {"tournament": {...},
+         "leaderboard": [
+            {"position": 1, "tied": false,
+             "player": {"id": "sr:player:1", "first_name": "Scottie",
+                        "last_name": "Scheffler"}},
+            ...]}
+
+    We tolerate both ``player.first_name`` + ``player.last_name`` and a
+    pre-formatted ``player.full_name`` / ``player.name`` so a future
+    schema tweak doesn't silently regress to seed-based ratings.
+    Players who have withdrawn / been cut (``status`` not in the
+    "active" set) are dropped so they don't dilute the field.
+    """
+    if not isinstance(payload, dict):
+        return []
+    rows = payload.get("leaderboard") or payload.get("players") or []
+    out: list[dict[str, Any]] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        status = str(row.get("status") or "").lower()
+        if status in {"withdrew", "wd", "cut", "disqualified", "dq"}:
+            continue
+        player = row.get("player") if isinstance(row.get("player"), dict) else row
+        name = (
+            player.get("full_name")
+            or player.get("name")
+            or " ".join(
+                part for part in (
+                    player.get("first_name"),
+                    player.get("last_name"),
+                ) if part
+            ).strip()
+        )
+        if not name:
+            continue
+        position = row.get("position") or player.get("position")
+        out.append({"name": str(name), "position": position})
+    return out
+
+
+def _extract_f1_leaderboard(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    """Pull an ordered ``[{name, position}]`` list out of a Sportradar
+    F1 race summary payload.
+
+    F1 v2 summary shape during a live race is roughly::
+
+        {"sport_event": {...},
+         "sport_event_status": {"status": "live", "competitors": [
+            {"id": "sr:competitor:1", "name": "Verstappen",
+             "position": 1, "result": {...}},
+            ...]}}
+
+    We accept ``competitors`` either at the top level or nested under
+    ``sport_event_status`` (race) / ``stage`` (race weekend rollup) so
+    every public summary shape works without bespoke routing.
+    """
+    if not isinstance(payload, dict):
+        return []
+    candidates: list[Any] = []
+    status = payload.get("sport_event_status") or {}
+    if isinstance(status, dict):
+        candidates.append(status.get("competitors"))
+        candidates.append(status.get("results"))
+    stage = payload.get("stage") or {}
+    if isinstance(stage, dict):
+        candidates.append(stage.get("competitors"))
+    candidates.append(payload.get("competitors"))
+    candidates.append(payload.get("results"))
+
+    rows: list[dict[str, Any]] = []
+    for raw in candidates:
+        if isinstance(raw, list) and raw:
+            rows = raw
+            break
+    out: list[dict[str, Any]] = []
+    for entry in rows:
+        if not isinstance(entry, dict):
+            continue
+        name = entry.get("name") or (entry.get("competitor") or {}).get("name")
+        if not name:
+            continue
+        position = (
+            entry.get("position")
+            or (entry.get("result") or {}).get("position")
+            or entry.get("rank")
+        )
+        out.append({"name": str(name), "position": position})
+    return out
+
+
+async def _live_leaderboard_event_ids(
+    league: str, statuses: frozenset[str] = _LEADERBOARD_LIVE_STATUSES,
+) -> list[str]:
+    """Pull live PGA/F1 event IDs from ``sportradar_schedules``.
+
+    Returns ``[]`` when the table isn't populated yet (fresh install)
+    or when no events are live — best-effort, never raises.
+    """
+    try:
+        async with db.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT game_id
+                  FROM sportradar_schedules
+                 WHERE league = $1
+                   AND lower(status) = ANY($2::text[])
+                 ORDER BY scheduled DESC
+                """,
+                league,
+                list(statuses),
+            )
+    except Exception as e:
+        log.info(
+            "sportradar leaderboard %s: schedules lookup skipped (%s)",
+            league, e,
+        )
+        return []
+    return [str(r["game_id"]) for r in rows if r["game_id"]]
+
+
+async def _refresh_pga_leaderboard(api_key: str, tournament_id: str) -> int:
+    """Fetch one PGA tournament's leaderboard and refresh the per-event
+    ratings cache.  Returns the entrant count written (0 on failure)."""
+    from ..sports import set_field_from_leaderboard
+    payload = await _get_json(
+        f"sportradar:pga:leaderboard:{tournament_id}",
+        _PGA_LEADERBOARD_TPL.format(tournament_id=tournament_id),
+        api_key,
+    )
+    if not payload:
+        return 0
+    entries = _extract_pga_leaderboard(payload)
+    if len(entries) < 2:
+        return 0
+    return set_field_from_leaderboard(tournament_id, entries)
+
+
+async def _refresh_f1_leaderboard(api_key: str, event_id: str) -> int:
+    """Fetch one F1 race summary and refresh the per-event ratings
+    cache.  Returns the entrant count written (0 on failure)."""
+    from ..sports import set_field_from_leaderboard
+    payload = await _get_json(
+        f"sportradar:f1:leaderboard:{event_id}",
+        _F1_RACE_SUMMARY_TPL.format(event_id=event_id),
+        api_key,
+    )
+    if not payload:
+        return 0
+    entries = _extract_f1_leaderboard(payload)
+    if len(entries) < 2:
+        return 0
+    return set_field_from_leaderboard(event_id, entries)
+
+
+async def _poll_tournament_leaderboards() -> int:
+    """Refresh ratings for every in-progress PGA tournament + F1 race
+    weekend (task #449).
+
+    Returns the total number of entrants whose live rating got
+    refreshed across all events — exposed via ``Feed.poll`` so the
+    operator console reports a real number per cycle (instead of a
+    binary success/fail).  Per-event failures are isolated so one
+    flaky tournament doesn't blank out the rest.
+    """
+    pga_key = _api_key_for("pga")
+    f1_key = _api_key_for("f1")
+    if not pga_key and not f1_key:
+        raise RuntimeError(
+            "neither SPORTRADAR_PGA_KEY nor SPORTRADAR_F1_KEY is set"
+        )
+
+    refreshed = 0
+
+    if pga_key:
+        for tid in await _live_leaderboard_event_ids("PGA"):
+            try:
+                refreshed += await _refresh_pga_leaderboard(pga_key, tid)
+            except RateLimited:
+                # Re-raise so the scheduler records the cooldown — we
+                # can't keep hitting Sportradar after a 429.
+                raise
+            except Exception as e:  # noqa: BLE001 — don't let one event poison the rest
+                log.warning(
+                    "sportradar pga leaderboard %s refresh failed: %s", tid, e,
+                )
+
+    if f1_key:
+        for eid in await _live_leaderboard_event_ids("F1"):
+            try:
+                refreshed += await _refresh_f1_leaderboard(f1_key, eid)
+            except RateLimited:
+                raise
+            except Exception as e:  # noqa: BLE001
+                log.warning(
+                    "sportradar f1 leaderboard %s refresh failed: %s", eid, e,
+                )
+
+    return refreshed
+
+
+# ---------------------------------------------------------------------------
 # Registration
 # ---------------------------------------------------------------------------
 
@@ -966,6 +1208,12 @@ LIVE_STATE_CADENCE_SECONDS = max(15, int(os.environ.get("AXIOM_SPORTRADAR_LIVE_C
 # by default.
 ROSTERS_CADENCE_SECONDS = max(
     300, int(os.environ.get("AXIOM_SPORTRADAR_ROSTERS_CADENCE") or str(60 * 60 * 24))
+)
+# Leaderboards drive intra-event pricing for PGA / F1.  120s by default
+# matches Sportradar's published live-data refresh cadence and keeps us
+# well inside the trial-tier quota even with a multi-day tournament.
+LEADERBOARD_CADENCE_SECONDS = max(
+    30, int(os.environ.get("AXIOM_SPORTRADAR_LEADERBOARD_CADENCE") or "120")
 )
 
 
@@ -1033,3 +1281,25 @@ def register_sportradar_extra_feeds() -> None:
                 enabled=bool(api_key) and has_live_path,
                 skipped_reason=_reason(has_live_path, "live"),
             ))
+
+    # Cross-sport tournament leaderboard refresher (task #449).  One
+    # poller covers both PGA tournaments and F1 race weekends so the
+    # operator console gets a single status row + cadence per cycle
+    # instead of two near-identical entries.
+    leaderboard_name = "sportradar_tournament_leaderboards"
+    if registry.status_of(leaderboard_name) is None:
+        pga_key = _api_key_for("pga")
+        f1_key = _api_key_for("f1")
+        if pga_key or f1_key:
+            leaderboard_skipped: str | None = None
+        else:
+            leaderboard_skipped = (
+                "neither SPORTRADAR_PGA_KEY nor SPORTRADAR_F1_KEY is set"
+            )
+        registry.register(Feed(
+            name=leaderboard_name,
+            cadence_seconds=float(LEADERBOARD_CADENCE_SECONDS),
+            poll=_poll_tournament_leaderboards,
+            enabled=bool(pga_key or f1_key),
+            skipped_reason=leaderboard_skipped,
+        ))
