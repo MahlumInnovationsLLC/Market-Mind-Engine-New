@@ -10,7 +10,12 @@
  * `artifacts/web/src/pages/settings-notifications.tsx`, so a regression
  * that re-allows enabling SMS without verification on either platform
  * shows up red here.
+ *
+ * Also covers the device-timezone-mismatch banner added in task #527 —
+ * the one-tap "switch quiet hours to <device tz>" suggestion that fires
+ * when a traveler's device clock no longer matches `quiet_hours_tz`.
  */
+import AsyncStorage from "@react-native-async-storage/async-storage";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import {
   fireEvent,
@@ -239,5 +244,229 @@ describe("NotificationPrefs SMS verification (mobile)", () => {
     await screen.findByTestId("row-sms-live-trade");
     expect(screen.queryByTestId("badge-phone-verified-status")).toBeNull();
     expect(screen.queryByTestId("section-phone-verify")).toBeNull();
+  });
+});
+
+describe("NotificationPrefs device-tz banner (mobile)", () => {
+  // Pin the device's IANA zone for the duration of each test so we can
+  // simulate a traveler whose clock has flipped without depending on the
+  // host machine's actual timezone.
+  //
+  // The component reads it from `Intl.DateTimeFormat().resolvedOptions()
+  // .timeZone` (no-arg constructor). We proxy `Intl.DateTimeFormat` so
+  // the no-arg form returns the spoofed zone, while any call with args
+  // (e.g. `offsetForZone`'s `{ timeZone: "..." }` formatter) is forwarded
+  // to the real implementation untouched.
+  const RealDateTimeFormat = Intl.DateTimeFormat;
+  function mockDeviceTimezone(zone: string): void {
+    const FakeDateTimeFormat = function (
+      ...args: ConstructorParameters<typeof Intl.DateTimeFormat>
+    ) {
+      const fmt = new RealDateTimeFormat(...args);
+      if (args.length === 0) {
+        const realResolved = fmt.resolvedOptions.bind(fmt);
+        fmt.resolvedOptions = () => ({ ...realResolved(), timeZone: zone });
+      }
+      return fmt;
+    } as unknown as typeof Intl.DateTimeFormat;
+    // Preserve the static surface so `Intl.DateTimeFormat.supportedLocalesOf`
+    // etc. keep working if anything reaches for them.
+    Object.setPrototypeOf(FakeDateTimeFormat, RealDateTimeFormat);
+    (Intl as { DateTimeFormat: typeof Intl.DateTimeFormat }).DateTimeFormat =
+      FakeDateTimeFormat;
+  }
+
+  beforeEach(async () => {
+    await AsyncStorage.clear();
+  });
+
+  afterEach(() => {
+    (Intl as { DateTimeFormat: typeof Intl.DateTimeFormat }).DateTimeFormat =
+      RealDateTimeFormat;
+  });
+
+  it("does not show the banner when the device tz matches quiet_hours_tz", async () => {
+    mockDeviceTimezone("America/New_York");
+    mockApiFetch.mockResolvedValueOnce(
+      makePrefs({
+        quiet_hours_start_hour: 22,
+        quiet_hours_end_hour: 7,
+        quiet_hours_tz: "America/New_York",
+      }),
+    );
+
+    renderPanel();
+
+    await screen.findByTestId("row-sms-live-trade");
+    expect(screen.queryByTestId("banner-device-tz-mismatch")).toBeNull();
+  });
+
+  it("does not show the banner when quiet hours are disabled (no saved tz)", async () => {
+    mockDeviceTimezone("Asia/Tokyo");
+    mockApiFetch.mockResolvedValueOnce(
+      makePrefs({
+        quiet_hours_start_hour: null,
+        quiet_hours_end_hour: null,
+        quiet_hours_tz: null,
+      }),
+    );
+
+    renderPanel();
+
+    await screen.findByTestId("row-sms-live-trade");
+    expect(screen.queryByTestId("banner-device-tz-mismatch")).toBeNull();
+  });
+
+  it("surfaces the device's zone when it differs from quiet_hours_tz", async () => {
+    mockDeviceTimezone("Asia/Tokyo");
+    mockApiFetch.mockResolvedValueOnce(
+      makePrefs({
+        quiet_hours_start_hour: 22,
+        quiet_hours_end_hour: 7,
+        quiet_hours_tz: "America/Los_Angeles",
+      }),
+    );
+
+    renderPanel();
+
+    const banner = await screen.findByTestId("banner-device-tz-mismatch");
+    // Both zones (and the friendly city for the saved one) appear in
+    // the body so the user can confirm before tapping Switch.
+    expect(banner).toHaveTextContent(/Tokyo/);
+    expect(banner).toHaveTextContent(/Asia\/Tokyo/);
+    expect(banner).toHaveTextContent(/America\/Los_Angeles/);
+    expect(screen.getByTestId("button-tz-banner-switch")).toBeTruthy();
+    expect(screen.getByTestId("button-tz-banner-dismiss")).toBeTruthy();
+  });
+
+  it("PUTs the device tz when Switch is tapped and clears any prior dismissal", async () => {
+    mockDeviceTimezone("Asia/Tokyo");
+    // Pre-seed a stale dismissal for an unrelated pair so we can confirm
+    // it gets wiped when the user opts in to switching.
+    await AsyncStorage.setItem(
+      "axiom.notifications.tzBannerDismissedPair.v1",
+      JSON.stringify({ device: "Europe/Paris", quiet: "America/New_York" }),
+    );
+    mockApiFetch.mockResolvedValueOnce(
+      makePrefs({
+        quiet_hours_start_hour: 22,
+        quiet_hours_end_hour: 7,
+        quiet_hours_tz: "America/Los_Angeles",
+      }),
+    );
+    mockApiFetch.mockResolvedValueOnce(
+      makePrefs({
+        quiet_hours_start_hour: 22,
+        quiet_hours_end_hour: 7,
+        quiet_hours_tz: "Asia/Tokyo",
+      }),
+    );
+
+    renderPanel();
+
+    const switchBtn = await screen.findByTestId("button-tz-banner-switch");
+    fireEvent.press(switchBtn);
+
+    await waitFor(() => {
+      expect(mockApiFetch).toHaveBeenNthCalledWith(
+        2,
+        "/api/me/notification-prefs",
+        expect.objectContaining({
+          method: "PUT",
+          body: expect.objectContaining({
+            quiet_hours_tz: "Asia/Tokyo",
+            quiet_hours_tz_present: true,
+          }),
+        }),
+      );
+    });
+
+    // Saved zone now matches the device, so the banner is gone.
+    await waitFor(() => {
+      expect(screen.queryByTestId("banner-device-tz-mismatch")).toBeNull();
+    });
+    // Dismissal store was cleared as part of the opt-in.
+    expect(
+      await AsyncStorage.getItem(
+        "axiom.notifications.tzBannerDismissedPair.v1",
+      ),
+    ).toBeNull();
+  });
+
+  it("hides the banner and persists the dismissed pair when Dismiss is tapped", async () => {
+    mockDeviceTimezone("Asia/Tokyo");
+    mockApiFetch.mockResolvedValueOnce(
+      makePrefs({
+        quiet_hours_start_hour: 22,
+        quiet_hours_end_hour: 7,
+        quiet_hours_tz: "America/Los_Angeles",
+      }),
+    );
+
+    renderPanel();
+
+    const dismissBtn = await screen.findByTestId("button-tz-banner-dismiss");
+    fireEvent.press(dismissBtn);
+
+    await waitFor(() => {
+      expect(screen.queryByTestId("banner-device-tz-mismatch")).toBeNull();
+    });
+
+    const stored = await AsyncStorage.getItem(
+      "axiom.notifications.tzBannerDismissedPair.v1",
+    );
+    expect(stored).not.toBeNull();
+    expect(JSON.parse(stored!)).toEqual({
+      device: "Asia/Tokyo",
+      quiet: "America/Los_Angeles",
+    });
+
+    // Dismiss must not fire a PUT — the saved zone stays put.
+    expect(mockApiFetch).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not re-show the banner on remount when the same pair was already dismissed", async () => {
+    mockDeviceTimezone("Asia/Tokyo");
+    await AsyncStorage.setItem(
+      "axiom.notifications.tzBannerDismissedPair.v1",
+      JSON.stringify({ device: "Asia/Tokyo", quiet: "America/Los_Angeles" }),
+    );
+    mockApiFetch.mockResolvedValueOnce(
+      makePrefs({
+        quiet_hours_start_hour: 22,
+        quiet_hours_end_hour: 7,
+        quiet_hours_tz: "America/Los_Angeles",
+      }),
+    );
+
+    renderPanel();
+
+    // Wait for the rest of the card to render so we know the dismissal
+    // load has had time to settle, then assert the banner stays absent.
+    await screen.findByTestId("row-sms-live-trade");
+    await waitFor(() => {
+      expect(screen.queryByTestId("banner-device-tz-mismatch")).toBeNull();
+    });
+  });
+
+  it("re-shows the banner when the device tz differs from a previously dismissed pair", async () => {
+    mockDeviceTimezone("Asia/Tokyo");
+    // User dismissed a Paris→NY pair on a previous trip; that has no
+    // bearing on the current Tokyo→LA mismatch.
+    await AsyncStorage.setItem(
+      "axiom.notifications.tzBannerDismissedPair.v1",
+      JSON.stringify({ device: "Europe/Paris", quiet: "America/New_York" }),
+    );
+    mockApiFetch.mockResolvedValueOnce(
+      makePrefs({
+        quiet_hours_start_hour: 22,
+        quiet_hours_end_hour: 7,
+        quiet_hours_tz: "America/Los_Angeles",
+      }),
+    );
+
+    renderPanel();
+
+    await screen.findByTestId("banner-device-tz-mismatch");
   });
 });

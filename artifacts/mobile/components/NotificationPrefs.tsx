@@ -1,7 +1,9 @@
+import AsyncStorage from "@react-native-async-storage/async-storage";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import React from "react";
 import {
   ActivityIndicator,
+  AppState,
   Pressable,
   StyleSheet,
   Switch,
@@ -15,6 +17,27 @@ import { TimezonePicker } from "@/components/TimezonePicker";
 import { useColors } from "@/hooks/useColors";
 import { ApiError, apiFetch } from "@/lib/api";
 import { findTimezone, offsetForZone } from "@/lib/timezones";
+
+const TZ_BANNER_DISMISS_KEY = "axiom.notifications.tzBannerDismissedPair.v1";
+
+type DismissedTzPair = { device: string; quiet: string };
+
+function parseDismissedPair(raw: string | null): DismissedTzPair | null {
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw) as Partial<DismissedTzPair> | null;
+    if (
+      parsed &&
+      typeof parsed.device === "string" &&
+      typeof parsed.quiet === "string"
+    ) {
+      return { device: parsed.device, quiet: parsed.quiet };
+    }
+  } catch {
+    /* ignore malformed payload — treat as not dismissed */
+  }
+  return null;
+}
 
 type PrefsBody = {
   notify_live_trade: boolean;
@@ -102,6 +125,41 @@ export function NotificationPrefs(): React.ReactElement {
   const [verifyMsg, setVerifyMsg] = React.useState<string | null>(null);
   const [verifyError, setVerifyError] = React.useState<string | null>(null);
   const [verifyBusy, setVerifyBusy] = React.useState(false);
+  // Detect the device's IANA zone, and re-check whenever the app comes
+  // back to the foreground — that's when a traveler's clock has just
+  // flipped (PST → JST, etc.) and the saved `quiet_hours_tz` is most
+  // likely to be stale.
+  const [deviceTz, setDeviceTz] = React.useState<string>(() => detectDeviceTz());
+  React.useEffect(() => {
+    const sub = AppState.addEventListener("change", (state) => {
+      if (state === "active") {
+        setDeviceTz(detectDeviceTz());
+      }
+    });
+    return () => sub.remove();
+  }, []);
+  // Banner dismissal is sticky per (deviceTz, quietTz) pair so it does
+  // not re-appear on every visit. A different pair (e.g. user moves on
+  // to a third zone) re-arms the banner.
+  const [dismissedPair, setDismissedPair] =
+    React.useState<DismissedTzPair | null>(null);
+  const [dismissLoaded, setDismissLoaded] = React.useState(false);
+  React.useEffect(() => {
+    let cancelled = false;
+    AsyncStorage.getItem(TZ_BANNER_DISMISS_KEY)
+      .then((raw) => {
+        if (cancelled) return;
+        setDismissedPair(parseDismissedPair(raw));
+        setDismissLoaded(true);
+      })
+      .catch(() => {
+        if (cancelled) return;
+        setDismissLoaded(true);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const prefs = useQuery<PrefsResponse>({
     queryKey: ["notification-prefs"],
@@ -237,6 +295,56 @@ export function NotificationPrefs(): React.ReactElement {
     useDeviceTz();
   };
 
+  const switchToDeviceTz = () => {
+    // Opting in clears the dismissed pair — once the saved zone matches
+    // the device, the banner has nothing to suggest anyway.
+    setDismissedPair(null);
+    AsyncStorage.removeItem(TZ_BANNER_DISMISS_KEY).catch(() => {
+      /* best-effort; in-memory state still hides the banner */
+    });
+    mutation.mutate({
+      quiet_hours_tz: deviceTz,
+      quiet_hours_tz_present: true,
+    });
+  };
+
+  const dismissTzBanner = () => {
+    if (!quiet.quiet_hours_tz) return;
+    const pair: DismissedTzPair = {
+      device: deviceTz,
+      quiet: quiet.quiet_hours_tz,
+    };
+    setDismissedPair(pair);
+    AsyncStorage.setItem(TZ_BANNER_DISMISS_KEY, JSON.stringify(pair)).catch(
+      () => {
+        /* best-effort; banner stays hidden for this session regardless */
+      },
+    );
+  };
+
+  // Only suggest a switch when:
+  //   - quiet hours are configured (otherwise there is nothing pinned),
+  //   - the device's IANA zone is well-formed and differs from the saved one,
+  //   - the dismissal store has been read (so we don't flash the banner
+  //     for a beat before remembering the user already dismissed it),
+  //   - and the user hasn't already dismissed this exact pair.
+  const showTzBanner =
+    dismissLoaded &&
+    !!quiet.quiet_hours_tz &&
+    !!deviceTz &&
+    deviceTz !== quiet.quiet_hours_tz &&
+    !(
+      dismissedPair &&
+      dismissedPair.device === deviceTz &&
+      dismissedPair.quiet === quiet.quiet_hours_tz
+    );
+  const deviceTzOpt = findTimezone(deviceTz);
+  const deviceTzCity = deviceTzOpt ? deviceTzOpt.city : deviceTz;
+  const savedTzOpt = findTimezone(quiet.quiet_hours_tz);
+  const savedTzCity = savedTzOpt
+    ? savedTzOpt.city
+    : (quiet.quiet_hours_tz ?? "");
+
   const savePhone = () => {
     const next = phone.trim();
     setVerifyMsg(null);
@@ -313,6 +421,77 @@ export function NotificationPrefs(): React.ReactElement {
     <View>
       <SectionHeader>NOTIFICATIONS</SectionHeader>
       <Card>
+        {showTzBanner ? (
+          <View
+            testID="banner-device-tz-mismatch"
+            style={[
+              styles.tzBanner,
+              {
+                borderColor: colors.primary,
+                backgroundColor: colors.background,
+              },
+            ]}
+          >
+            <Text style={[styles.label, { color: colors.foreground }]}>
+              Switch quiet hours to {deviceTzCity}?
+            </Text>
+            <Text
+              testID="text-tz-banner-detail"
+              style={[styles.hint, { color: colors.mutedForeground }]}
+            >
+              Your device is on {deviceTz}, but quiet hours are pinned to{" "}
+              {savedTzCity} ({quiet.quiet_hours_tz}).
+            </Text>
+            <View style={styles.tzBannerActions}>
+              <Pressable
+                testID="button-tz-banner-switch"
+                onPress={switchToDeviceTz}
+                disabled={busy}
+                accessibilityRole="button"
+                accessibilityLabel={`Switch quiet hours to ${deviceTz}`}
+                style={({ pressed }) => [
+                  styles.primaryButton,
+                  {
+                    backgroundColor: colors.primary,
+                    opacity: busy ? 0.5 : pressed ? 0.7 : 1,
+                  },
+                ]}
+              >
+                <Text
+                  style={[
+                    styles.primaryButtonText,
+                    { color: colors.primaryForeground },
+                  ]}
+                >
+                  Switch
+                </Text>
+              </Pressable>
+              <Pressable
+                testID="button-tz-banner-dismiss"
+                onPress={dismissTzBanner}
+                disabled={busy}
+                accessibilityRole="button"
+                accessibilityLabel="Dismiss timezone suggestion"
+                style={({ pressed }) => [
+                  styles.secondaryButton,
+                  {
+                    borderColor: colors.border,
+                    opacity: busy ? 0.5 : pressed ? 0.7 : 1,
+                  },
+                ]}
+              >
+                <Text
+                  style={[
+                    styles.secondaryButtonText,
+                    { color: colors.foreground },
+                  ]}
+                >
+                  Dismiss
+                </Text>
+              </Pressable>
+            </View>
+          </View>
+        ) : null}
         <Row
           label="Live trades"
           hint="Push when a live (non-paper) order fills."
@@ -824,5 +1003,17 @@ const styles = StyleSheet.create({
     padding: 10,
     gap: 8,
     marginTop: 4,
+  },
+  tzBanner: {
+    borderWidth: 1,
+    borderRadius: 6,
+    padding: 10,
+    gap: 8,
+    marginBottom: 8,
+  },
+  tzBannerActions: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
   },
 });
