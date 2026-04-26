@@ -2,21 +2,25 @@ name: gh-pages-prune
 
 # Prune old CI failure HTML reports from the `gh-pages` branch so it doesn't
 # grow unboundedly. The companion publishers write reports under:
-#   pr-<number>/run-<runid>/            # web Playwright (web-e2e.yml)
-#   branch-<sanitized>/run-<runid>/     # web Playwright (push / workflow_dispatch)
-#   api/pr-<number>/run-<runid>/        # API pytest (api-pytest.yml)
-#   api/branch-<sanitized>/run-<runid>/ # API pytest (push / workflow_dispatch)
+#   pr-<number>/run-<runid>/                       # web Playwright (web-e2e.yml)
+#   branch-<sanitized>/run-<runid>/                # web Playwright (push / workflow_dispatch)
+#   api/pr-<number>/run-<runid>/                   # API pytest (api-pytest.yml)
+#   api/branch-<sanitized>/run-<runid>/            # API pytest (push / workflow_dispatch)
+#   coverage/web/pr-<number>/run-<runid>/          # web vitest HTML coverage (frontend-coverage-comment.yml)
+#   coverage/mobile/pr-<number>/run-<runid>/       # mobile jest HTML coverage (frontend-coverage-comment.yml)
 #
 # This workflow:
-#   * On `pull_request.closed`, immediately deletes `pr-<n>/` and
-#     `api/pr-<n>/` for the PR that just closed — no age gating.
-#   * On the daily schedule, also removes `pr-<n>/` and `api/pr-<n>/`
-#     directories for PRs that were merged or closed more than
-#     PR_MAX_AGE_DAYS ago (default: 14). This catches PRs whose close
-#     event was missed (e.g. if this workflow was disabled at the time).
-#   * Caps each `pr-<n>/`, `branch-<name>/`, `api/pr-<n>/` and
-#     `api/branch-<name>/` directory to the most recent RUNS_PER_DIR run
-#     subdirectories (default: 20), deleting older ones.
+#   * On `pull_request.closed`, immediately deletes `pr-<n>/`,
+#     `api/pr-<n>/`, `coverage/web/pr-<n>/` and `coverage/mobile/pr-<n>/`
+#     for the PR that just closed — no age gating.
+#   * On the daily schedule, also removes `pr-<n>/`, `api/pr-<n>/`,
+#     `coverage/web/pr-<n>/` and `coverage/mobile/pr-<n>/` directories
+#     for PRs that were merged or closed more than PR_MAX_AGE_DAYS ago
+#     (default: 14). This catches PRs whose close event was missed
+#     (e.g. if this workflow was disabled at the time).
+#   * Caps each per-PR / per-branch run-tree (web Playwright, API pytest,
+#     and frontend coverage variants) to the most recent RUNS_PER_DIR
+#     run subdirectories (default: 20), deleting older ones.
 #   * Re-renders the gh-pages landing-page `index.html` so it no longer
 #     points at any reports that were just pruned.
 
@@ -62,6 +66,17 @@ jobs:
       # delete `pr-<n>/` and `api/pr-<n>/` for that PR (bypassing the
       # PR_MAX_AGE_DAYS gate). Empty for scheduled / manual runs.
       CLOSED_PR_NUMBER: ${{ github.event_name == 'pull_request' && github.event.action == 'closed' && github.event.pull_request.number || '' }}
+      # Namespaces under which `pr-<n>/` and `branch-<sanitized>/` trees
+      # live on `gh-pages`. Empty string means the gh-pages root (web
+      # Playwright). Each prefix gets the same per-PR / per-branch
+      # treatment as the others, so adding a new publisher is just a
+      # matter of appending to this list (plus the publisher and the
+      # corresponding line in `EMPTY_NAMESPACES` below).
+      REPORT_NAMESPACES: "api/ coverage/web/ coverage/mobile/"
+      # Subset of REPORT_NAMESPACES whose container directory should
+      # itself be removed when it ends up empty after pruning, so the
+      # gh-pages root stays tidy. Walked deepest-first.
+      EMPTY_NAMESPACES: "api coverage/web coverage/mobile coverage"
 
     steps:
       - name: Check out repo (for the index renderer)
@@ -101,14 +116,20 @@ jobs:
           # reset-to-origin retry, since the deletions are deterministic
           # against the fresh state.
           prune_and_commit() {
-            local NOW_TS MAX_AGE_SEC dir base pr_num api_path resp state closed_at \
-                  closed_ts age parent runs count i victim CHANGES=0 \
-                  HAD_DIFF
+            local NOW_TS MAX_AGE_SEC ns dir base pr_num api_path resp state \
+                  closed_at closed_ts age parent runs count i victim \
+                  pr_dirs cap_dirs empty_ns CHANGES=0 HAD_DIFF
             NOW_TS="$(date -u +%s)"
             MAX_AGE_SEC=$(( PR_MAX_AGE_DAYS * 86400 ))
 
             pushd "${WORK}" >/dev/null
             shopt -s nullglob
+
+            # The web Playwright reports live at the gh-pages root
+            # (empty namespace); everything else lives under one of the
+            # `${REPORT_NAMESPACES}` prefixes. Build the union here so
+            # all three sweeps below walk the same set of trees.
+            local namespaces=("" ${REPORT_NAMESPACES})
 
             # ---- 0. Immediate cleanup for the PR that just closed ----
             # When triggered by a `pull_request.closed` event, drop the
@@ -116,7 +137,8 @@ jobs:
             # keeps merged-PR reports from sitting around for up to
             # PR_MAX_AGE_DAYS before the scheduled sweep notices them.
             if [ -n "${CLOSED_PR_NUMBER:-}" ]; then
-              for dir in "pr-${CLOSED_PR_NUMBER}/" "api/pr-${CLOSED_PR_NUMBER}/"; do
+              for ns in "${namespaces[@]}"; do
+                dir="${ns}pr-${CLOSED_PR_NUMBER}/"
                 if [ -d "${dir}" ]; then
                   echo "Removing ${dir} (PR #${CLOSED_PR_NUMBER} just closed)."
                   git rm -rf --quiet "${dir}"
@@ -129,10 +151,15 @@ jobs:
             # Ask the GitHub API for each PR's state + closed_at. If
             # the PR is closed/merged and was closed more than
             # PR_MAX_AGE_DAYS ago, delete the whole pr-<n>/ tree. Open
-            # or unknown PRs are left alone. Both web (`pr-<n>/`) and
-            # API (`api/pr-<n>/`) report trees are walked.
-            for dir in pr-*/ api/pr-*/; do
-              [ -d "${dir}" ] || continue
+            # or unknown PRs are left alone. All `pr-*/` trees across
+            # every namespace are walked together.
+            pr_dirs=()
+            for ns in "${namespaces[@]}"; do
+              for dir in "${ns}"pr-*/; do
+                [ -d "${dir}" ] && pr_dirs+=("${dir}")
+              done
+            done
+            for dir in "${pr_dirs[@]}"; do
               base="${dir%/}"             # strip trailing slash
               pr_num="${base##*pr-}"      # strip everything up to "pr-"
               case "${pr_num}" in
@@ -168,10 +195,17 @@ jobs:
             done
 
             # ---- 2. Cap each remaining pr-/branch- dir to RUNS_PER_DIR ----
-            # Same treatment for both web (`pr-*/`, `branch-*/`) and API
-            # (`api/pr-*/`, `api/branch-*/`) report roots.
-            for parent in pr-*/ branch-*/ api/pr-*/ api/branch-*/; do
-              [ -d "${parent}" ] || continue
+            # Same treatment for every namespace: web Playwright
+            # (`pr-*/`, `branch-*/`), API pytest (`api/pr-*/`,
+            # `api/branch-*/`), and frontend coverage
+            # (`coverage/web/pr-*/`, `coverage/mobile/pr-*/`, …).
+            cap_dirs=()
+            for ns in "${namespaces[@]}"; do
+              for parent in "${ns}"pr-*/ "${ns}"branch-*/; do
+                [ -d "${parent}" ] && cap_dirs+=("${parent}")
+              done
+            done
+            for parent in "${cap_dirs[@]}"; do
               # List run-<id>/ subdirs sorted by id descending. Run
               # IDs are monotonically increasing per repo, so newest
               # IDs == newest runs.
@@ -198,12 +232,16 @@ jobs:
               fi
             done
 
-            # If the `api/` namespace directory itself is now empty,
-            # drop it too so the gh-pages root stays tidy.
-            if [ -d api ] && [ -z "$(ls -A api 2>/dev/null)" ]; then
-              echo "  api/ is now empty; removing."
-              rmdir api 2>/dev/null || true
-            fi
+            # If a namespace container directory itself is now empty,
+            # drop it too so the gh-pages root stays tidy. Walked in
+            # the order given so deeper paths (e.g. `coverage/web`)
+            # disappear before their parents (`coverage`).
+            for empty_ns in ${EMPTY_NAMESPACES}; do
+              if [ -d "${empty_ns}" ] && [ -z "$(ls -A "${empty_ns}" 2>/dev/null)" ]; then
+                echo "  ${empty_ns}/ is now empty; removing."
+                rmdir "${empty_ns}" 2>/dev/null || true
+              fi
+            done
 
             shopt -u nullglob
             popd >/dev/null

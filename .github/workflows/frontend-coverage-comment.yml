@@ -4,7 +4,11 @@ name: frontend coverage comment
 # reasons we listen for both pull_request and push events from each
 # upstream workflow:
 #   - pull_request runs: post / update the coverage delta comment on
-#     the PR using the baseline stored on `js-coverage-data`.
+#     the PR using the baseline stored on `js-coverage-data`. We also
+#     publish the HTML coverage report to `gh-pages` under
+#     `coverage/<web|mobile>/pr-<n>/run-<id>/` and link to it from the
+#     comment so reviewers can click straight into the per-file
+#     breakdown without downloading the artifact zip.
 #   - push (to main) runs: refresh the baseline coverage stored on the
 #     `js-coverage-data` branch so future PR deltas are compared
 #     against an up-to-date main.
@@ -48,12 +52,14 @@ jobs:
           case "${UPSTREAM}" in
             web-vitest)
               echo "artifact_name=web-vitest-coverage" >> "$GITHUB_OUTPUT"
+              echo "html_artifact_name=web-vitest-coverage-html" >> "$GITHUB_OUTPUT"
               echo "subdir=web" >> "$GITHUB_OUTPUT"
               echo "label=Web (vitest)" >> "$GITHUB_OUTPUT"
               echo "marker=<!-- web-vitest-coverage-comment -->" >> "$GITHUB_OUTPUT"
               ;;
             mobile-jest)
               echo "artifact_name=mobile-jest-coverage" >> "$GITHUB_OUTPUT"
+              echo "html_artifact_name=mobile-jest-coverage-html" >> "$GITHUB_OUTPUT"
               echo "subdir=mobile" >> "$GITHUB_OUTPUT"
               echo "label=Mobile (jest)" >> "$GITHUB_OUTPUT"
               echo "marker=<!-- mobile-jest-coverage-comment -->" >> "$GITHUB_OUTPUT"
@@ -86,6 +92,31 @@ jobs:
             echo "found=false" >> "$GITHUB_OUTPUT"
           fi
 
+      - name: Find PR number from triggering workflow run
+        if: steps.have_summary.outputs.found == 'true' && github.event.workflow_run.event == 'pull_request'
+        id: pr
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const run = context.payload.workflow_run;
+            const prs = run.pull_requests || [];
+            if (prs.length > 0) {
+              core.setOutput('number', prs[0].number);
+              return;
+            }
+            // Fall back to listing PRs whose head matches the run's head SHA.
+            // This covers PRs from forks where `pull_requests` may be empty.
+            const { owner, repo } = context.repo;
+            const list = await github.rest.pulls.list({
+              owner, repo, state: 'open', per_page: 100,
+            });
+            const match = list.data.find(p => p.head.sha === run.head_sha);
+            if (match) {
+              core.setOutput('number', match.number);
+            } else {
+              core.warning(`No open PR found for head SHA ${run.head_sha}; skipping comment.`);
+            }
+
       - name: Fetch baseline summary from data branch
         if: steps.have_summary.outputs.found == 'true'
         id: baseline
@@ -114,52 +145,162 @@ jobs:
             echo "have_baseline=false" >> "$GITHUB_OUTPUT"
           fi
 
+      # ----------------------------------------------------------------------
+      # On PR runs, also republish the HTML coverage report to the
+      # `gh-pages` branch under
+      # `coverage/<web|mobile>/pr-<number>/run-<runid>/` so the sticky
+      # PR comment can link straight into the per-file breakdown.
+      # Mirrors the `pr-<n>/run-<id>/` pattern used by web-e2e.yml's
+      # Playwright publisher and `api/pr-<n>/run-<id>/` used by
+      # api-pytest.yml.
+      #
+      # Publish failures don't fail the job — the comment step still
+      # runs and just omits the HTML link.
+      # ----------------------------------------------------------------------
+      - name: Download HTML coverage artifact from triggering run
+        if: |
+          steps.have_summary.outputs.found == 'true' &&
+          github.event.workflow_run.event == 'pull_request' &&
+          steps.pr.outputs.number != ''
+        id: download_html
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ steps.ctx.outputs.html_artifact_name }}
+          path: coverage-html-artifact
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+        continue-on-error: true
+
+      - name: Publish HTML coverage report to gh-pages
+        if: |
+          steps.have_summary.outputs.found == 'true' &&
+          github.event.workflow_run.event == 'pull_request' &&
+          steps.pr.outputs.number != ''
+        id: publish_report
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ steps.pr.outputs.number }}
+          RUN_ID: ${{ github.event.workflow_run.id }}
+          SUBDIR_NAME: ${{ steps.ctx.outputs.subdir }}
+          LABEL: ${{ steps.ctx.outputs.label }}
+        run: |
+          set -euo pipefail
+          if [ ! -f coverage-html-artifact/index.html ]; then
+            echo "::notice::No HTML coverage report on disk; skipping publish."
+            echo "published=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          SUBDIR="coverage/${SUBDIR_NAME}/pr-${PR_NUMBER}/run-${RUN_ID}"
+          WORK="$(mktemp -d)"
+          REPO_URL="https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+
+          if git ls-remote --exit-code --heads "${REPO_URL}" gh-pages >/dev/null 2>&1; then
+            git clone --depth=1 --branch=gh-pages "${REPO_URL}" "${WORK}"
+          else
+            echo "gh-pages branch does not exist yet; initializing it."
+            git clone --depth=1 "${REPO_URL}" "${WORK}"
+            (
+              cd "${WORK}"
+              git checkout --orphan gh-pages
+              git rm -rf . >/dev/null 2>&1 || true
+              cat > index.html <<'HTML'
+          <!doctype html>
+          <meta charset="utf-8">
+          <title>CI reports</title>
+          <h1>CI reports</h1>
+          <p>Per-run HTML reports live under
+          <code>pr-&lt;number&gt;/run-&lt;id&gt;/</code> (web Playwright),
+          <code>api/pr-&lt;number&gt;/run-&lt;id&gt;/</code> (API pytest),
+          and <code>coverage/&lt;web|mobile&gt;/pr-&lt;number&gt;/run-&lt;id&gt;/</code>
+          (frontend coverage).</p>
+          HTML
+              git add index.html
+              git -c user.name='github-actions[bot]' \
+                  -c user.email='github-actions[bot]@users.noreply.github.com' \
+                  commit -m "Initialize gh-pages for CI reports"
+              git push -u origin gh-pages
+            )
+          fi
+
+          OWNER="${GITHUB_REPOSITORY%%/*}"
+          REPO="${GITHUB_REPOSITORY##*/}"
+          REPORT_URL="https://${OWNER}.github.io/${REPO}/${SUBDIR}/"
+
+          # Build the commit on top of whatever HEAD currently is; called
+          # again after each reset-to-origin retry so the report is
+          # reapplied cleanly on top of any concurrent commits.
+          build_publish_commit() {
+            mkdir -p "${WORK}/${SUBDIR}"
+            # Trailing `/.` copies the contents of the source dir into
+            # the destination, not the source dir itself.
+            cp -R coverage-html-artifact/. "${WORK}/${SUBDIR}/"
+            (
+              cd "${WORK}"
+              git add "${SUBDIR}"
+              if git diff --cached --quiet; then
+                # Nothing changed (e.g. the concurrent push already
+                # contained an identical state). Nothing to commit.
+                return 0
+              fi
+              git -c user.name='github-actions[bot]' \
+                  -c user.email='github-actions[bot]@users.noreply.github.com' \
+                  commit -m "Publish ${LABEL} coverage report: ${SUBDIR}"
+            )
+          }
+
+          build_publish_commit
+
+          attempt=0
+          MAX_ATTEMPTS=5
+          until (cd "${WORK}" && git push origin gh-pages); do
+            attempt=$((attempt + 1))
+            if [ "${attempt}" -ge "${MAX_ATTEMPTS}" ]; then
+              echo "::error::Failed to push gh-pages after ${attempt} attempts."
+              exit 1
+            fi
+            echo "::warning::Push attempt ${attempt} failed; resyncing with origin/gh-pages."
+            (
+              cd "${WORK}"
+              git fetch --depth=1 origin gh-pages
+              git reset --hard FETCH_HEAD
+            )
+            build_publish_commit
+            sleep $(( attempt * 2 ))
+          done
+
+          echo "Coverage report published to: ${REPORT_URL}"
+          echo "published=true" >> "$GITHUB_OUTPUT"
+          echo "report_url=${REPORT_URL}" >> "$GITHUB_OUTPUT"
+
       - name: Render coverage comment markdown
         if: steps.have_summary.outputs.found == 'true'
         env:
           LABEL: ${{ steps.ctx.outputs.label }}
           MARKER: ${{ steps.ctx.outputs.marker }}
           UPSTREAM_RUN_URL: ${{ github.event.workflow_run.html_url }}
+          REPORT_URL: ${{ steps.publish_report.outputs.report_url }}
         run: |
           set -euo pipefail
           BASELINE_ARG=""
           if [ -f baseline-summary.json ]; then
             BASELINE_ARG="--baseline baseline-summary.json"
           fi
+          REPORT_ARG=()
+          if [ -n "${REPORT_URL:-}" ]; then
+            REPORT_ARG=(--report-url "${REPORT_URL}")
+          fi
           node .github/scripts/post-coverage-comment.mjs \
             --name "${LABEL}" \
             --marker "${MARKER}" \
             --summary coverage-artifact/coverage-summary.json \
             ${BASELINE_ARG} \
+            "${REPORT_ARG[@]}" \
             --run-url "${UPSTREAM_RUN_URL}" \
             --out comment-body.md
           echo "----- comment body -----"
           cat comment-body.md
-
-      - name: Find PR number from triggering workflow run
-        if: steps.have_summary.outputs.found == 'true' && github.event.workflow_run.event == 'pull_request'
-        id: pr
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const run = context.payload.workflow_run;
-            const prs = run.pull_requests || [];
-            if (prs.length > 0) {
-              core.setOutput('number', prs[0].number);
-              return;
-            }
-            // Fall back to listing PRs whose head matches the run's head SHA.
-            // This covers PRs from forks where `pull_requests` may be empty.
-            const { owner, repo } = context.repo;
-            const list = await github.rest.pulls.list({
-              owner, repo, state: 'open', per_page: 100,
-            });
-            const match = list.data.find(p => p.head.sha === run.head_sha);
-            if (match) {
-              core.setOutput('number', match.number);
-            } else {
-              core.warning(`No open PR found for head SHA ${run.head_sha}; skipping comment.`);
-            }
 
       - name: Post / update sticky PR comment
         if: steps.have_summary.outputs.found == 'true' && github.event.workflow_run.event == 'pull_request' && steps.pr.outputs.number != ''
