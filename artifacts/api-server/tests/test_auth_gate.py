@@ -54,6 +54,8 @@ PROTECTED_ROUTES: tuple[str, ...] = (
     "/api/dashboard/slippage-guard-rejects",
     "/api/dashboard/recent-debates",
     "/api/dashboard/debates/{debate_id}",
+    # Live Games dashboard — read-model snapshot of in-progress markets.
+    "/api/live-games",
     "/api/dashboard/uw-signals",
     "/api/dashboard/trades/{trade_ref}",
     "/api/search",
@@ -171,6 +173,9 @@ PROTECTED_MUTATING_ENDPOINTS: tuple[tuple[str, str], ...] = (
     ("POST", "/api/settlement/settle-market"),
     ("POST", "/api/settlement/backfill"),
     ("POST", "/api/swarm/debate"),
+    # Live Games chatbot — single-shot Anthropic Q&A grounded in the
+    # per-market live context.
+    ("POST", "/api/live-games/{market_id}/ask"),
     ("POST", "/api/kalshi/paper-order"),
     ("POST", "/api/kalshi/resume"),
     ("POST", "/api/models/reload"),
