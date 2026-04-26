@@ -1557,6 +1557,92 @@ def bankroll_sync_silent(
     return _dispatch(subject, body, tag="bankroll-sync-silent", dry_run=dry_run)
 
 
+def elo_updater_unhealthy(
+    *,
+    reason: str,
+    last_completed_at: str | None,
+    age_seconds: float | None,
+    cycle_seconds: float,
+    threshold_seconds: float,
+    running: bool,
+    last_errors: list[str] | None,
+    games_examined: int | None,
+    games_updated: int | None,
+    consecutive_snapshots: int,
+    dry_run: bool = False,
+) -> dict[str, Any]:
+    """Operator alert: the periodic team-Elo updater has stalled or
+    started erroring on every game.
+
+    Fired by the health collector when ``elo_scheduler.scheduler.status()``
+    shows either no completed cycle within ``cycle_seconds * 3`` (the
+    updater has stopped doing work — DB outage, deploy bug, stuck loop)
+    or the most recent cycle returned errors. Either failure mode means
+    finished games stop feeding the rating engine and downstream picks
+    quietly degrade against stale numbers.
+
+    ``reason`` is one of ``"stalled"`` (no recent cycle) or
+    ``"errors"`` (last cycle reported per-game errors). The same
+    Postmark fan-out as the other scheduler-silence alerts (one page
+    per incident, deduped via ``notification_dedupe``).
+    """
+    if reason == "errors":
+        state_summary = (
+            f"{len(last_errors or [])} error(s) in last cycle"
+        )
+    elif not running:
+        state_summary = "scheduler loop is not running"
+    elif age_seconds is None:
+        state_summary = "no cycle completed since boot"
+    else:
+        state_summary = f"last cycle {age_seconds:.0f}s ago"
+    subject = (
+        f"[axiom][ELO] team-rating updater degraded ({state_summary})"
+    )
+    err_lines = ""
+    if last_errors:
+        sample = list(last_errors)[:5]
+        err_lines = (
+            "\nRecent cycle errors:\n"
+            + "".join(f"  - {e}\n" for e in sample)
+        )
+    body = (
+        "The periodic team-Elo updater is degraded.\n"
+        "Finished games are no longer being fed into the rating engine,\n"
+        "so downstream picks will quietly drift against stale numbers\n"
+        "until the loop recovers. Investigate the api-server logs and\n"
+        "the games / team_elo_history tables before relying on fresh\n"
+        "ratings.\n\n"
+        + _format_lines(
+            [
+                ("reason", reason),
+                ("running", "yes" if running else "no"),
+                ("last_completed_at", last_completed_at or "(never)"),
+                (
+                    "age_seconds",
+                    f"{age_seconds:.0f}" if age_seconds is not None else "(n/a)",
+                ),
+                ("cycle_seconds", f"{cycle_seconds:.0f}"),
+                ("threshold_seconds", f"{threshold_seconds:.0f}"),
+                (
+                    "games_examined",
+                    games_examined if games_examined is not None else "(n/a)",
+                ),
+                (
+                    "games_updated",
+                    games_updated if games_updated is not None else "(n/a)",
+                ),
+                ("error_count", len(last_errors or [])),
+                ("consecutive_snapshots", consecutive_snapshots),
+                ("at", _utc_now_iso()),
+            ]
+        )
+        + "\n"
+        + err_lines
+    )
+    return _dispatch(subject, body, tag="elo-updater-unhealthy", dry_run=dry_run)
+
+
 def rc_webhook_silence(
     *,
     silence_seconds: int,

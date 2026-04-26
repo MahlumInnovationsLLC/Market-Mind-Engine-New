@@ -47,6 +47,7 @@ from .feeds import registry as feed_registry
 from .kalshi import bus as kalshi_bus, client as kalshi_client_mod, lifecycle as kalshi_lifecycle, ws as kalshi_ws
 from .notifications import postmark
 from . import models_loader
+from .elo import scheduler as elo_scheduler
 from .orchestrator import scheduler as orchestrator_scheduler
 from .settlement import scheduler as settlement_scheduler
 
@@ -566,6 +567,271 @@ def _probe_bankroll_sync() -> dict:
     return _card(
         key="bankroll_sync",
         label="Kalshi bankroll sync",
+        category="passive",
+        status=status,
+        detail=detail,
+        extras=extras,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Elo updater health + alert (task #524)
+#
+# The periodic team-Elo updater (`app.elo.scheduler`) is read-mostly:
+# without it the operator panel still surfaces last-cycle counters and
+# errors, but only when someone is looking. If the loop stops cycling
+# (DB outage, deploy bug) or the most recent cycle returned errors,
+# ratings silently freeze and downstream picks degrade against stale
+# numbers. This probe maps both failure modes onto a `degraded` health
+# card and (after a small consecutive-bad-snapshot debounce) fans out
+# one Postmark alert per incident, deduped via the shared
+# `notification_dedupe` table — the same shape as the bankroll-sync
+# silence detector above.
+# ---------------------------------------------------------------------------
+
+
+# Per-incident consecutive-bad snapshot counter, keyed by a stable
+# label so an updater that recovers and then re-degrades has to climb
+# the threshold again before we re-alert.
+_elo_updater_bad_snapshot_counts: dict[str, int] = {}
+
+# How many consecutive snapshots the elo updater must look unhealthy
+# before paging.  Default 3 -> ~90s at the standard 30s health cadence,
+# enough debounce so a single transient stall doesn't page anyone.
+ELO_UPDATER_ALERT_THRESHOLD = max(
+    1, int(os.environ.get("AXIOM_ELO_UPDATER_ALERT_SNAPSHOTS") or "3")
+)
+
+# Dedupe TTL for the resulting Postmark alert.  One page per incident
+# per hour matches the rest of the scheduler-silence alerts.
+ELO_UPDATER_ALERT_TTL_SECONDS = max(
+    60, int(os.environ.get("AXIOM_ELO_UPDATER_ALERT_TTL_SECONDS") or "3600")
+)
+
+
+def _elo_updater_disabled() -> bool:
+    return (
+        os.environ.get("AXIOM_ELO_UPDATER_DISABLED", "").lower()
+        in ("1", "true", "yes")
+    )
+
+
+def _coerce_iso_to_ts(value: Any) -> float | None:
+    """Accept ISO-8601 strings (the scheduler stores `completed_at` as
+    a string) and return a UTC epoch float, or None when missing /
+    unparseable."""
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        try:
+            dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return dt.timestamp()
+        except Exception:
+            return None
+    if isinstance(value, datetime):
+        if value.tzinfo is None:
+            value = value.replace(tzinfo=timezone.utc)
+        return value.timestamp()
+    return None
+
+
+def _elo_updater_status(state: dict) -> tuple[str, str, dict]:
+    """Classify an `elo_scheduler.scheduler.status()` snapshot.
+
+    Returns ``(status, detail, signals)`` where ``status`` is one of
+    ``ok | degraded | down | unconfigured``, ``detail`` is the
+    human-readable card blurb, and ``signals`` carries the derived
+    numbers (age + threshold + reason) the alert dispatcher reuses.
+    """
+    cycle = float(state.get("cycle_seconds") or 300.0)
+    threshold = max(cycle * 3.0, 60.0)
+    last = state.get("last_cycle") or {}
+    if not isinstance(last, dict):
+        last = {}
+    last_completed = last.get("completed_at")
+    completed_ts = _coerce_iso_to_ts(last_completed)
+    age = (time.time() - completed_ts) if completed_ts else None
+    last_errors = list(last.get("errors") or [])
+    running = bool(state.get("running"))
+    games_examined = last.get("games_examined")
+    games_updated = last.get("games_updated")
+    signals = {
+        "cycle_seconds": cycle,
+        "threshold_seconds": threshold,
+        "age_seconds": round(age, 1) if age is not None else None,
+        "last_completed_at": last_completed,
+        "last_errors": last_errors,
+        "running": running,
+        "games_examined": games_examined,
+        "games_updated": games_updated,
+        "reason": None,
+    }
+
+    if _elo_updater_disabled():
+        return (
+            "unconfigured",
+            "elo updater disabled via AXIOM_ELO_UPDATER_DISABLED",
+            signals,
+        )
+
+    if not running:
+        signals["reason"] = "stalled"
+        return (
+            "degraded",
+            "elo updater loop is not running",
+            signals,
+        )
+    if completed_ts is None:
+        signals["reason"] = "stalled"
+        return (
+            "degraded",
+            f"running but no cycle completed yet (cadence={cycle:.0f}s)",
+            signals,
+        )
+    if age is not None and age > threshold:
+        signals["reason"] = "stalled"
+        detail = (
+            f"stalled: last cycle {age:.0f}s ago "
+            f"(>{threshold:.0f}s threshold)"
+        )
+        return ("degraded", detail, signals)
+    if last_errors:
+        signals["reason"] = "errors"
+        detail = (
+            f"last cycle returned {len(last_errors)} error(s): "
+            f"{str(last_errors[0])[:160]}"
+        )
+        return ("degraded", detail, signals)
+    return (
+        "ok",
+        f"last cycle {age:.0f}s ago (<= {threshold:.0f}s) | "
+        f"examined={games_examined} updated={games_updated}",
+        signals,
+    )
+
+
+def _maybe_dispatch_elo_updater_alert(
+    *, status: str, detail: str, signals: dict
+) -> dict | None:
+    """Update the consecutive-bad counter and fire one Postmark alert
+    per incident when the count crosses the threshold.
+
+    Returns the triggered payload (used by tests) or None when this
+    snapshot was healthy or below the threshold.
+    """
+    label = "elo_updater"
+    # Only `degraded` snapshots — stalled or last-cycle-errors — count
+    # toward the page. `unconfigured` (disabled via env) and `ok` reset
+    # the counter so a deploy that explicitly disables the updater
+    # doesn't accumulate toward an alert, and a one-off slow cycle
+    # that recovers next snapshot doesn't either.
+    if status != "degraded":
+        _elo_updater_bad_snapshot_counts.pop(label, None)
+        return None
+    cur = _elo_updater_bad_snapshot_counts.get(label, 0) + 1
+    _elo_updater_bad_snapshot_counts[label] = cur
+    if cur != ELO_UPDATER_ALERT_THRESHOLD:
+        return None
+
+    reason = signals.get("reason") or "stalled"
+    triggered = {
+        "label": label,
+        "status": status,
+        "detail": detail,
+        "consecutive_snapshots": cur,
+        "reason": reason,
+        "running": bool(signals.get("running")),
+        "last_completed_at": signals.get("last_completed_at"),
+        "age_seconds": signals.get("age_seconds"),
+        "cycle_seconds": signals.get("cycle_seconds"),
+        "threshold_seconds": signals.get("threshold_seconds"),
+        "last_errors": list(signals.get("last_errors") or []),
+        "games_examined": signals.get("games_examined"),
+        "games_updated": signals.get("games_updated"),
+    }
+
+    from .notifications import alerts as _alerts
+
+    async def _runner() -> None:
+        # Dedupe per (label, reason) so a stalled-then-erroring updater
+        # can fan out two distinct pages — they describe different
+        # failure modes and both want operator eyes.
+        dedupe_key = f"{label}:{reason}"
+        try:
+            ok = await _alerts.dedupe_or_skip(
+                "elo_updater_unhealthy",
+                dedupe_key,
+                ttl_seconds=ELO_UPDATER_ALERT_TTL_SECONDS,
+            )
+        except Exception as e:  # pragma: no cover — fail-open
+            log.warning("elo-updater dedupe failed: %s", e)
+            ok = True
+        if not ok:
+            return
+        try:
+            _alerts.elo_updater_unhealthy(
+                reason=reason,
+                last_completed_at=triggered["last_completed_at"],
+                age_seconds=triggered["age_seconds"],
+                cycle_seconds=triggered["cycle_seconds"],
+                threshold_seconds=triggered["threshold_seconds"],
+                running=triggered["running"],
+                last_errors=triggered["last_errors"],
+                games_examined=triggered["games_examined"],
+                games_updated=triggered["games_updated"],
+                consecutive_snapshots=triggered["consecutive_snapshots"],
+            )
+        except Exception as e:  # pragma: no cover
+            log.warning("elo-updater alert dispatch failed: %s", e)
+
+    try:
+        loop = asyncio.get_running_loop()
+        loop.create_task(_runner())
+    except RuntimeError:
+        # Sync test context — run inline so the test can observe it.
+        try:
+            asyncio.run(_runner())
+        except Exception as e:  # pragma: no cover
+            log.warning("inline elo-updater dispatch failed: %s", e)
+
+    return triggered
+
+
+def _probe_elo_updater() -> dict:
+    """Surface ``elo_scheduler.scheduler.status()`` as a passive health
+    card.
+
+    `degraded` when the loop is stopped, no cycle has completed within
+    ``cycle_seconds * 3`` (capped at >=60s so a fast test cadence
+    can't trigger on noise), or the most recent cycle returned
+    per-game errors. `unconfigured` when the scheduler is explicitly
+    disabled via env var. `ok` otherwise. The card flips the snapshot
+    `summary.overall` to `degraded` and a separate Postmark alert is
+    debounced via the shared notification dedupe table.
+    """
+    state = elo_scheduler.scheduler.status()
+    status, detail, signals = _elo_updater_status(state)
+    triggered = _maybe_dispatch_elo_updater_alert(
+        status=status, detail=detail, signals=signals
+    )
+    if status == "degraded":
+        error_log("elo_updater", detail[:240])
+    extras = {
+        **state,
+        **{k: v for k, v in signals.items() if k != "last_errors"},
+        "alert_threshold_snapshots": ELO_UPDATER_ALERT_THRESHOLD,
+        "consecutive_bad_snapshots": _elo_updater_bad_snapshot_counts.get(
+            "elo_updater", 0
+        ),
+        "alert_triggered_this_snapshot": triggered is not None,
+    }
+    return _card(
+        key="elo_updater",
+        label="Elo updater",
         category="passive",
         status=status,
         detail=detail,
@@ -1702,6 +1968,7 @@ async def _build_snapshot() -> _Snapshot:
         _probe_calibration(),
         _probe_ws_subscribers(),
         _probe_kalshi_reconciler(),
+        _probe_elo_updater(),
         _probe_bankroll_sync(),
         _probe_submit_recovery(),
         _probe_stale_resting_cancelled(),
