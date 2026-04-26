@@ -9,6 +9,7 @@
 import {
   TIMEZONES,
   findTimezone,
+  isInQuietHours,
   offsetForZone,
   searchTimezones,
 } from "@/lib/timezones";
@@ -86,6 +87,60 @@ describe("searchTimezones", () => {
 
   it("returns no rows when nothing matches", () => {
     expect(searchTimezones("zzz_nothing_matches")).toEqual([]);
+  });
+});
+
+describe("isInQuietHours", () => {
+  // 2026-04-26 04:00 UTC -> 00:00 in America/New_York (EDT, UTC-04:00)
+  // and 13:00 in Asia/Tokyo (UTC+09:00). At this instant a 22 -> 7
+  // overnight window catches the NYC user but not the Tokyo user —
+  // the whole reason the chosen zone matters.
+  const nycMidnightUtc = new Date("2026-04-26T04:00:00Z");
+  // 2026-04-26 18:30 UTC -> 14:30 in America/New_York (well outside
+  // a 22 -> 7 overnight window).
+  const dayUtc = new Date("2026-04-26T18:30:00Z");
+
+  it("returns true for an overnight window when the local hour is past the start", () => {
+    expect(isInQuietHours(22, 7, "America/New_York", nycMidnightUtc)).toBe(
+      true,
+    );
+  });
+
+  it("returns false when the same instant is daytime in a different zone", () => {
+    // 13:00 Tokyo — clearly outside [22, 24) ∪ [0, 7).
+    expect(isInQuietHours(22, 7, "Asia/Tokyo", nycMidnightUtc)).toBe(false);
+  });
+
+  it("returns false during the day for an overnight window", () => {
+    expect(isInQuietHours(22, 7, "America/New_York", dayUtc)).toBe(false);
+  });
+
+  it("handles a same-day window (start < end)", () => {
+    // 14:30 NYC is inside [9, 17)
+    expect(isInQuietHours(9, 17, "America/New_York", dayUtc)).toBe(true);
+    // and outside [18, 23)
+    expect(isInQuietHours(18, 23, "America/New_York", dayUtc)).toBe(false);
+  });
+
+  it("treats equal start/end as no window", () => {
+    expect(isInQuietHours(10, 10, "America/New_York", dayUtc)).toBe(false);
+  });
+
+  it("returns false when any of start/end/zone is missing", () => {
+    expect(isInQuietHours(null, 7, "America/New_York", dayUtc)).toBe(false);
+    expect(isInQuietHours(22, null, "America/New_York", dayUtc)).toBe(false);
+    expect(isInQuietHours(22, 7, null, dayUtc)).toBe(false);
+    expect(isInQuietHours(22, 7, "", dayUtc)).toBe(false);
+  });
+
+  it("returns false for out-of-range or non-integer hours", () => {
+    expect(isInQuietHours(-1, 7, "America/New_York", dayUtc)).toBe(false);
+    expect(isInQuietHours(22, 24, "America/New_York", dayUtc)).toBe(false);
+    expect(isInQuietHours(22.5, 7, "America/New_York", dayUtc)).toBe(false);
+  });
+
+  it("returns false for an invalid zone instead of throwing", () => {
+    expect(isInQuietHours(22, 7, "Mars/Olympus", dayUtc)).toBe(false);
   });
 });
 

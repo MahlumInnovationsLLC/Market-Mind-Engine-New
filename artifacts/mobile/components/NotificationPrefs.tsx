@@ -115,6 +115,17 @@ function tzDisplayLine(zone: string | null): string {
   return off ? `${city} (${off}) · ${zone}` : `${city} · ${zone}`;
 }
 
+/**
+ * Build the trailing "(Europe/London, GMT+1)" suffix shown in the
+ * Quiet Hours hint line so users picking a non-device zone get a
+ * quick visual confirmation of the saved zone's *current* offset.
+ * Falls back to "(zone)" if the offset can't be resolved.
+ */
+function quietHintZoneSuffix(zone: string): string {
+  const off = offsetForZone(zone);
+  return off ? `(${zone}, ${off})` : `(${zone})`;
+}
+
 export function NotificationPrefs(): React.ReactElement {
   const colors = useColors();
   const qc = useQueryClient();
@@ -541,7 +552,7 @@ export function NotificationPrefs(): React.ReactElement {
           label="Quiet hours"
           hint={
             quietEnabled
-              ? `Mute pushes ${formatHour(quiet.quiet_hours_start_hour!)} – ${formatHour(quiet.quiet_hours_end_hour!)} (${quiet.quiet_hours_tz}). Email alerts are unaffected.`
+              ? `Mute pushes ${formatHour(quiet.quiet_hours_start_hour!)} – ${formatHour(quiet.quiet_hours_end_hour!)} ${quietHintZoneSuffix(quiet.quiet_hours_tz!)}. Email alerts are unaffected.`
               : "Mute live-trade and halt pushes during a daily window. Email alerts are unaffected."
           }
           value={quietEnabled}

@@ -17,6 +17,7 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useColors } from "@/hooks/useColors";
 import { apiFetch } from "@/lib/api";
 import { deepLinkFromNotificationData } from "@/lib/push";
+import { isInQuietHours, offsetForZone } from "@/lib/timezones";
 
 type NotificationItem = {
   id: number;
@@ -33,6 +34,26 @@ type NotificationsResponse = {
   items: NotificationItem[];
   unread_count: number;
 };
+
+type QuietHoursPrefs = {
+  quiet_hours_start_hour: number | null;
+  quiet_hours_end_hour: number | null;
+  quiet_hours_tz: string | null;
+};
+
+type NotificationPrefsResponse = {
+  prefs: Partial<QuietHoursPrefs> & Record<string, unknown>;
+};
+
+/**
+ * "(Europe/London, GMT+1)"-style suffix for the quiet-hours annotation
+ * shown under muted history rows. Drops the offset gracefully when the
+ * runtime can't resolve it.
+ */
+function quietZoneSuffix(zone: string): string {
+  const off = offsetForZone(zone);
+  return off ? `${zone} (${off})` : zone;
+}
 
 function fmtTime(iso: string | null | undefined): string {
   if (!iso) return "—";
@@ -74,6 +95,33 @@ export default function NotificationsScreen() {
       apiFetch<NotificationsResponse>("/api/me/notifications?limit=50"),
     refetchInterval: 30_000,
   });
+
+  // Quiet-hours prefs let us annotate history rows that landed inside
+  // the user's saved DND window (task #526). We share the same query
+  // key as `NotificationPrefs` so a settings save updates the badges
+  // here without a refetch. A failed prefs fetch (e.g. unapproved
+  // user, offline) just hides the annotations.
+  const prefsQuery = useQuery<NotificationPrefsResponse>({
+    queryKey: ["notification-prefs"],
+    queryFn: () =>
+      apiFetch<NotificationPrefsResponse>("/api/me/notification-prefs"),
+    staleTime: 60_000,
+  });
+  const quiet: QuietHoursPrefs = {
+    quiet_hours_start_hour:
+      (prefsQuery.data?.prefs?.quiet_hours_start_hour as
+        | number
+        | null
+        | undefined) ?? null,
+    quiet_hours_end_hour:
+      (prefsQuery.data?.prefs?.quiet_hours_end_hour as
+        | number
+        | null
+        | undefined) ?? null,
+    quiet_hours_tz:
+      (prefsQuery.data?.prefs?.quiet_hours_tz as string | null | undefined) ??
+      null,
+  };
 
   const markRead = useMutation({
     mutationFn: (ids?: number[]) =>
@@ -306,6 +354,22 @@ export default function NotificationsScreen() {
             (item.data ?? null) as Record<string, unknown> | null,
           );
         const unreadRow = !item.read_at;
+        // Annotate rows that landed inside the user's saved quiet
+        // hours window so it's obvious why a push was silent (task
+        // #526). Falls back to no annotation when the timestamp is
+        // unparseable or the user hasn't configured quiet hours.
+        const createdAt = item.created_at ? new Date(item.created_at) : null;
+        const quietHit =
+          createdAt &&
+          !Number.isNaN(createdAt.getTime()) &&
+          quiet.quiet_hours_tz
+            ? isInQuietHours(
+                quiet.quiet_hours_start_hour,
+                quiet.quiet_hours_end_hour,
+                quiet.quiet_hours_tz,
+                createdAt,
+              )
+            : false;
         return (
           <ReanimatedSwipeable
             friction={2}
@@ -381,6 +445,17 @@ export default function NotificationsScreen() {
                   </Text>
                 ) : null}
               </View>
+              {quietHit ? (
+                <Text
+                  testID={`notification-quiet-${item.id}`}
+                  style={[
+                    styles.quietNote,
+                    { color: colors.mutedForeground },
+                  ]}
+                >
+                  Muted by quiet hours · {quietZoneSuffix(quiet.quiet_hours_tz!)}
+                </Text>
+              ) : null}
             </Pressable>
           </ReanimatedSwipeable>
         );
@@ -468,5 +543,11 @@ const styles = StyleSheet.create({
     fontSize: 10,
     letterSpacing: 1.5,
     fontFamily: "Inter_700Bold",
+  },
+  quietNote: {
+    fontSize: 10,
+    fontFamily: "Inter_400Regular",
+    fontStyle: "italic",
+    marginTop: 2,
   },
 });

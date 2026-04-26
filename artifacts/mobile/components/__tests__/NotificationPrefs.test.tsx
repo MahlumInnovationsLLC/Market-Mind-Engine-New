@@ -470,3 +470,34 @@ describe("NotificationPrefs device-tz banner (mobile)", () => {
     await screen.findByTestId("banner-device-tz-mismatch");
   });
 });
+
+describe("NotificationPrefs Quiet Hours hint (mobile)", () => {
+  it("annotates the hint with the saved zone and its current GMT offset (task #526)", async () => {
+    mockApiFetch.mockResolvedValueOnce(
+      makePrefs({
+        quiet_hours_start_hour: 22,
+        quiet_hours_end_hour: 7,
+        quiet_hours_tz: "Europe/London",
+      }),
+    );
+
+    renderPanel();
+
+    // The hint includes the rendered start/end and a "(zone, GMT…)"
+    // suffix. Match loosely on the offset to stay DST-resilient.
+    const hint = await screen.findByText(/Mute pushes 10 PM .* 7 AM/);
+    expect(hint).toHaveTextContent(/Europe\/London/);
+    expect(hint).toHaveTextContent(/GMT/);
+  });
+
+  it("falls back to the generic copy when quiet hours are disabled", async () => {
+    mockApiFetch.mockResolvedValueOnce(makePrefs());
+
+    renderPanel();
+
+    const hint = await screen.findByText(
+      /Mute live-trade and halt pushes during a daily window/,
+    );
+    expect(hint).toBeTruthy();
+  });
+});
