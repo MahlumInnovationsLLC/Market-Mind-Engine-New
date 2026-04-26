@@ -956,6 +956,19 @@ SOCCER_PERSONAS: tuple[Persona, ...] = (
             "fatigue, international-break travel, manager rotation "
             "patterns.  Translate lineup deltas into a probability "
             "swing on each of the 3 outcomes.\n"
+            "When the user prompt's OBSERVED CONDITIONS block carries "
+            "per-side `lineup severity` (in pp) and a `Net lineup "
+            "swing` from the cached sportradar rosters / "
+            "missing-players feeds, anchor your probability nudge on "
+            "those numbers: shave the more-depleted side's win share by "
+            "its own severity in probability points, then add the net "
+            "swing to the home-vs-away spread.  A missing goalkeeper "
+            "is the single biggest single-player swing (~3pp); missing "
+            "forwards / wingers ~2pp; midfielders / centre-backs "
+            "~1.5pp.  Doubtful entries are downweighted ~50% relative "
+            "to definitive scratches.  When the missing-players list "
+            "is empty for both sides, your probability stays close to "
+            "the xG-modeller's anchor.\n"
             + _OUTPUT_CONTRACT
         ),
     ),

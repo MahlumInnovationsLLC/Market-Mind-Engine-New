@@ -94,6 +94,12 @@ _SOCCER_PERSONA_CONTEXT = (
     "short-term price moves; rotation, suspensions and 'rested' starters "
     "(midweek UCL, international break, congested fixture lists) are the "
     "primary edge sources.\n"
+    "  * When OBSERVED CONDITIONS carries a per-side `lineup severity` "
+    "and a `Net lineup swing` line, treat them as the deterministic "
+    "anchor for your win-share nudge: shave the more-depleted side's "
+    "win share by its own severity, then apply the net swing direction "
+    "to the spread between home and away.  A goalkeeper out is the "
+    "single biggest single-player swing.\n"
     "  * xG and shot-quality differentials over the last 6-10 matches "
     "predict win probability better than table position.  Anchor on xG, "
     "then nudge for matchup, venue and referee.\n"
@@ -556,6 +562,49 @@ def _render_game_context(game_context: dict) -> str:
                 f"  * {side_label} ({team}) skill snap %: {snap_summary}"
             )
 
+    # Soccer lineup status — the structured cousin of the NFL
+    # `player_status` block, populated by `app.sports.soccer_context`
+    # from the cached sportradar_rosters + missing-players feeds.
+    # Renders one line per side plus an explicit signed swing so the
+    # lineup_rotation persona has a numeric anchor to nudge from.
+    lineup_status = (
+        game_context.get("lineup_status") if isinstance(game_context, dict) else None
+    )
+    if isinstance(lineup_status, dict):
+        for side_key, side_label in (("home", "Home"), ("away", "Away")):
+            side = lineup_status.get(side_key)
+            if not isinstance(side, dict):
+                continue
+            team = side.get("team") or "(unknown)"
+            missing_summary = _summarise_missing_players(
+                side.get("missing_players") or []
+            )
+            severity_pp = side.get("lineup_severity_pp")
+            roster_n = side.get("roster_size")
+            sev_pct = (
+                f"{float(severity_pp) * 100:.1f}pp"
+                if isinstance(severity_pp, (int, float))
+                else "n/a"
+            )
+            depth_chunk = (
+                f", squad depth {int(roster_n)}"
+                if isinstance(roster_n, int) and roster_n > 0
+                else ""
+            )
+            lines.append(
+                f"  * {side_label} ({team}) lineup severity {sev_pct}"
+                f"{depth_chunk}: {missing_summary}"
+            )
+        net_swing = lineup_status.get("net_home_swing_pp")
+        if isinstance(net_swing, (int, float)):
+            direction = "toward HOME" if net_swing > 0 else (
+                "toward AWAY" if net_swing < 0 else "neutral"
+            )
+            lines.append(
+                f"  * Net lineup swing: {float(net_swing) * 100:+.1f}pp "
+                f"({direction}) — anchor your win-share nudge on this delta."
+            )
+
     if not lines:
         return ""
     return "OBSERVED CONDITIONS for this matchup:\n" + "\n".join(lines)
@@ -591,4 +640,21 @@ def _summarise_snap_counts(snap_counts: list) -> str:
             chunks.append(f"{pos} {player} {float(pct):.0f}%")
     return ", ".join(chunks) if chunks else (
         "no snap-count data cached for the most recent game."
+    )
+
+
+def _summarise_missing_players(missing: list) -> str:
+    """Render the soccer missing-players list as a single prompt line."""
+    if not missing:
+        return "no missing players reported in feed cache."
+    chunks: list[str] = []
+    for row in missing[:8]:
+        if not isinstance(row, dict):
+            continue
+        status = (row.get("status") or "missing").upper()
+        pos = (row.get("position") or "??").upper()
+        player = row.get("player") or "(unknown)"
+        chunks.append(f"{status} {pos} {player}")
+    return "; ".join(chunks) if chunks else (
+        "no missing players reported in feed cache."
     )

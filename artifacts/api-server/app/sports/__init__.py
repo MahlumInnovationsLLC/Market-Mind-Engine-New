@@ -26,6 +26,12 @@ from .ratings import (
     get_field,
     set_field,
 )
+from .soccer_context import (
+    SOCCER_LEAGUES,
+    is_soccer_league,
+    build_game_context as build_soccer_game_context,
+    fetch_lineup_status as fetch_soccer_lineup_status,
+)
 
 __all__ = [
     "LeagueConfig",
@@ -42,4 +48,8 @@ __all__ = [
     "derive_field_ratings",
     "get_field",
     "set_field",
+    "SOCCER_LEAGUES",
+    "is_soccer_league",
+    "build_soccer_game_context",
+    "fetch_soccer_lineup_status",
 ]

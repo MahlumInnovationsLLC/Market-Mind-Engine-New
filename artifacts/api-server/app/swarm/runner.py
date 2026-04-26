@@ -562,9 +562,35 @@ async def _run_debate_inner(
             log.debug("NFL game_context build failed (best-effort): %s", e)
             nfl_game_context = {}
 
+    # Soccer game_context: pulls the cached sportradar_rosters +
+    # sportradar_injuries (missing-players feed, task #211) so the
+    # lineup_rotation persona reasons on real squad availability
+    # instead of just being told to "think about" rotation.  Best-
+    # effort like the NFL block — a build failure collapses to {}.
+    soccer_game_context: dict[str, Any] = {}
+    try:
+        from ..sports import is_soccer_league as _is_soccer
+        _is_soccer_match = _is_soccer(league)
+    except Exception:
+        _is_soccer_match = False
+    if _is_soccer_match:
+        try:
+            from ..sports import build_soccer_game_context as _build_soccer_ctx
+            soccer_game_context = await _build_soccer_ctx(
+                league,
+                candidate.get("home_team"),
+                candidate.get("away_team"),
+            )
+        except Exception as e:  # noqa: BLE001 — best-effort
+            log.debug("soccer game_context build failed (best-effort): %s", e)
+            soccer_game_context = {}
+
     try:
         from ..sports import persona_context_augment as _persona_aug
-        league_aug = _persona_aug(league, game_context=nfl_game_context or None)
+        league_aug = _persona_aug(
+            league,
+            game_context=nfl_game_context or soccer_game_context or None,
+        )
     except Exception:
         league_aug = ""
     if league_aug:
@@ -577,6 +603,9 @@ async def _run_debate_inner(
     if nfl_game_context:
         candidate = dict(candidate)
         candidate["nfl_context"] = nfl_game_context
+    if soccer_game_context:
+        candidate = dict(candidate)
+        candidate["soccer_context"] = soccer_game_context
 
     await _publish(
         {
@@ -951,6 +980,12 @@ async def _persist_debate(
             # personas actually saw, persisted alongside the prompt
             # candidate so settlement / replay can audit the inputs.
             "nfl_context": candidate.get("nfl_context"),
+            # Structured soccer conditions (lineup_status pulled from
+            # cached sportradar_rosters + missing-players feeds) the
+            # personas actually saw — same audit contract as nfl_context
+            # so settlement / replay can join debates back to the exact
+            # squad-availability numbers that drove the EV adjustment.
+            "soccer_context": candidate.get("soccer_context"),
         }
     )
 
