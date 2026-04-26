@@ -410,6 +410,164 @@ def test_persona_brier_uses_per_leg_outcome_on_draw_leg_win(monkeypatch):
     assert cap["debate_stamps"][0]["outcome"] == "DRAW_RESULT_WIN"
 
 
+def test_run_cycle_passes_sportradar_three_way_result_to_settle(monkeypatch):
+    """End-to-end cycle integration: a soccer kalshi market with NO
+    Kalshi resolution yet but a final Sportradar match score must
+    invoke ``settle_market`` with ``result_3way`` derived from the
+    Sportradar h/d/a result.
+
+    This is the wiring task #445 specifies — without it the cycle
+    would skip the market entirely (Kalshi parse returns None) and
+    soccer trades would never settle on the per-leg path until the
+    exchange catches up.
+    """
+    # Stub the candidate-market discovery so we run exactly one
+    # ticker through the loop.
+    async def _fake_open_ids(*_a, **_kw):
+        return ["KX-EPL-DRAW-1"]
+    monkeypatch.setattr(_pipeline, "_open_kalshi_market_ids", _fake_open_ids)
+
+    # Wire a fake Settings + KalshiClient so the cycle reaches the
+    # per-ticker branch.  KalshiClient is a context manager whose
+    # `get_market` returns a still-open market so the binary parse
+    # path returns None — forcing the cycle to consult Sportradar.
+    class _FakeKalshiClient:
+        def __init__(self, *a, **kw):
+            pass
+        async def __aenter__(self):
+            return self
+        async def __aexit__(self, *a):
+            return False
+        async def get_market(self, ticker):
+            return {"market": {"ticker": ticker, "status": "open"}}
+
+    class _FakeKalshiAPIError(RuntimeError):
+        def __init__(self, status, body=None):
+            super().__init__(f"kalshi {status}")
+            self.status = status
+    # Note: the cycle imports KalshiAPIError lazily; we just need the
+    # name to exist on the module for the `except` block.
+    import sys, types
+    fake_kalshi_mod = types.ModuleType("app.kalshi.client")
+    fake_kalshi_mod.KalshiClient = _FakeKalshiClient
+    fake_kalshi_mod.KalshiAPIError = _FakeKalshiAPIError
+    monkeypatch.setitem(sys.modules, "app.kalshi.client", fake_kalshi_mod)
+
+    fake_config_mod = types.ModuleType("app.config")
+    class _S:
+        kalshi_api_key_id = "k"
+        kalshi_private_key = "p"
+    fake_config_mod.get_settings = lambda: _S()
+    monkeypatch.setitem(sys.modules, "app.config", fake_config_mod)
+
+    # Stub DB lookups: league = EPL, sportradar score = 1-1 (draw).
+    captured: dict = {"settle_calls": []}
+
+    async def _fake_fetchrow(query: str, *args):
+        if "FROM trades" in query and "WHERE market_id" in query:
+            return {"league": "EPL"}
+        if "FROM swarm_debates" in query:
+            # Used by both _league_for_market fallback and
+            # _sportradar_three_way_result. Returning a debate row
+            # carrying the game_id is enough for both.
+            return {"league": "EPL", "game_id": "sr:match:42"}
+        if "FROM sportradar_live_state" in query:
+            return {"status": "closed", "home_score": 1, "away_score": 1}
+        return None
+
+    async def _fake_settle(market_id, *, outcome_yes, settle_price=None,
+                           result_3way=None):
+        captured["settle_calls"].append({
+            "market_id": market_id,
+            "outcome_yes": outcome_yes,
+            "settle_price": settle_price,
+            "result_3way": result_3way,
+        })
+        return {
+            "trades_settled": 1,
+            "persona_metrics_updated": 1,
+            "alerts_raised": 0,
+        }
+
+    monkeypatch.setattr(_pipeline.db, "fetchrow", _fake_fetchrow)
+    monkeypatch.setattr(_pipeline, "settle_market", _fake_settle)
+
+    cr = asyncio.run(_pipeline.run_cycle(market_limit=10))
+
+    assert cr.markets_examined == 1
+    assert cr.markets_settled == 1
+    assert len(captured["settle_calls"]) == 1
+    call = captured["settle_calls"][0]
+    assert call["market_id"] == "KX-EPL-DRAW-1"
+    # The cycle must pass the Sportradar-derived 3-way result through
+    # so settle_market can drive the per-leg outcome path.
+    assert call["result_3way"] == "draw"
+    # Binary fallback is the safe 0 — settle_market overrides it
+    # per-trade based on each row's `three_way_leg` metadata.
+    assert call["outcome_yes"] == 0
+
+
+def test_run_cycle_skips_market_when_sportradar_has_no_final_score(monkeypatch):
+    """Soccer market with no Kalshi resolution AND no Sportradar
+    match-final-status yet: cycle must NOT call settle_market and
+    must report 0 markets settled (preserves legacy "wait for the
+    feed" behaviour)."""
+    async def _fake_open_ids(*_a, **_kw):
+        return ["KX-EPL-INPLAY-2"]
+    monkeypatch.setattr(_pipeline, "_open_kalshi_market_ids", _fake_open_ids)
+
+    class _FakeKalshiClient:
+        def __init__(self, *a, **kw):
+            pass
+        async def __aenter__(self):
+            return self
+        async def __aexit__(self, *a):
+            return False
+        async def get_market(self, ticker):
+            return {"market": {"ticker": ticker, "status": "open"}}
+
+    class _FakeKalshiAPIError(RuntimeError):
+        def __init__(self, status, body=None):
+            super().__init__("kalshi error")
+            self.status = status
+
+    import sys, types
+    fake_kalshi_mod = types.ModuleType("app.kalshi.client")
+    fake_kalshi_mod.KalshiClient = _FakeKalshiClient
+    fake_kalshi_mod.KalshiAPIError = _FakeKalshiAPIError
+    monkeypatch.setitem(sys.modules, "app.kalshi.client", fake_kalshi_mod)
+
+    fake_config_mod = types.ModuleType("app.config")
+    class _S:
+        kalshi_api_key_id = "k"
+        kalshi_private_key = "p"
+    fake_config_mod.get_settings = lambda: _S()
+    monkeypatch.setitem(sys.modules, "app.config", fake_config_mod)
+
+    async def _fake_fetchrow(query: str, *args):
+        if "FROM trades" in query and "WHERE market_id" in query:
+            return {"league": "EPL"}
+        if "FROM swarm_debates" in query:
+            return {"league": "EPL", "game_id": "sr:match:99"}
+        if "FROM sportradar_live_state" in query:
+            # Match still in progress — no final score available.
+            return {"status": "live", "home_score": 0, "away_score": 1}
+        return None
+
+    settle_calls: list = []
+    async def _boom_settle(*a, **kw):
+        settle_calls.append((a, kw))
+        return {}
+    monkeypatch.setattr(_pipeline.db, "fetchrow", _fake_fetchrow)
+    monkeypatch.setattr(_pipeline, "settle_market", _boom_settle)
+
+    cr = asyncio.run(_pipeline.run_cycle(market_limit=10))
+
+    assert cr.markets_examined == 1
+    assert cr.markets_settled == 0
+    assert settle_calls == []
+
+
 def test_margin_regressor_skips_three_way_soccer():
     """The margin/total regressor is NA-sports-only.  Even if a soccer
     candidate somehow reaches `adjust_probability` carrying a Spread

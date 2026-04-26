@@ -941,6 +941,122 @@ async def _open_kalshi_market_ids(limit: int = 50) -> list[str]:
         return []
 
 
+async def _league_for_market(market_id: str) -> str | None:
+    """Best-effort lookup of the league a kalshi market belongs to.
+
+    Inspects the trades table first (richest source — every fill on
+    this market carries a league tag in production) then falls back to
+    the most recent ``swarm_debates`` row that referenced the market.
+    Returns ``None`` when neither source knows the league, in which
+    case the caller treats the market as non-3-way and skips the
+    sportradar lookup.
+    """
+    try:
+        row = await db.fetchrow(
+            """
+            SELECT league
+              FROM trades
+             WHERE market_id = $1
+               AND league IS NOT NULL
+             LIMIT 1
+            """,
+            market_id,
+        )
+        if row and row["league"]:
+            return str(row["league"])
+    except Exception as e:
+        log.debug("league lookup (trades) failed for %s: %s", market_id, e)
+    try:
+        row = await db.fetchrow(
+            """
+            SELECT league
+              FROM swarm_debates
+             WHERE ((game_context->>'kalshi_market_id') = $1 OR game_id = $1)
+               AND league IS NOT NULL
+             ORDER BY created_at DESC
+             LIMIT 1
+            """,
+            market_id,
+        )
+        if row and row["league"]:
+            return str(row["league"])
+    except Exception as e:
+        log.debug("league lookup (debates) failed for %s: %s", market_id, e)
+    return None
+
+
+# Sportradar status enum values that mean "match has finished and the
+# scoreline is final".  Mirrors the set already accepted by the
+# soccer-extended live-state poller (see feeds/sportradar.py).
+_SOCCER_FINAL_STATUSES = {"closed", "ended", "complete", "finished"}
+
+
+async def _sportradar_three_way_result(market_id: str) -> str | None:
+    """Resolve the 3-way (home/draw/away) match result for a soccer
+    kalshi market by joining through the swarm_debates → game_id link
+    into the ``sportradar_live_state`` cache the soccer-extended live
+    poller already maintains.
+
+    Returns one of ``"home"``, ``"draw"`` or ``"away"`` once the match
+    has finalised with a scoreline; ``None`` otherwise (no debate /
+    no live-state row / not yet final / scoreline missing).
+    """
+    try:
+        debate = await db.fetchrow(
+            """
+            SELECT game_id, league
+              FROM swarm_debates
+             WHERE ((game_context->>'kalshi_market_id') = $1 OR game_id = $1)
+               AND game_id IS NOT NULL
+             ORDER BY created_at DESC
+             LIMIT 1
+            """,
+            market_id,
+        )
+    except Exception as e:
+        log.debug("3-way debate lookup failed for %s: %s", market_id, e)
+        return None
+    if not debate:
+        return None
+    cfg = get_league_config(debate.get("league"))
+    if cfg is None or not cfg.three_way_market:
+        return None
+    game_id = debate["game_id"]
+    try:
+        row = await db.fetchrow(
+            """
+            SELECT status, home_score, away_score
+              FROM sportradar_live_state
+             WHERE game_id = $1
+             ORDER BY fetched_at DESC
+             LIMIT 1
+            """,
+            game_id,
+        )
+    except Exception as e:
+        log.debug("sportradar live-state read failed for %s: %s", game_id, e)
+        return None
+    if not row:
+        return None
+    status = (row["status"] or "").lower()
+    if status not in _SOCCER_FINAL_STATUSES:
+        return None
+    home = row["home_score"]
+    away = row["away_score"]
+    if home is None or away is None:
+        return None
+    try:
+        h = int(home)
+        a = int(away)
+    except (TypeError, ValueError):
+        return None
+    if h > a:
+        return "home"
+    if h < a:
+        return "away"
+    return "draw"
+
+
 def _parse_kalshi_outcome(market: dict[str, Any]) -> tuple[int, float | None] | None:
     """Inspect a Kalshi `/markets/{ticker}` response and return
     (outcome_yes, settle_price) if the market is final, else None."""
@@ -1010,17 +1126,49 @@ async def run_cycle(*, market_limit: int = 50) -> CycleResult:
                     raw = await kc.get_market(ticker)
                 except KalshiAPIError as e:
                     cr.errors.append(f"{ticker}: kalshi {e.status}")
-                    continue
+                    raw = None
                 except Exception as e:
                     cr.errors.append(f"{ticker}: {e}")
+                    raw = None
+                parsed = _parse_kalshi_outcome(raw) if raw is not None else None
+
+                # Consult the existing Sportradar soccer-extended feed
+                # for a 3-way (home/draw/away) match result so soccer
+                # markets settle on the richer per-leg path.  This lets
+                # the pipeline fire postmortems + persona Brier updates
+                # for every soccer trade — including ones whose Kalshi
+                # leg has not yet been published — and ensures a draw
+                # correctly settles BOTH the home and away YES legs as
+                # NO without being treated as a 2-way moneyline miss.
+                result_3way: str | None = None
+                try:
+                    league = await _league_for_market(ticker)
+                    cfg = get_league_config(league) if league else None
+                    if cfg is not None and cfg.three_way_market:
+                        result_3way = await _sportradar_three_way_result(ticker)
+                except Exception as e:
+                    log.debug("3-way result lookup failed for %s: %s", ticker, e)
+
+                if parsed is not None:
+                    outcome_yes, settle_price = parsed
+                elif result_3way is not None:
+                    # Kalshi hasn't published its YES/NO resolution yet
+                    # but Sportradar has the final score for this 3-way
+                    # soccer market.  Pass a binary fallback of 0 — the
+                    # per-leg derivation in `settle_market` overrides it
+                    # for every trade whose `three_way_leg` metadata is
+                    # populated (which is the canonical case for soccer
+                    # candidates persisted under task #210).
+                    outcome_yes, settle_price = 0, None
+                else:
                     continue
-                parsed = _parse_kalshi_outcome(raw)
-                if not parsed:
-                    continue
-                outcome_yes, settle_price = parsed
+
                 try:
                     res = await settle_market(
-                        ticker, outcome_yes=outcome_yes, settle_price=settle_price
+                        ticker,
+                        outcome_yes=outcome_yes,
+                        settle_price=settle_price,
+                        result_3way=result_3way,
                     )
                     cr.markets_settled += 1
                     cr.trades_settled += int(res.get("trades_settled", 0))
