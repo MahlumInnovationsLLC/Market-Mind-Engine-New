@@ -56,6 +56,8 @@ PROTECTED_ROUTES: tuple[str, ...] = (
     "/api/dashboard/debates/{debate_id}",
     # Live Games dashboard — read-model snapshot of in-progress markets.
     "/api/live-games",
+    # Live Games chatbot model catalog (per-provider availability).
+    "/api/live-games/models",
     "/api/dashboard/uw-signals",
     "/api/dashboard/trades/{trade_ref}",
     "/api/search",

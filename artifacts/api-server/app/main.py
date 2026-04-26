@@ -5037,6 +5037,23 @@ async def live_games(
     return await dashboard.get_live_games(limit=limit, window_seconds=window_seconds)
 
 
+@app.get("/api/live-games/models")
+async def live_games_models(
+    user: AuthedUser = Depends(require_auth),
+) -> dict[str, object]:
+    """Return the chatbot model catalog with per-provider availability.
+
+    The frontend renders a model picker driven by this list — rows
+    where ``available`` is False are shown disabled with a "missing
+    API key" hint, so the operator knows which providers to wire up.
+    """
+    models = _live_games_chat.list_models()
+    return {
+        "models": models,
+        "default_model_id": _live_games_chat.default_available_model(),
+    }
+
+
 @app.post("/api/live-games/{market_id}/ask")
 async def live_games_ask(
     market_id: str,
@@ -5062,10 +5079,18 @@ async def live_games_ask(
         raise HTTPException(status_code=400, detail=str(e))
     except RuntimeError as e:
         msg = str(e)
-        if msg == "anthropic_key_not_configured":
+        # Normalize all three provider misconfigurations to 503 so the
+        # frontend can show a "missing API key" hint regardless of
+        # which model the operator picked.
+        if msg in (
+            "anthropic_key_not_configured",
+            "openai_key_not_configured",
+            "google_key_not_configured",
+        ):
+            provider = msg.split("_", 1)[0]
             raise HTTPException(
                 status_code=503,
-                detail="anthropic_api_key_not_configured",
+                detail=f"{provider}_api_key_not_configured",
             )
         raise HTTPException(status_code=500, detail=msg)
     except Exception as e:

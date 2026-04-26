@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { useAuth } from "@clerk/react";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { GlassCard } from "@/components/ui/glass-card";
@@ -52,12 +52,25 @@ type AskResponse = {
   market_id: string;
   answer: string;
   model: string;
+  provider: string;
   context_summary: {
     has_data: boolean;
     timeline_rows: number;
     ticks_rows: number;
     has_swarm_debate: boolean;
   };
+};
+
+type ModelRow = {
+  provider: string;
+  model_id: string;
+  label: string;
+  available: boolean;
+};
+
+type ModelsResponse = {
+  models: ModelRow[];
+  default_model_id: string | null;
 };
 
 function pct(v: number | null | undefined, digits = 1): string {
@@ -106,14 +119,38 @@ export default function LiveGamesPage() {
   const [selected, setSelected] = useState<LiveGameItem | null>(null);
   const [question, setQuestion] = useState("");
   const [answer, setAnswer] = useState<AskResponse | null>(null);
+  const [chosenModel, setChosenModel] = useState<string>("");
+
+  const { data: modelsData } = useQuery<ModelsResponse>({
+    queryKey: ["live-games", "models"],
+    queryFn: () =>
+      apiFetch<ModelsResponse>("/api/live-games/models", {
+        getToken: tokenFn,
+      }),
+    enabled: !!isSignedIn,
+    staleTime: 60_000,
+  });
+
+  // Adopt the server-suggested default the first time models load.
+  // Doing this in useEffect avoids the render-phase setState anti-pattern
+  // (would otherwise fire on every render until the state caught up).
+  useEffect(() => {
+    if (!chosenModel && modelsData?.default_model_id) {
+      setChosenModel(modelsData.default_model_id);
+    }
+  }, [chosenModel, modelsData?.default_model_id]);
 
   const askMutation = useMutation({
-    mutationFn: async (vars: { market_id: string; question: string }) =>
+    mutationFn: async (vars: {
+      market_id: string;
+      question: string;
+      model: string;
+    }) =>
       apiFetch<AskResponse>(
         `/api/live-games/${encodeURIComponent(vars.market_id)}/ask`,
         {
           method: "POST",
-          body: { question: vars.question },
+          body: { question: vars.question, model: vars.model || undefined },
           getToken: tokenFn,
         },
       ),
@@ -126,8 +163,9 @@ export default function LiveGamesPage() {
     askMutation.mutate({
       market_id: selected.market_id,
       question: question.trim(),
+      model: chosenModel,
     });
-  }, [selected, question, askMutation]);
+  }, [selected, question, chosenModel, askMutation]);
 
   const items = data?.items ?? [];
   const liveNowCount = data?.is_live_now_count ?? 0;
@@ -191,21 +229,51 @@ export default function LiveGamesPage() {
             data-testid="live-games-chatbot-input"
             className="rounded-md border border-border bg-background/60 p-2 text-xs text-foreground placeholder:text-muted-foreground focus:border-accent-cyan focus:outline-none disabled:opacity-50"
           />
-          <div className="flex items-center justify-between gap-2">
-            <div className="text-[11px] text-muted-foreground">
-              {selected
-                ? `Market: ${selected.market_id}`
-                : "No market selected"}
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div className="flex items-center gap-2 text-[11px] text-muted-foreground">
+              <span>
+                {selected
+                  ? `Market: ${selected.market_id}`
+                  : "No market selected"}
+              </span>
             </div>
-            <button
-              type="button"
-              onClick={onAsk}
-              disabled={!selected || !question.trim() || askMutation.isPending}
-              data-testid="live-games-chatbot-ask"
-              className="rounded-md border border-accent-cyan/40 bg-accent-cyan/10 px-3 py-1 text-xs font-semibold uppercase tracking-wider text-accent-cyan hover:bg-accent-cyan/20 disabled:cursor-not-allowed disabled:opacity-40"
-            >
-              {askMutation.isPending ? "Thinking…" : "Ask"}
-            </button>
+            <div className="flex items-center gap-2">
+              <label
+                htmlFor="live-games-model"
+                className="text-[10px] uppercase tracking-wider text-muted-foreground"
+              >
+                Model
+              </label>
+              <select
+                id="live-games-model"
+                value={chosenModel}
+                onChange={(e) => setChosenModel(e.target.value)}
+                data-testid="live-games-chatbot-model"
+                className="rounded-md border border-border bg-background/60 px-2 py-1 text-[11px] text-foreground focus:border-accent-cyan focus:outline-none"
+              >
+                {(modelsData?.models ?? []).map((m) => (
+                  <option
+                    key={m.model_id}
+                    value={m.model_id}
+                    disabled={!m.available}
+                  >
+                    {m.label}
+                    {m.available ? "" : " (no API key)"}
+                  </option>
+                ))}
+              </select>
+              <button
+                type="button"
+                onClick={onAsk}
+                disabled={
+                  !selected || !question.trim() || askMutation.isPending
+                }
+                data-testid="live-games-chatbot-ask"
+                className="rounded-md border border-accent-cyan/40 bg-accent-cyan/10 px-3 py-1 text-xs font-semibold uppercase tracking-wider text-accent-cyan hover:bg-accent-cyan/20 disabled:cursor-not-allowed disabled:opacity-40"
+              >
+                {askMutation.isPending ? "Thinking…" : "Ask"}
+              </button>
+            </div>
           </div>
           {askMutation.isError && (
             <div
@@ -223,9 +291,14 @@ export default function LiveGamesPage() {
             >
               {answer.answer}
               <div className="mt-2 text-[10px] uppercase tracking-wider text-muted-foreground">
-                model={answer.model} · timeline_rows={answer.context_summary.timeline_rows} ·
+                {answer.provider}/{answer.model} · timeline_rows={answer.context_summary.timeline_rows} ·
                 ticks_rows={answer.context_summary.ticks_rows} ·
                 swarm={answer.context_summary.has_swarm_debate ? "yes" : "no"}
+                {chosenModel && answer.model !== chosenModel && (
+                  <span className="ml-1 text-warning">
+                    (fell back from {chosenModel})
+                  </span>
+                )}
               </div>
             </div>
           )}
