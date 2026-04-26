@@ -504,6 +504,16 @@ async def lifespan(_: FastAPI):
     except Exception as e:
         log.warning("crypto backtest scheduler start failed: %s", e)
 
+    # `crypto_backtest_runs` trend-table retention sweep. Both the
+    # admin endpoint and the scheduled backtest loop append rows
+    # without a TTL, so without this loop the table grows unboundedly.
+    # Per task #582.
+    try:
+        from . import crypto_backtest_retention as _crypto_backtest_retention
+        await _crypto_backtest_retention.start()
+    except Exception as e:
+        log.warning("crypto backtest retention start failed: %s", e)
+
     # Kick off model artifact reassembly in the background so a cold cache
     # (~240 MiB download) doesn't block the HTTP server from accepting
     # traffic. Health endpoints surface progress while it warms up.
@@ -592,6 +602,11 @@ async def lifespan(_: FastAPI):
             await _crypto_backtest_scheduler.stop()
         except Exception as e:
             log.warning("crypto backtest scheduler stop error: %s", e)
+        try:
+            from . import crypto_backtest_retention as _crypto_backtest_retention
+            await _crypto_backtest_retention.stop()
+        except Exception as e:
+            log.warning("crypto backtest retention stop error: %s", e)
         try:
             await rc_billing.stop()
         except Exception as e:
