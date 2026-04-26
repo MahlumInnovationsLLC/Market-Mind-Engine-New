@@ -157,6 +157,41 @@ def supported_pairs() -> list[tuple[str, str]]:
 # ---------------------------------------------------------------------------
 
 
+def _coerce_dt(value: Any) -> datetime | None:
+    """Coerce ISO-string / epoch / datetime values into a tz-aware datetime.
+
+    ``BacktestResult.started_at`` and ``completed_at`` are *typed* as ``str``
+    in the dataclass and assigned ISO-format strings throughout the scheduler.
+    asyncpg's prepared-statement layer does NOT auto-parse ISO strings for a
+    ``timestamptz`` parameter — it raises
+    ``expected a datetime.date or datetime.datetime instance, got 'str'`` —
+    so we coerce defensively before binding.  Returns ``None`` for empty /
+    unparseable inputs and lets the SQL ``DEFAULT`` (or NULL) take over.
+    """
+    if value is None or value == "":
+        return None
+    if isinstance(value, datetime):
+        return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+    if isinstance(value, (int, float)):
+        try:
+            return datetime.fromtimestamp(float(value), tz=timezone.utc)
+        except (OverflowError, OSError, ValueError):
+            return None
+    if isinstance(value, str):
+        s = value.strip()
+        if not s:
+            return None
+        # Python's fromisoformat doesn't understand the trailing ``Z`` until 3.11+.
+        if s.endswith("Z"):
+            s = s[:-1] + "+00:00"
+        try:
+            dt = datetime.fromisoformat(s)
+        except ValueError:
+            return None
+        return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+    return None
+
+
 async def persist_run(
     result: BacktestResult, *, days: int, lookback: int
 ) -> int | None:
@@ -168,6 +203,8 @@ async def persist_run(
     """
     payload = result.as_dict()
     reliability_json = json.dumps(payload.get("reliability", []))
+    started_at = _coerce_dt(result.started_at) or datetime.now(timezone.utc)
+    completed_at = _coerce_dt(result.completed_at) or started_at
     try:
         row_id = await db.fetchval(
             """
@@ -189,8 +226,8 @@ async def persist_run(
             float(result.brier_score),
             float(result.log_loss),
             reliability_json,
-            result.started_at,
-            result.completed_at,
+            started_at,
+            completed_at,
         )
         return int(row_id) if row_id is not None else None
     except Exception as e:

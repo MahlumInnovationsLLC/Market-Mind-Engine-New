@@ -5009,6 +5009,71 @@ async def dashboard_debate_by_id(
 
 
 # ---------------------------------------------------------------------------
+# Live Games — in-progress sports markets dashboard module
+# ---------------------------------------------------------------------------
+
+from . import live_games_chat as _live_games_chat
+
+
+class LiveGameAskRequest(BaseModel):
+    question: str = Field(..., min_length=1, max_length=_live_games_chat.MAX_QUESTION_LEN)
+    model: str | None = None
+
+
+@app.get("/api/live-games")
+async def live_games(
+    limit: int = 50,
+    window_seconds: int | None = None,
+    user: AuthedUser = Depends(require_auth),
+) -> dict[str, object]:
+    """Snapshot of in-progress sports markets.
+
+    Returns the most recent live-pipeline tick per market within the
+    supplied window (default 6h), joined with the latest matching swarm
+    debate verdict and Kalshi cached price tick.  ``is_live_now_count``
+    counts items that are both fresh (< 45min old) and not at game-end
+    (game_progress < 1.0).
+    """
+    return await dashboard.get_live_games(limit=limit, window_seconds=window_seconds)
+
+
+@app.post("/api/live-games/{market_id}/ask")
+async def live_games_ask(
+    market_id: str,
+    body: LiveGameAskRequest,
+    user: AuthedUser = Depends(require_auth),
+) -> dict[str, object]:
+    """Single-shot LLM Q&A grounded in the per-market live context.
+
+    Builds the context bundle from ``midgame_updates`` + the matching
+    ``swarm_debates`` row + recent ``market_price_ticks``, then asks
+    Anthropic Claude to answer the operator's free-text question.  The
+    system prompt forbids inventing numbers that aren't in the context,
+    so an empty context yields "I don't have that data in this game's
+    feed" rather than a hallucinated answer.
+    """
+    try:
+        return await _live_games_chat.answer_question(
+            market_id=market_id,
+            question=body.question,
+            model=body.model,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except RuntimeError as e:
+        msg = str(e)
+        if msg == "anthropic_key_not_configured":
+            raise HTTPException(
+                status_code=503,
+                detail="anthropic_api_key_not_configured",
+            )
+        raise HTTPException(status_code=500, detail=msg)
+    except Exception as e:
+        log.exception("live_games_ask failed for %s: %s", market_id, e)
+        raise HTTPException(status_code=502, detail="upstream_llm_error")
+
+
+# ---------------------------------------------------------------------------
 # Swarm: 6-persona LLM debate + gatekeeper
 # ---------------------------------------------------------------------------
 

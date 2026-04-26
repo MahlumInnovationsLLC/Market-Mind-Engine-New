@@ -424,6 +424,16 @@ def make_handler(
     return cls
 
 
+class _ReusableHTTPServer(HTTPServer):
+    """HTTPServer subclass that sets ``SO_REUSEADDR`` so a freshly-restarted
+    watchdog can immediately re-bind the status port even if the previous
+    process's socket is still in ``TIME_WAIT``.  Without this, a rapid
+    restart cycle (which is exactly what the workflow runner does) racily
+    crashes with ``OSError: [Errno 98] Address already in use``."""
+
+    allow_reuse_address = True
+
+
 def serve_status(
     state: WatchdogState,
     supervisor: ChildSupervisor | None,
@@ -433,7 +443,28 @@ def serve_status(
     stop_event: threading.Event,
 ) -> HTTPServer:
     handler = make_handler(state, supervisor)
-    httpd = HTTPServer((host, port), handler)
+    # Even with SO_REUSEADDR, the kernel can briefly hold the port if the
+    # previous holder hasn't fully released it yet.  Retry the bind for a
+    # few seconds before giving up — almost every collision we see in the
+    # workflow runner clears within ~1s.
+    bind_deadline = time.monotonic() + 5.0
+    last_err: OSError | None = None
+    httpd: HTTPServer | None = None
+    while True:
+        try:
+            httpd = _ReusableHTTPServer((host, port), handler)
+            break
+        except OSError as e:
+            last_err = e
+            if time.monotonic() >= bind_deadline:
+                raise
+            log.warning(
+                "[watchdog] status port %s:%d not yet free (%s) — retrying...",
+                host, port, e,
+            )
+            time.sleep(0.25)
+    if httpd is None:  # pragma: no cover — loop above either breaks or raises
+        raise RuntimeError(f"failed to bind watchdog status port: {last_err}")
     thread = threading.Thread(
         target=httpd.serve_forever, name="watchdog-http", daemon=True
     )

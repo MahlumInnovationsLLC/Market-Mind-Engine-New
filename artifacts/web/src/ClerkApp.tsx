@@ -55,6 +55,7 @@ const WeatherPage = lazy(() => import("@/pages/weather"));
 const ResearchPage = lazy(() => import("@/pages/research"));
 const SystemPage = lazy(() => import("@/pages/system"));
 const ProfilePage = lazy(() => import("@/pages/profile"));
+const LiveGamesPage = lazy(() => import("@/pages/live-games"));
 
 function PageFallback() {
   return (
@@ -276,6 +277,7 @@ function AuthedShell() {
           <Route path="/calibration" component={CalibrationPage} />
           <Route path="/weather" component={WeatherPage} />
           <Route path="/research" component={ResearchPage} />
+          <Route path="/live-games" component={LiveGamesPage} />
           <Route path="/system" component={SystemPage} />
           <Route path="/profile" component={ProfilePage} />
           <Route path="/trade/:ref" component={TradeDetailPage} />

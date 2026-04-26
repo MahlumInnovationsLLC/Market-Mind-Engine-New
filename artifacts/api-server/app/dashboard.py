@@ -2794,3 +2794,369 @@ def redact_swarm_debate_transcripts(items: list[dict[str, Any]]) -> list[dict[st
         clone["redacted"] = True
         out.append(clone)
     return out
+
+
+# ---------------------------------------------------------------------------
+# Live Games — in-progress sports markets read-model
+# ---------------------------------------------------------------------------
+
+# Window (seconds) of midgame_updates activity considered fresh enough to
+# render on the Live Games dashboard.  6 hours covers a full game's worth of
+# tick history for any major league while still cutting noise from days-old
+# settled markets.
+_LIVE_GAMES_WINDOW_SEC = int(6 * 3600)
+
+# Activity inside this window (and not at game-end) is treated as "live now".
+_LIVE_NOW_WINDOW_SEC = int(45 * 60)
+
+
+def _market_id_to_game_id(market_id: str) -> str:
+    """Best-effort game id parse from a Kalshi market_id like
+    ``KXNBAPTS-26APR02SASLAC-SASVWEMBANYAMA1-25``.  We strip the trailing
+    ``-NN`` strike segment + the prop-name segment so multiple prop markets
+    on the same game group together.  Returns the original id if the
+    pattern doesn't match."""
+    if not market_id:
+        return market_id
+    parts = market_id.split("-")
+    # Pattern observed in production:
+    #   PREFIX-DATEMATCH-PLAYERPROP-STRIKE
+    #   KXNBAPTS-26APR02SASLAC-SASVWEMBANYAMA1-25
+    # We want PREFIX-DATEMATCH so the SAS@LAC game collapses regardless of
+    # which player prop we're looking at.
+    if len(parts) >= 2:
+        return "-".join(parts[:2])
+    return market_id
+
+
+async def get_live_games(
+    *,
+    limit: int = 50,
+    window_seconds: int | None = None,
+) -> dict[str, Any]:
+    """Return a snapshot of in-progress sports markets.
+
+    Reads the most recent row per ``market_id`` from ``midgame_updates``
+    (the live-pipeline tick table that the in-game trading loop writes
+    into) within the supplied window, joins the most recent matching
+    ``swarm_debates`` row when one exists for the same market, and
+    attaches the latest cached Kalshi tick from ``market_price_ticks``.
+
+    The shape is intentionally flat-list-with-grouping-keys so the
+    frontend can group by ``league`` itself without needing the API to
+    pre-shard the response.
+    """
+    window = int(window_seconds or _LIVE_GAMES_WINDOW_SEC)
+    limit = max(1, min(200, int(limit)))
+    cutoff_epoch = (datetime.now(timezone.utc) - timedelta(seconds=window)).timestamp()
+    fresh_epoch = (datetime.now(timezone.utc) - timedelta(seconds=_LIVE_NOW_WINDOW_SEC)).timestamp()
+    fetched_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    items: list[dict[str, Any]] = []
+    try:
+        rows = await db.fetch(
+            """
+            WITH ranked AS (
+                SELECT m.*,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY m.market_id
+                           ORDER BY m.created_at DESC
+                       ) AS rn
+                  FROM midgame_updates m
+                 WHERE m.created_at >= $1
+            )
+            SELECT market_id, league, action, home_score, away_score,
+                   period, time_remaining, game_progress,
+                   pre_game_prob, updated_prob, market_price,
+                   current_edge, signal_json, created_at
+              FROM ranked
+             WHERE rn = 1
+             ORDER BY created_at DESC
+             LIMIT $2
+            """,
+            cutoff_epoch,
+            limit,
+        )
+    except Exception as e:
+        log.warning("get_live_games midgame_updates query failed: %s", e)
+        rows = []
+
+    market_ids = [r["market_id"] for r in rows if r.get("market_id")]
+    debates_by_market: dict[str, dict[str, Any]] = {}
+    ticks_by_market: dict[str, dict[str, Any]] = {}
+
+    if market_ids:
+        try:
+            debate_rows = await db.fetch(
+                """
+                WITH ranked AS (
+                    SELECT d.*,
+                           ROW_NUMBER() OVER (
+                               PARTITION BY d.game_context->>'kalshi_market_id'
+                               ORDER BY d.created_at DESC
+                           ) AS rn
+                      FROM swarm_debates d
+                     WHERE d.game_context->>'kalshi_market_id' = ANY($1::text[])
+                )
+                SELECT id, league, matchup, market_type, recommended_action,
+                       consensus_probability, agreement_rate, approved,
+                       confidence_band_low, confidence_band_high,
+                       to_char(created_at, 'YYYY-MM-DD"T"HH24:MI:SSZ') AS created_at,
+                       game_context->>'kalshi_market_id' AS market_id
+                  FROM ranked
+                 WHERE rn = 1
+                """,
+                market_ids,
+            )
+            for r in debate_rows:
+                mid = r["market_id"]
+                if mid:
+                    debates_by_market[mid] = {
+                        "id": r["id"],
+                        "matchup": r["matchup"],
+                        "market_type": r["market_type"],
+                        "recommended_action": r["recommended_action"],
+                        "consensus_probability": (
+                            float(r["consensus_probability"])
+                            if r["consensus_probability"] is not None else None
+                        ),
+                        "agreement_rate": (
+                            float(r["agreement_rate"])
+                            if r["agreement_rate"] is not None else None
+                        ),
+                        "approved": bool(r["approved"]) if r["approved"] is not None else None,
+                        "confidence_band_low": (
+                            float(r["confidence_band_low"])
+                            if r["confidence_band_low"] is not None else None
+                        ),
+                        "confidence_band_high": (
+                            float(r["confidence_band_high"])
+                            if r["confidence_band_high"] is not None else None
+                        ),
+                        "created_at": r["created_at"],
+                    }
+        except Exception as e:
+            log.warning("get_live_games debate join failed: %s", e)
+
+        try:
+            tick_rows = await db.fetch(
+                """
+                WITH ranked AS (
+                    SELECT t.*,
+                           ROW_NUMBER() OVER (
+                               PARTITION BY t.market_ticker
+                               ORDER BY t.bucket_ts DESC
+                           ) AS rn
+                      FROM market_price_ticks t
+                     WHERE t.market_ticker = ANY($1::text[])
+                )
+                SELECT market_ticker,
+                       close_cents, mean_cents,
+                       to_char(bucket_ts, 'YYYY-MM-DD"T"HH24:MI:SSZ') AS bucket_ts,
+                       to_char(fetched_at, 'YYYY-MM-DD"T"HH24:MI:SSZ') AS fetched_at
+                  FROM ranked
+                 WHERE rn = 1
+                """,
+                market_ids,
+            )
+            for r in tick_rows:
+                ticks_by_market[r["market_ticker"]] = {
+                    "close_cents": (int(r["close_cents"]) if r["close_cents"] is not None else None),
+                    "mean_cents": (int(r["mean_cents"]) if r["mean_cents"] is not None else None),
+                    "bucket_ts": r["bucket_ts"],
+                    "fetched_at": r["fetched_at"],
+                }
+        except Exception as e:
+            log.warning("get_live_games tick join failed: %s", e)
+
+    is_live_now_count = 0
+    for r in rows:
+        mid = r.get("market_id") or ""
+        progress = r.get("game_progress")
+        created = r.get("created_at")
+        is_fresh = bool(created is not None and float(created) >= fresh_epoch)
+        is_in_progress = bool(progress is not None and float(progress) < 1.0)
+        is_live = is_fresh and is_in_progress
+        if is_live:
+            is_live_now_count += 1
+        # ISO-8601 created_at for the frontend.
+        try:
+            created_iso = datetime.fromtimestamp(
+                float(created), tz=timezone.utc
+            ).strftime("%Y-%m-%dT%H:%M:%SZ") if created is not None else None
+        except (OverflowError, OSError, ValueError):
+            created_iso = None
+        items.append({
+            "market_id": mid,
+            "game_id": _market_id_to_game_id(mid),
+            "league": r.get("league") or "OTHER",
+            "is_live": is_live,
+            "action": r.get("action"),
+            "home_score": r.get("home_score"),
+            "away_score": r.get("away_score"),
+            "period": r.get("period"),
+            "time_remaining": r.get("time_remaining"),
+            "game_progress": (
+                float(r["game_progress"]) if r.get("game_progress") is not None else None
+            ),
+            "pre_game_prob": (
+                float(r["pre_game_prob"]) if r.get("pre_game_prob") is not None else None
+            ),
+            "updated_prob": (
+                float(r["updated_prob"]) if r.get("updated_prob") is not None else None
+            ),
+            "market_price": (
+                float(r["market_price"]) if r.get("market_price") is not None else None
+            ),
+            "current_edge": (
+                float(r["current_edge"]) if r.get("current_edge") is not None else None
+            ),
+            "last_update": created_iso,
+            "swarm": debates_by_market.get(mid),
+            "tick": ticks_by_market.get(mid),
+        })
+
+    return {
+        "items": items,
+        "is_live_now_count": is_live_now_count,
+        "window_seconds": window,
+        "fetched_at": fetched_at,
+    }
+
+
+async def get_live_game_context(market_id: str, *, history_limit: int = 12) -> dict[str, Any]:
+    """Build a context bundle for the chatbot answering questions about
+    a single live market.  Pulls the latest N midgame_updates (timeline),
+    the most recent swarm debate for the market, and the last K cached
+    Kalshi ticks.  All optional — any missing piece is reported as None
+    so the LLM can be told the data is unavailable rather than hallucinate.
+    """
+    history_limit = max(1, min(60, int(history_limit)))
+    timeline: list[dict[str, Any]] = []
+    debate: dict[str, Any] | None = None
+    ticks: list[dict[str, Any]] = []
+
+    try:
+        rows = await db.fetch(
+            """
+            SELECT market_id, league, action, home_score, away_score,
+                   period, time_remaining, game_progress,
+                   pre_game_prob, updated_prob, market_price,
+                   current_edge, created_at
+              FROM midgame_updates
+             WHERE market_id = $1
+             ORDER BY created_at DESC
+             LIMIT $2
+            """,
+            market_id, history_limit,
+        )
+        for r in rows:
+            try:
+                created_iso = datetime.fromtimestamp(
+                    float(r["created_at"]), tz=timezone.utc
+                ).strftime("%Y-%m-%dT%H:%M:%SZ") if r["created_at"] is not None else None
+            except (OverflowError, OSError, ValueError):
+                created_iso = None
+            timeline.append({
+                "league": r["league"],
+                "action": r["action"],
+                "home_score": r["home_score"],
+                "away_score": r["away_score"],
+                "period": r["period"],
+                "time_remaining": r["time_remaining"],
+                "game_progress": (
+                    float(r["game_progress"]) if r["game_progress"] is not None else None
+                ),
+                "pre_game_prob": (
+                    float(r["pre_game_prob"]) if r["pre_game_prob"] is not None else None
+                ),
+                "updated_prob": (
+                    float(r["updated_prob"]) if r["updated_prob"] is not None else None
+                ),
+                "market_price": (
+                    float(r["market_price"]) if r["market_price"] is not None else None
+                ),
+                "current_edge": (
+                    float(r["current_edge"]) if r["current_edge"] is not None else None
+                ),
+                "ts": created_iso,
+            })
+    except Exception as e:
+        log.warning("get_live_game_context timeline failed for %s: %s", market_id, e)
+
+    try:
+        d = await db.fetchrow(
+            """
+            SELECT id, league, matchup, market_type, recommended_action,
+                   consensus_probability, agreement_rate, approved,
+                   confidence_band_low, confidence_band_high,
+                   to_char(created_at, 'YYYY-MM-DD"T"HH24:MI:SSZ') AS created_at,
+                   game_context, moderator_synthesis
+              FROM swarm_debates
+             WHERE game_context->>'kalshi_market_id' = $1
+             ORDER BY created_at DESC
+             LIMIT 1
+            """,
+            market_id,
+        )
+        if d:
+            mod = d["moderator_synthesis"]
+            if isinstance(mod, str):
+                try:
+                    mod = json.loads(mod)
+                except Exception:
+                    mod = None
+            debate = {
+                "id": d["id"],
+                "matchup": d["matchup"],
+                "market_type": d["market_type"],
+                "recommended_action": d["recommended_action"],
+                "consensus_probability": (
+                    float(d["consensus_probability"])
+                    if d["consensus_probability"] is not None else None
+                ),
+                "agreement_rate": (
+                    float(d["agreement_rate"]) if d["agreement_rate"] is not None else None
+                ),
+                "approved": bool(d["approved"]) if d["approved"] is not None else None,
+                "confidence_band_low": (
+                    float(d["confidence_band_low"])
+                    if d["confidence_band_low"] is not None else None
+                ),
+                "confidence_band_high": (
+                    float(d["confidence_band_high"])
+                    if d["confidence_band_high"] is not None else None
+                ),
+                "created_at": d["created_at"],
+                "synthesis": (mod.get("synthesis") if isinstance(mod, dict) else None),
+            }
+    except Exception as e:
+        log.warning("get_live_game_context debate failed for %s: %s", market_id, e)
+
+    try:
+        rows = await db.fetch(
+            """
+            SELECT close_cents, mean_cents,
+                   to_char(bucket_ts, 'YYYY-MM-DD"T"HH24:MI:SSZ') AS bucket_ts
+              FROM market_price_ticks
+             WHERE market_ticker = $1
+             ORDER BY bucket_ts DESC
+             LIMIT 30
+            """,
+            market_id,
+        )
+        for r in rows:
+            ticks.append({
+                "close_cents": (int(r["close_cents"]) if r["close_cents"] is not None else None),
+                "mean_cents": (int(r["mean_cents"]) if r["mean_cents"] is not None else None),
+                "bucket_ts": r["bucket_ts"],
+            })
+    except Exception as e:
+        log.warning("get_live_game_context ticks failed for %s: %s", market_id, e)
+
+    return {
+        "market_id": market_id,
+        "timeline": timeline,
+        "swarm_debate": debate,
+        "ticks": ticks,
+    }
