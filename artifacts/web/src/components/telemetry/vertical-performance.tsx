@@ -204,6 +204,50 @@ function VerticalCard({ entry }: { entry: VerticalPerformanceEntry }) {
           <div className="font-bold">{fmtNum(entry.brier ?? null)}</div>
         </div>
       </div>
+      {/* Spec-anchored badges (task #450): open exposure, today's P&L, */}
+      {/* approved-debate count.  Kept on a tight 3-col row so the tile */}
+      {/* height stays within ~10% of the pre-change layout. */}
+      <div className="grid grid-cols-3 gap-2 text-[11px] mt-2 pt-2 border-t border-border">
+        <div>
+          <div className="text-muted-foreground uppercase tracking-widest text-[9px]">
+            OPEN EXP
+          </div>
+          <div
+            className="font-bold"
+            data-testid={`text-vertical-open-exposure-${entry.vertical}`}
+          >
+            {fmtCurrency(entry.open_exposure_usd)}
+          </div>
+        </div>
+        <div>
+          <div className="text-muted-foreground uppercase tracking-widest text-[9px]">
+            PNL TODAY
+          </div>
+          <div
+            className={`font-bold ${
+              entry.pnl_today < 0
+                ? "text-loss"
+                : entry.pnl_today > 0
+                  ? "text-win"
+                  : ""
+            }`}
+            data-testid={`text-vertical-pnl-today-${entry.vertical}`}
+          >
+            {fmtCurrency(entry.pnl_today)}
+          </div>
+        </div>
+        <div>
+          <div className="text-muted-foreground uppercase tracking-widest text-[9px]">
+            DEBATES
+          </div>
+          <div
+            className="font-bold"
+            data-testid={`text-vertical-debates-today-${entry.vertical}`}
+          >
+            {entry.approved_debates_today}
+          </div>
+        </div>
+      </div>
     </div>
   );
 }

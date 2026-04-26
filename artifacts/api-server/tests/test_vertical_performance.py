@@ -16,8 +16,14 @@ from app import dashboard
 class _FakeDB:
     """Routes db.fetch / fetchrow / fetchval based on substring match."""
 
-    def __init__(self, by_vertical: dict[str, dict[str, Any]]) -> None:
+    def __init__(
+        self,
+        by_vertical: dict[str, dict[str, Any]],
+        *,
+        approved_debates_by_league: dict[str, int] | None = None,
+    ) -> None:
         self._by_vertical = by_vertical
+        self._approved_debates_by_league = approved_debates_by_league or {}
 
     async def fetchrow(self, query: str, *args: Any) -> Any:
         # Trade aggregate query — first arg is the vertical.
@@ -30,9 +36,20 @@ class _FakeDB:
         if "calibration_snapshots" in query:
             v = args[0]
             return self._by_vertical.get(v, {}).get("brier")
+        if "FROM positions" in query:
+            v = args[0]
+            return self._by_vertical.get(v, {}).get("open_exposure")
+        if "FROM trades" in query and "executed_at >= (now() AT TIME ZONE 'UTC')::date" in query:
+            v = args[0]
+            return self._by_vertical.get(v, {}).get("pnl_today")
         return None
 
     async def fetch(self, query: str, *args: Any) -> list[dict[str, Any]]:
+        if "FROM swarm_debates" in query and "approved = TRUE" in query:
+            return [
+                {"league": lg, "n": n}
+                for lg, n in self._approved_debates_by_league.items()
+            ]
         if "bucketed" in query or "WITH settled" in query:
             v = args[0]
             return self._by_vertical.get(v, {}).get("bucket_rows", [])
@@ -63,6 +80,11 @@ def test_returns_three_verticals_with_empty_buckets(monkeypatch: pytest.MonkeyPa
         assert v["pnl"] == 0.0
         assert v["win_rate"] is None
         assert v["brier"] is None
+        # Spec-anchored badges (task #450) default to numeric zeros so
+        # the front-end can render them without nullable plumbing.
+        assert v["open_exposure_usd"] == 0.0
+        assert v["pnl_today"] == 0.0
+        assert v["approved_debates_today"] == 0
         # Always 10 buckets emitted, even with no data, with continuous midpoints.
         assert len(v["calibration"]) == 10
         assert len(v["pit"]) == 10
@@ -136,3 +158,53 @@ def test_clamps_days_to_valid_range(monkeypatch: pytest.MonkeyPatch) -> None:
     assert _run(dashboard.get_vertical_performance(0))["days"] == 1
     assert _run(dashboard.get_vertical_performance(-50))["days"] == 1
     assert _run(dashboard.get_vertical_performance(99999))["days"] == 365
+
+
+def test_strip_badges_open_exposure_pnl_today_and_debates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Task #450 — every tile carries open exposure, today's P&L, and
+    today's approved-debate count, with debates attributed to the right
+    tile via league mapping."""
+    fake = _FakeDB(
+        {
+            "weather": {"open_exposure": 1234.56, "pnl_today": -45.0},
+            "crypto": {"open_exposure": 200.0, "pnl_today": 12.5},
+            "sports": {"open_exposure": 0.0, "pnl_today": 0.0},
+        },
+        approved_debates_by_league={
+            # Weather + crypto map to their own tile via spec.leagues.
+            "WEATHER": 3,
+            "CRYPTO": 2,
+            # NFL has no dedicated strip vertical → falls into "sports".
+            "NFL": 5,
+            # NBA likewise.
+            "NBA": 4,
+            # Empty league string is dropped (cannot be attributed).
+            "": 7,
+        },
+    )
+    monkeypatch.setattr(dashboard, "db", fake)
+    out = _run(dashboard.get_vertical_performance(7))
+
+    by = {v["vertical"]: v for v in out["verticals"]}
+
+    assert by["weather"]["open_exposure_usd"] == pytest.approx(1234.56)
+    assert by["weather"]["pnl_today"] == pytest.approx(-45.0)
+    assert by["weather"]["approved_debates_today"] == 3
+
+    assert by["crypto"]["open_exposure_usd"] == pytest.approx(200.0)
+    assert by["crypto"]["pnl_today"] == pytest.approx(12.5)
+    assert by["crypto"]["approved_debates_today"] == 2
+
+    # Sports is the catch-all: NFL (5) + NBA (4) = 9.  The empty-league
+    # row and any league owned by another strip vertical (WEATHER /
+    # CRYPTO / etc.) must NOT be double-counted here.
+    assert by["sports"]["approved_debates_today"] == 9
+    assert by["sports"]["open_exposure_usd"] == 0.0
+    assert by["sports"]["pnl_today"] == 0.0
+
+    # Verticals with no fake debates default to zero — no leakage from
+    # the global "sports" bucket.
+    assert by["soccer"]["approved_debates_today"] == 0
+    assert by["combat-individual"]["approved_debates_today"] == 0

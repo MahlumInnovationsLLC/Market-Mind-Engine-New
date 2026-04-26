@@ -405,6 +405,21 @@ export const GetVerticalPerformanceResponse = zod.object({
         .number()
         .nullish()
         .describe("Latest 24h Brier from calibration_snapshots."),
+      open_exposure_usd: zod
+        .number()
+        .describe(
+          "USD notional currently at risk — sum of `positions.notional` for open positions in this vertical.",
+        ),
+      pnl_today: zod
+        .number()
+        .describe(
+          "Realized P&L over today's UTC calendar day for this vertical.",
+        ),
+      approved_debates_today: zod
+        .number()
+        .describe(
+          "Count of swarm debates approved today (UTC) and attributed to this vertical via league mapping.",
+        ),
       calibration: zod.array(
         zod.object({
           bucket: zod.number().describe("Midpoint of the bin (e.g. 0.05)."),

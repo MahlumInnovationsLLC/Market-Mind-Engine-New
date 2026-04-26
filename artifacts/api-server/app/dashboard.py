@@ -1504,6 +1504,40 @@ async def get_vertical_performance(days: int = 30) -> dict[str, Any]:
         "sports", "weather", "crypto"
     ]
 
+    # Pre-fetch today's approved-debate counts grouped by league so we
+    # can attribute each row to the right vertical without issuing one
+    # query per tile.  ``swarm_debates`` doesn't carry a ``vertical``
+    # column — it stores ``league`` — so we map league → vertical via
+    # the registry's per-spec league filter (task #450).
+    debates_today_by_league: dict[str, int] = {}
+    try:
+        drows = await db.fetch(
+            """
+            SELECT coalesce(league, '')                             AS league,
+                   count(*)::int                                    AS n
+              FROM swarm_debates
+             WHERE approved = TRUE
+               AND date_trunc('day', created_at AT TIME ZONE 'UTC')
+                   = (now() AT TIME ZONE 'UTC')::date
+             GROUP BY league
+            """
+        )
+        debates_today_by_league = {
+            (r["league"] or ""): int(r["n"] or 0) for r in drows
+        }
+    except Exception as e:
+        log.warning("vertical_perf approved_debates_today: %s", e)
+
+    # Build a set of every league that maps to a *non-sports* strip
+    # vertical so the catch-all "sports" tile counts every approved
+    # debate that didn't belong to a more specific vertical.
+    non_sports_strip_leagues: set[str] = set()
+    for _spec in _vertical_registry.all_specs():
+        if _spec.name == "sports" or _spec.name not in verticals:
+            continue
+        for lg in _spec.leagues:
+            non_sports_strip_leagues.add(lg)
+
     out: list[dict[str, Any]] = []
     for vertical in verticals:
         entry: dict[str, Any] = {
@@ -1516,6 +1550,9 @@ async def get_vertical_performance(days: int = 30) -> dict[str, Any]:
             "brier": None,
             "calibration": [],
             "pit": [],
+            "open_exposure_usd": 0.0,
+            "pnl_today": 0.0,
+            "approved_debates_today": 0,
         }
         # Aggregate trade stats over the rolling window.  We use the
         # same UTC calendar-day lower bound as the daily series below
@@ -1564,6 +1601,52 @@ async def get_vertical_performance(days: int = 30) -> dict[str, Any]:
                 entry["brier"] = float(entry["brier"])
         except Exception as e:
             log.warning("vertical_perf brier %s: %s", vertical, e)
+
+        # Open USD exposure — sum of `positions.notional` for currently
+        # open positions tagged with this vertical (task #450).
+        try:
+            n = await db.fetchval(
+                """
+                SELECT coalesce(sum(notional), 0)::float
+                  FROM positions
+                 WHERE vertical = $1
+                   AND coalesce(status, 'open') = 'open'
+                """,
+                vertical,
+            )
+            entry["open_exposure_usd"] = float(n or 0.0)
+        except Exception as e:
+            log.warning("vertical_perf open_exposure %s: %s", vertical, e)
+
+        # Today's realized P&L (UTC calendar day) for this vertical.
+        try:
+            n = await db.fetchval(
+                """
+                SELECT coalesce(sum(pnl), 0)::float
+                  FROM trades
+                 WHERE vertical = $1
+                   AND executed_at >= (now() AT TIME ZONE 'UTC')::date
+                """,
+                vertical,
+            )
+            entry["pnl_today"] = float(n or 0.0)
+        except Exception as e:
+            log.warning("vertical_perf pnl_today %s: %s", vertical, e)
+
+        # Approved-debate count today, attributed via league mapping.
+        spec = _vertical_registry.get_spec(vertical)
+        if vertical == "sports":
+            # The catch-all tile picks up every approved debate whose
+            # league did NOT map to a more specific strip vertical.
+            entry["approved_debates_today"] = sum(
+                n for lg, n in debates_today_by_league.items()
+                if lg and lg not in non_sports_strip_leagues
+            )
+        else:
+            leagues = list(spec.leagues) if spec else []
+            entry["approved_debates_today"] = sum(
+                debates_today_by_league.get(lg, 0) for lg in leagues
+            )
 
         # Calibration buckets (predicted vs observed) and PIT histogram
         # over the same rolling window, computed from settled trades.

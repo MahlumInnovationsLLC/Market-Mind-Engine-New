@@ -1040,6 +1040,15 @@ components:
         win_rate: { type: number, nullable: true }
         pnl: { type: number }
         brier: { type: number, nullable: true, description: "Latest 24h Brier from calibration_snapshots." }
+        open_exposure_usd:
+          type: number
+          description: "USD notional currently at risk — sum of `positions.notional` for open positions in this vertical."
+        pnl_today:
+          type: number
+          description: "Realized P&L over today's UTC calendar day for this vertical."
+        approved_debates_today:
+          type: integer
+          description: "Count of swarm debates approved today (UTC) and attributed to this vertical via league mapping."
         calibration:
           type: array
           items: { $ref: "#/components/schemas/CalibrationBucket" }
@@ -1050,7 +1059,18 @@ components:
           type: array
           description: "Per-day cumulative P&L and daily Brier over the rolling window, in chronological order."
           items: { $ref: "#/components/schemas/VerticalDailyPoint" }
-      required: [vertical, trades, wins, losses, pnl, calibration, pit, daily]
+      required:
+        - vertical
+        - trades
+        - wins
+        - losses
+        - pnl
+        - calibration
+        - pit
+        - daily
+        - open_exposure_usd
+        - pnl_today
+        - approved_debates_today
 
     VerticalPerformance:
       type: object

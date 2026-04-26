@@ -18,6 +18,12 @@ export interface VerticalPerformanceEntry {
   pnl: number;
   /** Latest 24h Brier from calibration_snapshots. */
   brier?: number | null;
+  /** USD notional currently at risk — sum of `positions.notional` for open positions in this vertical. */
+  open_exposure_usd: number;
+  /** Realized P&L over today's UTC calendar day for this vertical. */
+  pnl_today: number;
+  /** Count of swarm debates approved today (UTC) and attributed to this vertical via league mapping. */
+  approved_debates_today: number;
   calibration: CalibrationBucket[];
   pit: PitBucket[];
   /** Per-day cumulative P&L and daily Brier over the rolling window, in chronological order. */
