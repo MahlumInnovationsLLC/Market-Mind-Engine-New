@@ -15,6 +15,7 @@ import {
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
 import { Card, SectionHeader } from "@/components/Card";
+import EloUpdaterPanel from "@/components/EloUpdater";
 import { useColors } from "@/hooks/useColors";
 import { ApiError, apiFetch } from "@/lib/api";
 
@@ -496,6 +497,10 @@ export default function SettingsScreen() {
           </Text>
         ) : null}
       </Card>
+
+      <View style={{ height: 16 }} />
+      <SectionHeader>TEAM RATINGS UPDATER</SectionHeader>
+      <EloUpdaterPanel />
     </ScrollView>
   );
 }
