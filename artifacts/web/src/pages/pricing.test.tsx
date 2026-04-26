@@ -188,7 +188,6 @@ describe("PricingPage post-sign-up auto-checkout splash", () => {
     await screen.findByTestId("splash-checkout-redirect");
 
     // The full pricing grid (interval toggle + tier cards) must not be
-    // rendered while the splash is up; otherwise the user would see
     // both the spinner AND the comparison table flash.
     expect(screen.queryByTestId("card-tier-pro")).toBeNull();
     expect(screen.queryByTestId("card-tier-elite")).toBeNull();

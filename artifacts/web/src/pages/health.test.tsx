@@ -1,5 +1,18 @@
-import { describe, it, expect, afterEach } from "vitest";
+import { describe, it, expect, afterEach, vi } from "vitest";
 import { cleanup, render, screen } from "@testing-library/react";
+
+// `CardTile` calls `useGetMyAccess()` and `useAuth()` internally to decide
+// whether to show admin-only "Poll now" controls. The badge/cluster/freshness
+// rendering this test exercises does not depend on either, so we stub them
+// out so the test stays a pure render check (no QueryClientProvider, no
+// ClerkProvider needed).
+vi.mock("@clerk/react", () => ({
+  useAuth: () => ({ getToken: async () => null, isSignedIn: false }),
+}));
+
+vi.mock("@workspace/api-client-react", () => ({
+  useGetMyAccess: () => ({ data: undefined, isLoading: false, error: null }),
+}));
 
 // We render CardTile directly so the test only depends on the badge
 // rendering logic, not the full /system page (auth, fetch, polling).
