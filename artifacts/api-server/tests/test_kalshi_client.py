@@ -93,7 +93,17 @@ def _run(coro):
     loop = asyncio.new_event_loop()
     try:
         asyncio.set_event_loop(loop)
-        return loop.run_until_complete(coro)
+        result = loop.run_until_complete(coro)
+        # Drain any fire-and-forget tasks the production code may have
+        # scheduled (e.g. the cluster-mismatch alert dispatcher) so they
+        # don't surface as "Task was destroyed but it is pending!" when
+        # the loop closes below.
+        pending = [t for t in asyncio.all_tasks(loop) if not t.done()]
+        if pending:
+            loop.run_until_complete(
+                asyncio.gather(*pending, return_exceptions=True)
+            )
+        return result
     finally:
         loop.close()
         asyncio.set_event_loop(None)

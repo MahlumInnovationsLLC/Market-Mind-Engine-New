@@ -452,6 +452,17 @@ _cluster_probe_lock = asyncio.Lock()
 _cluster_probe_task: asyncio.Task | None = None
 _cluster_probe_stop = asyncio.Event()
 
+# How long a single Kalshi cluster-mismatch alert stays deduped in
+# ``notification_dedupe`` before another page can fire for the same
+# (configured_env, key_belongs_to) pair.  Six hours: long enough that a
+# string of restarts during a bad deploy generates one page (not one
+# per restart), short enough that a key that stays misrouted overnight
+# still re-pages a few times so the on-call can't claim they missed it.
+KALSHI_CLUSTER_MISMATCH_ALERT_TTL_SECONDS = max(
+    60,
+    int(os.environ.get("AXIOM_KALSHI_CLUSTER_MISMATCH_ALERT_TTL_SECONDS") or "21600"),
+)
+
 
 def cluster_probe_state() -> dict[str, Any]:
     """Return the latest cluster-probe result (empty until probe has run)."""
@@ -464,7 +475,15 @@ def _iso_utc(epoch: float) -> str:
 
 def _record_cluster_probe_result(result: dict[str, Any]) -> dict[str, Any]:
     """Stamp ``result`` with ``checked_at`` / ``checked_at_epoch`` and
-    publish it as the new ``_cluster_probe_state``."""
+    publish it as the new ``_cluster_probe_state``.
+
+    When the new verdict is the wrong-cluster case (``ok=False`` with a
+    non-null ``key_belongs_to``), schedule a dedupe-gated operator alert
+    so the same probe result that flips the dashboard card red also
+    pages on-call. The dispatch is fire-and-forget on the running event
+    loop — failures (e.g. no event loop, dedupe DB unreachable) are
+    logged and never propagate to the caller.
+    """
     now = time.time()
     stamped = {
         **result,
@@ -474,7 +493,61 @@ def _record_cluster_probe_result(result: dict[str, Any]) -> dict[str, Any]:
     }
     _cluster_probe_state.clear()
     _cluster_probe_state.update(stamped)
+    _maybe_dispatch_cluster_mismatch_alert(stamped)
     return stamped
+
+
+def _maybe_dispatch_cluster_mismatch_alert(result: dict[str, Any]) -> None:
+    """Schedule a wrong-cluster Postmark alert when ``result`` describes
+    the wrong-cluster condition (``ok=False`` with a non-null
+    ``key_belongs_to``).  Dedupe is keyed on the ``configured->detected``
+    pair so a single misconfigured deploy cannot spam inboxes on every
+    restart or every periodic re-probe.
+    """
+    if result.get("ok"):
+        return
+    configured = result.get("configured_env")
+    detected = result.get("key_belongs_to")
+    if not configured or not detected:
+        return
+    payload = {
+        "configured_env": str(configured),
+        "key_belongs_to": str(detected),
+        "status": result.get("status"),
+        "detail": result.get("error"),
+    }
+    dedupe_label = f"{payload['configured_env']}->{payload['key_belongs_to']}"
+
+    async def _runner() -> None:
+        # Lazy import to avoid a notifications -> kalshi import cycle
+        # at module load time.
+        from ..notifications import alerts as _alerts
+        try:
+            ok = await _alerts.dedupe_or_skip(
+                "kalshi_cluster_mismatch",
+                dedupe_label,
+                ttl_seconds=KALSHI_CLUSTER_MISMATCH_ALERT_TTL_SECONDS,
+            )
+        except Exception as e:  # pragma: no cover — fail-open
+            log.warning("kalshi cluster-mismatch dedupe failed: %s", e)
+            ok = True
+        if not ok:
+            return
+        try:
+            _alerts.kalshi_cluster_mismatch(**payload)
+        except Exception as e:  # pragma: no cover
+            log.warning("kalshi cluster-mismatch alert dispatch failed: %s", e)
+
+    try:
+        loop = asyncio.get_running_loop()
+        loop.create_task(_runner())
+    except RuntimeError:
+        # No running loop (sync test harness) — run inline so the
+        # caller can observe the dispatch.
+        try:
+            asyncio.run(_runner())
+        except Exception as e:  # pragma: no cover
+            log.warning("inline kalshi cluster-mismatch dispatch failed: %s", e)
 
 
 async def _signed_balance_call(base_url: str) -> dict[str, Any]:

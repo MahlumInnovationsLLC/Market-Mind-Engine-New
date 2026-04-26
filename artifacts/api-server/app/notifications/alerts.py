@@ -1393,6 +1393,64 @@ def ws_hub_overflowing(
 
 
 # ---------------------------------------------------------------------------
+# Kalshi cluster auth mismatch (task #520)
+# ---------------------------------------------------------------------------
+
+
+def kalshi_cluster_mismatch(
+    *,
+    configured_env: str,
+    key_belongs_to: str,
+    status: int | None = None,
+    detail: str | None = None,
+    dry_run: bool = False,
+) -> dict[str, Any]:
+    """Operator alert: the configured ``KALSHI_ENV`` does not match the
+    cluster the API key actually authenticates against.
+
+    Fired by the boot-time / periodic Kalshi cluster probe whenever its
+    cached state shows ``ok=False`` with a non-null ``key_belongs_to``
+    (the wrong-cluster case). The same incident on a fresh deploy can
+    sit broken for hours before anyone happens to look at the operator
+    dashboard, so the same probe verdict that flips the dashboard card
+    red also pages on-call via Postmark.
+
+    Caller is responsible for dedupe (use ``dedupe_or_skip`` keyed on
+    a stable ``configured->detected`` label so a single misconfigured
+    deploy does not spam inboxes on every restart or every periodic
+    re-probe).
+    """
+    subject = (
+        f"[axiom][KALSHI-CLUSTER] Kalshi key authenticates against "
+        f"{key_belongs_to}, not {configured_env}"
+    )
+    body = (
+        "The configured Kalshi cluster does not match the cluster the\n"
+        "API key actually authenticates against. Every signed REST call\n"
+        "and the WebSocket upgrade will silently 401 against the wrong\n"
+        "cluster, so live trading will not work until the environment\n"
+        "is corrected.\n\n"
+        f"Set KALSHI_ENV={key_belongs_to} (and confirm the matching\n"
+        "KALSHI_API_KEY_ID / KALSHI_API_PRIVATE_KEY belong to that\n"
+        "cluster) before resuming, then restart the api-server so the\n"
+        "boot-time cluster probe re-validates.\n\n"
+        + _format_lines(
+            [
+                ("configured_env", configured_env),
+                ("key_belongs_to", key_belongs_to),
+                ("status_from_configured", status if status is not None else "(n/a)"),
+                ("detail", (detail or "")[:240] or "(none)"),
+                ("at", _utc_now_iso()),
+            ]
+        )
+        + "\n"
+    )
+    return _dispatch(
+        subject, body, tag="kalshi-cluster-mismatch", dry_run=dry_run
+    )
+
+
+# ---------------------------------------------------------------------------
 # Crypto OHLCV feed freshness
 # ---------------------------------------------------------------------------
 
