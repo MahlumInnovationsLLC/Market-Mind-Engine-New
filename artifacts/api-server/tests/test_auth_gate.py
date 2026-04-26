@@ -131,6 +131,9 @@ PROTECTED_ROUTES: tuple[str, ...] = (
     # Task #181 — operator-only crypto-binary backtest panel.
     "/api/admin/crypto/backtest",
     "/api/admin/crypto/backtest/history",
+    # Task #580 — rolling-window realised accuracy / Brier / log-loss
+    # for settled Kalshi crypto predictions.
+    "/api/admin/crypto/accuracy",
     "/api/admin/autoresearch/features",
     "/api/admin/margin-regressor/status",
     # Task #245 — operator-only calibration & research dashboards.

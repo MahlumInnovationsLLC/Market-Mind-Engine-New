@@ -3560,6 +3560,76 @@ async def admin_crypto_backtest(
     return result.as_dict()
 
 
+from .crypto import accuracy_report as crypto_accuracy_report  # noqa: E402
+
+
+# Hard-cap windows the operator can request so a typo can't ask for a
+# multi-year scan.  90 days lines up with the backtest endpoint's
+# `days` ceiling above.
+_CRYPTO_ACCURACY_MAX_HOURS: int = 24 * 90
+
+
+@app.get("/api/admin/crypto/accuracy")
+async def admin_crypto_accuracy(
+    windows_hours: list[int] = Query(  # noqa: B008 — FastAPI sentinel
+        list(crypto_accuracy_report.DEFAULT_WINDOW_HOURS),
+        description=(
+            "Rolling-window sizes (hours) to report on. "
+            "Defaults to 24h / 7d / 30d."
+        ),
+    ),
+    actor: AuthedUser = Depends(require_admin),
+) -> dict[str, object]:
+    """Realised accuracy / Brier / log-loss for settled crypto predictions
+    (task #580).
+
+    Joins each settled ``predictions`` row (``league = 'CRYPTO'``,
+    ``settled_at`` stamped by the Kalshi crypto settler in
+    :mod:`app.feeds.kalshi_crypto_markets`) to the most recent
+    ``swarm_debates.consensus_probability`` for the same market and
+    computes accuracy / Brier / log-loss for each requested rolling
+    window.  Results are sliced per ``(symbol, timeframe)`` so the
+    operator can spot which BTC/ETH contracts the model handles best.
+
+    Each window's payload also reports ``n_void`` (Kalshi voids,
+    excluded from scoring) and ``n_unscored`` (settled rows we could
+    not join to a model probability) so coverage gaps are visible.
+    """
+    if not windows_hours:
+        raise HTTPException(
+            status_code=400,
+            detail="windows_hours must contain at least one value",
+        )
+    cleaned: list[int] = []
+    seen: set[int] = set()
+    for raw in windows_hours:
+        try:
+            w = int(raw)
+        except (TypeError, ValueError):
+            raise HTTPException(
+                status_code=400,
+                detail=f"invalid window hours value: {raw!r}",
+            )
+        if w <= 0:
+            raise HTTPException(
+                status_code=400,
+                detail=f"window hours must be positive, got {w}",
+            )
+        if w > _CRYPTO_ACCURACY_MAX_HOURS:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"window hours {w} exceeds cap "
+                    f"{_CRYPTO_ACCURACY_MAX_HOURS}"
+                ),
+            )
+        if w in seen:
+            continue
+        seen.add(w)
+        cleaned.append(w)
+    return await crypto_accuracy_report.evaluate_report(tuple(cleaned))
+
+
 @app.get("/api/admin/crypto/backtest/history")
 async def admin_crypto_backtest_history(
     symbol: str = Query("BTC"),
