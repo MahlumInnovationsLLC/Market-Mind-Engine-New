@@ -14,7 +14,7 @@ import logging
 import os
 import time
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
@@ -1251,17 +1251,42 @@ async def me_unregister_push_token(
     return {"ok": True, "removed": removed}
 
 
+_INTERNAL_PREF_FIELDS = frozenset({
+    # Never echo the in-flight verification code back to the client —
+    # that would let any authenticated session bypass the SMS round-trip
+    # and self-verify a stranger's phone.
+    "sms_phone_verification_code",
+    # Internal `verified_at` is replaced by the public boolean.
+    "sms_phone_verified_at",
+    # Raw rate-limit counters are an implementation detail; only the
+    # derived `sms_phone_verification_next_resend_allowed_at` is exposed
+    # so the UI can disable the Resend button + run a countdown.
+    "sms_phone_verification_last_sent_at",
+    "sms_phone_verification_attempts",
+    "sms_phone_verification_window_started_at",
+})
+
+
 async def _notification_prefs_payload(user: AuthedUser) -> dict[str, object]:
     prefs = await notif_push.get_prefs(user.user_id)
-    # SECURITY: never echo the in-flight verification code back to the
-    # client — that would let any authenticated session bypass the SMS
-    # round-trip and self-verify a stranger's phone. Strip the raw code
-    # and the internal `verified_at` timestamp; expose only the public
-    # `sms_phone_verified` boolean (and the expiry, for UI countdown).
     safe_prefs = {
-        k: v for k, v in prefs.items()
-        if k not in ("sms_phone_verification_code", "sms_phone_verified_at")
+        k: v for k, v in prefs.items() if k not in _INTERNAL_PREF_FIELDS
     }
+    # Derive the public "when can the Resend button re-enable" hint
+    # from the internal last-sent timestamp + the configured cooldown.
+    # Returning the wall-clock instant (rather than a "seconds left"
+    # delta) keeps the UI countdown immune to client/server clock skew
+    # and lets a refresh restore the correct disabled state.
+    last_sent = prefs.get("sms_phone_verification_last_sent_at")
+    if hasattr(last_sent, "isoformat"):
+        next_at = last_sent + timedelta(  # type: ignore[operator]
+            seconds=notif_push.SMS_VERIFICATION_RESEND_COOLDOWN_SECONDS,
+        )
+        safe_prefs["sms_phone_verification_next_resend_allowed_at"] = (
+            next_at.isoformat()
+        )
+    else:
+        safe_prefs["sms_phone_verification_next_resend_allowed_at"] = None
     sub = await billing.get_user_subscription(user)
     elite_unlocked = sub.tier in (billing.TIER_ELITE, billing.TIER_FOUNDER)
     return {
@@ -1389,20 +1414,31 @@ async def me_set_notification_prefs(
     # verified end-to-end (task #191). Users who change the phone in
     # the same call are also blocked, since the change wipes the
     # previous proof and the new number isn't verified yet.
+    #
+    # We also pre-load ``current`` whenever the phone number is in the
+    # request body so the post-save auto-fire branch (further down)
+    # can detect a *real* phone change. Without this guard a hostile
+    # client could spam ``PUT /api/me/notification-prefs`` with the
+    # same unverified number to bypass the per-resend cooldown
+    # — task #430.
     sms_enabling = [
         col for col in notif_push.SMS_PREF_COLUMNS
         if bool(getattr(body, col, None))
     ]
+    needs_current = sms_enabling or body.sms_phone_number_present
+    current: dict[str, object] = (
+        await notif_push.get_prefs(user.user_id) if needs_current else {}
+    )
+    prev_phone = (str(current.get("sms_phone_number") or "")).strip()
+    next_phone_normalized = (
+        (body.sms_phone_number or "").strip()
+        if body.sms_phone_number_present
+        else prev_phone
+    )
     if sms_enabling:
-        current = await notif_push.get_prefs(user.user_id)
-        cur_phone = (current.get("sms_phone_number") or "")
-        next_phone = (
-            (body.sms_phone_number or "").strip()
-            if body.sms_phone_number_present
-            else cur_phone
-        )
         verified = bool(current.get("sms_phone_verified")) and (
-            not body.sms_phone_number_present or next_phone == cur_phone
+            not body.sms_phone_number_present
+            or next_phone_normalized == prev_phone
         )
         if not verified:
             raise HTTPException(
@@ -1435,31 +1471,79 @@ async def me_set_notification_prefs(
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-    # Auto-issue a verification SMS as soon as a new (unverified) number
-    # is saved so the user lands directly on the "enter the code" step
-    # without an extra round trip. Gated on Elite tier so non-paying
-    # accounts can't repeatedly save phone numbers to burn Twilio spend
-    # on a channel they cannot use anyway — mirrors the explicit gate
-    # on /sms/start-verification.
+    # Auto-issue a verification SMS as soon as a *new* (unverified)
+    # number is saved so the user lands directly on the "enter the
+    # code" step without an extra round trip. Gated on Elite tier so
+    # non-paying accounts can't repeatedly save phone numbers to burn
+    # Twilio spend on a channel they cannot use anyway — mirrors the
+    # explicit gate on /sms/start-verification.
+    #
+    # The auto-fire MUST be guarded on a real phone change (task #430).
+    # ``set_prefs`` only zeroes the rate-limit counters when the phone
+    # actually changes, so re-saving the same unverified number must
+    # not bypass the per-resend cooldown — otherwise a malicious
+    # client could loop ``PUT`` calls to spam SMS at our expense. The
+    # rolling hourly cap inside ``issue_phone_verification_code`` is
+    # the second line of defence and stays in effect on this path.
+    phone_changed = next_phone_normalized != prev_phone
     if (
         elite_unlocked
         and body.sms_phone_number_present
+        and phone_changed
         and prefs_after.get("sms_phone_number")
         and not prefs_after.get("sms_phone_verified")
     ):
-        await _send_sms_verification(user.user_id)
+        await _send_sms_verification(user.user_id, enforce_rate_limit=False)
 
     return await _notification_prefs_payload(user)
 
 
-async def _send_sms_verification(clerk_user_id: str) -> dict[str, object]:
-    issued = await notif_push.issue_phone_verification_code(clerk_user_id)
-    if not issued:
+async def _send_sms_verification(
+    clerk_user_id: str,
+    *,
+    enforce_rate_limit: bool = True,
+) -> dict[str, object]:
+    """Issue + dispatch a fresh verification SMS, honouring the per-user
+    resend rate limit (task #430).
+
+    On rate-limit hits we raise an HTTP 429 carrying ``retry_after_seconds``
+    and an ISO ``next_resend_allowed_at`` so the UI can disable the
+    Resend button and run a countdown without re-polling. The
+    ``enforce_rate_limit=False`` knob is reserved for the auto-fire path
+    triggered by saving a *new* phone number — ``set_prefs`` has just
+    zeroed the counters so the cooldown check would always pass anyway,
+    but skipping it makes the intent explicit.
+    """
+    issued = await notif_push.issue_phone_verification_code(
+        clerk_user_id, enforce_rate_limit=enforce_rate_limit,
+    )
+    if issued is None:
         raise HTTPException(
             status_code=400,
             detail={"error": "no_phone_on_file"},
         )
-    code, phone, expires_at = issued
+    if issued.get("status") == "rate_limited":
+        retry_after = int(issued.get("retry_after_seconds") or 1)
+        next_at = issued.get("next_resend_allowed_at")
+        next_iso = (
+            next_at.isoformat() if hasattr(next_at, "isoformat") else None
+        )
+        raise HTTPException(
+            status_code=429,
+            detail={
+                "error": "resend_rate_limited",
+                "reason": issued.get("reason"),
+                "retry_after_seconds": retry_after,
+                "next_resend_allowed_at": next_iso,
+            },
+            # Standard HTTP retry hint so naive clients (curl, scripted
+            # bots) also back off without parsing the JSON body.
+            headers={"Retry-After": str(retry_after)},
+        )
+    code = str(issued["code"])
+    phone = str(issued["phone"])
+    expires_at = issued["expires_at"]
+    next_resend_at = issued["next_resend_allowed_at"]
     body = (
         f"Axiom verification code: {code}. "
         f"Enter it on /system?tab=settings to confirm this number. "
@@ -1469,6 +1553,8 @@ async def _send_sms_verification(clerk_user_id: str) -> dict[str, object]:
     return {
         "sent": sent,
         "expires_at": expires_at.isoformat(),
+        "next_resend_allowed_at": next_resend_at.isoformat(),
+        "attempts_remaining": int(issued.get("attempts_remaining") or 0),
         "twilio_configured": notif_sms.is_configured(),
     }
 
@@ -1517,10 +1603,15 @@ async def me_sms_start_verification(
         return {"ok": True, "already_verified": True}
     result = await _send_sms_verification(user.user_id)
     # Don't surface raw issuance internals to the client — only the
-    # high-level "we sent it" + expiry hint for UI countdown.
+    # high-level "we sent it" + expiry hint for UI countdown. The
+    # `next_resend_allowed_at` + `attempts_remaining` echo lets the UI
+    # disable the Resend button and run a local countdown without
+    # re-polling /api/me/notification-prefs (task #430).
     return {
         "ok": True,
         "expires_at": result.get("expires_at"),
+        "next_resend_allowed_at": result.get("next_resend_allowed_at"),
+        "attempts_remaining": result.get("attempts_remaining"),
         "twilio_configured": result.get("twilio_configured"),
     }
 

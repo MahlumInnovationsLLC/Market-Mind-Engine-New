@@ -26,6 +26,11 @@ interface PrefsView {
     sms_phone_number: string | null;
     sms_phone_verified: boolean;
     sms_phone_verification_expires_at: string | null;
+    // Server-issued cooldown hint (task #430). When set, the next
+    // Resend tap will be rejected with HTTP 429 until this ISO
+    // timestamp passes — the UI uses it to keep the Resend button
+    // disabled across page refreshes.
+    sms_phone_verification_next_resend_allowed_at: string | null;
   };
   tier: string;
   elite_unlocked: boolean;
@@ -33,6 +38,37 @@ interface PrefsView {
 }
 
 type ToggleKey = keyof PrefsView["prefs"] & string;
+
+interface RateLimitDetail {
+  error?: string;
+  reason?: string;
+  retry_after_seconds?: number;
+  next_resend_allowed_at?: string;
+}
+
+/**
+ * The rate-limited start-verification endpoint returns FastAPI's standard
+ * ``{detail: {...}}`` envelope. Pull the inner shape out defensively
+ * — anything off the happy path falls back to ``null`` so the caller
+ * just shows a generic message.
+ */
+function extractRateLimitDetail(body: unknown): RateLimitDetail | null {
+  if (!body || typeof body !== "object") return null;
+  const detail = (body as { detail?: unknown }).detail;
+  const candidate = detail && typeof detail === "object" ? detail : body;
+  if (!candidate || typeof candidate !== "object") return null;
+  const out: RateLimitDetail = {};
+  const c = candidate as Record<string, unknown>;
+  if (typeof c.error === "string") out.error = c.error;
+  if (typeof c.reason === "string") out.reason = c.reason;
+  if (typeof c.retry_after_seconds === "number") {
+    out.retry_after_seconds = c.retry_after_seconds;
+  }
+  if (typeof c.next_resend_allowed_at === "string") {
+    out.next_resend_allowed_at = c.next_resend_allowed_at;
+  }
+  return out;
+}
 
 interface HistoryChannel {
   kind: "email" | "push" | "sms" | "telegram";
@@ -151,6 +187,18 @@ export function NotificationPrefsPanel() {
   const [verifyCode, setVerifyCode] = useState<string>("");
   const [verifyBusy, setVerifyBusy] = useState(false);
   const [verifyMsg, setVerifyMsg] = useState<string | null>(null);
+  // Wall-clock ms after which the user may tap "Resend" again.
+  // Driven by the server-issued cooldown hint (task #430) — either the
+  // ``sms_phone_verification_next_resend_allowed_at`` field on the prefs
+  // payload (restored on every page load) or the ``next_resend_allowed_at``
+  // echoed back inside a 429 response body.
+  const [resendCooldownUntil, setResendCooldownUntil] = useState<number | null>(
+    null,
+  );
+  // Tick state used solely to force a re-render once a second so the
+  // button label can show "Resend in N s" and re-enable when the
+  // cooldown elapses.
+  const [, setNowTick] = useState(0);
   const [history, setHistory] = useState<HistoryItem[] | null>(null);
   const [historyLoading, setHistoryLoading] = useState(true);
   const [historyError, setHistoryError] = useState<string | null>(null);
@@ -167,6 +215,14 @@ export function NotificationPrefsPanel() {
         if (cancelled) return;
         setData(d);
         setPhone(d.prefs.sms_phone_number ?? "");
+        // Restore the Resend cooldown across hard refreshes — without
+        // this a user who hits the cooldown then reloads sees an
+        // enabled button that immediately 429s on tap.
+        const hint = d.prefs.sms_phone_verification_next_resend_allowed_at;
+        const ts = hint ? Date.parse(hint) : NaN;
+        setResendCooldownUntil(
+          Number.isFinite(ts) && ts > Date.now() ? ts : null,
+        );
         setLoading(false);
       })
       .catch((e: unknown) => {
@@ -178,6 +234,20 @@ export function NotificationPrefsPanel() {
       cancelled = true;
     };
   }, [isSignedIn, token]);
+
+  // Re-render once a second while a cooldown is active so the button
+  // label updates and naturally re-enables when the timer hits zero.
+  useEffect(() => {
+    if (resendCooldownUntil === null) return;
+    const timer = window.setInterval(() => {
+      if (Date.now() >= resendCooldownUntil) {
+        setResendCooldownUntil(null);
+      } else {
+        setNowTick((n) => n + 1);
+      }
+    }, 1000);
+    return () => window.clearInterval(timer);
+  }, [resendCooldownUntil]);
 
   const loadHistory = useMemo(
     () => async () => {
@@ -218,6 +288,14 @@ export function NotificationPrefsPanel() {
       });
       setData(next);
       setPhone(next.prefs.sms_phone_number ?? "");
+      // The PUT may have auto-fired a verification SMS (when the phone
+      // changed) which advances the server-side cooldown — sync the UI
+      // immediately so the Resend button doesn't appear tappable.
+      const hint = next.prefs.sms_phone_verification_next_resend_allowed_at;
+      const ts = hint ? Date.parse(hint) : NaN;
+      setResendCooldownUntil(
+        Number.isFinite(ts) && ts > Date.now() ? ts : null,
+      );
       setSavedAt(Date.now());
     } catch (e) {
       const msg = formatErrorMessage(
@@ -256,13 +334,41 @@ export function NotificationPrefsPanel() {
     setVerifyMsg(null);
     setError(null);
     try {
-      await apiFetch<unknown>(
+      const res = await apiFetch<{
+        next_resend_allowed_at?: string | null;
+      }>(
         "/api/me/notification-prefs/sms/start-verification",
         { method: "POST", getToken: token, body: {} },
       );
+      // Server tells us exactly when the next resend will be allowed —
+      // arm the cooldown so the button disables itself before the user
+      // can spam-tap and rack up SMS charges (task #430).
+      const hint = res.next_resend_allowed_at;
+      const ts = hint ? Date.parse(hint) : NaN;
+      if (Number.isFinite(ts) && ts > Date.now()) {
+        setResendCooldownUntil(ts);
+      }
       setVerifyMsg("New code sent. Check your phone.");
     } catch (e) {
-      setError(formatErrorMessage(e));
+      // Surface the rate-limit hint on a 429 so the button stays
+      // disabled even though the request technically failed.
+      if (e instanceof ApiError && e.status === 429) {
+        const detail = extractRateLimitDetail(e.body);
+        if (detail?.next_resend_allowed_at) {
+          const ts = Date.parse(detail.next_resend_allowed_at);
+          if (Number.isFinite(ts) && ts > Date.now()) {
+            setResendCooldownUntil(ts);
+          }
+        }
+        const wait = detail?.retry_after_seconds ?? null;
+        setError(
+          wait
+            ? `Too many resend requests — please wait ${wait}s before trying again.`
+            : "Too many resend requests. Please wait a moment.",
+        );
+      } else {
+        setError(formatErrorMessage(e));
+      }
     } finally {
       setVerifyBusy(false);
     }
@@ -285,6 +391,10 @@ export function NotificationPrefsPanel() {
       setData(next);
       setPhone(next.prefs.sms_phone_number ?? "");
       setVerifyCode("");
+      // Number is verified; the Resend button is gone from the DOM,
+      // but clear the timer anyway so a future re-edit doesn't inherit
+      // a stale cooldown.
+      setResendCooldownUntil(null);
       setVerifyMsg("Phone number verified. SMS alerts are unlocked.");
     } catch (e) {
       setError(formatErrorMessage(e, "Code was rejected. Try again."));
@@ -523,15 +633,30 @@ export function NotificationPrefsPanel() {
                         >
                           Verify
                         </button>
-                        <button
-                          type="button"
-                          onClick={resendCode}
-                          disabled={verifyBusy || saving}
-                          className="border border-border px-3 py-2 text-xs uppercase tracking-widest hover:border-primary/50 disabled:opacity-50"
-                          data-testid="button-resend-code"
-                        >
-                          Resend
-                        </button>
+                        {(() => {
+                          const remainingMs =
+                            resendCooldownUntil !== null
+                              ? resendCooldownUntil - Date.now()
+                              : 0;
+                          const cooling = remainingMs > 0;
+                          const remainingSec = Math.ceil(remainingMs / 1000);
+                          return (
+                            <button
+                              type="button"
+                              onClick={resendCode}
+                              disabled={verifyBusy || saving || cooling}
+                              title={
+                                cooling
+                                  ? `Wait ${remainingSec}s before requesting another code.`
+                                  : undefined
+                              }
+                              className="border border-border px-3 py-2 text-xs uppercase tracking-widest hover:border-primary/50 disabled:opacity-50"
+                              data-testid="button-resend-code"
+                            >
+                              {cooling ? `Resend (${remainingSec}s)` : "Resend"}
+                            </button>
+                          );
+                        })()}
                       </div>
                     </div>
                   )}

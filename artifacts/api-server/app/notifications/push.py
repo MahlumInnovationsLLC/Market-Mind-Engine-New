@@ -51,6 +51,26 @@ EXPO_PUSH_URL = "https://exp.host/--/api/v2/push/send"
 SMS_VERIFICATION_TTL_SECONDS = 600
 
 
+# Per-user rate limits for SMS verification resends (task #430).
+# Defends against a buggy or hostile client hammering
+# `POST /api/me/notification-prefs/sms/start-verification` to either
+# burn paid Twilio messages or spam-text the phone owner. Both knobs
+# are user-scoped and persisted on `user_notification_prefs` so they
+# survive a pod restart and stay in sync across replicas.
+#
+#   * COOLDOWN_SECONDS — minimum gap between two resend attempts. Set
+#     to 60s so a frantic user tapping Resend twice has to wait one
+#     minute, which is well within the documented Twilio Verify SLAs
+#     and gives the original SMS time to actually land.
+#   * HOURLY_LIMIT / HOURLY_WINDOW_SECONDS — rolling cap on how many
+#     codes we will issue in a one-hour window for the same user. Five
+#     covers "I never got the first one, let me try again with a
+#     different carrier" without enabling sustained spam.
+SMS_VERIFICATION_RESEND_COOLDOWN_SECONDS = 60
+SMS_VERIFICATION_HOURLY_LIMIT = 5
+SMS_VERIFICATION_HOURLY_WINDOW_SECONDS = 3600
+
+
 # Boolean toggles that *send paid SMS*. Listed explicitly so the gate
 # in the prefs endpoint and the dispatch-side filter (`opted_in_sms_phones`)
 # stay in sync as new SMS channels are added.
@@ -218,7 +238,28 @@ _VERIFICATION_COLS = (
     "sms_phone_verified_at",
     "sms_phone_verification_code",
     "sms_phone_verification_expires_at",
+    # Per-user resend rate-limit state (task #430). Reset to NULL/0 in
+    # `set_prefs` whenever the phone number changes so a legitimate
+    # "wrong number, let me try a different one" doesn't inherit the
+    # previous number's cooldown.
+    "sms_phone_verification_last_sent_at",
+    "sms_phone_verification_attempts",
+    "sms_phone_verification_window_started_at",
 )
+
+
+# Default values for the verification columns when no row exists yet —
+# `attempts` is `NOT NULL DEFAULT 0` at the SQL level, so the in-memory
+# default needs to match (otherwise the rate-limit math would compare
+# against `None`).
+_VERIFICATION_DEFAULTS: dict[str, Any] = {
+    "sms_phone_verified_at": None,
+    "sms_phone_verification_code": None,
+    "sms_phone_verification_expires_at": None,
+    "sms_phone_verification_last_sent_at": None,
+    "sms_phone_verification_attempts": 0,
+    "sms_phone_verification_window_started_at": None,
+}
 
 
 async def get_prefs(clerk_user_id: str) -> dict[str, object]:
@@ -246,7 +287,7 @@ async def get_prefs(clerk_user_id: str) -> dict[str, object]:
     for k, default in QUIET_HOURS_COLUMNS.items():
         out[k] = default
     for k in _VERIFICATION_COLS:
-        out[k] = None
+        out[k] = _VERIFICATION_DEFAULTS[k]
     if row is not None:
         for k in PREF_COLUMNS:
             out[k] = bool(row[k])
@@ -254,7 +295,14 @@ async def get_prefs(clerk_user_id: str) -> dict[str, object]:
         for k in QUIET_HOURS_COLUMNS:
             out[k] = row[k]
         for k in _VERIFICATION_COLS:
-            out[k] = row[k]
+            v = row[k]
+            # `attempts` is NOT NULL in the schema but a fork's row that
+            # predates the migration may still surface NULL through the
+            # asyncpg layer — fall back to the documented default so the
+            # rate-limit math doesn't blow up on `None + 1`.
+            out[k] = (
+                _VERIFICATION_DEFAULTS[k] if v is None else v
+            ) if k == "sms_phone_verification_attempts" else v
     out["sms_phone_verified"] = out.get("sms_phone_verified_at") is not None
     return out
 
@@ -322,10 +370,15 @@ async def set_prefs(
     # Whenever the destination phone changes (including being set for
     # the first time, or cleared back to NULL) the previous verification
     # is no longer meaningful — drop the proof and any in-flight code so
-    # the user is forced to re-verify before paid SMS resumes.
+    # the user is forced to re-verify before paid SMS resumes. The
+    # resend rate-limit counters (task #430) reset alongside it so a
+    # legitimate "wrong number, try again" doesn't inherit the previous
+    # number's cooldown — but a hostile loop of "save phone, request
+    # SMS, save phone, request SMS" is still bounded by the auto-fire
+    # gate (Elite-only) plus this fresh code's own per-resend cap.
     phone_changed = next_phone != current.get("sms_phone_number")
     if phone_changed:
-        next_verification: dict[str, Any] = {c: None for c in _VERIFICATION_COLS}
+        next_verification: dict[str, Any] = dict(_VERIFICATION_DEFAULTS)
     else:
         next_verification = {c: current.get(c) for c in _VERIFICATION_COLS}
 
@@ -379,20 +432,73 @@ async def set_prefs(
 # ---------------------------------------------------------------------------
 
 
+def _now() -> datetime:
+    """Single seam for "wall-clock UTC, right now".
+
+    Tests fast-forward time by monkey-patching this helper rather than
+    touching ``_push.datetime`` directly — the latter would break
+    ``isinstance(value, datetime)`` checks elsewhere in the module
+    when the patched value is a subclass of ``datetime``.
+    """
+    return datetime.now(timezone.utc)
+
+
+def _normalize_dt(v: Any) -> datetime | None:
+    """Coerce a DB timestamp value to a tz-aware UTC datetime.
+
+    asyncpg returns tz-aware timestamps for ``timestamptz`` columns, but
+    the in-memory test shim and any legacy rows that landed via the old
+    ``timestamp`` schema may surface naive datetimes. Treat naive values
+    as UTC so the comparison math doesn't raise ``TypeError`` mid-rate-
+    limit check.
+    """
+    if v is None:
+        return None
+    if isinstance(v, datetime):
+        return v if v.tzinfo else v.replace(tzinfo=timezone.utc)
+    return None
+
+
 async def issue_phone_verification_code(
     clerk_user_id: str,
-) -> tuple[str, str, datetime] | None:
+    *,
+    enforce_rate_limit: bool = True,
+) -> dict[str, Any] | None:
     """Generate a fresh 6-digit code for the user's saved phone number.
 
-    Persists the code + expiry, and clears any prior verification so the
+    Persists the code + expiry, advances the per-user resend rate-limit
+    counters (task #430), and clears any prior verification so the
     number is treated as unverified until the new code is confirmed.
-    Returns ``(code, phone, expires_at)`` on success, or ``None`` if the
-    user has no phone on file (caller should surface a 400 in that case).
+
+    Return shape:
+      * ``None`` — the user has no phone on file. Caller should surface
+        an HTTP 400 (``no_phone_on_file``).
+      * ``{"status": "rate_limited", "reason": ..., "retry_after_seconds": int,
+        "next_resend_allowed_at": datetime}`` — the per-user cap has
+        been hit. Caller should surface an HTTP 429 with the retry-after
+        hint so the UI can countdown the Resend button.
+      * ``{"status": "ok", "code": str, "phone": str, "expires_at": datetime,
+        "next_resend_allowed_at": datetime, "attempts_remaining": int}`` —
+        a fresh challenge was issued and the SMS may now be dispatched.
+
+    ``enforce_rate_limit=False`` is reserved for the auto-fire path
+    triggered by saving a *new* phone number (where ``set_prefs`` has
+    just zeroed the counters). It skips only the per-resend cooldown
+    — the rolling hourly cap is *always* enforced so a hostile client
+    that loops "PUT /api/me/notification-prefs with the same number"
+    can still only burn ``SMS_VERIFICATION_HOURLY_LIMIT`` SMS per
+    hour. Each successful issuance advances the per-user counters so
+    a subsequent explicit Resend tap is bounded.
     """
     try:
         row = await db.fetchrow(
-            "SELECT sms_phone_number FROM user_notification_prefs "
-            "WHERE clerk_user_id = $1",
+            """
+            SELECT sms_phone_number,
+                   sms_phone_verification_last_sent_at,
+                   sms_phone_verification_attempts,
+                   sms_phone_verification_window_started_at
+              FROM user_notification_prefs WHERE clerk_user_id = $1
+            """,
             clerk_user_id,
         )
     except Exception as e:
@@ -402,10 +508,76 @@ async def issue_phone_verification_code(
     phone = (str(phone).strip() if phone else "") or None
     if not phone:
         return None
-    code = f"{secrets.randbelow(1_000_000):06d}"
-    expires_at = datetime.now(timezone.utc) + timedelta(
-        seconds=SMS_VERIFICATION_TTL_SECONDS
+
+    now = _now()
+    last_sent = _normalize_dt((row or {}).get("sms_phone_verification_last_sent_at"))
+    window_start = _normalize_dt(
+        (row or {}).get("sms_phone_verification_window_started_at")
     )
+    raw_attempts = (row or {}).get("sms_phone_verification_attempts")
+    attempts = int(raw_attempts) if raw_attempts is not None else 0
+
+    # Roll the hourly window if it has expired. We do this *before* the
+    # rate-limit check so a user who blew through the cap an hour ago
+    # gets a fresh allotment without having to wait for an explicit
+    # reset job. ``window_start`` of ``None`` is treated as "no active
+    # window", so the first attempt of a fresh user opens one.
+    window_active = (
+        window_start is not None
+        and (now - window_start).total_seconds() < SMS_VERIFICATION_HOURLY_WINDOW_SECONDS
+    )
+    if not window_active:
+        attempts = 0
+        window_start = None
+
+    if enforce_rate_limit:
+        # Per-resend cooldown — the most common defence; one minute
+        # between attempts catches both a frantic double-tap and a
+        # naive bot loop without making a legitimate "I never got the
+        # first SMS" retry painful.
+        if last_sent is not None:
+            elapsed = (now - last_sent).total_seconds()
+            if elapsed < SMS_VERIFICATION_RESEND_COOLDOWN_SECONDS:
+                wait = int(
+                    SMS_VERIFICATION_RESEND_COOLDOWN_SECONDS - elapsed
+                ) + 1
+                return {
+                    "status": "rate_limited",
+                    "reason": "cooldown",
+                    "retry_after_seconds": wait,
+                    "next_resend_allowed_at": last_sent + timedelta(
+                        seconds=SMS_VERIFICATION_RESEND_COOLDOWN_SECONDS
+                    ),
+                }
+
+    # Rolling hourly cap — defends against a determined attacker who's
+    # willing to wait out the per-resend cooldown. Enforced even when
+    # ``enforce_rate_limit=False`` so the auto-fire path on PUT
+    # ``/api/me/notification-prefs`` can't be looped to bypass the
+    # SMS-spend ceiling (a hostile client repeatedly saving the same
+    # phone number would still be bounded here).
+    if window_active and attempts >= SMS_VERIFICATION_HOURLY_LIMIT:
+        assert window_start is not None  # narrowed by window_active above
+        wait = int(
+            SMS_VERIFICATION_HOURLY_WINDOW_SECONDS
+            - (now - window_start).total_seconds()
+        ) + 1
+        return {
+            "status": "rate_limited",
+            "reason": "hourly_cap",
+            "retry_after_seconds": max(wait, 1),
+            "next_resend_allowed_at": window_start + timedelta(
+                seconds=SMS_VERIFICATION_HOURLY_WINDOW_SECONDS
+            ),
+        }
+
+    # Allocate the new attempt against the (possibly fresh) window.
+    if window_start is None:
+        window_start = now
+    attempts += 1
+
+    code = f"{secrets.randbelow(1_000_000):06d}"
+    expires_at = now + timedelta(seconds=SMS_VERIFICATION_TTL_SECONDS)
     try:
         await db.execute(
             """
@@ -413,15 +585,30 @@ async def issue_phone_verification_code(
                SET sms_phone_verification_code = $2,
                    sms_phone_verification_expires_at = $3,
                    sms_phone_verified_at = NULL,
+                   sms_phone_verification_last_sent_at = $4,
+                   sms_phone_verification_attempts = $5,
+                   sms_phone_verification_window_started_at = $6,
                    updated_at = now()
              WHERE clerk_user_id = $1
             """,
-            clerk_user_id, code, expires_at,
+            clerk_user_id, code, expires_at, now, attempts, window_start,
         )
     except Exception as e:
         log.warning("issue_phone_verification_code persist failed: %s", e)
         return None
-    return code, phone, expires_at
+    next_allowed = now + timedelta(
+        seconds=SMS_VERIFICATION_RESEND_COOLDOWN_SECONDS
+    )
+    return {
+        "status": "ok",
+        "code": code,
+        "phone": phone,
+        "expires_at": expires_at,
+        "next_resend_allowed_at": next_allowed,
+        "attempts_remaining": max(
+            SMS_VERIFICATION_HOURLY_LIMIT - attempts, 0
+        ),
+    }
 
 
 async def confirm_phone_verification_code(

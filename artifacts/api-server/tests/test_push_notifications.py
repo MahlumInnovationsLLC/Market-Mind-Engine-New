@@ -93,12 +93,18 @@ class _Store:
             self.prefs[uid] = row
             return "INSERT 0 1"
         if q.startswith("UPDATE user_notification_prefs SET sms_phone_verification_code"):
-            uid, code, expires = args
+            # Mirrors the rate-limited issuance UPDATE in push.py:
+            # ($1=uid, $2=code, $3=expires, $4=last_sent, $5=attempts,
+            # $6=window_start). Six positional args after task #430.
+            uid, code, expires, last_sent, attempts, window_start = args
             row = self.prefs.get(uid)
             if row is not None:
                 row["sms_phone_verification_code"] = code
                 row["sms_phone_verification_expires_at"] = expires
                 row["sms_phone_verified_at"] = None
+                row["sms_phone_verification_last_sent_at"] = last_sent
+                row["sms_phone_verification_attempts"] = attempts
+                row["sms_phone_verification_window_started_at"] = window_start
             return "UPDATE 1"
         if q.startswith("UPDATE user_notification_prefs SET sms_phone_verified_at = now()"):
             (uid,) = args
@@ -245,10 +251,15 @@ def test_phone_verification_round_trip(store: _Store) -> None:
         clerk_user_id="user_v", sms_phone_number="+15550001111",
     ))
     issued = _run(_push.issue_phone_verification_code("user_v"))
-    assert issued is not None
-    code, phone, expires = issued
+    assert issued is not None and issued["status"] == "ok"
+    code = issued["code"]
+    phone = issued["phone"]
     assert phone == "+15550001111"
     assert len(code) == 6 and code.isdigit()
+    # Resend rate-limit metadata is surfaced to the caller so the API
+    # layer can echo it back to the UI for the Resend countdown.
+    assert "next_resend_allowed_at" in issued
+    assert issued["attempts_remaining"] == _push.SMS_VERIFICATION_HOURLY_LIMIT - 1
 
     # Wrong code is rejected and does not flip the verified flag.
     assert _run(_push.confirm_phone_verification_code("user_v", "000000")) is False
@@ -264,8 +275,8 @@ def test_changing_phone_clears_prior_verification(store: _Store) -> None:
     """A verified user who edits their number is forced to re-verify."""
     _run(_push.set_prefs(clerk_user_id="user_e", sms_phone_number="+15551112222"))
     issued = _run(_push.issue_phone_verification_code("user_e"))
-    assert issued is not None
-    assert _run(_push.confirm_phone_verification_code("user_e", issued[0])) is True
+    assert issued is not None and issued["status"] == "ok"
+    assert _run(_push.confirm_phone_verification_code("user_e", issued["code"])) is True
     assert _run(_push.get_prefs("user_e"))["sms_phone_verified"] is True
 
     _run(_push.set_prefs(clerk_user_id="user_e", sms_phone_number="+15553334444"))
@@ -274,12 +285,293 @@ def test_changing_phone_clears_prior_verification(store: _Store) -> None:
     assert after["sms_phone_verified"] is False, (
         "changing the phone must drop the prior verification"
     )
+    # Editing the number also resets the per-user rate-limit counters
+    # (task #430) so a legitimate "wrong number, try again" doesn't
+    # inherit the previous number's cooldown.
+    assert after["sms_phone_verification_last_sent_at"] is None
+    assert after["sms_phone_verification_attempts"] == 0
 
 
 def test_issue_phone_verification_without_phone_returns_none(
     store: _Store,
 ) -> None:
     assert _run(_push.issue_phone_verification_code("nobody")) is None
+
+
+def test_issue_phone_verification_enforces_per_user_cooldown(
+    store: _Store,
+) -> None:
+    """A second resend within the cooldown window must be rejected with
+    a structured rate-limit response, not a fresh code (task #430).
+    The original (still-valid) code must remain on the row so the user
+    can finish entering it."""
+    _run(_push.set_prefs(
+        clerk_user_id="user_rl", sms_phone_number="+15550005555",
+    ))
+    first = _run(_push.issue_phone_verification_code("user_rl"))
+    assert first is not None and first["status"] == "ok"
+    saved_code = store.prefs["user_rl"]["sms_phone_verification_code"]
+    assert saved_code == first["code"]
+
+    second = _run(_push.issue_phone_verification_code("user_rl"))
+    assert second is not None and second["status"] == "rate_limited"
+    assert second["reason"] == "cooldown"
+    assert 0 < second["retry_after_seconds"] <= (
+        _push.SMS_VERIFICATION_RESEND_COOLDOWN_SECONDS + 1
+    )
+    # The on-disk code must be unchanged so the user can still confirm
+    # the original SMS — rate-limited resends are a no-op, not a reset.
+    assert store.prefs["user_rl"]["sms_phone_verification_code"] == saved_code
+    assert store.prefs["user_rl"]["sms_phone_verification_attempts"] == 1
+
+
+def test_issue_phone_verification_enforces_hourly_cap(
+    store: _Store, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """After ``SMS_VERIFICATION_HOURLY_LIMIT`` resends in a window the
+    next call returns ``hourly_cap`` even when the per-resend cooldown
+    has elapsed. We fast-forward time by stubbing
+    ``datetime.now`` inside the push module so the test runs instantly."""
+    from datetime import datetime as _dt, timezone as _tz, timedelta as _td
+
+    base = _dt(2026, 5, 1, 12, 0, tzinfo=_tz.utc)
+    cursor = {"now": base}
+    monkeypatch.setattr(_push, "_now", lambda: cursor["now"])
+
+    _run(_push.set_prefs(
+        clerk_user_id="user_hr", sms_phone_number="+15550006666",
+    ))
+
+    # Burn through every allowed attempt in a 1h window. We jump past
+    # the per-resend cooldown each time so only the hourly cap can fire.
+    for i in range(_push.SMS_VERIFICATION_HOURLY_LIMIT):
+        out = _run(_push.issue_phone_verification_code("user_hr"))
+        assert out is not None and out["status"] == "ok", (
+            f"attempt #{i + 1} should be allowed within the cap"
+        )
+        cursor["now"] = cursor["now"] + _td(
+            seconds=_push.SMS_VERIFICATION_RESEND_COOLDOWN_SECONDS + 5
+        )
+
+    capped = _run(_push.issue_phone_verification_code("user_hr"))
+    assert capped is not None and capped["status"] == "rate_limited"
+    assert capped["reason"] == "hourly_cap"
+    assert capped["retry_after_seconds"] > 0
+
+    # Once the rolling window has fully elapsed the limit resets and
+    # the next attempt succeeds (with the per-user counter going back
+    # to 1, not piling onto the saturated bucket).
+    cursor["now"] = base + _td(
+        seconds=_push.SMS_VERIFICATION_HOURLY_WINDOW_SECONDS + 5
+    )
+    revived = _run(_push.issue_phone_verification_code("user_hr"))
+    assert revived is not None and revived["status"] == "ok"
+    assert store.prefs["user_hr"]["sms_phone_verification_attempts"] == 1
+
+
+def test_issue_phone_verification_bypass_skips_cooldown_only(
+    store: _Store,
+) -> None:
+    """``enforce_rate_limit=False`` is the auto-fire path triggered when
+    ``set_prefs`` swaps the phone — it skips the cooldown gate but
+    still consumes one attempt against the hourly bucket so the user
+    can't loop save → save to bypass the hourly cap."""
+    _run(_push.set_prefs(
+        clerk_user_id="user_bp", sms_phone_number="+15550007777",
+    ))
+    first = _run(_push.issue_phone_verification_code("user_bp"))
+    assert first is not None and first["status"] == "ok"
+
+    # Even though the cooldown hasn't elapsed, the bypass path lets the
+    # auto-fire issue a fresh code — but it advances the counter.
+    bypass = _run(_push.issue_phone_verification_code(
+        "user_bp", enforce_rate_limit=False,
+    ))
+    assert bypass is not None and bypass["status"] == "ok"
+    assert store.prefs["user_bp"]["sms_phone_verification_attempts"] == 2
+
+
+def test_issue_phone_verification_bypass_still_honours_hourly_cap(
+    store: _Store,
+) -> None:
+    """The bypass path skips the per-resend cooldown but MUST still
+    enforce the rolling hourly cap, otherwise a hostile client that
+    loops ``PUT /api/me/notification-prefs`` (re-saving the same
+    number) could send unlimited SMS at our expense (task #430)."""
+    _run(_push.set_prefs(
+        clerk_user_id="user_bphr", sms_phone_number="+15550008888",
+    ))
+    # Burn through the entire hourly budget via the bypass path.
+    for i in range(_push.SMS_VERIFICATION_HOURLY_LIMIT):
+        out = _run(_push.issue_phone_verification_code(
+            "user_bphr", enforce_rate_limit=False,
+        ))
+        assert out is not None and out["status"] == "ok", (
+            f"bypass attempt #{i + 1} should be allowed within the cap"
+        )
+
+    capped = _run(_push.issue_phone_verification_code(
+        "user_bphr", enforce_rate_limit=False,
+    ))
+    assert capped is not None and capped["status"] == "rate_limited"
+    assert capped["reason"] == "hourly_cap"
+
+
+def test_start_verification_endpoint_returns_429_on_cooldown(
+    store: _Store, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The HTTP layer must surface the cooldown as a real 429 with a
+    parseable ``retry_after_seconds`` payload + ``Retry-After`` header
+    so the UI can disable the Resend button and naive bots back off."""
+    from fastapi.testclient import TestClient
+    from app import main as _main
+    from app.auth import require_auth, AuthedUser
+    from app import billing as _billing
+    from app.notifications import sms as _sms
+
+    user = AuthedUser(
+        user_id="user_429", session_id=None,
+        claims={"sub": "user_429", "email": "r@example.com"},
+    )
+
+    async def _fake_sub(_u):
+        return _billing.UserSubscription(
+            user_id="user_429", email="r@example.com",
+            tier=_billing.TIER_ELITE, status="active",
+            stripe_customer_id=None, stripe_subscription_id=None,
+            stripe_price_id=None, interval=None,
+            current_period_end=None, cancel_at_period_end=False,
+            is_founder=False,
+        )
+
+    async def _fake_sms_send(to, body, *, tag=None):  # noqa: ANN001
+        return [{"to": list(to)[0], "ok": True}]
+
+    monkeypatch.setattr(_billing, "get_user_subscription", _fake_sub)
+    monkeypatch.setattr(_sms, "send", _fake_sms_send)
+    _main.app.dependency_overrides[require_auth] = lambda: user
+    try:
+        client = TestClient(_main.app)
+        # Save phone — this auto-fires one verification SMS and uses
+        # the bypass path on the cooldown gate. Counters now show
+        # last_sent=now, attempts=1.
+        resp = client.put(
+            "/api/me/notification-prefs",
+            json={
+                "sms_phone_number": "+15558881234",
+                "sms_phone_number_present": True,
+            },
+        )
+        assert resp.status_code == 200, resp.text
+
+        # First explicit Resend tap is *also* within the cooldown
+        # because the auto-fire above happened seconds ago. Must 429.
+        resp = client.post(
+            "/api/me/notification-prefs/sms/start-verification"
+        )
+        assert resp.status_code == 429, resp.text
+        body = resp.json()
+        assert body["detail"]["error"] == "resend_rate_limited"
+        assert body["detail"]["reason"] == "cooldown"
+        assert body["detail"]["retry_after_seconds"] >= 1
+        assert body["detail"]["next_resend_allowed_at"]
+        assert resp.headers.get("retry-after")
+
+        # And the UI cooldown hint surfaces on /api/me/notification-prefs
+        # so a page refresh can restore the disabled state without
+        # needing to remember the 429 client-side.
+        resp = client.get("/api/me/notification-prefs")
+        assert resp.status_code == 200, resp.text
+        prefs = resp.json()["prefs"]
+        assert prefs.get("sms_phone_verification_next_resend_allowed_at")
+        # Internal rate-limit columns must NOT leak in the response.
+        assert "sms_phone_verification_last_sent_at" not in prefs
+        assert "sms_phone_verification_attempts" not in prefs
+        assert "sms_phone_verification_window_started_at" not in prefs
+    finally:
+        _main.app.dependency_overrides.pop(require_auth, None)
+
+
+def test_put_prefs_with_unchanged_phone_does_not_resend_sms(
+    store: _Store, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A hostile client cannot bypass the resend rate limit by spamming
+    ``PUT /api/me/notification-prefs`` with the same unverified phone
+    number (task #430). The auto-fire branch must trigger only on a
+    *real* phone change; subsequent saves with the same number are a
+    no-op for SMS dispatch."""
+    from fastapi.testclient import TestClient
+    from app import main as _main
+    from app.auth import require_auth, AuthedUser
+    from app import billing as _billing
+    from app.notifications import sms as _sms
+
+    user = AuthedUser(
+        user_id="user_spam", session_id=None,
+        claims={"sub": "user_spam", "email": "s@example.com"},
+    )
+
+    async def _fake_sub(_u):
+        return _billing.UserSubscription(
+            user_id="user_spam", email="s@example.com",
+            tier=_billing.TIER_ELITE, status="active",
+            stripe_customer_id=None, stripe_subscription_id=None,
+            stripe_price_id=None, interval=None,
+            current_period_end=None, cancel_at_period_end=False,
+            is_founder=False,
+        )
+
+    sms_calls: list[str] = []
+
+    async def _fake_sms_send(to, body, *, tag=None):  # noqa: ANN001
+        for n in to:
+            sms_calls.append(n)
+        return [{"to": n, "ok": True} for n in to]
+
+    monkeypatch.setattr(_billing, "get_user_subscription", _fake_sub)
+    monkeypatch.setattr(_sms, "send", _fake_sms_send)
+    _main.app.dependency_overrides[require_auth] = lambda: user
+    try:
+        client = TestClient(_main.app)
+        # First save: phone goes from None → +15559990001, so the
+        # auto-fire branch dispatches one verification SMS.
+        resp = client.put(
+            "/api/me/notification-prefs",
+            json={
+                "sms_phone_number": "+15559990001",
+                "sms_phone_number_present": True,
+            },
+        )
+        assert resp.status_code == 200, resp.text
+        assert len(sms_calls) == 1, "first save should auto-fire one SMS"
+
+        # Re-save the SAME number five times. None of these should
+        # trigger a new SMS — no phone change, no auto-fire. Without
+        # the task #430 fix this loop sent 5 extra SMS by re-using
+        # the cooldown-bypass branch.
+        for _ in range(5):
+            resp = client.put(
+                "/api/me/notification-prefs",
+                json={
+                    "sms_phone_number": "+15559990001",
+                    "sms_phone_number_present": True,
+                },
+            )
+            assert resp.status_code == 200, resp.text
+        assert len(sms_calls) == 1, (
+            "re-saving an unchanged number must not auto-fire more SMS; "
+            f"got {len(sms_calls)} dispatches"
+        )
+
+        # And the explicit Resend endpoint is still gated by the
+        # cooldown that the original auto-fire armed.
+        resp = client.post(
+            "/api/me/notification-prefs/sms/start-verification"
+        )
+        assert resp.status_code == 429, resp.text
+        assert len(sms_calls) == 1, "rate-limited resend must not dispatch SMS"
+    finally:
+        _main.app.dependency_overrides.pop(require_auth, None)
 
 
 def test_notification_prefs_endpoint_blocks_sms_toggle_without_verification(
