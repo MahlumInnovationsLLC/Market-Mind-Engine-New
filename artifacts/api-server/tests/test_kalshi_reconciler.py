@@ -145,9 +145,12 @@ def _stub_db(monkeypatch, *, local_positions=None, recent_alert=False,
     monkeypatch.setattr(app_db, "execute", _execute)
 
     # Stub the alerts dispatch so dedupe_or_skip never hits the DB and
-    # drift() never reaches for SMTP.
-    import sys
-
+    # drift() never reaches for SMTP. See ``_stub_real_alerts`` for why
+    # we patch attributes on the real module instead of swapping
+    # ``sys.modules`` — the reconciler reaches alerts via
+    # ``from ..notifications import alerts as _alerts`` inside function
+    # bodies, which resolves through the parent package's *attribute*
+    # rather than ``sys.modules``.
     async def _dedupe_or_skip(*a, **kw):
         return True
 
@@ -155,18 +158,38 @@ def _stub_db(monkeypatch, *, local_positions=None, recent_alert=False,
         alerts.append(kwargs)
         return {"sent": True}
 
-    fake_alerts = SimpleNamespace(
-        dedupe_or_skip=_dedupe_or_skip,
-        drift=_drift,
-    )
-    monkeypatch.setitem(sys.modules, "app.notifications.alerts", fake_alerts)
-    # ``from app.notifications import alerts`` resolves the attribute on
-    # the parent package first when one is already bound (any earlier
-    # test in the suite that imported the real module triggers this),
-    # so patch the attribute too — sys.modules alone isn't enough.
-    import app.notifications as _notif_pkg
-    monkeypatch.setattr(_notif_pkg, "alerts", fake_alerts, raising=False)
+    _stub_real_alerts(monkeypatch,
+                      dedupe_or_skip=_dedupe_or_skip, drift=_drift)
     return executes, alerts
+
+
+def _stub_real_alerts(monkeypatch, *, dedupe_or_skip, drift):
+    """Patch attributes on the *real* ``app.notifications.alerts`` module.
+
+    Mirrors the helper introduced in ``test_kalshi_lifecycle.py``
+    (task #265). The reconciler module reaches the alerts dispatch via
+    ``from ..notifications import alerts as _alerts`` inside function
+    bodies. Per Python's ``from X import Y`` semantics, that lookup
+    resolves through the parent package's *attribute* (set when
+    ``app.notifications`` was first imported), NOT through
+    ``sys.modules``. Replacing the entry in ``sys.modules`` is therefore
+    a no-op for those imports — the real ``drift`` / ``dedupe_or_skip``
+    would still run and could schedule Postmark / SMS background tasks
+    (e.g. when ``OPERATOR_ALERT_EMAILS`` is set in CI). When the test's
+    short-lived event loop closes (we spin a fresh one per ``_run``),
+    those un-awaited send coroutines are garbage-collected, polluting
+    the pytest run with ``RuntimeWarning: coroutine ... was never
+    awaited`` and ``Task was destroyed but it is pending!``.
+
+    Patching the attributes directly on the real module routes both
+    ``import`` styles through our stubs and stops the leak at the
+    source.
+    """
+    from app.notifications import alerts as _alerts
+
+    monkeypatch.setattr(_alerts, "dedupe_or_skip", dedupe_or_skip,
+                        raising=False)
+    monkeypatch.setattr(_alerts, "drift", drift, raising=False)
 
 
 # ---------------------------------------------------------------------------
