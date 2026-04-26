@@ -1,6 +1,7 @@
 """Single-cycle execution: discover candidates → swarm → 12 gates → place."""
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import time
@@ -1194,6 +1195,19 @@ async def run_cycle(vertical: str = "sports") -> CycleResult:
         per_event,
     ) = await _open_position_aggregates()
     trades_today_per_league = await _today_trade_counts_per_league()
+
+    # Best-effort cap-bucket warn check: page the on-call when any
+    # NFL exposure bucket (per-league, per-game, Sunday-window)
+    # crosses the warn threshold (default 80%) so they hear about
+    # it before the next bet is silently blocked. Dedup is handled
+    # inside the helper so it cannot spam every cycle. Scheduled as
+    # a fire-and-forget task to avoid adding Postmark latency to the
+    # hot path; failures are swallowed.
+    try:
+        from ..notifications.cap_warnings import check_nfl_cap_warnings
+        asyncio.create_task(check_nfl_cap_warnings())
+    except Exception as e:  # pragma: no cover — defensive
+        log.debug("cap-warn check failed to schedule: %s", e)
 
     # 1) Cached approved debates first (cheap — no fresh LLM cost).
     cached = await _cached_debates(vertical, limit=10, aggression_mode=aggression_mode)

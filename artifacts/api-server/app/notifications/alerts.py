@@ -1491,6 +1491,71 @@ def rc_webhook_failure_rate(
     return _dispatch(subject, body, tag="rc-webhook-failures", dry_run=dry_run)
 
 
+def cap_bucket_warn(
+    *,
+    league: str,
+    bucket: str,
+    label: str,
+    open_usd: float,
+    cap_usd: float,
+    cap_pct: float,
+    utilization: float,
+    warn_threshold: float,
+    bankroll_usd: float | None,
+    matchup: str | None = None,
+    dry_run: bool = False,
+) -> dict[str, Any]:
+    """Operator alert: an exposure cap bucket has crossed the warn
+    threshold (default 80% of its configured cap).
+
+    Mirrors the dashboard panel from task #208 — the same buckets
+    ``dashboard.get_nfl_exposure()`` exposes (per-league, Sunday-window,
+    per-matchup) — but pages the on-call instead of waiting for
+    someone to be looking at the page when the next bet is silently
+    blocked by the risk gate.
+
+    Caller is expected to debounce via ``dedupe_or_skip`` keyed on
+    ``f"{league}:{bucket}"`` (with the matchup appended for the
+    per-game variant) so the warn fires once per incident rather than
+    once per cycle.
+    """
+    util_pct = utilization * 100.0
+    thr_pct = warn_threshold * 100.0
+    headroom_usd = max(0.0, cap_usd - open_usd)
+    subject = (
+        f"[axiom][CAP] {league} {label} at {util_pct:.1f}% "
+        f"of cap (warn >= {thr_pct:.0f}%)"
+    )
+    body = (
+        f"An NFL exposure cap bucket has crossed the {thr_pct:.0f}% warn "
+        "threshold.\n"
+        "The orchestrator's per-league / per-game / Sunday-window risk "
+        "gates will start blocking new bets in this bucket once the cap "
+        "is exhausted, so investigate before the next cycle silently "
+        "rejects a candidate.\n\n"
+        + _format_lines(
+            [
+                ("league", league),
+                ("bucket", bucket),
+                ("matchup", matchup or "(n/a)"),
+                ("open_usd", f"{open_usd:,.2f}"),
+                ("cap_usd", f"{cap_usd:,.2f}"),
+                ("cap_pct_of_bankroll", f"{cap_pct * 100.0:.2f}%"),
+                ("utilization_pct", f"{util_pct:.2f}%"),
+                ("warn_threshold_pct", f"{thr_pct:.2f}%"),
+                ("headroom_usd", f"{headroom_usd:,.2f}"),
+                (
+                    "bankroll_usd",
+                    f"{bankroll_usd:,.2f}" if bankroll_usd is not None else "(unknown)",
+                ),
+                ("at", _utc_now_iso()),
+            ]
+        )
+        + "\n"
+    )
+    return _dispatch(subject, body, tag="cap-bucket-warn", dry_run=dry_run)
+
+
 def bankroll_sync_silent(
     *,
     last_tick_at: str | None,
