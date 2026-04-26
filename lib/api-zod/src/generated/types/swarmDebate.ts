@@ -6,6 +6,7 @@
  * OpenAPI spec version: 0.1.0
  */
 import type { SwarmDebateAnalystVerdicts } from "./swarmDebateAnalystVerdicts";
+import type { SwarmDebateGameContext } from "./swarmDebateGameContext";
 import type { SwarmDebateModeratorSynthesis } from "./swarmDebateModeratorSynthesis";
 
 export interface SwarmDebate {
@@ -25,5 +26,6 @@ export interface SwarmDebate {
   created_at?: string | null;
   analyst_verdicts?: SwarmDebateAnalystVerdicts;
   moderator_synthesis?: SwarmDebateModeratorSynthesis;
+  game_context?: SwarmDebateGameContext;
   redacted?: boolean | null;
 }

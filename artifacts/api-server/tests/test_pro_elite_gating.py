@@ -80,6 +80,23 @@ _SAMPLE_DEBATE: dict[str, Any] = {
         {"persona": "contrarian", "lean": "NO", "reasoning": "books are sharp"},
     ],
     "moderator_synthesis": {"reasoning": "weighted majority lands YES"},
+    # Per-debate audit blob.  For tournament-market debates the
+    # orchestrator merges a Plackett-Luce per-entrant sketch in here so
+    # the analyst dashboard can render the full field of probabilities.
+    # Sub-Pro callers see this stripped along with the rest of the
+    # transcript (it can identify the kalshi_market_id).
+    "game_context": {
+        "kalshi_market_id": "KX-NBA-001",
+        "plackett_luce_sketch": {
+            "model": "plackett_luce",
+            "entrant": "alcaraz",
+            "entrant_rating": 2200,
+            "entrant_probability": 0.45,
+            "field_size": 3,
+            "ratings": {"alcaraz": 2200, "sinner": 2150, "djokovic": 2100},
+            "probabilities": {"alcaraz": 0.45, "sinner": 0.35, "djokovic": 0.20},
+        },
+    },
     # Pinned to a far-past timestamp so the free-tier 15-minute signal
     # delay (see app/free_tier.py) never drops this fixture row.
     "created_at": "2020-01-01T00:00:00Z",
@@ -142,9 +159,12 @@ def test_recent_debates_redacts_transcripts_for_free_callers(
     assert item["matchup"] == "LAL vs BOS"
     assert item["consensus_probability"] == 0.55
     assert item["recommended_action"] == "BUY_YES"
-    # Persona reasoning + moderator narrative are gone.
+    # Persona reasoning + moderator narrative are gone — and the
+    # game_context audit blob (which carries the Plackett-Luce sketch
+    # and the kalshi market id) is stripped along with them.
     assert "analyst_verdicts" not in item
     assert "moderator_synthesis" not in item
+    assert "game_context" not in item
     assert item["redacted"] is True
 
 
@@ -169,6 +189,15 @@ def test_recent_debates_returns_full_transcript_for_pro_plus(
     }
     assert "reasoning" in item["analyst_verdicts"][0]
     assert item["moderator_synthesis"]["reasoning"].startswith("weighted")
+    # game_context (Plackett-Luce per-entrant sketch + market id) is
+    # passed through verbatim so the analyst tournament view can render
+    # the full field.
+    assert item["game_context"]["kalshi_market_id"] == "KX-NBA-001"
+    sketch = item["game_context"]["plackett_luce_sketch"]
+    assert sketch["entrant"] == "alcaraz"
+    assert sketch["field_size"] == 3
+    assert set(sketch["probabilities"]) == {"alcaraz", "sinner", "djokovic"}
+    assert sum(sketch["probabilities"].values()) == pytest.approx(1.0, abs=1e-9)
     assert item["redacted"] is False
 
 

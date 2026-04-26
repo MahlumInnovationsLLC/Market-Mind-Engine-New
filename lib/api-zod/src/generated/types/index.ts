@@ -119,6 +119,7 @@ export * from "./storageHealth";
 export * from "./storageSampleEntry";
 export * from "./swarmDebate";
 export * from "./swarmDebateAnalystVerdicts";
+export * from "./swarmDebateGameContext";
 export * from "./swarmDebateList";
 export * from "./swarmDebateModeratorSynthesis";
 export * from "./swarmDebateRequest";

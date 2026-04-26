@@ -1853,6 +1853,7 @@ async def get_recent_swarm_debates(limit: int = 10) -> list[dict[str, Any]]:
               latency_ms,
               analyst_verdicts,
               moderator_synthesis,
+              game_context,
               to_char(created_at, 'YYYY-MM-DD"T"HH24:MI:SSZ') AS created_at
             FROM swarm_debates
             ORDER BY created_at DESC NULLS LAST
@@ -1860,7 +1861,24 @@ async def get_recent_swarm_debates(limit: int = 10) -> list[dict[str, Any]]:
             """,
             limit,
         )
-        return [dict(r) for r in rows]
+        out: list[dict[str, Any]] = []
+        for r in rows:
+            row = dict(r)
+            # `game_context` is jsonb in the DB; asyncpg usually decodes
+            # it to a dict, but older codecs may hand back a JSON string.
+            # Normalize to a dict (or None) so the API contract matches
+            # the OpenAPI schema and the frontend never has to JSON.parse
+            # a stringified blob.
+            ctx_raw = row.get("game_context")
+            if isinstance(ctx_raw, str):
+                try:
+                    row["game_context"] = json.loads(ctx_raw)
+                except Exception:
+                    row["game_context"] = None
+            elif ctx_raw is not None and not isinstance(ctx_raw, dict):
+                row["game_context"] = None
+            out.append(row)
+        return out
     except Exception as e:
         log.warning("recent_swarm_debates failed: %s", e)
         return []
@@ -2722,6 +2740,11 @@ def redact_swarm_debate_transcripts(items: list[dict[str, Any]]) -> list[dict[st
         clone = dict(it)
         clone.pop("analyst_verdicts", None)
         clone.pop("moderator_synthesis", None)
+        # `game_context` carries the per-debate audit blob — including
+        # the Plackett-Luce per-entrant probability sketch that powers
+        # the analyst tournament view.  Treat it like the rest of the
+        # transcript and strip it for sub-Pro callers.
+        clone.pop("game_context", None)
         clone["redacted"] = True
         out.append(clone)
     return out

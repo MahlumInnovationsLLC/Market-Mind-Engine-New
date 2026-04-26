@@ -474,6 +474,8 @@ export type SwarmDebateAnalystVerdicts =
 
 export type SwarmDebateModeratorSynthesis = { [key: string]: unknown } | null;
 
+export type SwarmDebateGameContext = { [key: string]: unknown } | null;
+
 export interface SwarmDebate {
   id: number;
   league?: string | null;
@@ -491,6 +493,7 @@ export interface SwarmDebate {
   created_at?: string | null;
   analyst_verdicts?: SwarmDebateAnalystVerdicts;
   moderator_synthesis?: SwarmDebateModeratorSynthesis;
+  game_context?: SwarmDebateGameContext;
   redacted?: boolean | null;
 }
 

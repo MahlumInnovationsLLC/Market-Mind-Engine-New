@@ -1407,6 +1407,16 @@ components:
           nullable: true
           type: object
           additionalProperties: true
+        # Persisted per-debate context (kalshi market id, line, n-way
+        # field, etc.).  For tournament-market debates the orchestrator
+        # also merges in `plackett_luce_sketch` here so analysts can
+        # audit the per-entrant rating + win probability for the field
+        # the traded leg was being priced against.  Sub-Pro callers see
+        # this stripped (along with the rest of the transcript blob).
+        game_context:
+          nullable: true
+          type: object
+          additionalProperties: true
         redacted: { type: boolean, nullable: true }
       required: [id]
 

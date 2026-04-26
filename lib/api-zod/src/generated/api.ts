@@ -707,6 +707,7 @@ export const GetRecentDebatesResponse = zod.object({
         ])
         .nullish(),
       moderator_synthesis: zod.record(zod.string(), zod.unknown()).nullish(),
+      game_context: zod.record(zod.string(), zod.unknown()).nullish(),
       redacted: zod.boolean().nullish(),
     }),
   ),
