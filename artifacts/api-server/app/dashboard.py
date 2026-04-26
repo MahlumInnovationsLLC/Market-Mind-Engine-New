@@ -1826,6 +1826,52 @@ async def get_recent_uw_signals(
         return []
 
 
+async def get_swarm_debate_by_id(debate_id: int) -> dict[str, Any] | None:
+    """Fetch a single ``swarm_debates`` row by primary key.
+
+    Returns ``None`` if no row exists. Same column projection as
+    :func:`get_recent_swarm_debates` so the per-id endpoint and the
+    list endpoint render identically on the mobile detail screen
+    (which falls back to this when the debate has fallen off the
+    cached recent feed, e.g. older than the top 25 or opened cold
+    from a deep link / push notification).
+
+    The ``analyst_verdicts`` and ``moderator_synthesis`` jsonb columns
+    are returned raw — the calling endpoint is responsible for redacting
+    them for sub-Pro callers via
+    :func:`redact_swarm_debate_transcripts`.
+    """
+    try:
+        row = await db.fetchrow(
+            """
+            SELECT
+              id,
+              league,
+              matchup,
+              market_type,
+              consensus_probability,
+              confidence_band_low,
+              confidence_band_high,
+              agreement_rate,
+              approved,
+              recommended_action,
+              outcome,
+              cost_estimate,
+              latency_ms,
+              analyst_verdicts,
+              moderator_synthesis,
+              to_char(created_at, 'YYYY-MM-DD"T"HH24:MI:SSZ') AS created_at
+            FROM swarm_debates
+            WHERE id = $1
+            """,
+            int(debate_id),
+        )
+        return dict(row) if row else None
+    except Exception as e:
+        log.warning("get_swarm_debate_by_id(%s) failed: %s", debate_id, e)
+        return None
+
+
 async def get_recent_swarm_debates(limit: int = 10) -> list[dict[str, Any]]:
     """Recent swarm-debate rows including the per-persona ``analyst_verdicts``
     and ``moderator_synthesis`` jsonb columns.

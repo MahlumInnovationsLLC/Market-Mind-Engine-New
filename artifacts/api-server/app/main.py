@@ -4959,6 +4959,55 @@ async def dashboard_recent_debates(
     }
 
 
+@app.get("/api/dashboard/debates/{debate_id}")
+async def dashboard_debate_by_id(
+    debate_id: int,
+    user: AuthedUser = Depends(require_auth),
+) -> dict[str, object]:
+    """Single LLM swarm debate by id.
+
+    Backs the mobile debate detail screen for the cold-start /
+    deep-link / push-notification flow: the screen normally reads the
+    transcript out of the cached ``/api/dashboard/recent-debates?limit=25``
+    list, but if the debate has fallen off that window (or the app was
+    re-opened after the cache was evicted) the list lookup fails and
+    the screen falls back to this endpoint instead of stranding the
+    user on "Debate not found in recent feed."
+
+    Applies the exact same Pro-vs-free redaction as the list endpoint:
+    sub-Pro callers receive consensus / agreement / verdict / timing
+    only, with ``redacted=true`` so the frontend can render the upsell
+    card; Pro+ (and founders) get the full transcript verbatim.
+    Sub-Pro callers also see the standard 15-minute signal delay —
+    debates younger than that 404 the same way the list endpoint
+    silently drops them, so this endpoint can never be used to
+    side-step the delay window.
+    """
+    item = await dashboard.get_swarm_debate_by_id(debate_id)
+    if item is None:
+        raise HTTPException(status_code=404, detail="debate_not_found")
+    sub = await billing.get_user_subscription(user)
+    delayed = False
+    if billing._TIER_RANK[sub.tier] < billing._TIER_RANK[billing.TIER_PRO]:
+        delayed_items = free_tier.apply_signal_delay(
+            [item], timestamp_key="created_at"
+        )
+        if not delayed_items:
+            # Within the free-tier delay window — pretend it doesn't
+            # exist yet, exactly like the list endpoint does.
+            raise HTTPException(status_code=404, detail="debate_not_found")
+        item = dashboard.redact_swarm_debate_transcripts(delayed_items)[0]
+        delayed = True
+    else:
+        item.setdefault("redacted", False)
+    return {
+        "item": item,
+        "tier": sub.tier,
+        "delayed": delayed,
+        "delay_minutes": free_tier.FREE_TIER_DELAY_MINUTES if delayed else 0,
+    }
+
+
 # ---------------------------------------------------------------------------
 # Swarm: 6-persona LLM debate + gatekeeper
 # ---------------------------------------------------------------------------

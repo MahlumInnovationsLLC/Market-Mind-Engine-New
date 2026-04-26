@@ -79,6 +79,13 @@ type DebatesResponse = {
   delay_minutes?: number;
 };
 
+type DebateByIdResponse = {
+  item: DebateDetail;
+  tier?: string;
+  delayed?: boolean;
+  delay_minutes?: number;
+};
+
 function fmtPct(n: number | null | undefined, digits = 0): string {
   if (n === null || n === undefined) return "—";
   return `${(n * 100).toFixed(digits)}%`;
@@ -107,8 +114,36 @@ export default function DebateDetailScreen() {
       apiFetch<DebatesResponse>("/api/dashboard/recent-debates?limit=25"),
   });
 
-  const item = (debates.data?.items ?? []).find((d) => d.id === debateId) ?? null;
-  const status = (debates.error as { status?: number } | null)?.status;
+  const itemFromList =
+    (debates.data?.items ?? []).find((d) => d.id === debateId) ?? null;
+
+  // Per-id fallback: if the debate isn't in the cached recent feed
+  // (older than the top 25, evicted, or this screen was opened cold
+  // from a deep link / push notification), fetch it directly. The
+  // backend applies the exact same Pro-vs-free redaction the list
+  // endpoint does, so the rendering below works identically either
+  // way.
+  const debateById = useQuery({
+    queryKey: ["dashboard", "debate-by-id", debateId],
+    queryFn: () =>
+      apiFetch<DebateByIdResponse>(`/api/dashboard/debates/${debateId}`),
+    enabled:
+      Number.isFinite(debateId) &&
+      !debates.isLoading &&
+      itemFromList === null &&
+      // Don't fall back when the list call itself failed — the user
+      // already sees the list error and we'd just pile on a second
+      // (likely identical) failure.
+      !debates.isError,
+  });
+
+  const item = itemFromList ?? debateById.data?.item ?? null;
+  const isLoading =
+    debates.isLoading || (itemFromList === null && debateById.isLoading);
+  const isError = debates.isError || debateById.isError;
+  const status =
+    (debates.error as { status?: number } | null)?.status ??
+    (debateById.error as { status?: number } | null)?.status;
 
   const headerTitle = item?.matchup ?? `DEBATE #${debateId}`;
 
@@ -127,16 +162,18 @@ export default function DebateDetailScreen() {
           headerBackTitle: "Back",
         }}
       />
-      {debates.isLoading ? (
+      {isLoading ? (
         <View style={styles.center}>
           <ActivityIndicator color={colors.primary} />
         </View>
-      ) : debates.isError ? (
+      ) : isError && !item ? (
         <View style={[styles.center, { padding: 24 }]}>
           <Text style={{ color: colors.destructive }}>
             {status === 403
               ? "Awaiting operator approval"
-              : `Failed to load (HTTP ${status ?? "?"})`}
+              : status === 404
+                ? "Debate not found."
+                : `Failed to load (HTTP ${status ?? "?"})`}
           </Text>
           <Pressable
             onPress={() => router.back()}
@@ -149,7 +186,7 @@ export default function DebateDetailScreen() {
       ) : !item ? (
         <View style={[styles.center, { padding: 24 }]}>
           <Text style={{ color: colors.mutedForeground }}>
-            Debate not found in recent feed.
+            Debate not found.
           </Text>
           <Pressable
             onPress={() => router.back()}

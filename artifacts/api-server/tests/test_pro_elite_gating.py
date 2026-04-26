@@ -23,6 +23,7 @@ is replaced wholesale so the suite never touches the real billing schema.
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from typing import Any
 
 import pytest
@@ -114,6 +115,24 @@ def patch_recent_debates(monkeypatch):
 
 
 @pytest.fixture
+def patch_debate_by_id(monkeypatch):
+    """Replace the per-id reader so the tests exercise the endpoint
+    without round-tripping through the real ``swarm_debates`` table."""
+    state: dict[str, Any] = {"row": dict(_SAMPLE_DEBATE)}
+
+    async def _fake_get(debate_id: int) -> dict[str, Any] | None:
+        row = state["row"]
+        if row is None:
+            return None
+        if int(debate_id) != int(row["id"]):
+            return None
+        return dict(row)
+
+    monkeypatch.setattr(dashboard, "get_swarm_debate_by_id", _fake_get)
+    return state
+
+
+@pytest.fixture
 def patch_subscription(monkeypatch):
     """Stub ``billing.get_user_subscription`` so each test picks the tier
     without round-tripping through the real subscriptions table."""
@@ -199,6 +218,100 @@ def test_recent_debates_returns_full_transcript_for_pro_plus(
     assert set(sketch["probabilities"]) == {"alcaraz", "sinner", "djokovic"}
     assert sum(sketch["probabilities"].values()) == pytest.approx(1.0, abs=1e-9)
     assert item["redacted"] is False
+
+
+# ---------------------------------------------------------------------------
+# Per-id /api/dashboard/debates/{id} fallback for the mobile detail screen
+# ---------------------------------------------------------------------------
+
+
+def test_debate_by_id_redacts_transcripts_for_free_callers(
+    patch_debate_by_id, patch_subscription, override_auth
+):
+    """Sub-Pro callers see the same redacted shape the list endpoint
+    produces — public-safe fields only, ``redacted=true``, no
+    per-persona reasoning, no moderator narrative."""
+    patch_subscription["value"] = _sub(billing.TIER_FREE)
+    client = TestClient(app)
+    resp = client.get("/api/dashboard/debates/42")
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["tier"] == billing.TIER_FREE
+    item = body["item"]
+    assert item["id"] == 42
+    assert item["matchup"] == "LAL vs BOS"
+    assert item["consensus_probability"] == 0.55
+    assert item["recommended_action"] == "BUY_YES"
+    assert "analyst_verdicts" not in item
+    assert "moderator_synthesis" not in item
+    assert item["redacted"] is True
+    assert body["delayed"] is True
+
+
+@pytest.mark.parametrize(
+    "tier", [billing.TIER_PRO, billing.TIER_ELITE, billing.TIER_FOUNDER]
+)
+def test_debate_by_id_returns_full_transcript_for_pro_plus(
+    tier, patch_debate_by_id, patch_subscription, override_auth
+):
+    """Pro+ (and founders) get the full transcript verbatim — same
+    contract as the list endpoint, exposed one row at a time so the
+    mobile detail screen can render even when the requested debate
+    has fallen off the cached recent feed."""
+    patch_subscription["value"] = _sub(tier)
+    client = TestClient(app)
+    resp = client.get("/api/dashboard/debates/42")
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["tier"] == tier
+    item = body["item"]
+    assert isinstance(item["analyst_verdicts"], list)
+    assert {v["persona"] for v in item["analyst_verdicts"]} == {
+        "quant_value",
+        "contrarian",
+    }
+    assert item["moderator_synthesis"]["reasoning"].startswith("weighted")
+    assert item["redacted"] is False
+    assert body["delayed"] is False
+
+
+def test_debate_by_id_returns_404_for_unknown_id(
+    patch_debate_by_id, patch_subscription, override_auth
+):
+    """The reader returns ``None`` for a missing row → endpoint 404s
+    instead of leaking an empty payload."""
+    patch_subscription["value"] = _sub(billing.TIER_PRO)
+    client = TestClient(app)
+    resp = client.get("/api/dashboard/debates/999")
+    assert resp.status_code == 404, resp.text
+    assert resp.json() == {"detail": "debate_not_found"}
+
+
+def test_debate_by_id_404s_within_free_tier_delay_window(
+    patch_debate_by_id, patch_subscription, override_auth
+):
+    """A debate younger than the free-tier signal-delay window must
+    look like it doesn't exist yet to sub-Pro callers — otherwise the
+    per-id endpoint would be a trivial way to side-step the delay
+    that the list endpoint already enforces."""
+    fresh_row = dict(_SAMPLE_DEBATE)
+    fresh_row["created_at"] = datetime.now(timezone.utc).strftime(
+        "%Y-%m-%dT%H:%M:%SZ"
+    )
+    patch_debate_by_id["row"] = fresh_row
+
+    patch_subscription["value"] = _sub(billing.TIER_FREE)
+    client = TestClient(app)
+    resp = client.get("/api/dashboard/debates/42")
+    assert resp.status_code == 404, resp.text
+    assert resp.json() == {"detail": "debate_not_found"}
+
+    # Pro callers see the fresh row immediately — the delay only
+    # applies below the Pro tier.
+    patch_subscription["value"] = _sub(billing.TIER_PRO)
+    resp = client.get("/api/dashboard/debates/42")
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["item"]["id"] == 42
 
 
 # ---------------------------------------------------------------------------
