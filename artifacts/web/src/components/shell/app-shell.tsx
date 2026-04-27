@@ -9,6 +9,7 @@ import { RealtimeNotifications } from "@/components/realtime/realtime-notificati
 import { ShellSidebar } from "./sidebar";
 import { ShellHeader } from "./header";
 import { DegradedModeBanner } from "./degraded-mode-banner";
+import { EloUpdaterBanner } from "./elo-updater-banner";
 import { StuckWsBanner } from "./stuck-ws-banner";
 import { TradingAlertsBanner } from "./trading-alerts-banner";
 
@@ -48,6 +49,7 @@ function AppShellInner({ isAdmin, operatorEmail, children }: AppShellProps) {
         <DegradedModeBanner />
         <TradingAlertsBanner />
         <StuckWsBanner />
+        <EloUpdaterBanner />
         <ShellHeader operatorEmail={operatorEmail} />
         <main
           id="main-content"

@@ -204,7 +204,7 @@ export default function SystemPage() {
             <TriggerCyclePanel />
           </GlassCard>
 
-          <GlassCard tone="solid" padding="md">
+          <GlassCard tone="solid" padding="md" data-focus-id="elo-updater">
             <div className="mb-3 text-[11px] font-semibold uppercase tracking-[0.18em] text-accent-cyan/80">
               Team rating updater
             </div>
