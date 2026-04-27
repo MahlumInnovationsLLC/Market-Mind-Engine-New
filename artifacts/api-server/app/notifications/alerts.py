@@ -1766,6 +1766,70 @@ def elo_updater_unhealthy(
     return _dispatch(subject, body, tag="elo-updater-unhealthy", dry_run=dry_run)
 
 
+def leaderboard_silent(
+    *,
+    zero_rows_since: str | None,
+    age_seconds: float,
+    threshold_seconds: float,
+    events_live: int,
+    cadence_seconds: float | None,
+    last_refresh_at: str | None,
+    last_success_at: str | None,
+    dry_run: bool = False,
+) -> dict[str, Any]:
+    """Operator alert: the Sportradar tournament-leaderboard refresher
+    has gone silent during a live event window.
+
+    Fired by the health collector when the per-cycle metadata stashed
+    by ``feeds.sportradar._poll_tournament_leaderboards`` shows
+    ``events_live > 0`` together with a non-null ``zero_rows_since``
+    streak whose age exceeds ``threshold_seconds`` (default 600 — the
+    same 10-minute floor the operator-console "stale leaderboard"
+    badge uses, per task #624). Intra-event PGA / F1 pricing depends
+    on these refreshes, so a silent leaderboard during a live
+    tournament means downstream picks are flying on stale ratings.
+
+    The caller persists a ``model_health_alerts`` row with
+    ``alert_type='leaderboard_silent'`` so the operator console can
+    snooze / acknowledge it via the existing model-alert flow, and
+    debounces via ``dedupe_or_skip`` keyed on a stable incident label
+    so a sustained outage produces one page, not one per snapshot.
+    """
+    minutes = max(1, int(round(age_seconds / 60.0)))
+    threshold_min = max(1, int(round(threshold_seconds / 60.0)))
+    subject = (
+        f"[axiom][LEADERBOARD] Sportradar tournament refresher silent "
+        f"for {minutes}m (>{threshold_min}m threshold, "
+        f"{events_live} live event{'s' if events_live != 1 else ''})"
+    )
+    body = (
+        "The cross-sport tournament-leaderboard refresher has been\n"
+        "writing 0 rows on every cycle while live PGA / F1 events are\n"
+        "in progress. Intra-event ratings drive the predictor's prices\n"
+        "for those markets, so a silent refresher means downstream\n"
+        "picks are degrading against stale leaderboards.\n\n"
+        "Investigate the api-server logs and Sportradar key / quota\n"
+        "for the affected sports before the next live cycle.\n\n"
+        + _format_lines(
+            [
+                ("events_live", events_live),
+                ("zero_rows_since", zero_rows_since or "(unknown)"),
+                ("age_seconds", f"{age_seconds:.0f}"),
+                ("threshold_seconds", f"{threshold_seconds:.0f}"),
+                (
+                    "cadence_seconds",
+                    f"{cadence_seconds:.0f}" if cadence_seconds is not None else "(n/a)",
+                ),
+                ("last_refresh_at", last_refresh_at or "(never)"),
+                ("last_success_at", last_success_at or "(never)"),
+                ("at", _utc_now_iso()),
+            ]
+        )
+        + "\n"
+    )
+    return _dispatch(subject, body, tag="leaderboard-silent", dry_run=dry_run)
+
+
 def rc_webhook_silence(
     *,
     silence_seconds: int,

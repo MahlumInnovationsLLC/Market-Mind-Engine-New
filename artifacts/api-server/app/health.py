@@ -1791,6 +1791,236 @@ def _probe_ws_subscribers() -> dict:
     )
 
 
+# ---------------------------------------------------------------------------
+# Sportradar tournament-leaderboard silence alert (task #653)
+#
+# The cross-sport tournament-leaderboard refresher
+# (`feeds.sportradar._poll_tournament_leaderboards`) stashes a
+# `zero_rows_since` timestamp on its FeedStatus.metadata whenever it
+# finishes a cycle that wrote 0 rows while live PGA / F1 events were
+# in progress. The operator console fires a "stale leaderboard" badge
+# once that streak crosses 10 minutes, but only operators actively
+# watching the page see it. This probe wires the same condition into
+# the model-alert / Postmark notification path so on-call gets paged
+# the moment intra-event pricing goes silent during a live tournament.
+#
+# Behaviour:
+#   * Fires exactly once per incident when the streak crosses
+#     `LEADERBOARD_SILENCE_THRESHOLD_SECONDS`.
+#   * Inserts a `model_health_alerts` row with
+#     `alert_type='leaderboard_silent'` so operators can snooze /
+#     acknowledge it via the existing model-alert flow.
+#   * Auto-resolves any open `leaderboard_silent` rows the moment the
+#     next non-zero refresh (or the off-season clearing) drops the
+#     streak — operator's snooze is left untouched intentionally.
+# ---------------------------------------------------------------------------
+
+
+# Same 10-minute threshold the operator console uses for its
+# "stale leaderboard" badge (task #624). Floor 60s so a misconfigured
+# env can't accidentally page on every 30s health snapshot.
+LEADERBOARD_SILENCE_THRESHOLD_SECONDS = max(
+    60,
+    int(
+        os.environ.get("AXIOM_LEADERBOARD_SILENCE_THRESHOLD_SECONDS")
+        or str(10 * 60)
+    ),
+)
+
+# Dedupe window for the resulting Postmark alert. One page per
+# incident per hour is plenty.
+LEADERBOARD_SILENCE_ALERT_TTL_SECONDS = max(
+    60,
+    int(
+        os.environ.get("AXIOM_LEADERBOARD_SILENCE_ALERT_TTL_SECONDS")
+        or "3600"
+    ),
+)
+
+
+# Stable in-memory flag so the alert fires exactly once per incident.
+# `True` means the current streak has already produced a page; no
+# follow-up snapshots will re-page until the streak resolves and a
+# brand-new one starts.
+_leaderboard_silence_alerted: bool = False
+
+
+def _reset_leaderboard_silence_state() -> None:
+    """Test helper — reset the in-memory alerted flag."""
+    global _leaderboard_silence_alerted
+    _leaderboard_silence_alerted = False
+
+
+def _parse_iso_age_seconds(iso_str: str | None) -> float | None:
+    """Parse a UTC-ISO timestamp and return its age in seconds.
+
+    Returns ``None`` when the input is empty or unparseable so the
+    caller can treat it as "no streak".
+    """
+    if not iso_str:
+        return None
+    try:
+        ts = datetime.fromisoformat(iso_str)
+    except ValueError:
+        return None
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=timezone.utc)
+    return (datetime.now(tz=timezone.utc) - ts).total_seconds()
+
+
+def _evaluate_leaderboard_silence_alert() -> dict | None:
+    """Examine the tournament-leaderboard feed metadata and either:
+
+      * fire one Postmark alert + insert a `model_health_alerts` row
+        when the zero-row streak crosses the configured threshold, or
+      * auto-resolve any open `leaderboard_silent` rows when the
+        streak ends (next non-zero refresh or events drop off).
+
+    Returns the triggered payload (used by tests) or ``None`` when
+    nothing happened on this snapshot.
+    """
+    global _leaderboard_silence_alerted
+
+    # Local import keeps the health-module import graph free of the
+    # feeds-package transitive deps for unrelated probes.
+    from .feeds.sportradar import TOURNAMENT_LEADERBOARDS_FEED_NAME
+
+    st = feed_registry.status_of(TOURNAMENT_LEADERBOARDS_FEED_NAME)
+    if st is None:
+        return None
+    meta = st.metadata or {}
+    events_live = int(meta.get("events_live") or 0)
+    zero_rows_since = meta.get("zero_rows_since") or None
+    age = _parse_iso_age_seconds(zero_rows_since) if zero_rows_since else None
+    is_stale = (
+        events_live > 0
+        and zero_rows_since is not None
+        and age is not None
+        and age > LEADERBOARD_SILENCE_THRESHOLD_SECONDS
+    )
+
+    if not is_stale:
+        if _leaderboard_silence_alerted:
+            _leaderboard_silence_alerted = False
+            _schedule_leaderboard_silence_resolve()
+        return None
+
+    if _leaderboard_silence_alerted:
+        return None
+
+    _leaderboard_silence_alerted = True
+    triggered = {
+        "events_live": events_live,
+        "zero_rows_since": zero_rows_since,
+        "age_seconds": round(age, 1) if age is not None else None,
+        "threshold_seconds": float(LEADERBOARD_SILENCE_THRESHOLD_SECONDS),
+        "cadence_seconds": st.cadence_seconds,
+        "last_refresh_at": meta.get("last_refresh_at"),
+        "last_success_at": _iso(st.last_ok_at) if st.last_ok_at else None,
+    }
+    error_log(
+        "leaderboard_silent",
+        f"events_live={events_live} zero_rows_since={zero_rows_since} "
+        f"age={triggered['age_seconds']}s",
+    )
+    _schedule_leaderboard_silence_dispatch(triggered)
+    return triggered
+
+
+def _schedule_leaderboard_silence_dispatch(triggered: dict) -> None:
+    """Run the persist + dedupe + email pipeline on the running event
+    loop (or inline in a sync test context)."""
+    from .notifications import alerts as _alerts
+
+    async def _runner() -> None:
+        # Persist the model_health_alerts row first so it surfaces
+        # immediately on the operator console even if Postmark dedupe
+        # later suppresses the email.
+        try:
+            await db.execute(
+                """
+                INSERT INTO model_health_alerts
+                    (vertical, alert_type, severity, metric_name,
+                     metric_value, threshold, message, acknowledged)
+                VALUES ('sportradar', 'leaderboard_silent', 'warning',
+                        'zero_rows_streak_seconds', $1, $2, $3, false)
+                ON CONFLICT (id) DO NOTHING
+                """,
+                float(triggered["age_seconds"]) if triggered["age_seconds"] is not None else None,
+                float(triggered["threshold_seconds"]),
+                (
+                    f"Sportradar tournament leaderboard refresher silent for "
+                    f"{int(round((triggered['age_seconds'] or 0) / 60.0))}m "
+                    f"({triggered['events_live']} live event(s)); "
+                    f"streak started {triggered['zero_rows_since'] or '(unknown)'}"
+                ),
+            )
+        except Exception as e:  # pragma: no cover — fail-open
+            log.warning("leaderboard_silent insert failed: %s", e)
+        try:
+            ok = await _alerts.dedupe_or_skip(
+                "leaderboard_silent",
+                "sportradar_tournament_leaderboards",
+                ttl_seconds=LEADERBOARD_SILENCE_ALERT_TTL_SECONDS,
+            )
+        except Exception as e:  # pragma: no cover
+            log.warning("leaderboard_silent dedupe failed: %s", e)
+            ok = True
+        if not ok:
+            return
+        try:
+            _alerts.leaderboard_silent(
+                zero_rows_since=triggered["zero_rows_since"],
+                age_seconds=float(triggered["age_seconds"] or 0.0),
+                threshold_seconds=float(triggered["threshold_seconds"]),
+                events_live=int(triggered["events_live"]),
+                cadence_seconds=triggered.get("cadence_seconds"),
+                last_refresh_at=triggered.get("last_refresh_at"),
+                last_success_at=triggered.get("last_success_at"),
+            )
+        except Exception as e:  # pragma: no cover
+            log.warning("leaderboard_silent dispatch failed: %s", e)
+
+    try:
+        loop = asyncio.get_running_loop()
+        loop.create_task(_runner())
+    except RuntimeError:
+        try:
+            asyncio.run(_runner())
+        except Exception as e:  # pragma: no cover
+            log.warning("inline leaderboard_silent dispatch failed: %s", e)
+
+
+def _schedule_leaderboard_silence_resolve() -> None:
+    """Auto-acknowledge any open `leaderboard_silent` alerts when the
+    streak ends. Marks them with `acknowledged_by='auto-resolved'` so
+    the audit log distinguishes operator acks from automatic ones.
+    """
+    async def _runner() -> None:
+        try:
+            await db.execute(
+                """
+                UPDATE model_health_alerts
+                   SET acknowledged = true,
+                       acknowledged_by = COALESCE(acknowledged_by, 'auto-resolved'),
+                       acknowledged_at = COALESCE(acknowledged_at, now())
+                 WHERE alert_type = 'leaderboard_silent'
+                   AND acknowledged = false
+                """,
+            )
+        except Exception as e:  # pragma: no cover
+            log.warning("leaderboard_silent auto-resolve failed: %s", e)
+
+    try:
+        loop = asyncio.get_running_loop()
+        loop.create_task(_runner())
+    except RuntimeError:
+        try:
+            asyncio.run(_runner())
+        except Exception as e:  # pragma: no cover
+            log.warning("inline leaderboard_silent auto-resolve failed: %s", e)
+
+
 def _probe_feeds() -> list[dict]:
     out: list[dict] = []
     for s in feed_registry.snapshot():
@@ -2002,6 +2232,14 @@ async def _build_snapshot() -> _Snapshot:
         _probe_orderbook_guard(),
         *_probe_feeds(),
     ]
+    # Side-effect-only evaluation: the operator console already
+    # renders the "stale leaderboard" badge from the feed metadata,
+    # so this evaluator emits no card — it just fires / auto-resolves
+    # the matching `model_health_alerts` + Postmark alert (task #653).
+    try:
+        _evaluate_leaderboard_silence_alert()
+    except Exception as e:  # pragma: no cover — must never break the snapshot
+        log.warning("leaderboard_silent evaluator failed: %s", e)
     config = _probe_config()
     cards = list(live) + passive + config
     # Per-client retry / failure counters (populated by every outbound
