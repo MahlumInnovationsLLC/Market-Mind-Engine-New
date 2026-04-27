@@ -4,6 +4,7 @@ import React from "react";
 import {
   ActivityIndicator,
   AppState,
+  DeviceEventEmitter,
   Pressable,
   StyleSheet,
   Switch,
@@ -148,6 +149,25 @@ export function NotificationPrefs(): React.ReactElement {
       }
     });
     return () => sub.remove();
+  }, []);
+  // Also subscribe to the OS-level timezone-change broadcast so the
+  // banner appears the instant a traveler's plane lands, without
+  // requiring them to background and re-foreground the app. iOS posts
+  // `NSSystemTimeZoneDidChangeNotification` (bridged as
+  // `timezoneDidChange`) and Android broadcasts
+  // `android.intent.action.TIMEZONE_CHANGED` (bridged as
+  // `timezoneChanged`). We listen for both names so whichever a future
+  // native bridge — or a third-party module the host app installs —
+  // emits, the banner re-evaluates immediately.
+  React.useEffect(() => {
+    const refresh = () => setDeviceTz(detectDeviceTz());
+    const subs = [
+      DeviceEventEmitter.addListener("timezoneDidChange", refresh),
+      DeviceEventEmitter.addListener("timezoneChanged", refresh),
+    ];
+    return () => {
+      for (const sub of subs) sub.remove();
+    };
   }, []);
   // Banner dismissal is sticky per (deviceTz, quietTz) pair so it does
   // not re-appear on every visit. A different pair (e.g. user moves on

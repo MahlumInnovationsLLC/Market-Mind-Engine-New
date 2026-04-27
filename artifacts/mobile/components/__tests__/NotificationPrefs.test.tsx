@@ -18,12 +18,14 @@
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import {
+  act,
   fireEvent,
   render,
   screen,
   waitFor,
 } from "@testing-library/react-native";
 import React from "react";
+import { DeviceEventEmitter } from "react-native";
 
 const mockApiFetch = jest.fn();
 
@@ -444,6 +446,46 @@ describe("NotificationPrefs device-tz banner (mobile)", () => {
     // Wait for the rest of the card to render so we know the dismissal
     // load has had time to settle, then assert the banner stays absent.
     await screen.findByTestId("row-sms-live-trade");
+    await waitFor(() => {
+      expect(screen.queryByTestId("banner-device-tz-mismatch")).toBeNull();
+    });
+  });
+
+  it("re-renders the banner without remount when the OS broadcasts a timezone change mid-session (task #634)", async () => {
+    // Start in LA — matches the saved zone, so the banner stays hidden.
+    mockDeviceTimezone("America/Los_Angeles");
+    mockApiFetch.mockResolvedValueOnce(
+      makePrefs({
+        quiet_hours_start_hour: 22,
+        quiet_hours_end_hour: 7,
+        quiet_hours_tz: "America/Los_Angeles",
+      }),
+    );
+
+    renderPanel();
+
+    await screen.findByTestId("row-sms-live-trade");
+    expect(screen.queryByTestId("banner-device-tz-mismatch")).toBeNull();
+
+    // Simulate the traveler's plane landing: the device clock flips to
+    // Tokyo and the OS broadcasts its timezone-change notification. The
+    // banner must appear immediately, *without* needing AppState to
+    // toggle to "active" (no remount, no foregrounding).
+    mockDeviceTimezone("Asia/Tokyo");
+    act(() => {
+      DeviceEventEmitter.emit("timezoneDidChange");
+    });
+
+    const banner = await screen.findByTestId("banner-device-tz-mismatch");
+    expect(banner).toHaveTextContent(/Tokyo/);
+    expect(banner).toHaveTextContent(/America\/Los_Angeles/);
+    // The Android-side event name should also drive the same refresh
+    // path. Flip back to LA via the Android broadcast and confirm the
+    // banner clears, again without remount.
+    mockDeviceTimezone("America/Los_Angeles");
+    act(() => {
+      DeviceEventEmitter.emit("timezoneChanged");
+    });
     await waitFor(() => {
       expect(screen.queryByTestId("banner-device-tz-mismatch")).toBeNull();
     });
