@@ -1,5 +1,5 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { Router } from "wouter";
 import { memoryLocation } from "wouter/memory-location";
 
@@ -9,12 +9,17 @@ const { apiState } = vi.hoisted(() => ({
       data: unknown;
       isFetching: boolean;
     },
+    access: { data: { is_admin: false } } as {
+      data: { is_admin: boolean } | null;
+    },
   },
 }));
 
 vi.mock("@workspace/api-client-react", () => ({
   useSearchAll: () => apiState.result,
   getSearchAllQueryKey: (params: unknown) => ["search-all", params],
+  useGetMyAccess: () => apiState.access,
+  getGetMyAccessQueryKey: () => ["get-my-access"],
 }));
 
 beforeAll(() => {
@@ -46,6 +51,7 @@ beforeAll(() => {
 import GlobalSearch from "./global-search";
 
 beforeEach(() => {
+  apiState.access = { data: { is_admin: false } };
   apiState.result = {
     data: {
       trades: [
@@ -258,5 +264,75 @@ describe("GlobalSearch navigation targets", () => {
     fireEvent.click(item);
 
     expect(history[history.length - 1]).toBe("/system?tab=settings");
+  });
+});
+
+describe("GlobalSearch admin-only hint", () => {
+  beforeEach(() => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    apiState.result = {
+      data: {
+        trades: [],
+        debates: [],
+        cycles: [],
+        users: [],
+        audit: [],
+      },
+      isFetching: false,
+    };
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  function typeQuery(value: string) {
+    const input = screen.getByTestId("input-global-search");
+    fireEvent.change(input, { target: { value } });
+    // Push past the 200ms debounce inside GlobalSearch so the empty branch
+    // (which is gated on `debounced.length >= 2`) actually renders.
+    act(() => {
+      vi.advanceTimersByTime(250);
+    });
+  }
+
+  it("shows the admin-only hint to non-admins when an email-shaped query returns nothing", () => {
+    renderSearch();
+    typeQuery("ops@example.com");
+
+    const hint = screen.getByTestId("search-admin-only-hint");
+    expect(hint.textContent ?? "").toMatch(/admin-only/i);
+  });
+
+  it("shows the admin-only hint when the query starts with a known audit-action prefix", () => {
+    renderSearch();
+    typeQuery("set_admin");
+
+    expect(screen.getByTestId("search-admin-only-hint")).toBeTruthy();
+  });
+
+  it("does not show the hint for a generic empty query", () => {
+    renderSearch();
+    typeQuery("zzzz");
+
+    expect(screen.queryByTestId("search-admin-only-hint")).toBeNull();
+  });
+
+  it("does not show the hint to admin callers even when they get no results", () => {
+    apiState.access = { data: { is_admin: true } };
+    renderSearch();
+    typeQuery("ops@example.com");
+
+    expect(screen.queryByTestId("search-admin-only-hint")).toBeNull();
+  });
+
+  it("suppresses the hint while the access record is still loading", () => {
+    // Mimic the in-flight state of useGetMyAccess before any data arrives
+    // — admins shouldn't briefly see a misleading "admin-only" note.
+    apiState.access = { data: null };
+    renderSearch();
+    typeQuery("ops@example.com");
+
+    expect(screen.queryByTestId("search-admin-only-hint")).toBeNull();
   });
 });

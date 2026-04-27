@@ -9,7 +9,12 @@ import {
   CommandList,
   CommandSeparator,
 } from "@/components/ui/command";
-import { getSearchAllQueryKey, useSearchAll } from "@workspace/api-client-react";
+import {
+  getGetMyAccessQueryKey,
+  getSearchAllQueryKey,
+  useGetMyAccess,
+  useSearchAll,
+} from "@workspace/api-client-react";
 
 function fmtTime(s: string | null | undefined): string {
   if (!s) return "—";
@@ -25,6 +30,29 @@ function fmtTime(s: string | null | undefined): string {
 function fmtPct(n: number | null | undefined): string {
   if (n === null || n === undefined) return "—";
   return `${(n * 100).toFixed(0)}%`;
+}
+
+// The /api/search endpoint only returns `users` / `audit` results to admin
+// callers, so a non-admin who searches for an email or audit-action substring
+// will always see empty arrays even when an admin would have matched.  We use
+// these heuristics to decide when an empty result might be worth flagging
+// with a "some matches may be admin-only" hint — without showing it on every
+// stray empty query.
+const ADMIN_AUDIT_ACTION_PREFIXES = [
+  "set_",
+  "approve",
+  "revoke",
+  "grant",
+  "promote",
+  "demote",
+];
+
+function looksLikeAdminQuery(q: string): boolean {
+  const v = q.trim().toLowerCase();
+  if (v.length < 2) return false;
+  // Email-ish: anything containing "@" is almost certainly an email lookup.
+  if (v.includes("@")) return true;
+  return ADMIN_AUDIT_ACTION_PREFIXES.some((p) => v.startsWith(p));
 }
 
 export default function GlobalSearch() {
@@ -67,6 +95,20 @@ export default function GlobalSearch() {
       queryKey: getSearchAllQueryKey(searchParams),
     },
   });
+
+  // Used purely to gate the "some matches may be admin-only" hint below;
+  // we never render the value itself, so the cached access record from
+  // other pages is reused via the shared query key.
+  const { data: access } = useGetMyAccess({
+    query: {
+      queryKey: getGetMyAccessQueryKey(),
+      staleTime: 30_000,
+    },
+  });
+  // Treat the user as non-admin for hint purposes only when we have an
+  // explicit `is_admin: false` from the API; while access is still
+  // loading we suppress the hint to avoid a flicker on admin sessions.
+  const knownNonAdmin = access?.is_admin === false;
 
   function go(path: string) {
     setOpen(false);
@@ -111,7 +153,18 @@ export default function GlobalSearch() {
             searching…
           </div>
         ) : !hasResults ? (
-          <CommandEmpty>NO_MATCHES</CommandEmpty>
+          <>
+            <CommandEmpty>NO_MATCHES</CommandEmpty>
+            {knownNonAdmin && looksLikeAdminQuery(debounced) && (
+              <div
+                className="px-4 pb-4 text-center text-[11px] leading-snug text-muted-foreground"
+                data-testid="search-admin-only-hint"
+              >
+                Some matches may be admin-only — ask an admin to search if you
+                expected results.
+              </div>
+            )}
+          </>
         ) : null}
 
         {trades.length > 0 && (
