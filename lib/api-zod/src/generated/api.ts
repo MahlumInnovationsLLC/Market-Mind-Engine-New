@@ -771,6 +771,58 @@ export const GetRecentDebatesResponse = zod.object({
 });
 
 /**
+ * @summary Per-entrant outright Kalshi markets + latest mid price for a tournament debate (Pro+).  Backs the analyst tournament view on the swarm-debates panel — each row in the per-entrant probability table routes to the resolved outright leg's public Kalshi page and displays its current mid next to the model probability.
+ */
+
+export const GetDebateEntrantMarketsParams = zod.object({
+  debate_id: zod.coerce.number().min(1),
+});
+
+export const GetDebateEntrantMarketsResponse = zod.object({
+  debate_id: zod.number(),
+  traded_market_id: zod
+    .string()
+    .nullish()
+    .describe("kalshi_market_id of the leg the swarm actually traded."),
+  traded_entrant: zod
+    .string()
+    .nullish()
+    .describe(
+      "Name of the entrant whose YES outright leg was traded; present only when the Plackett-Luce sketch recorded it.",
+    ),
+  entrants: zod
+    .record(
+      zod.string(),
+      zod
+        .object({
+          kalshi_market_id: zod
+            .string()
+            .describe(
+              "Kalshi market ticker for the entrant's YES outright leg.",
+            ),
+          mid_cents: zod
+            .number()
+            .nullish()
+            .describe(
+              "Latest cached mid price in cents (mean of the most recent tick bucket; falls back to the bucket close).  Null when no tick has been recorded for the resolved ticker.",
+            ),
+          kalshi_url: zod
+            .string()
+            .nullish()
+            .describe(
+              "Public Kalshi market URL the row should route to on click. Null when the ticker is malformed.",
+            ),
+        })
+        .describe(
+          "Resolved outright Kalshi leg for one entrant in a tournament's Plackett-Luce field.",
+        ),
+    )
+    .describe(
+      "``{entrant_name: EntrantOutrightMarket}`` map.  Entrants whose outright leg can't be resolved (e.g. title cache miss) are omitted, so the frontend can render those rows non-clickable with no price.",
+    ),
+});
+
+/**
  * @summary Resolve a Kalshi ticker to a human-readable market title
  */
 export const getMarketTitlePathTickerMax = 200;

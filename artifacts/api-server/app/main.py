@@ -5312,6 +5312,29 @@ async def dashboard_recent_debates(
     }
 
 
+@app.get("/api/dashboard/debates/{debate_id}/entrant-markets")
+async def dashboard_debate_entrant_markets(
+    debate_id: int,
+    _: object = Depends(billing.require_tier(billing.TIER_PRO)),
+) -> dict[str, object]:
+    """Per-entrant outright Kalshi markets for a tournament debate.
+
+    Resolves every entrant in the debate's Plackett-Luce sketch to its
+    own outright Kalshi market, fetches the latest cached mid price,
+    and builds the public-site URL — so the analyst tournament view on
+    the swarm-debates panel can link each row to the rival entrant's
+    leg and display its current price next to the model probability.
+
+    Pro+ only: the endpoint reads the debate's ``game_context`` blob
+    which is stripped from the public list endpoint for sub-Pro
+    callers, so this gate matches the same policy.
+    """
+    result = await dashboard.get_entrant_outright_markets_for_debate(debate_id)
+    if result is None:
+        raise HTTPException(status_code=404, detail="debate_not_found")
+    return result
+
+
 @app.get("/api/dashboard/debates/{debate_id}")
 async def dashboard_debate_by_id(
     debate_id: int,

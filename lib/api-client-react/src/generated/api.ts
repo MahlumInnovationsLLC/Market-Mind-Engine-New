@@ -41,6 +41,7 @@ import type {
   CheckoutSessionResult,
   CryptoOhlcvRetentionStatus,
   DashboardOverview,
+  DebateEntrantMarkets,
   EmergencyStopRequest,
   EmergencyStopResult,
   FullHealth,
@@ -1511,6 +1512,101 @@ export function useGetRecentDebates<
   },
 ): UseQueryResult<TData, TError> & { queryKey: QueryKey } {
   const queryOptions = getGetRecentDebatesQueryOptions(params, options);
+
+  const query = useQuery(queryOptions) as UseQueryResult<TData, TError> & {
+    queryKey: QueryKey;
+  };
+
+  return { ...query, queryKey: queryOptions.queryKey };
+}
+
+/**
+ * @summary Per-entrant outright Kalshi markets + latest mid price for a tournament debate (Pro+).  Backs the analyst tournament view on the swarm-debates panel — each row in the per-entrant probability table routes to the resolved outright leg's public Kalshi page and displays its current mid next to the model probability.
+ */
+export const getGetDebateEntrantMarketsUrl = (debateId: number) => {
+  return `/api/dashboard/debates/${debateId}/entrant-markets`;
+};
+
+export const getDebateEntrantMarkets = async (
+  debateId: number,
+  options?: RequestInit,
+): Promise<DebateEntrantMarkets> => {
+  return customFetch<DebateEntrantMarkets>(
+    getGetDebateEntrantMarketsUrl(debateId),
+    {
+      ...options,
+      method: "GET",
+    },
+  );
+};
+
+export const getGetDebateEntrantMarketsQueryKey = (debateId: number) => {
+  return [`/api/dashboard/debates/${debateId}/entrant-markets`] as const;
+};
+
+export const getGetDebateEntrantMarketsQueryOptions = <
+  TData = Awaited<ReturnType<typeof getDebateEntrantMarkets>>,
+  TError = ErrorType<void>,
+>(
+  debateId: number,
+  options?: {
+    query?: UseQueryOptions<
+      Awaited<ReturnType<typeof getDebateEntrantMarkets>>,
+      TError,
+      TData
+    >;
+    request?: SecondParameter<typeof customFetch>;
+  },
+) => {
+  const { query: queryOptions, request: requestOptions } = options ?? {};
+
+  const queryKey =
+    queryOptions?.queryKey ?? getGetDebateEntrantMarketsQueryKey(debateId);
+
+  const queryFn: QueryFunction<
+    Awaited<ReturnType<typeof getDebateEntrantMarkets>>
+  > = ({ signal }) =>
+    getDebateEntrantMarkets(debateId, { signal, ...requestOptions });
+
+  return {
+    queryKey,
+    queryFn,
+    enabled: !!debateId,
+    ...queryOptions,
+  } as UseQueryOptions<
+    Awaited<ReturnType<typeof getDebateEntrantMarkets>>,
+    TError,
+    TData
+  > & { queryKey: QueryKey };
+};
+
+export type GetDebateEntrantMarketsQueryResult = NonNullable<
+  Awaited<ReturnType<typeof getDebateEntrantMarkets>>
+>;
+export type GetDebateEntrantMarketsQueryError = ErrorType<void>;
+
+/**
+ * @summary Per-entrant outright Kalshi markets + latest mid price for a tournament debate (Pro+).  Backs the analyst tournament view on the swarm-debates panel — each row in the per-entrant probability table routes to the resolved outright leg's public Kalshi page and displays its current mid next to the model probability.
+ */
+
+export function useGetDebateEntrantMarkets<
+  TData = Awaited<ReturnType<typeof getDebateEntrantMarkets>>,
+  TError = ErrorType<void>,
+>(
+  debateId: number,
+  options?: {
+    query?: UseQueryOptions<
+      Awaited<ReturnType<typeof getDebateEntrantMarkets>>,
+      TError,
+      TData
+    >;
+    request?: SecondParameter<typeof customFetch>;
+  },
+): UseQueryResult<TData, TError> & { queryKey: QueryKey } {
+  const queryOptions = getGetDebateEntrantMarketsQueryOptions(
+    debateId,
+    options,
+  );
 
   const query = useQuery(queryOptions) as UseQueryResult<TData, TError> & {
     queryKey: QueryKey;

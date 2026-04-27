@@ -1,7 +1,14 @@
 import { useCallback, useState } from "react";
 import { Link } from "wouter";
 import { useQueryClient } from "@tanstack/react-query";
-import { useGetRecentDebates, getGetRecentDebatesQueryKey } from "@workspace/api-client-react";
+import {
+  useGetRecentDebates,
+  getGetRecentDebatesQueryKey,
+  useGetDebateEntrantMarkets,
+  getGetDebateEntrantMarketsQueryKey,
+  type DebateEntrantMarkets,
+  type EntrantOutrightMarket,
+} from "@workspace/api-client-react";
 import { useWebSocket } from "@/hooks/use-websocket";
 import DelayedSignalsBanner from "@/components/delayed-signals-banner";
 
@@ -66,6 +73,7 @@ type SketchRow = {
   rating: number | null;
   probability: number;
   isTraded: boolean;
+  market: EntrantOutrightMarket | null;
 };
 
 function extractPlackettLuceSketch(
@@ -109,8 +117,13 @@ function extractPlackettLuceSketch(
   };
 }
 
-type SortKey = "probability" | "rating" | "entrant";
+type SortKey = "probability" | "rating" | "entrant" | "mid";
 type SortDir = "asc" | "desc";
+
+function fmtCents(n: number | null | undefined): string {
+  if (n === null || n === undefined) return "—";
+  return `${n}¢`;
+}
 
 function PlackettLuceTable({
   debateId,
@@ -122,6 +135,20 @@ function PlackettLuceTable({
   const [sortKey, setSortKey] = useState<SortKey>("probability");
   const [sortDir, setSortDir] = useState<SortDir>("desc");
 
+  // Per-entrant outright market resolution.  This component only mounts
+  // for debates with a Plackett-Luce sketch (tournament-style fields),
+  // so the endpoint should resolve as long as the title cache has the
+  // sibling tickers.  Pro-only; sub-Pro callers (who never see
+  // game_context, hence no sketch) won't reach this code path.
+  const entrantMarketsQ = useGetDebateEntrantMarkets(debateId, {
+    query: {
+      staleTime: 30_000,
+      queryKey: getGetDebateEntrantMarketsQueryKey(debateId),
+    },
+  });
+  const entrantMarkets: DebateEntrantMarkets["entrants"] =
+    entrantMarketsQ.data?.entrants ?? {};
+
   const probs = sketch.probabilities ?? {};
   const ratings = sketch.ratings ?? {};
   const tradedEntrant = sketch.entrant ?? null;
@@ -131,6 +158,8 @@ function PlackettLuceTable({
     probability,
     rating: typeof ratings[entrant] === "number" ? ratings[entrant] : null,
     isTraded: tradedEntrant !== null && entrant === tradedEntrant,
+    market:
+      (entrantMarkets[entrant] as EntrantOutrightMarket | undefined) ?? null,
   }));
 
   const sorted = [...rows].sort((a, b) => {
@@ -143,6 +172,12 @@ function PlackettLuceTable({
       const br = b.rating ?? Number.NEGATIVE_INFINITY;
       if (ar === br) return 0;
       return (ar < br ? -1 : 1) * dir;
+    }
+    if (sortKey === "mid") {
+      const am = a.market?.mid_cents ?? Number.NEGATIVE_INFINITY;
+      const bm = b.market?.mid_cents ?? Number.NEGATIVE_INFINITY;
+      if (am === bm) return 0;
+      return (am < bm ? -1 : 1) * dir;
     }
     if (a.probability === b.probability) return 0;
     return (a.probability < b.probability ? -1 : 1) * dir;
@@ -203,6 +238,16 @@ function PlackettLuceTable({
             <th className="px-2 py-1 text-right font-normal">
               <button
                 type="button"
+                onClick={() => toggleSort("mid")}
+                className="hover:text-primary"
+                data-testid={`debate-pl-sort-mid-${debateId}`}
+              >
+                MID{sortIndicator("mid")}
+              </button>
+            </th>
+            <th className="px-2 py-1 text-right font-normal">
+              <button
+                type="button"
                 onClick={() => toggleSort("probability")}
                 className="hover:text-primary"
                 data-testid={`debate-pl-sort-probability-${debateId}`}
@@ -213,38 +258,65 @@ function PlackettLuceTable({
           </tr>
         </thead>
         <tbody>
-          {sorted.map((r) => (
-            <tr
-              key={r.entrant}
-              data-testid={`debate-pl-row-${debateId}-${r.entrant}`}
-              data-traded={r.isTraded ? "true" : "false"}
-              className={`border-b border-border/20 last:border-0 ${
-                r.isTraded ? "bg-primary/10 text-primary font-bold" : ""
-              }`}
-            >
-              <td className="px-2 py-1 text-left">
-                <div className="flex items-center gap-1">
-                  <span className="truncate" title={r.entrant}>
-                    {r.entrant}
+          {sorted.map((r) => {
+            const market = r.market;
+            const url = market?.kalshi_url ?? null;
+            const entrantCell = (
+              <div className="flex items-center gap-1">
+                <span className="truncate" title={r.entrant}>
+                  {r.entrant}
+                </span>
+                {r.isTraded ? (
+                  <span
+                    className="border border-primary/60 px-1 py-px text-[9px] uppercase tracking-widest text-primary"
+                    data-testid={`debate-pl-traded-badge-${debateId}`}
+                  >
+                    TRADED
                   </span>
-                  {r.isTraded ? (
-                    <span
-                      className="border border-primary/60 px-1 py-px text-[9px] uppercase tracking-widest text-primary"
-                      data-testid={`debate-pl-traded-badge-${debateId}`}
+                ) : null}
+              </div>
+            );
+            return (
+              <tr
+                key={r.entrant}
+                data-testid={`debate-pl-row-${debateId}-${r.entrant}`}
+                data-traded={r.isTraded ? "true" : "false"}
+                data-market-id={market?.kalshi_market_id ?? ""}
+                className={`border-b border-border/20 last:border-0 ${
+                  r.isTraded ? "bg-primary/10 text-primary font-bold" : ""
+                } ${url ? "hover:bg-muted/30" : ""}`}
+              >
+                <td className="px-2 py-1 text-left">
+                  {url ? (
+                    <a
+                      href={url}
+                      target="_blank"
+                      rel="noreferrer noopener"
+                      className="block hover:text-primary"
+                      data-testid={`debate-pl-link-${debateId}-${r.entrant}`}
+                      title={`Open ${market?.kalshi_market_id ?? r.entrant} on Kalshi`}
                     >
-                      TRADED
-                    </span>
-                  ) : null}
-                </div>
-              </td>
-              <td className="px-2 py-1 text-right tabular-nums text-muted-foreground">
-                {r.rating !== null ? r.rating.toFixed(0) : "—"}
-              </td>
-              <td className="px-2 py-1 text-right tabular-nums">
-                {(r.probability * 100).toFixed(1)}%
-              </td>
-            </tr>
-          ))}
+                      {entrantCell}
+                    </a>
+                  ) : (
+                    entrantCell
+                  )}
+                </td>
+                <td className="px-2 py-1 text-right tabular-nums text-muted-foreground">
+                  {r.rating !== null ? r.rating.toFixed(0) : "—"}
+                </td>
+                <td
+                  className="px-2 py-1 text-right tabular-nums"
+                  data-testid={`debate-pl-mid-${debateId}-${r.entrant}`}
+                >
+                  {fmtCents(market?.mid_cents)}
+                </td>
+                <td className="px-2 py-1 text-right tabular-nums">
+                  {(r.probability * 100).toFixed(1)}%
+                </td>
+              </tr>
+            );
+          })}
         </tbody>
       </table>
       {hasRatings ? null : (

@@ -54,6 +54,9 @@ PROTECTED_ROUTES: tuple[str, ...] = (
     "/api/dashboard/slippage-guard-rejects",
     "/api/dashboard/recent-debates",
     "/api/dashboard/debates/{debate_id}",
+    # Task #614 — per-entrant Kalshi outright market resolution for the
+    # Plackett-Luce field on the swarm-debates panel.
+    "/api/dashboard/debates/{debate_id}/entrant-markets",
     # Live Games dashboard — read-model snapshot of in-progress markets.
     "/api/live-games",
     # Live Games chatbot model catalog (per-provider availability).

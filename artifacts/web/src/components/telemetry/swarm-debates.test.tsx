@@ -7,6 +7,10 @@ const { apiState } = vi.hoisted(() => ({
       data: unknown;
       isLoading: boolean;
     },
+    entrantMarketsResult: { data: undefined, isLoading: false } as {
+      data: unknown;
+      isLoading: boolean;
+    },
   },
 }));
 
@@ -33,6 +37,11 @@ vi.mock("@tanstack/react-query", () => ({
 vi.mock("@workspace/api-client-react", () => ({
   useGetRecentDebates: () => apiState.debatesResult,
   getGetRecentDebatesQueryKey: (params: unknown) => ["recent-debates", params],
+  useGetDebateEntrantMarkets: () => apiState.entrantMarketsResult,
+  getGetDebateEntrantMarketsQueryKey: (debateId: number) => [
+    "debate-entrant-markets",
+    debateId,
+  ],
 }));
 
 vi.mock("@/hooks/use-websocket", () => ({
@@ -77,6 +86,10 @@ beforeEach(() => {
         makeDebate({ id: 404, redacted: null, matchup: "Null vs Null" }),
       ],
     },
+    isLoading: false,
+  };
+  apiState.entrantMarketsResult = {
+    data: { debate_id: 0, entrants: {} },
     isLoading: false,
   };
 });
@@ -149,6 +162,29 @@ describe("SwarmDebates redacted upsell", () => {
       },
       isLoading: false,
     };
+    apiState.entrantMarketsResult = {
+      data: {
+        debate_id: 555,
+        traded_market_id: "KX-ATP-RG-2025-ALCARAZ",
+        traded_entrant: "alcaraz",
+        entrants: {
+          alcaraz: {
+            kalshi_market_id: "KX-ATP-RG-2025-ALCARAZ",
+            mid_cents: 47,
+            kalshi_url: "https://kalshi.com/markets/kx/atp-rg-2025-alcaraz",
+          },
+          sinner: {
+            kalshi_market_id: "KX-ATP-RG-2025-SINNER",
+            mid_cents: 33,
+            kalshi_url: "https://kalshi.com/markets/kx/atp-rg-2025-sinner",
+          },
+          // Djokovic deliberately omitted: simulates a sibling ticker
+          // missing from market_title_cache (e.g. delisted) so the row
+          // should still render but stay non-clickable with no price.
+        },
+      },
+      isLoading: false,
+    };
 
     render(<SwarmDebates />);
 
@@ -196,6 +232,34 @@ describe("SwarmDebates redacted upsell", () => {
     expect(afterRatingSort[2].getAttribute("data-testid")).toBe(
       "debate-pl-row-555-alcaraz",
     );
+
+    // Mid prices render in cents next to the model probability for
+    // entrants whose outright leg resolved.  Djokovic, omitted from
+    // the markets payload, falls back to the em-dash placeholder.
+    const alcarazMid = within(table).getByTestId("debate-pl-mid-555-alcaraz");
+    const sinnerMid = within(table).getByTestId("debate-pl-mid-555-sinner");
+    const djokovicMid = within(table).getByTestId("debate-pl-mid-555-djokovic");
+    expect(alcarazMid.textContent).toBe("47¢");
+    expect(sinnerMid.textContent).toBe("33¢");
+    expect(djokovicMid.textContent).toBe("—");
+
+    // Resolved rows wrap the entrant cell in a Kalshi outright link;
+    // unresolved rows do not.  Links open in a new tab with secure rel.
+    const alcarazLink = within(table).getByTestId(
+      "debate-pl-link-555-alcaraz",
+    ) as HTMLAnchorElement;
+    const sinnerLink = within(table).getByTestId(
+      "debate-pl-link-555-sinner",
+    ) as HTMLAnchorElement;
+    expect(alcarazLink.getAttribute("href")).toBe(
+      "https://kalshi.com/markets/kx/atp-rg-2025-alcaraz",
+    );
+    expect(alcarazLink.getAttribute("target")).toBe("_blank");
+    expect(alcarazLink.getAttribute("rel")).toContain("noopener");
+    expect(sinnerLink.getAttribute("href")).toBe(
+      "https://kalshi.com/markets/kx/atp-rg-2025-sinner",
+    );
+    expect(screen.queryByTestId("debate-pl-link-555-djokovic")).toBeNull();
   });
 
   it("hides the Plackett-Luce table when game_context is missing or stripped", () => {

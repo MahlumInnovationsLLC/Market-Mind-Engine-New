@@ -503,6 +503,35 @@ export interface SwarmDebate {
   redacted?: boolean | null;
 }
 
+/**
+ * Resolved outright Kalshi leg for one entrant in a tournament's Plackett-Luce field.
+ */
+export interface EntrantOutrightMarket {
+  /** Kalshi market ticker for the entrant's YES outright leg. */
+  kalshi_market_id: string;
+  /** Latest cached mid price in cents (mean of the most recent tick bucket; falls back to the bucket close).  Null when no tick has been recorded for the resolved ticker. */
+  mid_cents?: number | null;
+  /** Public Kalshi market URL the row should route to on click. Null when the ticker is malformed. */
+  kalshi_url?: string | null;
+}
+
+/**
+ * ``{entrant_name: EntrantOutrightMarket}`` map.  Entrants whose outright leg can't be resolved (e.g. title cache miss) are omitted, so the frontend can render those rows non-clickable with no price.
+ */
+export type DebateEntrantMarketsEntrants = {
+  [key: string]: EntrantOutrightMarket;
+};
+
+export interface DebateEntrantMarkets {
+  debate_id: number;
+  /** kalshi_market_id of the leg the swarm actually traded. */
+  traded_market_id?: string | null;
+  /** Name of the entrant whose YES outright leg was traded; present only when the Plackett-Luce sketch recorded it. */
+  traded_entrant?: string | null;
+  /** ``{entrant_name: EntrantOutrightMarket}`` map.  Entrants whose outright leg can't be resolved (e.g. title cache miss) are omitted, so the frontend can render those rows non-clickable with no price. */
+  entrants: DebateEntrantMarketsEntrants;
+}
+
 export interface SwarmDebateList {
   items: SwarmDebate[];
   tier?: string | null;

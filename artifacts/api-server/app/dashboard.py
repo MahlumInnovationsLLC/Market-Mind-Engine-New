@@ -3116,6 +3116,253 @@ def redact_swarm_debate_transcripts(items: list[dict[str, Any]]) -> list[dict[st
 
 
 # ---------------------------------------------------------------------------
+# Per-entrant outright market resolution (analyst tournament view)
+# ---------------------------------------------------------------------------
+#
+# The Plackett-Luce sketch we persist on tournament debate rows lists every
+# entrant in the field along with its modelled win probability.  The analyst
+# UI on the swarm-debates panel renders that as a per-entrant table — but
+# only the *traded* entrant has a kalshi_market_id stamped on the debate.
+# To let analysts validate the model's relative pricing across the field
+# (and spot mispricings on legs we did not trade) we resolve each rival
+# entrant to its own outright Kalshi market, surface the latest cached mid
+# price, and build the public-site URL so the row can route there on click.
+
+def _kalshi_public_market_url(market_id: str | None) -> str | None:
+    """Build the public Kalshi market URL for a market ticker.
+
+    Kalshi's public site uses ``<series>/<event>`` paths under
+    ``https://kalshi.com/markets/`` — e.g. ``KXATPRG-25SEP-ALCARAZ``
+    lives at ``https://kalshi.com/markets/kxatprg/25sep``.  Returns
+    ``None`` when the input is empty so callers can decide whether to
+    render a non-clickable row.
+    """
+    if not market_id:
+        return None
+    parts = market_id.split("-")
+    series = parts[0].lower()
+    if not series:
+        return None
+    if len(parts) >= 2 and parts[1]:
+        return f"https://kalshi.com/markets/{series}/{parts[1].lower()}"
+    return f"https://kalshi.com/markets/{series}"
+
+
+def _normalize_entrant_token(name: str | None) -> str:
+    """Strip non-alphanumerics + lowercase for fuzzy market title matching.
+
+    Kalshi titles often reformat the entrant's name (extra punctuation,
+    middle initials, capitalization) — collapsing both sides to their
+    alnum projection lets ``Carlos Alcaraz`` match
+    ``Will Carlos Alcaraz win Roland-Garros?`` without false positives.
+    """
+    if not name:
+        return ""
+    return "".join(c for c in name.lower() if c.isalnum())
+
+
+async def resolve_entrant_outright_markets(
+    traded_market_id: str | None,
+    entrants: list[str],
+    *,
+    traded_entrant: str | None = None,
+) -> dict[str, dict[str, Any]]:
+    """Resolve each entrant in a Plackett-Luce field to its outright leg.
+
+    For every name in ``entrants`` we try to find the sibling outright
+    Kalshi market under the same event prefix as ``traded_market_id``
+    (everything before the last ``-`` segment).  Sibling tickers come
+    from the cached ``market_title_cache`` rows whose ticker shares the
+    event prefix; we then pick the one whose human-readable title (or
+    ticker suffix as a fallback) contains the entrant's name.
+
+    The traded entrant is always force-resolved to ``traded_market_id``
+    when ``traded_entrant`` is supplied — even if the title isn't yet
+    cached for that ticker — so the analyst can always pivot back to
+    the traded leg from the table.
+
+    Returns ``{entrant: {kalshi_market_id, mid_cents, kalshi_url}}``;
+    entrants that can't be resolved are simply omitted so the frontend
+    falls back to a non-clickable row with no price.
+    """
+    out: dict[str, dict[str, Any]] = {}
+    if not traded_market_id or not entrants:
+        return out
+
+    parts = traded_market_id.split("-")
+    if len(parts) < 2:
+        return out
+    event_prefix = "-".join(parts[:-1]) + "-"
+
+    siblings: list[tuple[str, str]] = []
+    try:
+        rows = await db.fetch(
+            """
+            SELECT ticker, title
+              FROM market_title_cache
+             WHERE ticker LIKE $1
+            """,
+            event_prefix + "%",
+        )
+        for r in rows:
+            ticker = r.get("ticker") or ""
+            title = r.get("title") or ""
+            if ticker:
+                siblings.append((ticker, title))
+    except Exception as e:
+        log.warning(
+            "resolve_entrant_outright_markets title lookup failed for %s: %s",
+            event_prefix, e,
+        )
+
+    resolved: dict[str, str] = {}
+    for entrant in entrants:
+        token = _normalize_entrant_token(entrant)
+        if not token:
+            continue
+        # Prefer a title-substring match — the public title is the
+        # canonical human-readable form Kalshi exposes.
+        match: str | None = None
+        for ticker, title in siblings:
+            if token in _normalize_entrant_token(title):
+                match = ticker
+                break
+        # Fall back to a ticker-suffix match (some entrants surface as
+        # ``KX...-ALCARAZ`` even before the title cache is warmed).
+        if match is None:
+            for ticker, _title in siblings:
+                suffix = ticker.rsplit("-", 1)[-1] if "-" in ticker else ticker
+                if token in _normalize_entrant_token(suffix):
+                    match = ticker
+                    break
+        if match is not None:
+            resolved[entrant] = match
+
+    # Force the traded entrant onto the traded ticker so the analyst
+    # can always click back to it even when the title cache is cold.
+    if traded_entrant:
+        for entrant in entrants:
+            if entrant == traded_entrant:
+                resolved[entrant] = traded_market_id
+                break
+
+    tickers = sorted({t for t in resolved.values()})
+    ticks: dict[str, int] = {}
+    if tickers:
+        try:
+            tick_rows = await db.fetch(
+                """
+                WITH ranked AS (
+                    SELECT t.market_ticker, t.close_cents, t.mean_cents,
+                           ROW_NUMBER() OVER (
+                               PARTITION BY t.market_ticker
+                               ORDER BY t.bucket_ts DESC
+                           ) AS rn
+                      FROM market_price_ticks t
+                     WHERE t.market_ticker = ANY($1::text[])
+                )
+                SELECT market_ticker, close_cents, mean_cents
+                  FROM ranked
+                 WHERE rn = 1
+                """,
+                tickers,
+            )
+            for r in tick_rows:
+                tk = r.get("market_ticker")
+                # Prefer the bucket mean (smoother for an analyst eyeball
+                # comparison against the model probability) and fall back
+                # to the close when only the close was recorded.
+                cents = r.get("mean_cents")
+                if cents is None:
+                    cents = r.get("close_cents")
+                if tk and cents is not None:
+                    try:
+                        ticks[tk] = int(cents)
+                    except (TypeError, ValueError):
+                        pass
+        except Exception as e:
+            log.warning(
+                "resolve_entrant_outright_markets tick lookup failed: %s", e,
+            )
+
+    for entrant, ticker in resolved.items():
+        out[entrant] = {
+            "kalshi_market_id": ticker,
+            "mid_cents": ticks.get(ticker),
+            "kalshi_url": _kalshi_public_market_url(ticker),
+        }
+    return out
+
+
+async def get_entrant_outright_markets_for_debate(
+    debate_id: int,
+) -> dict[str, Any] | None:
+    """Backs the ``/api/dashboard/debates/{debate_id}/entrant-markets``
+    endpoint: loads the debate's ``game_context`` (which carries both
+    the traded ``kalshi_market_id`` and the Plackett-Luce sketch
+    listing every entrant in the field), and resolves the per-entrant
+    outright leg map via :func:`resolve_entrant_outright_markets`.
+
+    Returns ``None`` when the debate doesn't exist; returns an empty
+    ``entrants`` map when the debate has no Plackett-Luce sketch (e.g.
+    a binary moneyline debate) so the caller can render an explicit
+    "no field" state instead of a 404.
+    """
+    try:
+        row = await db.fetchrow(
+            """
+            SELECT id, game_context
+              FROM swarm_debates
+             WHERE id = $1
+            """,
+            int(debate_id),
+        )
+    except Exception as e:
+        log.warning(
+            "get_entrant_outright_markets_for_debate(%s) lookup failed: %s",
+            debate_id, e,
+        )
+        return None
+    if row is None:
+        return None
+
+    ctx_raw = row.get("game_context") if isinstance(row, dict) else row["game_context"]
+    if isinstance(ctx_raw, str):
+        try:
+            ctx = json.loads(ctx_raw)
+        except Exception:
+            ctx = None
+    elif isinstance(ctx_raw, dict):
+        ctx = ctx_raw
+    else:
+        ctx = None
+    ctx = ctx or {}
+
+    traded_market_id = ctx.get("kalshi_market_id")
+    sketch = ctx.get("plackett_luce_sketch") or {}
+    if not isinstance(sketch, dict):
+        sketch = {}
+    probs = sketch.get("probabilities") or {}
+    if not isinstance(probs, dict):
+        probs = {}
+    entrants = [str(k) for k in probs.keys()]
+    traded_entrant_raw = sketch.get("entrant")
+    traded_entrant = str(traded_entrant_raw) if isinstance(traded_entrant_raw, str) else None
+
+    entrant_map = await resolve_entrant_outright_markets(
+        str(traded_market_id) if traded_market_id else None,
+        entrants,
+        traded_entrant=traded_entrant,
+    )
+    return {
+        "debate_id": int(debate_id),
+        "traded_market_id": traded_market_id,
+        "traded_entrant": traded_entrant,
+        "entrants": entrant_map,
+    }
+
+
+# ---------------------------------------------------------------------------
 # Live Games — in-progress sports markets read-model
 # ---------------------------------------------------------------------------
 

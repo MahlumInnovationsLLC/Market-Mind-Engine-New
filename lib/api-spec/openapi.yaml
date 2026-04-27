@@ -283,6 +283,31 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/SwarmDebateList" }
 
+  /dashboard/debates/{debate_id}/entrant-markets:
+    get:
+      operationId: getDebateEntrantMarkets
+      tags: [dashboard]
+      summary: >-
+        Per-entrant outright Kalshi markets + latest mid price for a
+        tournament debate (Pro+).  Backs the analyst tournament view on
+        the swarm-debates panel — each row in the per-entrant
+        probability table routes to the resolved outright leg's
+        public Kalshi page and displays its current mid next to the
+        model probability.
+      parameters:
+        - in: path
+          name: debate_id
+          required: true
+          schema: { type: integer, minimum: 1 }
+      responses:
+        "200":
+          description: Resolved per-entrant market map (entries omitted for entrants whose outright leg can't be resolved)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DebateEntrantMarkets" }
+        "404":
+          description: Debate not found
+
   /market-title/{ticker}:
     get:
       operationId: getMarketTitle
@@ -1439,6 +1464,54 @@ components:
           additionalProperties: true
         redacted: { type: boolean, nullable: true }
       required: [id]
+
+    EntrantOutrightMarket:
+      type: object
+      description: >-
+        Resolved outright Kalshi leg for one entrant in a tournament's
+        Plackett-Luce field.
+      properties:
+        kalshi_market_id:
+          type: string
+          description: Kalshi market ticker for the entrant's YES outright leg.
+        mid_cents:
+          type: integer
+          nullable: true
+          description: >-
+            Latest cached mid price in cents (mean of the most recent
+            tick bucket; falls back to the bucket close).  Null when no
+            tick has been recorded for the resolved ticker.
+        kalshi_url:
+          type: string
+          nullable: true
+          description: >-
+            Public Kalshi market URL the row should route to on click.
+            Null when the ticker is malformed.
+      required: [kalshi_market_id]
+
+    DebateEntrantMarkets:
+      type: object
+      properties:
+        debate_id: { type: integer }
+        traded_market_id:
+          type: string
+          nullable: true
+          description: kalshi_market_id of the leg the swarm actually traded.
+        traded_entrant:
+          type: string
+          nullable: true
+          description: >-
+            Name of the entrant whose YES outright leg was traded;
+            present only when the Plackett-Luce sketch recorded it.
+        entrants:
+          type: object
+          description: >-
+            ``{entrant_name: EntrantOutrightMarket}`` map.  Entrants
+            whose outright leg can't be resolved (e.g. title cache
+            miss) are omitted, so the frontend can render those rows
+            non-clickable with no price.
+          additionalProperties: { $ref: "#/components/schemas/EntrantOutrightMarket" }
+      required: [debate_id, entrants]
 
     SwarmDebateList:
       type: object
