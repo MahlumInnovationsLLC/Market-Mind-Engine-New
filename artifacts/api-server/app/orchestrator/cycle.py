@@ -357,6 +357,51 @@ async def _today_trade_counts_per_league() -> dict[str, int]:
     return out
 
 
+async def _persist_model_yes_prob(
+    market_id: str | None, prob: float | None
+) -> None:
+    """Stamp the model's YES probability onto the matching ``predictions``
+    row so the crypto accuracy report can score the row directly without
+    a lateral join into ``swarm_debates`` (task #646).
+
+    Idempotent: writes only when the new value is real (a finite float
+    in ``[0, 1]``) and the row doesn't already carry one — re-running
+    the cycle for the same market never overwrites the original
+    probability we traded against.  Best-effort: a sick UPDATE must NOT
+    take down the trading loop, so failures are logged at debug.
+
+    No-ops when ``market_id`` is missing (verticals whose discovery
+    feeds don't materialise a ``predictions`` row keyed on the Kalshi
+    ticker — e.g. some sports producers — simply have nothing to
+    stamp).
+    """
+    if not market_id:
+        return
+    if prob is None:
+        return
+    try:
+        p = float(prob)
+    except (TypeError, ValueError):
+        return
+    if not (0.0 <= p <= 1.0):
+        return
+    try:
+        await db.execute(
+            """
+            UPDATE predictions
+               SET model_yes_prob = $2,
+                   updated_at     = now()
+             WHERE kalshi_market_id = $1
+               AND model_yes_prob IS NULL
+            """,
+            market_id, p,
+        )
+    except Exception as e:  # pragma: no cover — defensive
+        log.debug(
+            "model_yes_prob persist failed for %s: %s", market_id, e,
+        )
+
+
 async def _market_cooldown(market_id: str) -> datetime | None:
     try:
         v = await db.fetchval(
@@ -1356,6 +1401,17 @@ async def run_cycle(vertical: str = "sports") -> CycleResult:
         effective_consensus = consensus
         if effective_consensus is None and live_pred is not None:
             effective_consensus = live_pred["probability"]
+        # Stamp the model's YES probability inline on the source
+        # ``predictions`` row so the crypto accuracy report (task #580)
+        # can join settled rows directly without a lateral
+        # ``swarm_debates`` lookup (task #646).  Persist the
+        # pre-calibration value so live writes share the same semantic
+        # as the historical backfill — both reflect the model's raw
+        # belief at scoring time, before the per-vertical isotonic
+        # adjustment.  No-op for verticals whose feeds don't write a
+        # ``predictions`` row keyed on ``kalshi_market_id`` and for
+        # rows that already carry a probability (idempotent).
+        await _persist_model_yes_prob(market_id, effective_consensus)
         # Route the model probability through the freshly-retrained
         # per-vertical isotonic calibrator (online-learning loop, task
         # #88).  Bypasses cleanly when no retrained snapshot has landed

@@ -134,6 +134,8 @@ PROTECTED_ROUTES: tuple[str, ...] = (
     # Task #580 — rolling-window realised accuracy / Brier / log-loss
     # for settled Kalshi crypto predictions.
     "/api/admin/crypto/accuracy",
+    # Task #646 — backfill status for historical crypto model probabilities.
+    "/api/admin/crypto/backfill-probabilities-status",
     "/api/admin/autoresearch/features",
     "/api/admin/margin-regressor/status",
     # Task #245 — operator-only calibration & research dashboards.
@@ -207,6 +209,8 @@ PROTECTED_MUTATING_ENDPOINTS: tuple[tuple[str, str], ...] = (
     ("POST", "/api/admin/entertainment/promote-kelly"),
     # Task #225 — admin-triggered historical entertainment-signal backfill.
     ("POST", "/api/admin/entertainment/backfill"),
+    # Task #646 — admin-triggered historical crypto model-probability backfill.
+    ("POST", "/api/admin/crypto/backfill-probabilities"),
     ("POST", "/api/admin/orchestrator/run-cycle"),
     # Admin-triggered out-of-band feed poll (commit 6899fc1).
     ("POST", "/api/admin/feeds/{name}/poll-now"),

@@ -9,20 +9,19 @@ joined a settled prediction back to the model probability the
 orchestrator scored it with.
 
 This module closes that loop: for a configurable rolling window
-(``24h`` / ``7d`` / ``30d`` by default) it joins each settled crypto
-prediction to the most recent ``swarm_debates.consensus_probability``
-recorded for the same market and reports realised accuracy, Brier and
-log-loss — sliced by ``(symbol, timeframe)`` so the operator can see
-which crypto contracts the live model handles well versus poorly.
+(``24h`` / ``7d`` / ``30d`` by default) it reads each settled crypto
+prediction's inline ``model_yes_prob`` (stamped by the orchestrator at
+scoring time — see :func:`app.orchestrator.cycle._persist_model_yes_prob`,
+task #646) and reports realised accuracy, Brier and log-loss — sliced
+by ``(symbol, timeframe)`` so the operator can see which crypto
+contracts the live model handles well versus poorly.
 
-The report intentionally pulls the model probability from
-``swarm_debates`` (not ``predictions.home_win_prob``, which is unused
-by the crypto producer) because that is where the orchestrator
-persists the YES probability it actually traded against — written by
-:func:`app.swarm.runner.run_debate` and joined back via
-``swarm_debates.game_id == predictions.game_id`` (the Kalshi ticker
-for crypto markets) or via
-``swarm_debates.game_context->>'kalshi_market_id'``.
+Historically the probability was looked up via a lateral join into
+``swarm_debates.consensus_probability``.  That join is gone now: the
+orchestrator writes the value inline at scoring time (task #646), and
+the one-shot :mod:`app.crypto.probability_backfill` task copies the
+historical ``swarm_debates.consensus_probability`` onto matching
+prediction rows so legacy data still scores in the report.
 
 Public surface:
     DEFAULT_WINDOW_HOURS — windows surfaced by the admin endpoint
@@ -65,12 +64,13 @@ _LOG_LOSS_EPS: float = 1e-9
 _LEAGUE: str = "CRYPTO"
 
 
-# Joined SELECT: each settled crypto prediction in the rolling window
-# alongside the most recent debate's consensus probability for the
-# same market.  The lateral join walks `swarm_debates` via either the
-# game_id heuristic (crypto's game_id == kalshi ticker) or the more
-# explicit `game_context->>'kalshi_market_id'` linkage so legacy
-# debates persisted before the linkage convention still resolve.
+# Plain SELECT over settled crypto predictions in the rolling window —
+# the model's YES probability is now stored inline on the row at
+# scoring time (task #646) so the historical lateral join into
+# ``swarm_debates`` is gone.  Rows whose ``model_yes_prob`` is still
+# NULL (legacy + un-backfilled) fall through to the report's
+# ``n_unscored`` bucket exactly as they used to under the join — the
+# one-shot ``probability_backfill`` task closes that gap when run.
 _WINDOW_SQL = """
 SELECT
     p.id                                   AS prediction_id,
@@ -80,16 +80,8 @@ SELECT
     p.settled_at                           AS settled_at,
     coalesce(p.game_context->>'symbol', '')    AS symbol,
     coalesce(p.game_context->>'timeframe', '') AS timeframe,
-    sd.consensus_probability               AS p_yes
+    p.model_yes_prob                       AS p_yes
   FROM predictions p
-  LEFT JOIN LATERAL (
-      SELECT consensus_probability
-        FROM swarm_debates
-       WHERE (game_context->>'kalshi_market_id') = p.kalshi_market_id
-          OR game_id = p.game_id
-       ORDER BY created_at DESC
-       LIMIT 1
-  ) sd ON true
  WHERE p.league = $1
    AND p.settled_at IS NOT NULL
    AND p.settled_at >= now() - make_interval(hours => $2)

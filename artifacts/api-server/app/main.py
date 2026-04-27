@@ -3583,13 +3583,15 @@ async def admin_crypto_accuracy(
     """Realised accuracy / Brier / log-loss for settled crypto predictions
     (task #580).
 
-    Joins each settled ``predictions`` row (``league = 'CRYPTO'``,
+    Reads each settled ``predictions`` row (``league = 'CRYPTO'``,
     ``settled_at`` stamped by the Kalshi crypto settler in
-    :mod:`app.feeds.kalshi_crypto_markets`) to the most recent
-    ``swarm_debates.consensus_probability`` for the same market and
-    computes accuracy / Brier / log-loss for each requested rolling
-    window.  Results are sliced per ``(symbol, timeframe)`` so the
-    operator can spot which BTC/ETH contracts the model handles best.
+    :mod:`app.feeds.kalshi_crypto_markets`) and uses the inline
+    ``predictions.model_yes_prob`` column — stamped by the orchestrator
+    at scoring time and backfilled for older rows by
+    :mod:`app.crypto.probability_backfill` (task #646) — to compute
+    accuracy / Brier / log-loss for each requested rolling window.
+    Results are sliced per ``(symbol, timeframe)`` so the operator can
+    spot which BTC/ETH contracts the model handles best.
 
     Each window's payload also reports ``n_void`` (Kalshi voids,
     excluded from scoring) and ``n_unscored`` (settled rows we could
@@ -3628,6 +3630,60 @@ async def admin_crypto_accuracy(
         seen.add(w)
         cleaned.append(w)
     return await crypto_accuracy_report.evaluate_report(tuple(cleaned))
+
+
+@app.post("/api/admin/crypto/backfill-probabilities")
+async def admin_crypto_backfill_probabilities(
+    actor: AuthedUser = Depends(require_admin),
+) -> dict[str, object]:
+    """Trigger the one-shot historical model-probability backfill (task #646).
+
+    Walks every ``predictions`` row in the crypto league with
+    ``model_yes_prob IS NULL`` and copies the most recent matching
+    ``swarm_debates.consensus_probability`` onto it so the rolling
+    accuracy report (``GET /api/admin/crypto/accuracy``) can score the
+    legacy tail directly from ``predictions`` without the lateral join
+    that used to power the report.
+
+    Idempotent: re-runnable safely.  Returns 409 if a backfill is
+    already in flight (the underlying UPDATE is single-flight).
+    """
+    from .crypto import probability_backfill as _crypto_backfill
+    if _crypto_backfill.is_running():
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": "backfill_already_running",
+                "status": _crypto_backfill.get_status(),
+            },
+        )
+
+    async def _runner() -> None:
+        try:
+            await _crypto_backfill.run_backfill()
+        except Exception:
+            log.exception("crypto probability backfill failed")
+
+    asyncio.create_task(_runner(), name="crypto-probability-backfill")
+    return {
+        "started": True,
+        "league": _crypto_backfill.DEFAULT_LEAGUE,
+        "status": _crypto_backfill.get_status(),
+    }
+
+
+@app.get("/api/admin/crypto/backfill-probabilities-status")
+async def admin_crypto_backfill_probabilities_status(
+    actor: AuthedUser = Depends(require_admin),
+) -> dict[str, object]:
+    """Snapshot of the in-process probability backfill plus the most
+    recent persisted run (so the operator panel survives restarts)."""
+    from .crypto import probability_backfill as _crypto_backfill
+    persisted = await _crypto_backfill.load_persisted_status()
+    return {
+        "current": _crypto_backfill.get_status(),
+        "last_persisted": persisted,
+    }
 
 
 @app.get("/api/admin/crypto/backtest/history")
