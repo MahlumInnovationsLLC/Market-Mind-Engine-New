@@ -552,6 +552,18 @@ async def lifespan(_: FastAPI):
     except Exception as e:
         log.warning("crypto backtest retention start failed: %s", e)
 
+    # `sportradar_tournament_leaderboards` history-table retention
+    # sweep. Task #623 wired the leaderboard poller to append one row
+    # per entrant per poll without a TTL, so without this loop the
+    # table grows unboundedly across PGA / F1 seasons. Per task #649.
+    try:
+        from . import sportradar_leaderboards_retention as _sr_leaderboards_retention
+        await _sr_leaderboards_retention.start()
+    except Exception as e:
+        log.warning(
+            "sportradar leaderboards retention start failed: %s", e
+        )
+
     # Kick off model artifact reassembly in the background so a cold cache
     # (~240 MiB download) doesn't block the HTTP server from accepting
     # traffic. Health endpoints surface progress while it warms up.
@@ -651,6 +663,13 @@ async def lifespan(_: FastAPI):
             await _crypto_backtest_retention.stop()
         except Exception as e:
             log.warning("crypto backtest retention stop error: %s", e)
+        try:
+            from . import sportradar_leaderboards_retention as _sr_leaderboards_retention
+            await _sr_leaderboards_retention.stop()
+        except Exception as e:
+            log.warning(
+                "sportradar leaderboards retention stop error: %s", e
+            )
         try:
             await rc_billing.stop()
         except Exception as e:
