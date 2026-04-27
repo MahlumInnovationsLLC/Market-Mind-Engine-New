@@ -3674,6 +3674,7 @@ export function RcWebhookPanel() {
                       key={row.event_id}
                       className="border-b border-border/50 align-top"
                       data-testid={`row-rc-failed-${row.event_id}`}
+                      data-focus-id={`rc-event-${row.event_id}`}
                     >
                       <td className="px-2 py-1 font-mono text-foreground">
                         {row.event_id}

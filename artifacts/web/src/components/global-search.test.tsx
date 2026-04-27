@@ -96,6 +96,37 @@ beforeEach(() => {
           created_at: "2026-04-24T12:00:00Z",
         },
       ],
+      billing: [
+        {
+          kind: "event",
+          provider: "revenuecat",
+          event_id: "evt_abc",
+          event_type: "RENEWAL",
+          last_failed_at: "2026-04-24T12:00:00Z",
+          last_error: "boom: 502",
+          attempts: 4,
+        },
+        {
+          kind: "customer",
+          provider: "stripe",
+          user_id: "user_stripe|1",
+          email: "billing@example.com",
+          tier: "pro",
+          status: "active",
+          stripe_customer_id: "cus_xyz",
+          updated_at: "2026-04-24T12:00:00Z",
+        },
+        {
+          kind: "customer",
+          provider: "revenuecat",
+          user_id: null,
+          app_user_id: "rc_app_42",
+          email: null,
+          tier: "elite",
+          status: "INITIAL_PURCHASE",
+          updated_at: "2026-04-24T12:30:00Z",
+        },
+      ],
     },
     isFetching: false,
   };
@@ -180,5 +211,52 @@ describe("GlobalSearch navigation targets", () => {
     expect(history[history.length - 1]).toBe(
       "/system?tab=audit&focus=audit-314",
     );
+  });
+
+  it("routes billing event hits to /system?tab=controls with the rc-event focus param", () => {
+    const { history } = renderSearch();
+    const input = screen.getByTestId("input-global-search");
+    fireEvent.change(input, { target: { value: "evt" } });
+
+    const item = screen.getByTestId("search-billing-event-evt_abc");
+    fireEvent.click(item);
+
+    expect(history[history.length - 1]).toBe(
+      `/system?tab=controls&focus=${encodeURIComponent("rc-event-evt_abc")}`,
+    );
+  });
+
+  it("routes billing customer hits with a known clerk id to /system?tab=users with the user focus param", () => {
+    const { history } = renderSearch();
+    const input = screen.getByTestId("input-global-search");
+    fireEvent.change(input, { target: { value: "billing" } });
+
+    // Stripe customer carries a clerk-style user_id with a `|` (the
+    // standard Clerk dev-mode separator) — focus value must be encoded.
+    const item = screen.getByTestId(
+      "search-billing-customer-stripe-user_stripe|1",
+    );
+    fireEvent.click(item);
+
+    expect(history[history.length - 1]).toBe(
+      `/system?tab=users&focus=${encodeURIComponent("user-user_stripe|1")}`,
+    );
+  });
+
+  it("routes anonymous RC customer hits (no clerk id) to /system?tab=settings", () => {
+    const { history } = renderSearch();
+    const input = screen.getByTestId("input-global-search");
+    fireEvent.change(input, { target: { value: "rc_app" } });
+
+    // RC mobile-only customer has app_user_id but no clerk user id —
+    // there's nothing to highlight on /system?tab=users, so the
+    // palette routes to the settings tab so the operator can look the
+    // customer up by hand.
+    const item = screen.getByTestId(
+      "search-billing-customer-revenuecat-rc_app_42",
+    );
+    fireEvent.click(item);
+
+    expect(history[history.length - 1]).toBe("/system?tab=settings");
   });
 });

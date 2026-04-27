@@ -1764,6 +1764,52 @@ components:
         created_at: { type: string, nullable: true }
       required: [id]
 
+    SearchBillingHit:
+      type: object
+      description: >-
+        Admin-only billing match. Carries either a stuck RevenueCat
+        webhook event (`kind: "event"`) or a Stripe / RevenueCat
+        customer row (`kind: "customer"`). The unused side's fields are
+        nullable; the frontend renders the appropriate row layout off
+        the discriminator.
+      properties:
+        kind:
+          type: string
+          enum: [event, customer]
+          description: >-
+            `event` → stuck RC webhook delivery; `customer` → Stripe
+            or RC subscription row.
+        provider:
+          type: string
+          nullable: true
+          description: >-
+            For `kind: "customer"`, one of `stripe` / `revenuecat`. For
+            `kind: "event"`, always `revenuecat`.
+        # Event fields ----------------------------------------------------
+        event_id: { type: string, nullable: true }
+        event_type: { type: string, nullable: true }
+        last_failed_at:
+          type: string
+          nullable: true
+          description: ISO-8601 timestamp of the most recent 5xx delivery.
+        last_error: { type: string, nullable: true }
+        attempts: { type: integer, nullable: true }
+        # Customer fields -------------------------------------------------
+        user_id:
+          type: string
+          nullable: true
+          description: Clerk user id when known.
+        app_user_id:
+          type: string
+          nullable: true
+          description: RevenueCat app_user_id (mobile-only customers).
+        email: { type: string, nullable: true }
+        tier: { type: string, nullable: true }
+        status: { type: string, nullable: true }
+        stripe_customer_id: { type: string, nullable: true }
+        updated_at: { type: string, nullable: true }
+      required: [kind]
+
     SearchResults:
       type: object
       properties:
@@ -1789,7 +1835,16 @@ components:
             actor / target email / numeric id). Always present; empty
             for non-admin callers.
           items: { $ref: "#/components/schemas/SearchAuditHit" }
-      required: [trades, debates, cycles, users, audit]
+        billing:
+          type: array
+          description: >-
+            Admin-only matches against `rc_webhook_deliveries` (latest
+            5xx by event_id / error substring) and the Stripe /
+            RevenueCat customer rows (lookup by email / clerk user id /
+            stripe customer id). Always present; empty for non-admin
+            callers.
+          items: { $ref: "#/components/schemas/SearchBillingHit" }
+      required: [trades, debates, cycles, users, audit, billing]
 
     StorageFile:
       type: object

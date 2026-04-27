@@ -733,6 +733,42 @@ export interface SearchAuditHit {
   created_at?: string | null;
 }
 
+/**
+ * `event` → stuck RC webhook delivery; `customer` → Stripe or RC subscription row.
+ */
+export type SearchBillingHitKind =
+  (typeof SearchBillingHitKind)[keyof typeof SearchBillingHitKind];
+
+export const SearchBillingHitKind = {
+  event: "event",
+  customer: "customer",
+} as const;
+
+/**
+ * Admin-only billing match. Carries either a stuck RevenueCat webhook event (`kind: "event"`) or a Stripe / RevenueCat customer row (`kind: "customer"`). The unused side's fields are nullable; the frontend renders the appropriate row layout off the discriminator.
+ */
+export interface SearchBillingHit {
+  /** `event` → stuck RC webhook delivery; `customer` → Stripe or RC subscription row. */
+  kind: SearchBillingHitKind;
+  /** For `kind: "customer"`, one of `stripe` / `revenuecat`. For `kind: "event"`, always `revenuecat`. */
+  provider?: string | null;
+  event_id?: string | null;
+  event_type?: string | null;
+  /** ISO-8601 timestamp of the most recent 5xx delivery. */
+  last_failed_at?: string | null;
+  last_error?: string | null;
+  attempts?: number | null;
+  /** Clerk user id when known. */
+  user_id?: string | null;
+  /** RevenueCat app_user_id (mobile-only customers). */
+  app_user_id?: string | null;
+  email?: string | null;
+  tier?: string | null;
+  status?: string | null;
+  stripe_customer_id?: string | null;
+  updated_at?: string | null;
+}
+
 export interface SearchResults {
   trades: SearchTradeHit[];
   debates: SearchDebateHit[];
@@ -741,6 +777,8 @@ export interface SearchResults {
   users: SearchUserHit[];
   /** Admin-only matches against `admin_audit_log` (action / actor / target email / numeric id). Always present; empty for non-admin callers. */
   audit: SearchAuditHit[];
+  /** Admin-only matches against `rc_webhook_deliveries` (latest 5xx by event_id / error substring) and the Stripe / RevenueCat customer rows (lookup by email / clerk user id / stripe customer id). Always present; empty for non-admin callers. */
+  billing: SearchBillingHit[];
 }
 
 export interface StorageFile {

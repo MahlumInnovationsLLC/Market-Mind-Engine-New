@@ -24,12 +24,18 @@ class _FakeDB:
         cycle_rows: list[dict[str, Any]] | None = None,
         user_rows: list[dict[str, Any]] | None = None,
         audit_rows: list[dict[str, Any]] | None = None,
+        rc_event_rows: list[dict[str, Any]] | None = None,
+        stripe_customer_rows: list[dict[str, Any]] | None = None,
+        rc_customer_rows: list[dict[str, Any]] | None = None,
     ) -> None:
         self.trade_rows = trade_rows or []
         self.debate_rows = debate_rows or []
         self.cycle_rows = cycle_rows or []
         self.user_rows = user_rows or []
         self.audit_rows = audit_rows or []
+        self.rc_event_rows = rc_event_rows or []
+        self.stripe_customer_rows = stripe_customer_rows or []
+        self.rc_customer_rows = rc_customer_rows or []
         self.calls: list[tuple[str, tuple[Any, ...]]] = []
 
     async def fetch(self, query: str, *args: Any) -> list[dict[str, Any]]:
@@ -40,10 +46,16 @@ class _FakeDB:
             return self.debate_rows
         if "FROM trading_cycles" in query:
             return self.cycle_rows
-        if "FROM app_users" in query:
+        if "FROM app_users" in query and "rc_subscriptions" not in query:
             return self.user_rows
         if "FROM admin_audit_log" in query:
             return self.audit_rows
+        if "rc_webhook_deliveries" in query:
+            return self.rc_event_rows
+        if "FROM rc_subscriptions" in query:
+            return self.rc_customer_rows
+        if "FROM subscriptions" in query:
+            return self.stripe_customer_rows
         return []
 
     async def fetchrow(self, query: str, *args: Any) -> Any:  # pragma: no cover
@@ -67,6 +79,7 @@ def test_empty_query_short_circuits(monkeypatch: pytest.MonkeyPatch) -> None:
         "cycles": [],
         "users": [],
         "audit": [],
+        "billing": [],
     }
     # No SQL fired — short-circuited before touching the db.
     assert fake.calls == []
@@ -84,6 +97,7 @@ def test_empty_query_short_circuits_for_admin_too(
         "cycles": [],
         "users": [],
         "audit": [],
+        "billing": [],
     }
     assert fake.calls == []
 
@@ -180,6 +194,7 @@ def test_empty_result_set_returns_empty_lists(monkeypatch: pytest.MonkeyPatch) -
         "cycles": [],
         "users": [],
         "audit": [],
+        "billing": [],
     }
 
 
@@ -187,11 +202,14 @@ def test_non_admin_caller_skips_user_and_audit_queries(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Non-admin callers must never trigger app_users / admin_audit_log
-    scans, and the returned envelope must still expose the keys so the
-    palette can render them without conditional access."""
+    / billing scans, and the returned envelope must still expose the
+    keys so the palette can render them without conditional access."""
     fake = _FakeDB(
         user_rows=[{"clerk_user_id": "u1"}],  # would be returned if asked
         audit_rows=[{"id": 1}],
+        rc_event_rows=[{"event_id": "evt_1"}],
+        stripe_customer_rows=[{"user_id": "u1", "email": "a@b"}],
+        rc_customer_rows=[{"user_id": "u1"}],
     )
     monkeypatch.setattr(dashboard, "db", fake)
 
@@ -200,8 +218,12 @@ def test_non_admin_caller_skips_user_and_audit_queries(
     queries = [c[0] for c in fake.calls]
     assert not any("FROM app_users" in q for q in queries)
     assert not any("FROM admin_audit_log" in q for q in queries)
+    assert not any("rc_webhook_deliveries" in q for q in queries)
+    assert not any("FROM rc_subscriptions" in q for q in queries)
+    assert not any("FROM subscriptions" in q for q in queries)
     assert out["users"] == []
     assert out["audit"] == []
+    assert out["billing"] == []
 
 
 def test_admin_caller_searches_users_by_substring(
@@ -303,3 +325,180 @@ def test_limit_is_clamped(monkeypatch: pytest.MonkeyPatch) -> None:
     _run(dashboard.search_global("foo", limit=0))
     for _, args in fake2.calls:
         assert args[-1] == 1
+
+
+# ---------------------------------------------------------------------------
+# Billing search (task #632) — admin-only RC webhook events + Stripe / RC
+# customer rows surface under the new ``billing`` envelope key.
+# ---------------------------------------------------------------------------
+
+
+def test_admin_billing_event_substring_branch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Substring query against `event_id` / last error returns RC events
+    tagged ``kind="event"`` and routed to the failed-events table."""
+    event = {
+        "event_id": "evt_abc123",
+        "event_type": "RENEWAL",
+        "last_failed_at": "2026-04-24T12:00:00Z",
+        "last_error": "boom: 502",
+        "attempts": 3,
+    }
+    fake = _FakeDB(rc_event_rows=[event])
+    monkeypatch.setattr(dashboard, "db", fake)
+
+    out = _run(dashboard.search_global("evt_abc", include_admin=True))
+
+    rc_calls = [c for c in fake.calls if "rc_webhook_deliveries" in c[0]]
+    assert rc_calls, "expected an rc_webhook_deliveries query for admin caller"
+    q, args = rc_calls[0]
+    assert "ILIKE" in q
+    assert "received_at::date = $1::date" not in q
+    assert args[0] == "%evt_abc%"
+    # Latest 5xx wins — the SQL must filter on the http_5xx status bucket.
+    assert "http_5xx" in q
+
+    assert out["billing"] == [
+        {
+            "kind": "event",
+            "provider": "revenuecat",
+            "event_id": "evt_abc123",
+            "event_type": "RENEWAL",
+            "last_failed_at": "2026-04-24T12:00:00Z",
+            "last_error": "boom: 502",
+            "attempts": 3,
+        }
+    ]
+
+
+def test_admin_billing_customer_email_branch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Substring query against `email` returns Stripe + RC customer rows
+    tagged ``kind="customer"`` with the appropriate provider field."""
+    stripe_row = {
+        "user_id": "user_stripe",
+        "email": "ops@example.com",
+        "tier": "pro",
+        "status": "active",
+        "stripe_customer_id": "cus_xyz",
+        "updated_at": "2026-04-24T12:00:00Z",
+    }
+    rc_row = {
+        "user_id": "user_rc",
+        "app_user_id": "rc_app_1",
+        "tier": "elite",
+        "event_type": "INITIAL_PURCHASE",
+        "email": "ops@example.com",
+        "updated_at": "2026-04-24T12:30:00Z",
+    }
+    fake = _FakeDB(
+        stripe_customer_rows=[stripe_row],
+        rc_customer_rows=[rc_row],
+    )
+    monkeypatch.setattr(dashboard, "db", fake)
+
+    out = _run(dashboard.search_global("ops@example", include_admin=True))
+
+    # Stripe sub-query routed to `subscriptions`.
+    sub_calls = [
+        c for c in fake.calls
+        if "FROM subscriptions" in c[0] and "rc_subscriptions" not in c[0]
+    ]
+    assert sub_calls, "expected a subscriptions query for admin caller"
+    q, args = sub_calls[0]
+    assert "ILIKE" in q
+    assert args[0] == "%ops@example%"
+
+    # RC sub-query routed to `rc_subscriptions` (joined to app_users for email).
+    rc_calls = [c for c in fake.calls if "FROM rc_subscriptions" in c[0]]
+    assert rc_calls, "expected an rc_subscriptions query for admin caller"
+    q, args = rc_calls[0]
+    assert "ILIKE" in q
+    assert "app_users" in q
+    assert args[0] == "%ops@example%"
+
+    # Both customer rows surface; provider tags identify the source.
+    customers = [b for b in out["billing"] if b["kind"] == "customer"]
+    providers = sorted(b["provider"] for b in customers)
+    assert providers == ["revenuecat", "stripe"]
+    stripe_hit = next(b for b in customers if b["provider"] == "stripe")
+    assert stripe_hit["email"] == "ops@example.com"
+    assert stripe_hit["tier"] == "pro"
+    assert stripe_hit["stripe_customer_id"] == "cus_xyz"
+    rc_hit = next(b for b in customers if b["provider"] == "revenuecat")
+    assert rc_hit["app_user_id"] == "rc_app_1"
+    assert rc_hit["tier"] == "elite"
+    # status mirrors the latest RC event_type so the operator can tell
+    # whether the customer is mid-renewal vs initial purchase.
+    assert rc_hit["status"] == "INITIAL_PURCHASE"
+
+
+def test_admin_billing_iso_date_filters_by_calendar_day(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ISO-date queries restrict billing tables to that calendar day."""
+    fake = _FakeDB()
+    monkeypatch.setattr(dashboard, "db", fake)
+
+    _run(dashboard.search_global("2026-04-24", include_admin=True))
+
+    rc_calls = [c for c in fake.calls if "rc_webhook_deliveries" in c[0]]
+    assert rc_calls
+    q, args = rc_calls[0]
+    assert "received_at::date = $1::date" in q
+    assert args[0] == "2026-04-24"
+
+    # subscriptions (Stripe) — match `updated_at::date`.
+    sub_calls = [
+        c for c in fake.calls
+        if "FROM subscriptions" in c[0] and "rc_subscriptions" not in c[0]
+    ]
+    assert sub_calls
+    q, args = sub_calls[0]
+    assert "updated_at::date = $1::date" in q
+    assert args[0] == "2026-04-24"
+
+    # rc_subscriptions (RC) — also `updated_at::date`.
+    rc_sub_calls = [c for c in fake.calls if "FROM rc_subscriptions" in c[0]]
+    assert rc_sub_calls
+    q, args = rc_sub_calls[0]
+    assert "updated_at::date = $1::date" in q
+    assert args[0] == "2026-04-24"
+
+
+def test_admin_billing_query_failure_is_swallowed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A db.fetch exception on any billing branch must not bubble up —
+    the rest of the search envelope (and the other billing branches)
+    should still come back populated."""
+
+    class _BoomDB(_FakeDB):
+        async def fetch(self, query: str, *args: Any) -> list[dict[str, Any]]:
+            self.calls.append((query, args))
+            if "rc_webhook_deliveries" in query:
+                raise RuntimeError("simulated rc_webhook_deliveries outage")
+            return await super().fetch(query, *args)
+
+    fake = _BoomDB(
+        stripe_customer_rows=[
+            {
+                "user_id": "u1",
+                "email": "x@y",
+                "tier": "free",
+                "status": "inactive",
+                "stripe_customer_id": None,
+                "updated_at": "2026-04-24T12:00:00Z",
+            }
+        ],
+    )
+    monkeypatch.setattr(dashboard, "db", fake)
+
+    out = _run(dashboard.search_global("x@y", include_admin=True))
+
+    # The Stripe customer hit still surfaces despite the RC events outage.
+    assert any(b["provider"] == "stripe" for b in out["billing"])
+    # No RC event hit (the failing branch silently returns nothing).
+    assert not any(b["kind"] == "event" for b in out["billing"])

@@ -100,6 +100,8 @@ export * from "./rearmTradingResult";
 export * from "./rearmTradingResultKillSwitch";
 export * from "./searchAllParams";
 export * from "./searchAuditHit";
+export * from "./searchBillingHit";
+export * from "./searchBillingHitKind";
 export * from "./searchCycleHit";
 export * from "./searchDebateHit";
 export * from "./searchResults";

@@ -899,10 +899,14 @@ async def search_global(
 
     When ``include_admin`` is True (caller is an admin) the response
     also includes ``users`` (matches on ``app_users`` by email / display
-    name / clerk user id) and ``audit`` (matches on ``admin_audit_log``
-    by action / actor / target email, plus numeric id). Non-admin
-    callers always receive empty lists for those keys so the operator
-    palette can render them unconditionally.
+    name / clerk user id), ``audit`` (matches on ``admin_audit_log``
+    by action / actor / target email, plus numeric id), and ``billing``
+    — stuck RC webhook deliveries (matched on ``rc_webhook_deliveries``
+    by ``event_id`` / last error substring, latest 5xx wins) plus
+    Stripe / RevenueCat customer rows (matched on ``subscriptions`` /
+    ``rc_subscriptions`` by email / clerk user id / stripe customer
+    id). Non-admin callers always receive empty lists for those keys
+    so the operator palette can render them unconditionally.
     """
     q = (q or "").strip()
     if not q:
@@ -912,6 +916,7 @@ async def search_global(
             "cycles": [],
             "users": [],
             "audit": [],
+            "billing": [],
         }
     limit = max(1, min(50, int(limit)))
 
@@ -1131,12 +1136,220 @@ async def search_global(
         except Exception as e:
             log.warning("search audit failed: %s", e)
 
+    billing: list[dict[str, Any]] = []
+    if include_admin:
+        # ------------------------------------------------------------------
+        # Admin-only billing matches (task #632). Two row kinds share
+        # one envelope so the palette renders them under a single
+        # "Billing" group:
+        #
+        #   * ``kind="event"``   — the latest 5xx delivery row from
+        #     ``rc_webhook_deliveries``, matched by ``event_id`` /
+        #     last-error substring (or by calendar day on the ISO-date
+        #     branch). Routes to the RC retry table on /system with a
+        #     ``focus=rc-event-<id>`` highlight.
+        #   * ``kind="customer"`` — Stripe (``subscriptions``) and RC
+        #     (``rc_subscriptions`` joined to ``app_users`` for email)
+        #     billing rows, matched on email / clerk user id / stripe
+        #     customer id. Routes to the user detail with a
+        #     ``focus=user-<clerk_user_id>`` highlight, mirroring the
+        #     existing user-search hits.
+        # ------------------------------------------------------------------
+
+        # --- RC webhook events ---------------------------------------
+        try:
+            if is_date:
+                rows = await db.fetch(
+                    """
+                    WITH latest AS (
+                        SELECT DISTINCT ON (event_id)
+                               event_id, status, http_status, event_type,
+                               received_at, error
+                          FROM rc_webhook_deliveries
+                         WHERE event_id IS NOT NULL
+                           AND received_at::date = $1::date
+                         ORDER BY event_id, received_at DESC
+                    ),
+                    per_event AS (
+                        SELECT event_id, count(*)::int AS attempts
+                          FROM rc_webhook_deliveries
+                         WHERE event_id IS NOT NULL
+                           AND received_at::date = $1::date
+                         GROUP BY event_id
+                    )
+                    SELECT l.event_id, l.event_type,
+                           to_char(l.received_at, 'YYYY-MM-DD"T"HH24:MI:SSZ')
+                               AS last_failed_at,
+                           l.error AS last_error,
+                           p.attempts
+                      FROM latest l
+                      JOIN per_event p USING (event_id)
+                     WHERE l.status = 'http_5xx'
+                     ORDER BY l.received_at DESC
+                     LIMIT $2
+                    """,
+                    q, limit,
+                )
+            else:
+                rows = await db.fetch(
+                    """
+                    WITH latest AS (
+                        SELECT DISTINCT ON (event_id)
+                               event_id, status, http_status, event_type,
+                               received_at, error
+                          FROM rc_webhook_deliveries
+                         WHERE event_id IS NOT NULL
+                           AND received_at >= now() - interval '30 days'
+                         ORDER BY event_id, received_at DESC
+                    ),
+                    per_event AS (
+                        SELECT event_id, count(*)::int AS attempts
+                          FROM rc_webhook_deliveries
+                         WHERE event_id IS NOT NULL
+                           AND received_at >= now() - interval '30 days'
+                         GROUP BY event_id
+                    )
+                    SELECT l.event_id, l.event_type,
+                           to_char(l.received_at, 'YYYY-MM-DD"T"HH24:MI:SSZ')
+                               AS last_failed_at,
+                           l.error AS last_error,
+                           p.attempts
+                      FROM latest l
+                      JOIN per_event p USING (event_id)
+                     WHERE l.status = 'http_5xx'
+                       AND (l.event_id ILIKE $1 OR coalesce(l.error, '') ILIKE $1)
+                     ORDER BY l.received_at DESC
+                     LIMIT $2
+                    """,
+                    like, limit,
+                )
+            for r in rows:
+                billing.append(
+                    {
+                        "kind": "event",
+                        "provider": "revenuecat",
+                        "event_id": r["event_id"],
+                        "event_type": r["event_type"],
+                        "last_failed_at": r["last_failed_at"],
+                        "last_error": r["last_error"],
+                        "attempts": int(r["attempts"] or 0),
+                    }
+                )
+        except Exception as e:
+            log.warning("search billing events failed: %s", e)
+
+        # --- Stripe customers ---------------------------------------
+        try:
+            if is_date:
+                rows = await db.fetch(
+                    """
+                    SELECT user_id, email, tier, status, stripe_customer_id,
+                           to_char(updated_at, 'YYYY-MM-DD"T"HH24:MI:SSZ')
+                               AS updated_at
+                      FROM subscriptions
+                     WHERE updated_at::date = $1::date
+                     ORDER BY updated_at DESC NULLS LAST
+                     LIMIT $2
+                    """,
+                    q, limit,
+                )
+            else:
+                rows = await db.fetch(
+                    """
+                    SELECT user_id, email, tier, status, stripe_customer_id,
+                           to_char(updated_at, 'YYYY-MM-DD"T"HH24:MI:SSZ')
+                               AS updated_at
+                      FROM subscriptions
+                     WHERE coalesce(email, '') ILIKE $1
+                        OR coalesce(stripe_customer_id, '') ILIKE $1
+                        OR coalesce(user_id, '') ILIKE $1
+                     ORDER BY updated_at DESC NULLS LAST
+                     LIMIT $2
+                    """,
+                    like, limit,
+                )
+            for r in rows:
+                billing.append(
+                    {
+                        "kind": "customer",
+                        "provider": "stripe",
+                        "user_id": r["user_id"],
+                        "email": r["email"],
+                        "tier": r["tier"],
+                        "status": r["status"],
+                        "stripe_customer_id": r["stripe_customer_id"],
+                        "updated_at": r["updated_at"],
+                    }
+                )
+        except Exception as e:
+            log.warning("search billing stripe customers failed: %s", e)
+
+        # --- RevenueCat customers -----------------------------------
+        # Only the latest row per (user_id|app_user_id) — RC writes one
+        # row per event_id, so without DISTINCT ON the same customer
+        # would surface multiple times.
+        try:
+            if is_date:
+                rows = await db.fetch(
+                    """
+                    SELECT DISTINCT ON (coalesce(s.user_id, s.app_user_id))
+                           s.user_id, s.app_user_id, s.tier, s.event_type,
+                           u.email,
+                           to_char(s.updated_at, 'YYYY-MM-DD"T"HH24:MI:SSZ')
+                               AS updated_at
+                      FROM rc_subscriptions s
+                      LEFT JOIN app_users u
+                             ON u.clerk_user_id = s.user_id
+                     WHERE s.updated_at::date = $1::date
+                     ORDER BY coalesce(s.user_id, s.app_user_id),
+                              s.updated_at DESC
+                     LIMIT $2
+                    """,
+                    q, limit,
+                )
+            else:
+                rows = await db.fetch(
+                    """
+                    SELECT DISTINCT ON (coalesce(s.user_id, s.app_user_id))
+                           s.user_id, s.app_user_id, s.tier, s.event_type,
+                           u.email,
+                           to_char(s.updated_at, 'YYYY-MM-DD"T"HH24:MI:SSZ')
+                               AS updated_at
+                      FROM rc_subscriptions s
+                      LEFT JOIN app_users u
+                             ON u.clerk_user_id = s.user_id
+                     WHERE coalesce(u.email, '') ILIKE $1
+                        OR coalesce(s.user_id, '') ILIKE $1
+                        OR coalesce(s.app_user_id, '') ILIKE $1
+                     ORDER BY coalesce(s.user_id, s.app_user_id),
+                              s.updated_at DESC
+                     LIMIT $2
+                    """,
+                    like, limit,
+                )
+            for r in rows:
+                billing.append(
+                    {
+                        "kind": "customer",
+                        "provider": "revenuecat",
+                        "user_id": r["user_id"],
+                        "app_user_id": r["app_user_id"],
+                        "email": r["email"],
+                        "tier": r["tier"],
+                        "status": r["event_type"],
+                        "updated_at": r["updated_at"],
+                    }
+                )
+        except Exception as e:
+            log.warning("search billing rc customers failed: %s", e)
+
     return {
         "trades": trades,
         "debates": debates,
         "cycles": cycles,
         "users": users,
         "audit": audit,
+        "billing": billing,
     }
 
 

@@ -6,6 +6,7 @@
  * OpenAPI spec version: 0.1.0
  */
 import type { SearchAuditHit } from "./searchAuditHit";
+import type { SearchBillingHit } from "./searchBillingHit";
 import type { SearchCycleHit } from "./searchCycleHit";
 import type { SearchDebateHit } from "./searchDebateHit";
 import type { SearchTradeHit } from "./searchTradeHit";
@@ -19,4 +20,6 @@ export interface SearchResults {
   users: SearchUserHit[];
   /** Admin-only matches against `admin_audit_log` (action / actor / target email / numeric id). Always present; empty for non-admin callers. */
   audit: SearchAuditHit[];
+  /** Admin-only matches against `rc_webhook_deliveries` (latest 5xx by event_id / error substring) and the Stripe / RevenueCat customer rows (lookup by email / clerk user id / stripe customer id). Always present; empty for non-admin callers. */
+  billing: SearchBillingHit[];
 }

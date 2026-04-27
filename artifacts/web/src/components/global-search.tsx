@@ -79,8 +79,15 @@ export default function GlobalSearch() {
   const cycles = data?.cycles ?? [];
   const users = data?.users ?? [];
   const audit = data?.audit ?? [];
+  const billing = data?.billing ?? [];
   const hasResults =
-    trades.length + debates.length + cycles.length + users.length + audit.length > 0;
+    trades.length +
+      debates.length +
+      cycles.length +
+      users.length +
+      audit.length +
+      billing.length >
+    0;
 
   return (
     <CommandDialog open={open} onOpenChange={setOpen} shouldFilter={false}>
@@ -271,6 +278,97 @@ export default function GlobalSearch() {
                   </div>
                 </CommandItem>
               ))}
+            </CommandGroup>
+          </>
+        )}
+
+        {billing.length > 0 && (
+          <>
+            {(trades.length > 0 ||
+              debates.length > 0 ||
+              cycles.length > 0 ||
+              users.length > 0 ||
+              audit.length > 0) && <CommandSeparator />}
+            <CommandGroup heading="Billing">
+              {billing.map((b, idx) => {
+                if (b.kind === "event") {
+                  const eventId = b.event_id ?? "";
+                  return (
+                    <CommandItem
+                      key={`billing-event-${eventId || idx}`}
+                      value={`billing-event-${eventId}-${b.event_type ?? ""}`}
+                      onSelect={() =>
+                        go(
+                          `/system?tab=controls&focus=${encodeURIComponent(
+                            `rc-event-${eventId}`,
+                          )}`,
+                        )
+                      }
+                      data-testid={`search-billing-event-${eventId || idx}`}
+                    >
+                      <div className="flex w-full items-center justify-between gap-3">
+                        <div className="min-w-0 flex-1">
+                          <div className="truncate text-foreground">
+                            RC event {eventId || "—"}
+                          </div>
+                          <div className="truncate text-[10px] uppercase tracking-wider text-muted-foreground">
+                            {b.event_type ?? "—"}
+                            {" · "}
+                            {b.attempts ?? 0} tries
+                            {" · "}
+                            {fmtTime(b.last_failed_at)}
+                            {b.last_error ? ` · ${b.last_error}` : ""}
+                          </div>
+                        </div>
+                        <div className="text-[10px] uppercase tracking-wider text-muted-foreground">
+                          5xx
+                        </div>
+                      </div>
+                    </CommandItem>
+                  );
+                }
+                // kind === "customer"
+                const provider = b.provider ?? "stripe";
+                const clerkId = b.user_id ?? "";
+                // RC mobile-only customers may not have a clerk id yet
+                // (anonymous app_user_id). Fall back to the user-search
+                // page for known clerk ids; otherwise stay on /system
+                // settings so the operator can look them up by hand.
+                const target = clerkId
+                  ? `/system?tab=users&focus=${encodeURIComponent(
+                      `user-${clerkId}`,
+                    )}`
+                  : `/system?tab=settings`;
+                const key =
+                  clerkId || b.app_user_id || b.email || `idx-${idx}`;
+                return (
+                  <CommandItem
+                    key={`billing-customer-${provider}-${key}`}
+                    value={`billing-customer-${provider}-${key}-${b.email ?? ""}`}
+                    onSelect={() => go(target)}
+                    data-testid={`search-billing-customer-${provider}-${key}`}
+                  >
+                    <div className="flex w-full items-center justify-between gap-3">
+                      <div className="min-w-0 flex-1">
+                        <div className="truncate text-foreground">
+                          {b.email || clerkId || b.app_user_id || "—"}
+                        </div>
+                        <div className="truncate text-[10px] uppercase tracking-wider text-muted-foreground">
+                          {provider}
+                          {" · "}
+                          {b.tier ?? "—"}
+                          {b.status ? ` · ${b.status}` : ""}
+                          {" · updated "}
+                          {fmtTime(b.updated_at)}
+                        </div>
+                      </div>
+                      <div className="text-[10px] uppercase tracking-wider text-muted-foreground truncate max-w-[140px]">
+                        {clerkId || b.stripe_customer_id || b.app_user_id || ""}
+                      </div>
+                    </div>
+                  </CommandItem>
+                );
+              })}
             </CommandGroup>
           </>
         )}

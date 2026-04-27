@@ -404,6 +404,47 @@ export const SearchAllResponse = zod.object({
     .describe(
       "Admin-only matches against `admin_audit_log` (action \/ actor \/ target email \/ numeric id). Always present; empty for non-admin callers.",
     ),
+  billing: zod
+    .array(
+      zod
+        .object({
+          kind: zod
+            .enum(["event", "customer"])
+            .describe(
+              "`event` → stuck RC webhook delivery; `customer` → Stripe or RC subscription row.",
+            ),
+          provider: zod
+            .string()
+            .nullish()
+            .describe(
+              'For `kind: \"customer\"`, one of `stripe` \/ `revenuecat`. For `kind: \"event\"`, always `revenuecat`.',
+            ),
+          event_id: zod.string().nullish(),
+          event_type: zod.string().nullish(),
+          last_failed_at: zod
+            .string()
+            .nullish()
+            .describe("ISO-8601 timestamp of the most recent 5xx delivery."),
+          last_error: zod.string().nullish(),
+          attempts: zod.number().nullish(),
+          user_id: zod.string().nullish().describe("Clerk user id when known."),
+          app_user_id: zod
+            .string()
+            .nullish()
+            .describe("RevenueCat app_user_id (mobile-only customers)."),
+          email: zod.string().nullish(),
+          tier: zod.string().nullish(),
+          status: zod.string().nullish(),
+          stripe_customer_id: zod.string().nullish(),
+          updated_at: zod.string().nullish(),
+        })
+        .describe(
+          'Admin-only billing match. Carries either a stuck RevenueCat webhook event (`kind: \"event\"`) or a Stripe \/ RevenueCat customer row (`kind: \"customer\"`). The unused side\'s fields are nullable; the frontend renders the appropriate row layout off the discriminator.',
+        ),
+    )
+    .describe(
+      "Admin-only matches against `rc_webhook_deliveries` (latest 5xx by event_id \/ error substring) and the Stripe \/ RevenueCat customer rows (lookup by email \/ clerk user id \/ stripe customer id). Always present; empty for non-admin callers.",
+    ),
 });
 
 /**
