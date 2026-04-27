@@ -54,6 +54,7 @@ vi.mock("@/pages/settings-notifications", () => ({
 
 vi.mock("@/pages/admin", () => ({
   AuditLogPanel: () => <div />,
+  CryptoAccuracyPanel: () => <div />,
   CryptoBacktestPanel: () => <div />,
   EloUpdaterPanel: () => <div />,
   GatekeeperModelPanel: () => <div />,

@@ -4943,6 +4943,256 @@ export function CryptoBacktestPanel() {
 }
 
 // ---------------------------------------------------------------------------
+// Realised crypto accuracy panel (task #645) — surfaces
+// `/api/admin/crypto/accuracy`, the rolling-window report of accuracy /
+// Brier / log-loss for *settled* Kalshi crypto predictions joined back to
+// the swarm's recorded YES probability.  Sits next to the in-process
+// crypto backtest panel above so operators can compare the live model's
+// realised performance against its historical-OHLCV baseline.
+// ---------------------------------------------------------------------------
+
+type CryptoAccuracySlice = {
+  symbol: string | null;
+  timeframe: string | null;
+  n: number;
+  accuracy: number | null;
+  brier: number | null;
+  log_loss: number | null;
+  yes_count: number;
+  no_count: number;
+};
+
+type CryptoAccuracyWindow = {
+  window_hours: number;
+  n_settled: number;
+  n_void: number;
+  n_unscored: number;
+  overall: CryptoAccuracySlice;
+  slices: CryptoAccuracySlice[];
+};
+
+type CryptoAccuracyReport = {
+  league: string;
+  windows: CryptoAccuracyWindow[];
+};
+
+// Compact "24h" / "7d" / "30d" label.  Anything below 48h stays in hours
+// so 24h doesn't get awkwardly rounded to "1d"; everything else falls
+// back to whole-day display matching the endpoint's default windows.
+function fmtAccuracyWindow(hours: number): string {
+  if (!Number.isFinite(hours) || hours <= 0) return "—";
+  if (hours < 48) return `${Math.round(hours)}h`;
+  const days = hours / 24;
+  return Number.isInteger(days) ? `${days}d` : `${days.toFixed(1)}d`;
+}
+
+export function CryptoAccuracyPanel() {
+  const { getToken, isSignedIn } = useAuth();
+  const tokenFn = useMemo(
+    () => () => getToken().then((t) => t ?? null),
+    [getToken],
+  );
+
+  const { data, isLoading, error, refetch, isFetching } =
+    useQuery<CryptoAccuracyReport>({
+      queryKey: ["admin", "crypto-accuracy"] as const,
+      queryFn: () =>
+        apiFetch<CryptoAccuracyReport>("/api/admin/crypto/accuracy", {
+          getToken: tokenFn,
+        }),
+      enabled: !!isSignedIn,
+      refetchOnWindowFocus: false,
+      staleTime: 60_000,
+    });
+
+  const windows = data?.windows ?? [];
+
+  return (
+    <div className="space-y-3" data-testid="panel-crypto-accuracy">
+      <div className="flex flex-wrap items-start justify-between gap-2">
+        <p className="text-[11px] text-muted-foreground leading-snug">
+          Realised accuracy for settled Kalshi crypto predictions, joined
+          back to the swarm&apos;s recorded YES probability. Each rolling
+          window reports overall accuracy / Brier / log-loss plus a
+          per-(symbol, timeframe) slice. <code>void</code> contracts are
+          excluded from scoring; <code>unscored</code> counts settled rows
+          we couldn&apos;t join to a model probability so coverage gaps
+          are visible.
+        </p>
+        <button
+          type="button"
+          onClick={() => refetch()}
+          disabled={isFetching}
+          className="text-[10px] uppercase tracking-widest text-muted-foreground hover:text-foreground disabled:opacity-50"
+          data-testid="button-crypto-accuracy-refresh"
+        >
+          {isFetching ? "Refreshing…" : "Refresh"}
+        </button>
+      </div>
+
+      {error && (
+        <div
+          className="border border-loss/60 bg-loss/10 p-2 text-xs text-loss"
+          data-testid="crypto-accuracy-error"
+        >
+          Failed to load accuracy report:{" "}
+          {error instanceof Error ? error.message : String(error)}
+        </div>
+      )}
+
+      {isLoading && !data && (
+        <div
+          className="h-24 animate-pulse bg-muted/10"
+          data-testid="crypto-accuracy-loading"
+        />
+      )}
+
+      {!isLoading && !error && windows.length === 0 && (
+        <div
+          className="py-4 text-center text-[11px] text-muted-foreground"
+          data-testid="crypto-accuracy-empty"
+        >
+          No settled crypto predictions in any of the requested windows yet.
+        </div>
+      )}
+
+      {windows.map((w) => (
+        <div
+          key={w.window_hours}
+          className="border border-border bg-card p-3 space-y-3"
+          data-testid={`crypto-accuracy-window-${w.window_hours}`}
+        >
+          <div className="flex flex-wrap items-baseline justify-between gap-2">
+            <h3 className="text-[10px] uppercase tracking-widest text-muted-foreground">
+              Window · {fmtAccuracyWindow(w.window_hours)}
+            </h3>
+            <span className="text-[10px] uppercase tracking-widest text-muted-foreground">
+              settled {w.n_settled.toLocaleString()} ·{" "}
+              <span data-testid={`crypto-accuracy-void-${w.window_hours}`}>
+                void {w.n_void.toLocaleString()}
+              </span>{" "}
+              ·{" "}
+              <span data-testid={`crypto-accuracy-unscored-${w.window_hours}`}>
+                unscored {w.n_unscored.toLocaleString()}
+              </span>
+            </span>
+          </div>
+
+          <div className="grid grid-cols-2 gap-3 text-[11px] md:grid-cols-4">
+            <div>
+              <div className="uppercase tracking-wider text-muted-foreground">
+                Scored
+              </div>
+              <div
+                className="font-mono text-sm"
+                data-testid={`crypto-accuracy-n-${w.window_hours}`}
+              >
+                {w.overall.n.toLocaleString()}
+              </div>
+              <div className="text-[10px] text-muted-foreground">
+                yes {w.overall.yes_count.toLocaleString()} · no{" "}
+                {w.overall.no_count.toLocaleString()}
+              </div>
+            </div>
+            <div>
+              <div className="uppercase tracking-wider text-muted-foreground">
+                Accuracy
+              </div>
+              <div
+                className="font-mono text-sm"
+                data-testid={`crypto-accuracy-accuracy-${w.window_hours}`}
+              >
+                {fmtMetric(w.overall.accuracy)}
+              </div>
+            </div>
+            <div>
+              <div className="uppercase tracking-wider text-muted-foreground">
+                Brier
+              </div>
+              <div
+                className="font-mono text-sm"
+                data-testid={`crypto-accuracy-brier-${w.window_hours}`}
+              >
+                {fmtMetric(w.overall.brier)}
+              </div>
+            </div>
+            <div>
+              <div className="uppercase tracking-wider text-muted-foreground">
+                Log loss
+              </div>
+              <div
+                className="font-mono text-sm"
+                data-testid={`crypto-accuracy-log-loss-${w.window_hours}`}
+              >
+                {fmtMetric(w.overall.log_loss)}
+              </div>
+            </div>
+          </div>
+
+          <div className="border border-border bg-background overflow-x-auto">
+            <table className="w-full text-xs">
+              <thead className="bg-muted/20 text-muted-foreground uppercase tracking-widest">
+                <tr>
+                  <th className="text-left p-2">Pair</th>
+                  <th className="text-right p-2">N</th>
+                  <th className="text-right p-2">Accuracy</th>
+                  <th className="text-right p-2">Brier</th>
+                  <th className="text-right p-2">Log loss</th>
+                  <th className="text-right p-2">Yes / No</th>
+                </tr>
+              </thead>
+              <tbody data-testid={`crypto-accuracy-slices-${w.window_hours}`}>
+                {w.slices.length === 0 ? (
+                  <tr>
+                    <td
+                      colSpan={6}
+                      className="p-3 text-center text-muted-foreground"
+                      data-testid={`crypto-accuracy-slices-empty-${w.window_hours}`}
+                    >
+                      {w.overall.n === 0
+                        ? "No scored rows in this window yet."
+                        : "No (symbol, timeframe) slices to show."}
+                    </td>
+                  </tr>
+                ) : (
+                  w.slices.map((s, i) => (
+                    <tr
+                      key={`${s.symbol ?? "?"}-${s.timeframe ?? "?"}-${i}`}
+                      className="border-t border-border"
+                      data-testid={`crypto-accuracy-slice-${w.window_hours}-${i}`}
+                    >
+                      <td className="p-2 font-mono">
+                        {(s.symbol ?? "?") + " · " + (s.timeframe ?? "?")}
+                      </td>
+                      <td className="p-2 text-right font-mono">
+                        {s.n.toLocaleString()}
+                      </td>
+                      <td className="p-2 text-right font-mono">
+                        {fmtMetric(s.accuracy)}
+                      </td>
+                      <td className="p-2 text-right font-mono">
+                        {fmtMetric(s.brier)}
+                      </td>
+                      <td className="p-2 text-right font-mono">
+                        {fmtMetric(s.log_loss)}
+                      </td>
+                      <td className="p-2 text-right font-mono text-muted-foreground">
+                        {s.yes_count.toLocaleString()} /{" "}
+                        {s.no_count.toLocaleString()}
+                      </td>
+                    </tr>
+                  ))
+                )}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Elo updater scheduler (task #344) — surface the periodic team-rating
 // updater's per-cycle counters so operators can see at a glance that team
 // ratings are flowing, plus a button to kick a catch-up cycle without

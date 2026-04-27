@@ -14,6 +14,7 @@ import { HealthPanel } from "@/pages/health";
 import { NotificationPrefsPanel } from "@/pages/settings-notifications";
 import {
   AuditLogPanel,
+  CryptoAccuracyPanel,
   CryptoBacktestPanel,
   EloUpdaterPanel,
   GatekeeperModelPanel,
@@ -222,6 +223,13 @@ export default function SystemPage() {
               Crypto-binary backtest
             </div>
             <CryptoBacktestPanel />
+          </GlassCard>
+
+          <GlassCard tone="solid" padding="md">
+            <div className="mb-3 text-[11px] font-semibold uppercase tracking-[0.18em] text-accent-cyan/80">
+              Realised crypto accuracy
+            </div>
+            <CryptoAccuracyPanel />
           </GlassCard>
 
           <GlassCard tone="solid" padding="md">
