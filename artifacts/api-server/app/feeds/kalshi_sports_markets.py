@@ -139,17 +139,22 @@ def _cadence_seconds() -> float:
 def _mid_price_dollars(market: dict[str, Any]) -> float | None:
     """Best-effort YES mid-price in dollars (0..1) from a Kalshi market row.
 
-    Order of fallbacks: (bid+ask)/2 → last_price → ask → bid.  Returns
-    ``None`` when no price signal is present at all so the upsert
-    leaves ``predictions.kalshi_price`` NULL — the orchestrator treats
-    a NULL price as "not yet seeded" and skips the row, preventing a
-    book-vs-fair edge calc against a phantom mid.
-    """
-    bid = market.get("yes_bid")
-    ask = market.get("yes_ask")
-    last = market.get("last_price")
+    Kalshi's live ``GET /markets`` response now ships the YES book under
+    the ``*_dollars`` suffixed fields (``yes_bid_dollars`` /
+    ``yes_ask_dollars`` / ``last_price_dollars``) which are already
+    expressed in dollars on a 0..1 scale.  The legacy un-suffixed
+    fields (``yes_bid`` / ``yes_ask`` / ``last_price``) used cents on
+    a 0..100 scale and have been removed from the live response — but
+    we still accept them as a fallback so unit-test fixtures that
+    pre-date the API rename keep working without churn.
 
-    def _to_cents(v: Any) -> float | None:
+    Order of fallbacks across sides: (bid+ask)/2 → last_price → ask →
+    bid.  Returns ``None`` when no price signal is present at all so
+    the upsert leaves ``predictions.kalshi_price`` NULL — the
+    orchestrator treats a NULL price as "not yet seeded" and skips
+    the row, preventing a book-vs-fair edge calc against a phantom mid.
+    """
+    def _to_num(v: Any) -> float | None:
         if v is None:
             return None
         try:
@@ -160,17 +165,27 @@ def _mid_price_dollars(market: dict[str, Any]) -> float | None:
             return None
         return f
 
-    bid_c = _to_cents(bid)
-    ask_c = _to_cents(ask)
-    last_c = _to_cents(last)
-    if bid_c is not None and ask_c is not None and ask_c >= bid_c:
-        return ((bid_c + ask_c) / 2.0) / 100.0
-    if last_c is not None:
-        return last_c / 100.0
-    if ask_c is not None:
-        return ask_c / 100.0
-    if bid_c is not None:
-        return bid_c / 100.0
+    def _resolve(dollars_key: str, cents_key: str) -> float | None:
+        d = _to_num(market.get(dollars_key))
+        if d is not None:
+            return d
+        c = _to_num(market.get(cents_key))
+        if c is not None:
+            return c / 100.0
+        return None
+
+    bid_d = _resolve("yes_bid_dollars", "yes_bid")
+    ask_d = _resolve("yes_ask_dollars", "yes_ask")
+    last_d = _resolve("last_price_dollars", "last_price")
+
+    if bid_d is not None and ask_d is not None and ask_d >= bid_d:
+        return (bid_d + ask_d) / 2.0
+    if last_d is not None:
+        return last_d
+    if ask_d is not None:
+        return ask_d
+    if bid_d is not None:
+        return bid_d
     return None
 
 
@@ -238,9 +253,17 @@ def _candidate_from_market(
             "title": market.get("title"),
             "status": market.get("status"),
             "close_time": close_time.isoformat() if close_time else None,
+            # Preserve both the new ``*_dollars`` (live API, 0..1
+            # dollars) and the legacy un-suffixed (cents, 0..100)
+            # field names so any forensics consumer that knows either
+            # convention can read the same blob without conditional
+            # logic.  Whichever side the API returned will be non-null.
             "yes_bid": market.get("yes_bid"),
             "yes_ask": market.get("yes_ask"),
             "last_price": market.get("last_price"),
+            "yes_bid_dollars": market.get("yes_bid_dollars"),
+            "yes_ask_dollars": market.get("yes_ask_dollars"),
+            "last_price_dollars": market.get("last_price_dollars"),
             "home_team": home,
             "away_team": away,
             "source": "kalshi_sports_markets",

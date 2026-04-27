@@ -59,6 +59,26 @@ DEFAULT_MAX_PRICE = 0.95
 DEFAULT_RESTING_ORDER_MAX_AGE_SECS = 30
 
 
+# Defensive datetime comparison: `markets.game_time` is stored as a
+# naive UTC ``timestamp without time zone`` (asyncpg returns it as a
+# tz-naive ``datetime``), but ``datetime.now(timezone.utc)`` is
+# tz-aware.  Comparing them directly raises
+# ``TypeError: can't compare offset-naive and offset-aware datetimes``
+# and aborts the entire cycle (no ``cycle_complete`` event), which
+# strands sports/crypto cycles in flight.  This helper normalizes a
+# naive value to UTC before the compare so the in-progress check is
+# bullet-proof regardless of whether a feed populated the column with
+# an aware or naive datetime.
+def _game_time_in_past(gt: Any) -> bool:
+    if gt is None:
+        return False
+    if not isinstance(gt, datetime):
+        return False
+    if gt.tzinfo is None:
+        gt = gt.replace(tzinfo=timezone.utc)
+    return gt <= datetime.now(timezone.utc)
+
+
 # Vertical → league filter is now driven by the pluggable
 # `app.verticals` registry.  `_league_filter` stays as a thin wrapper
 # so existing call sites (and tests that monkeypatch it) keep working.
@@ -1275,15 +1295,22 @@ async def run_cycle(vertical: str = "sports") -> CycleResult:
                 "league": pred["league"],
                 "market_type": "moneyline",
                 "side": "YES",
-                "current_price": float(pred["kalshi_price"]) if pred["kalshi_price"] else None,
+                "current_price": float(pred["kalshi_price"]) if pred.get("kalshi_price") is not None else None,
                 "context": (
                     f"home_win_prob={pred['home_win_prob']} "
                     f"edge={pred['edge']} confidence={pred['confidence']}"
                 ),
                 # Persisted into swarm_debates.game_context so settlement
                 # can join debates -> markets -> persona Brier updates.
+                # asyncpg returns numeric columns as ``Decimal``; cast
+                # to float here so the downstream JSON serializer in
+                # ``run_debate`` (and the swarm_debates.game_context
+                # jsonb persist) doesn't choke with
+                # ``Object of type Decimal is not JSON serializable``.
+                # Mirrors the float() conversion already applied to
+                # ``current_price`` two lines above.
                 "kalshi_market_id": pred.get("kalshi_market_id"),
-                "kalshi_price": pred.get("kalshi_price"),
+                "kalshi_price": float(pred["kalshi_price"]) if pred.get("kalshi_price") is not None else None,
                 # Carried so the persisted swarm_debates.game_context
                 # row holds the team names — that's what the Elo
                 # enrichment (`attach_elo_to_candidate`) keys off when
@@ -1511,10 +1538,7 @@ async def run_cycle(vertical: str = "sports") -> CycleResult:
             # sports — exactly the scenario the blackout protects.
             event_in_progress=(
                 bool(cand.get("event_in_progress", False))
-                or (
-                    cand.get("game_time") is not None
-                    and cand.get("game_time") <= datetime.now(timezone.utc)
-                )
+                or _game_time_in_past(cand.get("game_time"))
             ),
         )
 

@@ -34,6 +34,34 @@ def test_mid_price_falls_back_to_last_then_one_sided():
     assert kcm._mid_price_dollars({}) is None
 
 
+def test_mid_price_uses_dollars_fields_directly_without_dividing_by_100():
+    # The live Kalshi GET /markets response now ships YES book under the
+    # ``*_dollars`` suffixed field names, already on the 0..1 dollar
+    # scale.  Don't divide by 100 — these are the exact final price.
+    assert kcm._mid_price_dollars(
+        {"yes_bid_dollars": 0.40, "yes_ask_dollars": 0.44}
+    ) == pytest.approx(0.42)
+    assert kcm._mid_price_dollars(
+        {"last_price_dollars": 0.55}
+    ) == pytest.approx(0.55)
+    assert kcm._mid_price_dollars(
+        {"yes_ask_dollars": 0.60}
+    ) == pytest.approx(0.60)
+    assert kcm._mid_price_dollars(
+        {"yes_bid_dollars": 0.30}
+    ) == pytest.approx(0.30)
+
+
+def test_mid_price_prefers_dollars_field_when_both_keys_present():
+    # If a fixture happens to carry both names (e.g. transitional
+    # API), the new ``*_dollars`` field wins so the live path stays
+    # correct even if some intermediary added a legacy alias.
+    assert kcm._mid_price_dollars(
+        {"yes_bid_dollars": 0.40, "yes_ask_dollars": 0.44,
+         "yes_bid": 99, "yes_ask": 99}
+    ) == pytest.approx(0.42)
+
+
 def test_candidate_from_market_skips_unparseable_ticker():
     assert kcm._candidate_from_market({"ticker": "FOOBAR"}) is None
     assert kcm._candidate_from_market({}) is None
