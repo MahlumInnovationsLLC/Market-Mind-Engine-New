@@ -1,7 +1,16 @@
+import { useEffect, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { customFetch } from "@workspace/api-client-react";
 import { GlassCard } from "@/components/ui/glass-card";
 import { SectionHeader } from "@/components/ui/section-header";
+
+interface RecentAlert {
+  last_sent_at: string | null;
+  expires_at: string | null;
+  ttl_seconds_remaining: number | null;
+  fired_last_cycle: boolean;
+  suppressed_last_cycle: boolean;
+}
 
 interface ExposureBucket {
   open_usd: number;
@@ -10,6 +19,7 @@ interface ExposureBucket {
   headroom_usd: number | null;
   utilization: number | null;
   warn: boolean;
+  recent_alert?: RecentAlert | null;
 }
 
 interface PerMatchupBucket extends ExposureBucket {
@@ -28,10 +38,20 @@ interface LeagueEntry {
   per_matchup: PerMatchupBucket[];
 }
 
+interface RecentWarningsSummary {
+  ran_at: string | null;
+  threshold: number | null;
+  ttl_seconds: number | null;
+  fired_count: number;
+  suppressed_count: number;
+  tracked_buckets: number;
+}
+
 interface LeaguesExposureResponse {
   bankroll_usd: number | null;
   warn_threshold: number;
   leagues: LeagueEntry[];
+  recent_warnings?: RecentWarningsSummary;
 }
 
 function fmtUsd(n: number | null | undefined): string {
@@ -42,6 +62,30 @@ function fmtUsd(n: number | null | undefined): string {
 function fmtPct(n: number | null | undefined, digits = 1): string {
   if (n == null || Number.isNaN(n)) return "—";
   return `${(n * 100).toFixed(digits)}%`;
+}
+
+function fmtAgo(iso: string | null | undefined, now: number): string {
+  if (!iso) return "—";
+  const t = Date.parse(iso);
+  if (Number.isNaN(t)) return "—";
+  const sec = Math.max(0, Math.floor((now - t) / 1000));
+  if (sec < 60) return `${sec}s ago`;
+  const min = Math.floor(sec / 60);
+  if (min < 60) return `${min}m ago`;
+  const hr = Math.floor(min / 60);
+  if (hr < 24) return `${hr}h ago`;
+  const day = Math.floor(hr / 24);
+  return `${day}d ago`;
+}
+
+function fmtDuration(seconds: number | null | undefined): string {
+  if (seconds == null || seconds < 0) return "—";
+  if (seconds < 60) return `${Math.floor(seconds)}s`;
+  const min = Math.floor(seconds / 60);
+  if (min < 60) return `${min}m`;
+  const hr = Math.floor(min / 60);
+  const remMin = min % 60;
+  return remMin > 0 ? `${hr}h ${remMin}m` : `${hr}h`;
 }
 
 function utilTone(b: ExposureBucket): string {
@@ -69,14 +113,70 @@ function UtilBar({ b }: { b: ExposureBucket }) {
   );
 }
 
+function RecentAlertLine({
+  alert,
+  now,
+  testId,
+}: {
+  alert: RecentAlert | null | undefined;
+  now: number;
+  testId: string;
+}) {
+  if (!alert) {
+    return (
+      <div
+        data-testid={`${testId}-recent-alert`}
+        data-state="quiet"
+        className="text-[10px] text-muted-foreground/70 italic"
+      >
+        No cap-warn dispatched recently.
+      </div>
+    );
+  }
+  const sentAgo = fmtAgo(alert.last_sent_at, now);
+  const ttl = fmtDuration(alert.ttl_seconds_remaining);
+  const stateBadge = alert.fired_last_cycle
+    ? { text: "FIRED THIS CYCLE", tone: "text-warning" }
+    : alert.suppressed_last_cycle
+      ? { text: "DEDUPE SUPPRESSED", tone: "text-muted-foreground" }
+      : { text: "PRIOR PAGE", tone: "text-muted-foreground" };
+  return (
+    <div
+      data-testid={`${testId}-recent-alert`}
+      data-state={
+        alert.fired_last_cycle
+          ? "fired"
+          : alert.suppressed_last_cycle
+            ? "suppressed"
+            : "prior"
+      }
+      data-last-sent-at={alert.last_sent_at ?? ""}
+      className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[10px] text-muted-foreground border-t border-border/40 pt-1"
+    >
+      <span className={`uppercase tracking-widest font-semibold ${stateBadge.tone}`}>
+        {stateBadge.text}
+      </span>
+      <span>
+        Recently paged:{" "}
+        <span className="text-foreground">{sentAgo}</span>
+      </span>
+      <span>
+        dedupe expires in <span className="text-foreground">{ttl}</span>
+      </span>
+    </div>
+  );
+}
+
 function BucketRow({
   label,
   bucket,
   testId,
+  now,
 }: {
   label: string;
   bucket: ExposureBucket;
   testId: string;
+  now: number;
 }) {
   return (
     <div
@@ -110,11 +210,12 @@ function BucketRow({
           <span className="text-foreground">{fmtUsd(bucket.headroom_usd)}</span>
         </div>
       </div>
+      <RecentAlertLine alert={bucket.recent_alert} now={now} testId={testId} />
     </div>
   );
 }
 
-function LeagueCard({ entry }: { entry: LeagueEntry }) {
+function LeagueCard({ entry, now }: { entry: LeagueEntry; now: number }) {
   const slug = entry.league.toLowerCase();
   const sub: string[] = [
     `per-league ${fmtPct(entry.per_league.cap_pct, 2)}`,
@@ -147,12 +248,14 @@ function LeagueCard({ entry }: { entry: LeagueEntry }) {
           label="Per-league"
           bucket={entry.per_league}
           testId={`leagues-exposure-${slug}-per-league`}
+          now={now}
         />
         {entry.sunday_window && (
           <BucketRow
             label="Sunday window"
             bucket={entry.sunday_window}
             testId={`leagues-exposure-${slug}-sunday-window`}
+            now={now}
           />
         )}
       </div>
@@ -171,6 +274,7 @@ function LeagueCard({ entry }: { entry: LeagueEntry }) {
                 label={e.event_id}
                 bucket={e}
                 testId={`leagues-exposure-${slug}-event-${e.event_id}`}
+                now={now}
               />
             ))}
           </div>
@@ -195,6 +299,7 @@ function LeagueCard({ entry }: { entry: LeagueEntry }) {
                 label={m.matchup}
                 bucket={m}
                 testId={`leagues-exposure-${slug}-matchup-${m.matchup}`}
+                now={now}
               />
             ))}
           </div>
@@ -202,6 +307,75 @@ function LeagueCard({ entry }: { entry: LeagueEntry }) {
       </div>
     </div>
   );
+}
+
+function RecentWarningsSummaryLine({
+  summary,
+  now,
+}: {
+  summary: RecentWarningsSummary | undefined | null;
+  now: number;
+}) {
+  if (!summary || summary.ran_at == null) {
+    return (
+      <div
+        data-testid="leagues-exposure-cap-warn-summary"
+        data-state="never-ran"
+        className="text-[11px] text-muted-foreground border border-dashed border-border/60 rounded-md p-2"
+      >
+        Cap-warn dispatcher has not run since process start.
+      </div>
+    );
+  }
+  const ago = fmtAgo(summary.ran_at, now);
+  const ttl = fmtDuration(summary.ttl_seconds);
+  return (
+    <div
+      data-testid="leagues-exposure-cap-warn-summary"
+      data-state="ran"
+      data-fired-count={summary.fired_count}
+      data-suppressed-count={summary.suppressed_count}
+      className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-muted-foreground border border-border/60 rounded-md p-2 bg-card/30"
+    >
+      <span className="uppercase tracking-widest font-semibold text-foreground">
+        Cap-warn dispatcher
+      </span>
+      <span>
+        last ran <span className="text-foreground">{ago}</span>
+      </span>
+      <span>
+        threshold{" "}
+        <span className="text-foreground">
+          {fmtPct(summary.threshold ?? null, 0)}
+        </span>{" "}
+        · dedupe TTL{" "}
+        <span className="text-foreground">{ttl}</span>
+      </span>
+      <span data-testid="leagues-exposure-cap-warn-fired">
+        fired{" "}
+        <span
+          className={
+            summary.fired_count > 0 ? "text-warning" : "text-foreground"
+          }
+        >
+          {summary.fired_count}
+        </span>
+      </span>
+      <span data-testid="leagues-exposure-cap-warn-suppressed">
+        suppressed{" "}
+        <span className="text-foreground">{summary.suppressed_count}</span>
+      </span>
+    </div>
+  );
+}
+
+function useNow(intervalMs: number): number {
+  const [now, setNow] = useState<number>(() => Date.now());
+  useEffect(() => {
+    const id = window.setInterval(() => setNow(Date.now()), intervalMs);
+    return () => window.clearInterval(id);
+  }, [intervalMs]);
+  return now;
 }
 
 export default function LeaguesExposurePanel() {
@@ -215,6 +389,7 @@ export default function LeaguesExposurePanel() {
 
   const data = q.data;
   const leagues = data?.leagues ?? [];
+  const now = useNow(15_000);
 
   return (
     <GlassCard tone="solid" padding="md" data-testid="card-leagues-exposure">
@@ -227,6 +402,14 @@ export default function LeaguesExposurePanel() {
             : "Per-league + per-game cap headroom across every active league."
         }
       />
+      {data && (
+        <div className="mb-3">
+          <RecentWarningsSummaryLine
+            summary={data.recent_warnings}
+            now={now}
+          />
+        </div>
+      )}
       {q.isLoading && (
         <div className="text-xs text-muted-foreground py-6 text-center">
           Loading exposure…
@@ -245,7 +428,7 @@ export default function LeaguesExposurePanel() {
       {data && leagues.length > 0 && (
         <div className="space-y-3">
           {leagues.map((entry) => (
-            <LeagueCard key={entry.league} entry={entry} />
+            <LeagueCard key={entry.league} entry={entry} now={now} />
           ))}
         </div>
       )}

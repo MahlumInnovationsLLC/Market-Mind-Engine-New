@@ -2903,6 +2903,24 @@ async def get_nfl_exposure() -> dict[str, Any]:
         b["matchup"] = matchup
         per_matchup_buckets.append(b)
 
+    # Attach the cap-warn dispatch history so the operator can tell
+    # "the on-call already heard about this bucket" from "this bucket
+    # is silently quiet".  Failure here is advisory — the rest of the
+    # panel still renders.
+    history = await _safe_recent_cap_warnings()
+    by_bucket = history.get("by_bucket") or {}
+    last_cycle = history.get("last_cycle")
+
+    def _attach(bucket: dict[str, Any], key: str) -> None:
+        bucket["recent_alert"] = _build_recent_alert(
+            by_bucket.get(key), key, last_cycle
+        )
+
+    _attach(per_league_bucket, f"{league}:per_league")
+    _attach(sunday_bucket, f"{league}:sunday_window")
+    for m in per_matchup_buckets:
+        _attach(m, f"{league}:per_matchup:{m['matchup']}")
+
     return {
         "league": league,
         "bankroll_usd": bankroll,
@@ -2910,6 +2928,7 @@ async def get_nfl_exposure() -> dict[str, Any]:
         "per_league": per_league_bucket,
         "sunday_window": sunday_bucket,
         "per_matchup": per_matchup_buckets,
+        "recent_warnings": _summarize_recent_warnings(history),
         # Surface the raw aggregates too so a roundtrip test can prove
         # the panel's buckets were derived from `_open_position_aggregates`
         # rather than re-queried with a different SQL.
@@ -2918,6 +2937,80 @@ async def get_nfl_exposure() -> dict[str, Any]:
             "per_sunday_window_usd": float(per_sunday.get(league, 0.0)),
             "per_matchup_usd": {m: float(v) for m, v in matchups},
         },
+    }
+
+
+async def _safe_recent_cap_warnings() -> dict[str, Any]:
+    """Wrap :func:`cap_warnings.recent_dispatch_history` so a notifications
+    failure cannot break the exposure panel."""
+    try:
+        from .notifications import cap_warnings as _cap
+        return await _cap.recent_dispatch_history()
+    except Exception as e:  # pragma: no cover — advisory
+        log.warning("recent_dispatch_history failed: %s", e)
+        return {"alert_type": "nfl_cap_warn", "last_cycle": None, "by_bucket": {}}
+
+
+def _build_recent_alert(
+    row: dict[str, Any] | None,
+    bucket_key: str,
+    last_cycle: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    """Compose the per-bucket "recently paged" record consumed by the
+    operator dashboard.
+
+    Returns ``None`` only when the bucket has never paged *and* the
+    most recent cycle did not touch it — that way the panel can render
+    a placeholder instead of a stale label.
+    """
+    last_sent_at = row.get("last_sent_at") if row else None
+    expires_at = row.get("expires_at") if row else None
+    ttl_remaining = row.get("ttl_seconds_remaining") if row else None
+
+    fired_last_cycle = bool(
+        last_cycle and bucket_key in (last_cycle.get("fired") or [])
+    )
+    suppressed_last_cycle = bool(
+        last_cycle and bucket_key in (last_cycle.get("suppressed") or [])
+    )
+
+    if (
+        last_sent_at is None
+        and not fired_last_cycle
+        and not suppressed_last_cycle
+    ):
+        return None
+
+    return {
+        "last_sent_at": last_sent_at,
+        "expires_at": expires_at,
+        "ttl_seconds_remaining": ttl_remaining,
+        "fired_last_cycle": fired_last_cycle,
+        "suppressed_last_cycle": suppressed_last_cycle,
+    }
+
+
+def _summarize_recent_warnings(history: dict[str, Any]) -> dict[str, Any]:
+    """Top-level summary the dashboard renders alongside the per-bucket
+    detail — "last cap-warn check ran 12s ago, fired 1, suppressed 2"."""
+    last_cycle = history.get("last_cycle")
+    by_bucket = history.get("by_bucket") or {}
+    if last_cycle is None:
+        return {
+            "ran_at": None,
+            "threshold": None,
+            "ttl_seconds": None,
+            "fired_count": 0,
+            "suppressed_count": 0,
+            "tracked_buckets": len(by_bucket),
+        }
+    return {
+        "ran_at": last_cycle.get("ran_at"),
+        "threshold": last_cycle.get("threshold"),
+        "ttl_seconds": last_cycle.get("ttl_seconds"),
+        "fired_count": len(last_cycle.get("fired") or []),
+        "suppressed_count": len(last_cycle.get("suppressed") or []),
+        "tracked_buckets": len(by_bucket),
     }
 
 
@@ -3086,10 +3179,42 @@ async def get_leagues_exposure() -> dict[str, Any]:
 
     leagues_out.sort(key=_sort_key)
 
+    # Attach the cap-warn dispatch history per league bucket — currently
+    # only NFL has a background warn dispatcher, but the field is keyed
+    # by `{league}:{bucket}` so the same code path picks up future
+    # dispatchers (e.g. NBA per-game) without a UI rebuild.
+    history = await _safe_recent_cap_warnings()
+    by_bucket = history.get("by_bucket") or {}
+    last_cycle = history.get("last_cycle")
+    for entry in leagues_out:
+        league = entry["league"]
+        entry["per_league"]["recent_alert"] = _build_recent_alert(
+            by_bucket.get(f"{league}:per_league"),
+            f"{league}:per_league",
+            last_cycle,
+        )
+        if "sunday_window" in entry:
+            entry["sunday_window"]["recent_alert"] = _build_recent_alert(
+                by_bucket.get(f"{league}:sunday_window"),
+                f"{league}:sunday_window",
+                last_cycle,
+            )
+        for m in entry.get("per_matchup", []) or []:
+            key = f"{league}:per_matchup:{m['matchup']}"
+            m["recent_alert"] = _build_recent_alert(
+                by_bucket.get(key), key, last_cycle
+            )
+        for ev in entry.get("per_event", []) or []:
+            key = f"{league}:per_event:{ev['event_id']}"
+            ev["recent_alert"] = _build_recent_alert(
+                by_bucket.get(key), key, last_cycle
+            )
+
     return {
         "bankroll_usd": bankroll,
         "warn_threshold": 0.80,
         "leagues": leagues_out,
+        "recent_warnings": _summarize_recent_warnings(history),
     }
 
 

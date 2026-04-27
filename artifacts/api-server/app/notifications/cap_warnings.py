@@ -22,12 +22,175 @@ from __future__ import annotations
 
 import logging
 import os
+from datetime import datetime, timezone
 from typing import Any
 
 from . import alerts as _alerts
 
 
 log = logging.getLogger("axiom.notifications.cap_warnings")
+
+
+# ---------------------------------------------------------------------------
+# Last-cycle bookkeeping.
+#
+# `check_nfl_cap_warnings` runs once per orchestrator cycle. The dashboard
+# panel from task #208 needs to tell silence ("nothing crossed the warn
+# threshold") apart from quiet ("a bucket crossed but the dedupe row is
+# still hiding the page from the on-call"), so the most recent cycle's
+# fired/suppressed bucket keys are kept in process memory and surfaced
+# alongside the persistent `notification_dedupe` rows.
+#
+# The state is intentionally per-process (resets on restart) — the
+# persistent dedupe table is the source of truth for "was the on-call
+# actually paged"; this in-memory snapshot only flags "did this cycle
+# decide to suppress this bucket because of dedupe".
+# ---------------------------------------------------------------------------
+
+
+# Dedupe alert_type used by every cap-bucket warn dispatched from this
+# module.  Centralised so the dashboard reader can scan the right rows.
+DEDUPE_ALERT_TYPE = "nfl_cap_warn"
+
+
+_LAST_CYCLE: dict[str, Any] | None = None
+
+
+def _record_cycle(
+    *,
+    threshold: float,
+    ttl_seconds: int,
+    over_threshold: list[str],
+    fired: list[str],
+    suppressed: list[str],
+) -> None:
+    """Capture the result of the most recent ``check_nfl_cap_warnings``
+    invocation so the dashboard can surface "fired this cycle" /
+    "suppressed this cycle" without joining against historical cycle logs.
+    """
+    global _LAST_CYCLE
+    _LAST_CYCLE = {
+        "ran_at": datetime.now(tz=timezone.utc).isoformat(timespec="seconds"),
+        "threshold": float(threshold),
+        "ttl_seconds": int(ttl_seconds),
+        "over_threshold": list(over_threshold),
+        "fired": list(fired),
+        "suppressed": list(suppressed),
+    }
+
+
+def reset_last_cycle() -> None:
+    """Test helper — wipe the in-memory last-cycle snapshot."""
+    global _LAST_CYCLE
+    _LAST_CYCLE = None
+
+
+def last_cycle_snapshot() -> dict[str, Any] | None:
+    """Return a copy of the most recent cycle result, or ``None`` if
+    ``check_nfl_cap_warnings`` has not run since process start."""
+    if _LAST_CYCLE is None:
+        return None
+    return {
+        "ran_at": _LAST_CYCLE["ran_at"],
+        "threshold": _LAST_CYCLE["threshold"],
+        "ttl_seconds": _LAST_CYCLE["ttl_seconds"],
+        "over_threshold": list(_LAST_CYCLE["over_threshold"]),
+        "fired": list(_LAST_CYCLE["fired"]),
+        "suppressed": list(_LAST_CYCLE["suppressed"]),
+    }
+
+
+async def recent_dispatch_history() -> dict[str, Any]:
+    """Return the persistent dedupe history for cap-bucket warn alerts.
+
+    Combines two signals so the operator console can answer
+    "did the on-call already hear about this bucket?":
+
+    * The ``notification_dedupe`` rows tagged ``nfl_cap_warn:*`` —
+      keyed by the same ``{league}:{bucket}`` label
+      ``check_nfl_cap_warnings`` claims, carrying ``sent_at`` and
+      ``expires_at`` so the dashboard can show "last paged 7m ago,
+      dedupe expires in 53m".
+    * The most recent cycle's fired/suppressed lists from
+      :func:`last_cycle_snapshot` so silence
+      ("nothing crossed the threshold") can be told apart from quiet
+      ("dedupe is hiding the page").
+
+    Fails soft on any DB error: a missing dashboard panel detail is
+    strictly better than a 500 on the operator console because the
+    notifications schema is unreachable.
+    """
+    last_cycle = last_cycle_snapshot()
+
+    from .. import db
+    rows: list[Any] = []
+    try:
+        rows = await db.fetch(
+            """
+            SELECT key, sent_at, expires_at
+              FROM notification_dedupe
+             WHERE starts_with(key, $1)
+            """,
+            f"{DEDUPE_ALERT_TYPE}:",
+        )
+    except Exception as e:  # pragma: no cover — advisory read
+        log.warning("recent_dispatch_history fetch failed: %s", e)
+        rows = []
+
+    now = datetime.now(tz=timezone.utc)
+    by_bucket: dict[str, dict[str, Any]] = {}
+    prefix = f"{DEDUPE_ALERT_TYPE}:"
+    for r in rows:
+        try:
+            key = r["key"] if hasattr(r, "__getitem__") else r.get("key")
+        except Exception:
+            key = None
+        if not key or not key.startswith(prefix):
+            continue
+        bucket_key = key[len(prefix):]
+        try:
+            sent_at = r["sent_at"] if hasattr(r, "__getitem__") else r.get("sent_at")
+        except Exception:
+            sent_at = None
+        try:
+            expires_at = (
+                r["expires_at"] if hasattr(r, "__getitem__") else r.get("expires_at")
+            )
+        except Exception:
+            expires_at = None
+
+        ttl_remaining: int | None = None
+        if expires_at is not None:
+            try:
+                delta = (expires_at - now).total_seconds()
+                ttl_remaining = max(0, int(delta))
+            except Exception:
+                ttl_remaining = None
+
+        sent_iso = None
+        if sent_at is not None:
+            try:
+                sent_iso = sent_at.isoformat(timespec="seconds")
+            except Exception:
+                sent_iso = str(sent_at)
+        expires_iso = None
+        if expires_at is not None:
+            try:
+                expires_iso = expires_at.isoformat(timespec="seconds")
+            except Exception:
+                expires_iso = str(expires_at)
+
+        by_bucket[bucket_key] = {
+            "last_sent_at": sent_iso,
+            "expires_at": expires_iso,
+            "ttl_seconds_remaining": ttl_remaining,
+        }
+
+    return {
+        "alert_type": DEDUPE_ALERT_TYPE,
+        "last_cycle": last_cycle,
+        "by_bucket": by_bucket,
+    }
 
 
 def _read_threshold() -> float:
@@ -174,7 +337,7 @@ async def check_nfl_cap_warnings(
     for b in over:
         try:
             ok = await _alerts.dedupe_or_skip(
-                "nfl_cap_warn", b["key"], ttl_seconds=ttl,
+                DEDUPE_ALERT_TYPE, b["key"], ttl_seconds=ttl,
             )
         except Exception as e:  # pragma: no cover — fail-open
             log.warning("cap-warn dedupe failed for %s: %s", b["key"], e)
@@ -199,11 +362,20 @@ async def check_nfl_cap_warnings(
         except Exception as e:  # pragma: no cover
             log.warning("cap-warn alert dispatch failed for %s: %s", b["key"], e)
 
+    over_keys = [b["key"] for b in over]
+    _record_cycle(
+        threshold=thr,
+        ttl_seconds=ttl,
+        over_threshold=over_keys,
+        fired=fired,
+        suppressed=suppressed,
+    )
+
     return {
         "checked": True,
         "threshold": thr,
         "ttl_seconds": ttl,
-        "over_threshold": [b["key"] for b in over],
+        "over_threshold": over_keys,
         "fired": fired,
         "suppressed": suppressed,
     }
