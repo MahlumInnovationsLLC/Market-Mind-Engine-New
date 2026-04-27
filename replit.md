@@ -181,6 +181,15 @@ Axiom Predict is a pnpm workspace monorepo hosting a prediction-market trading p
   scheduler records them as feed-level errors instead of silently
   appearing healthy.
 
+## Known data-pipeline gaps (Apr 27, 2026 audit)
+
+Surfaced while diagnosing why the live-games chatbot reported "no data" for tonight's NBA matchup. Documented here so the next session doesn't re-derive them.
+
+- **`predictions` table — no live writer for sports.** The only `INSERT INTO predictions` in the codebase is `app/feeds/kalshi_crypto_markets.py` (crypto only). All sports rows in `predictions` are stale (last NBA write 2026-04-21). The orchestrator's sports vertical reads candidates from `predictions` via `app/orchestrator/cycle.py::_candidate_predictions`, so until a sports writer is restored the sports vertical produces 0 fresh debates per cycle. Manual debates via `POST /api/swarm/debate` (or calling `app.swarm.runner.run_debate({...})` directly) work as a stopgap.
+- **`intangibles_reports` is empty for every league.** The sole writer is `app/feeds/outlier_bet.py`. The `app.outlier.bet` upstream now returns a CloudFront 403 on `/api/auth/login` and serves an HTML SPA shell on every `/api/...` path from this region — the integration is effectively dead and needs to be either re-credentialed, region-shifted, or replaced. The feed used to silently report `status=ok, written=0`; it now raises and shows `status=degraded` with the real HTTP status + body snippet in `feeds_health.last_error`.
+- **`SPORTRADAR_*_KEY` not set.** All `sportradar_*` feeds (NBA injuries / live state / rosters, plus the analogous NFL / soccer feeds) report `status=unconfigured` in `feeds_health`. The chatbot's `player_status` block stays `None` for these leagues until a key is provided.
+- **`market_title_cache` and `market_price_ticks` only populate on demand.** Tonight's NBA tickers (`KXNBAGAME-…DETORL`) are absent because no caller has yet hit `/api/market-title/{ticker}` for them and the orchestrator hasn't engaged those markets. Both will fill once the sports candidate pipeline (above) is alive again.
+
 ## Operations Runbook — quick links
 
 For incident response and the live cutover, see [`docs/runbook.md`](docs/runbook.md). Direct links to the on-call sections:

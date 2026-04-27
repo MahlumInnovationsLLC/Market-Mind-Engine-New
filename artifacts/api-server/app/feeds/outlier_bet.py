@@ -63,13 +63,22 @@ async def _login(client: httpx.AsyncClient) -> str | None:
             timeout=15.0,
         )
     except httpx.HTTPError as e:
-        log.warning("outlier.bet login transport error: %s", e)
-        return None
+        # Surface to the feed scheduler so the health card flips to
+        # ``degraded`` — previously this returned ``None`` and the
+        # caller silently reported ``written=0, ok``, hiding a dead
+        # upstream.
+        raise RuntimeError(f"outlier.bet login transport error: {e}") from e
     if r.status_code == 429:
         raise RateLimited("outlier.bet login rate-limited")
     if r.status_code >= 400:
-        log.warning("outlier.bet login %s: %s", r.status_code, r.text[:240])
-        return None
+        # Includes the CloudFront/WAF 403 page that started returning in
+        # late Apr 2026 — surface the status + a body snippet so the
+        # operator sees *why* the feed is dark instead of just an empty
+        # row count on the dashboard.
+        snippet = (r.text or "")[:160].replace("\n", " ").strip()
+        raise RuntimeError(
+            f"outlier.bet login HTTP {r.status_code}: {snippet}"
+        )
     cookie = r.cookies.get("session") or r.cookies.get("auth_token")
     if not cookie:
         # Some deployments return JSON {token: "..."} instead of a cookie.
@@ -78,6 +87,14 @@ async def _login(client: httpx.AsyncClient) -> str | None:
             cookie = (body or {}).get("token") or (body or {}).get("access_token")
         except Exception:
             cookie = None
+    if not cookie:
+        # Login "succeeded" (2xx) but we got no usable credential — the
+        # auth shape has drifted and the scan call would 401/HTML below
+        # anyway.  Fail loudly here so the dashboard flags it now.
+        raise RuntimeError(
+            "outlier.bet login returned no session cookie or token "
+            "(auth response shape changed?)"
+        )
     return cookie
 
 
@@ -180,10 +197,14 @@ async def _poll_outlier_bet() -> int:
     if not (os.environ.get("OUTLIERBET_EMAIL") and os.environ.get("OUTLIERBET_PASSWORD")):
         return 0
     async with httpx.AsyncClient(follow_redirects=True) as client:
+        # _ensure_session now raises on login failure (used to silently
+        # return None) so the scheduler flips this feed to ``error``
+        # with a real reason instead of green-with-zero-rows.
         cookie = await _ensure_session(client)
         if not cookie:
-            log.warning("outlier.bet: no session cookie; skipping scan")
-            return 0
+            # Only reachable when creds are unset — already short-
+            # circuited above.  Belt-and-suspenders.
+            raise RuntimeError("outlier.bet: no session credentials configured")
         for attempt in (0, 1):
             try:
                 r = await client.get(
@@ -196,26 +217,42 @@ async def _poll_outlier_bet() -> int:
                     timeout=30.0,
                 )
             except httpx.HTTPError as e:
-                log.warning("outlier.bet scan transport error: %s", e)
-                return 0
+                raise RuntimeError(
+                    f"outlier.bet scan transport error: {e}"
+                ) from e
             if r.status_code == 401 and attempt == 0:
                 cookie = await _ensure_session(client, force=True)
                 if not cookie:
-                    return 0
+                    raise RuntimeError(
+                        "outlier.bet scan 401 and re-login produced no session"
+                    )
                 continue
             if r.status_code == 429:
                 retry = int(r.headers.get("Retry-After") or "60")
                 raise RateLimited(f"outlier.bet rate-limited; retry in {retry}s")
             if r.status_code >= 400:
-                log.warning(
-                    "outlier.bet scan %s: %s", r.status_code, r.text[:240]
+                snippet = (r.text or "")[:160].replace("\n", " ").strip()
+                raise RuntimeError(
+                    f"outlier.bet scan HTTP {r.status_code}: {snippet}"
                 )
-                return 0
+            # When CloudFront serves the SPA index.html instead of the
+            # API payload (current failure mode in late Apr 2026), the
+            # status is 200 but the body is HTML.  Detect that and
+            # raise so the operator dashboard shows the real reason
+            # rather than ``ok / written=0`` forever.
+            ctype = (r.headers.get("content-type") or "").lower()
+            if "json" not in ctype:
+                snippet = (r.text or "")[:160].replace("\n", " ").strip()
+                raise RuntimeError(
+                    "outlier.bet scan returned non-JSON content-type "
+                    f"{ctype!r} (HTML SPA shell?): {snippet}"
+                )
             try:
                 body = r.json()
             except Exception as e:
-                log.warning("outlier.bet scan body parse failed: %s", e)
-                return 0
+                raise RuntimeError(
+                    f"outlier.bet scan body parse failed: {e}"
+                ) from e
             rows = _normalize(body)
             return await _persist_scan(rows)
         return 0
