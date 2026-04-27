@@ -18,3 +18,15 @@ id = "QCrDHzV2tX_jqCWSnhvjq"
 uri = "file://artifacts/web/public/app-screens/positions-dark.jpg"
 type = "image"
 title = "positions dark"
+
+[[outputs]]
+id = "G1YREEf656QjHuWi1N6IE"
+uri = "file://attached_assets/outlier_email_form.png"
+type = "image"
+title = "Step 1: outlier.bet login page (only asks for email)"
+
+[[outputs]]
+id = "tHoZn5XYQiN9V1J8DAJ3Y"
+uri = "file://attached_assets/outlier_code_form.png"
+type = "image"
+title = "Step 2: after submitting email, it asks for a 6-digit code emailed to you"
