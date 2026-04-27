@@ -412,6 +412,142 @@ BANKROLL_SYNC_ALERT_TTL_SECONDS = max(
 )
 
 
+# ---------------------------------------------------------------------------
+# Sportradar soccer "season id stuck" alert (task #647).
+#
+# Task #612 already promotes a soccer feed whose cached season id
+# 404s and refuses to re-resolve to a `degraded` card with a "season
+# id stuck" detail.  That signal is only visible to operators who
+# happen to look at the feed health page; here we promote it to a
+# real Postmark alert once the stuck flag has been continuously set
+# for at least SEASON_STUCK_ALERT_THRESHOLD_SECONDS so an on-call gets
+# paged outside business hours.
+#
+# We track the wall-clock time at which each feed first transitioned
+# into `season_stuck=True` in `_season_stuck_first_seen_at`.  A
+# subsequent snapshot that sees the flag clear wipes the entry so a
+# future stuck event has to wait the full threshold again.
+# ---------------------------------------------------------------------------
+
+
+# feed_name -> wall-clock time (seconds since epoch) at which the
+# season_stuck flag first flipped True for this feed.  Cleared when
+# the flag clears.
+_season_stuck_first_seen_at: dict[str, float] = {}
+
+
+# How long the season_stuck flag must stay True before paging.
+# Default 3600s (60 minutes) per the task spec.
+SEASON_STUCK_ALERT_THRESHOLD_SECONDS = max(
+    60,
+    int(os.environ.get("AXIOM_SEASON_STUCK_ALERT_THRESHOLD_SECONDS") or "3600"),
+)
+
+
+# Dedupe TTL for the resulting Postmark alert.  Default 6h so the
+# on-call gets a single page per incident even when the stuck
+# condition lingers across the threshold for many hours.
+SEASON_STUCK_ALERT_TTL_SECONDS = max(
+    60,
+    int(os.environ.get("AXIOM_SEASON_STUCK_ALERT_TTL_SECONDS") or "21600"),
+)
+
+
+def _league_from_feed_name(name: str) -> str:
+    """Extract the league code (e.g. ``epl``) from a soccer feed
+    name like ``sportradar_epl_rosters``.  Falls back to the full
+    name when the pattern doesn't match so the alert subject still
+    reads sensibly for unfamiliar feed names."""
+    if name.startswith("sportradar_"):
+        rest = name[len("sportradar_"):]
+        for suffix in ("_rosters", "_injuries"):
+            if rest.endswith(suffix):
+                return rest[: -len(suffix)]
+    return name
+
+
+def _maybe_dispatch_season_stuck_alert(
+    *, feed_name: str, meta: dict, now: float | None = None,
+) -> dict | None:
+    """Track per-feed `season_stuck` duration and fire one Postmark
+    alert per incident once the flag has been continuously True for
+    SEASON_STUCK_ALERT_THRESHOLD_SECONDS.
+
+    Returns the triggered payload (used by tests) or None when the
+    feed is not stuck, has not been stuck long enough, or the alert
+    has already fired this incident (suppressed by the dedupe table).
+    """
+    now = time.time() if now is None else now
+    stuck = bool(meta.get("season_stuck"))
+    if not stuck:
+        # Recovery — wipe the first-seen marker so a future stuck
+        # event has to wait the full threshold again.
+        _season_stuck_first_seen_at.pop(feed_name, None)
+        return None
+
+    first_seen = _season_stuck_first_seen_at.get(feed_name)
+    if first_seen is None:
+        first_seen = now
+        _season_stuck_first_seen_at[feed_name] = first_seen
+
+    stuck_seconds = max(0.0, now - first_seen)
+    if stuck_seconds < SEASON_STUCK_ALERT_THRESHOLD_SECONDS:
+        return None
+
+    triggered = {
+        "feed_name": feed_name,
+        "league": _league_from_feed_name(feed_name),
+        "season_id": meta.get("season_id"),
+        "previous_season_id": meta.get("season_previous_id"),
+        "refresh_outcome": meta.get("season_last_refresh_outcome"),
+        "last_refresh_at": meta.get("season_last_refresh_at"),
+        "stuck_since": _iso(first_seen),
+        "stuck_seconds": stuck_seconds,
+        "threshold_seconds": float(SEASON_STUCK_ALERT_THRESHOLD_SECONDS),
+    }
+
+    from .notifications import alerts as _alerts
+
+    async def _runner() -> None:
+        try:
+            ok = await _alerts.dedupe_or_skip(
+                "season_stuck",
+                feed_name,
+                ttl_seconds=SEASON_STUCK_ALERT_TTL_SECONDS,
+            )
+        except Exception as e:  # pragma: no cover — fail-open
+            log.warning("season-stuck dedupe failed: %s", e)
+            ok = True
+        if not ok:
+            return
+        try:
+            _alerts.season_stuck(
+                feed_name=triggered["feed_name"],
+                league=triggered["league"],
+                season_id=triggered["season_id"],
+                previous_season_id=triggered["previous_season_id"],
+                refresh_outcome=triggered["refresh_outcome"],
+                last_refresh_at=triggered["last_refresh_at"],
+                stuck_since=triggered["stuck_since"],
+                stuck_seconds=triggered["stuck_seconds"],
+                threshold_seconds=triggered["threshold_seconds"],
+            )
+        except Exception as e:  # pragma: no cover
+            log.warning("season-stuck alert dispatch failed: %s", e)
+
+    try:
+        loop = asyncio.get_running_loop()
+        loop.create_task(_runner())
+    except RuntimeError:
+        # Sync test context — run inline so the test can observe it.
+        try:
+            asyncio.run(_runner())
+        except Exception as e:  # pragma: no cover
+            log.warning("inline season-stuck dispatch failed: %s", e)
+
+    return triggered
+
+
 def _bankroll_sync_status(state: dict) -> tuple[str, str, dict]:
     """Classify a `bankroll_sync.state()` snapshot.
 
@@ -2031,6 +2167,7 @@ def _probe_feeds() -> list[dict]:
         last_pull = s.get("last_finished_at") or s.get("last_ok_at")
         meta = s.get("metadata") or {}
 
+        season_alert: dict | None = None
         if not s.get("enabled"):
             status = "unconfigured"
             detail = s.get("skipped_reason") or "disabled"
@@ -2073,6 +2210,14 @@ def _probe_feeds() -> list[dict]:
                     f"feed:{s['name']}",
                     f"season id stuck (outcome={outcome}, cached={sid})",
                 )
+            # Track per-feed stuck duration and fire one Postmark
+            # alert per incident once the stuck flag has been
+            # continuously True for the configured threshold.  Done
+            # for every soccer feed (whether currently stuck or not)
+            # so a recovery wipes the first-seen marker.
+            season_alert = _maybe_dispatch_season_stuck_alert(
+                feed_name=s["name"], meta=meta
+            )
 
         # Promote last_pull + error_rate into the card extras so the
         # Health UI can render them as first-class metrics without
@@ -2080,6 +2225,22 @@ def _probe_feeds() -> list[dict]:
         extras = dict(s)
         extras["last_pull"] = last_pull
         extras["error_rate"] = error_rate
+        # Surface season-stuck alert state on the card so the
+        # operator console can show how long the feed has been stuck
+        # and whether the on-call has already been paged this incident.
+        first_seen = _season_stuck_first_seen_at.get(s["name"])
+        if first_seen is not None:
+            extras["season_stuck_since"] = _iso(first_seen)
+            extras["season_stuck_seconds"] = round(time.time() - first_seen, 1)
+        else:
+            extras["season_stuck_since"] = None
+            extras["season_stuck_seconds"] = None
+        extras["season_stuck_alert_threshold_seconds"] = (
+            SEASON_STUCK_ALERT_THRESHOLD_SECONDS
+        )
+        extras["season_stuck_alert_triggered_this_snapshot"] = (
+            season_alert is not None
+        )
         out.append(
             _card(
                 key=f"feed:{s['name']}",

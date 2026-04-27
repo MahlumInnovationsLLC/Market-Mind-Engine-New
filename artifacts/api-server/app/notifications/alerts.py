@@ -1508,6 +1508,69 @@ def crypto_feed_silent(
 
 
 # ---------------------------------------------------------------------------
+# Sportradar soccer "season id stuck" escalation
+# ---------------------------------------------------------------------------
+
+
+def season_stuck(
+    *,
+    feed_name: str,
+    league: str,
+    season_id: str | None,
+    previous_season_id: str | None,
+    refresh_outcome: str | None,
+    last_refresh_at: str | None,
+    stuck_since: str | None,
+    stuck_seconds: float,
+    threshold_seconds: float,
+    dry_run: bool = False,
+) -> dict[str, Any]:
+    """Operator alert: a Sportradar soccer feed has reported
+    ``season_stuck=True`` continuously for at least ``threshold_seconds``.
+
+    Emitted once per incident from the health collector (debounced via
+    ``dedupe_or_skip``) so the on-call hears about a 404 -> re-resolve
+    loop that's been failing in the background even when no operator
+    happens to be watching the feed health page.
+    """
+    duration_min = stuck_seconds / 60.0
+    threshold_min = threshold_seconds / 60.0
+    outcome = refresh_outcome or "unknown"
+    sid = season_id or "(none)"
+    subject = (
+        f"[axiom][SOCCER] season id stuck: {league} "
+        f"({outcome}, {duration_min:.0f}m)"
+    )
+    body = (
+        f"Sportradar soccer feed '{feed_name}' has reported "
+        f"`season_stuck=True` for {duration_min:.0f} minute(s) "
+        f"(threshold: {threshold_min:.0f}m). The cached season id keeps "
+        "404'ing on the seasoned endpoint and the tournament-info "
+        "refresh either resolves to the same id or returns nothing new, "
+        "so the feed has been silently writing 0 rows.\n\n"
+        "Investigate Sportradar's tournament-info response for this "
+        "league and verify whether a new season id needs to be wired "
+        "into the soccer feed before downstream pickers go stale.\n\n"
+        + _format_lines(
+            [
+                ("feed", feed_name),
+                ("league", league),
+                ("cached_season_id", sid),
+                ("previous_season_id", previous_season_id or "(none)"),
+                ("last_refresh_outcome", outcome),
+                ("last_refresh_at", last_refresh_at or "(unknown)"),
+                ("stuck_since", stuck_since or "(unknown)"),
+                ("stuck_minutes", f"{duration_min:.1f}"),
+                ("threshold_minutes", f"{threshold_min:.1f}"),
+                ("at", _utc_now_iso()),
+            ]
+        )
+        + "\n"
+    )
+    return _dispatch(subject, body, tag="season-stuck", dry_run=dry_run)
+
+
+# ---------------------------------------------------------------------------
 # RevenueCat (mobile IAP) webhook health
 # ---------------------------------------------------------------------------
 
