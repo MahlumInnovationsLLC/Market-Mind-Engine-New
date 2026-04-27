@@ -24,6 +24,7 @@ from ..config import get_settings
 from ..kalshi.market_titles import resolve_titles as resolve_market_titles
 from ..risk.gates import RiskContext
 from ..sports.leagues import get_league_config
+from .n_way import derive_n_way_competitor
 from .three_way import derive_three_way_leg
 
 
@@ -316,6 +317,30 @@ async def place_order(
     except Exception as e:  # pragma: no cover — never let this block insert
         log.debug(
             "three_way_leg derivation failed for %s: %s", ctx.market_id, e,
+        )
+
+    # N-way (tennis / F1 / PGA outright) competitor derivation (task
+    # #616).  Stamp the competitor identifier on the trade's `metadata`
+    # jsonb at insert-time so the settlement pipeline can apply the
+    # correct per-leg outcome on the actual race / tournament winner —
+    # without this, an ATP/F1/PGA outright market settled by Kalshi
+    # would silently fall back to the binary `outcome_yes` and the
+    # losing competitors' legs would be mis-scored as model misses
+    # rather than the deterministic NO they actually are.  Gated on
+    # the league's `n_way_market` flag so non-n-way verticals do not
+    # get spurious competitor tags from titles that happen to mention
+    # an entrant-shaped substring.
+    try:
+        cfg = get_league_config(ctx.league)
+        if cfg is not None and cfg.n_way_market:
+            comp = derive_n_way_competitor(
+                market_title=market_title, candidate=cand,
+            )
+            if isinstance(comp, dict):
+                metadata.update(comp)
+    except Exception as e:  # pragma: no cover — never let this block insert
+        log.debug(
+            "n_way_competitor derivation failed for %s: %s", ctx.market_id, e,
         )
     metadata_json = json.dumps(metadata) if metadata else None
 

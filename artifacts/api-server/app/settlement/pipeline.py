@@ -103,6 +103,88 @@ def resolve_three_way_leg(trade: dict[str, Any]) -> str | None:
 
 
 # ---------------------------------------------------------------------------
+# N-way (tennis / F1 / PGA outright) helpers
+# ---------------------------------------------------------------------------
+
+
+def resolve_n_way_competitor(trade: dict[str, Any]) -> dict[str, str] | None:
+    """Best-effort extraction of which competitor an n-way outright
+    trade was placed on.
+
+    Mirrors :func:`resolve_three_way_leg` for combat / individual sports
+    (ATP / WTA / F1 / PGA — leagues whose ``LeagueConfig.n_way_market``
+    flag is ``True``).  Returns a dict carrying any combination of
+    ``{"competitor_id": ..., "competitor_name": ...}`` or ``None`` when
+    no per-leg identifier was stamped onto the trade's metadata jsonb.
+
+    Inspects the trade's metadata jsonb only — unlike the three-way
+    helper there's no ``side`` fallback because n-way trades all ship
+    with ``side`` = "yes"/"no" and the per-competitor identity lives
+    exclusively in the metadata stamp written at insert-time by
+    :func:`app.orchestrator.n_way.derive_n_way_competitor`.
+    """
+    md = trade.get("metadata")
+    if isinstance(md, str):
+        try:
+            md = json.loads(md)
+        except Exception:
+            md = None
+    if not isinstance(md, dict):
+        return None
+    out: dict[str, str] = {}
+    for id_key in ("competitor_id", "entrant_id", "competitor", "entrant"):
+        v = md.get(id_key)
+        if isinstance(v, str) and v.strip():
+            out["competitor_id"] = v.strip()
+            break
+    for name_key in ("competitor_name", "entrant_name"):
+        v = md.get(name_key)
+        if isinstance(v, str) and v.strip():
+            out["competitor_name"] = v.strip()
+            break
+    return out or None
+
+
+def outcome_yes_for_n_way_competitor(
+    *,
+    winning_competitor_id: str | None,
+    winning_competitor_name: str | None,
+    leg: dict[str, str],
+) -> int:
+    """Map an n-way race / tournament winner to the YES/NO outcome
+    for a single trade's per-competitor leg.
+
+    Each tournament-winner market is structured as one independent
+    YES/NO Kalshi market per competitor — the leg pays YES iff the
+    bound competitor wins, NO otherwise.  Compares on ``competitor_id``
+    when both sides supply one (canonical match), falling back to a
+    case-insensitive ``competitor_name`` compare so a backfilled name
+    still scores even when the id is missing on either side.
+
+    Raises ``ValueError`` when neither the winner nor the leg provides
+    enough information to make a comparison — caller should treat that
+    as "no per-leg outcome available" and fall back to the binary
+    ``outcome_yes`` rather than guessing.
+    """
+    win_id = (winning_competitor_id or "").strip().lower()
+    win_name = (winning_competitor_name or "").strip().lower()
+    leg_id = (leg.get("competitor_id") or "").strip().lower()
+    leg_name = (leg.get("competitor_name") or "").strip().lower()
+    if not (win_id or win_name):
+        raise ValueError("winner identity required")
+    if not (leg_id or leg_name):
+        raise ValueError("leg identity required")
+    if win_id and leg_id:
+        return 1 if win_id == leg_id else 0
+    if win_name and leg_name:
+        return 1 if win_name == leg_name else 0
+    # Mixed-form compare: id on one side, name on the other.  Treat as
+    # a non-match (NO) — we cannot prove identity across forms without
+    # a join table, and an over-eager YES would mis-credit a loser.
+    return 0
+
+
+# ---------------------------------------------------------------------------
 # Result + helpers
 # ---------------------------------------------------------------------------
 
@@ -170,6 +252,8 @@ def _trade_pnl(side: str | None, quantity: float | None, price: float | None,
 async def _settle_one_trade(
     trade: dict[str, Any], outcome_yes: int, settle_price: float | None,
     *, result_3way: str | None = None, leg: str | None = None,
+    n_way_winner: dict[str, str] | None = None,
+    n_way_competitor: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """Settle a single un-settled trade row.  Returns a result dict.
 
@@ -177,6 +261,12 @@ async def _settle_one_trade(
     belongs to a 3-way market — they are written into the postmortem
     details so downstream analytics can distinguish a draw outcome on
     a home/away leg from a "model miss" on a true 2-way moneyline.
+
+    `n_way_winner`/`n_way_competitor` carry the analogous context for
+    n-way outright markets (ATP / WTA / F1 / PGA): the winning entrant
+    and the per-trade competitor leg — also written into the postmortem
+    so a losing-competitor leg is stored as a deterministic NO rather
+    than a "model miss" against a binary moneyline frame.
     """
     tid = trade["id"]
     pnl = _trade_pnl(trade.get("side"), trade.get("quantity"), trade.get("price"),
@@ -238,6 +328,13 @@ async def _settle_one_trade(
                 # working unchanged.
                 "three_way_result": result_3way,
                 "three_way_leg": leg,
+                # N-way (tennis / F1 / PGA outright) context — present
+                # only for combat / individual-sport trades; null
+                # otherwise so legacy analytics keep working unchanged.
+                "n_way_winner_id": (n_way_winner or {}).get("competitor_id"),
+                "n_way_winner_name": (n_way_winner or {}).get("competitor_name"),
+                "n_way_competitor_id": (n_way_competitor or {}).get("competitor_id"),
+                "n_way_competitor_name": (n_way_competitor or {}).get("competitor_name"),
             }),
         )
     except Exception as e:
@@ -727,6 +824,7 @@ async def _calibration_and_drift(vertical: str | None) -> int:
 async def settle_market(
     market_id: str, *, outcome_yes: int, settle_price: float | None = None,
     result_3way: str | None = None,
+    n_way_winner: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """Settle every un-settled trade against `market_id` with the given
     binary outcome.  Cascades through positions, postmortems, persona
@@ -743,17 +841,34 @@ async def settle_market(
     flag the market as 3-way, `result_3way` is ignored and the binary
     `outcome_yes` is used unchanged for every trade (legacy behaviour).
 
+    For ATP / WTA / F1 / PGA outright markets (leagues whose
+    `n_way_market` flag is True), callers may pass `n_way_winner` —
+    a ``{"competitor_id": ..., "competitor_name": ...}`` dict naming
+    the actual race / tournament winner.  Each trade's per-leg outcome
+    is then derived from the trade's stamped `competitor_id` (see
+    :func:`resolve_n_way_competitor`) so a winner outcome correctly
+    settles the winning leg as YES and every losing-competitor leg as
+    NO without treating the latter as model misses.  When the league
+    is not flagged n-way OR no winner is supplied, the binary
+    `outcome_yes` is used unchanged.
+
     Returns a result dict the API endpoint can serialize.
     """
     if outcome_yes not in (0, 1):
         raise ValueError("outcome_yes must be 0 or 1")
     result_3way = normalize_three_way_result(result_3way)
+    n_way_winner = (
+        {k: v for k, v in n_way_winner.items() if isinstance(v, str) and v.strip()}
+        if isinstance(n_way_winner, dict)
+        else None
+    ) or None
 
     await _publish({
         "type": "market_settle_start",
         "market_id": market_id,
         "outcome_yes": outcome_yes,
         "result_3way": result_3way,
+        "n_way_winner": n_way_winner,
     })
 
     try:
@@ -795,25 +910,47 @@ async def settle_market(
         # leg can't be resolved (preserves legacy 2-way behaviour for
         # rows persisted before the leg metadata convention landed).
         trade_leg: str | None = None
+        trade_competitor: dict[str, str] | None = None
         trade_outcome_yes = outcome_yes
-        if result_3way is not None:
-            cfg = get_league_config(td.get("league"))
-            if cfg is not None and cfg.three_way_market:
-                trade_leg = resolve_three_way_leg(td)
-                if trade_leg is not None:
-                    try:
-                        trade_outcome_yes = outcome_yes_for_three_way_leg(
-                            result_3way, trade_leg
-                        )
-                    except ValueError:
-                        # Defensive — normalize_three_way_result already
-                        # validated `result_3way`, so this can only fire
-                        # if `trade_leg` is malformed.  Fall back to the
-                        # binary outcome rather than skipping the trade.
-                        trade_outcome_yes = outcome_yes
+        cfg = get_league_config(td.get("league"))
+        if result_3way is not None and cfg is not None and cfg.three_way_market:
+            trade_leg = resolve_three_way_leg(td)
+            if trade_leg is not None:
+                try:
+                    trade_outcome_yes = outcome_yes_for_three_way_leg(
+                        result_3way, trade_leg
+                    )
+                except ValueError:
+                    # Defensive — normalize_three_way_result already
+                    # validated `result_3way`, so this can only fire
+                    # if `trade_leg` is malformed.  Fall back to the
+                    # binary outcome rather than skipping the trade.
+                    trade_outcome_yes = outcome_yes
+        # Same shape for n-way outright markets (task #616): when the
+        # league is flagged `n_way_market` AND the caller supplied a
+        # winner, score this trade's leg against the actual winner.
+        elif (
+            n_way_winner is not None
+            and cfg is not None
+            and cfg.n_way_market
+        ):
+            trade_competitor = resolve_n_way_competitor(td)
+            if trade_competitor is not None:
+                try:
+                    trade_outcome_yes = outcome_yes_for_n_way_competitor(
+                        winning_competitor_id=n_way_winner.get("competitor_id"),
+                        winning_competitor_name=n_way_winner.get("competitor_name"),
+                        leg=trade_competitor,
+                    )
+                except ValueError:
+                    # Defensive — caller-supplied winner had no id /
+                    # name; fall back to the binary outcome rather than
+                    # skipping the trade.
+                    trade_outcome_yes = outcome_yes
         res = await _settle_one_trade(
             td, trade_outcome_yes, settle_price,
             result_3way=result_3way, leg=trade_leg,
+            n_way_winner=n_way_winner, n_way_competitor=trade_competitor,
         )
         trade_outcomes[td.get("id")] = trade_outcome_yes
         settled.append(res)
@@ -895,6 +1032,7 @@ async def settle_market(
         "market_id": market_id,
         "outcome_yes": outcome_yes,
         "result_3way": result_3way,
+        "n_way_winner": n_way_winner,
         "trades_settled": len([s for s in settled if s.get("ok")]),
         "persona_metrics_updated": persona_touched,
         "verticals": sorted(verticals),
