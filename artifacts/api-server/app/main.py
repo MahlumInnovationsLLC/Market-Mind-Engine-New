@@ -5146,6 +5146,31 @@ async def dashboard_over_filled_orders_today(
     return await dashboard.get_over_filled_orders_today()
 
 
+@app.get("/api/dashboard/tournament-leaderboards")
+async def dashboard_tournament_leaderboards(
+    since_hours: int = 168,
+    per_event_limit: int = 60,
+    max_events: int = 20,
+    _: object = Depends(require_approved_user),
+) -> dict[str, object]:
+    """Most-recent PGA / F1 tournament leaderboards (task #650).
+
+    Backed by ``app.feeds.sportradar.latest_tournament_leaderboard``,
+    one entry per event with at least one snapshot in the trailing
+    ``since_hours`` window (default 7 days).  Each entry carries the
+    league + display name (via ``sportradar_schedules``), the
+    snapshot's ``fetched_at`` timestamp, and a position-ordered list
+    of ``{position, name}`` entries so operators can verify the
+    leaderboard the orchestrator priced off without leaving the
+    console.  Returns ``{"events": []}`` when no snapshots exist yet.
+    """
+    return await dashboard.get_tournament_leaderboards(
+        since_hours=since_hours,
+        per_event_limit=per_event_limit,
+        max_events=max_events,
+    )
+
+
 @app.get("/api/dashboard/crypto-ohlcv-retention")
 async def dashboard_crypto_ohlcv_retention(
     _: object = Depends(require_approved_user),

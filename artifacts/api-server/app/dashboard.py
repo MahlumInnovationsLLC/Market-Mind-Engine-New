@@ -2434,6 +2434,120 @@ async def get_over_filled_orders_today() -> dict[str, Any]:
     return {"date_utc": today_utc, "count": len(items), "items": items}
 
 
+async def get_tournament_leaderboards(
+    *,
+    since_hours: int = 168,
+    per_event_limit: int = 60,
+    max_events: int = 20,
+) -> dict[str, Any]:
+    """Operator-facing snapshot of recent PGA / F1 tournament
+    leaderboards (task #650).
+
+    Lists every event with at least one row in
+    ``sportradar_tournament_leaderboards`` in the trailing
+    ``since_hours`` window (default 7 days), enriched with the league
+    and display name from ``sportradar_schedules`` so the panel header
+    can show ``PGA · The Masters`` instead of a raw event id.  Each
+    event carries the position-ordered roster from
+    :func:`app.feeds.sportradar.latest_tournament_leaderboard` plus the
+    snapshot's ``fetched_at`` so the panel header can render a
+    "fetched X minutes ago" badge.
+
+    Returns ``{"events": [...]}`` — empty list when no snapshots have
+    landed yet (operators see "no snapshots recorded yet" in the UI).
+    Per-event failures are isolated so one missing snapshot doesn't
+    blank the rest of the panel.
+    """
+    since_hours = max(1, min(720, int(since_hours)))
+    per_event_limit = max(1, min(200, int(per_event_limit)))
+    max_events = max(1, min(50, int(max_events)))
+
+    try:
+        rows = await db.fetch(
+            """
+            SELECT event_id,
+                   max(fetched_at) AS fetched_at
+              FROM sportradar_tournament_leaderboards
+             WHERE fetched_at >= now() - make_interval(hours => $1)
+             GROUP BY event_id
+             ORDER BY max(fetched_at) DESC
+             LIMIT $2
+            """,
+            since_hours,
+            max_events,
+        )
+    except Exception as e:
+        log.info("get_tournament_leaderboards distinct lookup skipped: %s", e)
+        return {"events": []}
+
+    if not rows:
+        return {"events": []}
+
+    event_ids = [str(r["event_id"]) for r in rows]
+    schedule_meta: dict[str, dict[str, str]] = {}
+    try:
+        sched_rows = await db.fetch(
+            """
+            SELECT league, game_id, home_team, away_team, status
+              FROM sportradar_schedules
+             WHERE game_id = ANY($1::text[])
+               AND upper(league) IN ('PGA', 'F1')
+            """,
+            event_ids,
+        )
+        for sr in sched_rows:
+            schedule_meta[str(sr["game_id"])] = {
+                "league": (sr["league"] or "").upper(),
+                "name": (sr["home_team"] or sr["away_team"] or "").strip(),
+                "status": (sr["status"] or "").lower(),
+            }
+    except Exception as e:
+        log.debug(
+            "get_tournament_leaderboards schedules lookup skipped: %s", e,
+        )
+
+    from .feeds.sportradar import latest_tournament_leaderboard
+
+    events: list[dict[str, Any]] = []
+    for r in rows:
+        event_id = str(r["event_id"])
+        try:
+            snap = await latest_tournament_leaderboard(event_id)
+        except Exception as e:  # noqa: BLE001
+            log.debug(
+                "get_tournament_leaderboards snapshot fetch failed for %s: %s",
+                event_id, e,
+            )
+            snap = []
+
+        meta = schedule_meta.get(event_id, {})
+        fetched_at = r["fetched_at"]
+        if hasattr(fetched_at, "isoformat"):
+            fetched_at_iso = fetched_at.isoformat()
+        elif fetched_at is None:
+            fetched_at_iso = None
+        else:
+            fetched_at_iso = str(fetched_at)
+
+        entries = [
+            {
+                "position": e.get("position"),
+                "name": e.get("name") or "",
+            }
+            for e in snap[:per_event_limit]
+            if e.get("name")
+        ]
+        events.append({
+            "event_id": event_id,
+            "league": meta.get("league") or "",
+            "name": meta.get("name") or "",
+            "status": meta.get("status") or "",
+            "fetched_at": fetched_at_iso,
+            "entries": entries,
+        })
+    return {"events": events}
+
+
 async def get_per_league_calibration() -> dict[str, Any]:
     """Most-recent per-league calibrator snapshots for the dashboard.
 

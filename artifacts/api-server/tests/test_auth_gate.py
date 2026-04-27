@@ -145,6 +145,8 @@ PROTECTED_ROUTES: tuple[str, ...] = (
     "/api/dashboard/nfl-exposure",
     # Task #437 — multi-league exposure panel (NFL panel generalised).
     "/api/dashboard/leagues-exposure",
+    # Task #650 — saved tournament leaderboard history (PGA / F1).
+    "/api/dashboard/tournament-leaderboards",
     # Per-source weather freshness badge — operator dashboard only.
     "/api/weather/freshness",
 )
