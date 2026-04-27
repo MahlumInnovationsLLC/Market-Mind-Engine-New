@@ -28,21 +28,18 @@ type NotificationItem = {
   data?: Record<string, unknown> | null;
   created_at?: string | null;
   read_at?: string | null;
+  // Snapshot of the recipient's quiet-hours window at dispatch time
+  // (task #630). All three are nullable: legacy rows that predate the
+  // column carry no zone, and any row whose recipient hadn't
+  // configured DND simply has nothing to annotate against.
+  quiet_hours_tz?: string | null;
+  quiet_hours_start_hour?: number | null;
+  quiet_hours_end_hour?: number | null;
 };
 
 type NotificationsResponse = {
   items: NotificationItem[];
   unread_count: number;
-};
-
-type QuietHoursPrefs = {
-  quiet_hours_start_hour: number | null;
-  quiet_hours_end_hour: number | null;
-  quiet_hours_tz: string | null;
-};
-
-type NotificationPrefsResponse = {
-  prefs: Partial<QuietHoursPrefs> & Record<string, unknown>;
 };
 
 /**
@@ -95,33 +92,6 @@ export default function NotificationsScreen() {
       apiFetch<NotificationsResponse>("/api/me/notifications?limit=50"),
     refetchInterval: 30_000,
   });
-
-  // Quiet-hours prefs let us annotate history rows that landed inside
-  // the user's saved DND window (task #526). We share the same query
-  // key as `NotificationPrefs` so a settings save updates the badges
-  // here without a refetch. A failed prefs fetch (e.g. unapproved
-  // user, offline) just hides the annotations.
-  const prefsQuery = useQuery<NotificationPrefsResponse>({
-    queryKey: ["notification-prefs"],
-    queryFn: () =>
-      apiFetch<NotificationPrefsResponse>("/api/me/notification-prefs"),
-    staleTime: 60_000,
-  });
-  const quiet: QuietHoursPrefs = {
-    quiet_hours_start_hour:
-      (prefsQuery.data?.prefs?.quiet_hours_start_hour as
-        | number
-        | null
-        | undefined) ?? null,
-    quiet_hours_end_hour:
-      (prefsQuery.data?.prefs?.quiet_hours_end_hour as
-        | number
-        | null
-        | undefined) ?? null,
-    quiet_hours_tz:
-      (prefsQuery.data?.prefs?.quiet_hours_tz as string | null | undefined) ??
-      null,
-  };
 
   const markRead = useMutation({
     mutationFn: (ids?: number[]) =>
@@ -354,19 +324,23 @@ export default function NotificationsScreen() {
             (item.data ?? null) as Record<string, unknown> | null,
           );
         const unreadRow = !item.read_at;
-        // Annotate rows that landed inside the user's saved quiet
-        // hours window so it's obvious why a push was silent (task
-        // #526). Falls back to no annotation when the timestamp is
-        // unparseable or the user hasn't configured quiet hours.
+        // Annotate rows that landed inside the recipient's quiet
+        // hours window at dispatch time so it's obvious why a push
+        // was silent (task #526). The window is read from the
+        // per-row snapshot persisted by the API (task #630) instead
+        // of recomputed against current prefs, so editing the saved
+        // zone or hours later doesn't rewrite history. Falls back to
+        // no annotation when the timestamp is unparseable, the row
+        // predates the snapshot column, or the recipient hadn't
+        // configured a window at the time.
+        const itemTz = item.quiet_hours_tz ?? null;
         const createdAt = item.created_at ? new Date(item.created_at) : null;
         const quietHit =
-          createdAt &&
-          !Number.isNaN(createdAt.getTime()) &&
-          quiet.quiet_hours_tz
+          createdAt && !Number.isNaN(createdAt.getTime()) && itemTz
             ? isInQuietHours(
-                quiet.quiet_hours_start_hour,
-                quiet.quiet_hours_end_hour,
-                quiet.quiet_hours_tz,
+                item.quiet_hours_start_hour ?? null,
+                item.quiet_hours_end_hour ?? null,
+                itemTz,
                 createdAt,
               )
             : false;
@@ -453,7 +427,7 @@ export default function NotificationsScreen() {
                     { color: colors.mutedForeground },
                   ]}
                 >
-                  Muted by quiet hours · {quietZoneSuffix(quiet.quiet_hours_tz!)}
+                  Muted by quiet hours · {quietZoneSuffix(itemTz!)}
                 </Text>
               ) : null}
             </Pressable>

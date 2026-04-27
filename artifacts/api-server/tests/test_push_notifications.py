@@ -128,7 +128,7 @@ class _Store:
             return {"sms_phone_number": row["sms_phone_number"]} if row else None
         return None
 
-    async def fetch(self, query: str, *_args: Any) -> list[dict[str, Any]]:
+    async def fetch(self, query: str, *args: Any) -> list[dict[str, Any]]:
         q = " ".join(query.split())
         if "FROM expo_push_tokens t" in q:
             if "notify_live_trade" in q:
@@ -140,7 +140,9 @@ class _Store:
             # Two shapes share the FROM clause: the per-token recipient
             # query (returns expo_token rows + quiet-hours metadata) and
             # the per-user notification-log query (returns DISTINCT
-            # clerk_user_id). Pick the projection from the SELECT list.
+            # clerk_user_id + the same quiet-hours metadata so it can be
+            # snapshotted onto the log row — task #630). Pick the
+            # projection from the SELECT list.
             wants_users = "SELECT DISTINCT t.clerk_user_id" in q
             out: list[dict[str, Any]] = []
             seen_users: set[str] = set()
@@ -153,7 +155,12 @@ class _Store:
                     if row["clerk_user_id"] in seen_users:
                         continue
                     seen_users.add(row["clerk_user_id"])
-                    out.append({"clerk_user_id": row["clerk_user_id"]})
+                    out.append({
+                        "clerk_user_id": row["clerk_user_id"],
+                        "quiet_hours_tz": (pref or {}).get("quiet_hours_tz"),
+                        "quiet_hours_start_hour": (pref or {}).get("quiet_hours_start_hour"),
+                        "quiet_hours_end_hour": (pref or {}).get("quiet_hours_end_hour"),
+                    })
                 else:
                     out.append({
                         "expo_token": tok,
@@ -162,7 +169,45 @@ class _Store:
                         "quiet_hours_tz": (pref or {}).get("quiet_hours_tz"),
                     })
             return out
+        if "FROM mobile_notification_log" in q and "WHERE clerk_user_id = $1" in q:
+            uid, limit = args
+            rows = [
+                r for r in self.notification_log.values()
+                if r["clerk_user_id"] == uid
+            ]
+            rows.sort(
+                key=lambda r: (r.get("created_at") or 0, r.get("id") or 0),
+                reverse=True,
+            )
+            return rows[: int(limit)]
         return []
+
+    async def executemany(self, query: str, args_list: list[Any]) -> None:
+        q = " ".join(query.split())
+        if q.startswith("INSERT INTO mobile_notification_log"):
+            # Args layout matches `_record_dispatch_for_pref`'s INSERT:
+            # (clerk_user_id, type, title, body, deep_link, data,
+            #  quiet_hours_tz, quiet_hours_start_hour, quiet_hours_end_hour).
+            for args in args_list:
+                (
+                    uid, type_, title, body, deep_link, payload,
+                    qh_tz, qh_start, qh_end,
+                ) = args
+                nid = (max(self.notification_log.keys(), default=0) or 0) + 1
+                self.notification_log[nid] = {
+                    "id": nid,
+                    "clerk_user_id": uid,
+                    "type": type_,
+                    "title": title,
+                    "body": body,
+                    "deep_link": deep_link,
+                    "data": payload,
+                    "created_at": nid,  # monotonic stand-in for ordering
+                    "read_at": None,
+                    "quiet_hours_tz": qh_tz,
+                    "quiet_hours_start_hour": qh_start,
+                    "quiet_hours_end_hour": qh_end,
+                }
 
 
 @pytest.fixture
@@ -171,6 +216,7 @@ def store(monkeypatch: pytest.MonkeyPatch) -> _Store:
     monkeypatch.setattr(_db, "execute", s.execute)
     monkeypatch.setattr(_db, "fetchrow", s.fetchrow)
     monkeypatch.setattr(_db, "fetch", s.fetch)
+    monkeypatch.setattr(_db, "executemany", s.executemany)
     return s
 
 
@@ -1122,6 +1168,98 @@ def test_delete_notification_rejects_non_int_id(store: _Store) -> None:
     # Garbage ids never reach the DB layer.
     assert _run(_push.delete_notification("user_a", "not-a-number")) is False  # type: ignore[arg-type]
     assert 5 in store.notification_log
+
+
+# ---------------------------------------------------------------------------
+# Quiet-hours snapshot on each log row (task #630)
+# ---------------------------------------------------------------------------
+
+
+def test_record_dispatch_snapshots_quiet_hours_per_recipient(
+    store: _Store,
+) -> None:
+    """The zone+window in effect at insert time is persisted on the row.
+
+    A later edit of the user's saved prefs must not rewrite history:
+    `list_notifications` keeps returning the snapshot captured here so
+    the mobile feed's "Muted by quiet hours" annotation reflects what
+    was actually in effect when the push was dispatched.
+    """
+    # Two users with different DND windows, each with a registered device.
+    _run(_push.register_token(
+        clerk_user_id="user_la", expo_token=VALID_TOKEN, platform="ios",
+    ))
+    _run(_push.register_token(
+        clerk_user_id="user_ny", expo_token=VALID_TOKEN_2, platform="android",
+    ))
+    _run(_push.set_prefs(
+        clerk_user_id="user_la",
+        quiet_hours_start_hour=22,
+        quiet_hours_end_hour=7,
+        quiet_hours_tz="America/Los_Angeles",
+    ))
+    _run(_push.set_prefs(
+        clerk_user_id="user_ny",
+        quiet_hours_start_hour=23,
+        quiet_hours_end_hour=6,
+        quiet_hours_tz="America/New_York",
+    ))
+
+    _run(_push._record_dispatch_for_pref(
+        "notify_live_trade",
+        type_="live_trade",
+        title="Filled BUY 5",
+        body="market X",
+        deep_link="/trades/1",
+        data={"type": "live_trade", "ticker": "X"},
+    ))
+
+    la_rows = _run(_push.list_notifications("user_la"))
+    ny_rows = _run(_push.list_notifications("user_ny"))
+    assert len(la_rows) == 1 and len(ny_rows) == 1
+    assert la_rows[0]["quiet_hours_tz"] == "America/Los_Angeles"
+    assert la_rows[0]["quiet_hours_start_hour"] == 22
+    assert la_rows[0]["quiet_hours_end_hour"] == 7
+    assert ny_rows[0]["quiet_hours_tz"] == "America/New_York"
+    assert ny_rows[0]["quiet_hours_start_hour"] == 23
+    assert ny_rows[0]["quiet_hours_end_hour"] == 6
+
+    # Now flip the user's saved zone — the persisted snapshot must
+    # NOT change. This is the regression task #630 was filed for.
+    _run(_push.set_prefs(
+        clerk_user_id="user_la",
+        quiet_hours_start_hour=8,
+        quiet_hours_end_hour=9,
+        quiet_hours_tz="UTC",
+    ))
+    la_rows_after = _run(_push.list_notifications("user_la"))
+    assert la_rows_after[0]["quiet_hours_tz"] == "America/Los_Angeles"
+    assert la_rows_after[0]["quiet_hours_start_hour"] == 22
+    assert la_rows_after[0]["quiet_hours_end_hour"] == 7
+
+
+def test_record_dispatch_snapshots_null_quiet_hours_for_users_without_prefs(
+    store: _Store,
+) -> None:
+    """Users with no DND configured get NULL snapshots, not stale defaults."""
+    _run(_push.register_token(
+        clerk_user_id="user_x", expo_token=VALID_TOKEN, platform="ios",
+    ))
+    # No set_prefs call — user inherits PREF_COLUMNS defaults but has
+    # no row at all in user_notification_prefs.
+    _run(_push._record_dispatch_for_pref(
+        "notify_halt",
+        type_="halt",
+        title="HALT",
+        body="kill switch",
+        deep_link=None,
+        data={"type": "halt"},
+    ))
+    rows = _run(_push.list_notifications("user_x"))
+    assert len(rows) == 1
+    assert rows[0]["quiet_hours_tz"] is None
+    assert rows[0]["quiet_hours_start_hour"] is None
+    assert rows[0]["quiet_hours_end_hour"] is None
 
 
 def test_delete_all_notifications_clears_only_caller(store: _Store) -> None:

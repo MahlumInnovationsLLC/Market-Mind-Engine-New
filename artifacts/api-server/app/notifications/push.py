@@ -1021,15 +1021,23 @@ async def _record_dispatch_for_pref(
     """Insert one log row per opted-in user with a registered device.
 
     Mirrors the recipient set used by `_tokens_for_pref` (DISTINCT on
-    user) so the in-app feed matches what was actually pushed.
+    user) so the in-app feed matches what was actually pushed. Each
+    row also captures the recipient's quiet-hours window (zone +
+    start/end hour) as it was at insert time so the mobile feed can
+    annotate "Muted by quiet hours" forever, even after the user
+    later edits their saved DND preferences (task #630).
     """
     if pref_column not in ("notify_live_trade", "notify_halt", "notify_settlement"):
         return
     sql_users = (
-        "SELECT DISTINCT t.clerk_user_id FROM expo_push_tokens t "
-        "LEFT JOIN user_notification_prefs p "
-        "  ON p.clerk_user_id = t.clerk_user_id "
-        f"WHERE COALESCE(p.{pref_column}, true) = true"
+        "SELECT DISTINCT t.clerk_user_id, "
+        "       p.quiet_hours_tz, "
+        "       p.quiet_hours_start_hour, "
+        "       p.quiet_hours_end_hour "
+        "  FROM expo_push_tokens t "
+        "  LEFT JOIN user_notification_prefs p "
+        "    ON p.clerk_user_id = t.clerk_user_id "
+        f" WHERE COALESCE(p.{pref_column}, true) = true"
     )
     try:
         rows = await db.fetch(sql_users)
@@ -1040,14 +1048,25 @@ async def _record_dispatch_for_pref(
         return
     payload = json.dumps(data or {}, default=str)
     args_list = [
-        (str(r["clerk_user_id"]), type_, title, body, deep_link, payload)
+        (
+            str(r["clerk_user_id"]),
+            type_,
+            title,
+            body,
+            deep_link,
+            payload,
+            r.get("quiet_hours_tz"),
+            r.get("quiet_hours_start_hour"),
+            r.get("quiet_hours_end_hour"),
+        )
         for r in rows
     ]
     try:
         await db.executemany(
             "INSERT INTO mobile_notification_log "
-            "(clerk_user_id, type, title, body, deep_link, data) "
-            "VALUES ($1, $2, $3, $4, $5, $6::jsonb)",
+            "(clerk_user_id, type, title, body, deep_link, data, "
+            " quiet_hours_tz, quiet_hours_start_hour, quiet_hours_end_hour) "
+            "VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, $8, $9)",
             args_list,
         )
     except Exception as e:
@@ -1087,7 +1106,9 @@ async def list_notifications(
         rows = await db.fetch(
             """
             SELECT id, type, title, body, deep_link, data,
-                   created_at, read_at
+                   created_at, read_at,
+                   quiet_hours_tz, quiet_hours_start_hour,
+                   quiet_hours_end_hour
               FROM mobile_notification_log
              WHERE clerk_user_id = $1
              ORDER BY created_at DESC, id DESC
@@ -1108,6 +1129,13 @@ async def list_notifications(
                 payload = {}
         else:
             payload = raw or {}
+        # Coerce smallint columns to plain int so JSON serialisation
+        # (and the mobile client's number checks) don't have to deal
+        # with asyncpg's smallint subclass. Legacy rows that predate
+        # task #630 carry NULL — surface that as `None` so the UI
+        # falls back to no annotation rather than guessing.
+        qh_start = r.get("quiet_hours_start_hour")
+        qh_end = r.get("quiet_hours_end_hour")
         out.append(
             {
                 "id": int(r["id"]),
@@ -1118,6 +1146,13 @@ async def list_notifications(
                 "data": payload,
                 "created_at": r["created_at"],
                 "read_at": r.get("read_at"),
+                "quiet_hours_tz": r.get("quiet_hours_tz"),
+                "quiet_hours_start_hour": (
+                    int(qh_start) if qh_start is not None else None
+                ),
+                "quiet_hours_end_hour": (
+                    int(qh_end) if qh_end is not None else None
+                ),
             }
         )
     return out
