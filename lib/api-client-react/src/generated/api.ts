@@ -39,6 +39,7 @@ import type {
   BankrollRecent,
   CheckoutSessionRequest,
   CheckoutSessionResult,
+  CryptoBacktestRetentionStatus,
   CryptoOhlcvRetentionStatus,
   DashboardOverview,
   DebateEntrantMarkets,
@@ -1203,6 +1204,86 @@ export function useGetCryptoOhlcvRetentionStatus<
   request?: SecondParameter<typeof customFetch>;
 }): UseQueryResult<TData, TError> & { queryKey: QueryKey } {
   const queryOptions = getGetCryptoOhlcvRetentionStatusQueryOptions(options);
+
+  const query = useQuery(queryOptions) as UseQueryResult<TData, TError> & {
+    queryKey: QueryKey;
+  };
+
+  return { ...query, queryKey: queryOptions.queryKey };
+}
+
+/**
+ * @summary Health snapshot of the crypto_backtest_runs trend-table retention sweep
+ */
+export const getGetCryptoBacktestRetentionStatusUrl = () => {
+  return `/api/dashboard/crypto/backtest-retention`;
+};
+
+export const getCryptoBacktestRetentionStatus = async (
+  options?: RequestInit,
+): Promise<CryptoBacktestRetentionStatus> => {
+  return customFetch<CryptoBacktestRetentionStatus>(
+    getGetCryptoBacktestRetentionStatusUrl(),
+    {
+      ...options,
+      method: "GET",
+    },
+  );
+};
+
+export const getGetCryptoBacktestRetentionStatusQueryKey = () => {
+  return [`/api/dashboard/crypto/backtest-retention`] as const;
+};
+
+export const getGetCryptoBacktestRetentionStatusQueryOptions = <
+  TData = Awaited<ReturnType<typeof getCryptoBacktestRetentionStatus>>,
+  TError = ErrorType<unknown>,
+>(options?: {
+  query?: UseQueryOptions<
+    Awaited<ReturnType<typeof getCryptoBacktestRetentionStatus>>,
+    TError,
+    TData
+  >;
+  request?: SecondParameter<typeof customFetch>;
+}) => {
+  const { query: queryOptions, request: requestOptions } = options ?? {};
+
+  const queryKey =
+    queryOptions?.queryKey ?? getGetCryptoBacktestRetentionStatusQueryKey();
+
+  const queryFn: QueryFunction<
+    Awaited<ReturnType<typeof getCryptoBacktestRetentionStatus>>
+  > = ({ signal }) =>
+    getCryptoBacktestRetentionStatus({ signal, ...requestOptions });
+
+  return { queryKey, queryFn, ...queryOptions } as UseQueryOptions<
+    Awaited<ReturnType<typeof getCryptoBacktestRetentionStatus>>,
+    TError,
+    TData
+  > & { queryKey: QueryKey };
+};
+
+export type GetCryptoBacktestRetentionStatusQueryResult = NonNullable<
+  Awaited<ReturnType<typeof getCryptoBacktestRetentionStatus>>
+>;
+export type GetCryptoBacktestRetentionStatusQueryError = ErrorType<unknown>;
+
+/**
+ * @summary Health snapshot of the crypto_backtest_runs trend-table retention sweep
+ */
+
+export function useGetCryptoBacktestRetentionStatus<
+  TData = Awaited<ReturnType<typeof getCryptoBacktestRetentionStatus>>,
+  TError = ErrorType<unknown>,
+>(options?: {
+  query?: UseQueryOptions<
+    Awaited<ReturnType<typeof getCryptoBacktestRetentionStatus>>,
+    TError,
+    TData
+  >;
+  request?: SecondParameter<typeof customFetch>;
+}): UseQueryResult<TData, TError> & { queryKey: QueryKey } {
+  const queryOptions = getGetCryptoBacktestRetentionStatusQueryOptions(options);
 
   const query = useQuery(queryOptions) as UseQueryResult<TData, TError> & {
     queryKey: QueryKey;

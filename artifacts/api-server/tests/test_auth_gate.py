@@ -50,6 +50,8 @@ PROTECTED_ROUTES: tuple[str, ...] = (
     "/api/dashboard/vertical-performance",
     "/api/dashboard/over-filled-orders-today",
     "/api/dashboard/crypto-ohlcv-retention",
+    # Task #640 — backtest history retention status panel on the operator dashboard.
+    "/api/dashboard/crypto/backtest-retention",
     "/api/dashboard/bankroll/recent",
     "/api/dashboard/slippage-guard-rejects",
     "/api/dashboard/recent-debates",

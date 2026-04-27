@@ -29,6 +29,9 @@ vi.mock("@/components/dashboard/active-positions", () => ({
 vi.mock("@/components/dashboard/bankroll-panel", () => ({
   default: stub("stub-bankroll-panel"),
 }));
+vi.mock("@/components/dashboard/crypto-backtest-retention-panel", () => ({
+  default: stub("stub-crypto-backtest"),
+}));
 vi.mock("@/components/dashboard/crypto-ohlcv-retention-panel", () => ({
   default: stub("stub-crypto-ohlcv"),
 }));
@@ -165,6 +168,7 @@ describe("Dashboard", () => {
       "stub-trading-cycles",
       "stub-health-snapshot",
       "stub-crypto-ohlcv",
+      "stub-crypto-backtest",
       "stub-swarm-debates",
       "stub-swarm-analysts",
       "stub-swarm-personas-today",

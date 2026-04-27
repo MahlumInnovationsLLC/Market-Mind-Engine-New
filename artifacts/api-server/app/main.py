@@ -5343,6 +5343,23 @@ async def dashboard_crypto_ohlcv_retention(
     return await dashboard.get_crypto_ohlcv_retention_status()
 
 
+@app.get("/api/dashboard/crypto/backtest-retention")
+async def dashboard_crypto_backtest_retention(
+    _: object = Depends(require_approved_user),
+) -> dict[str, object]:
+    """Operator-facing snapshot of the ``crypto_backtest_runs`` retention sweep.
+
+    Mirrors :func:`dashboard_crypto_ohlcv_retention` for the trend-table
+    GC loop introduced by task #582. Surfaces the loop's internal
+    ``state()`` (running/enabled flags, last tick, last error, total +
+    last deletion counts, the resolved policy, and the sweep cadence)
+    plus two derived freshness fields the dashboard uses to flag a
+    misbehaving sweep at a glance: ``seconds_since_last_tick`` and
+    ``health`` (``ok`` / ``stale`` / ``error`` / ``disabled``).
+    """
+    return await dashboard.get_crypto_backtest_retention_status()
+
+
 @app.get("/api/dashboard/bankroll/recent")
 async def dashboard_bankroll_recent(
     limit: int = 200,

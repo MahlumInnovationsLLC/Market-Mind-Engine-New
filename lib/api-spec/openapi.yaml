@@ -229,6 +229,18 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/CryptoOhlcvRetentionStatus" }
 
+  /dashboard/crypto/backtest-retention:
+    get:
+      operationId: getCryptoBacktestRetentionStatus
+      tags: [dashboard]
+      summary: Health snapshot of the crypto_backtest_runs trend-table retention sweep
+      responses:
+        "200":
+          description: Retention loop state (running/enabled, last tick, errors, deletion counts, policy)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CryptoBacktestRetentionStatus" }
+
   /dashboard/slippage-guard-rejects:
     get:
       operationId: getSlippageGuardRejects
@@ -1351,6 +1363,63 @@ components:
         - total_deleted
         - last_deleted_by_granularity
         - retention_days
+        - interval_seconds
+        - health
+
+    CryptoBacktestRetentionPolicy:
+      type: object
+      description: Resolved retention horizons for the crypto_backtest_runs trend table.
+      properties:
+        min_rows:
+          type: integer
+          description: Minimum rows kept per (symbol, timeframe) pair regardless of age.
+        retention_days:
+          type: integer
+          description: Maximum age (days) a row is kept beyond the min_rows window.
+      required:
+        - min_rows
+        - retention_days
+
+    CryptoBacktestRetentionStatus:
+      type: object
+      description: |
+        Operator-facing snapshot of the periodic `crypto_backtest_runs`
+        retention sweep (`app.crypto_backtest_retention`). Mirrors the
+        loop's internal `state()` plus two derived freshness fields the
+        dashboard uses to flag a stalled or errored sweep.
+      properties:
+        running:
+          type: boolean
+          description: Whether the asyncio task is currently alive.
+        enabled:
+          type: boolean
+          description: Whether the loop is allowed to run per AXIOM_CRYPTO_BACKTEST_RETENTION_ENABLED.
+        started_at: { type: number, nullable: true, description: "Unix timestamp (seconds) when the loop was started." }
+        last_tick_at: { type: number, nullable: true, description: "Unix timestamp (seconds) of the most recent sweep." }
+        last_error: { type: string, nullable: true, description: "Most recent sweep error, or null." }
+        last_deleted: { type: integer, description: "Rows deleted on the most recent sweep." }
+        total_deleted: { type: integer, description: "Lifetime rows deleted since the loop started." }
+        policy: { $ref: "#/components/schemas/CryptoBacktestRetentionPolicy" }
+        interval_seconds: { type: number, description: "Sweep cadence in seconds." }
+        seconds_since_last_tick:
+          type: number
+          nullable: true
+          description: Wall-clock seconds since `last_tick_at`, or null if the loop has never ticked.
+        health:
+          type: string
+          enum: [ok, stale, error, disabled]
+          description: |
+            Rolled-up health verdict the dashboard uses to color the panel:
+            `ok` — running and ticked within `2 * interval_seconds`.
+            `stale` — meant to be running but hasn't ticked in time.
+            `error` — most recent sweep raised; the loop will retry next tick.
+            `disabled` — turned off by AXIOM_CRYPTO_BACKTEST_RETENTION_ENABLED=0.
+      required:
+        - running
+        - enabled
+        - last_deleted
+        - total_deleted
+        - policy
         - interval_seconds
         - health
 

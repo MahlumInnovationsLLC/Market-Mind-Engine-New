@@ -3143,6 +3143,66 @@ async def get_crypto_ohlcv_retention_status() -> dict[str, Any]:
     }
 
 
+async def get_crypto_backtest_retention_status() -> dict[str, Any]:
+    """Operator-facing snapshot of the ``crypto_backtest_runs`` retention sweep.
+
+    Wraps :func:`app.crypto_backtest_retention.state` and adds two
+    derived fields the dashboard needs to flag a misbehaving loop
+    without re-implementing the same logic in the frontend:
+
+    * ``seconds_since_last_tick`` — wall-clock seconds since the last
+      successful sweep, or ``None`` when the loop has never ticked.
+    * ``health`` — one of:
+
+        - ``"disabled"`` — the loop is intentionally off
+          (``AXIOM_CRYPTO_BACKTEST_RETENTION_ENABLED=0``).
+        - ``"error"`` — the most recent sweep raised an exception.
+        - ``"stale"`` — the loop is meant to be running but either
+          hasn't ticked yet (after a 2-interval grace) or its last
+          tick is older than ``2 * interval_seconds``.
+        - ``"ok"`` — running and ticked within the expected window.
+
+    Always returns a dict; never raises.
+    """
+    import time
+
+    from . import crypto_backtest_retention as _cbr
+
+    snap = _cbr.state()
+
+    last_tick = snap.get("last_tick_at")
+    started_at = snap.get("started_at")
+    interval = float(snap.get("interval_seconds") or _cbr.DEFAULT_INTERVAL_SECONDS)
+    grace = max(2.0 * interval, 60.0)
+
+    now = time.time()
+    seconds_since = (now - float(last_tick)) if last_tick else None
+
+    if not snap.get("enabled", True):
+        health = "disabled"
+    elif snap.get("last_error"):
+        health = "error"
+    elif last_tick is None:
+        # Never ticked — only flag once we've been up long enough that
+        # a healthy loop *should* have completed at least one sweep.
+        if started_at and (now - float(started_at)) > grace:
+            health = "stale"
+        elif not snap.get("running"):
+            health = "stale"
+        else:
+            health = "ok"
+    elif seconds_since is not None and seconds_since > grace:
+        health = "stale"
+    else:
+        health = "ok"
+
+    return {
+        **snap,
+        "seconds_since_last_tick": seconds_since,
+        "health": health,
+    }
+
+
 async def get_nfl_exposure() -> dict[str, Any]:
     """NFL per-league + per-game + Sunday-window exposure with cap headroom.
 
