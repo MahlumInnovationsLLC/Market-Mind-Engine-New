@@ -102,6 +102,25 @@ Axiom Predict is a pnpm workspace monorepo hosting a prediction-market trading p
   whose cadence is at or above this are classified as backfill and
   excluded from the READY gate (FRED/macro backfill polls would
   otherwise hold the gate closed for tens of minutes).
+- `AXIOM_ESPN_SCOREBOARD_DISABLED` (optional) — set to `1`/`true` to skip
+  the keyless ESPN scoreboard poller (`app/feeds/espn_scoreboard.py`).
+  When unset, the feed polls NFL/NBA/MLB/NHL every
+  `AXIOM_ESPN_SCOREBOARD_CADENCE_SECS` seconds (default `600`) and
+  upserts rows into `sportradar_schedules` with
+  `game_id="espn:<league>:<event_id>"` so downstream consumers
+  (`get_upcoming_games`, the team-name AND matcher, the live-games
+  chatbot's pre-game context bundle) keep working after the Sportradar
+  schedule trial expires.
+- `AXIOM_KALSHI_SCHEDULES_CADENCE_SECS` (default `300`) and
+  `AXIOM_KALSHI_SCHEDULE_SERIES` (default = curated NFL/NBA/MLB/NHL/MLS
+  + top-flight European football + NCAA series) — control the Kalshi
+  schedule synthesizer (`app/feeds/kalshi_schedules.py`). For each
+  configured series ticker (e.g. `KXNFLGAME=NFL,KXEPLGAME=EPL`) the
+  feed walks Kalshi `list_markets`, groups markets by event, parses the
+  matchup out of the title (`@`/`vs`/`v`/`at`/"X beat Y"), and writes
+  schedule rows with `game_id="kalshi:<event_ticker>"`. Feed advertises
+  itself as `enabled=False` with a clear `skipped_reason` when Kalshi
+  credentials are missing.
 
 **Backend (FastAPI):**
 - **Authentication:** Integrates with Clerk for user authentication. All authenticated endpoints require a Clerk session JWT. Unapproved users are restricted to `/api/me/access`.
@@ -141,6 +160,26 @@ Axiom Predict is a pnpm workspace monorepo hosting a prediction-market trading p
 - Model picker is flagships-only: Claude Sonnet 4.5, GPT-5, Gemini 2.5
   Pro. The catalog (`live_games_chat.AVAILABLE_MODELS`) is mirrored to
   `swarm/personas.py` pricing — adding a new entry requires both.
+
+**Schedule-data backstops (post-Sportradar-trial):**
+- The chatbot's "Today's Games" lookahead, `/api/upcoming-games`, and
+  `dashboard.get_upcoming_game_context` all read from
+  `sportradar_schedules`. To prevent that table from rolling empty when
+  the Sportradar schedule trial expires, two keyless backstop pollers
+  upsert into the same table behind provider-namespaced `game_id`
+  prefixes that cannot collide with native Sportradar IDs:
+  - `app/feeds/espn_scoreboard.py` (`game_id="espn:<league>:<id>"`) —
+    keyless ESPN public scoreboard for NFL/NBA/MLB/NHL. Per-league
+    fetch failures are isolated; a 429 raises `RateLimited` so the
+    scheduler enforces a real cooldown.
+  - `app/feeds/kalshi_schedules.py` (`game_id="kalshi:<event_ticker>"`) —
+    synthesizes a schedule row from the matchup title + `close_time`
+    of every event under a curated set of Kalshi sports series.
+    Skipped when Kalshi credentials are missing.
+  Both writers use the same `INSERT … ON CONFLICT (league, game_id)`
+  pattern as the Sportradar writer and **propagate** DB failures so the
+  scheduler records them as feed-level errors instead of silently
+  appearing healthy.
 
 ## Operations Runbook — quick links
 

@@ -70,6 +70,8 @@ from .feeds.sportradar import register_sportradar_extra_feeds
 from .feeds.weather import register_weather_feeds
 from .feeds.crypto import register_crypto_feeds
 from .feeds.commodities import register_commodities_feeds
+from .feeds.espn_scoreboard import register_espn_scoreboard_feed
+from .feeds.kalshi_schedules import register_kalshi_schedules_feed
 from .feeds.kalshi_crypto_markets import (
     register_kalshi_crypto_markets_feed,
     register_kalshi_crypto_settlements_feed,
@@ -221,6 +223,19 @@ async def lifespan(_: FastAPI):
             register_sportradar_extra_feeds()
         except Exception as e:
             log.warning("sportradar extra feed registration failed: %s", e)
+        # ESPN + Kalshi schedule backstops: keep the Today's Games
+        # lookahead alive after the Sportradar trial expires.  Both
+        # write into the same ``sportradar_schedules`` table with
+        # provider-prefixed game ids so they coexist with native
+        # Sportradar rows without a primary-key fight.
+        try:
+            register_espn_scoreboard_feed()
+        except Exception as e:
+            log.warning("espn_scoreboard feed registration failed: %s", e)
+        try:
+            register_kalshi_schedules_feed()
+        except Exception as e:
+            log.warning("kalshi_schedules feed registration failed: %s", e)
         try:
             from .feeds.nfl_snap_counts import (
                 ensure_schema as _ensure_nfl_snap_schema,
