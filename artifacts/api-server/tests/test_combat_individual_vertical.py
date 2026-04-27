@@ -1037,6 +1037,229 @@ def test_poll_tournament_leaderboards_raises_when_no_keys(monkeypatch):
         asyncio.run(sr._poll_tournament_leaderboards())
 
 
+def test_persist_leaderboard_snapshot_appends_rows(monkeypatch):
+    """Each refresh must append one row per entrant to
+    `sportradar_tournament_leaderboards`, all sharing one fetched_at
+    timestamp so the snapshot is recoverable as a coherent set
+    (task #623)."""
+    from contextlib import asynccontextmanager
+    from datetime import datetime, timezone
+
+    from app.feeds import sportradar as sr
+    from app import db as db_mod
+
+    captured: list[tuple] = []
+
+    class _Conn:
+        def transaction(self):
+            @asynccontextmanager
+            async def _tx():
+                yield None
+            return _tx()
+
+        async def executemany(self, _query, rows):
+            captured.extend(rows)
+
+    @asynccontextmanager
+    async def fake_acquire():
+        yield _Conn()
+
+    monkeypatch.setattr(db_mod, "acquire", fake_acquire)
+    fixed = datetime(2026, 4, 26, 12, 0, tzinfo=timezone.utc)
+
+    asyncio.run(sr._persist_leaderboard_snapshot(
+        "sr:tournament:pga-1",
+        [
+            {"name": "Rahm", "position": 1},
+            {"name": "Scheffler", "position": 2},
+            {"name": "McIlroy", "position": "DNF"},  # un-parseable -> NULL
+            {"name": "", "position": 4},  # empty name -> dropped
+        ],
+        fetched_at=fixed,
+    ))
+
+    # Empty-name row dropped; the un-parseable position stored as NULL.
+    assert [(r[0], r[1], r[2]) for r in captured] == [
+        ("sr:tournament:pga-1", 1, "Rahm"),
+        ("sr:tournament:pga-1", 2, "Scheffler"),
+        ("sr:tournament:pga-1", None, "McIlroy"),
+    ]
+    # Every row carries the same fetched_at so the snapshot is coherent.
+    assert {r[3] for r in captured} == {fixed}
+
+
+def test_persist_leaderboard_snapshot_swallows_db_errors(monkeypatch):
+    """A transient DB hiccup must not abort the rating refresh — the
+    helper logs and returns rather than propagating."""
+    from contextlib import asynccontextmanager
+
+    from app.feeds import sportradar as sr
+    from app import db as db_mod
+
+    @asynccontextmanager
+    async def boom_acquire():
+        raise RuntimeError("pool exhausted")
+        yield  # pragma: no cover - generator boilerplate
+
+    monkeypatch.setattr(db_mod, "acquire", boom_acquire)
+
+    # Must not raise.
+    asyncio.run(sr._persist_leaderboard_snapshot(
+        "sr:tournament:pga-1",
+        [{"name": "Rahm", "position": 1}, {"name": "Scheffler", "position": 2}],
+    ))
+
+
+def test_refresh_pga_leaderboard_persists_snapshot(monkeypatch):
+    """`_refresh_pga_leaderboard` must call the persist helper exactly
+    once per successful refresh, passing through the extracted entries
+    so historical pricing can be replayed off the table."""
+    from app.feeds import sportradar as sr
+    from app.sports import ratings as ratings_mod
+
+    ratings_mod.clear_cache()
+
+    async def fake_get_json(provider, url, api_key):
+        return {"leaderboard": [
+            {"position": 1, "player": {"full_name": "Rahm"}},
+            {"position": 2, "player": {"full_name": "Scheffler"}},
+        ]}
+
+    persisted: list[tuple[str, list[dict]]] = []
+
+    async def fake_persist(event_id, entries, fetched_at=None):
+        persisted.append((event_id, list(entries)))
+
+    monkeypatch.setattr(sr, "_get_json", fake_get_json)
+    monkeypatch.setattr(sr, "_persist_leaderboard_snapshot", fake_persist)
+
+    written = asyncio.run(sr._refresh_pga_leaderboard("k", "sr:tournament:pga-1"))
+    assert written == 2
+    assert len(persisted) == 1
+    assert persisted[0][0] == "sr:tournament:pga-1"
+    assert {e["name"] for e in persisted[0][1]} == {"Rahm", "Scheffler"}
+
+
+def test_refresh_f1_leaderboard_persists_snapshot(monkeypatch):
+    """Same contract for the F1 path — every successful refresh
+    appends one snapshot."""
+    from app.feeds import sportradar as sr
+    from app.sports import ratings as ratings_mod
+
+    ratings_mod.clear_cache()
+
+    async def fake_get_json(provider, url, api_key):
+        return {"sport_event_status": {"status": "live", "competitors": [
+            {"name": "Verstappen", "position": 1},
+            {"name": "Norris", "position": 2},
+        ]}}
+
+    persisted: list[str] = []
+
+    async def fake_persist(event_id, entries, fetched_at=None):
+        persisted.append(event_id)
+
+    monkeypatch.setattr(sr, "_get_json", fake_get_json)
+    monkeypatch.setattr(sr, "_persist_leaderboard_snapshot", fake_persist)
+
+    written = asyncio.run(sr._refresh_f1_leaderboard("k", "sr:sport_event:f1-1"))
+    assert written == 2
+    assert persisted == ["sr:sport_event:f1-1"]
+
+
+def test_refresh_leaderboard_skips_persist_when_field_too_thin(monkeypatch):
+    """If the extracted field is too thin to drive Plackett-Luce we
+    skip both the cache update *and* the snapshot append — no point
+    polluting the audit table with a partial fetch."""
+    from app.feeds import sportradar as sr
+
+    async def fake_get_json(provider, url, api_key):
+        # Only one entrant — extract returns a single row.
+        return {"leaderboard": [
+            {"position": 1, "player": {"full_name": "SoloPlayer"}},
+        ]}
+
+    persisted: list[str] = []
+
+    async def fake_persist(event_id, entries, fetched_at=None):
+        persisted.append(event_id)
+
+    monkeypatch.setattr(sr, "_get_json", fake_get_json)
+    monkeypatch.setattr(sr, "_persist_leaderboard_snapshot", fake_persist)
+
+    written = asyncio.run(sr._refresh_pga_leaderboard("k", "sr:tournament:thin"))
+    assert written == 0
+    assert persisted == []
+
+
+def test_latest_tournament_leaderboard_returns_most_recent_snapshot(monkeypatch):
+    """The read helper must return rows from the latest fetched_at,
+    ordered by position with NULLs last so dashboards / replays can
+    reconstruct the field exactly as the orchestrator saw it."""
+    from contextlib import asynccontextmanager
+    from datetime import datetime, timezone
+
+    from app.feeds import sportradar as sr
+    from app import db as db_mod
+
+    latest_ts = datetime(2026, 4, 26, 12, 5, tzinfo=timezone.utc)
+    canned_rows = [
+        {"event_id": "sr:tournament:pga-1", "position": 1,
+         "name": "Rahm", "fetched_at": latest_ts},
+        {"event_id": "sr:tournament:pga-1", "position": 2,
+         "name": "Scheffler", "fetched_at": latest_ts},
+        {"event_id": "sr:tournament:pga-1", "position": None,
+         "name": "Withdrew", "fetched_at": latest_ts},
+    ]
+
+    queries: list[tuple[str, tuple]] = []
+
+    class _Conn:
+        async def fetch(self, query, *args):
+            queries.append((query, args))
+            return canned_rows
+
+    @asynccontextmanager
+    async def fake_acquire():
+        yield _Conn()
+
+    monkeypatch.setattr(db_mod, "acquire", fake_acquire)
+
+    snap = asyncio.run(sr.latest_tournament_leaderboard("sr:tournament:pga-1"))
+    assert [(r["position"], r["name"]) for r in snap] == [
+        (1, "Rahm"), (2, "Scheffler"), (None, "Withdrew"),
+    ]
+    # Helper must select on event_id and key on the latest fetched_at.
+    assert queries and queries[0][1] == ("sr:tournament:pga-1",)
+    assert "MAX(fetched_at)" in queries[0][0]
+
+
+def test_latest_tournament_leaderboard_swallows_missing_table(monkeypatch):
+    """Lookups must degrade gracefully when the table doesn't exist
+    yet (fresh dev DB, migration not applied) — return [] rather
+    than raise so dashboards can fall back to seed-time ratings."""
+    from contextlib import asynccontextmanager
+
+    from app.feeds import sportradar as sr
+    from app import db as db_mod
+
+    @asynccontextmanager
+    async def boom_acquire():
+        raise RuntimeError("relation does not exist")
+        yield  # pragma: no cover
+
+    monkeypatch.setattr(db_mod, "acquire", boom_acquire)
+    assert asyncio.run(sr.latest_tournament_leaderboard("anything")) == []
+
+
+def test_latest_tournament_leaderboard_rejects_empty_event_id():
+    """Defensive: empty / None event_id short-circuits to [] without
+    touching the DB."""
+    from app.feeds import sportradar as sr
+
+    assert asyncio.run(sr.latest_tournament_leaderboard("")) == []
+
+
 def test_register_sportradar_extra_feeds_includes_leaderboards(monkeypatch):
     """The shared registration helper must surface the new
     cross-sport leaderboard feed exactly once, enabled when either

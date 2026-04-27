@@ -1284,9 +1284,118 @@ async def _live_leaderboard_event_ids(
     return [str(r["game_id"]) for r in rows if r["game_id"]]
 
 
+async def _persist_leaderboard_snapshot(
+    event_id: str,
+    entries: list[dict[str, Any]],
+    fetched_at: datetime | None = None,
+) -> None:
+    """Append one snapshot of a tournament leaderboard to
+    ``sportradar_tournament_leaderboards`` (task #623).
+
+    All rows from a single fetch share an identical ``fetched_at``
+    timestamp so callers can recover a coherent snapshot via
+    ``WHERE event_id = $1 AND fetched_at = MAX(fetched_at)``.
+
+    Best-effort: persistence failures are logged and swallowed so a
+    transient DB hiccup never poisons the in-memory ratings cache
+    refresh that the orchestrator's pricing depends on.  The caller
+    has already extracted ``entries`` from a live HTTP payload —
+    losing the snapshot is strictly less bad than losing the live
+    rating refresh.
+    """
+    if not event_id or not entries:
+        return
+    ts = fetched_at or datetime.now(tz=timezone.utc)
+    rows: list[tuple[str, int | None, str, datetime]] = []
+    for e in entries:
+        name = e.get("name")
+        if not name:
+            continue
+        raw_pos = e.get("position")
+        pos: int | None
+        if raw_pos is None:
+            pos = None
+        else:
+            try:
+                pos = int(float(raw_pos))
+            except (TypeError, ValueError):
+                pos = None
+        rows.append((str(event_id), pos, str(name), ts))
+    if not rows:
+        return
+    try:
+        async with db.acquire() as conn, conn.transaction():
+            await conn.executemany(
+                """
+                INSERT INTO sportradar_tournament_leaderboards
+                  (event_id, position, name, fetched_at)
+                VALUES ($1, $2, $3, $4)
+                """,
+                rows,
+            )
+    except Exception as e:  # noqa: BLE001 — never block the rating refresh
+        log.warning(
+            "sportradar leaderboard %s snapshot persist failed: %s",
+            event_id, e,
+        )
+
+
+async def latest_tournament_leaderboard(
+    event_id: str,
+) -> list[dict[str, Any]]:
+    """Return the most recent leaderboard snapshot for ``event_id`` so
+    dashboards / replays can reconstruct the field at the time we
+    last polled (task #623).
+
+    Each row carries ``{event_id, position, name, fetched_at}`` and the
+    list is ordered by position (NULLs last so unranked / withdrawn
+    entries don't crowd the leader).  Returns ``[]`` when no snapshot
+    has been recorded for the event yet — callers should treat this as
+    "fall back to the seed-time ratings" rather than as an error.
+    """
+    if not event_id:
+        return []
+    try:
+        async with db.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT event_id, position, name, fetched_at
+                  FROM sportradar_tournament_leaderboards
+                 WHERE event_id = $1
+                   AND fetched_at = (
+                       SELECT MAX(fetched_at)
+                         FROM sportradar_tournament_leaderboards
+                        WHERE event_id = $1
+                   )
+                 ORDER BY position NULLS LAST, name
+                """,
+                str(event_id),
+            )
+    except Exception as e:  # noqa: BLE001
+        log.info(
+            "sportradar leaderboard %s history lookup skipped (%s)",
+            event_id, e,
+        )
+        return []
+    return [
+        {
+            "event_id": r["event_id"],
+            "position": r["position"],
+            "name": r["name"],
+            "fetched_at": r["fetched_at"],
+        }
+        for r in rows
+    ]
+
+
 async def _refresh_pga_leaderboard(api_key: str, tournament_id: str) -> int:
     """Fetch one PGA tournament's leaderboard and refresh the per-event
-    ratings cache.  Returns the entrant count written (0 on failure)."""
+    ratings cache.  Returns the entrant count written (0 on failure).
+
+    Each successful fetch also appends a snapshot to
+    ``sportradar_tournament_leaderboards`` (task #623) so historical
+    pricing can be replayed.
+    """
     from ..sports import set_field_from_leaderboard
     payload = await _get_json(
         f"sportradar:pga:leaderboard:{tournament_id}",
@@ -1298,12 +1407,20 @@ async def _refresh_pga_leaderboard(api_key: str, tournament_id: str) -> int:
     entries = _extract_pga_leaderboard(payload)
     if len(entries) < 2:
         return 0
-    return set_field_from_leaderboard(tournament_id, entries)
+    written = set_field_from_leaderboard(tournament_id, entries)
+    if written:
+        await _persist_leaderboard_snapshot(tournament_id, entries)
+    return written
 
 
 async def _refresh_f1_leaderboard(api_key: str, event_id: str) -> int:
     """Fetch one F1 race summary and refresh the per-event ratings
-    cache.  Returns the entrant count written (0 on failure)."""
+    cache.  Returns the entrant count written (0 on failure).
+
+    Each successful fetch also appends a snapshot to
+    ``sportradar_tournament_leaderboards`` (task #623) so historical
+    pricing can be replayed.
+    """
     from ..sports import set_field_from_leaderboard
     payload = await _get_json(
         f"sportradar:f1:leaderboard:{event_id}",
@@ -1315,7 +1432,10 @@ async def _refresh_f1_leaderboard(api_key: str, event_id: str) -> int:
     entries = _extract_f1_leaderboard(payload)
     if len(entries) < 2:
         return 0
-    return set_field_from_leaderboard(event_id, entries)
+    written = set_field_from_leaderboard(event_id, entries)
+    if written:
+        await _persist_leaderboard_snapshot(event_id, entries)
+    return written
 
 
 async def _poll_tournament_leaderboards() -> int:
