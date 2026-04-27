@@ -5236,6 +5236,48 @@ function fmtEloInterval(seconds: number): string {
   return Number.isInteger(h) ? `${h}h` : `${h.toFixed(1)}h`;
 }
 
+function fmtEloRelative(seconds: number): string {
+  const s = Math.floor(Math.abs(seconds));
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  if (m < 60) {
+    const rem = s % 60;
+    return rem > 0 ? `${m}m ${rem}s` : `${m}m`;
+  }
+  const h = Math.floor(m / 60);
+  const remM = m % 60;
+  return remM > 0 ? `${h}h ${remM}m` : `${h}h`;
+}
+
+export function computeEloNextRun(
+  status: EloUpdaterStatus,
+  nowMs: number,
+): { label: string; overdue: boolean } | null {
+  if (!status.running) return null;
+  if (!Number.isFinite(status.cycle_seconds) || status.cycle_seconds <= 0) {
+    return null;
+  }
+  const last = status.last_cycle;
+  if (!last || !last.completed_at) return null;
+  const completedMs = Date.parse(last.completed_at);
+  if (!Number.isFinite(completedMs)) return null;
+  const nextMs = completedMs + status.cycle_seconds * 1000;
+  const diffSec = Math.round((nextMs - nowMs) / 1000);
+  if (diffSec >= 0) {
+    return { label: `in ${fmtEloRelative(diffSec)}`, overdue: false };
+  }
+  return { label: `overdue ${fmtEloRelative(diffSec)}`, overdue: true };
+}
+
+function useNowTick(intervalMs: number = 1000): number {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const id = setInterval(() => setNow(Date.now()), intervalMs);
+    return () => clearInterval(id);
+  }, [intervalMs]);
+  return now;
+}
+
 export function EloUpdaterDisplay({
   status,
   onRunNow,
@@ -5264,6 +5306,8 @@ export function EloUpdaterDisplay({
       : stateLabel === "PENDING"
         ? "border-accent-warning/60 text-accent-warning"
         : "border-accent-cyan/40 text-accent-cyan";
+  const now = useNowTick(1000);
+  const nextRun = computeEloNextRun(status, now);
 
   return (
     <div className="space-y-3" data-testid="panel-elo-updater">
@@ -5282,7 +5326,7 @@ export function EloUpdaterDisplay({
         </span>
       </div>
 
-      <div className="grid grid-cols-2 gap-3 text-[11px] md:grid-cols-4">
+      <div className="grid grid-cols-2 gap-3 text-[11px] md:grid-cols-5">
         <div>
           <div className="text-muted-foreground uppercase tracking-wider">
             Cycle interval
@@ -5309,6 +5353,19 @@ export function EloUpdaterDisplay({
               took {last.duration_seconds.toFixed(2)}s
             </div>
           )}
+        </div>
+        <div>
+          <div className="text-muted-foreground uppercase tracking-wider">
+            Next run
+          </div>
+          <div
+            className={`font-mono text-sm ${
+              nextRun?.overdue ? "text-accent-warning" : "text-foreground"
+            }`}
+            data-testid="elo-updater-next-run"
+          >
+            {nextRun ? nextRun.label : "—"}
+          </div>
         </div>
         <div>
           <div className="text-muted-foreground uppercase tracking-wider">

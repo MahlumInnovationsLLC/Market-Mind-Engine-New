@@ -1,8 +1,15 @@
-import { describe, it, expect, afterEach, vi } from "vitest";
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { describe, it, expect, afterEach, beforeEach, vi } from "vitest";
+import {
+  act,
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+} from "@testing-library/react";
 
 import {
   EloUpdaterDisplay,
+  computeEloNextRun,
   type EloUpdaterStatus,
   type EloUpdaterCycle,
 } from "./admin";
@@ -195,5 +202,129 @@ describe("EloUpdaterDisplay", () => {
     );
     expect(screen.getByTestId("elo-updater-run-error").textContent).toBe("boom");
     expect(screen.queryByTestId("elo-updater-run-result")).toBeNull();
+  });
+});
+
+describe("computeEloNextRun", () => {
+  const status = (overrides: Partial<EloUpdaterStatus> = {}): EloUpdaterStatus => ({
+    running: true,
+    cycle_seconds: 300,
+    last_cycle: baseCycle,
+    ...overrides,
+  });
+
+  it("returns an in-future label when the next cycle has not yet elapsed", () => {
+    // baseCycle.completed_at = 2026-04-24T12:00:01Z, +300s -> 12:05:01Z
+    const now = Date.parse("2026-04-24T12:03:01Z"); // 2 minutes in
+    const r = computeEloNextRun(status(), now);
+    expect(r).not.toBeNull();
+    expect(r!.overdue).toBe(false);
+    expect(r!.label).toBe("in 2m");
+  });
+
+  it("returns an overdue label when the next cycle is past", () => {
+    // 30 seconds past the next-run target.
+    const now = Date.parse("2026-04-24T12:05:31Z");
+    const r = computeEloNextRun(status(), now);
+    expect(r).not.toBeNull();
+    expect(r!.overdue).toBe(true);
+    expect(r!.label).toBe("overdue 30s");
+  });
+
+  it("includes seconds when the gap is more than a minute but not whole minutes", () => {
+    // 65s remaining → "in 1m 5s"
+    const completedAt = Date.parse(baseCycle.completed_at!);
+    const now = completedAt + (300 - 65) * 1000;
+    const r = computeEloNextRun(status(), now);
+    expect(r!.label).toBe("in 1m 5s");
+  });
+
+  it("returns null when the scheduler is stopped", () => {
+    const now = Date.parse("2026-04-24T12:03:01Z");
+    expect(computeEloNextRun(status({ running: false }), now)).toBeNull();
+  });
+
+  it("returns null when there is no completed cycle yet", () => {
+    const now = Date.parse("2026-04-24T12:03:01Z");
+    expect(
+      computeEloNextRun(status({ last_cycle: null }), now),
+    ).toBeNull();
+  });
+
+  it("returns null when the cycle interval is non-positive", () => {
+    const now = Date.parse("2026-04-24T12:03:01Z");
+    expect(computeEloNextRun(status({ cycle_seconds: 0 }), now)).toBeNull();
+    expect(computeEloNextRun(status({ cycle_seconds: -10 }), now)).toBeNull();
+  });
+});
+
+describe("EloUpdaterDisplay next-run countdown", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    // Fix the wall clock to a known instant inside the cycle window.
+    vi.setSystemTime(new Date("2026-04-24T12:03:01Z"));
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("shows a live 'in Xm/Xs' countdown derived from completed_at + cycle_seconds", () => {
+    const status: EloUpdaterStatus = {
+      running: true,
+      cycle_seconds: 300,
+      last_cycle: baseCycle,
+    };
+    render(
+      <EloUpdaterDisplay status={status} onRunNow={vi.fn()} running={false} />,
+    );
+    expect(screen.getByTestId("elo-updater-next-run").textContent).toBe(
+      "in 2m",
+    );
+    // After ticking 1 second the countdown should advance without a refetch.
+    act(() => {
+      vi.advanceTimersByTime(1000);
+    });
+    expect(screen.getByTestId("elo-updater-next-run").textContent).toBe(
+      "in 1m 59s",
+    );
+  });
+
+  it("flips to 'overdue Xs' once the next-run target has elapsed", () => {
+    vi.setSystemTime(new Date("2026-04-24T12:05:31Z"));
+    const status: EloUpdaterStatus = {
+      running: true,
+      cycle_seconds: 300,
+      last_cycle: baseCycle,
+    };
+    render(
+      <EloUpdaterDisplay status={status} onRunNow={vi.fn()} running={false} />,
+    );
+    expect(screen.getByTestId("elo-updater-next-run").textContent).toBe(
+      "overdue 30s",
+    );
+  });
+
+  it("renders an em-dash for the next run when the scheduler is stopped", () => {
+    const status: EloUpdaterStatus = {
+      running: false,
+      cycle_seconds: 300,
+      last_cycle: baseCycle,
+    };
+    render(
+      <EloUpdaterDisplay status={status} onRunNow={vi.fn()} running={false} />,
+    );
+    expect(screen.getByTestId("elo-updater-next-run").textContent).toBe("—");
+  });
+
+  it("renders an em-dash for the next run when there is no completed cycle", () => {
+    const status: EloUpdaterStatus = {
+      running: true,
+      cycle_seconds: 300,
+      last_cycle: null,
+    };
+    render(
+      <EloUpdaterDisplay status={status} onRunNow={vi.fn()} running={false} />,
+    );
+    expect(screen.getByTestId("elo-updater-next-run").textContent).toBe("—");
   });
 });

@@ -7,7 +7,7 @@
  * forgets the empty-state copy, or stops disabling the manual-run
  * button while a cycle is in flight will turn one of these red.
  */
-import { fireEvent, render, screen } from "@testing-library/react-native";
+import { act, fireEvent, render, screen } from "@testing-library/react-native";
 import React from "react";
 
 jest.mock("@/lib/api", () => ({
@@ -32,6 +32,7 @@ jest.mock("@/lib/api", () => ({
 
 import {
   EloUpdaterDisplay,
+  computeEloNextRun,
   type EloUpdaterCycle,
   type EloUpdaterStatus,
 } from "../EloUpdater";
@@ -246,5 +247,113 @@ describe("EloUpdaterDisplay", () => {
       screen.getByTestId("elo-updater-run-error").props.children,
     ).toBe("boom");
     expect(screen.queryByTestId("elo-updater-run-result")).toBeNull();
+  });
+});
+
+describe("computeEloNextRun (mobile)", () => {
+  const status = (
+    overrides: Partial<EloUpdaterStatus> = {},
+  ): EloUpdaterStatus => ({
+    running: true,
+    cycle_seconds: 300,
+    last_cycle: baseCycle,
+    ...overrides,
+  });
+
+  it("returns 'in Xm' when the next cycle is still pending", () => {
+    const now = Date.parse("2026-04-24T12:03:01Z");
+    const r = computeEloNextRun(status(), now);
+    expect(r).not.toBeNull();
+    expect(r!.overdue).toBe(false);
+    expect(r!.label).toBe("in 2m");
+  });
+
+  it("returns 'overdue Xs' once the next cycle has elapsed", () => {
+    const now = Date.parse("2026-04-24T12:05:31Z");
+    const r = computeEloNextRun(status(), now);
+    expect(r!.overdue).toBe(true);
+    expect(r!.label).toBe("overdue 30s");
+  });
+
+  it("returns null when the scheduler is stopped or has no completed cycle", () => {
+    const now = Date.parse("2026-04-24T12:03:01Z");
+    expect(computeEloNextRun(status({ running: false }), now)).toBeNull();
+    expect(
+      computeEloNextRun(status({ last_cycle: null }), now),
+    ).toBeNull();
+    expect(computeEloNextRun(status({ cycle_seconds: 0 }), now)).toBeNull();
+  });
+});
+
+describe("EloUpdaterDisplay next-run countdown (mobile)", () => {
+  beforeEach(() => {
+    jest.useFakeTimers();
+    jest.setSystemTime(new Date("2026-04-24T12:03:01Z"));
+  });
+  afterEach(() => {
+    jest.useRealTimers();
+  });
+
+  it("shows a live next-run label derived from completed_at + cycle_seconds", () => {
+    const status: EloUpdaterStatus = {
+      running: true,
+      cycle_seconds: 300,
+      last_cycle: baseCycle,
+    };
+    render(
+      <EloUpdaterDisplay
+        status={status}
+        onRunNow={jest.fn()}
+        running={false}
+      />,
+    );
+    expect(screen.getByTestId("elo-updater-next-run").props.children).toBe(
+      "in 2m",
+    );
+    // Advance the in-component setInterval; the label should re-render
+    // without any data refetch.
+    act(() => {
+      jest.advanceTimersByTime(1000);
+    });
+    expect(screen.getByTestId("elo-updater-next-run").props.children).toBe(
+      "in 1m 59s",
+    );
+  });
+
+  it("renders an em-dash for the next run when the scheduler is stopped", () => {
+    const status: EloUpdaterStatus = {
+      running: false,
+      cycle_seconds: 300,
+      last_cycle: baseCycle,
+    };
+    render(
+      <EloUpdaterDisplay
+        status={status}
+        onRunNow={jest.fn()}
+        running={false}
+      />,
+    );
+    expect(screen.getByTestId("elo-updater-next-run").props.children).toBe(
+      "—",
+    );
+  });
+
+  it("flips to 'overdue Xs' once the next-run target is past", () => {
+    jest.setSystemTime(new Date("2026-04-24T12:05:31Z"));
+    const status: EloUpdaterStatus = {
+      running: true,
+      cycle_seconds: 300,
+      last_cycle: baseCycle,
+    };
+    render(
+      <EloUpdaterDisplay
+        status={status}
+        onRunNow={jest.fn()}
+        running={false}
+      />,
+    );
+    expect(screen.getByTestId("elo-updater-next-run").props.children).toBe(
+      "overdue 30s",
+    );
   });
 });

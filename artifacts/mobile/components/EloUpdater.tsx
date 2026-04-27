@@ -65,6 +65,48 @@ function fmtCount(n: number | null | undefined): string {
   return n.toLocaleString();
 }
 
+function fmtRelative(seconds: number): string {
+  const s = Math.floor(Math.abs(seconds));
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  if (m < 60) {
+    const rem = s % 60;
+    return rem > 0 ? `${m}m ${rem}s` : `${m}m`;
+  }
+  const h = Math.floor(m / 60);
+  const remM = m % 60;
+  return remM > 0 ? `${h}h ${remM}m` : `${h}h`;
+}
+
+export function computeEloNextRun(
+  status: EloUpdaterStatus,
+  nowMs: number,
+): { label: string; overdue: boolean } | null {
+  if (!status.running) return null;
+  if (!Number.isFinite(status.cycle_seconds) || status.cycle_seconds <= 0) {
+    return null;
+  }
+  const last = status.last_cycle;
+  if (!last || !last.completed_at) return null;
+  const completedMs = Date.parse(last.completed_at);
+  if (!Number.isFinite(completedMs)) return null;
+  const nextMs = completedMs + status.cycle_seconds * 1000;
+  const diffSec = Math.round((nextMs - nowMs) / 1000);
+  if (diffSec >= 0) {
+    return { label: `in ${fmtRelative(diffSec)}`, overdue: false };
+  }
+  return { label: `overdue ${fmtRelative(diffSec)}`, overdue: true };
+}
+
+function useNowTick(intervalMs: number = 1000): number {
+  const [now, setNow] = React.useState(() => Date.now());
+  React.useEffect(() => {
+    const id = setInterval(() => setNow(Date.now()), intervalMs);
+    return () => clearInterval(id);
+  }, [intervalMs]);
+  return now;
+}
+
 export function EloUpdaterDisplay({
   status,
   onRunNow,
@@ -94,6 +136,8 @@ export function EloUpdaterDisplay({
       : stateLabel === "PENDING"
         ? colors.warning
         : colors.primary;
+  const now = useNowTick(1000);
+  const nextRun = computeEloNextRun(status, now);
 
   const styles = StyleSheet.create({
     card: { gap: 12 },
@@ -136,6 +180,7 @@ export function EloUpdaterDisplay({
       marginTop: 2,
     },
     valueAccent: { color: colors.primary },
+    valueWarning: { color: colors.warning },
     hint: {
       color: colors.mutedForeground,
       fontSize: 10,
@@ -240,6 +285,18 @@ export function EloUpdaterDisplay({
               took {last.duration_seconds.toFixed(2)}s
             </Text>
           ) : null}
+        </View>
+        <View style={styles.cell}>
+          <Text style={styles.label}>Next run</Text>
+          <Text
+            style={[
+              styles.value,
+              nextRun?.overdue ? styles.valueWarning : null,
+            ]}
+            testID="elo-updater-next-run"
+          >
+            {nextRun ? nextRun.label : "—"}
+          </Text>
         </View>
         <View style={styles.cell}>
           <Text style={styles.label}>Games examined</Text>
