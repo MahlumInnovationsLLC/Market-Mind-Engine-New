@@ -17,24 +17,19 @@ const { state, capturedChart } = vi.hoisted(() => ({
   capturedChart: { data: null as unknown },
 }));
 
-vi.mock("@clerk/react", () => ({
-  useAuth: () => ({
-    getToken: async () => "test-token",
-    isSignedIn: true,
-  }),
-}));
-
-vi.mock("@tanstack/react-query", () => ({
-  useQuery: ({ queryKey }: { queryKey: unknown[] }) => {
-    const action = queryKey[3];
-    if (action === "autoresearch_promote") return state.promote;
-    if (action === "autoresearch_reject") return state.reject;
+vi.mock("@workspace/api-client-react", () => ({
+  // The component uses the query-key helper to scope each fetch by
+  // action; the test only needs a stable key per action so the mock
+  // hook below can route to the right fixture.
+  getAdminGetAuditLogQueryKey: (params?: { action?: string; limit?: number }) => [
+    "/api/admin/audit-log",
+    params ?? {},
+  ],
+  useAdminGetAuditLog: (params?: { action?: string }) => {
+    if (params?.action === "autoresearch_promote") return state.promote;
+    if (params?.action === "autoresearch_reject") return state.reject;
     return { data: undefined, isLoading: false, isError: false };
   },
-}));
-
-vi.mock("@/lib/api", () => ({
-  apiFetch: vi.fn(),
 }));
 
 // Stub out the heavy SVG chart so the test can read the bucketed data

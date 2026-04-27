@@ -1,6 +1,4 @@
 import { useEffect, useMemo, useState } from "react";
-import { useQuery } from "@tanstack/react-query";
-import { useAuth } from "@clerk/react";
 import {
   Bar,
   BarChart,
@@ -10,8 +8,11 @@ import {
   XAxis,
   YAxis,
 } from "recharts";
-import type { AdminAuditLogEntry } from "@workspace/api-client-react";
-import { apiFetch } from "@/lib/api";
+import {
+  type AdminAuditLogEntry,
+  getAdminGetAuditLogQueryKey,
+  useAdminGetAuditLog,
+} from "@workspace/api-client-react";
 
 const PROMOTE_ACTION = "autoresearch_promote";
 const REJECT_ACTION = "autoresearch_reject";
@@ -51,10 +52,6 @@ function loadStoredWindow(): WindowDays {
     return DEFAULT_WINDOW;
   }
 }
-
-type AuditPage = {
-  items: AdminAuditLogEntry[];
-};
 
 function dayKey(d: Date): string {
   const y = d.getFullYear();
@@ -96,12 +93,6 @@ function bucketByDay(
  * day-over-day (task #419, window toggle from task #568).
  */
 export default function AutoResearchThroughputChart() {
-  const { getToken, isSignedIn } = useAuth();
-  const tokenFn = useMemo(
-    () => () => getToken().then((t) => t ?? null),
-    [getToken],
-  );
-
   // Window toggle, hydrated synchronously from localStorage so a
   // refresh keeps the operator's choice without a flash of the
   // default.  Persisted on change.
@@ -120,25 +111,22 @@ export default function AutoResearchThroughputChart() {
 
   const fetchLimit = fetchLimitForWindow(windowDays);
 
-  const promoteQuery = useQuery<AuditPage>({
-    queryKey: ["admin", "audit-log", "autoresearch", PROMOTE_ACTION, fetchLimit],
-    queryFn: () =>
-      apiFetch<AuditPage>(
-        `/api/admin/audit-log?action=${PROMOTE_ACTION}&limit=${fetchLimit}`,
-        { getToken: tokenFn },
-      ),
-    enabled: !!isSignedIn,
-    refetchInterval: 60_000,
+  // Use the generated audit-log hook (same one as the admin pages)
+  // so the throughput chart stays in lockstep with the API contract
+  // at the type level instead of relying on a hand-written fetch.
+  const promoteParams = { action: PROMOTE_ACTION, limit: fetchLimit };
+  const rejectParams = { action: REJECT_ACTION, limit: fetchLimit };
+  const promoteQuery = useAdminGetAuditLog(promoteParams, {
+    query: {
+      queryKey: getAdminGetAuditLogQueryKey(promoteParams),
+      refetchInterval: 60_000,
+    },
   });
-  const rejectQuery = useQuery<AuditPage>({
-    queryKey: ["admin", "audit-log", "autoresearch", REJECT_ACTION, fetchLimit],
-    queryFn: () =>
-      apiFetch<AuditPage>(
-        `/api/admin/audit-log?action=${REJECT_ACTION}&limit=${fetchLimit}`,
-        { getToken: tokenFn },
-      ),
-    enabled: !!isSignedIn,
-    refetchInterval: 60_000,
+  const rejectQuery = useAdminGetAuditLog(rejectParams, {
+    query: {
+      queryKey: getAdminGetAuditLogQueryKey(rejectParams),
+      refetchInterval: 60_000,
+    },
   });
 
   const isLoading = promoteQuery.isLoading || rejectQuery.isLoading;
