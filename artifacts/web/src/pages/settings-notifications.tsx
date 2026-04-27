@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { Link, Redirect } from "wouter";
 import { useAuth } from "@clerk/react";
 import { apiFetch, ApiError, formatErrorMessage } from "@/lib/api";
+import { isInQuietHours, offsetForZone } from "@/lib/timezones";
 
 export default function SettingsNotificationsPage() {
   // /settings/notifications now lives inside the unified /system page
@@ -31,10 +32,32 @@ interface PrefsView {
     // timestamp passes — the UI uses it to keep the Resend button
     // disabled across page refreshes.
     sms_phone_verification_next_resend_allowed_at: string | null;
+    // Quiet-hours window — managed on the Profile page but mirrored
+    // here so the recent-alerts feed can annotate rows that landed
+    // inside the user's saved DND window (task #629).
+    quiet_hours_start_hour?: number | null;
+    quiet_hours_end_hour?: number | null;
+    quiet_hours_tz?: string | null;
   };
   tier: string;
   elite_unlocked: boolean;
   elite_only_toggles: string[];
+}
+
+interface QuietHoursView {
+  start_hour: number | null;
+  end_hour: number | null;
+  zone: string | null;
+}
+
+/**
+ * "(Europe/London, GMT+1)"-style suffix for the quiet-hours
+ * annotation under muted history rows. Mirrors the mobile feed's
+ * `quietZoneSuffix` helper (task #629).
+ */
+function quietZoneSuffix(zone: string): string {
+  const off = offsetForZone(zone);
+  return off ? `${zone} (${off})` : zone;
 }
 
 type ToggleKey = keyof PrefsView["prefs"] & string;
@@ -677,6 +700,11 @@ export function NotificationPrefsPanel() {
               loading={historyLoading}
               error={historyError}
               onReload={loadHistory}
+              quiet={{
+                start_hour: data.prefs.quiet_hours_start_hour ?? null,
+                end_hour: data.prefs.quiet_hours_end_hour ?? null,
+                zone: data.prefs.quiet_hours_tz ?? null,
+              }}
             />
           </>
         )}
@@ -685,16 +713,18 @@ export function NotificationPrefsPanel() {
   );
 }
 
-function RecentAlertsPanel({
+export function RecentAlertsPanel({
   items,
   loading,
   error,
   onReload,
+  quiet,
 }: {
   items: HistoryItem[] | null;
   loading: boolean;
   error: string | null;
   onReload: () => void | Promise<void>;
+  quiet: QuietHoursView;
 }) {
   return (
     <section
@@ -751,55 +781,80 @@ function RecentAlertsPanel({
 
       {!error && !loading && items && items.length > 0 && (
         <ul className="divide-y divide-border" data-testid="list-history">
-          {items.map((item, idx) => (
-            <li
-              key={`${item.dedupe_key}-${idx}`}
-              className="py-3 flex items-start justify-between gap-3"
-              data-testid={`history-row-${idx}`}
-            >
-              <div className="min-w-0 flex-1">
-                <div className="text-sm text-foreground font-medium">
-                  {item.label}
+          {items.map((item, idx) => {
+            // Annotate rows that landed inside the user's saved
+            // quiet-hours window so it's obvious why a push was
+            // silent — mirrors the mobile feed (task #629).
+            const sentAt = item.sent_at ? new Date(item.sent_at) : null;
+            const quietHit =
+              sentAt &&
+              !Number.isNaN(sentAt.getTime()) &&
+              quiet.zone
+                ? isInQuietHours(
+                    quiet.start_hour,
+                    quiet.end_hour,
+                    quiet.zone,
+                    sentAt,
+                  )
+                : false;
+            return (
+              <li
+                key={`${item.dedupe_key}-${idx}`}
+                className="py-3 flex items-start justify-between gap-3"
+                data-testid={`history-row-${idx}`}
+              >
+                <div className="min-w-0 flex-1">
+                  <div className="text-sm text-foreground font-medium">
+                    {item.label}
+                  </div>
+                  <div className="text-[11px] text-muted-foreground">
+                    {item.sent_at
+                      ? new Date(item.sent_at).toLocaleString()
+                      : "(no timestamp)"}
+                  </div>
+                  {quietHit && (
+                    <div
+                      className="text-[11px] italic text-muted-foreground mt-1"
+                      data-testid={`history-quiet-${idx}`}
+                    >
+                      Muted by quiet hours · {quietZoneSuffix(quiet.zone!)}
+                    </div>
+                  )}
                 </div>
-                <div className="text-[11px] text-muted-foreground">
-                  {item.sent_at
-                    ? new Date(item.sent_at).toLocaleString()
-                    : "(no timestamp)"}
-                </div>
-              </div>
-              <div className="flex flex-wrap items-center gap-1 justify-end">
-                {item.channels.map((c) => (
+                <div className="flex flex-wrap items-center gap-1 justify-end">
+                  {item.channels.map((c) => (
+                    <span
+                      key={c.kind}
+                      className={`text-[10px] uppercase tracking-widest border px-2 py-0.5 ${
+                        c.opted_in
+                          ? "border-primary text-primary"
+                          : "border-border text-muted-foreground line-through"
+                      }`}
+                      data-testid={`history-channel-${idx}-${c.kind}`}
+                      title={
+                        c.opted_in
+                          ? `Sent via ${c.kind}`
+                          : `${c.kind} channel — you weren't opted in`
+                      }
+                    >
+                      {c.kind}
+                    </span>
+                  ))}
                   <span
-                    key={c.kind}
                     className={`text-[10px] uppercase tracking-widest border px-2 py-0.5 ${
-                      c.opted_in
+                      item.attempted
                         ? "border-primary text-primary"
-                        : "border-border text-muted-foreground line-through"
+                        : "border-destructive text-destructive"
                     }`}
-                    data-testid={`history-channel-${idx}-${c.kind}`}
-                    title={
-                      c.opted_in
-                        ? `Sent via ${c.kind}`
-                        : `${c.kind} channel — you weren't opted in`
-                    }
+                    data-testid={`history-status-${idx}`}
+                    title="The dispatch was attempted. Per-channel delivery status isn't tracked yet."
                   >
-                    {c.kind}
+                    {item.attempted ? "Attempted" : "Skipped"}
                   </span>
-                ))}
-                <span
-                  className={`text-[10px] uppercase tracking-widest border px-2 py-0.5 ${
-                    item.attempted
-                      ? "border-primary text-primary"
-                      : "border-destructive text-destructive"
-                  }`}
-                  data-testid={`history-status-${idx}`}
-                  title="The dispatch was attempted. Per-channel delivery status isn't tracked yet."
-                >
-                  {item.attempted ? "Attempted" : "Skipped"}
-                </span>
-              </div>
-            </li>
-          ))}
+                </div>
+              </li>
+            );
+          })}
         </ul>
       )}
     </section>

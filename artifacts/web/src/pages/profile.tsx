@@ -14,6 +14,7 @@ import {
 } from "@workspace/api-client-react";
 import { GlassCard } from "@/components/ui/glass-card";
 import { SectionHeader } from "@/components/ui/section-header";
+import { offsetForZone } from "@/lib/timezones";
 
 const TIER_COPY: Record<string, string> = {
   [UserSubscriptionTier.free]: "Read-only dashboard at delay.",
@@ -48,6 +49,18 @@ function formatHour(h: number): string {
   const suffix = hh < 12 ? "AM" : "PM";
   const display = hh === 0 ? 12 : hh > 12 ? hh - 12 : hh;
   return `${display} ${suffix}`;
+}
+
+/**
+ * Build the trailing "(Europe/London, GMT+1)" suffix shown in the
+ * Quiet Hours hint so users picking a non-device zone get a quick
+ * visual confirmation of the saved zone's *current* offset (task
+ * #629). Falls back to "(zone)" if the offset can't be resolved.
+ * Mirrors the mobile `quietHintZoneSuffix` helper.
+ */
+function quietHintZoneSuffix(zone: string): string {
+  const off = offsetForZone(zone);
+  return off ? `(${zone}, ${off})` : `(${zone})`;
 }
 
 export default function ProfilePage() {
@@ -588,7 +601,7 @@ export default function ProfilePage() {
           title="Quiet hours"
           subtitle={
             quietEnabled
-              ? `Push alerts muted ${formatHour(quietStart!)} – ${formatHour(quietEnd!)} (${quietTz}). Email alerts are unaffected.`
+              ? `Push alerts muted ${formatHour(quietStart!)} – ${formatHour(quietEnd!)} ${quietHintZoneSuffix(quietTz!)}. Email alerts are unaffected.`
               : "Mute live-trade and halt pushes during a daily window. Email alerts are unaffected."
           }
         />
