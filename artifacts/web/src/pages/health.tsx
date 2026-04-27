@@ -1384,6 +1384,33 @@ export function CardTile({ card }: { card: Card }) {
     metadata && typeof metadata.season_previous_id === "string"
       ? metadata.season_previous_id
       : null;
+  // Bounded ring buffer of recent rotation/stuck attempts (task #648)
+  // — surfaced as a collapsible block so an operator can scroll back
+  // through past rotations without leaving the health card.  Each
+  // entry has the shape `{at, from_id, to_id, outcome}`.  We narrow
+  // the unknown payload defensively so a malformed entry can't crash
+  // the React render.
+  type SeasonHistoryEntry = {
+    at: string | null;
+    from_id: string | null;
+    to_id: string | null;
+    outcome: string;
+  };
+  const seasonHistory: SeasonHistoryEntry[] =
+    metadata && Array.isArray(metadata.season_history)
+      ? (metadata.season_history as unknown[]).flatMap((raw) => {
+          if (!raw || typeof raw !== "object") return [];
+          const e = raw as Record<string, unknown>;
+          const outcome = typeof e.outcome === "string" ? e.outcome : null;
+          if (!outcome) return [];
+          return [{
+            at: typeof e.at === "string" ? e.at : null,
+            from_id: typeof e.from_id === "string" ? e.from_id : null,
+            to_id: typeof e.to_id === "string" ? e.to_id : null,
+            outcome,
+          }];
+        })
+      : [];
   const cadenceSeconds =
     isFeed && typeof extras.cadence_seconds === "number"
       ? (extras.cadence_seconds as number)
@@ -1630,6 +1657,55 @@ export function CardTile({ card }: { card: Card }) {
                   : ""}
               </span>
             </div>
+          )}
+          {seasonHistory.length > 0 && (
+            <details
+              className="pt-1"
+              data-testid={`feed-season-history-${card.key}`}
+            >
+              <summary
+                className="cursor-pointer select-none text-muted-foreground/80 hover:text-foreground"
+                data-testid={`feed-season-history-toggle-${card.key}`}
+              >
+                history ({seasonHistory.length})
+              </summary>
+              <ol
+                className="mt-1 space-y-0.5 normal-case tracking-normal text-foreground"
+                data-testid={`feed-season-history-list-${card.key}`}
+              >
+                {/* Newest first so an operator scanning the panel
+                    sees the most recent rotation/stuck attempt at
+                    the top instead of having to scroll past months
+                    of history.  We slice to a copy before reversing
+                    so we don't mutate the snapshot held in state. */}
+                {[...seasonHistory].reverse().map((entry, idx) => (
+                  <li
+                    key={`${entry.at ?? "?"}-${idx}`}
+                    className="flex flex-wrap gap-x-2 gap-y-0 text-[10px]"
+                    data-testid={`feed-season-history-entry-${card.key}-${idx}`}
+                    data-outcome={entry.outcome}
+                  >
+                    <span className="text-muted-foreground">
+                      {entry.at ?? "—"}
+                    </span>
+                    <span className="break-all">
+                      {entry.from_id ?? "—"} → {entry.to_id ?? "—"}
+                    </span>
+                    <span
+                      className={
+                        entry.outcome === "rotated"
+                          ? "text-success uppercase tracking-widest"
+                          : entry.outcome === "rotated_but_404"
+                            ? "text-warning uppercase tracking-widest"
+                            : "text-destructive uppercase tracking-widest"
+                      }
+                    >
+                      {entry.outcome}
+                    </span>
+                  </li>
+                ))}
+              </ol>
+            </details>
           )}
         </div>
       )}

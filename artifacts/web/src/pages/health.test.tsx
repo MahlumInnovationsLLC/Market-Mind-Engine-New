@@ -714,6 +714,131 @@ describe("Soccer season metadata (rendered via CardTile)", () => {
     ).toBeNull();
   });
 
+  it("renders the season-history details block (newest first) when the metadata carries a ring buffer", () => {
+    // Simulate two prior rotation/stuck attempts so the operator can
+    // scan back through them on the health card.  The component must
+    // render them newest-first so the most recent event is at the top
+    // (instead of the operator having to scroll past months of older
+    // entries).
+    render(
+      <CardTile
+        card={{
+          ...baseSoccerFeedCard,
+          status: "ok",
+          detail: "wrote 12 row(s)",
+          extras: {
+            cadence_seconds: 900,
+            metadata: {
+              season_id: "sr:season:NEW",
+              season_previous_id: "sr:season:OLD",
+              season_id_resolved_at: "2026-04-26T00:00:00+00:00",
+              season_stuck: false,
+              season_last_refresh_at: "2026-04-26T00:00:00+00:00",
+              season_last_refresh_outcome: "rotated",
+              season_history: [
+                {
+                  at: "2026-04-20T00:00:00+00:00",
+                  from_id: "sr:season:STALE",
+                  to_id: "sr:season:STALE",
+                  outcome: "same_id",
+                },
+                {
+                  at: "2026-04-26T00:00:00+00:00",
+                  from_id: "sr:season:OLD",
+                  to_id: "sr:season:NEW",
+                  outcome: "rotated",
+                },
+              ],
+            },
+          },
+        }}
+      />,
+    );
+    const wrap = screen.getByTestId(
+      "feed-season-history-feed:sportradar_epl_injuries",
+    );
+    expect(wrap).toBeTruthy();
+    // Toggle reflects the entry count so an operator can tell at a
+    // glance whether the buffer holds anything useful.
+    expect(
+      screen.getByTestId(
+        "feed-season-history-toggle-feed:sportradar_epl_injuries",
+      ).textContent,
+    ).toMatch(/history \(2\)/i);
+    const entries = screen.getAllByTestId(
+      /^feed-season-history-entry-feed:sportradar_epl_injuries-\d+$/,
+    );
+    expect(entries).toHaveLength(2);
+    // Newest first ⇒ the rotated entry is at index 0, the older
+    // same_id entry at index 1.
+    expect(entries[0].getAttribute("data-outcome")).toBe("rotated");
+    expect(entries[0].textContent).toMatch(/sr:season:OLD/);
+    expect(entries[0].textContent).toMatch(/sr:season:NEW/);
+    expect(entries[1].getAttribute("data-outcome")).toBe("same_id");
+  });
+
+  it("does not render the history block when the metadata has no entries", () => {
+    render(
+      <CardTile
+        card={{
+          ...baseSoccerFeedCard,
+          status: "ok",
+          detail: "wrote 0 row(s)",
+          extras: {
+            cadence_seconds: 900,
+            metadata: {
+              season_id: "sr:season:CLEAN",
+              season_id_resolved_at: "2026-04-25T12:00:00+00:00",
+              season_stuck: false,
+              season_history: [],
+            },
+          },
+        }}
+      />,
+    );
+    expect(
+      screen.queryByTestId(
+        "feed-season-history-feed:sportradar_epl_injuries",
+      ),
+    ).toBeNull();
+  });
+
+  it("ignores malformed history entries (missing outcome) without crashing", () => {
+    // Defensive narrowing: an upgrade hiccup that drops the `outcome`
+    // field on one entry must not blow up the whole card render.
+    render(
+      <CardTile
+        card={{
+          ...baseSoccerFeedCard,
+          status: "ok",
+          detail: "wrote 0 row(s)",
+          extras: {
+            cadence_seconds: 900,
+            metadata: {
+              season_id: "sr:season:CLEAN",
+              season_id_resolved_at: "2026-04-25T12:00:00+00:00",
+              season_stuck: false,
+              season_history: [
+                { at: "2026-04-26T00:00:00+00:00" }, // dropped (no outcome)
+                {
+                  at: "2026-04-26T01:00:00+00:00",
+                  from_id: "sr:season:A",
+                  to_id: "sr:season:B",
+                  outcome: "rotated",
+                },
+              ],
+            },
+          },
+        }}
+      />,
+    );
+    const entries = screen.getAllByTestId(
+      /^feed-season-history-entry-feed:sportradar_epl_injuries-\d+$/,
+    );
+    expect(entries).toHaveLength(1);
+    expect(entries[0].getAttribute("data-outcome")).toBe("rotated");
+  });
+
   it("renders no season block on non-feed cards even if extras carry a metadata field", () => {
     render(
       <CardTile

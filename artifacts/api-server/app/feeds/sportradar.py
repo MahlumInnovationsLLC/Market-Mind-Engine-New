@@ -176,6 +176,53 @@ _SOCCER_SEASON_CACHE: dict[str, str] = {}
 # see when a competition rolled into a new season.
 _SOCCER_SEASON_RESOLVED_AT: dict[str, str] = {}
 
+# Bounded ring-buffer length for the per-feed season-rotation history
+# (task #648).  Each 404-triggered refresh attempt appends an entry of
+# the form ``{at, from_id, to_id, outcome}`` so operators can scroll
+# back through "last N rotations / stuck attempts" on the health card
+# instead of only seeing the *current* state.  20 covers a few months
+# of rotations even on the chattiest competitions while keeping the
+# per-feed metadata payload small enough to ship with every health
+# snapshot.
+_SEASON_HISTORY_MAX = 20
+
+
+def _append_season_history(
+    feed_name: str | None,
+    *,
+    from_id: str | None,
+    to_id: str | None,
+    outcome: str,
+) -> None:
+    """Append a rotation/stuck entry to the feed's `season_history`
+    metadata list, capped at :data:`_SEASON_HISTORY_MAX` entries.
+
+    No-op when ``feed_name`` is ``None`` (some callers pass it as
+    optional) or when the feed isn't registered yet.  Stored as a plain
+    list of dicts so it round-trips through ``FeedStatus.to_dict`` and
+    the health snapshot without any extra serialisation glue.
+    """
+    if not feed_name:
+        return
+    st = registry.status_of(feed_name)
+    if st is None:
+        return
+    history = st.metadata.get("season_history")
+    if not isinstance(history, list):
+        history = []
+    entry: dict[str, Any] = {
+        "at": _utc_iso(),
+        "from_id": from_id,
+        "to_id": to_id,
+        "outcome": outcome,
+    }
+    # Take the last (N-1) entries + the new one so the buffer is hard
+    # capped.  Slice copy on every append keeps the semantics simple
+    # at the cost of one O(N) op per rotation — N is 20, rotations
+    # are rare, so this is fine.
+    new_history = (history + [entry])[-_SEASON_HISTORY_MAX:]
+    registry.set_metadata(feed_name, season_history=new_history)
+
 
 _INJURY_PATHS: dict[str, str] = {
     "nba":   "https://api.sportradar.us/nba/trial/v8/en/league/injuries.json",
@@ -461,6 +508,12 @@ async def _fetch_soccer_seasoned(
                 season_last_refresh_at=_utc_iso(),
                 season_last_refresh_outcome="no_id_available",
             )
+            _append_season_history(
+                feed_name,
+                from_id=None,
+                to_id=None,
+                outcome="no_id_available",
+            )
         return None
     # Always advertise the currently-cached season id so the operator
     # console can show *which* season the feed is pinned to.  Reset
@@ -502,6 +555,9 @@ async def _fetch_soccer_seasoned(
         # 404 on.  Flag the feed as stuck so the operator console
         # surfaces a "season id stuck" warning instead of letting the
         # poll look like a green zero-row success.
+        outcome_label = (
+            "same_id" if new_season_id == season_id else "no_new_id"
+        )
         if feed_name:
             registry.set_metadata(
                 feed_name,
@@ -510,9 +566,18 @@ async def _fetch_soccer_seasoned(
                 tournament_id=tid,
                 season_stuck=True,
                 season_last_refresh_at=refresh_at,
-                season_last_refresh_outcome=(
-                    "same_id" if new_season_id == season_id else "no_new_id"
-                ),
+                season_last_refresh_outcome=outcome_label,
+            )
+            # For "no_new_id" the refresh returned nothing usable, so
+            # record `to_id=None` to reflect "tournament_info had no
+            # answer".  For "same_id" we faithfully record the same id
+            # on both sides so a forensic read shows the exact pair
+            # the poller was holding.
+            _append_season_history(
+                feed_name,
+                from_id=season_id,
+                to_id=season_id if outcome_label == "same_id" else None,
+                outcome=outcome_label,
             )
         # Restore the cached id so we don't thrash tournament_info on
         # every subsequent poll: we'll keep retrying the seasoned
@@ -545,6 +610,12 @@ async def _fetch_soccer_seasoned(
             season_stuck=(refresh_payload is None),
             season_last_refresh_at=refresh_at,
             season_last_refresh_outcome=refresh_outcome,
+        )
+        _append_season_history(
+            feed_name,
+            from_id=season_id,
+            to_id=new_season_id,
+            outcome=refresh_outcome,
         )
     return refresh_payload
 

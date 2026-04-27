@@ -1011,6 +1011,103 @@ def test_soccer_poll_metadata_flags_stuck_when_refresh_yields_no_new_id(monkeypa
     assert inj.metadata.get("season_id") == "sr:season:STUCK"
 
 
+def test_soccer_season_history_is_bounded(monkeypatch):
+    """The per-feed `season_history` ring buffer must hard-cap at
+    :data:`sportradar._SEASON_HISTORY_MAX` entries so a feed that's
+    been hammering the rotation path for weeks doesn't grow the
+    metadata payload without bound (it ships with every health
+    snapshot)."""
+    import asyncio
+
+    monkeypatch.setenv("SPORTRADAR_API_KEY", "k")
+    reg = _isolated_registry()
+    monkeypatch.setattr(sportradar, "registry", reg)
+    sportradar.register_sportradar_extra_feeds()
+
+    # Force every poll into the "same_id" branch — the cached id 404s
+    # on the seasoned endpoint, the refresh re-resolves to the same id,
+    # so each poll appends exactly one history entry.
+    async def fake_get(name, url, key, *, distinguish_404=False, **_kw):
+        if "/tournaments/" in url and "/info.json" in url:
+            return _soccer_tournament_info_fixture(season_id="sr:season:STUCK")
+        if "/missing_players.json" in url:
+            return sportradar._NOT_FOUND if distinguish_404 else None
+        return None
+
+    monkeypatch.setattr(sportradar, "_get_json", fake_get)
+    monkeypatch.setattr(sportradar, "db", _CapturingDB())
+
+    n_polls = sportradar._SEASON_HISTORY_MAX + 5
+    for _ in range(n_polls):
+        asyncio.run(sportradar._poll_injuries("epl"))
+
+    inj = reg.status_of("sportradar_epl_injuries")
+    assert inj is not None
+    history = inj.metadata.get("season_history")
+    assert isinstance(history, list)
+    # Hard cap respected — older entries fall off, newest stay.
+    assert len(history) == sportradar._SEASON_HISTORY_MAX, (
+        f"history grew unbounded: {len(history)} entries after {n_polls} polls"
+    )
+    # Every entry must have the documented shape so the React UI's
+    # narrowing doesn't silently drop legitimate rows.
+    for entry in history:
+        assert set(entry.keys()) == {"at", "from_id", "to_id", "outcome"}
+        assert entry["outcome"] == "same_id"
+        assert entry["from_id"] == "sr:season:STUCK"
+        assert entry["to_id"] == "sr:season:STUCK"
+        assert isinstance(entry["at"], str) and entry["at"]
+
+
+def test_soccer_season_history_records_rotation_outcome(monkeypatch):
+    """A successful 404→re-resolve→new id rotation must append exactly
+    one ``rotated`` history entry capturing the from/to ids so the
+    operator console can show "X rolled into Y at <ts>" without diff'ing
+    successive snapshots."""
+    import asyncio
+
+    monkeypatch.setenv("SPORTRADAR_API_KEY", "k")
+    reg = _isolated_registry()
+    monkeypatch.setattr(sportradar, "registry", reg)
+    sportradar.register_sportradar_extra_feeds()
+
+    season_state = {"current": "sr:season:OLD"}
+
+    async def fake_get(name, url, key, *, distinguish_404=False, **_kw):
+        if "/tournaments/" in url and "/info.json" in url:
+            return _soccer_tournament_info_fixture(
+                season_id=season_state["current"]
+            )
+        if "/missing_players.json" in url:
+            if f"/seasons/{season_state['current']}/" in url:
+                return _soccer_missing_players_fixture()
+            return sportradar._NOT_FOUND if distinguish_404 else None
+        return None
+
+    monkeypatch.setattr(sportradar, "_get_json", fake_get)
+    monkeypatch.setattr(sportradar, "db", _CapturingDB())
+
+    # First poll caches OLD without triggering a refresh — no history
+    # entry is appended because nothing has actually rotated.
+    asyncio.run(sportradar._poll_injuries("epl"))
+    inj = reg.status_of("sportradar_epl_injuries")
+    assert inj is not None
+    assert inj.metadata.get("season_history", []) == []
+
+    # Sportradar rolls over.  The cached OLD now 404s; the refresh
+    # picks up NEW and the seasoned endpoint succeeds.
+    season_state["current"] = "sr:season:NEW"
+    asyncio.run(sportradar._poll_injuries("epl"))
+
+    history = inj.metadata.get("season_history")
+    assert isinstance(history, list) and len(history) == 1
+    rotation = history[0]
+    assert rotation["outcome"] == "rotated"
+    assert rotation["from_id"] == "sr:season:OLD"
+    assert rotation["to_id"] == "sr:season:NEW"
+    assert rotation["at"]
+
+
 def test_health_probe_renders_stuck_season_as_degraded(monkeypatch):
     """`_probe_feeds()` must promote a soccer feed whose metadata says
     `season_stuck=True` to status=degraded with a clear "season id
