@@ -1261,6 +1261,131 @@ def test_normalize_pga_tournament_schedule_emits_one_row_per_event():
     assert all(r["away"]["name"] == "FIELD" for r in rows)
 
 
+def test_poll_tournament_leaderboards_records_per_cycle_metadata(monkeypatch):
+    """Task #624: each cycle stashes the live-events count, the most
+    recent refresh count, and the timestamp on feed metadata so the
+    operator console can render them next to the other Sportradar
+    entries.  When the refresher writes 0 rows while events are live,
+    `zero_rows_since` is set so the console can fire a stale badge
+    after >10 minutes.  A non-zero refresh clears the streak.
+    """
+    monkeypatch.setenv("SPORTRADAR_PGA_KEY", "pga-test-key")
+    monkeypatch.delenv("SPORTRADAR_F1_KEY", raising=False)
+    monkeypatch.delenv("SPORTRADAR_API_KEY", raising=False)
+
+    reg = _isolated_registry()
+    monkeypatch.setattr(sportradar, "registry", reg)
+    sportradar.register_sportradar_extra_feeds()
+
+    async def _live_ids(sport: str) -> list[str]:
+        return ["sr:tournament:masters-2026"] if sport == "PGA" else []
+
+    refresh_returns = iter([0, 7])
+
+    async def _refresh_pga(api_key, tid):  # noqa: ANN001
+        return next(refresh_returns)
+
+    monkeypatch.setattr(sportradar, "_live_leaderboard_event_ids", _live_ids)
+    monkeypatch.setattr(sportradar, "_refresh_pga_leaderboard", _refresh_pga)
+
+    import asyncio as _asyncio
+    # First cycle: 0 rows refreshed but a live event ⇒ streak starts.
+    written = _asyncio.run(sportradar._poll_tournament_leaderboards())
+    assert written == 0
+    st = reg.status_of(sportradar.TOURNAMENT_LEADERBOARDS_FEED_NAME)
+    assert st is not None
+    meta = st.metadata
+    assert meta.get("events_live") == 1
+    assert meta.get("last_refresh_count") == 0
+    assert meta.get("zero_rows_since")
+    streak_started = meta["zero_rows_since"]
+    assert isinstance(streak_started, str)
+    assert isinstance(meta.get("per_event"), list) and len(meta["per_event"]) == 1
+    assert meta["per_event"][0]["sport"] == "PGA"
+    assert meta["per_event"][0]["entrants"] == 0
+
+    # Second cycle: same event, 7 entrants refreshed ⇒ streak cleared,
+    # last_refresh_count updated.
+    written = _asyncio.run(sportradar._poll_tournament_leaderboards())
+    assert written == 7
+    meta = st.metadata
+    assert meta.get("last_refresh_count") == 7
+    assert meta.get("events_live") == 1
+    assert meta.get("zero_rows_since") is None
+    assert meta["per_event"][0]["entrants"] == 7
+
+
+def test_poll_tournament_leaderboards_streak_persists_across_zero_cycles(monkeypatch):
+    """The zero-row streak's `since` timestamp must NOT advance on
+    subsequent zero-row cycles — otherwise the >10min badge would
+    never fire on a poller that ticks more often than every 10
+    minutes.
+    """
+    monkeypatch.setenv("SPORTRADAR_PGA_KEY", "pga-test-key")
+    monkeypatch.delenv("SPORTRADAR_F1_KEY", raising=False)
+    monkeypatch.delenv("SPORTRADAR_API_KEY", raising=False)
+
+    reg = _isolated_registry()
+    monkeypatch.setattr(sportradar, "registry", reg)
+    sportradar.register_sportradar_extra_feeds()
+
+    async def _live_ids(sport: str) -> list[str]:
+        return ["sr:tournament:masters-2026"] if sport == "PGA" else []
+
+    async def _refresh_pga(api_key, tid):  # noqa: ANN001
+        return 0
+
+    monkeypatch.setattr(sportradar, "_live_leaderboard_event_ids", _live_ids)
+    monkeypatch.setattr(sportradar, "_refresh_pga_leaderboard", _refresh_pga)
+
+    import asyncio as _asyncio
+    _asyncio.run(sportradar._poll_tournament_leaderboards())
+    st = reg.status_of(sportradar.TOURNAMENT_LEADERBOARDS_FEED_NAME)
+    assert st is not None
+    first_since = st.metadata.get("zero_rows_since")
+    assert first_since
+    # Second poll a fraction later — `zero_rows_since` must stay pinned
+    # to the original timestamp so the >10min check stays accurate.
+    _asyncio.run(sportradar._poll_tournament_leaderboards())
+    assert st.metadata.get("zero_rows_since") == first_since
+
+
+def test_poll_tournament_leaderboards_clears_streak_when_no_events_live(monkeypatch):
+    """If events drop off (no live tournaments) the zero-row streak
+    must clear so the badge doesn't keep firing in the off-season."""
+    monkeypatch.setenv("SPORTRADAR_PGA_KEY", "pga-test-key")
+    monkeypatch.delenv("SPORTRADAR_F1_KEY", raising=False)
+    monkeypatch.delenv("SPORTRADAR_API_KEY", raising=False)
+
+    reg = _isolated_registry()
+    monkeypatch.setattr(sportradar, "registry", reg)
+    sportradar.register_sportradar_extra_feeds()
+
+    live_ids: list[str] = ["sr:tournament:masters-2026"]
+
+    async def _live(sport: str) -> list[str]:
+        return list(live_ids) if sport == "PGA" else []
+
+    async def _refresh_pga(api_key, tid):  # noqa: ANN001
+        return 0
+
+    monkeypatch.setattr(sportradar, "_live_leaderboard_event_ids", _live)
+    monkeypatch.setattr(sportradar, "_refresh_pga_leaderboard", _refresh_pga)
+
+    import asyncio as _asyncio
+    _asyncio.run(sportradar._poll_tournament_leaderboards())
+    st = reg.status_of(sportradar.TOURNAMENT_LEADERBOARDS_FEED_NAME)
+    assert st is not None
+    assert st.metadata.get("zero_rows_since")
+
+    # Tournament wraps up — no more live events ⇒ streak clears.
+    live_ids.clear()
+    _asyncio.run(sportradar._poll_tournament_leaderboards())
+    assert st.metadata.get("zero_rows_since") is None
+    assert st.metadata.get("events_live") == 0
+    assert st.metadata.get("last_refresh_count") == 0
+
+
 def test_normalize_combat_payload_skips_entries_without_grouping_id_safely():
     """Defensive guard: an entry missing every grouping key falls back
     to its own id rather than silently dropping out."""

@@ -1401,6 +1401,52 @@ export function CardTile({ card }: { card: Card }) {
     Number.isFinite(refreshAgeMs) &&
     refreshAgeMs >= 0 &&
     refreshAgeMs <= refreshBadgeWindowMs;
+  // Sportradar tournament-leaderboard refresher (task #624) stashes a
+  // per-cycle entrant count + a "live events" counter on the feed
+  // metadata so the operator console can render a dedicated row next
+  // to the other Sportradar entries instead of leaving operators to
+  // parse the generic detail string.  The badge fires when the
+  // refresher has been writing 0 rows for >10min while events are
+  // live so a silent zero-row streak doesn't masquerade as a green
+  // poll.
+  const isTournamentLeaderboards =
+    isFeed && card.key === "feed:sportradar_tournament_leaderboards";
+  const leaderboardEventsLive =
+    isTournamentLeaderboards &&
+    metadata &&
+    typeof metadata.events_live === "number"
+      ? (metadata.events_live as number)
+      : null;
+  const leaderboardLastRefreshCount =
+    isTournamentLeaderboards &&
+    metadata &&
+    typeof metadata.last_refresh_count === "number"
+      ? (metadata.last_refresh_count as number)
+      : null;
+  const leaderboardLastRefreshAt =
+    isTournamentLeaderboards &&
+    metadata &&
+    typeof metadata.last_refresh_at === "string"
+      ? (metadata.last_refresh_at as string)
+      : null;
+  const leaderboardZeroRowsSince =
+    isTournamentLeaderboards &&
+    metadata &&
+    typeof metadata.zero_rows_since === "string"
+      ? (metadata.zero_rows_since as string)
+      : null;
+  const leaderboardLastSuccessAt = isTournamentLeaderboards
+    ? ((extras.last_ok_at as string | null) ?? null)
+    : null;
+  const leaderboardZeroRowsAgeMs = leaderboardZeroRowsSince
+    ? Date.now() - Date.parse(leaderboardZeroRowsSince)
+    : Number.NaN;
+  const showLeaderboardStaleBadge =
+    isTournamentLeaderboards &&
+    !!leaderboardZeroRowsSince &&
+    (leaderboardEventsLive ?? 0) > 0 &&
+    Number.isFinite(leaderboardZeroRowsAgeMs) &&
+    leaderboardZeroRowsAgeMs > 10 * 60 * 1000;
   const access = useGetMyAccess();
   const { getToken } = useAuth();
   const isAdmin = !!access.data?.is_admin;
@@ -1461,6 +1507,67 @@ export function CardTile({ card }: { card: Card }) {
               {polls != null && fails != null ? ` (${fails}/${polls})` : ""}
             </span>
           </span>
+        </div>
+      )}
+      {isTournamentLeaderboards && (
+        <div
+          className="space-y-0.5 text-[10px] uppercase tracking-widest text-muted-foreground"
+          data-testid={`feed-leaderboard-${card.key}`}
+        >
+          <div className="flex flex-wrap items-center gap-2">
+            <span>
+              events live:{" "}
+              <span
+                className="text-foreground normal-case tracking-normal"
+                data-testid={`feed-leaderboard-events-${card.key}`}
+              >
+                {leaderboardEventsLive ?? 0}
+              </span>
+            </span>
+            <span>
+              last refresh:{" "}
+              <span
+                className="text-foreground normal-case tracking-normal"
+                data-testid={`feed-leaderboard-refresh-count-${card.key}`}
+              >
+                {leaderboardLastRefreshCount != null
+                  ? `${leaderboardLastRefreshCount} entrants`
+                  : "—"}
+              </span>
+            </span>
+            {showLeaderboardStaleBadge && (
+              <span
+                className="border border-destructive/60 bg-destructive/10 text-destructive px-1 py-0.5"
+                data-testid={`feed-leaderboard-stale-${card.key}`}
+                title={
+                  leaderboardZeroRowsSince
+                    ? `Refresh has produced 0 rows since ${leaderboardZeroRowsSince}`
+                    : "Refresh has produced 0 rows for >10 minutes"
+                }
+              >
+                stale leaderboard
+              </span>
+            )}
+          </div>
+          <div>
+            last success:{" "}
+            <span
+              className="text-foreground normal-case tracking-normal"
+              data-testid={`feed-leaderboard-last-success-${card.key}`}
+            >
+              {leaderboardLastSuccessAt ?? "never"}
+            </span>
+            {leaderboardLastRefreshAt &&
+              leaderboardLastRefreshAt !== leaderboardLastSuccessAt && (
+                <>
+                  {" "}
+                  · attempted{" "}
+                  <span className="text-foreground normal-case tracking-normal">
+                    {leaderboardLastRefreshAt}
+                  </span>
+                </>
+              )}
+          </div>
         </div>
       )}
       {isFeed && metadata && (seasonId || seasonStuck) && (

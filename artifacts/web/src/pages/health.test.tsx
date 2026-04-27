@@ -16,7 +16,7 @@ vi.mock("@workspace/api-client-react", () => ({
 
 // We render CardTile directly so the test only depends on the badge
 // rendering logic, not the full /system page (auth, fetch, polling).
-import { CardTile, CryptoFreshnessWidget } from "./health";
+import { CardTile, CryptoFreshnessWidget, CryptoOutcomeBadge } from "./health";
 
 afterEach(() => cleanup());
 
@@ -734,8 +734,6 @@ describe("Soccer season metadata (rendered via CardTile)", () => {
   });
 });
 
-import { CryptoOutcomeBadge } from "./health";
-
 describe("CryptoOutcomeBadge", () => {
   it("renders a green YES badge for a settled YES market", () => {
     render(<CryptoOutcomeBadge outcome="yes" />);
@@ -772,3 +770,174 @@ describe("CryptoOutcomeBadge", () => {
     expect(pending.textContent).toMatch(/pending/i);
   });
 });
+
+const baseLeaderboardCard = {
+  key: "feed:sportradar_tournament_leaderboards",
+  label: "Feed :: sportradar_tournament_leaderboards",
+  category: "passive" as const,
+  checked_at: "2026-04-26T00:00:00Z",
+  latency_ms: null,
+};
+
+describe("Tournament leaderboard refresh (rendered via CardTile)", () => {
+  it("shows the live-event count and most recent refresh entrant total", () => {
+    render(
+      <CardTile
+        card={{
+          ...baseLeaderboardCard,
+          status: "ok",
+          detail: "wrote 142 row(s)",
+          extras: {
+            cadence_seconds: 120,
+            last_ok_at: "2026-04-26T00:00:00+00:00",
+            metadata: {
+              events_live: 2,
+              last_refresh_count: 142,
+              last_refresh_at: "2026-04-26T00:00:00+00:00",
+              zero_rows_since: null,
+            },
+          },
+        }}
+      />,
+    );
+    expect(
+      screen.getByTestId(
+        "feed-leaderboard-events-feed:sportradar_tournament_leaderboards",
+      ).textContent,
+    ).toBe("2");
+    expect(
+      screen.getByTestId(
+        "feed-leaderboard-refresh-count-feed:sportradar_tournament_leaderboards",
+      ).textContent,
+    ).toMatch(/142 entrants/);
+    expect(
+      screen.getByTestId(
+        "feed-leaderboard-last-success-feed:sportradar_tournament_leaderboards",
+      ).textContent,
+    ).toContain("2026-04-26T00:00:00+00:00");
+    // No streak ⇒ no stale badge.
+    expect(
+      screen.queryByTestId(
+        "feed-leaderboard-stale-feed:sportradar_tournament_leaderboards",
+      ),
+    ).toBeNull();
+  });
+
+  it("does NOT fire the stale badge when the zero-row streak is shorter than 10 minutes", () => {
+    const fiveMinutesAgo = new Date(Date.now() - 5 * 60 * 1000).toISOString();
+    render(
+      <CardTile
+        card={{
+          ...baseLeaderboardCard,
+          status: "ok",
+          detail: "wrote 0 row(s)",
+          extras: {
+            cadence_seconds: 120,
+            last_ok_at: "2026-04-26T00:00:00+00:00",
+            metadata: {
+              events_live: 1,
+              last_refresh_count: 0,
+              last_refresh_at: new Date().toISOString(),
+              zero_rows_since: fiveMinutesAgo,
+            },
+          },
+        }}
+      />,
+    );
+    expect(
+      screen.queryByTestId(
+        "feed-leaderboard-stale-feed:sportradar_tournament_leaderboards",
+      ),
+    ).toBeNull();
+  });
+
+  it("fires the red stale-leaderboard badge after >10 minutes of zero-row refreshes while events are live", () => {
+    const fifteenMinutesAgo = new Date(Date.now() - 15 * 60 * 1000).toISOString();
+    render(
+      <CardTile
+        card={{
+          ...baseLeaderboardCard,
+          status: "ok",
+          detail: "wrote 0 row(s)",
+          extras: {
+            cadence_seconds: 120,
+            last_ok_at: "2026-04-26T00:00:00+00:00",
+            metadata: {
+              events_live: 1,
+              last_refresh_count: 0,
+              last_refresh_at: new Date().toISOString(),
+              zero_rows_since: fifteenMinutesAgo,
+            },
+          },
+        }}
+      />,
+    );
+    const badge = screen.getByTestId(
+      "feed-leaderboard-stale-feed:sportradar_tournament_leaderboards",
+    );
+    expect(badge.textContent).toMatch(/stale leaderboard/i);
+    // Tooltip surfaces when the streak began so an operator can see
+    // exactly how long it's been silent.
+    expect(badge.getAttribute("title") ?? "").toContain(fifteenMinutesAgo);
+  });
+
+  it("does NOT fire the stale badge when no events are currently live, even on a long zero-row streak", () => {
+    const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000).toISOString();
+    render(
+      <CardTile
+        card={{
+          ...baseLeaderboardCard,
+          status: "ok",
+          detail: "wrote 0 row(s)",
+          extras: {
+            cadence_seconds: 120,
+            last_ok_at: "2026-04-26T00:00:00+00:00",
+            metadata: {
+              events_live: 0,
+              last_refresh_count: 0,
+              last_refresh_at: new Date().toISOString(),
+              // Backend would normally clear this when no events are
+              // live, but defensive: even if a stale value lingers,
+              // the badge stays off because there's no live event to
+              // be stale about.
+              zero_rows_since: oneHourAgo,
+            },
+          },
+        }}
+      />,
+    );
+    expect(
+      screen.queryByTestId(
+        "feed-leaderboard-stale-feed:sportradar_tournament_leaderboards",
+      ),
+    ).toBeNull();
+  });
+
+  it("does not render the leaderboard block on unrelated feed cards", () => {
+    // The block must be gated on the leaderboard feed key — otherwise
+    // every Sportradar feed would sprout an empty 'events live: 0'
+    // line and confuse operators.
+    render(
+      <CardTile
+        card={{
+          key: "feed:sportradar_epl_injuries",
+          label: "Feed :: sportradar_epl_injuries",
+          category: "passive" as const,
+          checked_at: "2026-04-26T00:00:00Z",
+          latency_ms: null,
+          status: "ok",
+          detail: "wrote 0 row(s)",
+          extras: {
+            metadata: { events_live: 99, last_refresh_count: 99 },
+          },
+        }}
+      />,
+    );
+    expect(
+      screen.queryByTestId(
+        "feed-leaderboard-feed:sportradar_epl_injuries",
+      ),
+    ).toBeNull();
+  });
+});
+

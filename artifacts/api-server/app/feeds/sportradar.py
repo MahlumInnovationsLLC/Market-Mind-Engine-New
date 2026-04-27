@@ -1438,6 +1438,9 @@ async def _refresh_f1_leaderboard(api_key: str, event_id: str) -> int:
     return written
 
 
+TOURNAMENT_LEADERBOARDS_FEED_NAME = "sportradar_tournament_leaderboards"
+
+
 async def _poll_tournament_leaderboards() -> int:
     """Refresh ratings for every in-progress PGA tournament + F1 race
     weekend (task #449).
@@ -1447,6 +1450,12 @@ async def _poll_tournament_leaderboards() -> int:
     operator console reports a real number per cycle (instead of a
     binary success/fail).  Per-event failures are isolated so one
     flaky tournament doesn't blank out the rest.
+
+    Per-cycle bookkeeping is also stashed on the feed's metadata so the
+    operator console can render the most recent refresh count alongside
+    the other Sportradar entries and fire a "stale leaderboard" badge
+    when the poller has been writing 0 rows for >10 minutes while
+    events are live (task #624).
     """
     pga_key = _api_key_for("pga")
     f1_key = _api_key_for("f1")
@@ -1456,11 +1465,18 @@ async def _poll_tournament_leaderboards() -> int:
         )
 
     refreshed = 0
+    events_live = 0
+    per_event: list[dict[str, Any]] = []
 
     if pga_key:
         for tid in await _live_leaderboard_event_ids("PGA"):
+            events_live += 1
             try:
-                refreshed += await _refresh_pga_leaderboard(pga_key, tid)
+                count = await _refresh_pga_leaderboard(pga_key, tid)
+                refreshed += count
+                per_event.append(
+                    {"sport": "PGA", "event_id": tid, "entrants": count}
+                )
             except RateLimited:
                 # Re-raise so the scheduler records the cooldown — we
                 # can't keep hitting Sportradar after a 429.
@@ -1469,17 +1485,52 @@ async def _poll_tournament_leaderboards() -> int:
                 log.warning(
                     "sportradar pga leaderboard %s refresh failed: %s", tid, e,
                 )
+                per_event.append(
+                    {"sport": "PGA", "event_id": tid, "entrants": 0,
+                     "error": str(e)[:120]}
+                )
 
     if f1_key:
         for eid in await _live_leaderboard_event_ids("F1"):
+            events_live += 1
             try:
-                refreshed += await _refresh_f1_leaderboard(f1_key, eid)
+                count = await _refresh_f1_leaderboard(f1_key, eid)
+                refreshed += count
+                per_event.append(
+                    {"sport": "F1", "event_id": eid, "entrants": count}
+                )
             except RateLimited:
                 raise
             except Exception as e:  # noqa: BLE001
                 log.warning(
                     "sportradar f1 leaderboard %s refresh failed: %s", eid, e,
                 )
+                per_event.append(
+                    {"sport": "F1", "event_id": eid, "entrants": 0,
+                     "error": str(e)[:120]}
+                )
+
+    # Track when the current zero-row streak started so the operator
+    # console can fire a stale-leaderboard badge after >10 minutes of
+    # empty refreshes while events are live.  Cleared the moment a
+    # non-zero refresh comes in (or all events drop off) so the badge
+    # doesn't linger after the next successful cycle.
+    existing = registry.status_of(TOURNAMENT_LEADERBOARDS_FEED_NAME)
+    existing_meta = (existing.metadata if existing else {}) or {}
+    now_iso = _utc_iso()
+    if events_live > 0 and refreshed == 0:
+        zero_rows_since = existing_meta.get("zero_rows_since") or now_iso
+    else:
+        zero_rows_since = None
+
+    registry.set_metadata(
+        TOURNAMENT_LEADERBOARDS_FEED_NAME,
+        events_live=events_live,
+        last_refresh_count=refreshed,
+        last_refresh_at=now_iso,
+        per_event=per_event,
+        zero_rows_since=zero_rows_since,
+    )
 
     return refreshed
 
