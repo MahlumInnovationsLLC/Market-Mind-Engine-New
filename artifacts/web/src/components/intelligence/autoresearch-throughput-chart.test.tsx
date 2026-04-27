@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 
 const { state, capturedChart } = vi.hoisted(() => ({
   state: {
@@ -70,6 +70,10 @@ beforeEach(() => {
   // Anchor "today" so the rolling 14-day window is deterministic.
   vi.useFakeTimers();
   vi.setSystemTime(new Date(2026, 3, 26, 12, 0, 0));
+
+  // Window toggle hydrates from localStorage, so wipe it between tests
+  // to avoid one test's selection leaking into the next.
+  window.localStorage.clear();
 
   state.promote = { data: undefined, isLoading: false, isError: false };
   state.reject = { data: undefined, isLoading: false, isError: false };
@@ -265,5 +269,113 @@ describe("AutoResearchThroughputChart", () => {
     // Error branch wins over both empty and chart branches.
     expect(screen.queryByTestId("chart-autoresearch-throughput")).toBeNull();
     expect(screen.queryByTestId("text-autoresearch-throughput-empty")).toBeNull();
+  });
+
+  it("defaults to the 14-day window when localStorage is empty", () => {
+    state.promote = { data: { items: [] }, isLoading: false, isError: false };
+    state.reject = { data: { items: [] }, isLoading: false, isError: false };
+
+    render(<AutoResearchThroughputChart />);
+
+    // Subtitle reflects the default window.
+    expect(screen.getByText("Promote vs reject · last 14 days")).toBeTruthy();
+
+    // The 14D button is the active one in the toggle group.
+    expect(
+      screen
+        .getByTestId("button-autoresearch-throughput-window-14d")
+        .getAttribute("aria-pressed"),
+    ).toBe("true");
+    expect(
+      screen
+        .getByTestId("button-autoresearch-throughput-window-7d")
+        .getAttribute("aria-pressed"),
+    ).toBe("false");
+    expect(
+      screen
+        .getByTestId("button-autoresearch-throughput-window-30d")
+        .getAttribute("aria-pressed"),
+    ).toBe("false");
+  });
+
+  it("updates the visible range and subtitle when the 7D / 30D buttons are clicked", () => {
+    // Seed a single in-window entry so the chart branch (not the empty
+    // branch) is the one that re-renders, exposing the bucketed series
+    // we want to inspect.
+    state.promote = {
+      data: {
+        items: [
+          { id: 1, action: "autoresearch_promote", created_at: localIso(2026, 3, 26, 9) },
+        ],
+      },
+      isLoading: false,
+      isError: false,
+    };
+    state.reject = { data: { items: [] }, isLoading: false, isError: false };
+
+    render(<AutoResearchThroughputChart />);
+
+    // Default state: 14d window with 14 buckets ending today.
+    expect(screen.getByText("Promote vs reject · last 14 days")).toBeTruthy();
+    expect((capturedChart.data as Array<unknown>).length).toBe(14);
+
+    // Switch to 7D — subtitle, active button, and series length all move.
+    fireEvent.click(screen.getByTestId("button-autoresearch-throughput-window-7d"));
+    expect(screen.getByText("Promote vs reject · last 7 days")).toBeTruthy();
+    expect(
+      screen
+        .getByTestId("button-autoresearch-throughput-window-7d")
+        .getAttribute("aria-pressed"),
+    ).toBe("true");
+    let series = capturedChart.data as Array<{ key: string }>;
+    expect(series).toHaveLength(7);
+    expect(series[0].key).toBe("2026-04-20");
+    expect(series[6].key).toBe("2026-04-26");
+
+    // Switch to 30D — same three observable changes in the other direction.
+    fireEvent.click(screen.getByTestId("button-autoresearch-throughput-window-30d"));
+    expect(screen.getByText("Promote vs reject · last 30 days")).toBeTruthy();
+    expect(
+      screen
+        .getByTestId("button-autoresearch-throughput-window-30d")
+        .getAttribute("aria-pressed"),
+    ).toBe("true");
+    series = capturedChart.data as Array<{ key: string }>;
+    expect(series).toHaveLength(30);
+    expect(series[0].key).toBe("2026-03-28");
+    expect(series[29].key).toBe("2026-04-26");
+  });
+
+  it("persists the chosen window to localStorage and re-reads it on remount", () => {
+    state.promote = { data: { items: [] }, isLoading: false, isError: false };
+    state.reject = { data: { items: [] }, isLoading: false, isError: false };
+
+    const { unmount } = render(<AutoResearchThroughputChart />);
+
+    fireEvent.click(screen.getByTestId("button-autoresearch-throughput-window-30d"));
+
+    // The selection landed in localStorage under the documented key.
+    expect(
+      window.localStorage.getItem("axiom.autoresearch-throughput-window"),
+    ).toBe("30");
+
+    // Tear down the component and mount a fresh instance — it should
+    // hydrate from localStorage instead of falling back to 14d.
+    unmount();
+    cleanup();
+
+    render(<AutoResearchThroughputChart />);
+
+    expect(screen.getByText("Promote vs reject · last 30 days")).toBeTruthy();
+    expect(
+      screen
+        .getByTestId("button-autoresearch-throughput-window-30d")
+        .getAttribute("aria-pressed"),
+    ).toBe("true");
+    expect(
+      screen
+        .getByTestId("button-autoresearch-throughput-window-14d")
+        .getAttribute("aria-pressed"),
+    ).toBe("false");
   });
 });
