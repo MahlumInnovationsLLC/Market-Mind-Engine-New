@@ -186,6 +186,17 @@ export default function AutoResearchThroughputChart() {
 
   const hasAny = totals.promoted > 0 || totals.rejected > 0;
 
+  // Per-day averages alongside the totals so operators can compare
+  // activity across windows without doing the math in their head
+  // (task #635).  `windowDays` is always one of WINDOW_OPTIONS so the
+  // divisor is never zero, but guard anyway and let days with no
+  // throughput contribute a clean 0 to the average.
+  const perDayDivisor = windowDays > 0 ? windowDays : 1;
+  const promotedPerDay = totals.promoted / perDayDivisor;
+  const rejectedPerDay = totals.rejected / perDayDivisor;
+  const formatPerDay = (value: number) =>
+    Number.isFinite(value) ? value.toFixed(1) : "0.0";
+
   return (
     <div
       className="mb-3 border border-border bg-card/40 p-3"
@@ -232,11 +243,23 @@ export default function AutoResearchThroughputChart() {
             <span data-testid="text-autoresearch-throughput-promoted">
               {totals.promoted} PROMOTED
             </span>
+            <span
+              className="text-muted-foreground"
+              data-testid="text-autoresearch-throughput-promoted-per-day"
+            >
+              ({formatPerDay(promotedPerDay)}/DAY)
+            </span>
           </span>
           <span className="flex items-center gap-1 text-destructive">
             <span className="inline-block h-2 w-2 bg-destructive" />
             <span data-testid="text-autoresearch-throughput-rejected">
               {totals.rejected} REJECTED
+            </span>
+            <span
+              className="text-muted-foreground"
+              data-testid="text-autoresearch-throughput-rejected-per-day"
+            >
+              ({formatPerDay(rejectedPerDay)}/DAY)
             </span>
           </span>
         </div>

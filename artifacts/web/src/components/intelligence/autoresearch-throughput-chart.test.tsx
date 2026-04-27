@@ -172,6 +172,48 @@ describe("AutoResearchThroughputChart", () => {
     const totalRejected = series.reduce((acc, row) => acc + row.rejected, 0);
     expect(totalPromoted).toBe(3);
     expect(totalRejected).toBe(4);
+
+    // Per-day averages are totals divided by the active window (14d
+    // by default), formatted to one decimal so operators can compare
+    // ranges at a glance regardless of which window is selected.
+    expect(
+      screen.getByTestId("text-autoresearch-throughput-promoted-per-day")
+        .textContent,
+    ).toBe("(0.2/DAY)");
+    expect(
+      screen.getByTestId("text-autoresearch-throughput-rejected-per-day")
+        .textContent,
+    ).toBe("(0.3/DAY)");
+  });
+
+  it("renders zero per-day averages without dividing by zero on empty windows", () => {
+    state.promote = {
+      data: {
+        items: [
+          // Only entries outside the window — totals will be zero.
+          { id: 1, action: "autoresearch_promote", created_at: localIso(2026, 2, 1) },
+        ],
+      },
+      isLoading: false,
+      isError: false,
+    };
+    state.reject = {
+      data: { items: [] },
+      isLoading: false,
+      isError: false,
+    };
+
+    render(<AutoResearchThroughputChart />);
+
+    // 0/14 must render as a clean "0.0", never NaN or Infinity.
+    expect(
+      screen.getByTestId("text-autoresearch-throughput-promoted-per-day")
+        .textContent,
+    ).toBe("(0.0/DAY)");
+    expect(
+      screen.getByTestId("text-autoresearch-throughput-rejected-per-day")
+        .textContent,
+    ).toBe("(0.0/DAY)");
   });
 
   it("renders the empty state when both queries return no in-window items", () => {
