@@ -47,6 +47,7 @@ from .notifications import (
     postmark as notif_postmark,
     push as notif_push,
     sms as notif_sms,
+    soccer_settlement_drift as notif_soccer_settlement_drift,
     suppression as notif_suppression,
     weekly_roundup as notif_weekly_roundup,
 )
@@ -397,6 +398,17 @@ async def lifespan(_: FastAPI):
         await notif_persona_brier_alerts.start()
     except Exception as e:
         log.warning("persona brier alerts scheduler start failed: %s", e)
+    # Soccer-settlement drift watcher (task #611). Polls every ~10m for
+    # soccer Kalshi markets whose linked Sportradar match has been final
+    # for >2h while trades on the market are still un-settled — surfaces
+    # stale `swarm_debates` -> `game_id` links the settlement cycle is
+    # silently skipping.
+    try:
+        await notif_soccer_settlement_drift.start()
+    except Exception as e:
+        log.warning(
+            "soccer settlement drift scheduler start failed: %s", e
+        )
     # RevenueCat webhook silence detector — fires an operator alert
     # when the mobile-IAP webhook stops delivering during business hours
     # (catches dashboard pause/resume + upstream outages). Per task #252.
@@ -612,6 +624,12 @@ async def lifespan(_: FastAPI):
             await notif_persona_brier_alerts.stop()
         except Exception as e:
             log.warning("persona brier alerts stop error: %s", e)
+        try:
+            await notif_soccer_settlement_drift.stop()
+        except Exception as e:
+            log.warning(
+                "soccer settlement drift stop error: %s", e
+            )
         try:
             from .crypto import backtest_scheduler as _crypto_backtest_scheduler
             await _crypto_backtest_scheduler.stop()

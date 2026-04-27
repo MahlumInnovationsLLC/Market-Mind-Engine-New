@@ -53,6 +53,7 @@ _TAG_TO_USER_PREF: dict[str, str] = {
     "persona-brier":         "email_drift",
     "crypto-backtest-drift": "email_drift",
     "weekly-roundup":        "email_weekly_roundup",
+    "soccer-settlement-drift": "email_drift",
 }
 
 
@@ -1568,6 +1569,75 @@ def season_stuck(
         + "\n"
     )
     return _dispatch(subject, body, tag="season-stuck", dry_run=dry_run)
+
+
+# ---------------------------------------------------------------------------
+# Soccer settlement drift — match final on Sportradar but trades unsettled
+# ---------------------------------------------------------------------------
+
+
+def soccer_settlement_drift(
+    *,
+    market_ticker: str,
+    game_id: str,
+    league: str | None,
+    final_for_seconds: float,
+    threshold_seconds: float,
+    open_trades: int,
+    sportradar_status: str | None = None,
+    first_final_at: str | None = None,
+    note: str | None = None,
+    dry_run: bool = False,
+) -> dict[str, Any]:
+    """Operator alert: a soccer Kalshi market still has un-settled trades
+    even though Sportradar has been reporting the linked match as final
+    for longer than ``threshold_seconds``.
+
+    Surfaces stale ``swarm_debates`` -> ``game_id`` links (or other
+    silent skips in `_sportradar_three_way_result`) before the
+    open positions hide losses. Caller is responsible for dedupe via
+    ``dedupe_or_skip`` keyed on ``(market_ticker, game_id)`` so a
+    persistent drift only pages once per TTL.
+    """
+    final_minutes = final_for_seconds / 60.0
+    threshold_minutes = threshold_seconds / 60.0
+    subject = (
+        f"[axiom][SOCCER-SETTLEMENT] {market_ticker} unsettled "
+        f"{final_minutes:.0f}m after Sportradar final"
+    )
+    body = (
+        "A soccer Kalshi market still has un-settled trades even though "
+        "the linked Sportradar match has been final for longer than the "
+        "configured threshold. The settlement cycle's "
+        "`_sportradar_three_way_result` lookup is silently skipping this "
+        "market — most often because the `swarm_debates` row that ties "
+        "the Kalshi ticker to the Sportradar `game_id` is missing, "
+        "stale, or pointing at the wrong game.\n\n"
+        "Investigate the swarm_debates link and verify the live-state "
+        "scoreline for this game before the open positions hide losses.\n\n"
+        + _format_lines(
+            [
+                ("kalshi_ticker", market_ticker),
+                ("sportradar_game_id", game_id),
+                ("league", league or "(unknown)"),
+                ("sportradar_status", sportradar_status or "(unknown)"),
+                ("final_minutes", f"{final_minutes:.1f}"),
+                ("threshold_minutes", f"{threshold_minutes:.1f}"),
+                (
+                    "first_final_at",
+                    first_final_at or "(unknown)",
+                ),
+                ("open_trades", open_trades),
+                ("at", _utc_now_iso()),
+            ]
+        )
+        + "\n"
+    )
+    if note:
+        body += f"\nDetails:\n  {note}\n"
+    return _dispatch(
+        subject, body, tag="soccer-settlement-drift", dry_run=dry_run
+    )
 
 
 # ---------------------------------------------------------------------------
