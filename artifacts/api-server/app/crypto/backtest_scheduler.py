@@ -674,10 +674,43 @@ async def check_now(
 
 _task: asyncio.Task | None = None
 _stop = asyncio.Event()
+# In-process status snapshot of the most recent cadence sweep, surfaced
+# to the operator console so a quietly-stuck loop is visible without
+# tailing logs. Mutated only by `_loop`/`start`/`stop`.
+_status: dict[str, Any] = {
+    "running": False,
+    "enabled": None,
+    "interval_seconds": None,
+    "started_at": None,
+    "last_sweep_started_at": None,
+    "last_sweep_completed_at": None,
+    "last_sweep_pairs": 0,
+    "last_sweep_errors": 0,
+    "last_sweep_alerts": 0,
+    "last_error": None,
+    "sweeps_completed": 0,
+}
+
+
+def status() -> dict[str, Any]:
+    """Return a snapshot of the scheduler's most-recent activity.
+
+    Pure-read; safe to call from request handlers. Operator console can
+    page on ``running == False`` after start, or on
+    ``last_sweep_completed_at`` falling more than ~2x ``interval_seconds``
+    behind ``now()``.
+    """
+    snap = dict(_status)
+    snap["enabled"] = _enabled()
+    snap["interval_seconds"] = _interval_seconds()
+    snap["running"] = bool(_task and not _task.done())
+    return snap
 
 
 async def _loop() -> None:
     interval = _interval_seconds()
+    _status["started_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    _status["interval_seconds"] = interval
     log.info(
         "crypto_backtest_scheduler loop started: "
         "interval=%.1fs days=%d lookback=%d brier_abs=%.3f log_abs=%.3f",
@@ -685,17 +718,28 @@ async def _loop() -> None:
         _brier_abs_threshold(), _logloss_abs_threshold(),
     )
     while not _stop.is_set():
+        sweep_started = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        _status["last_sweep_started_at"] = sweep_started
         try:
             summary = await check_now()
+            _status["last_sweep_completed_at"] = datetime.now(
+                timezone.utc
+            ).isoformat(timespec="seconds")
+            _status["last_sweep_pairs"] = len(summary.get("pairs") or [])
+            _status["last_sweep_errors"] = int(summary.get("errors", 0))
+            _status["last_sweep_alerts"] = int(summary.get("alerts_raised", 0))
+            _status["sweeps_completed"] = int(_status.get("sweeps_completed", 0)) + 1
+            _status["last_error"] = None
             log.info(
                 "crypto_backtest_scheduler sweep done: pairs=%d errors=%d alerts=%d",
-                len(summary.get("pairs") or []),
-                summary.get("errors", 0),
-                summary.get("alerts_raised", 0),
+                _status["last_sweep_pairs"],
+                _status["last_sweep_errors"],
+                _status["last_sweep_alerts"],
             )
         except asyncio.CancelledError:
             raise
         except Exception as e:  # pragma: no cover — defensive
+            _status["last_error"] = f"{type(e).__name__}: {e}"
             log.warning("crypto_backtest_scheduler loop error: %s", e)
             error_log(
                 "crypto_backtest_scheduler.loop",
@@ -710,13 +754,20 @@ async def _loop() -> None:
 
 
 async def start() -> None:
-    global _task
+    global _task, _stop
     if not _enabled():
         log.info("crypto_backtest_scheduler disabled")
+        _status["enabled"] = False
+        _status["running"] = False
         return
     if _task and not _task.done():
         return
-    _stop.clear()
+    # Recreate the Event so it binds to the *current* running loop.
+    # asyncio Events stay bound to the loop they were first awaited on,
+    # which would break a stop-then-restart from inside a test or from
+    # an in-process reload that swapped the running loop underneath us.
+    _stop = asyncio.Event()
+    _status["enabled"] = True
     _task = asyncio.create_task(_loop(), name="crypto-backtest-scheduler")
 
 
@@ -730,3 +781,4 @@ async def stop() -> None:
         except (asyncio.CancelledError, Exception):
             pass
     _task = None
+    _status["running"] = False

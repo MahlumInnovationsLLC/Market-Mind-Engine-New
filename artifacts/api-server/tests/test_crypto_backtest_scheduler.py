@@ -541,3 +541,197 @@ def test_supported_pairs_covers_full_grid() -> None:
     assert pairs, "supported_pairs() returned empty"
     # Sanity: BTC/1h is always supported.
     assert ("BTC", "1h") in pairs
+
+
+def test_loop_invokes_run_backtest_for_each_pair_each_cadence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The background `_loop` must call `run_backtest` for every supported
+    pair, once per cadence tick. We shrink the supported grid to two pairs,
+    set the cadence to ~0s, and assert two ticks produce two invocations
+    per pair before stopping the loop.
+    """
+    monkeypatch.setenv("CRYPTO_BACKTEST_SCHEDULER_ENABLED", "1")
+    # Bypass the 60s floor in _interval_seconds() so the cadence loop
+    # ticks immediately and the test stays fast.
+    monkeypatch.setattr(_bts, "_interval_seconds", lambda: 0.01)
+    monkeypatch.setattr(
+        _bts, "supported_pairs", lambda: [("BTC", "1h"), ("ETH", "15m")]
+    )
+
+    calls: list[tuple[str, str]] = []
+
+    async def _fake_run_backtest(
+        *,
+        symbol: str,
+        timeframe: str,
+        days: int,
+        lookback: int,
+        model: Any | None = None,
+    ) -> BacktestResult:
+        calls.append((symbol, timeframe))
+        # Once we've recorded two full sweeps' worth of invocations,
+        # trip the stop event so the loop exits on its next tick.
+        if len(calls) >= 4:
+            _bts._stop.set()
+        return BacktestResult(
+            symbol=symbol,
+            timeframe=timeframe,
+            n_evaluated=0,  # below min_evaluated -> skips drift + persist
+            accuracy=0.0,
+            brier_score=0.0,
+            log_loss=0.0,
+            reliability=[],
+            started_at="2026-04-26T00:00:00+00:00",
+            completed_at="2026-04-26T00:00:01+00:00",
+        )
+
+    monkeypatch.setattr(_backtest, "run_backtest", _fake_run_backtest)
+
+    async def _drive() -> None:
+        # Rebind to the active loop — asyncio Events stay bound to the
+        # loop they were first awaited on, and pytest spins up a fresh
+        # loop per `asyncio.run`.
+        _bts._stop = asyncio.Event()
+        try:
+            await asyncio.wait_for(_bts._loop(), timeout=5.0)
+        finally:
+            _bts._stop.set()
+
+    asyncio.run(_drive())
+
+    # The first two invocations are the BTC/1h + ETH/15m sweep at tick 1;
+    # the second pair of invocations is tick 2 — proving the cadence loop
+    # iterates every supported pair on every cycle.
+    assert calls[:4] == [
+        ("BTC", "1h"),
+        ("ETH", "15m"),
+        ("BTC", "1h"),
+        ("ETH", "15m"),
+    ]
+
+
+def test_status_reflects_recent_sweep(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`status()` should expose the most-recent sweep's outcome so the
+    operator console can detect a stuck loop without tailing logs."""
+    monkeypatch.setenv("CRYPTO_BACKTEST_SCHEDULER_ENABLED", "1")
+    monkeypatch.setattr(_bts, "_interval_seconds", lambda: 0.01)
+    monkeypatch.setattr(
+        _bts, "supported_pairs", lambda: [("BTC", "1h"), ("ETH", "15m")]
+    )
+
+    async def _fake_run_backtest(
+        *,
+        symbol: str,
+        timeframe: str,
+        days: int,
+        lookback: int,
+        model: Any | None = None,
+    ) -> BacktestResult:
+        return BacktestResult(
+            symbol=symbol,
+            timeframe=timeframe,
+            n_evaluated=0,
+            accuracy=0.0,
+            brier_score=0.0,
+            log_loss=0.0,
+            reliability=[],
+            started_at="2026-04-26T00:00:00+00:00",
+            completed_at="2026-04-26T00:00:01+00:00",
+        )
+
+    monkeypatch.setattr(_backtest, "run_backtest", _fake_run_backtest)
+
+    async def _drive() -> None:
+        # Reset module state so a previous test's run doesn't bleed in.
+        _bts._status.update(
+            {
+                "started_at": None,
+                "last_sweep_started_at": None,
+                "last_sweep_completed_at": None,
+                "last_sweep_pairs": 0,
+                "last_sweep_errors": 0,
+                "last_sweep_alerts": 0,
+                "last_error": None,
+                "sweeps_completed": 0,
+            }
+        )
+        _bts._stop = asyncio.Event()
+        loop_task = asyncio.create_task(_bts._loop())
+        try:
+            # Wait for at least one full sweep to land in the status.
+            for _ in range(200):
+                await asyncio.sleep(0.01)
+                if (_bts._status["sweeps_completed"] or 0) >= 1:
+                    break
+            _bts._stop.set()
+            await asyncio.wait_for(loop_task, timeout=2.0)
+        finally:
+            _bts._stop.set()
+
+    asyncio.run(_drive())
+    snap = _bts.status()
+    assert snap["sweeps_completed"] >= 1
+    assert snap["last_sweep_completed_at"] is not None
+    assert snap["last_sweep_pairs"] == 2
+    assert snap["last_sweep_errors"] == 0
+    assert snap["last_error"] is None
+    assert snap["interval_seconds"] is not None
+    # `enabled` reflects the env at read-time so operators see the live flag.
+    assert snap["enabled"] is True
+
+
+def test_loop_continues_after_a_pair_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """If `run_backtest` raises for one pair, the loop must still
+    invoke the next pair (per-pair failures are non-fatal)."""
+    monkeypatch.setenv("CRYPTO_BACKTEST_SCHEDULER_ENABLED", "1")
+    monkeypatch.setattr(_bts, "_interval_seconds", lambda: 0.01)
+    monkeypatch.setattr(
+        _bts, "supported_pairs", lambda: [("BTC", "1h"), ("ETH", "15m")]
+    )
+
+    calls: list[tuple[str, str]] = []
+
+    async def _flaky_run_backtest(
+        *,
+        symbol: str,
+        timeframe: str,
+        days: int,
+        lookback: int,
+        model: Any | None = None,
+    ) -> BacktestResult:
+        calls.append((symbol, timeframe))
+        # Stop after the very first sweep so the test is deterministic.
+        if symbol == "ETH":
+            _bts._stop.set()
+        if symbol == "BTC":
+            raise RuntimeError("simulated upstream failure")
+        return BacktestResult(
+            symbol=symbol,
+            timeframe=timeframe,
+            n_evaluated=0,
+            accuracy=0.0,
+            brier_score=0.0,
+            log_loss=0.0,
+            reliability=[],
+            started_at="2026-04-26T00:00:00+00:00",
+            completed_at="2026-04-26T00:00:01+00:00",
+        )
+
+    monkeypatch.setattr(_backtest, "run_backtest", _flaky_run_backtest)
+
+    async def _drive() -> None:
+        _bts._stop = asyncio.Event()
+        try:
+            await asyncio.wait_for(_bts._loop(), timeout=5.0)
+        finally:
+            _bts._stop.set()
+
+    asyncio.run(_drive())
+
+    # Both pairs were attempted in the same tick despite BTC raising.
+    assert calls[:2] == [("BTC", "1h"), ("ETH", "15m")]
