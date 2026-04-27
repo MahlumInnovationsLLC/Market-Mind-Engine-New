@@ -276,6 +276,299 @@ describe("CryptoBacktestPanel — history trend chart", () => {
     expect(screen.queryByTestId("crypto-backtest-history-loading")).toBeNull();
   });
 
+  it("renders the result block and reliability rows after a successful Run", async () => {
+    // Route by URL: history stays empty (not the focus here) and the
+    // backtest endpoint returns a populated result with two reliability
+    // bins so we can assert the table renders one row per bin.
+    fetchMock.mockImplementation(async (input: unknown) => {
+      const url = urlOf([input]);
+      if (url.includes("/api/admin/crypto/backtest/history")) {
+        return jsonResponse({ symbol: "ETH", timeframe: "15m", items: [] });
+      }
+      if (url.includes("/api/admin/crypto/backtest")) {
+        return jsonResponse({
+          symbol: "ETH",
+          timeframe: "15m",
+          lookback: 30,
+          n_evaluated: 1234,
+          accuracy: 0.6125,
+          brier_score: 0.1875,
+          log_loss: 0.5432,
+          reliability: [
+            {
+              bin_lower: 0.0,
+              bin_upper: 0.5,
+              mean_predicted: 0.3,
+              mean_actual: 0.32,
+              count: 80,
+            },
+            {
+              bin_lower: 0.5,
+              bin_upper: 1.0,
+              mean_predicted: 0.7,
+              mean_actual: 0.71,
+              count: 120,
+            },
+          ],
+          started_at: "2026-04-26T10:00:00Z",
+          completed_at: "2026-04-26T10:00:01Z",
+        });
+      }
+      throw new Error(`unexpected fetch url: ${url}`);
+    });
+
+    renderPanel();
+
+    // Commit non-default params before clicking Run so the assertion
+    // proves the selector values flow into the request URL.
+    fireEvent.change(screen.getByTestId("select-crypto-backtest-symbol"), {
+      target: { value: "ETH" },
+    });
+    fireEvent.change(screen.getByTestId("select-crypto-backtest-timeframe"), {
+      target: { value: "15m" },
+    });
+    fireEvent.change(screen.getByTestId("input-crypto-backtest-days"), {
+      target: { value: "30" },
+    });
+
+    fireEvent.click(screen.getByTestId("button-crypto-backtest-run"));
+
+    // The result block + metric tiles should render once the backtest
+    // request resolves.
+    await waitFor(() =>
+      expect(screen.getByTestId("crypto-backtest-result")).toBeTruthy(),
+    );
+
+    const backtestCall = fetchMock.mock.calls.find(
+      (c) =>
+        urlOf(c).includes("/api/admin/crypto/backtest") &&
+        !urlOf(c).includes("/history"),
+    );
+    expect(backtestCall).toBeTruthy();
+    const backtestUrl = urlOf(backtestCall!);
+    expect(backtestUrl).toMatch(/[?&]symbol=ETH(?:&|$)/);
+    expect(backtestUrl).toMatch(/[?&]timeframe=15m(?:&|$)/);
+    expect(backtestUrl).toMatch(/[?&]days=30(?:&|$)/);
+
+    expect(screen.getByTestId("crypto-backtest-pair").textContent).toMatch(
+      /ETH.*15m/,
+    );
+    expect(screen.getByTestId("crypto-backtest-n").textContent).toMatch(
+      /1,234/,
+    );
+    expect(
+      screen.getByTestId("crypto-backtest-accuracy").textContent,
+    ).toMatch(/0\.6125/);
+    expect(screen.getByTestId("crypto-backtest-brier").textContent).toMatch(
+      /0\.1875/,
+    );
+
+    // One <tr> per reliability bin — the per-bin testids are indexed.
+    expect(screen.getByTestId("crypto-backtest-bin-0")).toBeTruthy();
+    expect(screen.getByTestId("crypto-backtest-bin-1")).toBeTruthy();
+    expect(screen.queryByTestId("crypto-backtest-bin-2")).toBeNull();
+    expect(
+      screen.getByTestId("crypto-backtest-bin-0").textContent,
+    ).toMatch(/0\.00.*0\.50/);
+    // The empty-state row uses colSpan=4 + a sentinel string; assert it
+    // is *not* present when bins exist.
+    expect(
+      screen.getByTestId("crypto-backtest-reliability").textContent,
+    ).not.toMatch(/No populated reliability bins\./);
+  });
+
+  it("disables the Run button and switches its label while a backtest is in flight, then flips to Re-run", async () => {
+    // Hold the backtest request open so we can observe the in-flight
+    // state; let the history call resolve immediately so it doesn't
+    // monopolise the button's `isFetching` flag.  The backtest query
+    // is the one wired to the Run button — see `useQuery` at line 4548.
+    let resolveBacktest: (value: Response) => void = () => undefined;
+    const backtestPending = new Promise<Response>((resolve) => {
+      resolveBacktest = resolve;
+    });
+    fetchMock.mockImplementation(async (input: unknown) => {
+      const url = urlOf([input]);
+      if (url.includes("/api/admin/crypto/backtest/history")) {
+        return jsonResponse({ symbol: "BTC", timeframe: "1h", items: [] });
+      }
+      if (url.includes("/api/admin/crypto/backtest")) {
+        return backtestPending;
+      }
+      throw new Error(`unexpected fetch url: ${url}`);
+    });
+
+    renderPanel();
+
+    // Initial idle state — label is "Run", button enabled.
+    const runButton = screen.getByTestId(
+      "button-crypto-backtest-run",
+    ) as HTMLButtonElement;
+    expect(runButton.disabled).toBe(false);
+    expect(runButton.textContent).toMatch(/^Run$/);
+
+    fireEvent.click(runButton);
+
+    // While the backtest is in flight the button is disabled and shows
+    // a spinner-style label.
+    await waitFor(() => {
+      const btn = screen.getByTestId(
+        "button-crypto-backtest-run",
+      ) as HTMLButtonElement;
+      expect(btn.disabled).toBe(true);
+      expect(btn.textContent).toMatch(/Running/);
+    });
+
+    // Resolve the backtest so React Query transitions out of fetching.
+    resolveBacktest(
+      jsonResponse({
+        symbol: "BTC",
+        timeframe: "1h",
+        lookback: 14,
+        n_evaluated: 100,
+        accuracy: 0.55,
+        brier_score: 0.21,
+        log_loss: 0.62,
+        reliability: [],
+        started_at: "2026-04-26T10:00:00Z",
+        completed_at: "2026-04-26T10:00:01Z",
+      }),
+    );
+
+    // Once params are committed and the run is no longer in flight the
+    // label switches to "Re-run".
+    await waitFor(() => {
+      const btn = screen.getByTestId(
+        "button-crypto-backtest-run",
+      ) as HTMLButtonElement;
+      expect(btn.disabled).toBe(false);
+      expect(btn.textContent).toMatch(/^Re-run$/);
+    });
+
+    // The optional Refresh button only shows after a committed run.
+    expect(
+      screen.getByTestId("button-crypto-backtest-refresh"),
+    ).toBeTruthy();
+  });
+
+  it("renders the error banner when the backtest request fails without breaking the rest of the panel", async () => {
+    fetchMock.mockImplementation(async (input: unknown) => {
+      const url = urlOf([input]);
+      if (url.includes("/api/admin/crypto/backtest/history")) {
+        return jsonResponse({ symbol: "BTC", timeframe: "1h", items: [] });
+      }
+      if (url.includes("/api/admin/crypto/backtest")) {
+        return new Response(JSON.stringify({ detail: "kaboom" }), {
+          status: 500,
+          headers: { "content-type": "application/json" },
+        });
+      }
+      throw new Error(`unexpected fetch url: ${url}`);
+    });
+
+    renderPanel();
+
+    fireEvent.click(screen.getByTestId("button-crypto-backtest-run"));
+
+    await waitFor(() =>
+      expect(screen.getByTestId("crypto-backtest-error")).toBeTruthy(),
+    );
+
+    expect(
+      screen.getByTestId("crypto-backtest-error").textContent,
+    ).toMatch(/Failed to run backtest/);
+
+    // The result block must NOT render when the backtest errored, but
+    // the rest of the panel — selectors, Run button, history widget —
+    // should still be present.
+    expect(screen.queryByTestId("crypto-backtest-result")).toBeNull();
+    expect(
+      screen.getByTestId("select-crypto-backtest-symbol"),
+    ).toBeTruthy();
+    expect(
+      screen.getByTestId("select-crypto-backtest-timeframe"),
+    ).toBeTruthy();
+    expect(screen.getByTestId("input-crypto-backtest-days")).toBeTruthy();
+    expect(screen.getByTestId("button-crypto-backtest-run")).toBeTruthy();
+    expect(screen.getByTestId("crypto-backtest-history")).toBeTruthy();
+  });
+
+  it("renders the empty-state row inside the reliability table when reliability is []", async () => {
+    fetchMock.mockImplementation(async (input: unknown) => {
+      const url = urlOf([input]);
+      if (url.includes("/api/admin/crypto/backtest/history")) {
+        return jsonResponse({ symbol: "BTC", timeframe: "1h", items: [] });
+      }
+      if (url.includes("/api/admin/crypto/backtest")) {
+        return jsonResponse({
+          symbol: "BTC",
+          timeframe: "1h",
+          lookback: 14,
+          // Non-zero `n_evaluated` -> the "no populated reliability
+          // bins" sentinel is the one that renders (the alternate
+          // sentinel is gated on n_evaluated === 0).
+          n_evaluated: 100,
+          accuracy: 0.55,
+          brier_score: 0.21,
+          log_loss: 0.62,
+          reliability: [],
+          started_at: "2026-04-26T10:00:00Z",
+          completed_at: "2026-04-26T10:00:01Z",
+        });
+      }
+      throw new Error(`unexpected fetch url: ${url}`);
+    });
+
+    renderPanel();
+
+    fireEvent.click(screen.getByTestId("button-crypto-backtest-run"));
+
+    await waitFor(() =>
+      expect(screen.getByTestId("crypto-backtest-reliability")).toBeTruthy(),
+    );
+
+    expect(
+      screen.getByTestId("crypto-backtest-reliability").textContent,
+    ).toMatch(/No populated reliability bins\./);
+    // No per-bin rows when the array is empty.
+    expect(screen.queryByTestId("crypto-backtest-bin-0")).toBeNull();
+  });
+
+  it("renders the n_evaluated=0 backfill hint inside the reliability table when no bars matched", async () => {
+    fetchMock.mockImplementation(async (input: unknown) => {
+      const url = urlOf([input]);
+      if (url.includes("/api/admin/crypto/backtest/history")) {
+        return jsonResponse({ symbol: "BTC", timeframe: "1h", items: [] });
+      }
+      if (url.includes("/api/admin/crypto/backtest")) {
+        return jsonResponse({
+          symbol: "BTC",
+          timeframe: "1h",
+          lookback: 14,
+          n_evaluated: 0,
+          accuracy: 0,
+          brier_score: 0,
+          log_loss: 0,
+          reliability: [],
+          started_at: "2026-04-26T10:00:00Z",
+          completed_at: "2026-04-26T10:00:01Z",
+        });
+      }
+      throw new Error(`unexpected fetch url: ${url}`);
+    });
+
+    renderPanel();
+
+    fireEvent.click(screen.getByTestId("button-crypto-backtest-run"));
+
+    await waitFor(() =>
+      expect(screen.getByTestId("crypto-backtest-reliability")).toBeTruthy(),
+    );
+
+    expect(
+      screen.getByTestId("crypto-backtest-reliability").textContent,
+    ).toMatch(/backfill OHLCV or widen the days range/);
+  });
+
   it("refetches the history endpoint after a successful Run completes", async () => {
     // Route requests by URL: the backtest endpoint returns a single
     // result row, the history endpoint always returns an empty list
