@@ -1260,6 +1260,254 @@ def test_latest_tournament_leaderboard_rejects_empty_event_id():
     assert asyncio.run(sr.latest_tournament_leaderboard("")) == []
 
 
+def test_iter_tournament_leaderboard_history_replays_live_pricing(monkeypatch):
+    """A stored snapshot replayed through the backtest helper must
+    reproduce the exact ratings the live cache held when the snapshot
+    was written, so Plackett-Luce probs at re-price time match the
+    numbers the orchestrator priced off live (task #651).
+
+    The replay must NOT touch the in-memory ratings cache — a backtest
+    run shouldn't be able to pollute live pricing for the same event.
+    """
+    from contextlib import asynccontextmanager
+    from datetime import datetime, timezone
+
+    from app.feeds import sportradar as sr
+    from app.sports import (
+        get_field,
+        ratings as ratings_mod,
+        set_field_from_leaderboard,
+    )
+    from app import db as db_mod
+
+    ratings_mod.clear_cache()
+
+    # Live refresh: cache the leaderboard ratings the way the live
+    # poller would, then capture the probabilities the orchestrator
+    # would have priced off this field.
+    entries = [
+        {"position": 1, "name": "Rahm"},
+        {"position": 2, "name": "Scheffler"},
+        {"position": 3, "name": "McIlroy"},
+    ]
+    written = set_field_from_leaderboard("sr:tournament:pga-1", entries)
+    assert written == 3
+    live_ratings = get_field("sr:tournament:pga-1")
+    assert live_ratings is not None
+    live_probs = plackett_luce_from_mapping(live_ratings)
+
+    # Now drop the live cache and prove the backtest helper can
+    # reconstruct the same field purely from the persisted rows.
+    ratings_mod.clear_cache()
+
+    ts = datetime(2026, 4, 26, 12, 0, tzinfo=timezone.utc)
+    canned_rows = [
+        {"position": 1, "name": "Rahm", "fetched_at": ts},
+        {"position": 2, "name": "Scheffler", "fetched_at": ts},
+        {"position": 3, "name": "McIlroy", "fetched_at": ts},
+    ]
+
+    queries: list[tuple[str, tuple]] = []
+
+    class _Conn:
+        async def fetch(self, query, *args):
+            queries.append((query, args))
+            return canned_rows
+
+    @asynccontextmanager
+    async def fake_acquire():
+        yield _Conn()
+
+    monkeypatch.setattr(db_mod, "acquire", fake_acquire)
+
+    async def collect():
+        out = []
+        async for snap in sr.iter_tournament_leaderboard_history(
+            "sr:tournament:pga-1",
+        ):
+            out.append(snap)
+        return out
+
+    snaps = asyncio.run(collect())
+    assert len(snaps) == 1
+    snap_ts, snap_ratings = snaps[0]
+    assert snap_ts == ts
+    assert snap_ratings == live_ratings
+    assert plackett_luce_from_mapping(snap_ratings) == live_probs
+
+    # Crucially, the replay path never wrote into the live cache.
+    assert get_field("sr:tournament:pga-1") is None
+    # And the SQL filtered to the requested event.
+    assert queries and queries[0][1] == ("sr:tournament:pga-1",)
+    assert "sportradar_tournament_leaderboards" in queries[0][0]
+    assert "ORDER BY fetched_at ASC" in queries[0][0]
+
+
+def test_iter_tournament_leaderboard_history_yields_each_snapshot(monkeypatch):
+    """Multiple stored snapshots must come back oldest-first, one
+    ratings dict per ``fetched_at`` group, so the harness can re-price
+    every minute of a past tournament in time order."""
+    from contextlib import asynccontextmanager
+    from datetime import datetime, timezone
+
+    from app.feeds import sportradar as sr
+    from app import db as db_mod
+
+    t1 = datetime(2026, 4, 26, 12, 0, tzinfo=timezone.utc)
+    t2 = datetime(2026, 4, 26, 12, 5, tzinfo=timezone.utc)
+    t3 = datetime(2026, 4, 26, 12, 10, tzinfo=timezone.utc)
+    canned_rows = [
+        {"position": 1, "name": "Rahm", "fetched_at": t1},
+        {"position": 2, "name": "Scheffler", "fetched_at": t1},
+        {"position": 1, "name": "Scheffler", "fetched_at": t2},
+        {"position": 2, "name": "Rahm", "fetched_at": t2},
+        {"position": 1, "name": "McIlroy", "fetched_at": t3},
+        {"position": 2, "name": "Rahm", "fetched_at": t3},
+        {"position": 3, "name": "Scheffler", "fetched_at": t3},
+    ]
+
+    class _Conn:
+        async def fetch(self, query, *args):
+            return canned_rows
+
+    @asynccontextmanager
+    async def fake_acquire():
+        yield _Conn()
+
+    monkeypatch.setattr(db_mod, "acquire", fake_acquire)
+
+    async def collect():
+        out = []
+        async for snap in sr.iter_tournament_leaderboard_history(
+            "sr:tournament:pga-1",
+        ):
+            out.append(snap)
+        return out
+
+    snaps = asyncio.run(collect())
+    timestamps = [ts for ts, _ in snaps]
+    assert timestamps == [t1, t2, t3]
+
+    # The leader changes across snapshots, so the top-rated entrant
+    # must change too — proving each snapshot is grouped independently.
+    leaders = [max(r, key=r.get) for _, r in snaps]
+    assert leaders == ["Rahm", "Scheffler", "McIlroy"]
+    # And the third snapshot has a 3-deep field, the first two only 2.
+    assert [len(r) for _, r in snaps] == [2, 2, 3]
+
+
+def test_iter_tournament_leaderboard_history_honours_time_bounds(monkeypatch):
+    """``since`` / ``until`` must be parameterised into the SQL so the
+    harness can replay a narrow window of the tournament without
+    materialising the whole history client-side."""
+    from contextlib import asynccontextmanager
+    from datetime import datetime, timezone
+
+    from app.feeds import sportradar as sr
+    from app import db as db_mod
+
+    seen: dict[str, tuple] = {}
+
+    class _Conn:
+        async def fetch(self, query, *args):
+            seen["query"] = query
+            seen["args"] = args
+            return []
+
+    @asynccontextmanager
+    async def fake_acquire():
+        yield _Conn()
+
+    monkeypatch.setattr(db_mod, "acquire", fake_acquire)
+    since = datetime(2026, 4, 26, 12, 0, tzinfo=timezone.utc)
+    until = datetime(2026, 4, 26, 14, 0, tzinfo=timezone.utc)
+
+    async def drain():
+        async for _ in sr.iter_tournament_leaderboard_history(
+            "sr:tournament:pga-1", since=since, until=until,
+        ):
+            pass
+
+    asyncio.run(drain())
+    assert seen["args"] == ("sr:tournament:pga-1", since, until)
+    assert "fetched_at >= $2" in seen["query"]
+    assert "fetched_at <= $3" in seen["query"]
+
+
+def test_iter_tournament_leaderboard_history_swallows_missing_table(monkeypatch):
+    """A fresh DB without the migration must yield nothing rather than
+    raising — the backtest harness should fall back to seed-time
+    ratings instead of crashing the whole replay run."""
+    from contextlib import asynccontextmanager
+
+    from app.feeds import sportradar as sr
+    from app import db as db_mod
+
+    @asynccontextmanager
+    async def boom_acquire():
+        raise RuntimeError("relation does not exist")
+        yield  # pragma: no cover
+
+    monkeypatch.setattr(db_mod, "acquire", boom_acquire)
+
+    async def collect():
+        return [snap async for snap in sr.iter_tournament_leaderboard_history(
+            "sr:tournament:pga-1",
+        )]
+
+    assert asyncio.run(collect()) == []
+
+
+def test_iter_tournament_leaderboard_history_rejects_empty_event_id():
+    """Defensive: an empty ``event_id`` short-circuits to no snapshots
+    without touching the DB so a buggy caller can't blow up replay."""
+    from app.feeds import sportradar as sr
+
+    async def collect():
+        return [snap async for snap in sr.iter_tournament_leaderboard_history("")]
+
+    assert asyncio.run(collect()) == []
+
+
+def test_iter_tournament_leaderboard_history_skips_thin_snapshots(monkeypatch):
+    """If a stored snapshot only carries one named entrant (which the
+    live path wouldn't have written, but a partial backfill could)
+    the helper must skip it — Plackett-Luce on a 1-entry field is
+    degenerate."""
+    from contextlib import asynccontextmanager
+    from datetime import datetime, timezone
+
+    from app.feeds import sportradar as sr
+    from app import db as db_mod
+
+    t1 = datetime(2026, 4, 26, 12, 0, tzinfo=timezone.utc)
+    t2 = datetime(2026, 4, 26, 12, 5, tzinfo=timezone.utc)
+    canned_rows = [
+        {"position": 1, "name": "Rahm", "fetched_at": t1},  # thin
+        {"position": 1, "name": "Rahm", "fetched_at": t2},
+        {"position": 2, "name": "Scheffler", "fetched_at": t2},
+    ]
+
+    class _Conn:
+        async def fetch(self, query, *args):
+            return canned_rows
+
+    @asynccontextmanager
+    async def fake_acquire():
+        yield _Conn()
+
+    monkeypatch.setattr(db_mod, "acquire", fake_acquire)
+
+    async def collect():
+        return [snap async for snap in sr.iter_tournament_leaderboard_history(
+            "sr:tournament:pga-1",
+        )]
+
+    snaps = asyncio.run(collect())
+    assert [ts for ts, _ in snaps] == [t2]
+    assert set(snaps[0][1]) == {"Rahm", "Scheffler"}
+
+
 def test_register_sportradar_extra_feeds_includes_leaderboards(monkeypatch):
     """The shared registration helper must surface the new
     cross-sport leaderboard feed exactly once, enabled when either

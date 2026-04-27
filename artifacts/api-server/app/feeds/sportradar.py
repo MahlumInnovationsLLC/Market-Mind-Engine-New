@@ -21,7 +21,7 @@ import logging
 import os
 import time
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, AsyncIterator
 
 import httpx
 
@@ -1457,6 +1457,94 @@ async def latest_tournament_leaderboard(
         }
         for r in rows
     ]
+
+
+async def iter_tournament_leaderboard_history(
+    event_id: str,
+    *,
+    since: datetime | None = None,
+    until: datetime | None = None,
+) -> AsyncIterator[tuple[datetime, dict[str, float]]]:
+    """Yield ``(fetched_at, {entrant: rating})`` for each stored snapshot
+    of ``event_id`` in chronological order (task #651).
+
+    Built on the ``sportradar_tournament_leaderboards`` table populated
+    by task #623.  Intended for the backtest harness: walking the saved
+    history lets the orchestrator re-price every minute of a past
+    tournament against the actual mid-event field — without touching
+    the in-memory ratings cache that serves the live pipeline (so a
+    backtest run cannot pollute live pricing).
+
+    Each snapshot's ratings are derived via
+    :func:`app.sports.ratings.derive_field_ratings_from_leaderboard`,
+    which is the same function the live refresh path uses, so a saved
+    snapshot reproduces exactly the ratings the live cache held the
+    moment it was written.  The resulting dict plugs straight into
+    :func:`app.predictor_n_way.plackett_luce_from_mapping` to recover
+    the probabilities the orchestrator priced off at the time.
+
+    ``since`` / ``until`` are inclusive bounds on ``fetched_at``;
+    either may be ``None`` to leave that side open so callers can
+    replay an entire tournament or a narrow window equally.
+
+    Snapshots whose entries are too thin to drive Plackett-Luce
+    (<2 named entrants after derivation) are skipped — they were
+    never written by the live path either, but a defensive filter
+    keeps a partial backfill from yielding degenerate fields.
+
+    Yields nothing when the event has no stored history (or when the
+    table doesn't exist yet on a fresh dev DB) so the harness can
+    fall back to seed-time ratings without an exception.
+    """
+    if not event_id:
+        return
+    from ..sports import derive_field_ratings_from_leaderboard
+
+    bounds_sql_parts: list[str] = []
+    args: list[Any] = [str(event_id)]
+    if since is not None:
+        args.append(since)
+        bounds_sql_parts.append(f"AND fetched_at >= ${len(args)}")
+    if until is not None:
+        args.append(until)
+        bounds_sql_parts.append(f"AND fetched_at <= ${len(args)}")
+    bounds_sql = " ".join(bounds_sql_parts)
+    try:
+        async with db.acquire() as conn:
+            rows = await conn.fetch(
+                f"""
+                SELECT position, name, fetched_at
+                  FROM sportradar_tournament_leaderboards
+                 WHERE event_id = $1
+                 {bounds_sql}
+                 ORDER BY fetched_at ASC, position NULLS LAST, name
+                """,
+                *args,
+            )
+    except Exception as e:  # noqa: BLE001
+        log.info(
+            "sportradar leaderboard %s history walk skipped (%s)",
+            event_id, e,
+        )
+        return
+
+    current_ts: datetime | None = None
+    current_entries: list[dict[str, Any]] = []
+    for r in rows:
+        ts = r["fetched_at"]
+        if current_ts is not None and ts != current_ts:
+            ratings = derive_field_ratings_from_leaderboard(current_entries)
+            if len(ratings) >= 2:
+                yield current_ts, ratings
+            current_entries = []
+        current_ts = ts
+        current_entries.append(
+            {"position": r["position"], "name": r["name"]}
+        )
+    if current_ts is not None and current_entries:
+        ratings = derive_field_ratings_from_leaderboard(current_entries)
+        if len(ratings) >= 2:
+            yield current_ts, ratings
 
 
 async def _refresh_pga_leaderboard(api_key: str, tournament_id: str) -> int:
