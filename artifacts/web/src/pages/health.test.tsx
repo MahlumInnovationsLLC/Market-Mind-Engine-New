@@ -1,5 +1,5 @@
-import { describe, it, expect, afterEach, vi } from "vitest";
-import { cleanup, render, screen } from "@testing-library/react";
+import { describe, it, expect, afterEach, vi, beforeEach } from "vitest";
+import { cleanup, render, screen, waitFor } from "@testing-library/react";
 
 // `CardTile` calls `useGetMyAccess()` and `useAuth()` internally to decide
 // whether to show admin-only "Poll now" controls. The badge/cluster/freshness
@@ -14,9 +14,35 @@ vi.mock("@workspace/api-client-react", () => ({
   useGetMyAccess: () => ({ data: undefined, isLoading: false, error: null }),
 }));
 
+// `CryptoAccuracyPanel` calls `apiFetch` directly inside a `useEffect` to
+// load the rollup. The other tests in this file render pure presentation
+// components and never trigger the fetch, so a hoisted top-level mock is
+// safe and stays out of their way.
+const { apiFetchMock } = vi.hoisted(() => ({
+  apiFetchMock: vi.fn(),
+}));
+
+vi.mock("@/lib/api", () => ({
+  apiFetch: apiFetchMock,
+  ApiError: class ApiError extends Error {
+    status: number;
+    constructor(status: number, message: string) {
+      super(message);
+      this.status = status;
+    }
+  },
+  formatErrorMessage: (e: unknown, fallback?: string) =>
+    fallback ?? (e instanceof Error ? e.message : String(e)),
+}));
+
 // We render CardTile directly so the test only depends on the badge
 // rendering logic, not the full /system page (auth, fetch, polling).
-import { CardTile, CryptoFreshnessWidget, CryptoOutcomeBadge } from "./health";
+import {
+  CardTile,
+  CryptoAccuracyPanel,
+  CryptoFreshnessWidget,
+  CryptoOutcomeBadge,
+} from "./health";
 
 afterEach(() => cleanup());
 
@@ -1066,3 +1092,134 @@ describe("Tournament leaderboard refresh (rendered via CardTile)", () => {
   });
 });
 
+
+describe("CryptoAccuracyPanel", () => {
+  beforeEach(() => {
+    apiFetchMock.mockReset();
+  });
+
+  // Stub `setInterval` so the polling timer doesn't keep the test
+  // event loop alive after the assertions land. The hoisted
+  // `vi.useFakeTimers()` would also work but interferes with
+  // testing-library's microtask flushing.
+  it("renders both rolling-window cards with brier and hit rate", async () => {
+    apiFetchMock.mockResolvedValueOnce({
+      league: "CRYPTO",
+      windows: [
+        {
+          window_hours: 24,
+          n_settled: 12,
+          n_scored: 10,
+          n_void: 2,
+          brier: 0.1875,
+          hit_rate: 0.6,
+        },
+        {
+          window_hours: 24 * 7,
+          n_settled: 80,
+          n_scored: 75,
+          n_void: 5,
+          brier: 0.2234,
+          hit_rate: 0.5466,
+        },
+      ],
+    });
+
+    const token = vi.fn(async () => null);
+    render(<CryptoAccuracyPanel token={token} />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("crypto-accuracy-window-24h")).toBeTruthy();
+    });
+
+    // 24h card.
+    expect(
+      screen.getByTestId("crypto-accuracy-window-24h-brier").textContent,
+    ).toBe("0.1875");
+    expect(
+      screen.getByTestId("crypto-accuracy-window-24h-hit-rate").textContent,
+    ).toBe("60.0%");
+    expect(
+      screen.getByTestId("crypto-accuracy-window-24h-counts").textContent,
+    ).toMatch(/scored 10/);
+    expect(
+      screen.getByTestId("crypto-accuracy-window-24h-counts").textContent,
+    ).toMatch(/void 2/);
+
+    // 7d card label collapses to "7d" rather than "168h".
+    const week = screen.getByTestId("crypto-accuracy-window-168h");
+    expect(week.textContent).toMatch(/last 7d/);
+    expect(
+      screen.getByTestId("crypto-accuracy-window-168h-brier").textContent,
+    ).toBe("0.2234");
+    expect(
+      screen.getByTestId("crypto-accuracy-window-168h-hit-rate").textContent,
+    ).toBe("54.7%");
+
+    // The endpoint we hit is the operator-console rollup.
+    expect(apiFetchMock.mock.calls[0]?.[0]).toBe(
+      "/api/dashboard/crypto-accuracy",
+    );
+  });
+
+  it("renders an em-dash placeholder when a window has no scored rows", async () => {
+    apiFetchMock.mockResolvedValueOnce({
+      league: "CRYPTO",
+      windows: [
+        {
+          window_hours: 24,
+          n_settled: 0,
+          n_scored: 0,
+          n_void: 0,
+          brier: null,
+          hit_rate: null,
+        },
+        {
+          // All four 7d-window rows voided → still scoreless. Brier/
+          // hit_rate must render as "—" rather than 0.0000 / 0.0%, which
+          // would mislead the operator into thinking the model nailed
+          // every prediction.
+          window_hours: 24 * 7,
+          n_settled: 4,
+          n_scored: 0,
+          n_void: 4,
+          brier: null,
+          hit_rate: null,
+        },
+      ],
+    });
+
+    render(<CryptoAccuracyPanel token={vi.fn(async () => null)} />);
+
+    await waitFor(() => {
+      expect(
+        screen.getByTestId("crypto-accuracy-window-24h-brier").textContent,
+      ).toBe("—");
+    });
+    expect(
+      screen.getByTestId("crypto-accuracy-window-24h-hit-rate").textContent,
+    ).toBe("—");
+    expect(
+      screen.getByTestId("crypto-accuracy-window-168h-brier").textContent,
+    ).toBe("—");
+    expect(
+      screen.getByTestId("crypto-accuracy-window-168h-hit-rate").textContent,
+    ).toBe("—");
+  });
+
+  it("surfaces a rollup-fetch error without blanking the panel chrome", async () => {
+    apiFetchMock.mockRejectedValueOnce(new Error("network down"));
+
+    render(<CryptoAccuracyPanel token={vi.fn(async () => null)} />);
+
+    await waitFor(() => {
+      expect(screen.getByText(/network down/)).toBeTruthy();
+    });
+    // Panel chrome (heading + section) is still present so the
+    // operator can see the panel is alive even when the rollup
+    // fetch fails — they just see the error message instead of the
+    // window cards.
+    expect(screen.getByTestId("panel-crypto-accuracy")).toBeTruthy();
+    expect(screen.queryByTestId("crypto-accuracy-window-24h")).toBeNull();
+  });
+});

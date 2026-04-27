@@ -4988,6 +4988,29 @@ async def dashboard_vertical_performance(
     return await dashboard.get_vertical_performance(days)
 
 
+@app.get("/api/dashboard/crypto-accuracy")
+async def dashboard_crypto_accuracy(
+    _: object = Depends(require_approved_user),
+) -> dict[str, object]:
+    """Operator-console rollup of realised crypto-market accuracy.
+
+    Computes Brier / hit-rate over 24h and 7d windows from the
+    Kalshi crypto-binary ``predictions`` rows the
+    ``app.feeds.kalshi_crypto_markets`` settler stamps with
+    ``outcome`` / ``settle_price`` (migration
+    ``0022_predictions_settlement``). Voids are excluded from
+    scoring but counted under ``n_void`` for coverage.
+
+    Sibling to the operator candidates feed
+    ``/api/feeds/kalshi-crypto-candidates``: candidates show what is
+    in flight; this endpoint shows how those bets actually realised.
+    The deeper per-symbol/per-timeframe report (with model-vs-market
+    log-loss) lives behind the admin endpoint
+    ``/api/admin/crypto/accuracy``.
+    """
+    return await dashboard.get_crypto_accuracy_rollup()
+
+
 @app.get("/api/dashboard/verticals")
 async def dashboard_verticals_overview(
     days: int = 7, _: object = Depends(require_approved_user)

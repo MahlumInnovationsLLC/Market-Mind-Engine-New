@@ -129,6 +129,10 @@ PROTECTED_ROUTES: tuple[str, ...] = (
     "/api/admin/verticals/halts",
     "/api/dashboard/verticals",
     "/api/dashboard/vertical-visibility",
+    # Task #644 — operator-console rollup of realised crypto-market
+    # accuracy (brier / hit rate over 24h + 7d) computed from the
+    # ``predictions.outcome`` / ``settle_price`` columns.
+    "/api/dashboard/crypto-accuracy",
     "/api/admin/models",
     "/api/admin/models/mirror/status",
     # Task #181 — operator-only crypto-binary backtest panel.

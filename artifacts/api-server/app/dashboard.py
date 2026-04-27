@@ -2158,6 +2158,134 @@ async def get_vertical_performance(days: int = 30) -> dict[str, Any]:
     return {"days": days, "verticals": out}
 
 
+# Rolling windows surfaced by the operator-facing crypto accuracy
+# rollup.  Hours so the SQL ``make_interval(hours => $1)`` clause stays
+# uniform across windows.
+_CRYPTO_ACCURACY_WINDOWS_HOURS: tuple[int, ...] = (24, 24 * 7)
+
+
+async def _crypto_accuracy_window(window_hours: int) -> dict[str, Any]:
+    """Compute the realised-accuracy rollup for one rolling window.
+
+    The Kalshi crypto producer (see ``app.feeds.kalshi_crypto_markets``)
+    upserts each live binary market into ``predictions`` with the
+    market mid in ``kalshi_price`` and — once the
+    ``kalshi_crypto_settlements`` settler observes Kalshi's resolution
+    — stamps ``outcome`` / ``settle_price`` / ``settled_at`` per
+    migration ``0022_predictions_settlement``.
+
+    For each settled (non-void) row in the window we treat
+    ``kalshi_price`` as the predicted YES probability and join it
+    against ``settle_price`` (1.0 / 0.0) to produce a Brier score and
+    hit rate.  Voids are excluded from scoring (they refund every
+    contract) but counted separately so the operator can see
+    coverage.
+
+    Returns ``brier`` / ``hit_rate`` as ``None`` when no scorable rows
+    exist so the panel can render a clear "no data" state instead of
+    a misleading 0.0.
+    """
+    empty: dict[str, Any] = {
+        "window_hours": int(window_hours),
+        "n_settled": 0,
+        "n_scored": 0,
+        "n_void": 0,
+        "brier": None,
+        "hit_rate": None,
+    }
+    try:
+        row = await db.fetchrow(
+            """
+            SELECT
+              count(*) FILTER (
+                WHERE settled_at IS NOT NULL
+              )::int                                                  AS n_settled,
+              count(*) FILTER (
+                WHERE settled_at IS NOT NULL
+                  AND lower(coalesce(outcome, '')) = 'void'
+              )::int                                                  AS n_void,
+              count(*) FILTER (
+                WHERE settled_at IS NOT NULL
+                  AND settle_price IS NOT NULL
+                  AND kalshi_price IS NOT NULL
+                  AND lower(coalesce(outcome, '')) IN ('yes', 'no')
+              )::int                                                  AS n_scored,
+              avg(power(kalshi_price - settle_price, 2)) FILTER (
+                WHERE settled_at IS NOT NULL
+                  AND settle_price IS NOT NULL
+                  AND kalshi_price IS NOT NULL
+                  AND lower(coalesce(outcome, '')) IN ('yes', 'no')
+              )::float                                                AS brier,
+              avg(
+                CASE
+                  WHEN (kalshi_price >= 0.5) = (settle_price >= 0.5)
+                    THEN 1.0
+                  ELSE 0.0
+                END
+              ) FILTER (
+                WHERE settled_at IS NOT NULL
+                  AND settle_price IS NOT NULL
+                  AND kalshi_price IS NOT NULL
+                  AND lower(coalesce(outcome, '')) IN ('yes', 'no')
+              )::float                                                AS hit_rate
+              FROM predictions
+             WHERE league = 'CRYPTO'
+               AND settled_at >= now() - make_interval(hours => $1)
+            """,
+            int(window_hours),
+        )
+    except Exception as e:  # noqa: BLE001 — defensive
+        # Soft-fail: a transient DB blip or a fork without the
+        # settlement migration shouldn't blank the operator panel.
+        log.warning(
+            "crypto_accuracy window=%sh failed: %s", window_hours, e,
+        )
+        return empty
+    if row is None:
+        return empty
+    return {
+        "window_hours": int(window_hours),
+        "n_settled": int(row["n_settled"] or 0),
+        "n_scored": int(row["n_scored"] or 0),
+        "n_void": int(row["n_void"] or 0),
+        "brier": float(row["brier"]) if row["brier"] is not None else None,
+        "hit_rate": (
+            float(row["hit_rate"]) if row["hit_rate"] is not None else None
+        ),
+    }
+
+
+async def get_crypto_accuracy_rollup() -> dict[str, Any]:
+    """Operator-console rollup of realised crypto-market accuracy.
+
+    Computes a small Brier / hit-rate summary against the Kalshi
+    crypto-binary predictions the
+    ``app.feeds.kalshi_crypto_markets`` settler has stamped with
+    ``outcome`` / ``settle_price`` (migration
+    ``0022_predictions_settlement``).  Two rolling windows are
+    surfaced — 24h and 7d — so the operator can spot drift between
+    short-horizon noise and the steady-state signal without leaving
+    the operator console.
+
+    The predicted YES probability is ``predictions.kalshi_price`` (the
+    market mid the producer wrote when the candidate was discovered),
+    matching the rollup the task #644 spec called for: a brier score
+    on ``kalshi_price`` vs ``settle_price`` plus a hit rate.  The
+    deeper, model-vs-market joined report (with per-symbol slices and
+    log-loss) lives behind the admin endpoint
+    ``/api/admin/crypto/accuracy`` (see
+    ``app.crypto.accuracy_report``); this rollup is intentionally
+    lightweight and operator-visible.
+
+    Each window is computed independently so a single failed query
+    only nulls out one card rather than blanking the panel.
+    """
+    windows = []
+    for hours in _CRYPTO_ACCURACY_WINDOWS_HOURS:
+        windows.append(await _crypto_accuracy_window(hours))
+    return {"league": "CRYPTO", "windows": windows}
+
+
 async def get_recent_uw_signals(
     limit: int = 20,
     since_hours: int = 24,

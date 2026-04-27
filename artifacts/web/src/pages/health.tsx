@@ -425,6 +425,8 @@ export function HealthPanel() {
 
         <KalshiCryptoCandidatesPanel token={token} />
 
+        <CryptoAccuracyPanel token={token} />
+
 
         <section className="space-y-3">
           <div className="flex items-baseline justify-between gap-3 flex-wrap">
@@ -1735,6 +1737,166 @@ export function CardTile({ card }: { card: Card }) {
         {card.latency_ms !== null && <span>{card.latency_ms}ms</span>}
       </div>
     </div>
+  );
+}
+
+type CryptoAccuracyWindow = {
+  window_hours: number;
+  n_settled: number;
+  n_scored: number;
+  n_void: number;
+  brier: number | null;
+  hit_rate: number | null;
+};
+
+type CryptoAccuracyResponse = {
+  league: string;
+  windows: CryptoAccuracyWindow[];
+};
+
+function fmtBrier(v: number | null): string {
+  if (v === null || v === undefined || Number.isNaN(v)) return "—";
+  return v.toFixed(4);
+}
+
+function fmtHitRate(v: number | null): string {
+  if (v === null || v === undefined || Number.isNaN(v)) return "—";
+  return `${(v * 100).toFixed(1)}%`;
+}
+
+function windowLabel(hours: number): string {
+  if (hours <= 0) return `${hours}h`;
+  if (hours % 24 === 0) {
+    const days = hours / 24;
+    return days === 1 ? "24h" : `${days}d`;
+  }
+  return `${hours}h`;
+}
+
+export function CryptoAccuracyPanel({
+  token,
+}: {
+  token: () => Promise<string | null>;
+}) {
+  const [data, setData] = useState<CryptoAccuracyResponse | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    async function load() {
+      try {
+        const res = await apiFetch<CryptoAccuracyResponse>(
+          "/api/dashboard/crypto-accuracy",
+          { getToken: token },
+        );
+        if (cancelled) return;
+        setData(res);
+        setError(null);
+      } catch (e: unknown) {
+        if (cancelled) return;
+        setError(
+          formatErrorMessage(
+            e,
+            e instanceof ApiError ? `HTTP ${e.status} :: ${e.message}` : undefined,
+          ),
+        );
+      }
+    }
+    load();
+    // 60s cadence: realised accuracy moves only as new markets settle,
+    // so the higher-frequency 15s candidates panel is enough live data.
+    const id = setInterval(load, 60_000);
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+    };
+  }, [token]);
+
+  const windows = data?.windows ?? [];
+
+  return (
+    <section
+      className="space-y-3"
+      data-testid="panel-crypto-accuracy"
+    >
+      <div className="flex items-baseline justify-between gap-3 flex-wrap">
+        <h2 className="text-sm uppercase tracking-widest text-muted-foreground">
+          Crypto realised accuracy
+        </h2>
+        <span className="text-[10px] uppercase tracking-widest text-muted-foreground/70">
+          source :: predictions.kalshi_price vs settle_price · auto-refreshes every 60s
+        </span>
+      </div>
+      <p className="text-[11px] text-muted-foreground">
+        Brier score and hit rate for settled Kalshi crypto-binary
+        markets, scoring the market mid the producer recorded
+        (<code>kalshi_price</code>) against the realised
+        <code> settle_price</code> the settler stamped. Voids
+        refund every contract and are excluded from scoring but
+        counted under <code>void</code> for coverage.
+      </p>
+      {error && (
+        <div className="border border-destructive bg-destructive/10 text-destructive p-2 text-xs">
+          {error}
+        </div>
+      )}
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+        {windows.length === 0 && !error && (
+          <div
+            className="border border-border bg-card p-3 text-xs text-muted-foreground sm:col-span-2"
+            data-testid="crypto-accuracy-empty"
+          >
+            no settled crypto predictions in the rolling windows
+          </div>
+        )}
+        {windows.map((w) => {
+          const label = windowLabel(w.window_hours);
+          return (
+            <div
+              key={w.window_hours}
+              className="border border-border bg-card p-3 space-y-2"
+              data-testid={`crypto-accuracy-window-${w.window_hours}h`}
+            >
+              <div className="flex items-baseline justify-between gap-2">
+                <span className="text-[11px] uppercase tracking-widest text-muted-foreground">
+                  last {label}
+                </span>
+                <span
+                  className="text-[10px] uppercase tracking-widest text-muted-foreground/70"
+                  data-testid={`crypto-accuracy-window-${w.window_hours}h-counts`}
+                >
+                  scored {w.n_scored} · settled {w.n_settled} · void {w.n_void}
+                </span>
+              </div>
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <div className="text-[10px] uppercase tracking-widest text-muted-foreground">
+                    brier
+                  </div>
+                  <div
+                    className="text-lg font-bold tabular-nums"
+                    data-testid={`crypto-accuracy-window-${w.window_hours}h-brier`}
+                  >
+                    {fmtBrier(w.brier)}
+                  </div>
+                </div>
+                <div>
+                  <div className="text-[10px] uppercase tracking-widest text-muted-foreground">
+                    hit rate
+                  </div>
+                  <div
+                    className="text-lg font-bold tabular-nums"
+                    data-testid={`crypto-accuracy-window-${w.window_hours}h-hit-rate`}
+                  >
+                    {fmtHitRate(w.hit_rate)}
+                  </div>
+                </div>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </section>
   );
 }
 
