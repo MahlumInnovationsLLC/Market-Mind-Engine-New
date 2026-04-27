@@ -179,7 +179,14 @@ def _candidate_from_market(market: dict[str, Any]) -> dict[str, Any] | None:
         "kalshi_market_id": ticker,
         "kalshi_price": price,
         "game_time": close_time,
-        "game_context": {
+        # Persisted into ``predictions.metadata`` (jsonb).  Earlier
+        # revisions of this feed wrote into a ``game_context`` column
+        # that doesn't exist on the predictions table — every upsert
+        # silently raised ``column "game_context" ... does not exist``
+        # in the per-row defensive ``except``, which manifested as
+        # zero crypto candidates ever reaching the orchestrator.
+        # Renaming to the actual column unblocks the BTC/ETH cycle.
+        "metadata": {
             "kalshi_market_id": ticker,
             "kalshi_price": price,
             "symbol": parsed.symbol,
@@ -200,17 +207,22 @@ def _candidate_from_market(market: dict[str, Any]) -> dict[str, Any] | None:
 # --- Persistence -------------------------------------------------------------
 
 
+# NB: predictions has ``metadata`` (jsonb default '{}'), NO
+# ``game_context`` and NO ``updated_at`` column.  The previous version
+# of this UPSERT referenced both — every poll silently raised inside
+# the per-row ``except`` and the crypto-binary cycle saw zero
+# candidates.  See ``_candidate_from_market`` for the matching dict
+# rename.
 _UPSERT_SQL = """
 INSERT INTO predictions
-       (game_id, league, kalshi_market_id, kalshi_price, game_time, game_context)
+       (game_id, league, kalshi_market_id, kalshi_price, game_time, metadata)
 VALUES ($1, $2, $3, $4, $5, $6::jsonb)
 ON CONFLICT (kalshi_market_id) WHERE kalshi_market_id IS NOT NULL
 DO UPDATE SET
     league       = EXCLUDED.league,
     kalshi_price = EXCLUDED.kalshi_price,
     game_time    = EXCLUDED.game_time,
-    game_context = EXCLUDED.game_context,
-    updated_at   = now();
+    metadata     = EXCLUDED.metadata;
 """
 
 
@@ -222,9 +234,20 @@ async def _upsert_candidates(rows: Iterable[dict[str, Any]]) -> int:
     off with N-1 valid candidates than zero.
     """
     import json as _json
+    from datetime import timezone as _tz
 
     n = 0
     for row in rows:
+        # ``predictions.game_time`` is ``timestamp WITHOUT time zone``
+        # (per the migrations), but Kalshi gives us tz-aware close
+        # times.  asyncpg refuses to bind a tz-aware datetime to a
+        # naive column ("can't subtract offset-naive and offset-aware
+        # datetimes") and the row is silently dropped in the
+        # per-row ``except`` below.  Normalize to naive UTC at the
+        # bind boundary so the producer's row dict can stay tz-aware.
+        gt = row.get("game_time")
+        if gt is not None and getattr(gt, "tzinfo", None) is not None:
+            gt = gt.astimezone(_tz.utc).replace(tzinfo=None)
         try:
             await db.execute(
                 _UPSERT_SQL,
@@ -232,8 +255,8 @@ async def _upsert_candidates(rows: Iterable[dict[str, Any]]) -> int:
                 row["league"],
                 row["kalshi_market_id"],
                 row.get("kalshi_price"),
-                row.get("game_time"),
-                _json.dumps(row.get("game_context") or {}),
+                gt,
+                _json.dumps(row.get("metadata") or {}),
             )
             n += 1
         except Exception as e:  # noqa: BLE001

@@ -159,7 +159,7 @@ class _FakeDB:
                     continue
                 if p.get("settled_at") is None:
                     continue
-                ctx = p.get("game_context") or {}
+                ctx = p.get("metadata") or {}
                 out.append({
                     "prediction_id": p["id"],
                     "market_id": p.get("kalshi_market_id"),
@@ -418,7 +418,7 @@ def test_evaluate_window_reads_inline_model_yes_prob(
         outcome="yes",
         settle_price=1.0,
         model_yes_prob=0.8,
-        game_context={"symbol": "BTC", "timeframe": "1h"},
+        metadata={"symbol": "BTC", "timeframe": "1h"},
     )
     rep = asyncio.run(accuracy_report.evaluate_window(24))
     assert rep.n_settled == 1

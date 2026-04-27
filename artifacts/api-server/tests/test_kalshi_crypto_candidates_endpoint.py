@@ -57,8 +57,8 @@ def test_handler_returns_count_and_items(monkeypatch):
             "kalshi_market_id": "KXBTCD-26APR15-T68000",
             "kalshi_price": 0.42,
             "game_time": close,
-            "game_context": {"symbol": "BTC", "title": "BTC above 68000?"},
-            "updated_at": updated,
+            "metadata": {"symbol": "BTC", "title": "BTC above 68000?"},
+            "created_at": updated,
             # Settled YES — should round-trip with iso timestamp,
             # outcome label, and 1.0 settle_price.
             "settled_at": settled,
@@ -69,8 +69,8 @@ def test_handler_returns_count_and_items(monkeypatch):
             "kalshi_market_id": "KXETHD-26APR15-T3500",
             "kalshi_price": None,
             "game_time": None,
-            "game_context": json.dumps({"symbol": "ETH"}),
-            "updated_at": updated,
+            "metadata": json.dumps({"symbol": "ETH"}),
+            "created_at": updated,
             # Still in flight: all three settlement fields are NULL.
             "settled_at": None,
             "outcome": None,
@@ -79,7 +79,7 @@ def test_handler_returns_count_and_items(monkeypatch):
     ]
 
     async def fake_fetch(sql: str, *args: Any) -> list[dict[str, Any]]:
-        assert "ORDER BY updated_at" in sql
+        assert "ORDER BY created_at" in sql
         # The endpoint must ask for the settlement triplet so the
         # operator console can render realised outcomes.
         assert "settled_at" in sql
@@ -204,8 +204,8 @@ def test_handler_tolerates_missing_settled_rollup_query(monkeypatch):
                 "kalshi_market_id": "KXBTCD-26APR15-T68000",
                 "kalshi_price": 0.5,
                 "game_time": close,
-                "game_context": {"symbol": "BTC"},
-                "updated_at": close,
+                "metadata": {"symbol": "BTC"},
+                "created_at": close,
                 "settled_at": None,
                 "outcome": None,
                 "settle_price": None,

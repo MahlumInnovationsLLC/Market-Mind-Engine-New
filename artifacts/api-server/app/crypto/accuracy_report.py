@@ -78,8 +78,13 @@ SELECT
     p.outcome                              AS outcome,
     p.settle_price                         AS settle_price,
     p.settled_at                           AS settled_at,
-    coalesce(p.game_context->>'symbol', '')    AS symbol,
-    coalesce(p.game_context->>'timeframe', '') AS timeframe,
+    -- Provenance (``symbol`` / ``timeframe``) lives inline in the
+    -- ``predictions.metadata`` jsonb column written by the kalshi
+    -- crypto producer.  An earlier revision read a non-existent
+    -- column name here and silently returned empty strings, so the
+    -- whole report collapsed into the no-slice overall bucket.
+    coalesce(p.metadata->>'symbol', '')    AS symbol,
+    coalesce(p.metadata->>'timeframe', '') AS timeframe,
     p.model_yes_prob                       AS p_yes
   FROM predictions p
  WHERE p.league = $1

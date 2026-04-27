@@ -56,7 +56,7 @@ def test_candidate_from_market_builds_full_payload():
     assert cand["kalshi_market_id"] == "KXBTCD-26APR15-T68000"
     assert cand["kalshi_price"] == pytest.approx(0.42)
     assert cand["game_time"] == datetime(2026, 4, 15, 20, 0, tzinfo=timezone.utc)
-    ctx = cand["game_context"]
+    ctx = cand["metadata"]
     assert ctx["symbol"] == "BTC"
     assert ctx["source"] == "kalshi_crypto_markets"
     assert ctx["title"] == "BTC closes above 68000?"
@@ -77,7 +77,7 @@ def test_upsert_candidates_executes_one_statement_per_row(monkeypatch):
             "kalshi_market_id": "KXBTCD-1",
             "kalshi_price": 0.42,
             "game_time": datetime(2026, 4, 15, 20, 0, tzinfo=timezone.utc),
-            "game_context": {"symbol": "BTC"},
+            "metadata": {"symbol": "BTC"},
         },
         {
             "game_id": "KXETHD-1",
@@ -85,7 +85,7 @@ def test_upsert_candidates_executes_one_statement_per_row(monkeypatch):
             "kalshi_market_id": "KXETHD-1",
             "kalshi_price": 0.55,
             "game_time": None,
-            "game_context": {"symbol": "ETH"},
+            "metadata": {"symbol": "ETH"},
         },
     ]
     n = asyncio.run(kcm._upsert_candidates(rows))
@@ -94,7 +94,7 @@ def test_upsert_candidates_executes_one_statement_per_row(monkeypatch):
     sql, args = calls[0]
     assert "INSERT INTO predictions" in sql
     assert "ON CONFLICT (kalshi_market_id)" in sql
-    # game_context arrives as a JSON-encoded string ($6::jsonb in SQL).
+    # metadata arrives as a JSON-encoded string ($6::jsonb in SQL).
     assert json.loads(args[5]) == {"symbol": "BTC"}
 
 
@@ -110,10 +110,10 @@ def test_upsert_continues_when_one_row_fails(monkeypatch):
     rows = [
         {"game_id": "KXBTCD-bad", "league": "CRYPTO",
          "kalshi_market_id": "KXBTCD-bad", "kalshi_price": 0.4,
-         "game_time": None, "game_context": {}},
+         "game_time": None, "metadata": {}},
         {"game_id": "KXBTCD-ok", "league": "CRYPTO",
          "kalshi_market_id": "KXBTCD-ok", "kalshi_price": 0.5,
-         "game_time": None, "game_context": {}},
+         "game_time": None, "metadata": {}},
     ]
     n = asyncio.run(kcm._upsert_candidates(rows))
     assert n == 1

@@ -77,6 +77,7 @@ from .feeds.kalshi_crypto_markets import (
     register_kalshi_crypto_markets_feed,
     register_kalshi_crypto_settlements_feed,
 )
+from .feeds.kalshi_sports_markets import register_kalshi_sports_markets_feed
 from .feeds.tech_evidence import register_tech_evidence_feeds
 from .feeds.election_polls import register_election_polls_feeds
 from .feeds.unusual_whales import register_unusual_whales_feeds
@@ -195,6 +196,16 @@ async def lifespan(_: FastAPI):
         except Exception as e:
             log.warning(
                 "kalshi_crypto_settlements feed registration failed: %s", e,
+            )
+        try:
+            # Sports analog of the crypto markets producer.  Without
+            # this the orchestrator's _candidate_predictions returns
+            # 0 rows for every sports vertical because nothing else
+            # writes Kalshi-keyed rows under NFL/NBA/MLB/NHL/etc.
+            register_kalshi_sports_markets_feed()
+        except Exception as e:
+            log.warning(
+                "kalshi_sports_markets feed registration failed: %s", e,
             )
         register_tech_evidence_feeds()
         try:
@@ -4519,15 +4530,15 @@ async def feeds_kalshi_crypto_candidates(
             SELECT kalshi_market_id,
                    kalshi_price,
                    game_time,
-                   game_context,
-                   updated_at,
+                   metadata,
+                   created_at,
                    settled_at,
                    outcome,
                    settle_price
               FROM predictions
              WHERE league = 'CRYPTO'
                AND kalshi_market_id IS NOT NULL
-             ORDER BY updated_at DESC NULLS LAST
+             ORDER BY created_at DESC NULLS LAST
              LIMIT $1
             """,
             n,
@@ -4547,7 +4558,13 @@ async def feeds_kalshi_crypto_candidates(
 
     items: list[dict[str, object]] = []
     for r in rows:
-        ctx_raw = r["game_context"]
+        # ``metadata`` is the actual jsonb column on ``predictions``
+        # (the producer writes provenance there).  An earlier version
+        # selected a non-existent ``game_context`` column and the
+        # outer ``except`` swallowed it, so this endpoint silently
+        # returned an empty list — see the kalshi producer fix for
+        # the full story.
+        ctx_raw = r["metadata"]
         if isinstance(ctx_raw, str):
             try:
                 ctx = json.loads(ctx_raw)
@@ -4577,9 +4594,17 @@ async def feeds_kalshi_crypto_candidates(
                 r["game_time"].isoformat()
                 if r["game_time"] is not None else None
             ),
+            # The response field is still named ``updated_at`` for
+            # backward-compatibility with existing dashboard clients,
+            # but the underlying ``predictions`` table only has
+            # ``created_at`` (the producer UPSERT does not touch a
+            # last-modified column).  For freshly-inserted rows the
+            # two are identical; for updates this drifts, but the
+            # operator console only uses the timestamp for ordering
+            # and "last seen" hints, so the precision is acceptable.
             "updated_at": (
-                r["updated_at"].isoformat()
-                if r["updated_at"] is not None else None
+                r["created_at"].isoformat()
+                if r["created_at"] is not None else None
             ),
             "settled_at": (
                 settled_at.isoformat()
