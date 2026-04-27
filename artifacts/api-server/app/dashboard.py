@@ -876,7 +876,12 @@ def _looks_like_iso_date(q: str) -> bool:
     return bool(_ISO_DATE_RE.match(q))
 
 
-async def search_global(q: str, limit: int = 10) -> dict[str, list[dict[str, Any]]]:
+async def search_global(
+    q: str,
+    limit: int = 10,
+    *,
+    include_admin: bool = False,
+) -> dict[str, list[dict[str, Any]]]:
     """Find trades / debates / cycles that match `q`.
 
     Spec: ticker (e.g. ``KXNFL-25SEP04SEAARI-SEA``), market id, or an
@@ -891,10 +896,23 @@ async def search_global(q: str, limit: int = 10) -> dict[str, list[dict[str, Any
 
     An ISO-date query restricts each table to that calendar day in UTC
     (``executed_at`` / ``created_at`` / ``started_at`` respectively).
+
+    When ``include_admin`` is True (caller is an admin) the response
+    also includes ``users`` (matches on ``app_users`` by email / display
+    name / clerk user id) and ``audit`` (matches on ``admin_audit_log``
+    by action / actor / target email, plus numeric id). Non-admin
+    callers always receive empty lists for those keys so the operator
+    palette can render them unconditionally.
     """
     q = (q or "").strip()
     if not q:
-        return {"trades": [], "debates": [], "cycles": []}
+        return {
+            "trades": [],
+            "debates": [],
+            "cycles": [],
+            "users": [],
+            "audit": [],
+        }
     limit = max(1, min(50, int(limit)))
 
     is_date = _looks_like_iso_date(q)
@@ -1016,7 +1034,110 @@ async def search_global(q: str, limit: int = 10) -> dict[str, list[dict[str, Any
     except Exception as e:
         log.warning("search cycles failed: %s", e)
 
-    return {"trades": trades, "debates": debates, "cycles": cycles}
+    users: list[dict[str, Any]] = []
+    audit: list[dict[str, Any]] = []
+
+    if include_admin:
+        # ------------------------------------------------------------------
+        # Admin-only sections: app_users + admin_audit_log. Operators
+        # without admin always get empty lists so the palette can render
+        # the sections unconditionally without leaking PII to non-admins.
+        # ------------------------------------------------------------------
+        try:
+            if is_date:
+                rows = await db.fetch(
+                    """
+                    SELECT clerk_user_id, email, display_name, approved,
+                           is_admin,
+                           to_char(last_seen_at, 'YYYY-MM-DD"T"HH24:MI:SSZ') AS last_seen_at
+                      FROM app_users
+                     WHERE last_seen_at::date = $1::date
+                     ORDER BY last_seen_at DESC NULLS LAST
+                     LIMIT $2
+                    """,
+                    q, limit,
+                )
+            else:
+                rows = await db.fetch(
+                    """
+                    SELECT clerk_user_id, email, display_name, approved,
+                           is_admin,
+                           to_char(last_seen_at, 'YYYY-MM-DD"T"HH24:MI:SSZ') AS last_seen_at
+                      FROM app_users
+                     WHERE clerk_user_id ILIKE $1
+                        OR coalesce(email, '') ILIKE $1
+                        OR coalesce(display_name, '') ILIKE $1
+                     ORDER BY last_seen_at DESC NULLS LAST
+                     LIMIT $2
+                    """,
+                    like, limit,
+                )
+            users = [dict(r) for r in rows]
+        except Exception as e:
+            log.warning("search users failed: %s", e)
+
+        try:
+            if is_date:
+                rows = await db.fetch(
+                    """
+                    SELECT id, action, actor_email, actor_user_id,
+                           target_email, target_user_id,
+                           to_char(created_at, 'YYYY-MM-DD"T"HH24:MI:SSZ') AS created_at
+                      FROM admin_audit_log
+                     WHERE created_at::date = $1::date
+                     ORDER BY created_at DESC NULLS LAST
+                     LIMIT $2
+                    """,
+                    q, limit,
+                )
+            elif q.isdigit():
+                # Numeric query: try the audit row id directly. Fall back
+                # to substring against the textual columns so the operator
+                # can still find a row by, say, an integer market id
+                # embedded in the action label.
+                rows = await db.fetch(
+                    """
+                    SELECT id, action, actor_email, actor_user_id,
+                           target_email, target_user_id,
+                           to_char(created_at, 'YYYY-MM-DD"T"HH24:MI:SSZ') AS created_at
+                      FROM admin_audit_log
+                     WHERE id = $1
+                        OR coalesce(action, '') ILIKE $2
+                        OR coalesce(actor_email, '') ILIKE $2
+                        OR coalesce(target_email, '') ILIKE $2
+                     ORDER BY created_at DESC NULLS LAST
+                     LIMIT $3
+                    """,
+                    int(q), like, limit,
+                )
+            else:
+                rows = await db.fetch(
+                    """
+                    SELECT id, action, actor_email, actor_user_id,
+                           target_email, target_user_id,
+                           to_char(created_at, 'YYYY-MM-DD"T"HH24:MI:SSZ') AS created_at
+                      FROM admin_audit_log
+                     WHERE coalesce(action, '') ILIKE $1
+                        OR coalesce(actor_email, '') ILIKE $1
+                        OR coalesce(target_email, '') ILIKE $1
+                        OR coalesce(actor_user_id, '') ILIKE $1
+                        OR coalesce(target_user_id, '') ILIKE $1
+                     ORDER BY created_at DESC NULLS LAST
+                     LIMIT $2
+                    """,
+                    like, limit,
+                )
+            audit = [dict(r) for r in rows]
+        except Exception as e:
+            log.warning("search audit failed: %s", e)
+
+    return {
+        "trades": trades,
+        "debates": debates,
+        "cycles": cycles,
+        "users": users,
+        "audit": audit,
+    }
 
 
 def _parse_iso_z(value: str | None) -> datetime | None:

@@ -22,10 +22,14 @@ class _FakeDB:
         trade_rows: list[dict[str, Any]] | None = None,
         debate_rows: list[dict[str, Any]] | None = None,
         cycle_rows: list[dict[str, Any]] | None = None,
+        user_rows: list[dict[str, Any]] | None = None,
+        audit_rows: list[dict[str, Any]] | None = None,
     ) -> None:
         self.trade_rows = trade_rows or []
         self.debate_rows = debate_rows or []
         self.cycle_rows = cycle_rows or []
+        self.user_rows = user_rows or []
+        self.audit_rows = audit_rows or []
         self.calls: list[tuple[str, tuple[Any, ...]]] = []
 
     async def fetch(self, query: str, *args: Any) -> list[dict[str, Any]]:
@@ -36,6 +40,10 @@ class _FakeDB:
             return self.debate_rows
         if "FROM trading_cycles" in query:
             return self.cycle_rows
+        if "FROM app_users" in query:
+            return self.user_rows
+        if "FROM admin_audit_log" in query:
+            return self.audit_rows
         return []
 
     async def fetchrow(self, query: str, *args: Any) -> Any:  # pragma: no cover
@@ -53,8 +61,30 @@ def test_empty_query_short_circuits(monkeypatch: pytest.MonkeyPatch) -> None:
     fake = _FakeDB()
     monkeypatch.setattr(dashboard, "db", fake)
     out = _run(dashboard.search_global("   "))
-    assert out == {"trades": [], "debates": [], "cycles": []}
+    assert out == {
+        "trades": [],
+        "debates": [],
+        "cycles": [],
+        "users": [],
+        "audit": [],
+    }
     # No SQL fired — short-circuited before touching the db.
+    assert fake.calls == []
+
+
+def test_empty_query_short_circuits_for_admin_too(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake = _FakeDB()
+    monkeypatch.setattr(dashboard, "db", fake)
+    out = _run(dashboard.search_global("   ", include_admin=True))
+    assert out == {
+        "trades": [],
+        "debates": [],
+        "cycles": [],
+        "users": [],
+        "audit": [],
+    }
     assert fake.calls == []
 
 
@@ -144,7 +174,120 @@ def test_empty_result_set_returns_empty_lists(monkeypatch: pytest.MonkeyPatch) -
     fake = _FakeDB()  # all empty
     monkeypatch.setattr(dashboard, "db", fake)
     out = _run(dashboard.search_global("nope-no-match"))
-    assert out == {"trades": [], "debates": [], "cycles": []}
+    assert out == {
+        "trades": [],
+        "debates": [],
+        "cycles": [],
+        "users": [],
+        "audit": [],
+    }
+
+
+def test_non_admin_caller_skips_user_and_audit_queries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Non-admin callers must never trigger app_users / admin_audit_log
+    scans, and the returned envelope must still expose the keys so the
+    palette can render them without conditional access."""
+    fake = _FakeDB(
+        user_rows=[{"clerk_user_id": "u1"}],  # would be returned if asked
+        audit_rows=[{"id": 1}],
+    )
+    monkeypatch.setattr(dashboard, "db", fake)
+
+    out = _run(dashboard.search_global("ops"))
+
+    queries = [c[0] for c in fake.calls]
+    assert not any("FROM app_users" in q for q in queries)
+    assert not any("FROM admin_audit_log" in q for q in queries)
+    assert out["users"] == []
+    assert out["audit"] == []
+
+
+def test_admin_caller_searches_users_by_substring(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    user = {
+        "clerk_user_id": "user_abc",
+        "email": "ops@example.com",
+        "display_name": "Ops",
+        "approved": True,
+        "is_admin": False,
+        "last_seen_at": "2026-04-24T12:00:00Z",
+    }
+    fake = _FakeDB(user_rows=[user])
+    monkeypatch.setattr(dashboard, "db", fake)
+
+    out = _run(dashboard.search_global("ops", limit=5, include_admin=True))
+
+    user_calls = [c for c in fake.calls if "FROM app_users" in c[0]]
+    assert user_calls, "expected an app_users query for admin caller"
+    q, args = user_calls[0]
+    assert "ILIKE" in q
+    assert "last_seen_at::date = $1::date" not in q
+    assert args[0] == "%ops%"
+    assert args[1] == 5
+    assert out["users"] == [user]
+
+
+def test_admin_caller_searches_audit_by_action_substring(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    entry = {
+        "id": 314,
+        "action": "set_approved",
+        "actor_email": "admin@example.com",
+        "actor_user_id": "user_admin",
+        "target_email": "ops@example.com",
+        "target_user_id": "user_ops",
+        "created_at": "2026-04-24T12:00:00Z",
+    }
+    fake = _FakeDB(audit_rows=[entry])
+    monkeypatch.setattr(dashboard, "db", fake)
+
+    out = _run(dashboard.search_global("set_approved", include_admin=True))
+
+    audit_calls = [c for c in fake.calls if "FROM admin_audit_log" in c[0]]
+    assert audit_calls
+    q, args = audit_calls[0]
+    assert "ILIKE" in q
+    assert args[0] == "%set_approved%"
+    assert out["audit"] == [entry]
+
+
+def test_admin_numeric_query_targets_audit_id_branch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake = _FakeDB(audit_rows=[{"id": 99, "action": "x"}])
+    monkeypatch.setattr(dashboard, "db", fake)
+
+    _run(dashboard.search_global("99", include_admin=True))
+
+    audit_calls = [c for c in fake.calls if "FROM admin_audit_log" in c[0]]
+    assert audit_calls
+    q, args = audit_calls[0]
+    assert "WHERE id = $1" in q
+    assert args[0] == 99  # coerced to int
+    assert args[1] == "%99%"  # textual fallback retains the substring
+
+
+def test_admin_iso_date_filters_users_and_audit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake = _FakeDB()
+    monkeypatch.setattr(dashboard, "db", fake)
+
+    _run(dashboard.search_global("2025-09-04", include_admin=True))
+
+    for table, col in (
+        ("FROM app_users", "last_seen_at"),
+        ("FROM admin_audit_log", "created_at"),
+    ):
+        matches = [c for c in fake.calls if table in c[0]]
+        assert matches, f"expected query against {table}"
+        q, args = matches[0]
+        assert f"{col}::date = $1::date" in q
+        assert args[0] == "2025-09-04"
 
 
 def test_limit_is_clamped(monkeypatch: pytest.MonkeyPatch) -> None:

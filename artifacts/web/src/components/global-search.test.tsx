@@ -77,6 +77,25 @@ beforeEach(() => {
           started_at: "2026-04-24T12:00:00Z",
         },
       ],
+      users: [
+        {
+          clerk_user_id: "user_abc|123",
+          email: "ops@example.com",
+          display_name: "Ops User",
+          approved: true,
+          is_admin: false,
+          last_seen_at: "2026-04-24T12:00:00Z",
+        },
+      ],
+      audit: [
+        {
+          id: 314,
+          action: "set_approved",
+          actor_email: "admin@example.com",
+          target_email: "ops@example.com",
+          created_at: "2026-04-24T12:00:00Z",
+        },
+      ],
     },
     isFetching: false,
   };
@@ -133,5 +152,33 @@ describe("GlobalSearch navigation targets", () => {
     fireEvent.click(item);
 
     expect(history[history.length - 1]).toBe("/app?focus=cycle-42");
+  });
+
+  it("routes user hits to /system?tab=users with the clerk_user_id encoded in the focus param", () => {
+    const { history } = renderSearch();
+    const input = screen.getByTestId("input-global-search");
+    fireEvent.change(input, { target: { value: "ops" } });
+
+    // Note the clerk id contains a `|` (the standard Clerk dev-mode
+    // separator) so we expect the focus value to be URL-encoded.
+    const item = screen.getByTestId("search-user-user_abc|123");
+    fireEvent.click(item);
+
+    expect(history[history.length - 1]).toBe(
+      `/system?tab=users&focus=${encodeURIComponent("user-user_abc|123")}`,
+    );
+  });
+
+  it("routes audit hits to /system?tab=audit with a focus param matching the audit row", () => {
+    const { history } = renderSearch();
+    const input = screen.getByTestId("input-global-search");
+    fireEvent.change(input, { target: { value: "set_approved" } });
+
+    const item = screen.getByTestId("search-audit-314");
+    fireEvent.click(item);
+
+    expect(history[history.length - 1]).toBe(
+      "/system?tab=audit&focus=audit-314",
+    );
   });
 });

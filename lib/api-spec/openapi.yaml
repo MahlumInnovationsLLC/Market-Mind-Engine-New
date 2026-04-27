@@ -1668,6 +1668,29 @@ components:
         completed_at: { type: string, nullable: true }
       required: [id]
 
+    SearchUserHit:
+      type: object
+      properties:
+        clerk_user_id: { type: string }
+        email: { type: string, nullable: true }
+        display_name: { type: string, nullable: true }
+        approved: { type: boolean, nullable: true }
+        is_admin: { type: boolean, nullable: true }
+        last_seen_at: { type: string, nullable: true }
+      required: [clerk_user_id]
+
+    SearchAuditHit:
+      type: object
+      properties:
+        id: { type: integer }
+        action: { type: string, nullable: true }
+        actor_email: { type: string, nullable: true }
+        actor_user_id: { type: string, nullable: true }
+        target_email: { type: string, nullable: true }
+        target_user_id: { type: string, nullable: true }
+        created_at: { type: string, nullable: true }
+      required: [id]
+
     SearchResults:
       type: object
       properties:
@@ -1680,7 +1703,20 @@ components:
         cycles:
           type: array
           items: { $ref: "#/components/schemas/SearchCycleHit" }
-      required: [trades, debates, cycles]
+        users:
+          type: array
+          description: >-
+            Admin-only matches against `app_users` (email / display name /
+            clerk user id). Always present; empty for non-admin callers.
+          items: { $ref: "#/components/schemas/SearchUserHit" }
+        audit:
+          type: array
+          description: >-
+            Admin-only matches against `admin_audit_log` (action /
+            actor / target email / numeric id). Always present; empty
+            for non-admin callers.
+          items: { $ref: "#/components/schemas/SearchAuditHit" }
+      required: [trades, debates, cycles, users, audit]
 
     StorageFile:
       type: object

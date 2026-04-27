@@ -685,10 +685,33 @@ export interface SearchCycleHit {
   completed_at?: string | null;
 }
 
+export interface SearchUserHit {
+  clerk_user_id: string;
+  email?: string | null;
+  display_name?: string | null;
+  approved?: boolean | null;
+  is_admin?: boolean | null;
+  last_seen_at?: string | null;
+}
+
+export interface SearchAuditHit {
+  id: number;
+  action?: string | null;
+  actor_email?: string | null;
+  actor_user_id?: string | null;
+  target_email?: string | null;
+  target_user_id?: string | null;
+  created_at?: string | null;
+}
+
 export interface SearchResults {
   trades: SearchTradeHit[];
   debates: SearchDebateHit[];
   cycles: SearchCycleHit[];
+  /** Admin-only matches against `app_users` (email / display name / clerk user id). Always present; empty for non-admin callers. */
+  users: SearchUserHit[];
+  /** Admin-only matches against `admin_audit_log` (action / actor / target email / numeric id). Always present; empty for non-admin callers. */
+  audit: SearchAuditHit[];
 }
 
 export interface StorageFile {

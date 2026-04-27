@@ -5,12 +5,18 @@
  * Axiom-Predict API — backend for the prediction-market trading platform.
  * OpenAPI spec version: 0.1.0
  */
+import type { SearchAuditHit } from "./searchAuditHit";
 import type { SearchCycleHit } from "./searchCycleHit";
 import type { SearchDebateHit } from "./searchDebateHit";
 import type { SearchTradeHit } from "./searchTradeHit";
+import type { SearchUserHit } from "./searchUserHit";
 
 export interface SearchResults {
   trades: SearchTradeHit[];
   debates: SearchDebateHit[];
   cycles: SearchCycleHit[];
+  /** Admin-only matches against `app_users` (email / display name / clerk user id). Always present; empty for non-admin callers. */
+  users: SearchUserHit[];
+  /** Admin-only matches against `admin_audit_log` (action / actor / target email / numeric id). Always present; empty for non-admin callers. */
+  audit: SearchAuditHit[];
 }

@@ -375,6 +375,35 @@ export const SearchAllResponse = zod.object({
       completed_at: zod.string().nullish(),
     }),
   ),
+  users: zod
+    .array(
+      zod.object({
+        clerk_user_id: zod.string(),
+        email: zod.string().nullish(),
+        display_name: zod.string().nullish(),
+        approved: zod.boolean().nullish(),
+        is_admin: zod.boolean().nullish(),
+        last_seen_at: zod.string().nullish(),
+      }),
+    )
+    .describe(
+      "Admin-only matches against `app_users` (email \/ display name \/ clerk user id). Always present; empty for non-admin callers.",
+    ),
+  audit: zod
+    .array(
+      zod.object({
+        id: zod.number(),
+        action: zod.string().nullish(),
+        actor_email: zod.string().nullish(),
+        actor_user_id: zod.string().nullish(),
+        target_email: zod.string().nullish(),
+        target_user_id: zod.string().nullish(),
+        created_at: zod.string().nullish(),
+      }),
+    )
+    .describe(
+      "Admin-only matches against `admin_audit_log` (action \/ actor \/ target email \/ numeric id). Always present; empty for non-admin callers.",
+    ),
 });
 
 /**

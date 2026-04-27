@@ -77,7 +77,10 @@ export default function GlobalSearch() {
   const trades = data?.trades ?? [];
   const debates = data?.debates ?? [];
   const cycles = data?.cycles ?? [];
-  const hasResults = trades.length + debates.length + cycles.length > 0;
+  const users = data?.users ?? [];
+  const audit = data?.audit ?? [];
+  const hasResults =
+    trades.length + debates.length + cycles.length + users.length + audit.length > 0;
 
   return (
     <CommandDialog open={open} onOpenChange={setOpen} shouldFilter={false}>
@@ -182,6 +185,88 @@ export default function GlobalSearch() {
                         {c.picks_evaluated ?? 0} evaluated · {c.trades_placed ?? 0} placed ·
                         {" "}{fmtTime(c.started_at)}
                       </div>
+                    </div>
+                  </div>
+                </CommandItem>
+              ))}
+            </CommandGroup>
+          </>
+        )}
+
+        {users.length > 0 && (
+          <>
+            {(trades.length > 0 || debates.length > 0 || cycles.length > 0) && (
+              <CommandSeparator />
+            )}
+            <CommandGroup heading="Users">
+              {users.map((u) => (
+                <CommandItem
+                  key={`user-${u.clerk_user_id}`}
+                  value={`user-${u.clerk_user_id}-${u.email ?? ""}`}
+                  onSelect={() =>
+                    go(
+                      `/system?tab=users&focus=${encodeURIComponent(
+                        `user-${u.clerk_user_id}`,
+                      )}`,
+                    )
+                  }
+                  data-testid={`search-user-${u.clerk_user_id}`}
+                >
+                  <div className="flex w-full items-center justify-between gap-3">
+                    <div className="min-w-0 flex-1">
+                      <div className="truncate text-foreground">
+                        {u.email || u.display_name || u.clerk_user_id}
+                      </div>
+                      <div className="truncate text-[10px] uppercase tracking-wider text-muted-foreground">
+                        {u.is_admin
+                          ? "admin"
+                          : u.approved
+                            ? "approved"
+                            : "pending"}
+                        {" · "}last seen {fmtTime(u.last_seen_at)}
+                      </div>
+                    </div>
+                    <div className="text-[10px] uppercase tracking-wider text-muted-foreground truncate max-w-[140px]">
+                      {u.clerk_user_id}
+                    </div>
+                  </div>
+                </CommandItem>
+              ))}
+            </CommandGroup>
+          </>
+        )}
+
+        {audit.length > 0 && (
+          <>
+            {(trades.length > 0 ||
+              debates.length > 0 ||
+              cycles.length > 0 ||
+              users.length > 0) && <CommandSeparator />}
+            <CommandGroup heading="Audit">
+              {audit.map((a) => (
+                <CommandItem
+                  key={`audit-${a.id}`}
+                  value={`audit-${a.id}-${a.action ?? ""}`}
+                  onSelect={() =>
+                    go(`/system?tab=audit&focus=audit-${a.id}`)
+                  }
+                  data-testid={`search-audit-${a.id}`}
+                >
+                  <div className="flex w-full items-center justify-between gap-3">
+                    <div className="min-w-0 flex-1">
+                      <div className="truncate text-foreground">
+                        {a.action || `audit #${a.id}`}
+                      </div>
+                      <div className="truncate text-[10px] uppercase tracking-wider text-muted-foreground">
+                        {a.actor_email ?? a.actor_user_id ?? "—"}
+                        {" → "}
+                        {a.target_email ?? a.target_user_id ?? "—"}
+                        {" · "}
+                        {fmtTime(a.created_at)}
+                      </div>
+                    </div>
+                    <div className="text-[10px] uppercase tracking-wider text-muted-foreground">
+                      #{a.id}
                     </div>
                   </div>
                 </CommandItem>

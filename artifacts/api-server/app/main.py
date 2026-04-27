@@ -4806,15 +4806,22 @@ async def dashboard_trade_detail(
 async def dashboard_search(
     q: str = "",
     limit: int = 10,
-    _: object = Depends(require_approved_user),
+    user: AuthedUser = Depends(require_approved_user),
 ) -> dict[str, object]:
     """Global search across trades, debates, and cycles.
 
     Query syntax: ticker / market id substring, or an ISO date
     (YYYY-MM-DD).  Fuzzy / NL search is intentionally out of scope.
+
+    Admin callers additionally receive matching ``users`` (email /
+    display name / clerk user id) and ``audit`` (action / actor /
+    target email / numeric id) entries so the global palette can jump
+    straight to the highlighted row in the admin console. Non-admin
+    callers always see those keys as empty arrays.
     """
     limit = max(1, min(50, int(limit)))
-    return await dashboard.search_global(q, limit)
+    is_admin = await check_admin(user)
+    return await dashboard.search_global(q, limit, include_admin=is_admin)
 
 
 @app.get("/api/dashboard/nfl-exposure")
