@@ -160,6 +160,10 @@ PROTECTED_ROUTES: tuple[str, ...] = (
     "/api/dashboard/leagues-exposure",
     # Task #650 — saved tournament leaderboard history (PGA / F1).
     "/api/dashboard/tournament-leaderboards",
+    # Task #697 — operator-dashboard view of recent tournament-replay
+    # backtest runs + admin-only listing of the same persisted runs.
+    "/api/dashboard/tournament-backtest/recent",
+    "/api/admin/tournament-backtest/recent",
     # Per-source weather freshness badge — operator dashboard only.
     "/api/weather/freshness",
 )
@@ -241,6 +245,9 @@ PROTECTED_MUTATING_ENDPOINTS: tuple[tuple[str, str], ...] = (
     ("POST", "/api/research/directives/{directive_id}/decision"),
     # Task #283 — operator-driven retry of stuck mobile IAP webhooks.
     ("POST", "/api/admin/rc-webhook/retry/{event_id}"),
+    # Task #697 — admin-triggered tournament backtest replay
+    # (single-event or date-range sweep).
+    ("POST", "/api/admin/tournament-backtest/replay"),
 )
 
 # Path-only view of the mutating-endpoint inventory, used by the

@@ -3788,6 +3788,180 @@ async def admin_crypto_backtest_history(
     }
 
 
+from .sports import tournament_backtest as _tournament_backtest  # noqa: E402
+
+
+def _parse_admin_replay_ts(raw: str | None, *, field_name: str) -> datetime | None:
+    """Parse an ISO-8601 timestamp from an admin query param.
+
+    Returns ``None`` when ``raw`` is empty so callers can leave the
+    bound open.  Raises a 400 when the value is non-empty but
+    unparseable so a typo doesn't silently widen the replay window.
+    """
+    if raw is None:
+        return None
+    text = raw.strip()
+    if not text:
+        return None
+    try:
+        ts = datetime.fromisoformat(text)
+    except ValueError:
+        raise HTTPException(
+            status_code=400,
+            detail=f"invalid ISO timestamp for {field_name}: {raw!r}",
+        )
+    # Treat naive timestamps as UTC so operators don't need to remember
+    # to type a +00:00 every time — the underlying iter helper compares
+    # against ``timestamptz`` columns which are normalised to UTC.
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=timezone.utc)
+    return ts
+
+
+@app.post("/api/admin/tournament-backtest/replay")
+async def admin_tournament_backtest_replay(
+    event_id: str | None = Query(
+        None,
+        description=(
+            "Single event to replay (e.g. 'sr:tournament:pga-1'). "
+            "Leave empty to sweep every event with snapshots in "
+            "[start, end]."
+        ),
+    ),
+    winner: str | None = Query(
+        None,
+        description=(
+            "Override the actual winner — defaults to the position-1 "
+            "entrant of the most recent stored snapshot."
+        ),
+    ),
+    start: str | None = Query(
+        None,
+        description=(
+            "ISO-8601 lower bound on snapshot fetched_at. "
+            "Inclusive; naive timestamps are treated as UTC."
+        ),
+    ),
+    end: str | None = Query(
+        None,
+        description="ISO-8601 upper bound on snapshot fetched_at (inclusive).",
+    ),
+    league: str | None = Query(
+        None,
+        description=(
+            "Restrict the date-range sweep to a single discipline "
+            "(e.g. 'PGA' or 'F1'). Ignored when event_id is set."
+        ),
+    ),
+    actor: AuthedUser = Depends(require_admin),
+) -> dict[str, object]:
+    """Walk every saved leaderboard snapshot of a finished tournament
+    (task #697), price each one through the same Plackett-Luce
+    predictor the live pipeline uses, and grade the resulting
+    probabilities against the actual winner.
+
+    Either ``event_id`` *or* a ``[start, end]`` window must be
+    provided.  Single-event replays return a per-snapshot trace plus
+    the rolled-up Brier / log-loss / accuracy.  Date-range sweeps
+    return one rolled-up report per event (no per-snapshot trace) so
+    the response stays compact when the operator scans a busy week.
+
+    Completed runs are persisted to ``sportradar_tournament_replays``
+    so the operator dashboard's recent-runs panel survives restarts.
+    """
+    start_dt = _parse_admin_replay_ts(start, field_name="start")
+    end_dt = _parse_admin_replay_ts(end, field_name="end")
+
+    if event_id and event_id.strip():
+        try:
+            result = await _tournament_backtest.replay_event(
+                event_id.strip(),
+                winner=winner,
+                since=start_dt,
+                until=end_dt,
+            )
+        except Exception:
+            log.exception("tournament backtest failed for %s", event_id)
+            raise HTTPException(status_code=502, detail="replay failed")
+        await _tournament_backtest.record_run(result)
+        return result.as_dict()
+
+    if start_dt is None or end_dt is None:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "either event_id or both start and end must be provided"
+            ),
+        )
+    if start_dt > end_dt:
+        raise HTTPException(
+            status_code=400,
+            detail="start must be <= end",
+        )
+
+    try:
+        results = await _tournament_backtest.replay_events_in_range(
+            start=start_dt,
+            end=end_dt,
+            league=league,
+        )
+    except Exception:
+        log.exception("tournament backtest sweep failed")
+        raise HTTPException(status_code=502, detail="replay sweep failed")
+
+    for r in results:
+        await _tournament_backtest.record_run(r)
+
+    # Per-snapshot detail can balloon a multi-event sweep; surface only
+    # the rolled-up report here so the operator console stays snappy.
+    # Operators can re-run a single event for the per-snapshot view.
+    summaries: list[dict[str, object]] = []
+    for r in results:
+        d = r.as_dict()
+        d.pop("snapshots", None)
+        summaries.append(d)
+    return {
+        "start": start_dt.isoformat(),
+        "end": end_dt.isoformat(),
+        "league": (league or "").upper() or None,
+        "n_events": len(summaries),
+        "events": summaries,
+    }
+
+
+@app.get("/api/admin/tournament-backtest/recent")
+async def admin_tournament_backtest_recent(
+    limit: int = Query(50, ge=1, le=500),
+    actor: AuthedUser = Depends(require_admin),
+) -> dict[str, object]:
+    """Recent persisted tournament-replay summaries (task #697).
+
+    Backs the operator dashboard's "Recent tournament replays" panel
+    so operators can spot Brier / log-loss drift across events without
+    re-running every replay on demand.  Newest-first ordering matches
+    the panel's expected render order.
+    """
+    items = await _tournament_backtest.list_recent_runs(limit=limit)
+    return {"items": items}
+
+
+@app.get("/api/dashboard/tournament-backtest/recent")
+async def dashboard_tournament_backtest_recent(
+    limit: int = Query(50, ge=1, le=500),
+    _: object = Depends(require_approved_user),
+) -> dict[str, object]:
+    """Operator-dashboard view of the most recent tournament replays
+    (task #697).
+
+    Mirrors :func:`admin_tournament_backtest_recent` but lives behind
+    the standard approved-user gate so the read-only operator panel
+    can render without the admin-only badge — write actions (running a
+    new replay) stay locked to admins via the POST endpoint above.
+    """
+    items = await _tournament_backtest.list_recent_runs(limit=limit)
+    return {"items": items}
+
+
 @app.get("/api/health")
 async def health_full(_: object = Depends(require_approved_user)) -> dict[str, object]:
     """Full readiness check across DB and Storage."""
