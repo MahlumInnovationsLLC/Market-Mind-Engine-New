@@ -185,7 +185,7 @@ async def _fetch_snapshot_inputs(
             sod_primary AS (
                 SELECT balance_cents
                   FROM bankroll_events
-                 WHERE ((created_at at time zone $2)::date) < $1
+                 WHERE ((occurred_at at time zone $2)::date) < $1
                  ORDER BY id DESC
                  LIMIT 1
             ),
