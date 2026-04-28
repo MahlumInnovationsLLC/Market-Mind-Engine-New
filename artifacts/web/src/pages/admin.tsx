@@ -4769,13 +4769,24 @@ export function GatekeeperTuningPanel() {
     placeholderData: (prev) => prev,
   });
 
-  const historyKey = ["admin", "gatekeeper-tuning", "history", verticalParam ?? "__global__"] as const;
+  // Knob filter for the audit-history panel.  Empty string means "all
+  // knobs"; any other value is passed through to /history?knob=...
+  const [historyKnobFilter, setHistoryKnobFilter] = useState<string>("");
+
+  const historyKey = [
+    "admin",
+    "gatekeeper-tuning",
+    "history",
+    verticalParam ?? "__global__",
+    historyKnobFilter || "__all__",
+  ] as const;
   const historyQuery = useQuery<{ history: GatekeeperHistoryRow[] }>({
     queryKey: historyKey,
     queryFn: () => {
       const params = new URLSearchParams();
       params.set("limit", "50");
       if (verticalParam) params.set("vertical", verticalParam);
+      if (historyKnobFilter) params.set("knob", historyKnobFilter);
       return apiFetch<{ history: GatekeeperHistoryRow[] }>(
         `/api/admin/gatekeeper/history?${params.toString()}`,
         { getToken: tokenFn },
@@ -5093,9 +5104,31 @@ export function GatekeeperTuningPanel() {
       </div>
 
       <div>
-        <div className="mb-2 text-[11px] font-semibold uppercase tracking-[0.18em] text-accent-cyan/80">
-          Override history
-          {verticalParam ? ` · ${verticalParam}` : " · global + all verticals"}
+        <div className="mb-2 flex flex-wrap items-center gap-3">
+          <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-accent-cyan/80">
+            Override history
+            {verticalParam ? ` · ${verticalParam}` : " · global + all verticals"}
+          </div>
+          <label
+            htmlFor="gatekeeper-history-knob"
+            className="text-[11px] uppercase tracking-widest text-muted-foreground"
+          >
+            Knob filter
+          </label>
+          <select
+            id="gatekeeper-history-knob"
+            data-testid="select-gatekeeper-history-knob"
+            className="bg-background border border-border px-2 py-1 text-xs uppercase tracking-widest"
+            value={historyKnobFilter}
+            onChange={(e) => setHistoryKnobFilter(e.target.value)}
+          >
+            <option value="">All knobs</option>
+            {knobs.map((k) => (
+              <option key={k.key} value={k.key}>
+                {k.key}
+              </option>
+            ))}
+          </select>
         </div>
         {historyQuery.isLoading && !historyQuery.data ? (
           <div className="text-xs text-muted-foreground uppercase tracking-widest">
