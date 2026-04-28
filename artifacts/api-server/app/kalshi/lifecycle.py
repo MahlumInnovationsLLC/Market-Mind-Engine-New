@@ -472,11 +472,27 @@ async def _record_recovery_attempt(
     }
     try:
         if outcome in success_outcomes:
+            # Natural recovery on a non-dead-lettered row → resolve.
+            # Natural recovery on a DEAD-LETTERED row → record the
+            # outcome but DO NOT auto-resolve. Once the operator was
+            # paged, only an explicit click closes the loop — otherwise
+            # the row would silently disappear from the operator
+            # console mid-investigation, leaving them confused about
+            # whether the order was reconciled or whether a duplicate
+            # manual fill is needed.
             await db.execute(
                 """
                 UPDATE order_recovery_attempts
-                   SET resolved_at           = now(),
-                       resolution_action     = $2,
+                   SET resolved_at           = CASE
+                                                  WHEN dead_lettered_at IS NULL
+                                                  THEN now()
+                                                  ELSE resolved_at
+                                               END,
+                       resolution_action     = CASE
+                                                  WHEN dead_lettered_at IS NULL
+                                                  THEN $2
+                                                  ELSE resolution_action
+                                               END,
                        last_recovery_at      = now(),
                        last_recovery_outcome = $2,
                        updated_at            = now()
@@ -499,7 +515,22 @@ async def _record_recovery_attempt(
                 $1, $2, $3, $4, $5, $6, $7, 1, now(), $8, $9
             )
             ON CONFLICT (client_order_id) DO UPDATE
-               SET recovery_attempts     = order_recovery_attempts.recovery_attempts + 1,
+               SET recovery_attempts     = CASE
+                                              WHEN order_recovery_attempts.resolved_at IS NOT NULL
+                                              THEN 1
+                                              ELSE order_recovery_attempts.recovery_attempts + 1
+                                           END,
+                   first_failed_at       = CASE
+                                              WHEN order_recovery_attempts.resolved_at IS NOT NULL
+                                              THEN now()
+                                              ELSE order_recovery_attempts.first_failed_at
+                                           END,
+                   resolved_at           = NULL,
+                   resolution_action     = NULL,
+                   resolver_email        = NULL,
+                   resolution_reason     = NULL,
+                   fill_price_cents      = NULL,
+                   dead_lettered_at      = NULL,
                    last_recovery_at      = now(),
                    last_recovery_outcome = EXCLUDED.last_recovery_outcome,
                    last_error            = EXCLUDED.last_error,
@@ -552,10 +583,74 @@ async def _record_recovery_attempt(
         await _send_order_submit_stuck_alert(snapshot)
 
 
+async def _persist_order_submit_stuck_health_alert(snap: dict[str, Any]) -> None:
+    """Persist a row in ``model_health_alerts`` so the operator
+    dashboard surfaces a stuck order alongside other model-health
+    signals (Brier drift, position drift, settlement drift, etc.).
+
+    Hourly dedupe on ``(alert_type, metric_name)`` so a sustained
+    outage that re-crosses the threshold repeatedly doesn't flood
+    the table.
+
+    Best-effort: any DB error is swallowed — the threshold paging
+    via :func:`_send_order_submit_stuck_alert` is the source of truth
+    for operator notification; this row is a redundant dashboard
+    surface.
+    """
+    coid = str(snap.get("client_order_id") or "")
+    if not coid:
+        return
+    attempts = int(snap.get("recovery_attempts") or 0)
+    threshold = int(snap.get("threshold") or 0)
+    ticker = str(snap.get("market_ticker") or "")
+    vertical = str(snap.get("vertical") or "trading")
+    try:
+        recent = await db.fetchrow(
+            """
+            SELECT 1 FROM model_health_alerts
+             WHERE alert_type   = 'order_submit_stuck'
+               AND metric_name  = $1
+               AND created_at   > now() - interval '1 hour'
+             LIMIT 1
+            """,
+            coid,
+        )
+        if recent:
+            return
+        await db.execute(
+            """
+            INSERT INTO model_health_alerts
+                (vertical, alert_type, severity, metric_name,
+                 metric_value, threshold, message, acknowledged)
+            VALUES ($1, 'order_submit_stuck', 'warn', $2,
+                    $3, $4, $5, false)
+            ON CONFLICT (id) DO NOTHING
+            """,
+            vertical,
+            coid,
+            float(attempts),
+            float(threshold),
+            (
+                f"Order {coid} stuck after {attempts} recovery "
+                f"attempts (threshold={threshold}, ticker={ticker})"
+            ),
+        )
+    except Exception as e:  # pragma: no cover — dashboard surface is best-effort
+        log.warning(
+            "order_submit_stuck health-alert insert failed for %s: %s",
+            coid, e,
+        )
+
+
 async def _send_order_submit_stuck_alert(snap: dict[str, Any]) -> None:
     """Off-hot-path dispatcher for ``order_submit_stuck``. Deduped on
     ``client_order_id`` with a 7-day TTL so a sustained outage pages
-    once per coid, not once per recovery tick."""
+    once per coid, not once per recovery tick.
+
+    Also persists a ``model_health_alerts`` dashboard row (1-hour
+    dedupe, best-effort) so the operator console surfaces the stuck
+    order alongside other model-health signals.
+    """
     from ..notifications import alerts as _alerts
     try:
         coid = str(snap.get("client_order_id") or "")
@@ -566,6 +661,9 @@ async def _send_order_submit_stuck_alert(snap: dict[str, Any]) -> None:
         )
         if not ok:
             return
+        # Dashboard surface — independent of the email dedupe gate so
+        # the row appears even if the email path is gated/disabled.
+        await _persist_order_submit_stuck_health_alert(snap)
         _alerts.order_submit_stuck(
             client_order_id=coid,
             market_ticker=str(snap.get("market_ticker") or ""),

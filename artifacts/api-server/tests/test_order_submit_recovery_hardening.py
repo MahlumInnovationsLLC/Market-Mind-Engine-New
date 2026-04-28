@@ -109,8 +109,15 @@ class _FakeDB:
             coid, action = args[0], args[1]
             row = self.rows.get(coid)
             if row and row.get("resolved_at") is None:
-                row["resolved_at"] = "now"
-                row["resolution_action"] = action
+                # Always record the recovery outcome.
+                row["last_recovery_at"] = "now"
+                row["last_recovery_outcome"] = action
+                # CASE: only auto-resolve rows that aren't dead-lettered.
+                # Once paged, only an explicit operator click closes
+                # the loop (see lifecycle.py for rationale).
+                if row.get("dead_lettered_at") is None:
+                    row["resolved_at"] = "now"
+                    row["resolution_action"] = action
         return "OK"
 
     async def fetch(self, sql: str, *args: Any) -> list[Any]:
@@ -143,9 +150,22 @@ class _FakeDB:
                 }
                 self.rows[coid] = row
             else:
-                existing["recovery_attempts"] = (
-                    int(existing["recovery_attempts"]) + 1
-                )
+                # Mirror the real ON CONFLICT CASE logic: a new failure
+                # against a previously-resolved row (force_retry path)
+                # is a fresh start — counter resets to 1 and the
+                # resolution / dead-letter columns are cleared.
+                if existing.get("resolved_at") is not None:
+                    existing["recovery_attempts"] = 1
+                    existing["resolved_at"] = None
+                    existing["resolution_action"] = None
+                    existing["resolver_email"] = None
+                    existing["resolution_reason"] = None
+                    existing["fill_price_cents"] = None
+                    existing["dead_lettered_at"] = None
+                else:
+                    existing["recovery_attempts"] = (
+                        int(existing["recovery_attempts"]) + 1
+                    )
                 existing["last_recovery_outcome"] = outcome
                 existing["last_error"] = error
                 row = existing
@@ -955,3 +975,321 @@ def test_resolve_failing_row_only_allows_force_retry(override_admin, resolve_db)
     )
     assert resp.status_code == 200
     assert resolve_db["rows"]["coid-failing"]["resolution_action"] == "force_retry"
+
+
+# ---------------------------------------------------------------------------
+# Dead-letter guard: natural recovery on a paged row stays open
+# ---------------------------------------------------------------------------
+
+
+def test_record_recovery_attempt_does_not_resolve_dead_lettered_row(monkeypatch):
+    """Once a row is dead-lettered (operator paged), a natural recovery
+    outcome from a later orchestrator pass MUST NOT auto-resolve it.
+
+    Rationale: the operator has been alerted and is investigating.
+    Auto-resolution would silently drop the row from the operator
+    console mid-investigation — they wouldn't know whether the venue
+    actually reconciled (in which case any manual claim_filled would
+    create a duplicate fill) or whether the row simply vanished. The
+    recovery outcome IS recorded in ``last_recovery_outcome`` so the
+    operator sees that it healed naturally and can choose
+    ``mark_cancelled`` or ``force_retry`` accordingly.
+    """
+    fake = _FakeDB()
+    _install_fake_db(monkeypatch, fake)
+    # Seed a dead-lettered row directly (skip the failure→sweep cycle
+    # since the sweeper isn't under test here).
+    fake.rows["coid-DL"] = {
+        "client_order_id": "coid-DL",
+        "market_ticker": "MKT-1",
+        "side": "yes",
+        "action": "buy",
+        "contracts": 3,
+        "limit_price_cents": 55,
+        "vertical": "crypto",
+        "recovery_attempts": 7,
+        "last_recovery_outcome": "not_found",
+        "last_error": "no exchange row",
+        "resolved_at": None,
+        "dead_lettered_at": "now",
+    }
+
+    _run(
+        lifecycle._record_recovery_attempt(
+            _mk_req("coid-DL"), outcome="recovered_filled", error=None,
+        )
+    )
+    row = fake.rows["coid-DL"]
+    # CRITICAL: dead-lettered row stays open (operator must click).
+    assert row["resolved_at"] is None
+    assert row["dead_lettered_at"] == "now"
+    # The recovery outcome is recorded so the operator console can
+    # render "actually recovered as recovered_filled".
+    assert row["last_recovery_outcome"] == "recovered_filled"
+
+
+def test_record_recovery_attempt_resolves_non_dead_lettered_row(monkeypatch):
+    """Counter-test for the dead-letter guard: a row that has NOT been
+    dead-lettered DOES auto-resolve on a recovery outcome — the original
+    'flapping coid never lands in the dead-letter queue' invariant
+    must still hold for non-paged rows."""
+    fake = _FakeDB()
+    _install_fake_db(monkeypatch, fake)
+    fake.rows["coid-OK"] = {
+        "client_order_id": "coid-OK",
+        "market_ticker": "MKT-1",
+        "side": "yes",
+        "action": "buy",
+        "contracts": 3,
+        "limit_price_cents": 55,
+        "vertical": "crypto",
+        "recovery_attempts": 2,
+        "last_recovery_outcome": "not_found",
+        "last_error": "x",
+        "resolved_at": None,
+        "dead_lettered_at": None,  # NOT dead-lettered
+    }
+
+    _run(
+        lifecycle._record_recovery_attempt(
+            _mk_req("coid-OK"), outcome="recovered_filled", error=None,
+        )
+    )
+    assert fake.rows["coid-OK"]["resolved_at"] == "now"
+    assert fake.rows["coid-OK"]["resolution_action"] == "recovered_filled"
+
+
+# ---------------------------------------------------------------------------
+# force_retry: counter resets on next failure
+# ---------------------------------------------------------------------------
+
+
+def test_force_retry_resets_recovery_attempts_on_next_failure(monkeypatch):
+    """``force_retry`` marks the recovery row resolved. The contract
+    is that a SUBSEQUENT failure for the same coid starts fresh — i.e.
+    ``recovery_attempts`` resets to 1 — instead of resuming from the
+    pre-resolution count. Otherwise force_retry would page the operator
+    again on the very next failure (since the count would already be
+    above the threshold).
+    """
+    fake = _FakeDB()
+    _install_fake_db(monkeypatch, fake)
+    # Seed a resolved row (post-force_retry state) with a high count.
+    fake.rows["coid-FR"] = {
+        "client_order_id": "coid-FR",
+        "market_ticker": "MKT-1",
+        "side": "yes",
+        "action": "buy",
+        "contracts": 3,
+        "limit_price_cents": 55,
+        "vertical": "crypto",
+        "recovery_attempts": 7,
+        "last_recovery_outcome": "not_found",
+        "last_error": "x",
+        "resolved_at": "now",
+        "resolution_action": "force_retry",
+        "dead_lettered_at": "now",  # was paged before retry
+    }
+
+    _run(
+        lifecycle._record_recovery_attempt(
+            _mk_req("coid-FR"), outcome="not_found", error="still missing",
+        )
+    )
+    row = fake.rows["coid-FR"]
+    # Counter reset → next failure starts at 1, not 8.
+    assert row["recovery_attempts"] == 1
+    # Resolution columns cleared so the row is "open" again.
+    assert row["resolved_at"] is None
+    assert row["resolution_action"] is None
+    # Dead-letter cleared too — the coid gets a fresh chance to either
+    # recover naturally OR re-cross the threshold and re-page.
+    assert row["dead_lettered_at"] is None
+
+
+# ---------------------------------------------------------------------------
+# Dashboard surface: model_health_alerts row written for sweeper + threshold
+# ---------------------------------------------------------------------------
+
+
+def test_sweep_dispatch_writes_model_health_alert_per_coid(monkeypatch):
+    """The sweeper must write one row to ``model_health_alerts`` per
+    promoted coid so the operator dashboard (which queries that table
+    for unacknowledged alerts) surfaces the dead-letter event alongside
+    other model-health signals (Brier drift, position drift, etc.).
+    """
+    executes: list[tuple[str, tuple[Any, ...]]] = []
+
+    async def _capture_execute(sql: str, *args: Any) -> str:
+        executes.append((sql, args))
+        return "INSERT 0 1"
+
+    monkeypatch.setattr(dls.db, "execute", _capture_execute)
+    # Stub the email path — we only care about the dashboard write here.
+    from app.notifications import alerts as _alerts
+
+    monkeypatch.setattr(_alerts, "order_dead_lettered", lambda **k: None)
+
+    rows = [
+        {
+            "client_order_id": "coid-A",
+            "market_ticker": "MKT-1",
+            "side": "yes",
+            "action": "buy",
+            "contracts": 3,
+            "limit_price_cents": 55,
+            "vertical": "crypto",
+            "recovery_attempts": 11,
+            "last_recovery_outcome": "not_found",
+            "last_error": "venue 5xx",
+        },
+        {
+            "client_order_id": "coid-B",
+            "market_ticker": "MKT-2",
+            "side": "no",
+            "action": "sell",
+            "contracts": 1,
+            "limit_price_cents": 30,
+            "vertical": "sports",
+            "recovery_attempts": 8,
+            "last_recovery_outcome": "lookup_failed",
+            "last_error": "timeout",
+        },
+    ]
+    _run(dls._dispatch_alerts(rows))
+
+    # Two INSERTs into model_health_alerts (one per coid).
+    health_inserts = [
+        e for e in executes
+        if "INSERT INTO model_health_alerts" in " ".join(e[0].split())
+    ]
+    assert len(health_inserts) == 2
+    # Both rows tagged with the dead-letter alert_type and the coid as
+    # metric_name so the dashboard can dedupe and link back.
+    coids_written = {e[1][1] for e in health_inserts}
+    assert coids_written == {"coid-A", "coid-B"}
+
+
+def test_sweep_health_alert_swallows_db_errors(monkeypatch):
+    """Dashboard surface is best-effort — the email paging path
+    (which is the source of truth for operator notification) must NOT
+    be blocked by a model_health_alerts INSERT failure."""
+    async def _boom_execute(sql: str, *args: Any) -> str:
+        raise RuntimeError("postgres degraded")
+
+    monkeypatch.setattr(dls.db, "execute", _boom_execute)
+
+    paged: list[str] = []
+    from app.notifications import alerts as _alerts
+
+    def _capture_email(**kwargs):
+        paged.append(str(kwargs.get("client_order_id")))
+
+    monkeypatch.setattr(_alerts, "order_dead_lettered", _capture_email)
+
+    rows = [
+        {
+            "client_order_id": "coid-X",
+            "market_ticker": "MKT-1",
+            "side": "yes",
+            "action": "buy",
+            "contracts": 1,
+            "limit_price_cents": 50,
+            "vertical": "crypto",
+            "recovery_attempts": 6,
+            "last_recovery_outcome": "not_found",
+            "last_error": "x",
+        },
+    ]
+    # Should not raise.
+    _run(dls._dispatch_alerts(rows))
+    # And the email path still fired.
+    assert paged == ["coid-X"]
+
+
+def test_threshold_alert_persists_health_alert_row(monkeypatch):
+    """When the recovery-attempt threshold is crossed, a row must
+    appear in ``model_health_alerts`` with ``alert_type='order_submit_stuck'``
+    and the coid as ``metric_name`` so the operator dashboard surfaces
+    the stuck order alongside other model-health signals.
+    """
+    executes: list[tuple[str, tuple[Any, ...]]] = []
+    fetchrows: list[tuple[str, tuple[Any, ...]]] = []
+
+    async def _capture_execute(sql: str, *args: Any) -> str:
+        executes.append((sql, args))
+        return "INSERT 0 1"
+
+    async def _capture_fetchrow(sql: str, *args: Any):
+        fetchrows.append((sql, args))
+        # No recent dedupe row → INSERT proceeds.
+        return None
+
+    monkeypatch.setattr(lifecycle.db, "execute", _capture_execute)
+    monkeypatch.setattr(lifecycle.db, "fetchrow", _capture_fetchrow)
+
+    snap = {
+        "client_order_id": "coid-stuck",
+        "market_ticker": "MKT-1",
+        "side": "yes",
+        "action": "buy",
+        "contracts": 5,
+        "limit_price_cents": 60,
+        "vertical": "crypto",
+        "recovery_attempts": 5,
+        "threshold": 3,
+        "last_recovery_outcome": "not_found",
+        "last_error": "missing",
+    }
+    _run(lifecycle._persist_order_submit_stuck_health_alert(snap))
+
+    # Dedupe SELECT ran first.
+    assert any(
+        "SELECT 1 FROM model_health_alerts" in " ".join(f[0].split())
+        for f in fetchrows
+    )
+    # INSERT followed.
+    health_inserts = [
+        e for e in executes
+        if "INSERT INTO model_health_alerts" in " ".join(e[0].split())
+    ]
+    assert len(health_inserts) == 1
+    args = health_inserts[0][1]
+    # vertical, coid, attempts, threshold, message
+    assert args[0] == "crypto"
+    assert args[1] == "coid-stuck"
+    assert args[2] == 5.0
+    assert args[3] == 3.0
+    assert "coid-stuck" in args[4]
+
+
+def test_threshold_alert_dedupes_within_one_hour(monkeypatch):
+    """Hourly dedupe on (alert_type, metric_name): a sustained outage
+    that re-crosses the threshold within an hour must NOT flood the
+    table."""
+    executes: list[tuple[str, tuple[Any, ...]]] = []
+
+    async def _capture_execute(sql: str, *args: Any) -> str:
+        executes.append((sql, args))
+        return "INSERT 0 1"
+
+    async def _recent_fetchrow(sql: str, *args: Any):
+        # Pretend a recent row already exists.
+        return {"?": 1}
+
+    monkeypatch.setattr(lifecycle.db, "execute", _capture_execute)
+    monkeypatch.setattr(lifecycle.db, "fetchrow", _recent_fetchrow)
+
+    _run(
+        lifecycle._persist_order_submit_stuck_health_alert(
+            {
+                "client_order_id": "coid-dup",
+                "recovery_attempts": 7,
+                "threshold": 3,
+                "vertical": "crypto",
+                "market_ticker": "MKT-1",
+            }
+        )
+    )
+    # Dedupe gate fired → no INSERT.
+    assert executes == []

@@ -1234,13 +1234,48 @@ recovery counters, the last error, and three resolve buttons.
 
 | Action | Use when | Side-effects |
 |---|---|---|
-| `force_retry` | Upstream blip cleared; you want the orchestrator to try again | Clears the recovery row only — next orchestrator cycle re-submits a fresh coid for the same intent. **No** fill written. |
-| `mark_cancelled` | Venue confirmed the order was rejected/cancelled and no fill exists | Clears the row only. **No** fill written, **no** position rollup change. |
-| `claim_filled` | Venue confirmed by phone/Slack that the order DID fill at price `P` | Inserts an `order_fills` row with `source='operator_manual'` and `fill_id=manual:<coid>:<ms>`, updates the position rollup at `P`, then clears the row. |
+| `force_retry` | Upstream blip cleared; you want the orchestrator to try again | Marks the row resolved. The next failure for the same coid is treated as a **fresh start** — `recovery_attempts` resets to 1 and `dead_lettered_at` clears, so a healthy retry won't re-page the operator immediately. **No** fill written. |
+| `mark_cancelled` | Venue confirmed the order was rejected/cancelled and no fill exists | Marks the row resolved. **No** fill written, **no** position rollup change. |
+| `claim_filled` | Venue confirmed by phone/Slack that the order DID fill at price `P` | Inserts an `order_fills` row with `source='operator_manual'` and `fill_id=manual:<coid>`, marks the row resolved, then updates the position rollup at `P`. |
 
 `claim_filled` writes the fill **before** the resolution UPDATE — a
 DB blip mid-flight leaves the row dead-lettered (caller can retry),
 never resolved-with-no-fill.
+
+### Behavior nuances
+
+* **Dead-lettered rows do NOT auto-resolve on natural recovery.**  Once
+  the operator has been paged, a later orchestrator pass that recovers
+  the order naturally (`recovered_filled`, `recovered_canceled`,
+  `recovered_resting`) will record the outcome in
+  `last_recovery_outcome` but leaves `resolved_at IS NULL` and the row
+  on the operator console.  Pick **`mark_cancelled`** if the natural
+  outcome was a cancel (the WS path already wrote any fill that
+  exists), or **`claim_filled`** if you want to back-fill a manual
+  ledger row.  This avoids the "row vanished while I was investigating"
+  UX and prevents a duplicate manual fill on a row that already
+  reconciled itself.
+* **Non-dead-lettered rows still auto-resolve.**  The "flapping coid
+  never reaches the dead-letter queue" invariant only fires before the
+  sweeper promotes the row.
+
+### Dashboard surface
+
+Both promotions also write a row to **`model_health_alerts`** so the
+existing operator dashboard surfaces the event alongside other model-
+health signals (Brier drift, position drift, settlement drift, etc.):
+
+| When | `alert_type` | `severity` | `metric_name` | `metric_value` |
+|---|---|---|---|---|
+| Threshold first crossed | `order_submit_stuck` | `warn` | `<coid>` | recovery attempts so far |
+| Sweeper promotes the row | `order_dead_lettered` | `high` | `<coid>` | recovery attempts at promotion |
+
+Dedupe is 1 hour for `order_submit_stuck` (so a sustained outage
+doesn't flood the table) and per-promotion for `order_dead_lettered`
+(every promotion is a discrete event).  The email/paging path is the
+source of truth for operator notification — these rows are a redundant
+dashboard surface, so a DB blip on the INSERT is logged-and-swallowed
+rather than blocking the alert.
 
 ### cURL (when the dashboard is down)
 

@@ -138,12 +138,59 @@ async def sweep_once() -> list[dict[str, Any]]:
     return marked
 
 
+async def _persist_health_alert(row: dict[str, Any]) -> None:
+    """Persist a ``model_health_alerts`` row per dead-lettered coid so
+    the operator console (which queries that table) surfaces the
+    promotion alongside other model-health signals.
+
+    Best-effort: any DB error is swallowed — the email path via
+    :func:`_dispatch_alerts` is the source of truth for paging; this
+    row is a redundant dashboard surface.
+    """
+    coid = str(row.get("client_order_id") or "")
+    if not coid:
+        return
+    attempts = int(row.get("recovery_attempts") or 0)
+    threshold_secs = _dead_letter_after_secs()
+    ticker = str(row.get("market_ticker") or "")
+    vertical = str(row.get("vertical") or "trading")
+    last_err = str(row.get("last_error") or "")[:200]
+    try:
+        await db.execute(
+            """
+            INSERT INTO model_health_alerts
+                (vertical, alert_type, severity, metric_name,
+                 metric_value, threshold, message, acknowledged)
+            VALUES ($1, 'order_dead_lettered', 'high', $2,
+                    $3, $4, $5, false)
+            ON CONFLICT (id) DO NOTHING
+            """,
+            vertical,
+            coid,
+            float(attempts),
+            float(threshold_secs),
+            (
+                f"Order {coid} dead-lettered after {attempts} recovery "
+                f"attempts (ticker={ticker}, last_error={last_err!r})"
+            ),
+        )
+    except Exception as e:  # pragma: no cover — dashboard surface is best-effort
+        log.warning(
+            "order_dead_lettered health-alert insert failed for %s: %s",
+            coid, e,
+        )
+
+
 async def _dispatch_alerts(rows: list[dict[str, Any]]) -> None:
-    """Fire one ``order_dead_lettered`` alert per coid (deduped)."""
+    """Fire one ``order_dead_lettered`` alert per coid (deduped) AND
+    persist a ``model_health_alerts`` dashboard row per coid."""
     if not rows:
         return
     from ..notifications import alerts as _alerts
     for r in rows:
+        # Dashboard surface first — insert is independent of the email
+        # dedupe gate so the row appears even if email is gated/disabled.
+        await _persist_health_alert(r)
         try:
             _alerts.order_dead_lettered(
                 client_order_id=str(r.get("client_order_id") or ""),
