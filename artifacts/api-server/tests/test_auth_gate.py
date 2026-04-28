@@ -252,8 +252,9 @@ PROTECTED_MUTATING_ENDPOINTS: tuple[tuple[str, str], ...] = (
     # Task #271 — per-vertical halt/resume toggles.
     ("POST", "/api/admin/verticals/{vertical}/halt"),
     ("POST", "/api/admin/verticals/{vertical}/resume"),
-    # Task #713 — recurring halt schedule create / delete.
+    # Task #713 — recurring halt schedule create / toggle / delete.
     ("POST", "/api/admin/verticals/halts/schedule"),
+    ("PATCH", "/api/admin/verticals/halts/schedule/{schedule_id}"),
     ("DELETE", "/api/admin/verticals/halts/schedule/{schedule_id}"),
     # Task #245 — research-directives admin gating + drift rollback workflow.
     ("POST", "/api/research/directives/{directive_id}/decision"),
