@@ -2318,6 +2318,64 @@ async def admin_export_audit_log_csv(
 
 
 # ---------------------------------------------------------------------------
+# Operator alert preferences — per-recipient opt-out for the branded
+# HTML per-trade operator alert (task #712).
+#
+# The plain-text firehose `live_trade()` continues to ship to every
+# configured operator; this lets individual operators mute the
+# companion HTML email without un-subscribing from everything else.
+# ---------------------------------------------------------------------------
+
+
+class OperatorAlertPreferenceRequest(BaseModel):
+    email: str
+    alert_type: str = "operator_trade_alert"
+    enabled: bool = True
+
+
+@app.get("/api/admin/operator-alerts/preferences")
+async def admin_list_operator_alert_preferences(
+    alert_type: str | None = None,
+    actor: AuthedUser = Depends(require_admin),
+) -> dict[str, object]:
+    """Return every row in `operator_alert_preferences`, newest first.
+
+    Optional `alert_type` filter scopes to one alert type. The admin
+    UI uses this to render the "who's opted out of branded emails"
+    table on the operator notifications page.
+    """
+    from .notifications import alerts as _alerts
+    items = await _alerts.list_operator_preferences(alert_type=alert_type)
+    return {
+        "items": items,
+        "alert_type": alert_type,
+        "default_when_missing": "enabled",
+    }
+
+
+@app.post("/api/admin/operator-alerts/preferences")
+async def admin_set_operator_alert_preference(
+    body: OperatorAlertPreferenceRequest,
+    actor: AuthedUser = Depends(require_admin),
+) -> dict[str, object]:
+    """Upsert one operator's preference for one alert type.
+
+    Returns 400 on validation failure (invalid email or unknown
+    alert_type) so the admin UI can surface a clear error rather
+    than a silent no-op.
+    """
+    from .notifications import alerts as _alerts
+    result = await _alerts.set_operator_preference(
+        email=body.email,
+        alert_type=body.alert_type,
+        enabled=bool(body.enabled),
+    )
+    if "error" in result:
+        raise HTTPException(status_code=400, detail=result)
+    return result
+
+
+# ---------------------------------------------------------------------------
 # Early-access (landing) leads — admin browse + CSV export (task #125)
 # ---------------------------------------------------------------------------
 

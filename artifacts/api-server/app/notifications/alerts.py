@@ -924,6 +924,775 @@ def trade_confirmation(
 
 
 # ---------------------------------------------------------------------------
+# Operator branded HTML per-trade alert (task #712).
+#
+# Companion to the plain-text operator firehose ``live_trade()``: same
+# trigger (every live fill), but a richer HTML email aimed at on-call
+# triage from a phone. Carries:
+#   * Market title (resolved via the existing market-title cache).
+#   * Side / contracts / price / total.
+#   * Position-after-fill (long / short / flat).
+#   * Today's vertical PnL context (realized + open exposure).
+#   * Risk-gate context (which gates approved this trade).
+#   * Direct link to the existing /trades/{order_id} dashboard page.
+#
+# Per-operator opt-out via ``operator_alert_preferences`` (default
+# opted-in). Dedupe is per-recipient on
+# ``(operator_email, exchange_order_id, fill_sequence)`` so the
+# branded email never piles up on partial-fill bursts.
+# ---------------------------------------------------------------------------
+
+
+OPERATOR_TRADE_ALERT_TYPE = "operator_trade_alert"
+
+
+async def is_operator_opted_in(email: str, alert_type: str) -> bool:
+    """Return True iff ``email`` is opted in for ``alert_type``.
+
+    Default is opted-in: a missing row (or a DB error) means the
+    operator hasn't touched their pref yet, in which case we err on
+    the side of delivering the alert. Operators who want to mute the
+    branded email explicitly write ``enabled = false``.
+    """
+    if not email:
+        return False
+    from .. import db
+    try:
+        row = await db.fetchrow(
+            """
+            SELECT enabled
+              FROM operator_alert_preferences
+             WHERE email = $1 AND alert_type = $2
+            """,
+            email.strip().lower(), alert_type,
+        )
+    except Exception as e:
+        log.warning("operator_alert_preferences lookup failed (%s/%s): %s",
+                    email, alert_type, e)
+        return True
+    if row is None:
+        return True
+    val = row.get("enabled") if isinstance(row, dict) else row["enabled"]
+    return bool(val) if val is not None else True
+
+
+async def set_operator_preference(
+    *, email: str, alert_type: str, enabled: bool
+) -> dict[str, Any]:
+    """Upsert one ``operator_alert_preferences`` row.
+
+    Used by the admin endpoint. Returns the resulting row as a dict
+    or ``{"error": ...}`` on DB failure (caller decides how to surface).
+    """
+    if not email or "@" not in email:
+        return {"error": "invalid_email"}
+    if alert_type != OPERATOR_TRADE_ALERT_TYPE:
+        # v1 only knows the per-trade alert; reject anything else so a
+        # typo doesn't silently land in the table.
+        return {"error": "unknown_alert_type"}
+    from .. import db
+    try:
+        row = await db.fetchrow(
+            """
+            INSERT INTO operator_alert_preferences
+                (email, alert_type, enabled, updated_at)
+            VALUES ($1, $2, $3, now())
+            ON CONFLICT (email, alert_type) DO UPDATE
+              SET enabled    = EXCLUDED.enabled,
+                  updated_at = now()
+            RETURNING email, alert_type, enabled, updated_at
+            """,
+            email.strip().lower(), alert_type, bool(enabled),
+        )
+        if row is None:
+            return {"error": "no_row_returned"}
+        out = dict(row)
+        if hasattr(out.get("updated_at"), "isoformat"):
+            out["updated_at"] = out["updated_at"].isoformat()
+        return out
+    except Exception as e:
+        log.warning("operator_alert_preferences upsert failed (%s/%s): %s",
+                    email, alert_type, e)
+        return {"error": str(e)}
+
+
+async def list_operator_preferences(alert_type: str | None = None) -> list[dict[str, Any]]:
+    """Return all rows in ``operator_alert_preferences`` (newest first).
+
+    Best-effort: returns ``[]`` on DB error. Used by the admin GET
+    endpoint to surface every operator's current state.
+    """
+    from .. import db
+    try:
+        if alert_type:
+            rows = await db.fetch(
+                """
+                SELECT email, alert_type, enabled, updated_at
+                  FROM operator_alert_preferences
+                 WHERE alert_type = $1
+                 ORDER BY updated_at DESC
+                """,
+                alert_type,
+            )
+        else:
+            rows = await db.fetch(
+                """
+                SELECT email, alert_type, enabled, updated_at
+                  FROM operator_alert_preferences
+                 ORDER BY updated_at DESC
+                """,
+            )
+    except Exception as e:
+        log.warning("operator_alert_preferences list failed: %s", e)
+        return []
+    out: list[dict[str, Any]] = []
+    for r in rows:
+        d = dict(r)
+        if hasattr(d.get("updated_at"), "isoformat"):
+            d["updated_at"] = d["updated_at"].isoformat()
+        out.append(d)
+    return out
+
+
+# ---- context fetchers --------------------------------------------------
+
+
+async def _fetch_market_title_safe(market_ticker: str) -> str:
+    try:
+        from ..kalshi.market_titles import get_title
+        title = await get_title(market_ticker)
+        return title or market_ticker
+    except Exception as e:
+        log.warning("market title lookup failed for %s: %s", market_ticker, e)
+        return market_ticker
+
+
+async def _fetch_position_after_fill(market_ticker: str) -> dict[str, Any]:
+    """Return ``{long, short, net}`` (signed contract counts) for the
+    given market across all OPEN positions on Kalshi.
+
+    Reads from the same ``positions`` table the dashboard uses, summed
+    across all rolled-up rows (one per ``order_id``). Fail-soft: any
+    error returns zeros so a transient DB issue can't break the alert.
+    """
+    from .. import db
+    try:
+        rows = await db.fetch(
+            """
+            SELECT lower(coalesce(side, '')) AS side_lc,
+                   coalesce(quantity, 0)::int AS qty
+              FROM positions
+             WHERE market_id = $1
+               AND coalesce(exchange, 'kalshi') = 'kalshi'
+               AND coalesce(status, 'open') = 'open'
+            """,
+            market_ticker,
+        )
+    except Exception as e:
+        log.warning("position context fetch failed for %s: %s", market_ticker, e)
+        return {"long": 0, "short": 0, "net": 0, "error": str(e)}
+    long_n = 0
+    short_n = 0
+    for r in rows:
+        side = (r["side_lc"] or "").strip()
+        qty = int(r["qty"] or 0)
+        if qty <= 0:
+            continue
+        if side in ("yes", "y", "buy", "long"):
+            long_n += qty
+        elif side in ("no", "n", "sell", "short"):
+            short_n += qty
+        else:
+            # Unknown side label — treat as long so we don't silently
+            # zero it out; surfaces in the alert body for triage.
+            long_n += qty
+    return {"long": long_n, "short": short_n, "net": long_n - short_n}
+
+
+async def _fetch_vertical_pnl_context(vertical: str) -> dict[str, Any]:
+    """Return ``{realized_today_usd, open_exposure_usd}`` for the
+    vertical, mirroring the dashboard's ``vertical_perf`` math.
+
+    Both values are best-effort floats; either may be 0.0 (or missing)
+    when the schema isn't initialised. Returns ``{}`` on hard error.
+    """
+    from .. import db
+    out: dict[str, Any] = {"realized_today_usd": 0.0, "open_exposure_usd": 0.0}
+    try:
+        n = await db.fetchval(
+            """
+            SELECT coalesce(sum(pnl), 0)::float
+              FROM trades
+             WHERE vertical = $1
+               AND executed_at >= (now() AT TIME ZONE 'UTC')::date
+            """,
+            vertical,
+        )
+        out["realized_today_usd"] = float(n or 0.0)
+    except Exception as e:
+        log.warning("vertical pnl realized fetch failed (%s): %s", vertical, e)
+        out["realized_today_usd_error"] = str(e)
+    try:
+        n = await db.fetchval(
+            """
+            SELECT coalesce(sum(notional), 0)::float
+              FROM positions
+             WHERE vertical = $1
+               AND coalesce(status, 'open') = 'open'
+            """,
+            vertical,
+        )
+        out["open_exposure_usd"] = float(n or 0.0)
+    except Exception as e:
+        log.warning("vertical pnl exposure fetch failed (%s): %s", vertical, e)
+        out["open_exposure_usd_error"] = str(e)
+    return out
+
+
+async def _fetch_gates_context(order_id: str) -> dict[str, Any]:
+    """Read the most recent ``order_lifecycle.metadata`` row for this
+    ``order_id`` (event_type = 'submitted' is the canonical pre-trade
+    snapshot) and return the embedded request context — that's where
+    the swarm consensus, model edge, and any gate-decision flags live.
+
+    Always returns a dict; empty on miss or error.
+    """
+    from .. import db
+    try:
+        row = await db.fetchrow(
+            """
+            SELECT metadata
+              FROM order_lifecycle
+             WHERE order_id = $1
+               AND event_type = 'submitted'
+             ORDER BY id DESC
+             LIMIT 1
+            """,
+            order_id,
+        )
+    except Exception as e:
+        log.warning("gates context fetch failed for %s: %s", order_id, e)
+        return {}
+    if not row:
+        return {}
+    md = row["metadata"] if not isinstance(row, dict) else row.get("metadata")
+    if md is None:
+        return {}
+    if isinstance(md, (bytes, str)):
+        import json
+        try:
+            md = json.loads(md)
+        except Exception:
+            return {}
+    if not isinstance(md, dict):
+        return {}
+    ctx = md.get("context")
+    if isinstance(ctx, dict):
+        return ctx
+    return {}
+
+
+def _format_position_summary(pos: dict[str, Any]) -> str:
+    if not pos:
+        return "flat"
+    long_n = int(pos.get("long") or 0)
+    short_n = int(pos.get("short") or 0)
+    if long_n == 0 and short_n == 0:
+        return "flat"
+    parts = []
+    if long_n:
+        parts.append(f"long {long_n}")
+    if short_n:
+        parts.append(f"short {short_n}")
+    return " / ".join(parts)
+
+
+def _format_gates_summary(ctx: dict[str, Any]) -> list[tuple[str, Any]]:
+    """Pluck a small, stable set of human-meaningful keys out of the
+    pre-trade request context and render them as ``(label, value)``
+    pairs for the email body. Anything missing is simply omitted —
+    callers decide whether to render an empty block.
+    """
+    if not ctx:
+        return []
+    candidate_keys = [
+        ("model_prob",        "Model prob"),
+        ("model_edge_cents",  "Model edge (¢)"),
+        ("swarm_consensus",   "Swarm consensus"),
+        ("swarm_confidence",  "Swarm confidence"),
+        ("strategy",          "Strategy"),
+        ("daily_loss_check",  "Daily-loss gate"),
+        ("kelly_fraction",    "Kelly fraction"),
+        ("slippage_guard",    "Slippage guard"),
+        ("sliced_by_slippage_guard", "Slice (slippage)"),
+    ]
+    out: list[tuple[str, Any]] = []
+    for k, label in candidate_keys:
+        if k not in ctx:
+            continue
+        v = ctx[k]
+        if v is None:
+            continue
+        if isinstance(v, dict):
+            # Compact representation — full JSON stays in the lifecycle row.
+            try:
+                v = ", ".join(f"{kk}={vv}" for kk, vv in v.items())
+            except Exception:
+                v = str(v)
+        if isinstance(v, float):
+            v = round(v, 4)
+        out.append((label, v))
+    return out
+
+
+# ---- renderers ---------------------------------------------------------
+
+
+def _render_operator_trade_alert_html(
+    *,
+    market_title: str,
+    market_ticker: str,
+    side: str,
+    action: str,
+    contracts: int,
+    avg_price_cents: int,
+    total_cost_cents: int,
+    vertical: str | None,
+    order_id: str,
+    fill_id: str,
+    timestamp_iso: str,
+    position: dict[str, Any],
+    pnl: dict[str, Any],
+    gates: list[tuple[str, Any]],
+    trade_url: str,
+) -> str:
+    side_label = (side or "").upper()
+    action_label = (action or "").upper()
+    fill_rows = [
+        ("Market", f"{_html_escape(market_title)} "
+                   f"<span style=\"color:#6B7280;\">"
+                   f"({_html_escape(market_ticker)})</span>"),
+        ("Side", _html_escape(side_label)),
+        ("Action", _html_escape(action_label)),
+        ("Contracts", _html_escape(contracts)),
+        ("Price", _html_escape(f"{avg_price_cents}¢")),
+        ("Total", _html_escape(_fmt_cents_usd(total_cost_cents))),
+    ]
+    if vertical:
+        fill_rows.append(("Vertical", _html_escape(vertical)))
+    fill_rows.extend([
+        ("Order ID", f'<code style="font-family:monospace;font-size:12px;">'
+                     f'{_html_escape(order_id)}</code>'),
+        ("Fill ID",  f'<code style="font-family:monospace;font-size:12px;">'
+                     f'{_html_escape(fill_id)}</code>'),
+        ("At", _html_escape(timestamp_iso)),
+    ])
+    fill_html = "".join(
+        f'<tr><td style="padding:8px 12px;color:#6B7280;font-size:12px;'
+        f'text-transform:uppercase;letter-spacing:0.08em;'
+        f'border-bottom:1px solid #E5E7EB;white-space:nowrap;">{k}</td>'
+        f'<td style="padding:8px 12px;color:#111827;font-size:14px;'
+        f'border-bottom:1px solid #E5E7EB;">{v}</td></tr>'
+        for k, v in fill_rows
+    )
+
+    # Position block.
+    pos_summary = _format_position_summary(position)
+    pos_html = (
+        '<h3 style="margin:20px 0 8px 0;font-size:14px;color:#111827;">'
+        "Position after fill</h3>"
+        f'<div style="font-size:14px;color:#111827;">{_html_escape(pos_summary)}</div>'
+    )
+
+    # Vertical PnL block.
+    realized = pnl.get("realized_today_usd") if pnl else None
+    exposure = pnl.get("open_exposure_usd") if pnl else None
+    realized_str = (
+        f"${realized:,.2f}" if isinstance(realized, (int, float)) else "—"
+    )
+    exposure_str = (
+        f"${exposure:,.2f}" if isinstance(exposure, (int, float)) else "—"
+    )
+    vertical_label = vertical or "(unknown)"
+    pnl_html = (
+        '<h3 style="margin:20px 0 8px 0;font-size:14px;color:#111827;">'
+        f"PnL today &middot; {_html_escape(vertical_label)}</h3>"
+        '<table cellpadding="0" cellspacing="0" '
+        'style="border-collapse:collapse;width:100%;'
+        'border:1px solid #E5E7EB;border-radius:6px;overflow:hidden;">'
+        '<tr>'
+        '<td style="padding:8px 12px;color:#6B7280;font-size:12px;'
+        'text-transform:uppercase;letter-spacing:0.08em;'
+        'border-bottom:1px solid #E5E7EB;">Realized today</td>'
+        f'<td style="padding:8px 12px;color:#111827;font-size:14px;'
+        f'border-bottom:1px solid #E5E7EB;">{_html_escape(realized_str)}</td>'
+        '</tr>'
+        '<tr>'
+        '<td style="padding:8px 12px;color:#6B7280;font-size:12px;'
+        'text-transform:uppercase;letter-spacing:0.08em;">Open exposure</td>'
+        f'<td style="padding:8px 12px;color:#111827;font-size:14px;">'
+        f'{_html_escape(exposure_str)}</td>'
+        '</tr>'
+        '</table>'
+    )
+
+    # Gates block.
+    if gates:
+        gate_rows = "".join(
+            f'<tr>'
+            f'<td style="padding:6px 12px;color:#6B7280;font-size:12px;'
+            f'text-transform:uppercase;letter-spacing:0.08em;'
+            f'border-bottom:1px solid #E5E7EB;white-space:nowrap;">'
+            f'{_html_escape(label)}</td>'
+            f'<td style="padding:6px 12px;color:#111827;font-size:13px;'
+            f'border-bottom:1px solid #E5E7EB;">{_html_escape(value)}</td>'
+            f'</tr>'
+            for label, value in gates
+        )
+        gates_html = (
+            '<h3 style="margin:20px 0 8px 0;font-size:14px;color:#111827;">'
+            "Gate context</h3>"
+            '<table cellpadding="0" cellspacing="0" '
+            'style="border-collapse:collapse;width:100%;'
+            'border:1px solid #E5E7EB;border-radius:6px;overflow:hidden;">'
+            f"{gate_rows}"
+            "</table>"
+        )
+    else:
+        gates_html = (
+            '<h3 style="margin:20px 0 8px 0;font-size:14px;color:#111827;">'
+            "Gate context</h3>"
+            '<div style="color:#6B7280;font-size:13px;font-style:italic;">'
+            "No pre-trade gate metadata recorded for this order."
+            "</div>"
+        )
+
+    return f"""<!DOCTYPE html>
+<html>
+<body style="margin:0;padding:0;background:#F9FAFB;{_HTML_SANS}">
+  <table width="100%" cellpadding="0" cellspacing="0" style="background:#F9FAFB;padding:24px 0;">
+    <tr><td align="center">
+      <table width="600" cellpadding="0" cellspacing="0" style="background:#FFFFFF;border:1px solid #E5E7EB;border-radius:8px;overflow:hidden;max-width:600px;width:100%;">
+        <tr>
+          <td style="background:#111827;color:#F9FAFB;padding:20px 24px;">
+            <div style="font-size:11px;letter-spacing:0.16em;text-transform:uppercase;color:#9CA3AF;">Axiom Predict &middot; Operator</div>
+            <div style="font-size:20px;font-weight:700;margin-top:4px;">Live trade fill &middot; {_html_escape(vertical_label)}</div>
+          </td>
+        </tr>
+        <tr>
+          <td style="padding:20px 24px 8px 24px;">
+            <div style="font-size:14px;color:#111827;">
+              {_html_escape(action_label)} {_html_escape(side_label)} {_html_escape(contracts)}x
+              <strong>{_html_escape(market_title)}</strong>
+              <span style="color:#6B7280;">({_html_escape(market_ticker)})</span>
+              @ {_html_escape(avg_price_cents)}¢
+            </div>
+          </td>
+        </tr>
+        <tr>
+          <td style="padding:8px 24px 0 24px;">
+            <table width="100%" cellpadding="0" cellspacing="0" style="border:1px solid #E5E7EB;border-radius:6px;border-collapse:separate;">
+              {fill_html}
+            </table>
+          </td>
+        </tr>
+        <tr>
+          <td style="padding:0 24px;">
+            {pos_html}
+            {pnl_html}
+            {gates_html}
+          </td>
+        </tr>
+        <tr>
+          <td style="padding:20px 24px 24px 24px;">
+            <a href="{_html_escape(trade_url)}" style="display:inline-block;background:#2563EB;color:#FFFFFF;text-decoration:none;padding:10px 16px;border-radius:6px;font-weight:600;font-size:14px;">Open trade detail</a>
+          </td>
+        </tr>
+        <tr>
+          <td style="padding:12px 24px 20px 24px;border-top:1px solid #E5E7EB;color:#6B7280;font-size:11px;line-height:1.5;">
+            Operator alert. Mute the branded copy any time via the operator notifications page; the plain-text firehose continues unchanged.
+          </td>
+        </tr>
+      </table>
+    </td></tr>
+  </table>
+</body>
+</html>"""
+
+
+def _render_operator_trade_alert_text(
+    *,
+    market_title: str,
+    market_ticker: str,
+    side: str,
+    action: str,
+    contracts: int,
+    avg_price_cents: int,
+    total_cost_cents: int,
+    vertical: str | None,
+    order_id: str,
+    fill_id: str,
+    timestamp_iso: str,
+    position: dict[str, Any],
+    pnl: dict[str, Any],
+    gates: list[tuple[str, Any]],
+    trade_url: str,
+) -> str:
+    lines: list[tuple[str, Any]] = [
+        ("market", f"{market_title} ({market_ticker})"),
+        ("side", (side or "").upper()),
+        ("action", (action or "").upper()),
+        ("contracts", contracts),
+        ("price", f"{avg_price_cents}¢"),
+        ("total", _fmt_cents_usd(total_cost_cents)),
+    ]
+    if vertical:
+        lines.append(("vertical", vertical))
+    lines.extend([
+        ("position_after", _format_position_summary(position)),
+    ])
+    realized = pnl.get("realized_today_usd") if pnl else None
+    exposure = pnl.get("open_exposure_usd") if pnl else None
+    if isinstance(realized, (int, float)):
+        lines.append(("pnl_realized_today", f"${realized:,.2f}"))
+    if isinstance(exposure, (int, float)):
+        lines.append(("open_exposure", f"${exposure:,.2f}"))
+    lines.extend([
+        ("order_id", order_id),
+        ("fill_id", fill_id),
+        ("at", timestamp_iso),
+    ])
+    body = (
+        f"Operator trade alert ({vertical or 'unknown'}) — live Kalshi fill.\n\n"
+        + _format_lines(lines)
+    )
+    if gates:
+        body += "\n\nGate context:\n" + _format_lines(
+            [(str(k).lower().replace(" ", "_"), v) for k, v in gates]
+        )
+    body += f"\n\nTrade detail: {trade_url}\n"
+    return body
+
+
+# ---- alert function ----------------------------------------------------
+
+
+async def _release_operator_dedupe_claim(dedupe_key: str) -> None:
+    """Best-effort: delete the dedupe row for this key so a transient
+    Postmark error doesn't silence the same operator for 7 days.
+
+    Failure here is silent on purpose — if the DB is down we can't
+    release the row but the firehose alert still went out so on-call
+    is not flying blind.
+    """
+    full_key = _compose_key(OPERATOR_TRADE_ALERT_TYPE, dedupe_key)
+    from .. import db
+    try:
+        await db.execute(
+            "DELETE FROM notification_dedupe WHERE key = $1",
+            full_key,
+        )
+    except Exception as e:  # pragma: no cover
+        log.warning("operator_trade_alert dedupe release failed for %s: %s",
+                    full_key, e)
+
+
+async def _send_one_operator_trade_alert(
+    *,
+    email: str,
+    subject: str,
+    text_body: str,
+    html_body: str,
+    dedupe_key: str,
+) -> dict[str, Any]:
+    """Per-recipient claim + send. Each operator gets an independent
+    dedupe row so a paused operator who later un-mutes doesn't replay
+    historical fills.
+
+    On Postmark send failure we release the dedupe claim so the next
+    fill (or a manual retry) can re-attempt — without this, a single
+    Postmark hiccup would suppress this (operator, order, fill) tuple
+    for 7 days and the operator would silently miss the alert.
+    """
+    claimed = await dedupe_or_skip(
+        OPERATOR_TRADE_ALERT_TYPE, dedupe_key, ttl_seconds=7 * 24 * 3600
+    )
+    if not claimed:
+        log.info("operator_trade_alert suppressed by dedupe: %s", dedupe_key)
+        return {"sent": False, "skipped_reason": "dedupe", "to": email}
+    try:
+        results = await postmark.send(
+            subject=subject,
+            text_body=text_body,
+            html_body=html_body,
+            to=[email],
+            tag="operator-trade-alert",
+        )
+        return {"sent": True, "to": email, "results": results}
+    except Exception as e:  # pragma: no cover
+        log.warning("operator_trade_alert send failed for %s: %s", email, e)
+        await _release_operator_dedupe_claim(dedupe_key)
+        return {"sent": False, "to": email, "error": str(e)}
+
+
+async def operator_trade_alert(
+    *,
+    market_ticker: str,
+    side: str,
+    action: str,
+    contracts: int,
+    price_cents: int,
+    order_id: str,
+    fill_id: str,
+    vertical: str | None = None,
+    market_title: str | None = None,
+    position: dict[str, Any] | None = None,
+    pnl: dict[str, Any] | None = None,
+    gates_context: dict[str, Any] | None = None,
+    recipients: Iterable[str] | None = None,
+    dry_run: bool = False,
+) -> dict[str, Any]:
+    """Compose + dispatch the branded HTML operator trade alert.
+
+    All ``*_context`` blocks are optional — when omitted the function
+    looks them up from the same DB sources the dashboard uses. Any
+    individual lookup failure degrades to an empty block so the email
+    still goes out.
+
+    Returns a dict with subject / recipients / per-recipient send
+    results (or dry-run preview). Never raises — failures are logged
+    and folded into the return value.
+    """
+    title = market_title or await _fetch_market_title_safe(market_ticker)
+    pos = position if position is not None else await _fetch_position_after_fill(market_ticker)
+    pnl_ctx = pnl if pnl is not None else (
+        await _fetch_vertical_pnl_context(vertical) if vertical else {}
+    )
+    if gates_context is None:
+        gates_context = await _fetch_gates_context(order_id)
+    gates = _format_gates_summary(gates_context or {})
+
+    total_cost_cents = int(price_cents) * int(contracts)
+    base_url = _public_base_url()
+    trade_url = f"{base_url}/trades/{order_id}"
+    ts = _utc_now_iso()
+
+    vertical_tag = (vertical or "unknown").lower()
+    subject = (
+        f"[axiom][operator][{vertical_tag}] "
+        f"{action.upper()} {side.upper()} {contracts}x "
+        f"{market_ticker} @ {price_cents}¢"
+    )
+
+    html_body = _render_operator_trade_alert_html(
+        market_title=title, market_ticker=market_ticker,
+        side=side, action=action, contracts=int(contracts),
+        avg_price_cents=int(price_cents),
+        total_cost_cents=int(total_cost_cents),
+        vertical=vertical, order_id=order_id, fill_id=fill_id,
+        timestamp_iso=ts,
+        position=pos or {}, pnl=pnl_ctx or {}, gates=gates,
+        trade_url=trade_url,
+    )
+    text_body = _render_operator_trade_alert_text(
+        market_title=title, market_ticker=market_ticker,
+        side=side, action=action, contracts=int(contracts),
+        avg_price_cents=int(price_cents),
+        total_cost_cents=int(total_cost_cents),
+        vertical=vertical, order_id=order_id, fill_id=fill_id,
+        timestamp_iso=ts,
+        position=pos or {}, pnl=pnl_ctx or {}, gates=gates,
+        trade_url=trade_url,
+    )
+
+    raw_recipients = (
+        list(recipients) if recipients is not None
+        else postmark.alert_recipients()
+    )
+
+    if dry_run:
+        return {
+            "dry_run": True,
+            "tag": "operator-trade-alert",
+            "subject": subject,
+            "body_preview": text_body[:4000],
+            "html_preview": html_body[:32000],
+            "would_send_to": raw_recipients,
+            "position": pos,
+            "pnl": pnl_ctx,
+            "gates": gates,
+            "configured": postmark.is_configured(),
+        }
+
+    if not raw_recipients:
+        log.info("operator_trade_alert skipped (no recipients) order=%s fill=%s",
+                 order_id, fill_id)
+        return {
+            "tag": "operator-trade-alert",
+            "subject": subject,
+            "queued": False,
+            "skipped_reason": "no_recipients",
+            "recipients": [],
+        }
+
+    # Filter to opted-in operators. Default = opted-in, so a fresh
+    # install with no rows in operator_alert_preferences sends to
+    # every configured email.
+    targets: list[str] = []
+    skipped_optout: list[str] = []
+    for r in raw_recipients:
+        try:
+            if await is_operator_opted_in(r, OPERATOR_TRADE_ALERT_TYPE):
+                targets.append(r)
+            else:
+                skipped_optout.append(r)
+        except Exception as e:  # pragma: no cover
+            log.warning("opt-in check error for %s: %s", r, e)
+            targets.append(r)
+
+    if not targets:
+        log.info("operator_trade_alert all recipients opted out: order=%s fill=%s",
+                 order_id, fill_id)
+        return {
+            "tag": "operator-trade-alert",
+            "subject": subject,
+            "queued": False,
+            "skipped_reason": "all_recipients_opted_out",
+            "skipped_optout": skipped_optout,
+        }
+
+    # Per-recipient dedupe + send. Each operator's mailbox gets at
+    # most one branded HTML email per (order_id, fill_id) inside the
+    # 7-day TTL window — so partial-fill bursts on the same fill_id
+    # collapse to one email per operator.
+    sends: list[dict[str, Any]] = []
+    for email in targets:
+        dedupe_key = (
+            f"{email.lower()}:{order_id or 'unknown'}:{fill_id or 'unknown'}"
+        )
+        sends.append(
+            await _send_one_operator_trade_alert(
+                email=email, subject=subject,
+                text_body=text_body, html_body=html_body,
+                dedupe_key=dedupe_key,
+            )
+        )
+
+    return {
+        "tag": "operator-trade-alert",
+        "subject": subject,
+        "queued": True,
+        "configured": postmark.is_configured(),
+        "recipients": targets,
+        "skipped_optout": skipped_optout,
+        "sends": sends,
+        "position": pos,
+        "pnl": pnl_ctx,
+        "gates": gates,
+    }
+
+
+# ---------------------------------------------------------------------------
 # Halt / kill switch
 # ---------------------------------------------------------------------------
 

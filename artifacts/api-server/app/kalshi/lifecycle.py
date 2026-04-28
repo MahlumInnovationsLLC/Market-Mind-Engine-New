@@ -1330,6 +1330,39 @@ async def handle_ws_fill(message: dict[str, Any]) -> None:
     except Exception as e:  # pragma: no cover
         log.warning("live_trade alert dispatch failed: %s", e)
 
+    # Operator branded HTML companion (task #712). Independent failure
+    # boundary from the plain-text firehose above — a render error in
+    # the rich email must NEVER swallow the firehose alert, and vice
+    # versa. The dedupe gate is per-recipient inside the helper, so a
+    # partial-fill burst on the same fill_id collapses to one branded
+    # email per operator.
+    #
+    # `contracts` is the actual ACCEPTED fill quantity for THIS WS event,
+    # not the requested order size — partial fills on a 100-contract
+    # order land in the operator's inbox showing the executed slice
+    # (e.g. "BUY YES 25x") so on-call triage isn't misled by
+    # `rec.request.count` which would be the unrelated total order.
+    try:
+        operator_alert_snapshot = {
+            "market_ticker": rec.request.market_ticker,
+            "side": rec.request.side,
+            "action": rec.request.action,
+            "contracts": int(accepted),
+            "price_cents": int(price),
+            "order_id": rec.order_id,
+            "fill_id": fill_id,
+            "vertical": rec.request.vertical,
+        }
+        try:
+            loop = asyncio.get_running_loop()
+            loop.create_task(
+                _send_operator_trade_alert_from_snapshot(operator_alert_snapshot)
+            )
+        except RuntimeError:  # pragma: no cover
+            await _send_operator_trade_alert_from_snapshot(operator_alert_snapshot)
+    except Exception as e:  # pragma: no cover
+        log.warning("operator_trade_alert dispatch failed: %s", e)
+
     # ---- per-user HTML trade-confirmation email (task #269) -----------
     # Distinct from the operator-broadcast `live_trade` alert above.
     # Fully off the hot path: we capture an immutable snapshot of the
@@ -1393,6 +1426,32 @@ async def _send_live_trade_alert_from_snapshot(snap: dict[str, Any]) -> None:
             )
     except Exception as e:  # pragma: no cover
         log.warning("live_trade alert dispatch failed: %s", e)
+
+
+async def _send_operator_trade_alert_from_snapshot(snap: dict[str, Any]) -> None:
+    """Background worker: dispatch the branded HTML operator alert
+    (task #712). Independent failure boundary from the plain-text
+    firehose — a render error or DB hiccup here must NEVER surface
+    upstream and must NEVER block the firehose from going out.
+
+    All context fetches (market title, position-after-fill, vertical
+    PnL, gate audit) happen inside ``operator_trade_alert`` and
+    fail-soft to empty blocks.
+    """
+    from ..notifications import alerts as _alerts
+    try:
+        await _alerts.operator_trade_alert(
+            market_ticker=snap["market_ticker"],
+            side=snap["side"],
+            action=snap["action"],
+            contracts=int(snap["contracts"]),
+            price_cents=int(snap["price_cents"]),
+            order_id=str(snap.get("order_id") or ""),
+            fill_id=str(snap.get("fill_id") or ""),
+            vertical=snap.get("vertical"),
+        )
+    except Exception as e:  # pragma: no cover
+        log.warning("operator_trade_alert worker failed: %s", e)
 
 
 async def _resolve_trade_confirmation_recipient(
