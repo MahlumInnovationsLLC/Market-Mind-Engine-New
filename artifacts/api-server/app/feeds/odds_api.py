@@ -145,11 +145,23 @@ async def _persist_odds_payload(sport: str, games: list[dict[str, Any]]) -> int:
                 for outcome in mk.get("outcomes", []) or []:
                     line = outcome.get("point")
                     price = outcome.get("price")
+                    # `outcome.name` is the side identifier for this row:
+                    # h2h     -> "<home team>" / "<away team>" / "Draw"
+                    # spreads -> "<home team>" / "<away team>" (mirrored point)
+                    # totals  -> "Over" / "Under" (shared point)
+                    # Cap at 255 chars to match the column width set by
+                    # migration 0030.  Long names are extremely rare but a
+                    # truncation here is preferable to crashing the whole
+                    # cross-sport sweep on one weird row.
+                    out_name = outcome.get("name")
+                    if out_name is not None:
+                        out_name = str(out_name)[:255]
                     snapshot_rows.append((
                         gid, sport, book, mtype,
                         float(line) if line is not None else None,
                         float(price) if price is not None else None,
                         home, away, False,
+                        out_name,
                     ))
                     change_rows.append((
                         gid, book, mtype,
@@ -161,18 +173,25 @@ async def _persist_odds_payload(sport: str, games: list[dict[str, Any]]) -> int:
     if not change_rows:
         return 0
 
-    # ON CONFLICT DO NOTHING is essential for two reasons:
-    # 1. `idx_line_snapshots_uq` makes (game_id, book, market_type, timestamp)
-    #    unique.  When two pollers race on the same game (e.g. the live
-    #    scheduler tick coinciding with a backfill replay), one wins and
-    #    the other was previously aborting the ENTIRE batch with a unique
-    #    violation, dropping every other row in the same `executemany`.
+    # ON CONFLICT DO NOTHING is essential for three reasons:
+    # 1. `idx_line_snapshots_uq` makes (game_id, book, market_type,
+    #    outcome, timestamp) unique (migration 0030 added `outcome` to
+    #    the tuple — before that the index dropped every non-first
+    #    outcome per cycle and we silently lost half the data on every
+    #    h2h / spreads / totals market).  When two pollers race on the
+    #    same game (e.g. the live scheduler tick coinciding with a
+    #    backfill replay), one wins and the other was previously
+    #    aborting the ENTIRE batch with a unique violation, dropping
+    #    every other row in the same `executemany`.
     # 2. Soccer feeds occasionally produced rows whose `sport` value was
     #    too long for the old `varchar(20)` column (migration 0029
     #    widened it to `varchar(50)`).  Even with the column widened,
     #    keeping the executemany resilient via ON CONFLICT is the right
     #    long-term posture — one bad row should never blank out a
     #    cross-sport sweep.
+    # 3. Older rows (pre-migration-0030) have `outcome IS NULL`.  Postgres
+    #    treats NULL as distinct in unique indexes, so historical rows
+    #    never collide with each other or with new (non-NULL) rows.
     written = 0
     try:
         async with db.acquire() as conn, conn.transaction():
@@ -180,9 +199,9 @@ async def _persist_odds_payload(sport: str, games: list[dict[str, Any]]) -> int:
                 """
                 INSERT INTO line_snapshots
                   (game_id, sport, book, market_type, line_value, odds_value,
-                   home_team, away_team, is_opening, timestamp)
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW())
-                ON CONFLICT (game_id, book, market_type, "timestamp")
+                   home_team, away_team, is_opening, outcome, timestamp)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW())
+                ON CONFLICT (game_id, book, market_type, outcome, "timestamp")
                   DO NOTHING
                 """,
                 snapshot_rows,
