@@ -77,6 +77,7 @@ import type {
   SettlementCycleResult,
   SettlementStatus,
   SlippageGuardRejectList,
+  SportradarLeaderboardsRetentionStatus,
   SwarmDebateList,
   SwarmDebateRequest,
   SwarmDebateResult,
@@ -1284,6 +1285,89 @@ export function useGetCryptoBacktestRetentionStatus<
   request?: SecondParameter<typeof customFetch>;
 }): UseQueryResult<TData, TError> & { queryKey: QueryKey } {
   const queryOptions = getGetCryptoBacktestRetentionStatusQueryOptions(options);
+
+  const query = useQuery(queryOptions) as UseQueryResult<TData, TError> & {
+    queryKey: QueryKey;
+  };
+
+  return { ...query, queryKey: queryOptions.queryKey };
+}
+
+/**
+ * @summary Health snapshot of the sportradar_tournament_leaderboards history-table retention sweep
+ */
+export const getGetSportradarLeaderboardsRetentionStatusUrl = () => {
+  return `/api/dashboard/sportradar-leaderboards-retention`;
+};
+
+export const getSportradarLeaderboardsRetentionStatus = async (
+  options?: RequestInit,
+): Promise<SportradarLeaderboardsRetentionStatus> => {
+  return customFetch<SportradarLeaderboardsRetentionStatus>(
+    getGetSportradarLeaderboardsRetentionStatusUrl(),
+    {
+      ...options,
+      method: "GET",
+    },
+  );
+};
+
+export const getGetSportradarLeaderboardsRetentionStatusQueryKey = () => {
+  return [`/api/dashboard/sportradar-leaderboards-retention`] as const;
+};
+
+export const getGetSportradarLeaderboardsRetentionStatusQueryOptions = <
+  TData = Awaited<ReturnType<typeof getSportradarLeaderboardsRetentionStatus>>,
+  TError = ErrorType<unknown>,
+>(options?: {
+  query?: UseQueryOptions<
+    Awaited<ReturnType<typeof getSportradarLeaderboardsRetentionStatus>>,
+    TError,
+    TData
+  >;
+  request?: SecondParameter<typeof customFetch>;
+}) => {
+  const { query: queryOptions, request: requestOptions } = options ?? {};
+
+  const queryKey =
+    queryOptions?.queryKey ??
+    getGetSportradarLeaderboardsRetentionStatusQueryKey();
+
+  const queryFn: QueryFunction<
+    Awaited<ReturnType<typeof getSportradarLeaderboardsRetentionStatus>>
+  > = ({ signal }) =>
+    getSportradarLeaderboardsRetentionStatus({ signal, ...requestOptions });
+
+  return { queryKey, queryFn, ...queryOptions } as UseQueryOptions<
+    Awaited<ReturnType<typeof getSportradarLeaderboardsRetentionStatus>>,
+    TError,
+    TData
+  > & { queryKey: QueryKey };
+};
+
+export type GetSportradarLeaderboardsRetentionStatusQueryResult = NonNullable<
+  Awaited<ReturnType<typeof getSportradarLeaderboardsRetentionStatus>>
+>;
+export type GetSportradarLeaderboardsRetentionStatusQueryError =
+  ErrorType<unknown>;
+
+/**
+ * @summary Health snapshot of the sportradar_tournament_leaderboards history-table retention sweep
+ */
+
+export function useGetSportradarLeaderboardsRetentionStatus<
+  TData = Awaited<ReturnType<typeof getSportradarLeaderboardsRetentionStatus>>,
+  TError = ErrorType<unknown>,
+>(options?: {
+  query?: UseQueryOptions<
+    Awaited<ReturnType<typeof getSportradarLeaderboardsRetentionStatus>>,
+    TError,
+    TData
+  >;
+  request?: SecondParameter<typeof customFetch>;
+}): UseQueryResult<TData, TError> & { queryKey: QueryKey } {
+  const queryOptions =
+    getGetSportradarLeaderboardsRetentionStatusQueryOptions(options);
 
   const query = useQuery(queryOptions) as UseQueryResult<TData, TError> & {
     queryKey: QueryKey;

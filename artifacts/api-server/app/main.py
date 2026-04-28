@@ -5360,6 +5360,24 @@ async def dashboard_crypto_backtest_retention(
     return await dashboard.get_crypto_backtest_retention_status()
 
 
+@app.get("/api/dashboard/sportradar-leaderboards-retention")
+async def dashboard_sportradar_leaderboards_retention(
+    _: object = Depends(require_approved_user),
+) -> dict[str, object]:
+    """Operator-facing snapshot of the ``sportradar_tournament_leaderboards`` retention sweep.
+
+    Mirrors :func:`dashboard_crypto_backtest_retention` for the
+    leaderboard history GC loop introduced by task #649. Surfaces the
+    loop's internal ``state()`` (running/enabled flags, last tick, last
+    error, total + last deletion counts, the resolved retention policy,
+    and the sweep cadence) plus two derived freshness fields the
+    dashboard uses to flag a misbehaving sweep at a glance:
+    ``seconds_since_last_tick`` and ``health``
+    (``ok`` / ``stale`` / ``error`` / ``disabled``).
+    """
+    return await dashboard.get_sportradar_leaderboards_retention_status()
+
+
 @app.get("/api/dashboard/bankroll/recent")
 async def dashboard_bankroll_recent(
     limit: int = 200,

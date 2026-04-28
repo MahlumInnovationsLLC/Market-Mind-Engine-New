@@ -35,6 +35,12 @@ vi.mock("@/components/dashboard/crypto-backtest-retention-panel", () => ({
 vi.mock("@/components/dashboard/crypto-ohlcv-retention-panel", () => ({
   default: stub("stub-crypto-ohlcv"),
 }));
+vi.mock(
+  "@/components/dashboard/sportradar-leaderboards-retention-panel",
+  () => ({
+    default: stub("stub-sportradar-leaderboards-retention"),
+  }),
+);
 vi.mock("@/components/dashboard/equity-charts", () => ({
   default: stub("stub-equity-charts"),
 }));
@@ -169,6 +175,7 @@ describe("Dashboard", () => {
       "stub-health-snapshot",
       "stub-crypto-ohlcv",
       "stub-crypto-backtest",
+      "stub-sportradar-leaderboards-retention",
       "stub-swarm-debates",
       "stub-swarm-analysts",
       "stub-swarm-personas-today",

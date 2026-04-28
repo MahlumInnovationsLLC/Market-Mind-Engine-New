@@ -484,6 +484,71 @@ export interface CryptoBacktestRetentionStatus {
   health: CryptoBacktestRetentionStatusHealth;
 }
 
+/**
+ * Resolved retention horizons for the sportradar_tournament_leaderboards history table.
+ */
+export interface SportradarLeaderboardsRetentionPolicy {
+  /** Minimum distinct snapshots kept per event_id regardless of age. */
+  min_snapshots: number;
+  /** Maximum age (days) a snapshot is kept beyond the min_snapshots window. */
+  retention_days: number;
+}
+
+/**
+ * Rolled-up health verdict the dashboard uses to color the panel:
+`ok` — running and ticked within `2 * interval_seconds`.
+`stale` — meant to be running but hasn't ticked in time.
+`error` — most recent sweep raised; the loop will retry next tick.
+`disabled` — turned off by AXIOM_SPORTRADAR_LEADERBOARDS_RETENTION_ENABLED=0.
+
+ */
+export type SportradarLeaderboardsRetentionStatusHealth =
+  (typeof SportradarLeaderboardsRetentionStatusHealth)[keyof typeof SportradarLeaderboardsRetentionStatusHealth];
+
+export const SportradarLeaderboardsRetentionStatusHealth = {
+  ok: "ok",
+  stale: "stale",
+  error: "error",
+  disabled: "disabled",
+} as const;
+
+/**
+ * Operator-facing snapshot of the periodic
+`sportradar_tournament_leaderboards` retention sweep
+(`app.sportradar_leaderboards_retention`). Mirrors the loop's
+internal `state()` plus two derived freshness fields the
+dashboard uses to flag a stalled or errored sweep.
+
+ */
+export interface SportradarLeaderboardsRetentionStatus {
+  /** Whether the asyncio task is currently alive. */
+  running: boolean;
+  /** Whether the loop is allowed to run per AXIOM_SPORTRADAR_LEADERBOARDS_RETENTION_ENABLED. */
+  enabled: boolean;
+  /** Unix timestamp (seconds) when the loop was started. */
+  started_at?: number | null;
+  /** Unix timestamp (seconds) of the most recent sweep. */
+  last_tick_at?: number | null;
+  /** Most recent sweep error, or null. */
+  last_error?: string | null;
+  /** Rows deleted on the most recent sweep. */
+  last_deleted: number;
+  /** Lifetime rows deleted since the loop started. */
+  total_deleted: number;
+  policy: SportradarLeaderboardsRetentionPolicy;
+  /** Sweep cadence in seconds. */
+  interval_seconds: number;
+  /** Wall-clock seconds since `last_tick_at`, or null if the loop has never ticked. */
+  seconds_since_last_tick?: number | null;
+  /** Rolled-up health verdict the dashboard uses to color the panel:
+`ok` — running and ticked within `2 * interval_seconds`.
+`stale` — meant to be running but hasn't ticked in time.
+`error` — most recent sweep raised; the loop will retry next tick.
+`disabled` — turned off by AXIOM_SPORTRADAR_LEADERBOARDS_RETENTION_ENABLED=0.
+ */
+  health: SportradarLeaderboardsRetentionStatusHealth;
+}
+
 export interface SlippageGuardReject {
   id: number;
   market_ticker?: string | null;

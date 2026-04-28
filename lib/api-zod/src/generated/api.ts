@@ -727,6 +727,70 @@ export const GetCryptoBacktestRetentionStatusResponse = zod
   );
 
 /**
+ * @summary Health snapshot of the sportradar_tournament_leaderboards history-table retention sweep
+ */
+export const GetSportradarLeaderboardsRetentionStatusResponse = zod
+  .object({
+    running: zod
+      .boolean()
+      .describe("Whether the asyncio task is currently alive."),
+    enabled: zod
+      .boolean()
+      .describe(
+        "Whether the loop is allowed to run per AXIOM_SPORTRADAR_LEADERBOARDS_RETENTION_ENABLED.",
+      ),
+    started_at: zod
+      .number()
+      .nullish()
+      .describe("Unix timestamp (seconds) when the loop was started."),
+    last_tick_at: zod
+      .number()
+      .nullish()
+      .describe("Unix timestamp (seconds) of the most recent sweep."),
+    last_error: zod
+      .string()
+      .nullish()
+      .describe("Most recent sweep error, or null."),
+    last_deleted: zod
+      .number()
+      .describe("Rows deleted on the most recent sweep."),
+    total_deleted: zod
+      .number()
+      .describe("Lifetime rows deleted since the loop started."),
+    policy: zod
+      .object({
+        min_snapshots: zod
+          .number()
+          .describe(
+            "Minimum distinct snapshots kept per event_id regardless of age.",
+          ),
+        retention_days: zod
+          .number()
+          .describe(
+            "Maximum age (days) a snapshot is kept beyond the min_snapshots window.",
+          ),
+      })
+      .describe(
+        "Resolved retention horizons for the sportradar_tournament_leaderboards history table.",
+      ),
+    interval_seconds: zod.number().describe("Sweep cadence in seconds."),
+    seconds_since_last_tick: zod
+      .number()
+      .nullish()
+      .describe(
+        "Wall-clock seconds since `last_tick_at`, or null if the loop has never ticked.",
+      ),
+    health: zod
+      .enum(["ok", "stale", "error", "disabled"])
+      .describe(
+        "Rolled-up health verdict the dashboard uses to color the panel:\n`ok` — running and ticked within `2 \* interval_seconds`.\n`stale` — meant to be running but hasn't ticked in time.\n`error` — most recent sweep raised; the loop will retry next tick.\n`disabled` — turned off by AXIOM_SPORTRADAR_LEADERBOARDS_RETENTION_ENABLED=0.\n",
+      ),
+  })
+  .describe(
+    "Operator-facing snapshot of the periodic\n`sportradar_tournament_leaderboards` retention sweep\n(`app.sportradar_leaderboards_retention`). Mirrors the loop's\ninternal `state()` plus two derived freshness fields the\ndashboard uses to flag a stalled or errored sweep.\n",
+  );
+
+/**
  * @summary Detail rows for trades the pre-submit slippage guard rejected
  */
 export const getSlippageGuardRejectsQuerySinceHoursDefault = 24;

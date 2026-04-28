@@ -52,6 +52,8 @@ PROTECTED_ROUTES: tuple[str, ...] = (
     "/api/dashboard/crypto-ohlcv-retention",
     # Task #640 — backtest history retention status panel on the operator dashboard.
     "/api/dashboard/crypto/backtest-retention",
+    # Task #699 — sportradar leaderboards history retention status panel on the operator dashboard.
+    "/api/dashboard/sportradar-leaderboards-retention",
     "/api/dashboard/bankroll/recent",
     "/api/dashboard/slippage-guard-rejects",
     "/api/dashboard/recent-debates",
