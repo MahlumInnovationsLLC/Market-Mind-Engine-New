@@ -7,9 +7,20 @@ returns an error.  Both providers feed the same `crypto_ohlcv` table;
 the (symbol, granularity, ts) unique index makes overlapping polls
 idempotent.
 
+CoinAPI is metered/paid.  Operators who want to run on the free
+CoinGecko fallback only (without revoking the ``COINAPI_*_KEY``
+secret) can set ``AXIOM_COINAPI_DISABLED=1`` to short-circuit every
+CoinAPI call site at the source.  ``coinapi_disabled()`` is the
+single source of truth and is also consulted by ``app.health`` so the
+"crypto feed freshness" card and freshness alert dispatcher stay
+consistent with the producer.
+
 Public surface:
     register_crypto_feeds()   — wired into app.main on startup
     backfill(days=90)         — invoked by scripts/backfill_crypto.py
+    coinapi_key()             — gated CoinAPI key reader (returns None
+                                when AXIOM_COINAPI_DISABLED is truthy)
+    coinapi_disabled()        — kill-switch predicate
 """
 from __future__ import annotations
 
@@ -50,6 +61,34 @@ GRANULARITIES: dict[str, dict[str, Any]] = {
 
 COINAPI_BASE = "https://rest.coinapi.io/v1"
 COINGECKO_BASE = "https://api.coingecko.com/api/v3"
+
+
+# --- CoinAPI kill switch -----------------------------------------------------
+
+
+def coinapi_disabled() -> bool:
+    """Return True when ``AXIOM_COINAPI_DISABLED`` is set to a truthy
+    value (``1`` / ``true`` / ``yes`` / ``on`` — case-insensitive).
+
+    The crypto poller, the backfill helper, the registration helper, and
+    ``app.health._probe_crypto_freshness`` all consult this flag so the
+    "crypto feed freshness" health card and any freshness alert keep
+    matching the producer's actual behaviour.
+    """
+    raw = os.environ.get("AXIOM_COINAPI_DISABLED") or ""
+    return raw.strip().lower() in ("1", "true", "yes", "on")
+
+
+def coinapi_key() -> str | None:
+    """Return the configured CoinAPI key, or ``None`` when CoinAPI is
+    intentionally disabled via ``AXIOM_COINAPI_DISABLED``.
+
+    Centralising the read here means a single env var flips every call
+    site (poll, backfill, registration, freshness probe) atomically.
+    """
+    if coinapi_disabled():
+        return None
+    return os.environ.get("COINAPI_API_KEY") or os.environ.get("COINAPI_KEY")
 
 # CoinGecko OHLC endpoint reports 4-hour candles for `days >= 31` and
 # 30-min candles for `2 <= days <= 30`.  When falling back at finer
@@ -252,16 +291,19 @@ def _parse_iso(s: str) -> datetime:
 
 async def _poll(symbol: str, granularity: str) -> int:
     """Poll one (symbol, granularity) pair, primary then fallback."""
-    coinapi_key = os.environ.get("COINAPI_API_KEY") or os.environ.get("COINAPI_KEY")
+    cak = coinapi_key()
     coingecko_key = os.environ.get("COINGECKO_API_KEY")
 
     timeout = httpx.Timeout(15.0, connect=5.0)
     async with httpx.AsyncClient(timeout=timeout) as client:
         # --- Primary: CoinAPI -------------------------------------------
-        if coinapi_key:
+        # `cak` returns None when the kill switch is on
+        # (AXIOM_COINAPI_DISABLED), so this branch is the kill-switch
+        # bypass — we fall straight through to the CoinGecko fallback.
+        if cak:
             try:
                 rows = await _fetch_coinapi(
-                    client, coinapi_key, symbol, granularity, limit=10
+                    client, cak, symbol, granularity, limit=10
                 )
                 return await _persist(symbol, granularity, "coinapi", rows)
             except RateLimited:
@@ -294,11 +336,13 @@ async def backfill(days: int = 90, symbols: Iterable[str] | None = None) -> dict
     under provider page limits.  Returns a per-feed row-count summary
     suitable for printing from the CLI.
     """
-    coinapi_key = os.environ.get("COINAPI_API_KEY") or os.environ.get("COINAPI_KEY")
+    cak = coinapi_key()
     coingecko_key = os.environ.get("COINGECKO_API_KEY")
-    if not coinapi_key and not coingecko_key:
+    if not cak and not coingecko_key:
         raise RuntimeError(
-            "backfill requires COINAPI_API_KEY or COINGECKO_API_KEY in the environment"
+            "backfill requires COINAPI_API_KEY or COINGECKO_API_KEY in the environment "
+            "(CoinAPI is also short-circuited when AXIOM_COINAPI_DISABLED is set; "
+            "either unset that flag or provide a CoinGecko key)"
         )
 
     targets = [s.upper() for s in (symbols or DEFAULT_SYMBOLS)]
@@ -318,12 +362,12 @@ async def backfill(days: int = 90, symbols: Iterable[str] | None = None) -> dict
                 # (90d × 1m = 130k bars) come through completely.
                 page_seconds = meta["seconds"] * 1000
                 cursor = start
-                if coinapi_key:
+                if cak:
                     try:
                         while cursor < end:
                             window_end = min(end, cursor + timedelta(seconds=page_seconds))
                             rows = await _fetch_coinapi(
-                                client, coinapi_key, symbol, granularity,
+                                client, cak, symbol, granularity,
                                 limit=1000, time_start=cursor, time_end=window_end,
                             )
                             if not rows:
@@ -364,11 +408,25 @@ async def backfill(days: int = 90, symbols: Iterable[str] | None = None) -> dict
 
 def register_crypto_feeds() -> None:
     """Register one feed per (symbol, granularity).  Skips with a clear
-    `skipped_reason` when neither provider has a key configured."""
-    coinapi_key = os.environ.get("COINAPI_API_KEY") or os.environ.get("COINAPI_KEY")
+    `skipped_reason` when neither provider has a key configured.
+
+    Note: when ``AXIOM_COINAPI_DISABLED`` is set, ``coinapi_key()`` returns
+    ``None`` even if the secret is present — so the registration here
+    needs only a CoinGecko key to keep the feeds enabled (CoinGecko-only
+    operation is fully supported by ``_poll`` / ``backfill``).
+    """
+    cak = coinapi_key()
     coingecko_key = os.environ.get("COINGECKO_API_KEY")
-    has_any_key = bool(coinapi_key or coingecko_key)
-    skipped_reason = None if has_any_key else "COINAPI_API_KEY / COINGECKO_API_KEY not set"
+    has_any_key = bool(cak or coingecko_key)
+    if has_any_key:
+        skipped_reason = None
+    elif coinapi_disabled():
+        skipped_reason = (
+            "COINGECKO_API_KEY not set "
+            "(CoinAPI is intentionally disabled via AXIOM_COINAPI_DISABLED)"
+        )
+    else:
+        skipped_reason = "COINAPI_API_KEY / COINGECKO_API_KEY not set"
 
     for symbol in DEFAULT_SYMBOLS:
         for granularity, meta in GRANULARITIES.items():

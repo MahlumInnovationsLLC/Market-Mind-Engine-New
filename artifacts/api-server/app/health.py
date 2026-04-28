@@ -1260,15 +1260,26 @@ async def _probe_crypto_freshness() -> dict:
     """
     from .feeds import crypto as crypto_feeds  # local import to avoid cycle
 
-    coinapi_key = os.environ.get("COINAPI_API_KEY") or os.environ.get("COINAPI_KEY")
+    # Honour the AXIOM_COINAPI_DISABLED kill switch via the producer's
+    # shared helper so the freshness card matches whatever the poller
+    # is actually doing — otherwise turning CoinAPI off would leave
+    # this card "unconfigured" despite a working CoinGecko fallback.
+    coinapi_key = crypto_feeds.coinapi_key()
     coingecko_key = os.environ.get("COINGECKO_API_KEY")
     if not (coinapi_key or coingecko_key):
+        if crypto_feeds.coinapi_disabled():
+            detail = (
+                "COINGECKO_API_KEY not set "
+                "(CoinAPI is intentionally disabled via AXIOM_COINAPI_DISABLED)"
+            )
+        else:
+            detail = "COINAPI_API_KEY / COINGECKO_API_KEY not set"
         return _card(
             key="crypto_feed_freshness",
             label="Crypto feed freshness",
             category="passive",
             status="unconfigured",
-            detail="COINAPI_API_KEY / COINGECKO_API_KEY not set",
+            detail=detail,
         )
 
     expected: list[tuple[str, str, int]] = []

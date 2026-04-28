@@ -60,8 +60,12 @@ def fake_pipe(monkeypatch: pytest.MonkeyPatch) -> _FakeDedupe:
         return {"tag": tag, "dispatched": True}
 
     monkeypatch.setattr(_alerts, "_dispatch", _fake_dispatch)
-    # Provider key so the probe doesn't short-circuit `unconfigured`.
+    # Provider key so the probe doesn't short-circuit `unconfigured`,
+    # plus an explicit "kill switch off" guard so a stray
+    # AXIOM_COINAPI_DISABLED in the test environment can't silently
+    # neutralise the COINAPI_API_KEY we just set.
     monkeypatch.setenv("COINAPI_API_KEY", "x")
+    monkeypatch.delenv("AXIOM_COINAPI_DISABLED", raising=False)
     # Reset per-test counters so tests are decoupled.
     health_mod._crypto_freshness_bad_counts.clear()
     return fake

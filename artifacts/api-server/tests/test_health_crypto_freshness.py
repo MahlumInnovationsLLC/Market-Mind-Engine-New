@@ -26,12 +26,73 @@ def test_unconfigured_when_no_provider_keys(monkeypatch):
     monkeypatch.delenv("COINAPI_API_KEY", raising=False)
     monkeypatch.delenv("COINAPI_KEY", raising=False)
     monkeypatch.delenv("COINGECKO_API_KEY", raising=False)
+    monkeypatch.delenv("AXIOM_COINAPI_DISABLED", raising=False)
     card = _run(health_mod._probe_crypto_freshness())
     assert card["status"] == "unconfigured"
     assert card["key"] == "crypto_feed_freshness"
+    assert "AXIOM_COINAPI_DISABLED" not in (card.get("detail") or "")
+
+
+def test_unconfigured_message_calls_out_kill_switch(monkeypatch):
+    """When the operator has flipped the CoinAPI kill switch and *also*
+    has no CoinGecko key, the unconfigured-card detail should explain
+    why CoinAPI isn't being used so the operator doesn't think it's a
+    bug."""
+    monkeypatch.delenv("COINAPI_API_KEY", raising=False)
+    monkeypatch.delenv("COINAPI_KEY", raising=False)
+    monkeypatch.delenv("COINGECKO_API_KEY", raising=False)
+    monkeypatch.setenv("AXIOM_COINAPI_DISABLED", "1")
+    card = _run(health_mod._probe_crypto_freshness())
+    assert card["status"] == "unconfigured"
+    assert "AXIOM_COINAPI_DISABLED" in card["detail"]
+    assert "intentionally disabled" in card["detail"]
+
+
+def test_kill_switch_short_circuits_coinapi_with_coingecko_only(monkeypatch):
+    """COINAPI_API_KEY *present* + AXIOM_COINAPI_DISABLED=1 + a CoinGecko
+    key should leave the card in a normal "configured" state (it has a
+    working provider) and `coinapi_key()` should return ``None`` so the
+    poller bypasses CoinAPI entirely."""
+    monkeypatch.setenv("COINAPI_API_KEY", "should-be-ignored")
+    monkeypatch.setenv("COINGECKO_API_KEY", "y")
+    monkeypatch.setenv("AXIOM_COINAPI_DISABLED", "1")
+    from app.feeds import crypto as crypto_feeds
+    assert crypto_feeds.coinapi_disabled() is True
+    assert crypto_feeds.coinapi_key() is None
+    # With a CoinGecko key but no fresh bars in the stub DB, the card
+    # is `down` (missing data) — NOT `unconfigured`. The point is that
+    # the kill switch did not hide the CoinGecko configuration.
+    monkeypatch.setattr(health_mod, "db", _StubDB([]))
+    card = _run(health_mod._probe_crypto_freshness())
+    assert card["status"] != "unconfigured"
+
+
+def test_kill_switch_recognises_truthy_strings(monkeypatch):
+    from app.feeds import crypto as crypto_feeds
+    for raw in ("1", "true", "TRUE", "yes", "Yes", "on", " on "):
+        monkeypatch.setenv("AXIOM_COINAPI_DISABLED", raw)
+        assert crypto_feeds.coinapi_disabled() is True, f"raw={raw!r}"
+    for raw in ("0", "false", "no", "off", ""):
+        monkeypatch.setenv("AXIOM_COINAPI_DISABLED", raw)
+        assert crypto_feeds.coinapi_disabled() is False, f"raw={raw!r}"
+    monkeypatch.delenv("AXIOM_COINAPI_DISABLED", raising=False)
+    assert crypto_feeds.coinapi_disabled() is False
+
+
+def test_kill_switch_off_returns_configured_key(monkeypatch):
+    from app.feeds import crypto as crypto_feeds
+    monkeypatch.setenv("COINAPI_API_KEY", "primary-key")
+    monkeypatch.delenv("COINAPI_KEY", raising=False)
+    monkeypatch.delenv("AXIOM_COINAPI_DISABLED", raising=False)
+    assert crypto_feeds.coinapi_key() == "primary-key"
+    # Legacy COINAPI_KEY is still honoured when the primary is unset.
+    monkeypatch.delenv("COINAPI_API_KEY", raising=False)
+    monkeypatch.setenv("COINAPI_KEY", "legacy-key")
+    assert crypto_feeds.coinapi_key() == "legacy-key"
 
 
 def test_all_pairs_fresh_returns_ok(monkeypatch):
+    monkeypatch.delenv("AXIOM_COINAPI_DISABLED", raising=False)
     monkeypatch.setenv("COINAPI_API_KEY", "x")
     now = time.time()
     rows = []
