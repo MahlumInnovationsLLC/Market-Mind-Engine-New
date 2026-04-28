@@ -1152,6 +1152,26 @@ components:
         by_email: { type: string, nullable: true }
         at: { type: string, nullable: true }
         reason: { type: string, nullable: true }
+        expires_at:
+          type: string
+          nullable: true
+          description: |
+            ISO-8601 UTC timestamp at which the TTL sweeper will
+            auto-resume this vertical. Null = permanent halt that
+            stays in place until an admin manually resumes.
+        source:
+          type: string
+          nullable: true
+          description: |
+            How this halt was triggered: ``manual_admin`` (operator
+            click), ``scheduled_rule`` (cron), or ``ttl_expiry`` (only
+            ever appears on history rows, never on a live halt).
+        schedule_id:
+          type: integer
+          nullable: true
+          description: |
+            ID of the ``vertical_halt_schedules`` row that fired this
+            halt, when ``source = scheduled_rule``. Null otherwise.
 
     VerticalsOverviewEntry:
       type: object

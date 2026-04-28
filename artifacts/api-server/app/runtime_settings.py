@@ -1245,34 +1245,107 @@ async def is_vertical_halted(vertical: str) -> bool:
     return (vertical or "").strip().lower() in halts
 
 
+DEFAULT_NO_REASON = "manual: no reason given"
+
+_VALID_HALT_SOURCES = ("manual_admin", "scheduled_rule", "ttl_expiry")
+
+
+async def _write_halt_history(
+    *,
+    vertical: str,
+    event: str,
+    source: str,
+    actor_user_id: str | None,
+    actor_email: str | None,
+    reason: str | None,
+    expires_at: "datetime | None" = None,
+    schedule_id: int | None = None,
+) -> None:
+    """Insert one ``vertical_halt_history`` row.  Best-effort —
+    history is advisory; failures must never block the underlying
+    halt/resume."""
+    try:
+        async with db.acquire() as c:
+            await c.execute(
+                """
+                INSERT INTO vertical_halt_history (
+                    vertical, event, source,
+                    actor_user_id, actor_email,
+                    reason, expires_at, schedule_id
+                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                """,
+                vertical, event, source,
+                actor_user_id, actor_email,
+                reason, expires_at, schedule_id,
+            )
+    except Exception as e:
+        log.warning(
+            "vertical_halt_history insert failed (%s/%s/%s): %s",
+            vertical, event, source, e,
+        )
+
+
 async def set_vertical_halted(
     vertical: str,
     *,
     actor_user_id: str,
     actor_email: str | None,
     reason: str | None = None,
+    ttl_secs: int | None = None,
+    source: str = "manual_admin",
+    schedule_id: int | None = None,
 ) -> tuple[dict[str, Any], bool]:
     """Mark ``vertical`` halted.
 
     Returns ``(meta, changed)`` — ``changed`` is ``False`` on a no-op
     double-halt so callers can skip the resting-order cancel sweep and
     the duplicate audit-log row.
+
+    ``ttl_secs`` (optional, must be > 0) records an ``expires_at``
+    field in the JSON blob. The background TTL sweeper (started from
+    the API lifespan) auto-resumes when the deadline passes. The risk
+    gate ignores the field — presence of the row remains the halt
+    signal, so a missed sweep tick still fails closed.
+
+    ``source`` is the halt origin written to ``vertical_halt_history``
+    — one of ``manual_admin`` / ``scheduled_rule`` / ``ttl_expiry``.
+    ``schedule_id`` links the history row back to the firing rule.
     """
     name = _require_known_vertical(vertical)
+    if source not in _VALID_HALT_SOURCES:
+        raise ValueError(
+            f"invalid halt source {source!r}; expected one of {list(_VALID_HALT_SOURCES)}"
+        )
 
     before = await get_vertical_halts()
     if name in before:
         # Idempotent double-halt: return existing meta, report no change.
         return before[name], False
 
-    from datetime import datetime, timezone
+    from datetime import datetime, timedelta, timezone
     import json as _json
 
+    now = datetime.now(timezone.utc)
     meta: dict[str, Any] = {
         "by_user_id": actor_user_id,
         "by_email": actor_email,
-        "at": datetime.now(timezone.utc).isoformat(),
+        "at": now.isoformat(),
     }
+    expires_dt: datetime | None = None
+    if ttl_secs is not None:
+        ttl_int = int(ttl_secs)
+        if ttl_int <= 0:
+            raise ValueError("ttl_secs must be a positive integer")
+        if ttl_int > 7 * 24 * 3600:
+            # 7-day cap — anything longer should be a scheduled rule
+            # so it survives a process restart with explicit intent.
+            raise ValueError("ttl_secs must be <= 7 days (604800 seconds)")
+        expires_dt = now + timedelta(seconds=ttl_int)
+        meta["expires_at"] = expires_dt.isoformat()
+    if source != "manual_admin":
+        meta["source"] = source
+    if schedule_id is not None:
+        meta["schedule_id"] = int(schedule_id)
     if reason:
         meta["reason"] = str(reason)[:500]
 
@@ -1311,6 +1384,17 @@ async def set_vertical_halted(
     except Exception as e:
         log.warning("audit log insert (halt_vertical) failed: %s", e)
     _ = after  # referenced for side-effect readability
+
+    await _write_halt_history(
+        vertical=name,
+        event="halted",
+        source=source,
+        actor_user_id=actor_user_id,
+        actor_email=actor_email,
+        reason=meta.get("reason"),
+        expires_at=expires_dt,
+        schedule_id=schedule_id,
+    )
     return meta, True
 
 
@@ -1320,6 +1404,8 @@ async def clear_vertical_halt(
     actor_user_id: str,
     actor_email: str | None,
     reason: str | None = None,
+    source: str = "manual_admin",
+    event: str = "resumed",
 ) -> tuple[dict[str, Any] | None, bool]:
     """Resume ``vertical``.
 
@@ -1327,8 +1413,22 @@ async def clear_vertical_halt(
     ``False`` when the vertical wasn't halted (idempotent resume).
     The optional ``reason`` is recorded in the audit log so operators
     can capture *why* something was resumed (matches the halt flow).
+
+    ``source`` and ``event`` plumb through to the
+    ``vertical_halt_history`` row so a TTL sweeper can stamp this
+    resume with ``source='ttl_expiry'`` / ``event='ttl_expired'``
+    and a manual operator click stays the default ``manual_admin`` /
+    ``resumed``.
     """
     name = _require_known_vertical(vertical)
+    if source not in _VALID_HALT_SOURCES:
+        raise ValueError(
+            f"invalid resume source {source!r}; expected one of {list(_VALID_HALT_SOURCES)}"
+        )
+    if event not in ("resumed", "ttl_expired"):
+        raise ValueError(
+            f"invalid resume event {event!r}; expected 'resumed' or 'ttl_expired'"
+        )
 
     before = await get_vertical_halts()
     if name not in before:
@@ -1348,6 +1448,8 @@ async def clear_vertical_halt(
     after_payload: dict[str, Any] = {"vertical": name, "halted": False}
     if cleaned_reason:
         after_payload["reason"] = cleaned_reason
+    if source != "manual_admin":
+        after_payload["source"] = source
 
     try:
         async with db.acquire() as c:
@@ -1369,7 +1471,394 @@ async def clear_vertical_halt(
             )
     except Exception as e:
         log.warning("audit log insert (resume_vertical) failed: %s", e)
+
+    schedule_id_raw = prev_meta.get("schedule_id") if isinstance(prev_meta, dict) else None
+    schedule_id_int: int | None = None
+    if isinstance(schedule_id_raw, (int, float)):
+        try:
+            schedule_id_int = int(schedule_id_raw)
+        except Exception:
+            schedule_id_int = None
+
+    await _write_halt_history(
+        vertical=name,
+        event=event,
+        source=source,
+        actor_user_id=actor_user_id,
+        actor_email=actor_email,
+        reason=cleaned_reason,
+        schedule_id=schedule_id_int,
+    )
     return prev_meta, True
+
+
+# ---------------------------------------------------------------------------
+# TTL sweeper + scheduled-rule eval — task #713
+# ---------------------------------------------------------------------------
+
+
+async def list_expired_vertical_halts(
+    now: "datetime | None" = None,
+) -> list[tuple[str, dict[str, Any]]]:
+    """Return ``[(vertical, meta), ...]`` for halts whose ``expires_at``
+    is in the past relative to ``now`` (defaults to UTC wall-clock).
+
+    Halts without an ``expires_at`` field are permanent and never
+    surface here. Bad/unparseable ``expires_at`` values are skipped
+    with a warning so a single corrupt row never stalls the sweeper.
+    """
+    from datetime import datetime, timezone
+
+    now_dt = now or datetime.now(timezone.utc)
+    out: list[tuple[str, dict[str, Any]]] = []
+    halts = await get_vertical_halts()
+    for vertical, meta in halts.items():
+        expires_raw = meta.get("expires_at") if isinstance(meta, dict) else None
+        if not expires_raw:
+            continue
+        try:
+            s = expires_raw.strip()
+            if s.endswith("Z"):
+                s = s[:-1] + "+00:00"
+            dt = datetime.fromisoformat(s)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+        except Exception as e:
+            log.warning(
+                "vertical halt %s has invalid expires_at %r: %s",
+                vertical, expires_raw, e,
+            )
+            continue
+        if dt <= now_dt:
+            out.append((vertical, meta))
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Hand-rolled 5-field cron parser (minute hour day-of-month month day-of-week).
+# Supports `*`, comma lists, ranges (`1-5`), step values (`*/N`, `1-10/2`),
+# and a few common name aliases (`@hourly`, `@daily`, `@weekly`).
+# Day-of-week is 0=Sunday..6=Saturday (cron convention); 7 is also Sunday.
+# ---------------------------------------------------------------------------
+
+
+_CRON_ALIASES = {
+    "@hourly": "0 * * * *",
+    "@daily": "0 0 * * *",
+    "@midnight": "0 0 * * *",
+    "@weekly": "0 0 * * 0",
+    "@monthly": "0 0 1 * *",
+}
+
+_CRON_FIELD_BOUNDS = (
+    (0, 59),  # minute
+    (0, 23),  # hour
+    (1, 31),  # dom
+    (1, 12),  # month
+    (0, 7),   # dow (7 == 0 == Sunday)
+)
+
+
+def _parse_cron_field(field: str, lo: int, hi: int) -> set[int]:
+    """Return the set of allowed integer values for one cron field."""
+    out: set[int] = set()
+    for chunk in field.split(","):
+        chunk = chunk.strip()
+        if not chunk:
+            raise ValueError(f"empty cron sub-expression in {field!r}")
+        step = 1
+        if "/" in chunk:
+            base, step_s = chunk.split("/", 1)
+            try:
+                step = int(step_s)
+            except ValueError as e:
+                raise ValueError(f"invalid step in {chunk!r}") from e
+            if step <= 0:
+                raise ValueError(f"step must be positive in {chunk!r}")
+        else:
+            base = chunk
+        if base == "*":
+            start, end = lo, hi
+        elif "-" in base:
+            a, b = base.split("-", 1)
+            try:
+                start, end = int(a), int(b)
+            except ValueError as e:
+                raise ValueError(f"invalid range in {chunk!r}") from e
+            if start > end:
+                raise ValueError(f"range start > end in {chunk!r}")
+        else:
+            try:
+                start = end = int(base)
+            except ValueError as e:
+                raise ValueError(f"invalid cron value in {chunk!r}") from e
+        if start < lo or end > hi:
+            raise ValueError(
+                f"cron value {chunk!r} out of bounds [{lo}, {hi}]"
+            )
+        for v in range(start, end + 1, step):
+            out.add(v)
+    return out
+
+
+def parse_cron(expr: str) -> tuple[set[int], set[int], set[int], set[int], set[int]]:
+    """Parse a 5-field cron expression. Returns the five allowed-value
+    sets ``(minute, hour, dom, month, dow)``. Day-of-week 7 is
+    normalized to 0 (Sunday). Raises ``ValueError`` on any parse error.
+    """
+    raw = (expr or "").strip()
+    if not raw:
+        raise ValueError("cron expression must be non-empty")
+    if raw in _CRON_ALIASES:
+        raw = _CRON_ALIASES[raw]
+    parts = raw.split()
+    if len(parts) != 5:
+        raise ValueError(
+            f"cron expression must have 5 fields, got {len(parts)} ({expr!r})"
+        )
+    fields = []
+    for part, (lo, hi) in zip(parts, _CRON_FIELD_BOUNDS):
+        fields.append(_parse_cron_field(part, lo, hi))
+    minute, hour, dom, month, dow = fields
+    if 7 in dow:
+        dow = (dow - {7}) | {0}
+    return minute, hour, dom, month, dow
+
+
+def cron_matches(expr: str, dt: "datetime") -> bool:
+    """Return True iff the wall-clock minute ``dt`` (UTC, second/usec
+    truncated) matches the cron expression ``expr``.
+
+    Day-of-month and day-of-week behave per Vixie cron: when one is
+    `*` and the other is restricted, only the restricted one applies;
+    when both are restricted, EITHER match wins (intentionally lenient
+    so "Sunday OR the 1st" works).
+    """
+    minute, hour, dom, month, dow = parse_cron(expr)
+    if dt.minute not in minute:
+        return False
+    if dt.hour not in hour:
+        return False
+    if dt.month not in month:
+        return False
+    # Python weekday(): Monday=0..Sunday=6. Cron uses Sunday=0..Saturday=6.
+    py_dow = (dt.weekday() + 1) % 7
+    parts = (expr.strip().split() if not expr.strip().startswith("@") else
+             _CRON_ALIASES[expr.strip()].split())
+    dom_unrestricted = parts[2].strip() == "*"
+    dow_unrestricted = parts[4].strip() == "*"
+    dom_match = dt.day in dom
+    dow_match = py_dow in dow
+    if dom_unrestricted and not dow_unrestricted:
+        return dow_match
+    if dow_unrestricted and not dom_unrestricted:
+        return dom_match
+    return dom_match or dow_match
+
+
+async def list_vertical_halt_schedules() -> list[dict[str, Any]]:
+    """Return every row in ``vertical_halt_schedules``, newest first."""
+    try:
+        rows = await db.fetch(
+            """
+            SELECT id, vertical, cron_expr, duration_secs, reason, enabled,
+                   created_by_user_id, created_by_email,
+                   created_at, updated_at, last_fired_at
+              FROM vertical_halt_schedules
+             ORDER BY created_at DESC
+            """
+        )
+    except Exception as e:
+        log.warning("list_vertical_halt_schedules read failed: %s", e)
+        return []
+    return [dict(r) for r in rows]
+
+
+async def create_vertical_halt_schedule(
+    *,
+    vertical: str,
+    cron_expr: str,
+    duration_secs: int,
+    reason: str,
+    actor_user_id: str | None,
+    actor_email: str | None,
+) -> dict[str, Any]:
+    """Insert a new schedule rule. Validates the cron expression and
+    duration server-side so a malformed payload can't get persisted.
+    Returns the inserted row.
+    """
+    name = _require_known_vertical(vertical)
+    parse_cron(cron_expr)  # raises ValueError on bad expression
+    duration_int = int(duration_secs)
+    if duration_int <= 0:
+        raise ValueError("duration_secs must be a positive integer")
+    if duration_int > 7 * 24 * 3600:
+        raise ValueError("duration_secs must be <= 7 days (604800 seconds)")
+    cleaned_reason = (reason or "").strip()
+    if not cleaned_reason:
+        raise ValueError("reason is required for scheduled halts")
+    cleaned_reason = cleaned_reason[:500]
+
+    row = await db.fetchrow(
+        """
+        INSERT INTO vertical_halt_schedules (
+            vertical, cron_expr, duration_secs, reason,
+            enabled, created_by_user_id, created_by_email
+        ) VALUES ($1, $2, $3, $4, true, $5, $6)
+        RETURNING id, vertical, cron_expr, duration_secs, reason, enabled,
+                  created_by_user_id, created_by_email,
+                  created_at, updated_at, last_fired_at
+        """,
+        name, cron_expr.strip(), duration_int, cleaned_reason,
+        actor_user_id, actor_email,
+    )
+    return dict(row) if row else {}
+
+
+async def delete_vertical_halt_schedule(schedule_id: int) -> bool:
+    """Delete a schedule rule by id. Returns True iff a row was removed."""
+    try:
+        sid = int(schedule_id)
+    except (TypeError, ValueError) as e:
+        raise ValueError(f"invalid schedule id {schedule_id!r}") from e
+    res = await db.fetchval(
+        """
+        WITH d AS (
+          DELETE FROM vertical_halt_schedules WHERE id = $1
+          RETURNING 1
+        )
+        SELECT count(*)::int FROM d
+        """,
+        sid,
+    )
+    return bool(res)
+
+
+async def list_vertical_halt_history(
+    *,
+    vertical: str | None = None,
+    since: "datetime | None" = None,
+    limit: int = 100,
+) -> list[dict[str, Any]]:
+    """Return audit history rows, newest first. Optional filters:
+    ``vertical`` (exact match, case-insensitive) and ``since`` (UTC
+    cutoff). ``limit`` is clamped to [1, 500].
+    """
+    limit_int = max(1, min(500, int(limit or 100)))
+    clauses: list[str] = []
+    params: list[Any] = []
+    if vertical:
+        params.append(vertical.strip().lower())
+        clauses.append(f"vertical = ${len(params)}")
+    if since is not None:
+        params.append(since)
+        clauses.append(f"effective_at >= ${len(params)}")
+    where_sql = ("WHERE " + " AND ".join(clauses)) if clauses else ""
+    params.append(limit_int)
+    try:
+        rows = await db.fetch(
+            f"""
+            SELECT id, vertical, event, source,
+                   actor_user_id, actor_email,
+                   reason, effective_at, expires_at, schedule_id
+              FROM vertical_halt_history
+              {where_sql}
+             ORDER BY effective_at DESC, id DESC
+             LIMIT ${len(params)}
+            """,
+            *params,
+        )
+    except Exception as e:
+        log.warning("list_vertical_halt_history read failed: %s", e)
+        return []
+    return [dict(r) for r in rows]
+
+
+def _minute_boundary(dt: "datetime") -> "datetime":
+    """Truncate ``dt`` to the start of its UTC minute."""
+    return dt.replace(second=0, microsecond=0)
+
+
+async def list_due_vertical_halt_schedules(
+    now: "datetime | None" = None,
+) -> list[dict[str, Any]]:
+    """Return enabled schedule rows whose cron expression matches the
+    current minute and which haven't already fired in the same minute.
+
+    Cron expressions match at minute granularity (the smallest cron
+    field is one minute), so the dedupe key is the **minute boundary
+    of ``last_fired_at``** vs. the current minute.  This means:
+
+      * a 30s scheduler tick re-evaluates rules twice per minute,
+      * a `* * * * *` rule fires exactly once per minute (the second
+        tick inside the minute is a no-op because ``last_fired_at``
+        already points into the current minute),
+      * a one-shot `30 14 * * 5` rule cannot re-fire in the same
+        minute even if the loop runs unusually fast.
+    """
+    from datetime import datetime, timezone
+
+    now_dt = (now or datetime.now(timezone.utc)).replace(microsecond=0)
+    minute_start = _minute_boundary(now_dt)
+    out: list[dict[str, Any]] = []
+    rules = await list_vertical_halt_schedules()
+    for rule in rules:
+        if not rule.get("enabled"):
+            continue
+        expr = rule.get("cron_expr") or ""
+        try:
+            if not cron_matches(expr, now_dt):
+                continue
+        except ValueError as e:
+            log.warning(
+                "schedule %s has invalid cron %r: %s",
+                rule.get("id"), expr, e,
+            )
+            continue
+        last = rule.get("last_fired_at")
+        if isinstance(last, datetime) and last >= minute_start:
+            continue
+        out.append(rule)
+    return out
+
+
+async def mark_schedule_fired(
+    schedule_id: int, *, fired_at: "datetime | None" = None
+) -> bool:
+    """Atomically claim a schedule fire for the minute of ``fired_at``.
+
+    Returns ``True`` iff this caller successfully advanced
+    ``last_fired_at`` into the current minute (i.e. won the race).
+    Returns ``False`` if another worker / earlier tick already
+    claimed it for the same minute.
+
+    The conditional ``WHERE last_fired_at IS NULL OR last_fired_at <
+    minute_start`` is the cheap distributed-lock primitive that
+    prevents duplicate halts when more than one api-server replica
+    is sweeping the same schedule table.
+    """
+    from datetime import datetime, timezone
+
+    ts = fired_at or datetime.now(timezone.utc)
+    minute_start = _minute_boundary(ts)
+    try:
+        async with db.acquire() as c:
+            row = await c.fetchrow(
+                """
+                UPDATE vertical_halt_schedules
+                   SET last_fired_at = $1, updated_at = now()
+                 WHERE id = $2
+                   AND (last_fired_at IS NULL OR last_fired_at < $3)
+                RETURNING id
+                """,
+                ts, int(schedule_id), minute_start,
+            )
+            return row is not None
+    except Exception as e:
+        log.warning(
+            "mark_schedule_fired(%s) failed: %s", schedule_id, e
+        )
+        return False
 
 
 # ---------------------------------------------------------------------------

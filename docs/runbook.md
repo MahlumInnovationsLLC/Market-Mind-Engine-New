@@ -694,6 +694,136 @@ is a no-op and does not double-log.
 
 ---
 
+## 9b. Recurring halt schedules + TTL auto-resume
+
+Task #713 layered three things on top of section 9:
+
+1. A **TTL** (`ttl_secs`, 1 second to 7 days) you can attach to any
+   manual halt. The background sweeper auto-resumes the vertical
+   when the TTL expires and pages the operator with
+   `vertical_halt_ttl_expired`. Leave the TTL blank for a permanent
+   halt that only a human can clear.
+2. **Cron schedules** (`vertical_halt_schedules`, 5-field UTC cron)
+   that fire automatically — e.g. halt `crypto` every Friday 14:30
+   UTC for 30 minutes around the EIA print. Each fire pages with
+   `vertical_halt_scheduled_fired`.
+3. A unified **history table** (`vertical_halt_history`, mirrored to
+   `admin_audit_log`) that ties every halt / resume / TTL-expiry to
+   the rule that fired it.
+
+The background loop lives in `app.vertical_halt_scheduler`. It
+ticks every `AXIOM_VERTICAL_HALT_TICK_SECS` seconds (default 30,
+minimum 5) and can be disabled wholesale with
+`AXIOM_VERTICAL_HALT_SCHEDULER_ENABLED=false` — useful in tests
+or during a controlled outage. Manual halts and resumes always
+work even if the loop is off; you just lose the auto-resume.
+
+### Dashboard
+
+`/system → controls` now has three cards:
+
+* **Vertical halts** — adds an **Expires** column and a TTL
+  (minutes) input next to the reason field on the halt prompt.
+  The badge tooltip on the dashboard cards shows
+  `auto-resumes at <iso>` when a TTL is set, plus `· scheduled
+  rule` when the halt was rule-driven.
+* **Vertical halt schedules** — add / list / delete cron rules.
+  Validation rejects bad cron expressions, durations outside
+  1..10080 minutes, and empty reasons before they ever leave the
+  browser. The 90 s dedupe window stops a 1-minute cron from
+  re-firing on the next tick.
+* **Vertical halt history** — chronological feed (newest first)
+  with a vertical filter. Events are colour-coded: red `halted`,
+  green `resumed`, cyan `ttl_expired`. The `source` column shows
+  the schedule ID when a rule was the trigger.
+
+### cURL (admin JWT required)
+
+```bash
+# Halt weather for one hour with a TTL.
+curl -X POST https://YOUR_HOST/api/admin/verticals/weather/halt \
+  -H "Authorization: Bearer $CLERK_ADMIN_JWT" \
+  -H "Content-Type: application/json" \
+  -d '{"reason":"NWS feed flapping","ttl_secs":3600}'
+# -> halts immediately; sweeper auto-resumes ~3600s later
+
+# Add a recurring rule: halt crypto every Fri 14:30 UTC for 30 min.
+curl -X POST https://YOUR_HOST/api/admin/verticals/halts/schedule \
+  -H "Authorization: Bearer $CLERK_ADMIN_JWT" \
+  -H "Content-Type: application/json" \
+  -d '{"vertical":"crypto","cron_expr":"30 14 * * 5",
+       "duration_secs":1800,"reason":"EIA print"}'
+
+# List rules + history.
+curl -s https://YOUR_HOST/api/admin/verticals/halts/schedule \
+  -H "Authorization: Bearer $CLERK_ADMIN_JWT" | jq
+curl -s 'https://YOUR_HOST/api/admin/verticals/halts/history?vertical=crypto&limit=50' \
+  -H "Authorization: Bearer $CLERK_ADMIN_JWT" | jq
+
+# Delete a rule (idempotent — second delete is a no-op 404).
+curl -X DELETE https://YOUR_HOST/api/admin/verticals/halts/schedule/42 \
+  -H "Authorization: Bearer $CLERK_ADMIN_JWT"
+```
+
+### Cron expression cheat sheet
+
+5-field Vixie cron, **always UTC**:
+
+| Expression       | Meaning                                       |
+|------------------|-----------------------------------------------|
+| `*/5 * * * *`    | Every 5 minutes                               |
+| `0 13 * * *`     | Daily at 13:00 UTC                            |
+| `30 14 * * 5`    | Every Friday at 14:30 UTC (EIA print)         |
+| `0 0 1 * *`      | Midnight UTC on the 1st of every month        |
+| `0 22 * * 1-5`   | 22:00 UTC every weekday                       |
+| `@daily`         | Equivalent to `0 0 * * *`                     |
+| `@hourly`        | Equivalent to `0 * * * *`                     |
+
+Vixie OR semantics: when both day-of-month and day-of-week are
+restricted, **either** match wins (matches `cron(8)` exactly).
+
+### SQL fallback (sweeper down, can't reach the API)
+
+```sql
+-- See live halts and which ones have a TTL attached.
+SELECT key, value, updated_at
+FROM system_settings
+WHERE key LIKE 'risk.vertical_halted.%'
+ORDER BY key;
+
+-- See the most recent 50 history rows (any vertical).
+SELECT effective_at, vertical, event, source,
+       actor_email, reason, expires_at, schedule_id
+FROM vertical_halt_history
+ORDER BY effective_at DESC
+LIMIT 50;
+
+-- Manually clear an expired TTL halt the sweeper missed
+-- (operator paged but loop was down).
+DELETE FROM system_settings
+WHERE key = 'risk.vertical_halted.weather';
+INSERT INTO vertical_halt_history
+       (vertical, event, source, actor_email, reason)
+VALUES ('weather', 'ttl_expired', 'ttl_expiry',
+        'you@example.com', 'manual sweep — scheduler was down');
+
+-- Disable a misbehaving schedule without deleting it.
+UPDATE vertical_halt_schedules SET enabled = false WHERE id = 42;
+```
+
+### Rollback
+
+* **Disable just the loop**: set `AXIOM_VERTICAL_HALT_SCHEDULER_ENABLED=false`
+  and restart the api-server. All existing halts stay in place,
+  but TTLs stop expiring and cron rules stop firing.
+* **Drop a single rule**: `DELETE … WHERE id = …` on
+  `vertical_halt_schedules`, or hit the **Delete** button.
+* **Roll back the migration**: `alembic downgrade -1` from
+  `artifacts/api-server`. The downgrade drops the two new tables
+  and is safe — no other code reads from them.
+
+---
+
 ## 10. Cutover go/no-go checklist (paper → tiny live → full live)
 
 Ten steps, three phases. Do not skip a step to "save time" — each

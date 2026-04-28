@@ -561,6 +561,16 @@ async def lifespan(_: FastAPI):
     except Exception as e:
         log.warning("crypto backtest scheduler start failed: %s", e)
 
+    # Per-vertical halt scheduler + TTL sweeper (task #713). Single tick
+    # task that auto-resumes TTL halts and applies recurring schedule
+    # rules. Failures inside the loop are caught so a bad cron row
+    # never stalls the rest of the system.
+    try:
+        from . import vertical_halt_scheduler as _vertical_halt_scheduler
+        await _vertical_halt_scheduler.start()
+    except Exception as e:
+        log.warning("vertical halt scheduler start failed: %s", e)
+
     # `crypto_backtest_runs` trend-table retention sweep. Both the
     # admin endpoint and the scheduled backtest loop append rows
     # without a TTL, so without this loop the table grows unboundedly.
@@ -723,6 +733,11 @@ async def lifespan(_: FastAPI):
             await autoresearch.scheduler.stop()
         except Exception as e:
             log.warning("autoresearch scheduler stop error: %s", e)
+        try:
+            from . import vertical_halt_scheduler as _vertical_halt_scheduler
+            await _vertical_halt_scheduler.stop()
+        except Exception as e:
+            log.warning("vertical halt scheduler stop error: %s", e)
         try:
             await health.stop()
         except Exception as e:
@@ -5406,6 +5421,41 @@ class AdminHaltVerticalRequest(BaseModel):
         default=None,
         description="Optional free-text reason surfaced in audit log and pipeline events.",
     )
+    ttl_secs: int | None = Field(
+        default=None,
+        gt=0,
+        le=7 * 24 * 3600,
+        description=(
+            "Optional auto-resume TTL in seconds (1..604800 / 7d). "
+            "When set, the background scheduler auto-resumes the "
+            "vertical once the deadline passes and dispatches the "
+            "`vertical_halt_ttl_expired` operator alert."
+        ),
+    )
+
+
+class AdminCreateVerticalHaltScheduleRequest(BaseModel):
+    vertical: str = Field(
+        ..., description="Vertical name (e.g. `crypto`, `nfl`)."
+    )
+    cron_expr: str = Field(
+        ...,
+        description=(
+            "5-field cron expression (minute hour dom month dow) or "
+            "one of the supported aliases: @hourly, @daily, @midnight, "
+            "@weekly, @monthly. Day-of-week 0 or 7 = Sunday."
+        ),
+    )
+    duration_secs: int = Field(
+        ..., gt=0, le=7 * 24 * 3600,
+        description="Halt duration when this rule fires (1..604800 / 7d).",
+    )
+    reason: str = Field(
+        ...,
+        min_length=1,
+        max_length=500,
+        description="Required free-text reason — surfaced in audit log + alerts.",
+    )
 
 
 class AdminResumeVerticalRequest(BaseModel):
@@ -5483,12 +5533,15 @@ async def admin_halt_vertical(
     except Exception:
         pass
     reason = body.reason if body else None
+    ttl_secs = body.ttl_secs if body else None
     try:
         meta, changed = await runtime_settings_mod.set_vertical_halted(
             vertical,
             actor_user_id=actor.user_id,
             actor_email=actor_email,
             reason=reason,
+            ttl_secs=ttl_secs,
+            source="manual_admin",
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -5541,6 +5594,103 @@ async def admin_resume_vertical(
         "changed": changed,
         "previous_meta": prev_meta,
     }
+
+
+@app.get("/api/admin/verticals/halts/schedule")
+async def admin_list_vertical_halt_schedules(
+    _: AuthedUser = Depends(require_admin),
+) -> dict[str, object]:
+    """Return every recurring per-vertical halt schedule (newest
+    first). Empty list when none have been created yet — the schedule
+    panel in the operator console renders the empty state.
+    """
+    rows = await runtime_settings_mod.list_vertical_halt_schedules()
+    return {"schedules": rows}
+
+
+@app.post("/api/admin/verticals/halts/schedule")
+async def admin_create_vertical_halt_schedule(
+    body: AdminCreateVerticalHaltScheduleRequest,
+    actor: AuthedUser = Depends(require_admin),
+) -> dict[str, object]:
+    """Create a recurring halt schedule. Validation is server-side
+    (cron parse + duration bounds + non-empty reason) so a bad payload
+    can never get persisted. Returns the inserted row including the
+    auto-assigned ``id`` and ``created_at``.
+    """
+    actor_email: str | None = None
+    try:
+        actor_email = (await check_approval(actor))[1]
+    except Exception:
+        pass
+    try:
+        row = await runtime_settings_mod.create_vertical_halt_schedule(
+            vertical=body.vertical,
+            cron_expr=body.cron_expr,
+            duration_secs=body.duration_secs,
+            reason=body.reason,
+            actor_user_id=actor.user_id,
+            actor_email=actor_email,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"schedule": row}
+
+
+@app.delete("/api/admin/verticals/halts/schedule/{schedule_id}")
+async def admin_delete_vertical_halt_schedule(
+    schedule_id: int,
+    _: AuthedUser = Depends(require_admin),
+) -> dict[str, object]:
+    """Remove a recurring halt schedule. Returns ``deleted=False``
+    when the id was already gone (idempotent so a double-click in the
+    UI doesn't 404).
+    """
+    try:
+        deleted = await runtime_settings_mod.delete_vertical_halt_schedule(
+            schedule_id
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"schedule_id": schedule_id, "deleted": deleted}
+
+
+@app.get("/api/admin/verticals/halts/history")
+async def admin_list_vertical_halt_history(
+    vertical: str | None = None,
+    limit: int = 100,
+    _: AuthedUser = Depends(require_admin),
+) -> dict[str, object]:
+    """Return the per-vertical halt audit history (newest first).
+
+    Optional ``vertical`` filter does an exact case-insensitive match
+    against the row's stored ``vertical`` field. ``limit`` is clamped
+    to [1, 500] server-side so a misuse can't hammer the database.
+    """
+    rows = await runtime_settings_mod.list_vertical_halt_history(
+        vertical=vertical, limit=limit,
+    )
+    out: list[dict[str, object]] = []
+    for r in rows:
+        out.append({
+            "id": r.get("id"),
+            "vertical": r.get("vertical"),
+            "event": r.get("event"),
+            "source": r.get("source"),
+            "actor_user_id": r.get("actor_user_id"),
+            "actor_email": r.get("actor_email"),
+            "reason": r.get("reason"),
+            "effective_at": (
+                r["effective_at"].isoformat()
+                if r.get("effective_at") else None
+            ),
+            "expires_at": (
+                r["expires_at"].isoformat()
+                if r.get("expires_at") else None
+            ),
+            "schedule_id": r.get("schedule_id"),
+        })
+    return {"history": out}
 
 
 # ---------------------------------------------------------------------------

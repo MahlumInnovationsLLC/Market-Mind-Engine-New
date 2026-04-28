@@ -137,6 +137,9 @@ PROTECTED_ROUTES: tuple[str, ...] = (
     "/api/admin/risk-knobs/history",
     "/api/admin/vertical-visibility",
     "/api/admin/verticals/halts",
+    # Task #713 — recurring halt schedules + audit history.
+    "/api/admin/verticals/halts/schedule",
+    "/api/admin/verticals/halts/history",
     "/api/dashboard/verticals",
     "/api/dashboard/vertical-visibility",
     # Task #644 — operator-console rollup of realised crypto-market
@@ -249,6 +252,9 @@ PROTECTED_MUTATING_ENDPOINTS: tuple[tuple[str, str], ...] = (
     # Task #271 — per-vertical halt/resume toggles.
     ("POST", "/api/admin/verticals/{vertical}/halt"),
     ("POST", "/api/admin/verticals/{vertical}/resume"),
+    # Task #713 — recurring halt schedule create / delete.
+    ("POST", "/api/admin/verticals/halts/schedule"),
+    ("DELETE", "/api/admin/verticals/halts/schedule/{schedule_id}"),
     # Task #245 — research-directives admin gating + drift rollback workflow.
     ("POST", "/api/research/directives/{directive_id}/decision"),
     # Task #283 — operator-driven retry of stuck mobile IAP webhooks.

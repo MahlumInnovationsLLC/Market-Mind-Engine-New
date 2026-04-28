@@ -1666,6 +1666,24 @@ export const GetVerticalsOverviewResponse = zod.object({
               by_email: zod.string().nullish(),
               at: zod.string().nullish(),
               reason: zod.string().nullish(),
+              expires_at: zod
+                .string()
+                .nullish()
+                .describe(
+                  "ISO-8601 UTC timestamp at which the TTL sweeper will\nauto-resume this vertical. Null = permanent halt that\nstays in place until an admin manually resumes.\n",
+                ),
+              source: zod
+                .string()
+                .nullish()
+                .describe(
+                  "How this halt was triggered: ``manual_admin`` (operator\nclick), ``scheduled_rule`` (cron), or ``ttl_expiry`` (only\never appears on history rows, never on a live halt).\n",
+                ),
+              schedule_id: zod
+                .number()
+                .nullish()
+                .describe(
+                  "ID of the ``vertical_halt_schedules`` row that fired this\nhalt, when ``source = scheduled_rule``. Null otherwise.\n",
+                ),
             })
             .describe(
               "Metadata describing who halted a vertical and when. Surfaced\nread-only on the operator dashboard so non-admins can see why\nthe vertical is sat out without needing \/system access.\n",
@@ -1711,6 +1729,24 @@ export const GetVerticalsOverviewResponse = zod.object({
           by_email: zod.string().nullish(),
           at: zod.string().nullish(),
           reason: zod.string().nullish(),
+          expires_at: zod
+            .string()
+            .nullish()
+            .describe(
+              "ISO-8601 UTC timestamp at which the TTL sweeper will\nauto-resume this vertical. Null = permanent halt that\nstays in place until an admin manually resumes.\n",
+            ),
+          source: zod
+            .string()
+            .nullish()
+            .describe(
+              "How this halt was triggered: ``manual_admin`` (operator\nclick), ``scheduled_rule`` (cron), or ``ttl_expiry`` (only\never appears on history rows, never on a live halt).\n",
+            ),
+          schedule_id: zod
+            .number()
+            .nullish()
+            .describe(
+              "ID of the ``vertical_halt_schedules`` row that fired this\nhalt, when ``source = scheduled_rule``. Null otherwise.\n",
+            ),
         })
         .describe(
           "Metadata describing who halted a vertical and when. Surfaced\nread-only on the operator dashboard so non-admins can see why\nthe vertical is sat out without needing \/system access.\n",

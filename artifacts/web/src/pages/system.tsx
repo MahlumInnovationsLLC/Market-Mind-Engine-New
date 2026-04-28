@@ -36,6 +36,8 @@ import {
   TechAiPromotionPanel,
   TriggerCyclePanel,
   UserManagementPanel,
+  VerticalHaltHistoryPanel,
+  VerticalHaltSchedulePanel,
   VerticalHaltsPanel,
   VerticalVisibilityPanel,
 } from "@/pages/admin";
@@ -208,6 +210,20 @@ export default function SystemPage() {
               Vertical halts
             </div>
             <VerticalHaltsPanel />
+          </GlassCard>
+
+          <GlassCard tone="solid" padding="md">
+            <div className="mb-3 text-[11px] font-semibold uppercase tracking-[0.18em] text-accent-cyan/80">
+              Vertical halt schedules
+            </div>
+            <VerticalHaltSchedulePanel />
+          </GlassCard>
+
+          <GlassCard tone="solid" padding="md">
+            <div className="mb-3 text-[11px] font-semibold uppercase tracking-[0.18em] text-accent-cyan/80">
+              Vertical halt history
+            </div>
+            <VerticalHaltHistoryPanel />
           </GlassCard>
 
           <GlassCard tone="solid" padding="md">

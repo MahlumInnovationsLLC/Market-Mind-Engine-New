@@ -106,7 +106,18 @@ function buildHaltTooltip(meta: VerticalHaltMeta): string {
   const who = meta.by_email || meta.by_user_id || "an admin";
   const when = meta.at ? `${fmtRelativePast(meta.at)} (${meta.at})` : "an unknown time";
   const reason = meta.reason ? ` — “${meta.reason}”` : "";
-  return `Halted by ${who} ${when}${reason}`;
+  const sourceLabel =
+    meta.source === "scheduled_rule"
+      ? " · scheduled rule"
+      : meta.source === "manual_admin"
+        ? ""
+        : meta.source
+          ? ` · ${meta.source}`
+          : "";
+  const ttl = meta.expires_at
+    ? ` · auto-resumes at ${meta.expires_at}`
+    : "";
+  return `Halted by ${who} ${when}${reason}${sourceLabel}${ttl}`;
 }
 
 function VerticalCard({

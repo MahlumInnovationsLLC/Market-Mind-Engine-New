@@ -1886,6 +1886,98 @@ def emergency_stop(
 
 
 # ---------------------------------------------------------------------------
+# Per-vertical scheduled halt fired (task #713)
+# ---------------------------------------------------------------------------
+
+
+def vertical_halt_scheduled_fired(
+    *,
+    vertical: str,
+    cron_expr: str,
+    duration_secs: int,
+    reason: str | None,
+    schedule_id: int | None,
+    expires_at: str | None,
+    dry_run: bool = False,
+) -> dict[str, Any]:
+    """Operator alert raised when a recurring schedule halts a vertical.
+
+    Fired by ``app.vertical_halt_scheduler`` once per matching cron
+    window (de-duped on the rule's ``last_fired_at`` so a 30s
+    scheduler tick can't double-fire). The companion
+    ``vertical_halt_ttl_expired`` alert fires when the TTL auto-resumes.
+    """
+    subject = (
+        f"[axiom] Scheduled halt fired :: {vertical} for {duration_secs}s"
+    )
+    body = (
+        "A recurring halt schedule fired. The risk-gate chain will "
+        "reject this vertical's candidates on the next cycle and the "
+        "TTL sweeper will auto-resume when the window closes.\n\n"
+        + _format_lines(
+            [
+                ("vertical", vertical),
+                ("cron_expr", cron_expr),
+                ("duration_secs", duration_secs),
+                ("reason", reason or "(unspecified)"),
+                ("schedule_id", schedule_id if schedule_id is not None else "(n/a)"),
+                ("expires_at", expires_at or "(n/a)"),
+                ("at", _utc_now_iso()),
+            ]
+        )
+        + "\n"
+    )
+    return _dispatch(
+        subject, body, tag="vertical-halt-scheduled-fired", dry_run=dry_run
+    )
+
+
+# ---------------------------------------------------------------------------
+# Per-vertical TTL halt auto-resumed (task #713)
+# ---------------------------------------------------------------------------
+
+
+def vertical_halt_ttl_expired(
+    *,
+    vertical: str,
+    halted_at: str | None,
+    expires_at: str | None,
+    reason: str | None,
+    source: str | None,
+    schedule_id: int | None,
+    dry_run: bool = False,
+) -> dict[str, Any]:
+    """Operator alert raised when a halt's TTL deadline elapses and
+    the background sweeper auto-resumes the vertical.
+
+    ``source`` is the original halt source (``manual_admin`` for an
+    operator-set TTL, ``scheduled_rule`` for a recurring rule) so the
+    alert can hint at why the halt existed in the first place.
+    """
+    subject = f"[axiom] TTL halt expired :: {vertical} resumed"
+    body = (
+        "A TTL halt elapsed and the background sweeper auto-resumed "
+        "trading for this vertical. The risk-gate chain will accept "
+        "its candidates again on the next cycle.\n\n"
+        + _format_lines(
+            [
+                ("vertical", vertical),
+                ("source", source or "(unknown)"),
+                ("halted_at", halted_at or "(unknown)"),
+                ("expires_at", expires_at or "(unknown)"),
+                ("reason", reason or "(unspecified)"),
+                ("schedule_id", schedule_id if schedule_id is not None else "(n/a)"),
+                ("resumed_at", _utc_now_iso()),
+            ]
+        )
+        + "\n"
+    )
+    return _dispatch(
+        subject, body, tag="vertical-halt-ttl-expired", dry_run=dry_run
+    )
+
+
+# ---------------------------------------------------------------------------
 # Drift alert (raised by settlement loop)
 # ---------------------------------------------------------------------------
 

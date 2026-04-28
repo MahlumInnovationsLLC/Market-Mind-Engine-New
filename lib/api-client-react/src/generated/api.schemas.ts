@@ -224,6 +224,20 @@ export interface VerticalHaltMeta {
   by_email?: string | null;
   at?: string | null;
   reason?: string | null;
+  /** ISO-8601 UTC timestamp at which the TTL sweeper will
+auto-resume this vertical. Null = permanent halt that
+stays in place until an admin manually resumes.
+ */
+  expires_at?: string | null;
+  /** How this halt was triggered: ``manual_admin`` (operator
+click), ``scheduled_rule`` (cron), or ``ttl_expiry`` (only
+ever appears on history rows, never on a live halt).
+ */
+  source?: string | null;
+  /** ID of the ``vertical_halt_schedules`` row that fired this
+halt, when ``source = scheduled_rule``. Null otherwise.
+ */
+  schedule_id?: number | null;
 }
 
 export interface VerticalsOverviewEntry {

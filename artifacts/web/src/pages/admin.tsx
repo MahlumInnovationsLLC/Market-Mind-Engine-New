@@ -3786,17 +3786,29 @@ export function VerticalHaltsPanel() {
     { vertical: string; summary: HaltCancelSummary } | null
   >(null);
   const [pending, setPending] = useState<
-    { vertical: string; action: "halt" | "resume"; reason: string } | null
+    {
+      vertical: string;
+      action: "halt" | "resume";
+      reason: string;
+      ttlMinutes: string;
+    } | null
   >(null);
 
   const haltMutation = useMutation({
-    mutationFn: async (vars: { vertical: string; reason: string | null }) =>
+    mutationFn: async (vars: {
+      vertical: string;
+      reason: string | null;
+      ttlSecs: number | null;
+    }) =>
       apiFetch<{ resting_orders: HaltCancelSummary; changed: boolean }>(
         `/api/admin/verticals/${encodeURIComponent(vars.vertical)}/halt`,
         {
           method: "POST",
           getToken: tokenFn,
-          body: JSON.stringify({ reason: vars.reason }),
+          body: JSON.stringify({
+            reason: vars.reason,
+            ttl_secs: vars.ttlSecs,
+          }),
           headers: { "Content-Type": "application/json" },
         },
       ),
@@ -3804,6 +3816,7 @@ export function VerticalHaltsPanel() {
       setLastCancel({ vertical: vars.vertical, summary: result.resting_orders });
       setPending(null);
       qc.invalidateQueries({ queryKey: ["admin", "vertical-halts"] });
+      qc.invalidateQueries({ queryKey: ["admin", "vertical-halt-history"] });
     },
   });
 
@@ -3835,9 +3848,24 @@ export function VerticalHaltsPanel() {
   const submitPending = () => {
     if (!pending) return;
     const reason = pending.reason.trim() || null;
-    const vars = { vertical: pending.vertical, reason };
-    if (pending.action === "halt") haltMutation.mutate(vars);
-    else resumeMutation.mutate(vars);
+    if (pending.action === "halt") {
+      const mins = pending.ttlMinutes.trim();
+      let ttlSecs: number | null = null;
+      if (mins) {
+        const n = Number(mins);
+        if (!Number.isFinite(n) || n <= 0 || n > 7 * 24 * 60) {
+          // soft client-side guard — server enforces 1..604800 too
+          window.alert(
+            "TTL must be a positive number of minutes (max 10080 = 7 days). Leave blank for no expiry.",
+          );
+          return;
+        }
+        ttlSecs = Math.round(n * 60);
+      }
+      haltMutation.mutate({ vertical: pending.vertical, reason, ttlSecs });
+    } else {
+      resumeMutation.mutate({ vertical: pending.vertical, reason });
+    }
   };
 
   const halts = haltsQuery.data?.halts ?? {};
@@ -3865,6 +3893,7 @@ export function VerticalHaltsPanel() {
             <th className="text-left p-2">State</th>
             <th className="text-left p-2">Halted by</th>
             <th className="text-left p-2">Halted at</th>
+            <th className="text-left p-2">Expires</th>
             <th className="text-left p-2 w-32">Action</th>
           </tr>
         </thead>
@@ -3909,6 +3938,27 @@ export function VerticalHaltsPanel() {
                   <td className="p-2 text-muted-foreground">
                     {meta?.at ? _fmtRelative(meta.at) : "—"}
                   </td>
+                  <td
+                    className="p-2 text-muted-foreground"
+                    data-testid={`expires-vertical-halt-${entry.vertical}`}
+                  >
+                    {meta?.expires_at ? (
+                      <>
+                        {_fmtRelative(meta.expires_at)}
+                        {meta.source === "scheduled_rule" ? (
+                          <div className="text-[9px] uppercase tracking-widest text-accent-cyan/70">
+                            scheduled
+                          </div>
+                        ) : null}
+                      </>
+                    ) : isHalted ? (
+                      <span className="text-[10px] uppercase tracking-widest text-muted-foreground">
+                        no expiry
+                      </span>
+                    ) : (
+                      "—"
+                    )}
+                  </td>
                   <td className="p-2">
                     {isHalted ? (
                       <button
@@ -3919,6 +3969,7 @@ export function VerticalHaltsPanel() {
                             vertical: entry.vertical,
                             action: "resume",
                             reason: "",
+                            ttlMinutes: "",
                           })
                         }
                         className="px-2 py-0.5 border border-emerald-500/60 text-emerald-500 text-[10px] uppercase tracking-widest hover:bg-emerald-500/10 disabled:opacity-50"
@@ -3935,6 +3986,7 @@ export function VerticalHaltsPanel() {
                             vertical: entry.vertical,
                             action: "halt",
                             reason: "",
+                            ttlMinutes: "",
                           })
                         }
                         className="px-2 py-0.5 border border-destructive text-destructive text-[10px] uppercase tracking-widest hover:bg-destructive/10 disabled:opacity-50"
@@ -3950,7 +4002,7 @@ export function VerticalHaltsPanel() {
                     className="border-t border-border bg-muted/10"
                     data-testid={`prompt-vertical-${pending.action}-${entry.vertical}`}
                   >
-                    <td colSpan={5} className="p-2">
+                    <td colSpan={6} className="p-2">
                       <div className="flex flex-wrap items-center gap-2">
                         <label
                           className="text-[10px] uppercase tracking-widest text-muted-foreground"
@@ -3990,6 +4042,42 @@ export function VerticalHaltsPanel() {
                           className="flex-1 min-w-[240px] bg-background border border-border px-2 py-1 text-xs font-mono"
                           data-testid={`input-reason-${entry.vertical}`}
                         />
+                        {pending.action === "halt" ? (
+                          <>
+                            <label
+                              className="text-[10px] uppercase tracking-widest text-muted-foreground"
+                              htmlFor={`ttl-${entry.vertical}`}
+                            >
+                              TTL (min, blank = no expiry, max 10080)
+                            </label>
+                            <input
+                              id={`ttl-${entry.vertical}`}
+                              type="number"
+                              min={1}
+                              max={10080}
+                              step={1}
+                              value={pending.ttlMinutes}
+                              onChange={(e) =>
+                                setPending({
+                                  ...pending,
+                                  ttlMinutes: e.target.value,
+                                })
+                              }
+                              onKeyDown={(e) => {
+                                if (e.key === "Enter") {
+                                  e.preventDefault();
+                                  submitPending();
+                                } else if (e.key === "Escape") {
+                                  e.preventDefault();
+                                  setPending(null);
+                                }
+                              }}
+                              placeholder="e.g. 60"
+                              className="w-24 bg-background border border-border px-2 py-1 text-xs font-mono"
+                              data-testid={`input-ttl-${entry.vertical}`}
+                            />
+                          </>
+                        ) : null}
                         <button
                           type="button"
                           disabled={busy}
@@ -4049,6 +4137,438 @@ export function VerticalHaltsPanel() {
           )?.message ?? "Toggle failed."}
         </div>
       ) : null}
+    </main>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Vertical halt schedules + history (task #713)
+// ---------------------------------------------------------------------------
+
+type VerticalHaltSchedule = {
+  id: number;
+  vertical: string;
+  cron_expr: string;
+  duration_secs: number;
+  reason: string;
+  enabled: boolean;
+  created_by_user_id: string | null;
+  created_by_email: string | null;
+  created_at: string;
+  updated_at: string;
+  last_fired_at: string | null;
+};
+
+type VerticalHaltSchedulesPayload = {
+  schedules: VerticalHaltSchedule[];
+};
+
+type VerticalHaltHistoryEntry = {
+  id: number;
+  vertical: string;
+  event: "halted" | "resumed" | "ttl_expired";
+  source: string;
+  actor_user_id: string | null;
+  actor_email: string | null;
+  reason: string | null;
+  expires_at: string | null;
+  schedule_id: number | null;
+  effective_at: string;
+};
+
+type VerticalHaltHistoryPayload = {
+  history: VerticalHaltHistoryEntry[];
+};
+
+function _fmtDurationSecs(secs: number): string {
+  if (secs < 60) return `${secs}s`;
+  const min = Math.round(secs / 60);
+  if (min < 60) return `${min}m`;
+  const hr = Math.round(min / 60);
+  if (hr < 48) return `${hr}h`;
+  const day = Math.round(hr / 24);
+  return `${day}d`;
+}
+
+export function VerticalHaltSchedulePanel() {
+  const { getToken, isSignedIn } = useAuth();
+  const qc = useQueryClient();
+  const tokenFn = useMemo(
+    () => () => getToken().then((t) => t ?? null),
+    [getToken],
+  );
+
+  const overview = useGetVerticalsOverview(
+    { days: 7 },
+    {
+      query: {
+        queryKey: getGetVerticalsOverviewQueryKey({ days: 7 }),
+        staleTime: 30_000,
+      },
+    },
+  );
+
+  const schedulesQuery = useQuery<VerticalHaltSchedulesPayload>({
+    queryKey: ["admin", "vertical-halt-schedules"],
+    queryFn: () =>
+      apiFetch<VerticalHaltSchedulesPayload>(
+        "/api/admin/verticals/halts/schedule",
+        { getToken: tokenFn },
+      ),
+    enabled: !!isSignedIn,
+    refetchInterval: 60_000,
+    placeholderData: (prev) => prev,
+  });
+
+  const verticals = overview.data?.verticals.map((v) => v.vertical) ?? [];
+
+  const [draftVertical, setDraftVertical] = useState<string>("");
+  const [draftCron, setDraftCron] = useState<string>("");
+  const [draftDurationMin, setDraftDurationMin] = useState<string>("");
+  const [draftReason, setDraftReason] = useState<string>("");
+  const [error, setError] = useState<string | null>(null);
+
+  const createMutation = useMutation({
+    mutationFn: async () => {
+      const dur = Number(draftDurationMin);
+      if (!Number.isFinite(dur) || dur <= 0 || dur > 7 * 24 * 60) {
+        throw new Error(
+          "Duration must be a positive number of minutes (max 10080 = 7 days).",
+        );
+      }
+      const body = {
+        vertical: draftVertical,
+        cron_expr: draftCron.trim(),
+        duration_secs: Math.round(dur * 60),
+        reason: draftReason.trim(),
+      };
+      if (!body.vertical) throw new Error("Vertical required.");
+      if (!body.cron_expr) throw new Error("Cron expression required.");
+      if (!body.reason) throw new Error("Reason required.");
+      return apiFetch<VerticalHaltSchedule>(
+        "/api/admin/verticals/halts/schedule",
+        {
+          method: "POST",
+          getToken: tokenFn,
+          body: JSON.stringify(body),
+          headers: { "Content-Type": "application/json" },
+        },
+      );
+    },
+    onSuccess: () => {
+      setDraftVertical("");
+      setDraftCron("");
+      setDraftDurationMin("");
+      setDraftReason("");
+      setError(null);
+      qc.invalidateQueries({ queryKey: ["admin", "vertical-halt-schedules"] });
+    },
+    onError: (e: Error) => setError(e.message ?? "Create failed."),
+  });
+
+  const deleteMutation = useMutation({
+    mutationFn: async (id: number) =>
+      apiFetch<{ deleted: boolean }>(
+        `/api/admin/verticals/halts/schedule/${id}`,
+        { method: "DELETE", getToken: tokenFn },
+      ),
+    onSuccess: () =>
+      qc.invalidateQueries({
+        queryKey: ["admin", "vertical-halt-schedules"],
+      }),
+  });
+
+  const schedules = schedulesQuery.data?.schedules ?? [];
+
+  return (
+    <main data-testid="panel-vertical-halt-schedule">
+      <p className="text-xs text-muted-foreground mb-3 normal-case tracking-normal">
+        Recurring halt windows. Cron is 5-field UTC (minute, hour, day-of-month,
+        month, day-of-week). When a rule fires the vertical is halted with the
+        configured TTL, then auto-resumes when the TTL expires. Operators are
+        paged on every fire and resume.
+      </p>
+
+      <div className="mb-4 border border-border bg-muted/10 p-3">
+        <div className="grid grid-cols-1 sm:grid-cols-5 gap-2 text-xs">
+          <select
+            value={draftVertical}
+            onChange={(e) => setDraftVertical(e.target.value)}
+            className="bg-background border border-border px-2 py-1 font-mono uppercase"
+            data-testid="select-schedule-vertical"
+          >
+            <option value="">— vertical —</option>
+            {verticals.map((v) => (
+              <option key={v} value={v}>
+                {v}
+              </option>
+            ))}
+          </select>
+          <input
+            type="text"
+            value={draftCron}
+            onChange={(e) => setDraftCron(e.target.value)}
+            placeholder="cron e.g. 30 14 * * 5 (UTC)"
+            className="bg-background border border-border px-2 py-1 font-mono"
+            data-testid="input-schedule-cron"
+          />
+          <input
+            type="number"
+            min={1}
+            max={10080}
+            step={1}
+            value={draftDurationMin}
+            onChange={(e) => setDraftDurationMin(e.target.value)}
+            placeholder="duration min"
+            className="bg-background border border-border px-2 py-1 font-mono"
+            data-testid="input-schedule-duration"
+          />
+          <input
+            type="text"
+            maxLength={500}
+            value={draftReason}
+            onChange={(e) => setDraftReason(e.target.value)}
+            placeholder="reason (e.g. EIA print)"
+            className="bg-background border border-border px-2 py-1 font-mono sm:col-span-1"
+            data-testid="input-schedule-reason"
+          />
+          <button
+            type="button"
+            disabled={createMutation.isPending}
+            onClick={() => createMutation.mutate()}
+            className="px-2 py-1 border border-primary text-primary text-[10px] uppercase tracking-widest hover:bg-primary/10 disabled:opacity-50"
+            data-testid="button-create-schedule"
+          >
+            {createMutation.isPending ? "…" : "Add rule"}
+          </button>
+        </div>
+        {error ? (
+          <div
+            className="mt-2 text-[11px] text-destructive"
+            data-testid="text-schedule-error"
+          >
+            {error}
+          </div>
+        ) : null}
+      </div>
+
+      {schedulesQuery.isLoading && !schedulesQuery.data ? (
+        <div className="text-xs text-muted-foreground uppercase tracking-widest">
+          Loading…
+        </div>
+      ) : null}
+
+      <table className="w-full text-xs">
+        <thead className="text-muted-foreground uppercase tracking-widest">
+          <tr>
+            <th className="text-left p-2">Vertical</th>
+            <th className="text-left p-2">Cron (UTC)</th>
+            <th className="text-left p-2">Duration</th>
+            <th className="text-left p-2">Reason</th>
+            <th className="text-left p-2">Last fired</th>
+            <th className="text-left p-2 w-24">Action</th>
+          </tr>
+        </thead>
+        <tbody>
+          {schedules.length === 0 ? (
+            <tr>
+              <td
+                colSpan={6}
+                className="p-3 text-center text-muted-foreground italic"
+                data-testid="text-no-schedules"
+              >
+                No recurring halt rules configured.
+              </td>
+            </tr>
+          ) : (
+            schedules.map((s) => (
+              <tr
+                key={s.id}
+                className="border-t border-border"
+                data-testid={`row-schedule-${s.id}`}
+              >
+                <td className="p-2 uppercase font-bold text-primary">
+                  {s.vertical}
+                </td>
+                <td className="p-2 font-mono">{s.cron_expr}</td>
+                <td className="p-2 text-muted-foreground">
+                  {_fmtDurationSecs(s.duration_secs)}
+                </td>
+                <td className="p-2 text-muted-foreground italic normal-case tracking-normal">
+                  “{s.reason}”
+                </td>
+                <td className="p-2 text-muted-foreground">
+                  {s.last_fired_at ? _fmtRelative(s.last_fired_at) : "never"}
+                </td>
+                <td className="p-2">
+                  <button
+                    type="button"
+                    disabled={deleteMutation.isPending}
+                    onClick={() => {
+                      if (
+                        window.confirm(
+                          `Delete halt rule for ${s.vertical} (${s.cron_expr})?`,
+                        )
+                      ) {
+                        deleteMutation.mutate(s.id);
+                      }
+                    }}
+                    className="px-2 py-0.5 border border-destructive text-destructive text-[10px] uppercase tracking-widest hover:bg-destructive/10 disabled:opacity-50"
+                    data-testid={`button-delete-schedule-${s.id}`}
+                  >
+                    Delete
+                  </button>
+                </td>
+              </tr>
+            ))
+          )}
+        </tbody>
+      </table>
+    </main>
+  );
+}
+
+export function VerticalHaltHistoryPanel() {
+  const { getToken, isSignedIn } = useAuth();
+  const tokenFn = useMemo(
+    () => () => getToken().then((t) => t ?? null),
+    [getToken],
+  );
+  const [verticalFilter, setVerticalFilter] = useState<string>("");
+
+  const overview = useGetVerticalsOverview(
+    { days: 7 },
+    {
+      query: {
+        queryKey: getGetVerticalsOverviewQueryKey({ days: 7 }),
+        staleTime: 30_000,
+      },
+    },
+  );
+
+  const verticals = overview.data?.verticals.map((v) => v.vertical) ?? [];
+
+  const historyQuery = useQuery<VerticalHaltHistoryPayload>({
+    queryKey: ["admin", "vertical-halt-history", verticalFilter],
+    queryFn: () => {
+      const qs = verticalFilter
+        ? `?vertical=${encodeURIComponent(verticalFilter)}&limit=200`
+        : "?limit=200";
+      return apiFetch<VerticalHaltHistoryPayload>(
+        `/api/admin/verticals/halts/history${qs}`,
+        { getToken: tokenFn },
+      );
+    },
+    enabled: !!isSignedIn,
+    refetchInterval: 60_000,
+    placeholderData: (prev) => prev,
+  });
+
+  const entries = historyQuery.data?.history ?? [];
+
+  return (
+    <main data-testid="panel-vertical-halt-history">
+      <p className="text-xs text-muted-foreground mb-3 normal-case tracking-normal">
+        Auto-recorded timeline of every halt and resume — manual, scheduled, or
+        TTL-expired. Mirrors <code>admin_audit_log</code> but joined with the
+        scheduling rule that fired (if any).
+      </p>
+      <div className="mb-3 flex items-center gap-2">
+        <label
+          className="text-[10px] uppercase tracking-widest text-muted-foreground"
+          htmlFor="halt-history-vertical"
+        >
+          Vertical
+        </label>
+        <select
+          id="halt-history-vertical"
+          value={verticalFilter}
+          onChange={(e) => setVerticalFilter(e.target.value)}
+          className="bg-background border border-border px-2 py-1 text-xs font-mono uppercase"
+          data-testid="select-history-vertical"
+        >
+          <option value="">— all —</option>
+          {verticals.map((v) => (
+            <option key={v} value={v}>
+              {v}
+            </option>
+          ))}
+        </select>
+      </div>
+
+      {historyQuery.isLoading && !historyQuery.data ? (
+        <div className="text-xs text-muted-foreground uppercase tracking-widest">
+          Loading…
+        </div>
+      ) : null}
+
+      <table className="w-full text-xs">
+        <thead className="text-muted-foreground uppercase tracking-widest">
+          <tr>
+            <th className="text-left p-2">When</th>
+            <th className="text-left p-2">Vertical</th>
+            <th className="text-left p-2">Event</th>
+            <th className="text-left p-2">Source</th>
+            <th className="text-left p-2">Actor</th>
+            <th className="text-left p-2">Reason</th>
+            <th className="text-left p-2">Expires</th>
+          </tr>
+        </thead>
+        <tbody>
+          {entries.length === 0 ? (
+            <tr>
+              <td
+                colSpan={7}
+                className="p-3 text-center text-muted-foreground italic"
+                data-testid="text-no-history"
+              >
+                No halt activity recorded yet.
+              </td>
+            </tr>
+          ) : (
+            entries.map((e) => (
+              <tr
+                key={e.id}
+                className="border-t border-border"
+                data-testid={`row-history-${e.id}`}
+              >
+                <td className="p-2 text-muted-foreground">
+                  {_fmtRelative(e.effective_at)}
+                </td>
+                <td className="p-2 uppercase font-bold text-primary">
+                  {e.vertical}
+                </td>
+                <td className="p-2">
+                  <span
+                    className={`px-2 py-0.5 border text-[10px] uppercase tracking-widest ${
+                      e.event === "halted"
+                        ? "border-destructive text-destructive"
+                        : e.event === "resumed"
+                          ? "border-emerald-500/60 text-emerald-500"
+                          : "border-accent-cyan/60 text-accent-cyan"
+                    }`}
+                  >
+                    {e.event}
+                  </span>
+                </td>
+                <td className="p-2 text-muted-foreground font-mono">
+                  {e.source}
+                  {e.schedule_id ? ` (#${e.schedule_id})` : ""}
+                </td>
+                <td className="p-2 text-muted-foreground">
+                  {e.actor_email ?? e.actor_user_id ?? "—"}
+                </td>
+                <td className="p-2 text-muted-foreground italic normal-case tracking-normal">
+                  {e.reason ? `“${e.reason}”` : "—"}
+                </td>
+                <td className="p-2 text-muted-foreground">
+                  {e.expires_at ? _fmtRelative(e.expires_at) : "—"}
+                </td>
+              </tr>
+            ))
+          )}
+        </tbody>
+      </table>
     </main>
   );
 }
