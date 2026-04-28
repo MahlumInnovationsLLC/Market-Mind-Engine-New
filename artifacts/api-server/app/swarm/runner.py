@@ -865,6 +865,13 @@ async def _run_debate_inner(
 
     return {
         "debate_id": debate_id,
+        # Streaming UUID — same id every per-debate websocket event on
+        # /api/ws/llm-logs carries.  Surfaced so the orchestrator can
+        # correlate post-debate events (e.g. the per-entrant Plackett-
+        # Luce sketch published from cycle.py) back to the live
+        # transcript card without round-tripping through the persisted
+        # DB id (task #613).
+        "stream_debate_id": stream_debate_id,
         "game_id": game_id,
         "matchup": matchup,
         "league": league,

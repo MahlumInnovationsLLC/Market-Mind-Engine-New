@@ -1,6 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { useWebSocket, type WSStatus } from "@/hooks/use-websocket";
 import WsStatusIndicator from "@/components/ws-status-indicator";
+import {
+  PlackettLuceTable,
+  coercePlackettLuceSketch,
+  type PlackettLuceSketch,
+} from "@/components/telemetry/plackett-luce-table";
 
 /**
  * Live transcript of /api/ws/llm-logs.
@@ -57,6 +62,11 @@ type DebateState = {
   costEstimate: number | null;
   latencyMs: number | null;
   vetoReason: string | null;
+  // N-way tournament markets: per-entrant Plackett-Luce probability
+  // sketch published alongside the swarm_debates UPDATE so the live
+  // transcript can render the same field-probability table the
+  // recent-debates panel shows.
+  nWaySketch: PlackettLuceSketch | null;
   personas: Map<string, PersonaState>;
   personaOrder: string[];
   version: number; // bumped on any non-text change
@@ -154,6 +164,7 @@ class SwarmTranscriptStore {
         costEstimate: null,
         latencyMs: null,
         vetoReason: null,
+        nWaySketch: null,
         personas: new Map(),
         personaOrder: [],
         version: 0,
@@ -300,6 +311,20 @@ class SwarmTranscriptStore {
       d.approved = typeof raw["approved"] === "boolean" ? (raw["approved"] as boolean) : d.approved;
       d.recommendedAction = (raw["recommended_action"] as string) ?? d.recommendedAction;
       d.vetoReason = (raw["veto_reason"] as string) ?? d.vetoReason;
+      d.version += 1;
+      this.notifyDebate(debateId);
+      return;
+    }
+
+    if (type === "debate_n_way_sketch") {
+      // The orchestrator publishes this event right after persisting
+      // the per-entrant Plackett-Luce sketch onto the swarm_debates
+      // row, so the live transcript can render the same field
+      // probability table that the recent-debates panel shows for
+      // tournament markets (ATP/WTA/F1/PGA).
+      const sketch = coercePlackettLuceSketch(raw["sketch"]);
+      if (!sketch) return;
+      d.nWaySketch = sketch;
       d.version += 1;
       this.notifyDebate(debateId);
       return;
@@ -531,6 +556,9 @@ function DebateCard({
               ))}
             </div>
           )}
+          {d.nWaySketch ? (
+            <PlackettLuceTable testIdSuffix={d.id} sketch={d.nWaySketch} />
+          ) : null}
         </div>
       )}
     </div>

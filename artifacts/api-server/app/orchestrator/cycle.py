@@ -38,6 +38,7 @@ from ..risk import RiskContext, run_all_gates
 from ..sports import coerce_to_ratings, get_field, get_league_config
 from ..runtime_settings import get_aggression_mode
 from ..swarm import run_debate
+from ..swarm.streams import llm_log_hub
 from .features import build_features
 from .paper import place_order
 from .venue_router import route_for_candidate
@@ -618,6 +619,13 @@ def _fresh_debate_candidate(
     """
     return {
         "debate_id": debate.get("debate_id"),
+        # Streaming UUID surfaced by run_debate so the orchestrator can
+        # publish post-debate events that the live SwarmTranscript can
+        # correlate back to its open card (task #613).  Cached debates
+        # have no stream id — they were run in a prior session — so
+        # downstream code keys off the presence of this field to
+        # decide whether the live transcript can render the update.
+        "stream_debate_id": debate.get("stream_debate_id"),
         "game_id": debate.get("game_id"),
         "matchup": debate.get("matchup"),
         "league": debate.get("league"),
@@ -648,6 +656,71 @@ def _fresh_debate_candidate(
 
 async def _publish(event: dict[str, Any]) -> None:
     await pipeline_event_hub.publish(event)
+
+
+async def _persist_and_broadcast_n_way_sketch(
+    cand: dict[str, Any], live_pred: dict[str, Any] | None
+) -> None:
+    """Persist the per-entrant Plackett-Luce sketch onto the debate row
+    and mirror it onto the LLM-logs websocket so the live SwarmTranscript
+    can render the same field-probability table the recent-debates panel
+    shows (tasks #213 + #613).
+
+    Best-effort: a sick swarm_debates UPDATE or websocket publish must
+    NOT take down the trading loop.  Splits cleanly on the two pieces:
+
+    - The DB UPDATE keys off the persisted DB id (`cand["debate_id"]`).
+    - The websocket event keys off the streaming UUID
+      (`cand["stream_debate_id"]`) — same id every per-debate event on
+      `/api/ws/llm-logs` carries, so the live transcript can attach the
+      sketch to the active card.  Cached debates carry no stream id
+      (they were run in a prior session), so the websocket publish is
+      skipped — there is no live transcript card for them.
+    """
+    if live_pred is None:
+        return
+    sketch = live_pred.get("n_way_sketch")
+    if not isinstance(sketch, dict):
+        return
+    persisted_id = cand.get("debate_id")
+    if persisted_id is not None:
+        try:
+            # Namespace the audit data under a single key so we never
+            # collide with other game_context fields.  The entrant
+            # identifier already lives inside the sketch.
+            await db.execute(
+                """
+                UPDATE swarm_debates
+                   SET game_context = coalesce(game_context, '{}'::jsonb)
+                                      || jsonb_build_object(
+                                            'plackett_luce_sketch', $2::jsonb
+                                         )
+                 WHERE id = $1
+                """,
+                int(persisted_id),
+                json.dumps(sketch),
+            )
+        except Exception as e:  # pragma: no cover — defensive
+            log.debug(
+                "plackett-luce sketch persist failed for debate %s: %s",
+                persisted_id, e,
+            )
+    stream_id = cand.get("stream_debate_id")
+    if stream_id:
+        try:
+            event: dict[str, Any] = {
+                "type": "debate_n_way_sketch",
+                "debate_id": str(stream_id),
+                "sketch": sketch,
+            }
+            if persisted_id is not None:
+                event["persisted_debate_id"] = int(persisted_id)
+            await llm_log_hub.publish(event)
+        except Exception as e:  # pragma: no cover — defensive
+            log.debug(
+                "plackett-luce sketch publish failed for debate %s: %s",
+                stream_id, e,
+            )
 
 
 async def _predict_for_crypto_binary(cand: dict[str, Any]) -> dict[str, Any] | None:
@@ -1389,38 +1462,13 @@ async def run_cycle(vertical: str = "sports") -> CycleResult:
             edge=pre_edge,
             vertical=vertical,
         )
-        # N-way tournament markets (task #213): when the candidate
-        # priced through Plackett-Luce, persist the full per-entrant
-        # sketch onto the debate row's `game_context` so analysts can
-        # audit which leg was being priced and what the alternative
-        # entrants would have looked like.  Best-effort: a sick
-        # swarm_debates UPDATE must NOT take down the trading loop.
-        if (
-            live_pred is not None
-            and isinstance(live_pred.get("n_way_sketch"), dict)
-            and cand.get("debate_id") is not None
-        ):
-            try:
-                # Namespace the audit data under a single key so we
-                # never collide with other game_context fields.  The
-                # entrant identifier already lives inside the sketch.
-                await db.execute(
-                    """
-                    UPDATE swarm_debates
-                       SET game_context = coalesce(game_context, '{}'::jsonb)
-                                          || jsonb_build_object(
-                                                'plackett_luce_sketch', $2::jsonb
-                                             )
-                     WHERE id = $1
-                    """,
-                    int(cand["debate_id"]),
-                    json.dumps(live_pred["n_way_sketch"]),
-                )
-            except Exception as e:  # pragma: no cover — defensive
-                log.debug(
-                    "plackett-luce sketch persist failed for debate %s: %s",
-                    cand.get("debate_id"), e,
-                )
+        # N-way tournament markets (task #213): persist the per-entrant
+        # Plackett-Luce sketch onto the debate row's `game_context` AND
+        # mirror it onto the LLM-logs websocket so the live transcript
+        # can render the same field-probability table the recent-debates
+        # panel shows (task #613).  Best-effort: failures must NOT take
+        # down the trading loop.
+        await _persist_and_broadcast_n_way_sketch(cand, live_pred)
         # If swarm consensus is missing, fall back to the live model
         # probability so the gates still get a real number to chew on —
         # storing the live probability "alongside" the cached consensus

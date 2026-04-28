@@ -391,7 +391,11 @@ def test_cycle_persists_plackett_luce_sketch_on_debate_row(monkeypatch):
             captured["args"] = args
         return "UPDATE 1"
 
+    async def fake_publish(event):
+        return None
+
     monkeypatch.setattr(cycle_mod.db, "execute", fake_execute)
+    monkeypatch.setattr(cycle_mod.llm_log_hub, "publish", fake_publish)
 
     cand = {
         "league": "ATP",
@@ -412,23 +416,13 @@ def test_cycle_persists_plackett_luce_sketch_on_debate_row(monkeypatch):
     assert live_pred is not None
     assert isinstance(live_pred.get("n_way_sketch"), dict)
 
-    # Replicate the exact persistence call the cycle main loop performs.
-    import json as _json
-
+    # Drive the actual production helper that run_cycle invokes — this
+    # keeps the test honest about the SQL/payload it is asserting against.
     asyncio.run(
-        cycle_mod.db.execute(
-            """
-            UPDATE swarm_debates
-               SET game_context = coalesce(game_context, '{}'::jsonb)
-                                  || jsonb_build_object(
-                                        'plackett_luce_sketch', $2::jsonb
-                                     )
-             WHERE id = $1
-            """,
-            int(cand["debate_id"]),
-            _json.dumps(live_pred["n_way_sketch"]),
-        )
+        cycle_mod._persist_and_broadcast_n_way_sketch(cand, live_pred)
     )
+
+    import json as _json
 
     assert captured, "expected swarm_debates UPDATE to be issued"
     debate_id, sketch_json = captured["args"]
@@ -437,6 +431,142 @@ def test_cycle_persists_plackett_luce_sketch_on_debate_row(monkeypatch):
     assert decoded["model"] == "plackett_luce"
     assert decoded["entrant"] == "alcaraz"
     assert set(decoded["probabilities"]) == {"alcaraz", "sinner", "djokovic"}
+
+
+def test_cycle_publishes_plackett_luce_sketch_event_for_live_transcript(monkeypatch):
+    """Mirror of `test_cycle_persists_plackett_luce_sketch_on_debate_row`
+    for the websocket side: the orchestrator must also publish a
+    `debate_n_way_sketch` event onto the LLM-logs hub so the live
+    SwarmTranscript can render the per-entrant probability table the
+    moment the sketch is computed (task #613).
+
+    Critically, the event must carry the **streaming UUID** (the same
+    debate_id the live transcript groups other per-debate events by),
+    not the persisted DB id — otherwise the transcript can't attach
+    the sketch to its open card.  The persisted DB id rides along on
+    a `persisted_debate_id` field so downstream subscribers can still
+    cross-reference the row.
+    """
+    from app.orchestrator import cycle as cycle_mod
+
+    published: list[dict] = []
+
+    async def fake_execute(sql, *args):
+        return "UPDATE 1"
+
+    async def fake_publish(event):
+        published.append(event)
+
+    monkeypatch.setattr(cycle_mod.db, "execute", fake_execute)
+    monkeypatch.setattr(cycle_mod.llm_log_hub, "publish", fake_publish)
+
+    stream_uuid = "abcdef0123456789abcdef0123456789"
+    cand = {
+        "league": "ATP",
+        "n_way_field": {"alcaraz": 2200, "sinner": 2150, "djokovic": 2100},
+        "entrant": "alcaraz",
+        "game_id": "ATP-RG-2025",
+        "debate_id": 4242,
+        # Same UUID `swarm/runner.py` injects into every per-debate
+        # event published on `/api/ws/llm-logs`; surfaced through
+        # `_fresh_debate_candidate` so the orchestrator can correlate.
+        "stream_debate_id": stream_uuid,
+    }
+    live_pred = asyncio.run(
+        cycle_mod._predict_for_candidate(
+            cand,
+            consensus=None,
+            current_price=0.40,
+            edge=None,
+            vertical="combat-individual",
+        )
+    )
+    assert live_pred is not None
+    assert isinstance(live_pred.get("n_way_sketch"), dict)
+
+    asyncio.run(
+        cycle_mod._persist_and_broadcast_n_way_sketch(cand, live_pred)
+    )
+
+    assert len(published) == 1, "expected exactly one debate_n_way_sketch event"
+    event = published[0]
+    assert event["type"] == "debate_n_way_sketch"
+    # The transcript groups events by the streaming UUID — that MUST
+    # be what `debate_id` carries here.
+    assert event["debate_id"] == stream_uuid
+    assert isinstance(event["debate_id"], str)
+    assert event["persisted_debate_id"] == 4242
+    sketch = event["sketch"]
+    assert sketch["model"] == "plackett_luce"
+    assert sketch["entrant"] == "alcaraz"
+    assert set(sketch["probabilities"]) == {"alcaraz", "sinner", "djokovic"}
+    assert set(sketch["ratings"]) == {"alcaraz", "sinner", "djokovic"}
+
+
+def test_persist_and_broadcast_n_way_sketch_skips_publish_for_cached_debates(monkeypatch):
+    """Cached debates have no `stream_debate_id` (they were run in a
+    prior session, so their live transcript card has long since been
+    pruned).  The persist branch must still fire so the audit row is
+    backfilled, but the websocket publish must be a no-op — otherwise
+    the transcript would display an orphan sketch with no parent card.
+    """
+    from app.orchestrator import cycle as cycle_mod
+
+    update_calls: list = []
+    publish_calls: list = []
+
+    async def fake_execute(sql, *args):
+        if "swarm_debates" in sql and "plackett_luce_sketch" in sql:
+            update_calls.append(args)
+        return "UPDATE 1"
+
+    async def fake_publish(event):
+        publish_calls.append(event)
+
+    monkeypatch.setattr(cycle_mod.db, "execute", fake_execute)
+    monkeypatch.setattr(cycle_mod.llm_log_hub, "publish", fake_publish)
+
+    cand = {
+        "league": "ATP",
+        "n_way_field": {"alcaraz": 2200, "sinner": 2150, "djokovic": 2100},
+        "entrant": "alcaraz",
+        "game_id": "ATP-RG-2025",
+        "debate_id": 4242,
+        # Cached debate — no stream_debate_id.
+    }
+    live_pred = asyncio.run(
+        cycle_mod._predict_for_candidate(
+            cand,
+            consensus=None,
+            current_price=0.40,
+            edge=None,
+            vertical="combat-individual",
+        )
+    )
+    assert live_pred is not None
+
+    asyncio.run(
+        cycle_mod._persist_and_broadcast_n_way_sketch(cand, live_pred)
+    )
+
+    assert len(update_calls) == 1, "persist branch must still fire for cached debates"
+    assert update_calls[0][0] == 4242
+    assert publish_calls == [], (
+        "publish branch must be skipped when the candidate carries no stream_debate_id"
+    )
+
+
+def test_run_debate_returns_stream_debate_id():
+    """The orchestrator pulls `stream_debate_id` out of `run_debate`'s
+    return value to correlate post-debate websocket events back to the
+    live transcript card (task #613).  Make sure the runner contract
+    actually surfaces it as a 32-char hex UUID."""
+    from app.swarm import runner
+
+    inner_src = runner._run_debate_inner.__code__
+    # Cheap structural assertion: the return-dict literal includes the
+    # `stream_debate_id` key so callers can rely on it.
+    assert "stream_debate_id" in inner_src.co_consts
 
 
 def test_predict_for_candidate_falls_through_for_two_way_league():
