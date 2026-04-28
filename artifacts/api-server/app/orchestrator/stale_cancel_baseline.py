@@ -327,13 +327,15 @@ async def compute_baseline(
         stdev = math.sqrt(var)
     else:
         stdev = 0.0
-    # Sparkline: keep the trailing 30 values so the UI can render a
-    # compact history without shipping the whole window every refresh.
+    # Sparkline: keep the trailing 24 values (one per hourly cycle for
+    # ~last 24h) so the UI can render a compact history without
+    # shipping the whole window every refresh. Aligns with the task
+    # #711 spec text ("last 24 observations").
     # `recent_failures` is the parallel array used by the failure-spike
     # evaluator to check the strict tail (last N consecutive cycles)
     # rather than the 24h aggregate, which would latch the alert.
-    sparkline = cancelled_vals[-30:]
-    failure_tail = failed_vals[-30:]
+    sparkline = cancelled_vals[-24:]
+    failure_tail = failed_vals[-24:]
     # Rows are ORDER BY observed_at ASC, so the last row is the newest.
     last_obs = rows[-1].get("observed_at")
     out.update(
