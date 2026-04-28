@@ -469,10 +469,49 @@ async def gate_swarm_approval(ctx: RiskContext) -> GateResult:
     return GateResult("swarm_approval", True, "", {"debate_id": ctx.debate_id})
 
 
+def _resolve_per_vertical_override(
+    ctx: RiskContext, knob: str, fallback: float
+) -> float:
+    """Look up a knob value with per-vertical precedence (Task #714).
+
+    Resolution order:
+
+      1. ``risk.<knob>.<vertical>``  → ``ctx.operator_overrides['<knob>.<vertical>']``
+      2. ``risk.<knob>``             → ``ctx.operator_overrides['<knob>']``
+      3. ``fallback``                (typically the aggression-mode default)
+
+    ``ctx.operator_overrides`` is populated by ``_load_operator_overrides``
+    which strips the ``risk.`` prefix from every ``system_settings`` row,
+    so the per-vertical row ``risk.min_edge_pp.crypto`` shows up here
+    as the key ``min_edge_pp.crypto``.
+
+    Vertical names are lower-cased and dash→underscore-normalised so
+    the lookup key matches what the gatekeeper-tuning admin endpoint
+    writes (``app.runtime_settings._system_settings_key``).
+    """
+    if ctx.vertical:
+        vert = ctx.vertical.strip().lower()
+        if vert:
+            per_key = f"{knob}.{vert}"
+            v = ctx.operator_overrides.get(per_key)
+            if v is not None:
+                try:
+                    return float(v)
+                except (TypeError, ValueError):
+                    pass
+    g = ctx.operator_overrides.get(knob)
+    if g is not None:
+        try:
+            return float(g)
+        except (TypeError, ValueError):
+            pass
+    return float(fallback)
+
+
 async def gate_min_edge(ctx: RiskContext) -> GateResult:
     """edge >= operator override / default."""
     default_pp = _mode_default(ctx, "min_edge_pp", 3.0)
-    min_edge = float(ctx.operator_overrides.get("min_edge_pp", default_pp)) / 100.0
+    min_edge = _resolve_per_vertical_override(ctx, "min_edge_pp", default_pp) / 100.0
     edge = ctx.edge if ctx.edge is not None else 0.0
     if edge < min_edge:
         return GateResult(
@@ -488,11 +527,9 @@ async def gate_drift(ctx: RiskContext) -> GateResult:
     """Confidence band must not be wider than allowed drift cap.
     Wide bands signal the personas disagree dramatically on the
     underlying probability and the edge is unreliable."""
-    cap = float(
-        ctx.operator_overrides.get(
-            "max_confidence_band",
-            _mode_default(ctx, "max_confidence_band", 0.30),
-        )
+    cap = _resolve_per_vertical_override(
+        ctx, "max_confidence_band",
+        _mode_default(ctx, "max_confidence_band", 0.30),
     )
     if ctx.confidence_band_low is None or ctx.confidence_band_high is None:
         return GateResult("drift", True, "no band reported", {"cap": cap})
@@ -509,11 +546,9 @@ async def gate_drift(ctx: RiskContext) -> GateResult:
 
 async def gate_agreement(ctx: RiskContext) -> GateResult:
     """Persona agreement rate >= floor."""
-    floor = float(
-        ctx.operator_overrides.get(
-            "min_agreement_rate",
-            _mode_default(ctx, "min_agreement_rate", 0.50),
-        )
+    floor = _resolve_per_vertical_override(
+        ctx, "min_agreement_rate",
+        _mode_default(ctx, "min_agreement_rate", 0.50),
     )
     if ctx.agreement_rate is None:
         return GateResult("agreement", True, "no agreement reported", {"floor": floor})
@@ -556,11 +591,9 @@ async def gate_kelly_fraction(ctx: RiskContext) -> GateResult:
             f"kelly {kelly:.4f} <= 0",
             {"kelly": kelly},
         )
-    fraction_cap = float(
-        ctx.operator_overrides.get(
-            "kelly_fraction_cap",
-            _mode_default(ctx, "kelly_fraction_cap", 0.25),
-        )
+    fraction_cap = _resolve_per_vertical_override(
+        ctx, "kelly_fraction_cap",
+        _mode_default(ctx, "kelly_fraction_cap", 0.25),
     )
     # Per-vertical Kelly multiplier from the registry (operator override
     # via "kelly_multiplier" still wins).  Defaults to 1.0 so existing

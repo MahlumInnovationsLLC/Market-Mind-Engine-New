@@ -2181,3 +2181,453 @@ async def get_state() -> dict[str, Any]:
         "pending_revert": pending_revert,
         "presets": presets,
     }
+
+
+# ---------------------------------------------------------------------------
+# Per-vertical gatekeeper-knob overrides — Task #714.
+#
+# The 4 knobs the swarm gatekeeper consults on every cycle —
+# ``min_edge_pp`` / ``min_agreement_rate`` / ``max_confidence_band`` /
+# ``kelly_fraction_cap`` — already accept a *global* override stored
+# as ``system_settings`` rows ``risk.<knob>``.  Task #714 layers a
+# *per-vertical* override on top — ``risk.<knob>.<vertical>`` — so a
+# single noisy book can be tightened without dragging the rest of the
+# portfolio.
+#
+# Resolution order on the read side (see ``app.risk.gates``):
+#
+#   1. ``risk.<knob>.<vertical>``  (per-vertical operator override)
+#   2. ``risk.<knob>``             (global operator override)
+#   3. ``MODE_PROFILES[mode][knob]``  (aggression-mode default)
+#
+# The same 4 knobs ALREADY validate inputs against ``RISK_KNOB_SPECS``
+# (``_coerce_knob_value``) — we reuse that bounds check so a slider in
+# the per-vertical UI can't push values outside [min, max] either.
+#
+# Vertical names are normalised to lower-case to match
+# ``app.verticals.registry`` and to keep ``risk.<knob>.<vertical>``
+# row keys deterministic.
+# ---------------------------------------------------------------------------
+
+
+GATEKEEPER_TUNABLE_KNOBS: tuple[str, ...] = (
+    "min_edge_pp",
+    "min_agreement_rate",
+    "max_confidence_band",
+    "kelly_fraction_cap",
+)
+
+
+# Surfaced read-only in the gatekeeper-tuning UI for reference; the
+# operator still tunes it through the existing Live-risk-knobs panel
+# (global) or the auto-promote pipeline (per-vertical).  POST/DELETE
+# on the gatekeeper-tuning endpoints reject this knob explicitly.
+GATEKEEPER_READONLY_KNOBS: tuple[str, ...] = ("kelly_multiplier",)
+
+
+def _normalise_vertical_name(name: str | None) -> str | None:
+    if name is None:
+        return None
+    s = str(name).strip().lower()
+    return s or None
+
+
+def _gatekeeper_knob_spec(knob: str) -> "_KnobSpec":
+    if knob not in GATEKEEPER_TUNABLE_KNOBS:
+        raise ValueError(f"unknown gatekeeper knob: {knob!r}")
+    return _KNOB_BY_KEY[knob]
+
+
+def _system_settings_key(knob: str, vertical: str | None) -> str:
+    """Compose the ``system_settings`` row key for a knob override.
+
+    Global-scope overrides land under the legacy ``risk.<knob>`` key
+    so existing call-sites (and the Live-risk-knobs panel) continue
+    to read/write the same rows.  Per-vertical overrides use
+    ``risk.<knob>.<vertical>`` — the dot-separator matches the spec
+    and is distinct from the legacy underscore convention used by
+    ``kelly_multiplier_<vertical>`` (which we leave alone).
+    """
+    if vertical is None:
+        return f"risk.{knob}"
+    return f"risk.{knob}.{vertical}"
+
+
+async def _read_system_setting_raw(key: str) -> str | None:
+    try:
+        row = await db.fetchrow(
+            "SELECT value FROM system_settings WHERE key = $1", key
+        )
+    except Exception as e:
+        log.debug("gatekeeper override read (%s) failed: %s", key, e)
+        return None
+    if row is None:
+        return None
+    raw = row["value"]
+    return None if raw is None else str(raw)
+
+
+def _coerce_optional_knob(spec: "_KnobSpec", raw: str | None) -> float | int | None:
+    if raw is None:
+        return None
+    try:
+        return _coerce_knob_value(spec, raw)
+    except Exception:
+        return None
+
+
+async def get_gatekeeper_effective_state(
+    vertical: str | None = None,
+) -> dict[str, Any]:
+    """Return the full effective gatekeeper-knob view for the operator
+    console.  When ``vertical`` is provided the response includes the
+    per-vertical override (if any) and the resolved effective value
+    for that vertical; when ``vertical`` is None the per-vertical
+    column is omitted and the effective value is the global override
+    (or the mode default).
+
+    Includes the four mutable knobs plus a read-only entry for
+    ``kelly_multiplier`` so the UI can show the per-vertical Kelly
+    multiplier next to the gate thresholds without the operator
+    being able to mutate it from this surface.
+    """
+    vert = _normalise_vertical_name(vertical)
+    mode = await get_aggression_mode()
+    profile = profile_for(mode)
+
+    out_knobs: list[dict[str, Any]] = []
+    for knob in GATEKEEPER_TUNABLE_KNOBS:
+        spec = _KNOB_BY_KEY[knob]
+        default = float(profile.get(knob, 0.0))
+        global_raw = await _read_system_setting_raw(_system_settings_key(knob, None))
+        global_override = _coerce_optional_knob(spec, global_raw)
+        per_vertical_override: float | int | None = None
+        if vert is not None:
+            per_raw = await _read_system_setting_raw(
+                _system_settings_key(knob, vert)
+            )
+            per_vertical_override = _coerce_optional_knob(spec, per_raw)
+        if per_vertical_override is not None:
+            effective = float(per_vertical_override)
+            source = "per_vertical"
+        elif global_override is not None:
+            effective = float(global_override)
+            source = "global"
+        else:
+            effective = default
+            source = "mode_default"
+        entry = {
+            "key": knob,
+            "label": spec.label,
+            "description": spec.description,
+            "minimum": spec.minimum,
+            "maximum": spec.maximum,
+            "step": spec.step,
+            "unit": spec.unit,
+            "kind": spec.kind,
+            "mode_default": default,
+            "global_override": global_override,
+            "effective": effective,
+            "source": source,
+            "read_only": False,
+        }
+        if vert is not None:
+            entry["per_vertical_override"] = per_vertical_override
+        out_knobs.append(entry)
+
+    # Read-only kelly_multiplier surface — pulled from the registry
+    # spec and the existing override path; ``effective`` follows the
+    # same precedence the gate itself uses.
+    try:
+        from . import verticals as _verticals
+        spec_obj = _verticals.get_spec(vert) if vert else None
+        spec_default = float(spec_obj.kelly_multiplier) if spec_obj else 1.0
+    except Exception:
+        spec_default = 1.0
+    km_global_raw = await _read_system_setting_raw("risk.kelly_multiplier")
+    try:
+        km_global = float(km_global_raw) if km_global_raw is not None else None
+    except (TypeError, ValueError):
+        km_global = None
+    km_per: float | None = None
+    if vert is not None:
+        km_per_key = f"risk.kelly_multiplier_{vert.replace('-', '_')}"
+        km_per_raw = await _read_system_setting_raw(km_per_key)
+        try:
+            km_per = float(km_per_raw) if km_per_raw is not None else None
+        except (TypeError, ValueError):
+            km_per = None
+    if km_per is not None:
+        km_eff, km_src = km_per, "per_vertical"
+    elif km_global is not None:
+        km_eff, km_src = km_global, "global"
+    else:
+        km_eff, km_src = spec_default, "vertical_spec_default"
+    km_entry: dict[str, Any] = {
+        "key": "kelly_multiplier",
+        "label": "Kelly multiplier",
+        "description": (
+            "Per-vertical Kelly stake multiplier. Tuned via the "
+            "auto-promote pipeline; surfaced here for reference only."
+        ),
+        "minimum": 0.0,
+        "maximum": 5.0,
+        "step": 0.05,
+        "unit": "fraction",
+        "kind": "float",
+        "mode_default": spec_default,
+        "global_override": km_global,
+        "effective": km_eff,
+        "source": km_src,
+        "read_only": True,
+    }
+    if vert is not None:
+        km_entry["per_vertical_override"] = km_per
+    out_knobs.append(km_entry)
+
+    return {
+        "vertical": vert,
+        "aggression_mode": mode,
+        "knobs": out_knobs,
+    }
+
+
+async def list_known_verticals_for_tuning() -> list[str]:
+    """Return the registered vertical names sorted alphabetically.
+    Used by the GET /effective endpoint to populate the per-vertical
+    selector without coupling the front-end to the registry shape.
+    """
+    try:
+        from . import verticals as _verticals
+        names = list(_verticals.registry.names())
+    except Exception as e:
+        log.debug("list_known_verticals_for_tuning: registry unavailable (%s)", e)
+        return []
+    return sorted({_normalise_vertical_name(n) or "" for n in names if n})
+
+
+async def _write_gatekeeper_history_row(
+    *,
+    knob: str,
+    vertical: str | None,
+    old_value: float | int | None,
+    new_value: float | int | None,
+    actor_user_id: str,
+    actor_email: str | None,
+    reason: str | None,
+) -> None:
+    try:
+        await db.execute(
+            """
+            INSERT INTO gatekeeper_setting_history
+                (knob, vertical, old_value, new_value,
+                 changed_by_user_id, changed_by_email, reason)
+            VALUES ($1, $2, $3, $4, $5, $6, $7)
+            """,
+            knob,
+            vertical,
+            None if old_value is None else str(old_value),
+            None if new_value is None else str(new_value),
+            actor_user_id,
+            actor_email,
+            (reason.strip()[:500] if isinstance(reason, str) and reason.strip() else None),
+        )
+    except Exception as e:
+        # History write failures must NOT mask the actual setting
+        # change — log loudly and move on.  The change itself has
+        # already landed in ``system_settings``.
+        log.warning("gatekeeper_setting_history insert failed: %s", e)
+
+
+async def set_gatekeeper_override(
+    *,
+    knob: str,
+    vertical: str | None,
+    value: Any,
+    actor_user_id: str,
+    actor_email: str | None,
+    reason: str | None,
+) -> dict[str, Any]:
+    """Upsert a gatekeeper knob override.
+
+    * ``knob`` must be one of ``GATEKEEPER_TUNABLE_KNOBS``.
+    * ``vertical=None`` writes the global ``risk.<knob>`` row.
+    * ``vertical='<name>'`` writes ``risk.<knob>.<name>`` after
+      validating the name against the live registry.
+    * ``value`` is coerced + bounds-checked through
+      ``_coerce_knob_value`` so out-of-range inputs raise ``ValueError``.
+
+    No-op semantics: if the new value equals the current row value
+    exactly, nothing is written and the response carries
+    ``no_op=True`` so the API layer can skip the audit alert.
+    """
+    spec = _gatekeeper_knob_spec(knob)
+    vert = _normalise_vertical_name(vertical)
+    if vert is not None:
+        try:
+            from . import verticals as _verticals
+            if not _verticals.registry.has(vert):
+                raise ValueError(f"unknown vertical: {vert!r}")
+        except ValueError:
+            raise
+        except Exception as e:
+            raise ValueError(f"vertical registry unavailable: {e}") from e
+    new_val = _coerce_knob_value(spec, value)
+
+    key = _system_settings_key(knob, vert)
+    old_raw = await _read_system_setting_raw(key)
+    old_val = _coerce_optional_knob(spec, old_raw)
+
+    if old_val is not None and float(old_val) == float(new_val):
+        return {
+            "knob": knob,
+            "vertical": vert,
+            "key": key,
+            "old_value": old_val,
+            "new_value": new_val,
+            "changed": False,
+            "no_op": True,
+        }
+
+    str_val = str(new_val)
+    try:
+        await db.execute(
+            """
+            INSERT INTO system_settings (key, value, updated_at, updated_by)
+            VALUES ($1, $2, now(), $3)
+            ON CONFLICT (key) DO UPDATE
+              SET value = EXCLUDED.value,
+                  updated_at = now(),
+                  updated_by = EXCLUDED.updated_by
+            """,
+            key, str_val, actor_email or actor_user_id,
+        )
+    except Exception as e:
+        raise RuntimeError(f"failed to write {key}: {e}") from e
+
+    await _write_gatekeeper_history_row(
+        knob=knob,
+        vertical=vert,
+        old_value=old_val,
+        new_value=new_val,
+        actor_user_id=actor_user_id,
+        actor_email=actor_email,
+        reason=reason,
+    )
+    return {
+        "knob": knob,
+        "vertical": vert,
+        "key": key,
+        "old_value": old_val,
+        "new_value": new_val,
+        "changed": True,
+        "no_op": False,
+    }
+
+
+async def clear_gatekeeper_override(
+    *,
+    knob: str,
+    vertical: str | None,
+    actor_user_id: str,
+    actor_email: str | None,
+    reason: str | None,
+) -> dict[str, Any]:
+    """Delete a gatekeeper knob override, falling the gate back to
+    the next layer in the resolution chain.  Returns ``no_op=True``
+    if the key was already absent (no audit row written).
+    """
+    spec = _gatekeeper_knob_spec(knob)
+    vert = _normalise_vertical_name(vertical)
+    if vert is not None:
+        try:
+            from . import verticals as _verticals
+            if not _verticals.registry.has(vert):
+                raise ValueError(f"unknown vertical: {vert!r}")
+        except ValueError:
+            raise
+        except Exception as e:
+            raise ValueError(f"vertical registry unavailable: {e}") from e
+
+    key = _system_settings_key(knob, vert)
+    old_raw = await _read_system_setting_raw(key)
+    old_val = _coerce_optional_knob(spec, old_raw)
+    if old_raw is None:
+        return {
+            "knob": knob,
+            "vertical": vert,
+            "key": key,
+            "old_value": None,
+            "new_value": None,
+            "changed": False,
+            "no_op": True,
+        }
+
+    try:
+        await db.execute("DELETE FROM system_settings WHERE key = $1", key)
+    except Exception as e:
+        raise RuntimeError(f"failed to delete {key}: {e}") from e
+
+    await _write_gatekeeper_history_row(
+        knob=knob,
+        vertical=vert,
+        old_value=old_val,
+        new_value=None,
+        actor_user_id=actor_user_id,
+        actor_email=actor_email,
+        reason=reason,
+    )
+    return {
+        "knob": knob,
+        "vertical": vert,
+        "key": key,
+        "old_value": old_val,
+        "new_value": None,
+        "changed": True,
+        "no_op": False,
+    }
+
+
+async def list_gatekeeper_setting_history(
+    *,
+    knob: str | None = None,
+    vertical: str | None = None,
+    limit: int = 100,
+) -> list[dict[str, Any]]:
+    """Return audit history rows newest-first.  Optional filters:
+    ``knob`` (exact match) and ``vertical`` (exact match, lower-case;
+    pass the literal string ``'__global__'`` to filter to
+    global-scope rows i.e. ``vertical IS NULL``).  ``limit`` is
+    clamped to [1, 500].
+    """
+    limit_int = max(1, min(500, int(limit or 100)))
+    clauses: list[str] = []
+    params: list[Any] = []
+    if knob:
+        params.append(knob)
+        clauses.append(f"knob = ${len(params)}")
+    if vertical is not None:
+        if vertical == "__global__":
+            clauses.append("vertical IS NULL")
+        else:
+            params.append(_normalise_vertical_name(vertical))
+            clauses.append(f"vertical = ${len(params)}")
+    where_sql = ("WHERE " + " AND ".join(clauses)) if clauses else ""
+    params.append(limit_int)
+    try:
+        rows = await db.fetch(
+            f"""
+            SELECT id, knob, vertical, old_value, new_value,
+                   changed_by_user_id, changed_by_email,
+                   reason, changed_at
+              FROM gatekeeper_setting_history
+              {where_sql}
+             ORDER BY changed_at DESC, id DESC
+             LIMIT ${len(params)}
+            """,
+            *params,
+        )
+    except Exception as e:
+        log.warning("list_gatekeeper_setting_history read failed: %s", e)
+        return []
+    return [dict(r) for r in rows]

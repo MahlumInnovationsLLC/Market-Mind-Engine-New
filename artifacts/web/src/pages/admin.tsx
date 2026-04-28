@@ -4672,6 +4672,492 @@ type LandingLeadsPage = {
   offset: number;
 };
 
+// ---------------------------------------------------------------------------
+// Per-vertical gatekeeper-knob tuning panel (Task #714)
+//
+// Lets an operator layer per-vertical overrides on top of the global
+// risk knobs without touching the rest of the portfolio.  See
+// ``app.runtime_settings.set_gatekeeper_override`` for the storage
+// shape and ``app.risk.gates._resolve_per_vertical_override`` for
+// the read path used by the gates.  Every real change writes an audit
+// row and dispatches a ``gatekeeper-override-changed`` operator alert.
+// ---------------------------------------------------------------------------
+
+const GATEKEEPER_GLOBAL_SCOPE = "__global__" as const;
+
+type GatekeeperKnob = {
+  key: string;
+  label: string;
+  description: string;
+  minimum: number;
+  maximum: number;
+  step: number;
+  unit: string;
+  kind: string;
+  mode_default: number;
+  global_override: number | null;
+  per_vertical_override?: number | null;
+  effective: number;
+  source: "per_vertical" | "global" | "mode_default" | "vertical_spec_default";
+  read_only: boolean;
+};
+
+type GatekeeperEffectiveResponse = {
+  vertical: string | null;
+  aggression_mode: string;
+  knobs: GatekeeperKnob[];
+  available_verticals: string[];
+  last_change?: {
+    knob: string;
+    vertical: string | null;
+    old_value: number | null;
+    new_value: number | null;
+    changed: boolean;
+    no_op: boolean;
+  };
+};
+
+type GatekeeperHistoryRow = {
+  id: number;
+  knob: string;
+  vertical: string | null;
+  old_value: string | null;
+  new_value: string | null;
+  changed_by_user_id: string | null;
+  changed_by_email: string | null;
+  reason: string | null;
+  changed_at: string;
+};
+
+function _fmtKnob(value: number | null | undefined, unit: string): string {
+  if (value === null || value === undefined || Number.isNaN(value)) return "—";
+  if (unit === "pp") return `${value.toFixed(2)}pp`;
+  if (unit === "fraction") return value.toFixed(3);
+  if (unit === "usd") return `$${value.toFixed(0)}`;
+  if (unit === "count") return String(Math.round(value));
+  return String(value);
+}
+
+function _fmtScope(v: string | null | undefined): string {
+  return v ? v : "GLOBAL";
+}
+
+export function GatekeeperTuningPanel() {
+  const { getToken, isSignedIn } = useAuth();
+  const queryClient = useQueryClient();
+  const tokenFn = useMemo(
+    () => () => getToken().then((t) => t ?? null),
+    [getToken],
+  );
+
+  // Scope selector — `__global__` means "edit the global risk.<knob>
+  // row".  Any other value selects a per-vertical scope.
+  const [scope, setScope] = useState<string>(GATEKEEPER_GLOBAL_SCOPE);
+  const verticalParam = scope === GATEKEEPER_GLOBAL_SCOPE ? null : scope;
+
+  const stateKey = ["admin", "gatekeeper-tuning", verticalParam ?? "__global__"] as const;
+  const stateQuery = useQuery<GatekeeperEffectiveResponse>({
+    queryKey: stateKey,
+    queryFn: () => {
+      const path = verticalParam
+        ? `/api/admin/gatekeeper/effective?vertical=${encodeURIComponent(verticalParam)}`
+        : "/api/admin/gatekeeper/effective";
+      return apiFetch<GatekeeperEffectiveResponse>(path, { getToken: tokenFn });
+    },
+    enabled: !!isSignedIn,
+    refetchInterval: 60_000,
+    placeholderData: (prev) => prev,
+  });
+
+  const historyKey = ["admin", "gatekeeper-tuning", "history", verticalParam ?? "__global__"] as const;
+  const historyQuery = useQuery<{ history: GatekeeperHistoryRow[] }>({
+    queryKey: historyKey,
+    queryFn: () => {
+      const params = new URLSearchParams();
+      params.set("limit", "50");
+      if (verticalParam) params.set("vertical", verticalParam);
+      return apiFetch<{ history: GatekeeperHistoryRow[] }>(
+        `/api/admin/gatekeeper/history?${params.toString()}`,
+        { getToken: tokenFn },
+      );
+    },
+    enabled: !!isSignedIn,
+    refetchInterval: 60_000,
+    placeholderData: (prev) => prev,
+  });
+
+  // Local draft slider positions and per-knob "reason" inputs.  Both
+  // are flushed to the server on Save and discarded on scope change.
+  const [draft, setDraft] = useState<Record<string, number>>({});
+  const [reasons, setReasons] = useState<Record<string, string>>({});
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    setDraft({});
+    setReasons({});
+    setError(null);
+  }, [scope]);
+
+  const setMutation = useMutation({
+    mutationFn: (vars: { knob: string; value: number; reason: string }) =>
+      apiFetch<GatekeeperEffectiveResponse>("/api/admin/gatekeeper/override", {
+        method: "POST",
+        body: {
+          knob: vars.knob,
+          vertical: verticalParam,
+          value: vars.value,
+          reason: vars.reason || null,
+        },
+        getToken: tokenFn,
+      }),
+    onSuccess: (next, vars) => {
+      queryClient.setQueryData(stateKey, next);
+      queryClient.invalidateQueries({ queryKey: historyKey });
+      setError(null);
+      setDraft((d) => {
+        const out = { ...d };
+        delete out[vars.knob];
+        return out;
+      });
+      setReasons((r) => {
+        const out = { ...r };
+        delete out[vars.knob];
+        return out;
+      });
+    },
+    onError: (e: unknown) => {
+      const msg = e instanceof Error ? e.message : "Failed to save override.";
+      setError(msg);
+    },
+  });
+
+  const clearMutation = useMutation({
+    mutationFn: (vars: { knob: string; reason: string }) => {
+      const params = new URLSearchParams();
+      params.set("knob", vars.knob);
+      if (verticalParam) params.set("vertical", verticalParam);
+      if (vars.reason) params.set("reason", vars.reason);
+      return apiFetch<GatekeeperEffectiveResponse>(
+        `/api/admin/gatekeeper/override?${params.toString()}`,
+        { method: "DELETE", getToken: tokenFn },
+      );
+    },
+    onSuccess: (next, vars) => {
+      queryClient.setQueryData(stateKey, next);
+      queryClient.invalidateQueries({ queryKey: historyKey });
+      setError(null);
+      setDraft((d) => {
+        const out = { ...d };
+        delete out[vars.knob];
+        return out;
+      });
+      setReasons((r) => {
+        const out = { ...r };
+        delete out[vars.knob];
+        return out;
+      });
+    },
+    onError: (e: unknown) => {
+      const msg = e instanceof Error ? e.message : "Failed to clear override.";
+      setError(msg);
+    },
+  });
+
+  const verticals = stateQuery.data?.available_verticals ?? [];
+  const knobs = stateQuery.data?.knobs ?? [];
+
+  return (
+    <main data-testid="panel-gatekeeper-tuning" className="space-y-4">
+      <p className="text-xs text-muted-foreground normal-case tracking-normal">
+        Layer per-vertical gatekeeper overrides on top of the global risk
+        knobs. Resolution order is per-vertical → global → aggression-mode
+        default. Out-of-range or unknown values are rejected and every
+        change writes to <code>gatekeeper_setting_history</code>.
+      </p>
+
+      <div className="flex flex-wrap items-center gap-3">
+        <label
+          className="text-[10px] uppercase tracking-widest text-muted-foreground"
+          htmlFor="gatekeeper-scope"
+        >
+          Scope
+        </label>
+        <select
+          id="gatekeeper-scope"
+          value={scope}
+          onChange={(e) => setScope(e.target.value)}
+          className="bg-input border border-border px-2 py-1 text-xs uppercase tracking-widest"
+          data-testid="select-gatekeeper-scope"
+        >
+          <option value={GATEKEEPER_GLOBAL_SCOPE}>Global (all verticals)</option>
+          {verticals.map((v) => (
+            <option key={v} value={v}>
+              {v}
+            </option>
+          ))}
+        </select>
+        <span className="text-[10px] uppercase tracking-widest text-muted-foreground">
+          Mode: {stateQuery.data?.aggression_mode ?? "—"}
+        </span>
+      </div>
+
+      {error ? (
+        <div
+          className="border border-destructive bg-destructive/10 text-destructive text-xs px-3 py-2"
+          data-testid="gatekeeper-tuning-error"
+        >
+          {error}
+        </div>
+      ) : null}
+
+      {stateQuery.isLoading && !stateQuery.data ? (
+        <div className="text-xs text-muted-foreground uppercase tracking-widest">
+          Loading…
+        </div>
+      ) : null}
+
+      <div className="space-y-3">
+        {knobs.map((knob) => {
+          const draftVal =
+            draft[knob.key] ?? knob.effective ?? knob.minimum;
+          const isDirty =
+            draft[knob.key] !== undefined &&
+            Math.abs((draft[knob.key] ?? 0) - knob.effective) > 1e-9;
+          const reason = reasons[knob.key] ?? "";
+          const busy =
+            (setMutation.isPending &&
+              (setMutation.variables as { knob?: string } | undefined)?.knob ===
+                knob.key) ||
+            (clearMutation.isPending &&
+              (clearMutation.variables as { knob?: string } | undefined)?.knob ===
+                knob.key);
+          const hasOverride =
+            verticalParam == null
+              ? knob.global_override !== null
+              : (knob.per_vertical_override ?? null) !== null;
+          return (
+            <div
+              key={knob.key}
+              className="border border-border p-3 bg-background"
+              data-testid={`row-gatekeeper-knob-${knob.key}`}
+            >
+              <div className="flex items-baseline justify-between gap-4">
+                <div>
+                  <div className="text-xs uppercase tracking-widest text-foreground">
+                    {knob.label}
+                    {knob.read_only ? (
+                      <span className="ml-2 text-[9px] uppercase tracking-widest text-muted-foreground">
+                        read-only
+                      </span>
+                    ) : null}
+                  </div>
+                  <div className="text-[10px] text-muted-foreground normal-case tracking-normal">
+                    {knob.description}
+                  </div>
+                </div>
+                <div className="text-right text-[10px] uppercase tracking-widest text-muted-foreground space-y-0.5">
+                  <div>
+                    Default {_fmtKnob(knob.mode_default, knob.unit)}
+                  </div>
+                  <div>
+                    Global{" "}
+                    <span
+                      className={
+                        knob.global_override != null
+                          ? "text-primary"
+                          : "text-muted-foreground"
+                      }
+                    >
+                      {knob.global_override != null
+                        ? _fmtKnob(knob.global_override, knob.unit)
+                        : "none"}
+                    </span>
+                  </div>
+                  {verticalParam ? (
+                    <div>
+                      Per-vertical{" "}
+                      <span
+                        className={
+                          knob.per_vertical_override != null
+                            ? "text-primary"
+                            : "text-muted-foreground"
+                        }
+                      >
+                        {knob.per_vertical_override != null
+                          ? _fmtKnob(knob.per_vertical_override, knob.unit)
+                          : "none"}
+                      </span>
+                    </div>
+                  ) : null}
+                  <div>
+                    Effective{" "}
+                    <span
+                      className="text-foreground"
+                      data-testid={`effective-gatekeeper-${knob.key}`}
+                    >
+                      {_fmtKnob(knob.effective, knob.unit)}
+                    </span>{" "}
+                    <span className="text-muted-foreground">
+                      ({knob.source.replace("_", "-")})
+                    </span>
+                  </div>
+                </div>
+              </div>
+              {!knob.read_only ? (
+                <div className="mt-3 flex flex-wrap items-center gap-2">
+                  <input
+                    type="range"
+                    min={knob.minimum}
+                    max={knob.maximum}
+                    step={knob.step}
+                    value={draftVal}
+                    disabled={busy}
+                    onChange={(e) =>
+                      setDraft((d) => ({
+                        ...d,
+                        [knob.key]: Number(e.target.value),
+                      }))
+                    }
+                    className="flex-1 min-w-[120px] accent-primary"
+                    data-testid={`slider-gatekeeper-${knob.key}`}
+                  />
+                  <input
+                    type="number"
+                    min={knob.minimum}
+                    max={knob.maximum}
+                    step={knob.step}
+                    value={draftVal}
+                    disabled={busy}
+                    onChange={(e) =>
+                      setDraft((d) => ({
+                        ...d,
+                        [knob.key]: Number(e.target.value),
+                      }))
+                    }
+                    className="w-24 bg-input border border-border px-2 py-1 text-xs"
+                    data-testid={`input-gatekeeper-${knob.key}`}
+                  />
+                  <input
+                    type="text"
+                    placeholder="reason (optional)"
+                    maxLength={500}
+                    value={reason}
+                    disabled={busy}
+                    onChange={(e) =>
+                      setReasons((r) => ({
+                        ...r,
+                        [knob.key]: e.target.value,
+                      }))
+                    }
+                    className="flex-1 min-w-[140px] bg-input border border-border px-2 py-1 text-xs normal-case tracking-normal"
+                    data-testid={`reason-gatekeeper-${knob.key}`}
+                  />
+                  <button
+                    type="button"
+                    disabled={!isDirty || busy}
+                    onClick={() =>
+                      setMutation.mutate({
+                        knob: knob.key,
+                        value: draftVal,
+                        reason: reason.trim(),
+                      })
+                    }
+                    className={`border px-3 py-1 text-[10px] uppercase tracking-widest ${
+                      isDirty
+                        ? "border-primary text-primary hover:bg-primary/10"
+                        : "border-border text-muted-foreground"
+                    } disabled:opacity-50`}
+                    data-testid={`button-save-gatekeeper-${knob.key}`}
+                  >
+                    {busy ? "…" : "Save"}
+                  </button>
+                  <button
+                    type="button"
+                    disabled={!hasOverride || busy}
+                    onClick={() =>
+                      clearMutation.mutate({
+                        knob: knob.key,
+                        reason: reason.trim(),
+                      })
+                    }
+                    className="border border-border px-3 py-1 text-[10px] uppercase tracking-widest text-muted-foreground hover:text-destructive hover:border-destructive disabled:opacity-50"
+                    data-testid={`button-clear-gatekeeper-${knob.key}`}
+                  >
+                    Clear
+                  </button>
+                </div>
+              ) : null}
+            </div>
+          );
+        })}
+      </div>
+
+      <div>
+        <div className="mb-2 text-[11px] font-semibold uppercase tracking-[0.18em] text-accent-cyan/80">
+          Override history
+          {verticalParam ? ` · ${verticalParam}` : " · global + all verticals"}
+        </div>
+        {historyQuery.isLoading && !historyQuery.data ? (
+          <div className="text-xs text-muted-foreground uppercase tracking-widest">
+            Loading history…
+          </div>
+        ) : (historyQuery.data?.history?.length ?? 0) === 0 ? (
+          <div className="text-xs text-muted-foreground normal-case tracking-normal">
+            No changes recorded yet for this scope.
+          </div>
+        ) : (
+          <table
+            className="w-full text-xs"
+            data-testid="table-gatekeeper-history"
+          >
+            <thead className="text-muted-foreground uppercase tracking-widest">
+              <tr>
+                <th className="text-left p-2">When</th>
+                <th className="text-left p-2">Scope</th>
+                <th className="text-left p-2">Knob</th>
+                <th className="text-left p-2">Change</th>
+                <th className="text-left p-2">Actor</th>
+                <th className="text-left p-2">Reason</th>
+              </tr>
+            </thead>
+            <tbody>
+              {(historyQuery.data?.history ?? []).map((row) => (
+                <tr
+                  key={row.id}
+                  className="border-t border-border"
+                  data-testid={`row-gatekeeper-history-${row.id}`}
+                >
+                  <td className="p-2 text-muted-foreground whitespace-nowrap">
+                    {row.changed_at}
+                  </td>
+                  <td className="p-2">
+                    <span className="px-1.5 py-0.5 border border-border text-[10px] uppercase tracking-widest">
+                      {_fmtScope(row.vertical)}
+                    </span>
+                  </td>
+                  <td className="p-2 uppercase tracking-widest text-foreground">
+                    {row.knob}
+                  </td>
+                  <td className="p-2 text-muted-foreground">
+                    {row.old_value ?? "(none)"} → {row.new_value ?? "(none)"}
+                  </td>
+                  <td className="p-2 text-muted-foreground">
+                    {row.changed_by_email ?? row.changed_by_user_id ?? "—"}
+                  </td>
+                  <td className="p-2 text-muted-foreground italic normal-case tracking-normal">
+                    {row.reason ?? "—"}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </div>
+    </main>
+  );
+}
+
+
 const LEADS_PAGE_SIZES = [25, 50, 100, 200] as const;
 const LEADS_INTEREST_NONE_SENTINEL = "__none__";
 

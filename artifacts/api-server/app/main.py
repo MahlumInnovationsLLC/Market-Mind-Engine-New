@@ -3323,6 +3323,166 @@ async def admin_set_risk_knobs(
 
 
 # ---------------------------------------------------------------------------
+# Per-vertical gatekeeper-knob tuning (admin-only) — Task #714
+#
+# Layers a per-vertical override on top of the existing global
+# ``risk.<knob>`` system_settings row.  See
+# ``app.runtime_settings.set_gatekeeper_override`` for the storage
+# layout and ``app.risk.gates._resolve_per_vertical_override`` for
+# the read path used by the gates themselves.
+# ---------------------------------------------------------------------------
+
+
+class AdminGatekeeperOverrideRequest(BaseModel):
+    """Set or clear one gatekeeper knob override.
+
+    * ``vertical=None`` writes the global ``risk.<knob>`` row.
+    * ``vertical='<name>'`` writes the per-vertical
+      ``risk.<knob>.<name>`` row (validated against the registry).
+    * ``value=None`` clears the override (equivalent to a DELETE).
+    """
+    knob: str = Field(..., min_length=1, max_length=64)
+    vertical: str | None = Field(default=None, max_length=64)
+    value: float | int | None = Field(
+        default=None,
+        description="New value, or null to clear the override.",
+    )
+    reason: str | None = Field(default=None, max_length=500)
+
+
+@app.get("/api/admin/gatekeeper/effective")
+async def admin_get_gatekeeper_effective(
+    vertical: str | None = Query(default=None, max_length=64),
+    actor: AuthedUser = Depends(require_admin),
+) -> dict[str, object]:
+    """Return the full effective state for the four tunable
+    gatekeeper knobs, plus a read-only ``kelly_multiplier`` row.
+    Includes the mode default, the global override (if set), the
+    per-vertical override (when ``vertical`` is supplied), and the
+    resolved effective value with its ``source`` tag.
+    """
+    state = await runtime_settings_mod.get_gatekeeper_effective_state(vertical)
+    state["available_verticals"] = (
+        await runtime_settings_mod.list_known_verticals_for_tuning()
+    )
+    return state
+
+
+@app.post("/api/admin/gatekeeper/override")
+async def admin_set_gatekeeper_override(
+    body: AdminGatekeeperOverrideRequest,
+    actor: AuthedUser = Depends(require_admin),
+) -> dict[str, object]:
+    """Set (or clear, via ``value=null``) one gatekeeper override.
+    Out-of-range values, unknown knobs, and unknown verticals are
+    rejected with HTTP 400.  No-op writes (new value equals current)
+    return ``no_op=true`` and skip the operator-alert dispatch.
+    """
+    actor_email = (await check_approval(actor))[1]
+    try:
+        if body.value is None:
+            result = await runtime_settings_mod.clear_gatekeeper_override(
+                knob=body.knob,
+                vertical=body.vertical,
+                actor_user_id=actor.user_id,
+                actor_email=actor_email,
+                reason=body.reason,
+            )
+        else:
+            result = await runtime_settings_mod.set_gatekeeper_override(
+                knob=body.knob,
+                vertical=body.vertical,
+                value=body.value,
+                actor_user_id=actor.user_id,
+                actor_email=actor_email,
+                reason=body.reason,
+            )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    if result.get("changed"):
+        from .notifications import alerts as _alerts
+        try:
+            _alerts.gatekeeper_override_changed(
+                knob=body.knob,
+                vertical=result.get("vertical"),
+                old_value=result.get("old_value"),
+                new_value=result.get("new_value"),
+                actor_email=actor_email,
+                reason=body.reason,
+            )
+        except Exception as e:  # pragma: no cover
+            log.warning("gatekeeper_override_changed alert failed: %s", e)
+    state = await runtime_settings_mod.get_gatekeeper_effective_state(
+        body.vertical
+    )
+    state["available_verticals"] = (
+        await runtime_settings_mod.list_known_verticals_for_tuning()
+    )
+    state["last_change"] = result
+    return state
+
+
+@app.delete("/api/admin/gatekeeper/override")
+async def admin_clear_gatekeeper_override(
+    knob: str = Query(..., min_length=1, max_length=64),
+    vertical: str | None = Query(default=None, max_length=64),
+    reason: str | None = Query(default=None, max_length=500),
+    actor: AuthedUser = Depends(require_admin),
+) -> dict[str, object]:
+    """Drop one gatekeeper override row (global if ``vertical`` is
+    omitted).  Idempotent — clearing an absent row returns
+    ``no_op=true`` with no audit row written.
+    """
+    actor_email = (await check_approval(actor))[1]
+    try:
+        result = await runtime_settings_mod.clear_gatekeeper_override(
+            knob=knob,
+            vertical=vertical,
+            actor_user_id=actor.user_id,
+            actor_email=actor_email,
+            reason=reason,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    if result.get("changed"):
+        from .notifications import alerts as _alerts
+        try:
+            _alerts.gatekeeper_override_changed(
+                knob=knob,
+                vertical=result.get("vertical"),
+                old_value=result.get("old_value"),
+                new_value=None,
+                actor_email=actor_email,
+                reason=reason,
+            )
+        except Exception as e:  # pragma: no cover
+            log.warning("gatekeeper_override_changed alert failed: %s", e)
+    state = await runtime_settings_mod.get_gatekeeper_effective_state(vertical)
+    state["available_verticals"] = (
+        await runtime_settings_mod.list_known_verticals_for_tuning()
+    )
+    state["last_change"] = result
+    return state
+
+
+@app.get("/api/admin/gatekeeper/history")
+async def admin_get_gatekeeper_history(
+    knob: str | None = Query(default=None, max_length=64),
+    vertical: str | None = Query(default=None, max_length=64),
+    limit: int = Query(default=100, ge=1, le=500),
+    actor: AuthedUser = Depends(require_admin),
+) -> dict[str, object]:
+    """Audit feed for gatekeeper override changes.  Filters:
+    ``knob`` (exact match), ``vertical`` (exact match; pass the
+    literal ``__global__`` to filter to global-scope rows only).
+    """
+    rows = await runtime_settings_mod.list_gatekeeper_setting_history(
+        knob=knob, vertical=vertical, limit=limit,
+    )
+    return {"history": rows}
+
+
+# ---------------------------------------------------------------------------
 # Per-vertical persona toggles (admin-only) — Task #194
 # ---------------------------------------------------------------------------
 

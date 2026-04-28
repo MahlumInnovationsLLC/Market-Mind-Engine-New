@@ -26,6 +26,7 @@ import {
   CryptoBacktestPanel,
   EloUpdaterPanel,
   GatekeeperModelPanel,
+  GatekeeperTuningPanel,
   GithubMirrorPanel,
   LeadsPanel,
   ModelsPanel,
@@ -46,7 +47,7 @@ import EmergencyStop from "@/components/telemetry/emergency-stop";
 import AccessRequests from "@/components/telemetry/access-requests";
 import AutoResearchPanel from "@/components/intelligence/autoresearch-panel";
 
-const ALL_TABS = ["health", "controls", "risk", "reconciler", "stuck-orders", "settings", "research", "audit", "users", "leads"] as const;
+const ALL_TABS = ["health", "controls", "risk", "swarm-tuning", "reconciler", "stuck-orders", "settings", "research", "audit", "users", "leads"] as const;
 type TabKey = (typeof ALL_TABS)[number];
 
 const TAB_DEFS: Record<TabKey, TabDef<TabKey> & { adminOnly: boolean; subtitle: string }> = {
@@ -67,6 +68,12 @@ const TAB_DEFS: Record<TabKey, TabDef<TabKey> & { adminOnly: boolean; subtitle: 
     label: "Risk",
     adminOnly: true,
     subtitle: "Edge / Kelly / agreement / confidence-band gating thresholds.",
+  },
+  "swarm-tuning": {
+    key: "swarm-tuning",
+    label: "Swarm tuning",
+    adminOnly: true,
+    subtitle: "Per-vertical gatekeeper-knob overrides · effective values · audit history.",
   },
   reconciler: {
     key: "reconciler",
@@ -314,6 +321,17 @@ export default function SystemPage() {
               Tech-AI Kelly promotion
             </div>
             <TechAiPromotionPanel />
+          </GlassCard>
+        </div>
+      )}
+
+      {tab === "swarm-tuning" && isAdmin && (
+        <div data-testid="panel-system-swarm-tuning">
+          <GlassCard tone="solid" padding="md">
+            <div className="mb-3 text-[11px] font-semibold uppercase tracking-[0.18em] text-accent-cyan/80">
+              Per-vertical gatekeeper tuning
+            </div>
+            <GatekeeperTuningPanel />
           </GlassCard>
         </div>
       )}

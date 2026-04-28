@@ -1978,6 +1978,71 @@ def vertical_halt_ttl_expired(
 
 
 # ---------------------------------------------------------------------------
+# Per-vertical gatekeeper-knob override changed (task #714)
+# ---------------------------------------------------------------------------
+
+
+def gatekeeper_override_changed(
+    *,
+    knob: str,
+    vertical: str | None,
+    old_value: float | int | None,
+    new_value: float | int | None,
+    actor_email: str | None,
+    reason: str | None,
+    dry_run: bool = False,
+) -> dict[str, Any]:
+    """Operator alert raised when a swarm-gatekeeper knob override
+    is set, changed, or cleared.
+
+    Fired by the per-vertical gatekeeper-tuning admin endpoints
+    (``POST`` / ``DELETE /api/admin/gatekeeper/override``) once per
+    real change.  No-op writes (where the new value equals the
+    current value) are short-circuited upstream and never reach
+    here, so every dispatch represents an actual gate-behaviour
+    change taking effect on the next orchestrator cycle.
+    """
+    scope = vertical or "GLOBAL"
+    if new_value is None:
+        verb = "cleared"
+        delta = f"{_fmt_value(old_value)} → mode default"
+    elif old_value is None:
+        verb = "set"
+        delta = f"(none) → {_fmt_value(new_value)}"
+    else:
+        verb = "changed"
+        delta = f"{_fmt_value(old_value)} → {_fmt_value(new_value)}"
+    subject = f"[axiom] Gatekeeper {verb} :: {scope}.{knob} {delta}"
+    body = (
+        f"A swarm-gatekeeper knob override was {verb}. The risk-gate "
+        "chain will use the new effective value on the next cycle.\n\n"
+        + _format_lines(
+            [
+                ("knob", knob),
+                ("scope", scope),
+                ("old_value", _fmt_value(old_value)),
+                ("new_value", _fmt_value(new_value)),
+                ("actor", actor_email or "(unknown)"),
+                ("reason", reason or "(unspecified)"),
+                ("at", _utc_now_iso()),
+            ]
+        )
+        + "\n"
+    )
+    return _dispatch(
+        subject, body, tag="gatekeeper-override-changed", dry_run=dry_run
+    )
+
+
+def _fmt_value(v: float | int | None) -> str:
+    if v is None:
+        return "(none)"
+    if isinstance(v, int):
+        return str(v)
+    return f"{float(v):.4g}"
+
+
+# ---------------------------------------------------------------------------
 # Drift alert (raised by settlement loop)
 # ---------------------------------------------------------------------------
 

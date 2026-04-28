@@ -28,9 +28,12 @@ vi.mock("@tanstack/react-query", () => ({
   }),
 }));
 
+// Mutable so a single test can flip the admin flag without re-hoisting
+// the entire mock module.
+const _accessState: { is_admin: boolean } = { is_admin: false };
 vi.mock("@workspace/api-client-react", () => ({
   getGetMyAccessQueryKey: () => ["my-access"],
-  useGetMyAccess: () => ({ data: { is_admin: false }, isLoading: false }),
+  useGetMyAccess: () => ({ data: { is_admin: _accessState.is_admin }, isLoading: false }),
   customFetch: vi.fn(async () => ({})),
 }));
 
@@ -58,6 +61,7 @@ vi.mock("@/pages/admin", () => ({
   CryptoBacktestPanel: () => <div />,
   EloUpdaterPanel: () => <div />,
   GatekeeperModelPanel: () => <div />,
+  GatekeeperTuningPanel: () => <div data-testid="gatekeeper-tuning-stub" />,
   GithubMirrorPanel: () => <div />,
   LeadsPanel: () => <div />,
   ModelsPanel: () => <div />,
@@ -111,5 +115,21 @@ describe("SystemPage", () => {
       </Router>,
     );
     expect(getByTestId("panel-system-settings")).toBeTruthy();
+  });
+
+  it("renders the Swarm tuning panel for admins on ?tab=swarm-tuning", () => {
+    _accessState.is_admin = true;
+    try {
+      const { hook } = memoryLocation({ path: "/system?tab=swarm-tuning" });
+      const { getByTestId } = render(
+        <Router hook={hook}>
+          <SystemPage />
+        </Router>,
+      );
+      expect(getByTestId("panel-system-swarm-tuning")).toBeTruthy();
+      expect(getByTestId("gatekeeper-tuning-stub")).toBeTruthy();
+    } finally {
+      _accessState.is_admin = false;
+    }
   });
 });

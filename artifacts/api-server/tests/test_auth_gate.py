@@ -135,6 +135,9 @@ PROTECTED_ROUTES: tuple[str, ...] = (
     "/api/dashboard/runtime-settings",
     "/api/admin/risk-knobs",
     "/api/admin/risk-knobs/history",
+    # Task #714 — per-vertical gatekeeper-knob tuning (effective view + audit).
+    "/api/admin/gatekeeper/effective",
+    "/api/admin/gatekeeper/history",
     "/api/admin/vertical-visibility",
     "/api/admin/verticals/halts",
     # Task #713 — recurring halt schedules + audit history.
@@ -228,6 +231,9 @@ PROTECTED_MUTATING_ENDPOINTS: tuple[tuple[str, str], ...] = (
     ("POST", "/api/admin/runtime-settings/presets"),
     ("DELETE", "/api/admin/runtime-settings/presets/{preset_id}"),
     ("POST", "/api/admin/risk-knobs"),
+    # Task #714 — per-vertical gatekeeper-knob tuning (set / clear).
+    ("POST", "/api/admin/gatekeeper/override"),
+    ("DELETE", "/api/admin/gatekeeper/override"),
     ("POST", "/api/admin/vertical-visibility"),
     ("POST", "/api/admin/tech-ai/promote-kelly"),
     ("POST", "/api/admin/elections/promote-kelly"),

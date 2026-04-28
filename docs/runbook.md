@@ -20,6 +20,8 @@ the change, and the rollback path if you need to undo it.
 11. [First 24 hours live](#11-first-24-hours-live)
 12. [Tune WebSocket subscriber queue sizes](#12-tune-websocket-subscriber-queue-sizes)
 13. [Order-submit dead-letter triage](#13-order-submit-dead-letter-triage)
+14. [Stale-cancel anomaly triage](#14-stale-cancel-anomaly-triage)
+15. [Per-vertical gatekeeper-knob tuning](#15-per-vertical-gatekeeper-knob-tuning)
 
 ---
 
@@ -1568,3 +1570,117 @@ downgrade (`alembic downgrade 0032_order_recovery_attempts`), which
 drops `stale_cancel_observations`. The cycle's alert path is wrapped
 in a try/except so a missing table is logged but never blocks. Old
 recovery code paths continue to work uninstrumented.
+
+---
+
+## 15. Per-vertical gatekeeper-knob tuning
+
+The four core gatekeeper thresholds — `min_edge_pp`,
+`min_agreement_rate`, `max_confidence_band`, `kelly_fraction_cap` —
+default to the global aggression-mode profile (`MODE_PROFILES` in
+`app/runtime_settings.py`) and can be overridden globally via the
+`risk.<knob>` rows in `system_settings`. Task #714 layers a third
+tier on top: a **per-vertical override** keyed
+`risk.<knob>.<vertical>` (e.g. `risk.min_edge_pp.crypto`).
+
+The read path in `app.risk.gates._resolve_per_vertical_override`
+honours strict precedence:
+
+1. **Per-vertical** override (`risk.<knob>.<vertical>`)
+2. **Global** override (`risk.<knob>`)
+3. **Aggression-mode default** from `MODE_PROFILES`
+
+The Kelly multiplier (`risk.kelly_multiplier_<vertical>`) keeps its
+existing per-vertical-only key for backward compatibility but is
+surfaced read-only in the same UI so the operator sees one effective
+state.
+
+### Operator UI
+
+Open `/system → Swarm tuning` (admin-only). The Scope selector picks
+either GLOBAL (writes `risk.<knob>`) or one of the registered
+verticals (writes `risk.<knob>.<vertical>`). Each row shows the mode
+default, the global override (if any), the per-vertical override (if
+the per-vertical scope is selected), and the resolved effective value
+with its source.
+
+To change a knob:
+
+1. Move the slider or type a value in the number input.
+2. Optionally add a one-line **reason** — it lands verbatim in the
+   audit table and the operator alert.
+3. Click **Save**. Out-of-range values are rejected at the API layer.
+4. Click **Clear** to remove the override and fall back to the next
+   tier.
+
+Every real change writes a row to `gatekeeper_setting_history` and
+fires the `gatekeeper-override-changed` operator alert. Idempotent
+re-applies (saving the same value that's already effective) are
+no-ops — neither an audit row nor an alert is emitted.
+
+### Audit history
+
+The bottom table on the panel shows the most recent 50 changes for
+the selected scope. The same data is queryable from the API:
+
+```bash
+# Last 50 changes to min_edge_pp.crypto
+curl -H "Authorization: Bearer $ADMIN_TOKEN" \
+  "$API/api/admin/gatekeeper/history?knob=min_edge_pp&vertical=crypto&limit=50"
+
+# Last 50 GLOBAL-scope changes (any knob, vertical=null)
+curl -H "Authorization: Bearer $ADMIN_TOKEN" \
+  "$API/api/admin/gatekeeper/history?vertical=__global__&limit=50"
+```
+
+### Emergency SQL fallback (UI down)
+
+If the dashboard is unreachable but the database is up, the same
+overrides can be applied with raw SQL. Pick the right key shape:
+
+```sql
+-- Per-vertical override: tighten crypto's min edge to 8pp.
+INSERT INTO system_settings (key, value, updated_at)
+VALUES ('risk.min_edge_pp.crypto', '8.0', now())
+ON CONFLICT (key) DO UPDATE SET value = excluded.value, updated_at = now();
+
+-- Global override: raise the agreement floor everywhere to 0.65.
+INSERT INTO system_settings (key, value, updated_at)
+VALUES ('risk.min_agreement_rate', '0.65', now())
+ON CONFLICT (key) DO UPDATE SET value = excluded.value, updated_at = now();
+
+-- Clear an override (falls back to the next tier).
+DELETE FROM system_settings WHERE key = 'risk.min_edge_pp.crypto';
+```
+
+Direct SQL **bypasses the audit table and the operator alert** — log
+the change in #ops-trading by hand and replay through the UI as soon
+as it's reachable so the audit row + alert backfill cleanly.
+
+### What it does NOT do
+
+- Does not change the LLM gatekeeper prompt or any deterministic
+  gate logic — only the threshold values the gates already read.
+- Does not let you tune `kelly_multiplier` from this surface (the
+  existing per-vertical promotion path remains the only writer; the
+  UI surfaces it read-only).
+- Does not provide a per-vertical aggression-mode override — that's
+  a separate, larger task. Mode stays global.
+
+### Rollback
+
+The migration is additive (`gatekeeper_setting_history` only) and
+the read-path change in `gates.py` is a pure fall-through. To
+rollback the schema, run `alembic downgrade
+0035_vertical_halt_schedule_and_history`, which drops the audit
+table; the read path will continue to work because it never reads
+the audit table directly. To revert all per-vertical overrides
+without code changes, run:
+
+```sql
+DELETE FROM system_settings WHERE key LIKE 'risk.%.%';
+```
+
+(Note the two-dot pattern — single-dot keys like `risk.min_edge_pp`
+are global overrides and must be preserved unless you also want to
+clear those.)
