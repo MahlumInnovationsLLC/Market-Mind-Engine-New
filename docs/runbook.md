@@ -994,6 +994,30 @@ loads (it just shows "no rows") and operator actions still work on
 any pre-existing rows — the flag only gates the reconciler's
 periodic `INSERT/UPDATE` into `position_drift_resolutions`.
 
+### State model
+
+`position_drift_resolutions.state` is a closed enum — the queue UI,
+admin endpoints, and self-heal sweep all switch on these exact
+values. Two are **active** (the row blocks future alerts and the
+reconciler keeps re-checking it); four are **terminal** (the row is
+archived for audit and the reconciler ignores it):
+
+| State                       | Active? | How it gets set                                                    |
+|-----------------------------|:-------:|--------------------------------------------------------------------|
+| `open`                      |   yes   | reconciler detects a drift with no live row                        |
+| `snoozed`                   |   yes   | operator snoozes via `/admin/reconciler/drifts/{ticker}/snooze`    |
+| `resolved_accept_exchange`  |   no    | operator accepts exchange truth                                    |
+| `resolved_orphan_skeleton`  |   no    | reconciler auto-skeletons a fully-orphan exchange position         |
+| `resolved_self_healed`      |   no    | reconciler self-heal sweep clears a drift that fixed itself        |
+| `resolved_manual`           |   no    | reserved for future manual-close action (admin endpoint TBD)       |
+
+Indexed via the partial unique index
+`position_drift_resolutions_active_uidx ON (ticker)
+WHERE state IN ('open','snoozed')` so an active row is unique per
+ticker. All terminal states are filtered out of the default
+`open`/`snoozed` queue tabs but remain visible under
+`/system → Reconciler → resolved`.
+
 ### Triage the queue
 
 1. Open `/system → Reconciler`. The default tab is the **open**

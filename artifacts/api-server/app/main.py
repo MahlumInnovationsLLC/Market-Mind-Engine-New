@@ -5486,12 +5486,17 @@ async def admin_accept_drift_exchange_truth(
         actor_email = (await check_approval(actor))[1]
     except Exception:
         pass
-    # Audit-trail fallback: if approval lookup failed for any reason
-    # (DB blip, Clerk metadata stale), still capture *who clicked* by
-    # pulling the email straight from the verified JWT claims. The
-    # admin gate already passed, so the actor is authenticated.
+    # Audit-trail fallback chain: if approval lookup failed for any
+    # reason (DB blip, Clerk metadata stale), still capture *who
+    # clicked* by pulling the email from the verified JWT claims.
+    # If even that's missing (JWT template without email scope),
+    # fall back to a sentinel built from the verified ``user_id``
+    # so the audit row is never NULL on a real-money mutation.
+    # The admin gate has already passed, so the actor is verified.
     if not actor_email:
         actor_email = _email_from_claims(actor.claims)
+    if not actor_email:
+        actor_email = f"unknown_resolver:{actor.user_id}"
     reason = body.reason if body else None
     result = await _recon.accept_exchange_truth(
         ticker=ticker.strip(),
@@ -5519,8 +5524,10 @@ async def admin_snooze_reconciler_drift(
     except Exception:
         pass
     if not actor_email:
-        # Same audit-trail fallback as accept-exchange-truth above.
+        # Same audit-trail fallback chain as accept-exchange-truth above.
         actor_email = _email_from_claims(actor.claims)
+    if not actor_email:
+        actor_email = f"unknown_resolver:{actor.user_id}"
     result = await _recon.snooze_drift(
         ticker=ticker.strip(),
         until=body.until,
