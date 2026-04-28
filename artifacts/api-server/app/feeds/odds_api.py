@@ -43,6 +43,36 @@ DEFAULT_ODDS_REGIONS = os.environ.get("AXIOM_ODDS_REGIONS", "us")
 DEFAULT_ODDS_MARKETS = os.environ.get("AXIOM_ODDS_MARKETS", "h2h,spreads,totals")
 
 
+# In-memory cache of the most recent successful per-sport payload from
+# The Odds API.  Populated by `_poll_the_odds_api` and consumed by
+# downstream derivation feeds (e.g. positive_ev) so they don't burn an
+# extra HTTP call against the same shared API key — which on a small
+# trial-tier plan would push us over the per-minute quota and cause the
+# primary line_snapshots feed to start 429-ing.
+#
+# Shape: { sport_key: (unix_ts, games_list) }.  Readers use
+# `get_recent_games_for_sport(sport, max_age_s)` and skip stale data
+# rather than acting on a stale line.
+_LAST_GAMES_BY_SPORT: dict[str, tuple[float, list[dict[str, Any]]]] = {}
+
+
+def get_recent_games_for_sport(
+    sport: str, max_age_s: float = 120.0
+) -> list[dict[str, Any]] | None:
+    """Return the last fetched games for ``sport`` if it is no older than
+    ``max_age_s`` seconds.  Returns ``None`` when the cache is empty or
+    stale, so the caller can decide to skip vs. fall back."""
+    import time as _time
+
+    entry = _LAST_GAMES_BY_SPORT.get(sport)
+    if not entry:
+        return None
+    ts, games = entry
+    if _time.time() - ts > max_age_s:
+        return None
+    return games
+
+
 async def _poll_the_odds_api() -> int:
     api_key = (
         os.environ.get("THE_ODDS_API_KEY")
@@ -85,6 +115,12 @@ async def _poll_the_odds_api() -> int:
             except Exception:
                 continue
 
+            # Cache for downstream derivers (positive_ev) BEFORE persist —
+            # persistence failures should not deny derivation feeds the
+            # data they need this cycle.
+            import time as _time
+            _LAST_GAMES_BY_SPORT[sport] = (_time.time(), games)
+
             written += await _persist_odds_payload(sport, games)
     return written
 
@@ -125,6 +161,18 @@ async def _persist_odds_payload(sport: str, games: list[dict[str, Any]]) -> int:
     if not change_rows:
         return 0
 
+    # ON CONFLICT DO NOTHING is essential for two reasons:
+    # 1. `idx_line_snapshots_uq` makes (game_id, book, market_type, timestamp)
+    #    unique.  When two pollers race on the same game (e.g. the live
+    #    scheduler tick coinciding with a backfill replay), one wins and
+    #    the other was previously aborting the ENTIRE batch with a unique
+    #    violation, dropping every other row in the same `executemany`.
+    # 2. Soccer feeds occasionally produced rows whose `sport` value was
+    #    too long for the old `varchar(20)` column (migration 0029
+    #    widened it to `varchar(50)`).  Even with the column widened,
+    #    keeping the executemany resilient via ON CONFLICT is the right
+    #    long-term posture — one bad row should never blank out a
+    #    cross-sport sweep.
     written = 0
     try:
         async with db.acquire() as conn, conn.transaction():
@@ -134,6 +182,8 @@ async def _persist_odds_payload(sport: str, games: list[dict[str, Any]]) -> int:
                   (game_id, sport, book, market_type, line_value, odds_value,
                    home_team, away_team, is_opening, timestamp)
                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW())
+                ON CONFLICT (game_id, book, market_type, "timestamp")
+                  DO NOTHING
                 """,
                 snapshot_rows,
             )

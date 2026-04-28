@@ -83,6 +83,7 @@ from .feeds.election_polls import register_election_polls_feeds
 from .feeds.unusual_whales import register_unusual_whales_feeds
 from .feeds.public_betting import register_public_betting_feeds
 from .feeds.outlier_bet import register_outlier_bet_feed
+from .feeds.positive_ev import register_positive_ev_feed
 from .features import drift as feature_drift, registry as feature_registry
 from .elo import scheduler as elo_scheduler
 from .orchestrator import pipeline_event_hub, run_cycle, scheduler as orchestrator_scheduler
@@ -274,6 +275,13 @@ async def lifespan(_: FastAPI):
             register_outlier_bet_feed()
         except Exception as e:
             log.warning("outlier_bet feed registration failed: %s", e)
+        try:
+            # In-process positive-EV substitute for outlier.bet (which has
+            # been CloudFront-blocked since late Apr 2026).  Derives the
+            # same intangibles_reports rows from The Odds API.
+            register_positive_ev_feed()
+        except Exception as e:
+            log.warning("positive_ev feed registration failed: %s", e)
         try:
             from .feeds.nfl_backfill import register_nfl_backfill_feed
             register_nfl_backfill_feed()

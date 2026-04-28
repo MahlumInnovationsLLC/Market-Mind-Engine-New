@@ -152,6 +152,12 @@ async def _fetch_snapshot_inputs(
 
     * ``realized`` sums settled trades whose ``settled_at`` falls on
       ``$1`` when projected into ``$2`` (the configured trading-day TZ).
+      The trades table stores realized P&L per trade in the ``pnl``
+      column (there is no ``realized_pnl`` column on trades — that
+      column lives on ``positions``).  Earlier revisions of this file
+      referenced ``trades.realized_pnl`` and silently degraded the
+      gate every cycle with "column does not exist", leaving the
+      daily-loss kill switch as a no-op in production.
     * ``unrealized`` sums open positions' ``unrealized_pnl``.
     * Start-of-day bankroll is the latest ``bankroll_events.balance_cents``
       strictly before ``$1`` in the same TZ, falling back to the earliest
@@ -166,7 +172,7 @@ async def _fetch_snapshot_inputs(
         row = await db.fetchrow(
             """
             WITH realized AS (
-                SELECT coalesce(sum(realized_pnl), 0)::float AS v
+                SELECT coalesce(sum(pnl), 0)::float AS v
                   FROM trades
                  WHERE settled_at IS NOT NULL
                    AND ((settled_at at time zone $2)::date) = $1
