@@ -572,6 +572,143 @@ def test_lifecycle_operator_alert_failure_does_not_block_live_trade(
     assert live_trade_calls[0].get("market_ticker") == "KXISO-FAIL-TEST"
 
 
+def test_lifecycle_fees_from_ws_fill_reach_rendered_email(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """End-to-end: a `fee` field on the WS fill payload must flow
+    through the lifecycle snapshot, the background worker, and the
+    operator_trade_alert renderer into the actual rendered email
+    body. Direct unit tests on operator_trade_alert prove the
+    renderer plumbing; this test pins the production wiring so a
+    future refactor of the lifecycle dispatch can't silently drop
+    the fee context the task spec required."""
+    from app.kalshi import lifecycle as _lc
+    from app.notifications import alerts as _al
+    from app.notifications import postmark as _pm
+
+    captured_alert_calls: list[dict[str, Any]] = []
+    captured_sends: list[dict[str, Any]] = []
+
+    # Wrap real operator_trade_alert so we can capture both the
+    # kwargs it receives AND let it run end-to-end into postmark.send.
+    real_operator_alert = _al.operator_trade_alert
+
+    async def _capturing_operator_alert(**kwargs: Any) -> dict[str, Any]:
+        captured_alert_calls.append(kwargs)
+        return await real_operator_alert(**kwargs)
+
+    monkeypatch.setattr(_al, "operator_trade_alert", _capturing_operator_alert)
+
+    async def _fake_send(**kwargs: Any) -> list[dict[str, Any]]:
+        captured_sends.append(kwargs)
+        to = kwargs.get("to") or []
+        return [{"to": to[0] if to else None, "ok": True}]
+
+    monkeypatch.setattr(_pm, "send", _fake_send)
+    monkeypatch.setattr(
+        _pm, "alert_recipients", lambda: ["alice@example.com"]
+    )
+    monkeypatch.setattr(_pm, "is_configured", lambda: True)
+
+    # Stub live_trade so the firehose path is silent in this test.
+    monkeypatch.setattr(_al, "live_trade", lambda **_kw: {"stub": True})
+
+    # Stub everything else lifecycle / alerts touches so we run offline.
+    async def _noop(*_a: Any, **_kw: Any) -> None:
+        return None
+
+    async def _always_fresh(**_kw: Any) -> bool:
+        return True
+
+    async def _claim_ok(*_a, **_kw) -> bool:
+        return True
+
+    monkeypatch.setattr(_lc, "_record", _noop)
+    monkeypatch.setattr(_lc, "_emit", _noop)
+    monkeypatch.setattr(_lc, "_record_fill_idempotent", _always_fresh)
+    monkeypatch.setattr(_lc, "_upsert_position_rollup", _noop)
+    monkeypatch.setattr(_al, "dedupe_or_skip", _claim_ok)
+
+    # The operator alert helper consults operator opt-out + context
+    # tables; stub the DB layer so all of those return "no rows".
+    from app import db as _db_mod
+
+    async def _fr_none(*_a, **_kw): return None
+    async def _f_empty(*_a, **_kw): return []
+    async def _fv_none(*_a, **_kw): return None
+    async def _exec_ok(*_a, **_kw): return "OK"
+
+    monkeypatch.setattr(_db_mod, "fetchrow", _fr_none)
+    monkeypatch.setattr(_db_mod, "fetch", _f_empty)
+    monkeypatch.setattr(_db_mod, "fetchval", _fv_none)
+    monkeypatch.setattr(_db_mod, "execute", _exec_ok)
+
+    from app.kalshi import market_titles as _mt
+    async def _t(_t): return "Test Title"
+    monkeypatch.setattr(_mt, "get_title", _t)
+
+    req = _lc.OrderRequest(
+        market_ticker="KX-FEE-WIRE",
+        side="yes", action="buy",
+        count=10, limit_price_cents=42,
+        vertical="sports",
+        client_order_id="coid_fee_wire",
+        context={"user_id": "user_fee_wire"},
+    )
+    rec = _lc.OrderRecord(
+        order_id="ord_fee_wire", request=req,
+        paper=False, state="resting",
+        exchange_order_id="exch_fee_wire",
+    )
+
+    async def go() -> None:
+        async with _lc._resting_lock:
+            _lc._resting[req.client_order_id] = rec
+        msg = {
+            "msg": {
+                "type": "fill",
+                "msg": {
+                    "client_order_id": req.client_order_id,
+                    "count": 10, "yes_price": 42,
+                    "trade_id": "f_fee_wire",
+                    "created_time": "2026-04-23T12:00:00Z",
+                    # Kalshi WS fill carries an exchange fee on this
+                    # variant — must reach the rendered email.
+                    "fee": 23,
+                },
+            }
+        }
+        await _lc.handle_ws_fill(msg)
+        # Background tasks need a tick to settle.
+        for _ in range(40):
+            await asyncio.sleep(0.05)
+            if captured_sends:
+                break
+
+    asyncio.run(go())
+
+    assert len(captured_alert_calls) == 1, (
+        f"operator_trade_alert must be called exactly once; got "
+        f"{len(captured_alert_calls)}"
+    )
+    assert captured_alert_calls[0].get("fees_cents") == 23, (
+        "fees_cents from WS fill payload must propagate through the "
+        "lifecycle snapshot into operator_trade_alert kwargs"
+    )
+    assert len(captured_sends) == 1, (
+        f"expected exactly one rendered email, got {len(captured_sends)}"
+    )
+    sent = captured_sends[0]
+    assert "$0.23" in sent["text_body"], (
+        "fee from WS fill payload (23¢) must render as $0.23 in the "
+        "operator email plain-text body"
+    )
+    assert "$0.23" in sent["html_body"], (
+        "fee from WS fill payload (23¢) must render as $0.23 in the "
+        "operator email HTML body"
+    )
+
+
 def test_snapshot_contracts_from_helper_match_input(shim, captured_sends):
     """`operator_trade_alert(contracts=...)` must propagate verbatim
     into the rendered email — proves the lifecycle wiring (which now

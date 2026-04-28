@@ -1454,6 +1454,10 @@ async def _send_operator_trade_alert_from_snapshot(snap: dict[str, Any]) -> None
     """
     from ..notifications import alerts as _alerts
     try:
+        # Task #712 — fees_cents flows from the WS fill payload (when
+        # present) all the way into the rendered operator email so
+        # on-call triage sees the executed slice's exchange fee.
+        _fees = snap.get("fees_cents")
         await _alerts.operator_trade_alert(
             market_ticker=snap["market_ticker"],
             side=snap["side"],
@@ -1463,6 +1467,7 @@ async def _send_operator_trade_alert_from_snapshot(snap: dict[str, Any]) -> None
             order_id=str(snap.get("order_id") or ""),
             fill_id=str(snap.get("fill_id") or ""),
             vertical=snap.get("vertical"),
+            fees_cents=int(_fees) if _fees is not None else None,
         )
     except Exception as e:  # pragma: no cover
         log.warning("operator_trade_alert worker failed: %s", e)
