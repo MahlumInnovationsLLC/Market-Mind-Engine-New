@@ -59,6 +59,7 @@ from .auth import (
     require_admin,
     require_approved_user,
     require_auth,
+    _email_from_claims,
 )
 from .config import get_settings
 from .middleware import RequestIdMiddleware
@@ -5485,6 +5486,12 @@ async def admin_accept_drift_exchange_truth(
         actor_email = (await check_approval(actor))[1]
     except Exception:
         pass
+    # Audit-trail fallback: if approval lookup failed for any reason
+    # (DB blip, Clerk metadata stale), still capture *who clicked* by
+    # pulling the email straight from the verified JWT claims. The
+    # admin gate already passed, so the actor is authenticated.
+    if not actor_email:
+        actor_email = _email_from_claims(actor.claims)
     reason = body.reason if body else None
     result = await _recon.accept_exchange_truth(
         ticker=ticker.strip(),
@@ -5511,6 +5518,9 @@ async def admin_snooze_reconciler_drift(
         actor_email = (await check_approval(actor))[1]
     except Exception:
         pass
+    if not actor_email:
+        # Same audit-trail fallback as accept-exchange-truth above.
+        actor_email = _email_from_claims(actor.claims)
     result = await _recon.snooze_drift(
         ticker=ticker.strip(),
         until=body.until,
