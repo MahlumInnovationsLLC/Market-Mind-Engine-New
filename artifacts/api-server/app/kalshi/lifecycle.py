@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import uuid
 from dataclasses import dataclass, field, asdict
 from datetime import datetime, timezone
@@ -384,7 +385,9 @@ async def _emit(event: dict[str, Any]) -> None:
 
 
 async def _record_fill_idempotent(
-    *, order_id: str, fill_id: str, count: int, price_cents: int
+    *, order_id: str, fill_id: str, count: int, price_cents: int,
+    source: str = "ws",
+    strict: bool = False,
 ) -> bool:
     """Insert one row into `order_fills`. Returns True iff the row was newly
     inserted (i.e. this fill event is NOT a WebSocket replay).
@@ -393,22 +396,191 @@ async def _record_fill_idempotent(
     the same partial-fill on reconnect, the unique (order_id, fill_id)
     constraint trips and we report False so the caller skips state
     mutation. Returns True on DB error too — failing-open is the safer
-    default than silently dropping a real fill.
+    default for the WS path than silently dropping a real fill.
+
+    Pass ``strict=True`` from the operator-driven dead-letter resolve
+    path: callers there NEED to know if the write actually persisted
+    (otherwise the resolution UPDATE would mark the row resolved with
+    no fill recorded). In strict mode the underlying DB exception
+    propagates instead of being swallowed.
+
+    ``source`` distinguishes WS-derived fills (``'ws'``, default) from
+    operator-claimed manual fills written by the dead-letter resolve
+    path (``'operator_manual'``). Uses positional INSERT against the
+    column list so this stays in sync regardless of any future column
+    additions.
     """
     try:
         rid = await db.fetchval(
             """
-            INSERT INTO order_fills (order_id, fill_id, count, price_cents)
-            VALUES ($1, $2, $3, $4)
+            INSERT INTO order_fills (order_id, fill_id, count, price_cents, source)
+            VALUES ($1, $2, $3, $4, $5)
             ON CONFLICT (order_id, fill_id) DO NOTHING
             RETURNING order_id
             """,
-            order_id, fill_id, int(count), int(price_cents),
+            order_id, fill_id, int(count), int(price_cents), str(source or "ws"),
         )
         return rid is not None
     except Exception as e:
         log.warning("order_fills insert failed (%s/%s): %s", order_id, fill_id, e)
+        if strict:
+            raise
         return True
+
+
+def _recovery_attempt_threshold() -> int:
+    """Per-order recovery-attempt count that triggers
+    ``order_submit_stuck``. Default 5; tunable via
+    ``AXIOM_ORDER_RECOVERY_ATTEMPT_THRESHOLD``.
+    """
+    raw = os.environ.get("AXIOM_ORDER_RECOVERY_ATTEMPT_THRESHOLD")
+    try:
+        v = int(raw) if raw is not None else 5
+        return max(1, v)
+    except (TypeError, ValueError):
+        return 5
+
+
+async def _record_recovery_attempt(
+    req: "OrderRequest",
+    *,
+    outcome: str,
+    error: str | None,
+) -> None:
+    """Sidecar row tracking submit-recovery attempts for one
+    ``client_order_id``. Called by ``_attempt_submit_recovery`` after
+    every branch.
+
+    On a failure outcome (``lookup_failed`` / ``not_found`` /
+    ``not_found_malformed``) increments ``recovery_attempts`` and
+    fires ``order_submit_stuck`` once when the count first crosses
+    :func:`_recovery_attempt_threshold`. Subsequent attempts re-cross
+    the threshold but are absorbed by the dedupe gate keyed on the
+    ``client_order_id``.
+
+    On a success outcome (``recovered_*``) marks any open row
+    ``resolved_at = now()`` so a coid that flapped between failure
+    and recovery never lands in the dead-letter queue.
+
+    Best-effort: fails open on every DB error so the recovery path
+    keeps running even if the sidecar table is unavailable.
+    """
+    coid = req.client_order_id
+    failure_outcomes = {"lookup_failed", "not_found", "not_found_malformed"}
+    success_outcomes = {
+        "recovered_canceled", "recovered_filled", "recovered_resting",
+    }
+    try:
+        if outcome in success_outcomes:
+            await db.execute(
+                """
+                UPDATE order_recovery_attempts
+                   SET resolved_at           = now(),
+                       resolution_action     = $2,
+                       last_recovery_at      = now(),
+                       last_recovery_outcome = $2,
+                       updated_at            = now()
+                 WHERE client_order_id = $1
+                   AND resolved_at     IS NULL
+                """,
+                coid, outcome,
+            )
+            return
+        if outcome not in failure_outcomes:
+            return
+        row = await db.fetchrow(
+            """
+            INSERT INTO order_recovery_attempts (
+                client_order_id, market_ticker, side, action,
+                contracts, limit_price_cents, vertical,
+                recovery_attempts, last_recovery_at, last_recovery_outcome,
+                last_error
+            ) VALUES (
+                $1, $2, $3, $4, $5, $6, $7, 1, now(), $8, $9
+            )
+            ON CONFLICT (client_order_id) DO UPDATE
+               SET recovery_attempts     = order_recovery_attempts.recovery_attempts + 1,
+                   last_recovery_at      = now(),
+                   last_recovery_outcome = EXCLUDED.last_recovery_outcome,
+                   last_error            = EXCLUDED.last_error,
+                   updated_at            = now()
+         RETURNING recovery_attempts, market_ticker, side, action,
+                   contracts, limit_price_cents, vertical,
+                   last_recovery_outcome, last_error
+            """,
+            coid, req.market_ticker, req.side, req.action, int(req.count),
+            (
+                int(req.limit_price_cents)
+                if req.limit_price_cents is not None
+                else None
+            ),
+            req.vertical, outcome, (error or "")[:500],
+        )
+    except Exception as e:  # noqa: BLE001 — fail open
+        log.warning(
+            "order_recovery_attempts upsert failed for %s: %s", coid, e,
+        )
+        return
+    if not row:
+        return
+
+    threshold = _recovery_attempt_threshold()
+    attempts = int(row["recovery_attempts"])
+    if attempts < threshold:
+        return
+    snapshot = {
+        "client_order_id": coid,
+        "market_ticker": row["market_ticker"],
+        "side": row["side"],
+        "action": row["action"],
+        "contracts": int(row["contracts"]),
+        "limit_price_cents": (
+            int(row["limit_price_cents"])
+            if row["limit_price_cents"] is not None
+            else None
+        ),
+        "vertical": row["vertical"],
+        "recovery_attempts": attempts,
+        "threshold": threshold,
+        "last_recovery_outcome": row["last_recovery_outcome"],
+        "last_error": row["last_error"],
+    }
+    try:
+        loop = asyncio.get_running_loop()
+        loop.create_task(_send_order_submit_stuck_alert(snapshot))
+    except RuntimeError:  # pragma: no cover
+        await _send_order_submit_stuck_alert(snapshot)
+
+
+async def _send_order_submit_stuck_alert(snap: dict[str, Any]) -> None:
+    """Off-hot-path dispatcher for ``order_submit_stuck``. Deduped on
+    ``client_order_id`` with a 7-day TTL so a sustained outage pages
+    once per coid, not once per recovery tick."""
+    from ..notifications import alerts as _alerts
+    try:
+        coid = str(snap.get("client_order_id") or "")
+        if not coid:
+            return
+        ok = await _alerts.dedupe_or_skip(
+            "order_submit_stuck", coid, ttl_seconds=7 * 24 * 3600,
+        )
+        if not ok:
+            return
+        _alerts.order_submit_stuck(
+            client_order_id=coid,
+            market_ticker=str(snap.get("market_ticker") or ""),
+            side=str(snap.get("side") or ""),
+            action=str(snap.get("action") or ""),
+            contracts=int(snap.get("contracts") or 0),
+            threshold=int(snap.get("threshold") or 0),
+            limit_price_cents=snap.get("limit_price_cents"),
+            vertical=snap.get("vertical"),
+            recovery_attempts=int(snap.get("recovery_attempts") or 0),
+            last_recovery_outcome=snap.get("last_recovery_outcome"),
+            last_error=snap.get("last_error"),
+        )
+    except Exception as e:  # pragma: no cover — alert must not break recovery
+        log.warning("order_submit_stuck dispatch failed: %s", e)
 
 
 async def _upsert_position_rollup(
@@ -421,6 +593,7 @@ async def _upsert_position_rollup(
     avg_price_cents: int,
     over_filled: bool,
     closed: bool,
+    strict: bool = False,
 ) -> None:
     """UPSERT the rolled-up position row keyed by `order_id`.
 
@@ -460,6 +633,8 @@ async def _upsert_position_rollup(
         )
     except Exception as e:
         log.warning("position rollup upsert failed (%s): %s", order_id, e)
+        if strict:
+            raise
 
 
 # --- main entry ----------------------------------------------------------
@@ -711,6 +886,10 @@ async def _attempt_submit_recovery(
             "submit recovery lookup failed for %s: %s",
             req.client_order_id, lookup_exc,
         )
+        await _record_recovery_attempt(
+            req, outcome="lookup_failed",
+            error=f"{type(lookup_exc).__name__}: {lookup_exc}",
+        )
         return None
 
     if not result.get("found"):
@@ -721,6 +900,9 @@ async def _attempt_submit_recovery(
             "submit recovery: venue has no order for client_order_id=%s "
             "(original error: %s)",
             req.client_order_id, err_str,
+        )
+        await _record_recovery_attempt(
+            req, outcome="not_found", error=err_str,
         )
         return None
 
@@ -752,6 +934,13 @@ async def _attempt_submit_recovery(
             "submit recovery: malformed venue order for %s: %r",
             req.client_order_id, order,
         )
+        await _record_recovery_attempt(
+            req, outcome="not_found_malformed",
+            error=(
+                f"malformed venue order: missing exchange id and unknown "
+                f"status {venue_status!r}"
+            ),
+        )
         return None
     record.exchange_order_id = exchange_order_id
 
@@ -774,6 +963,9 @@ async def _attempt_submit_recovery(
         log.info(
             "submit recovery: client_order_id=%s -> canceled at venue",
             req.client_order_id,
+        )
+        await _record_recovery_attempt(
+            req, outcome="recovered_canceled", error=None,
         )
         return record
 
@@ -820,6 +1012,9 @@ async def _attempt_submit_recovery(
             "submit recovery: client_order_id=%s -> filled at venue (count=%d)",
             req.client_order_id, filled_count,
         )
+        await _record_recovery_attempt(
+            req, outcome="recovered_filled", error=None,
+        )
         return record
 
     # Default: treat as resting (includes "resting", "open", "new", or
@@ -845,6 +1040,9 @@ async def _attempt_submit_recovery(
     log.info(
         "submit recovery: client_order_id=%s -> resting at venue (exo=%s)",
         req.client_order_id, exchange_order_id,
+    )
+    await _record_recovery_attempt(
+        req, outcome="recovered_resting", error=None,
     )
     return record
 

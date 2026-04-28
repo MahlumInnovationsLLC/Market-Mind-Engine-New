@@ -19,6 +19,7 @@ the change, and the rollback path if you need to undo it.
 10. [Cutover go/no-go checklist (paper → tiny live → full live)](#10-cutover-gono-go-checklist-paper--tiny-live--full-live)
 11. [First 24 hours live](#11-first-24-hours-live)
 12. [Tune WebSocket subscriber queue sizes](#12-tune-websocket-subscriber-queue-sizes)
+13. [Order-submit dead-letter triage](#13-order-submit-dead-letter-triage)
 
 ---
 
@@ -1209,3 +1210,85 @@ drift is gone. Audit views can list operator-corrected rows with
 `SELECT * FROM positions WHERE order_id LIKE 'recon-%'`.
 
 ---
+
+## 13. Order-submit dead-letter triage
+
+When a `client_order_id` (coid) fails the WS-place → REST-confirm
+recovery loop more than `AXIOM_ORDER_RECOVERY_ATTEMPT_THRESHOLD`
+times (default **5**), the operator gets an
+**`order_submit_stuck`** alert.  If the same coid is still failing
+`AXIOM_ORDER_DEAD_LETTER_AFTER_SECS` after the first failure
+(default **600s**), the dead-letter sweeper promotes it into
+`order_recovery_attempts.dead_lettered_at` and the operator gets a
+second alert: **`order_dead_lettered`**.
+
+Per task #710. Both alerts route to the same `email_halt` operator
+preference and dedupe on the coid (7-day TTL) so a single sustained
+outage pages once, not once per sweep.
+
+### Surface (preferred)
+
+`/system → Stuck orders` lists every open dead-letter row with the
+original intent (market, side, action, contracts, limit price), the
+recovery counters, the last error, and three resolve buttons.
+
+| Action | Use when | Side-effects |
+|---|---|---|
+| `force_retry` | Upstream blip cleared; you want the orchestrator to try again | Clears the recovery row only — next orchestrator cycle re-submits a fresh coid for the same intent. **No** fill written. |
+| `mark_cancelled` | Venue confirmed the order was rejected/cancelled and no fill exists | Clears the row only. **No** fill written, **no** position rollup change. |
+| `claim_filled` | Venue confirmed by phone/Slack that the order DID fill at price `P` | Inserts an `order_fills` row with `source='operator_manual'` and `fill_id=manual:<coid>:<ms>`, updates the position rollup at `P`, then clears the row. |
+
+`claim_filled` writes the fill **before** the resolution UPDATE — a
+DB blip mid-flight leaves the row dead-lettered (caller can retry),
+never resolved-with-no-fill.
+
+### cURL (when the dashboard is down)
+
+```bash
+# List the open queue.
+curl -s -H "Authorization: Bearer $ADMIN_BEARER" \
+  "$API/api/admin/orders/dead-lettered?state=open" | jq '.items[]'
+
+# Resolve one row (force retry).
+curl -s -X POST -H "Authorization: Bearer $ADMIN_BEARER" \
+  -H "content-type: application/json" \
+  -d '{"action":"force_retry","reason":"upstream cleared"}' \
+  "$API/api/admin/orders/<COID>/resolve"
+
+# Resolve as a manual fill at 47¢.
+curl -s -X POST -H "Authorization: Bearer $ADMIN_BEARER" \
+  -H "content-type: application/json" \
+  -d '{"action":"claim_filled","fill_price_cents":47,"reason":"venue confirmed by phone"}' \
+  "$API/api/admin/orders/<COID>/resolve"
+```
+
+`?state=` accepts `open` (default), `resolved`, `failing`
+(pre-promotion view), or `all`.
+
+### Operator confirmation alert
+
+Every successful resolution fires an
+**`order_dead_letter_resolved`** email to the operator rotation,
+deduped on `f"{coid}:{action}"` (7-day TTL) so a rapid double-click
+doesn't double-page.  The audit row in `admin_audit_log` carries the
+full before/after JSON keyed on `order_dead_letter_resolve:<action>`
+— that's the source of truth for "who claimed which fill" if there
+is ever a downstream reconciliation question.
+
+### Tuning knobs
+
+| Env var | Default | Effect |
+|---|---|---|
+| `AXIOM_ORDER_RECOVERY_ATTEMPT_THRESHOLD` | `5` | Recovery attempts on one coid before `order_submit_stuck` fires. |
+| `AXIOM_ORDER_DEAD_LETTER_AFTER_SECS` | `600` | Age of `first_failed_at` before the sweeper promotes a row. |
+| `AXIOM_ORDER_DEAD_LETTER_SWEEP_SECS` | `60` | How often the sweeper scans. |
+
+Skipped entirely in paper mode — paper submits never go through the
+recovery path.
+
+### Rollback
+
+The migration is purely additive; rollback is the standard alembic
+downgrade (`alembic downgrade 0031_position_drift_resolutions`),
+which drops `order_recovery_attempts` and the `order_fills.source`
+column.  Old recovery code paths continue to work uninstrumented.

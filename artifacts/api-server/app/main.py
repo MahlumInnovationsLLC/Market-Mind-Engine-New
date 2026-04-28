@@ -530,6 +530,16 @@ async def lifespan(_: FastAPI):
     except Exception as e:
         log.warning("kalshi reconciler start failed: %s", e)
 
+    # Dead-letter sweeper (task #710): promotes long-failing rows in
+    # ``order_recovery_attempts`` into the operator dead-letter queue
+    # and pages once per coid. Internally skips in paper mode and
+    # absorbs DB blips.
+    try:
+        from .kalshi import dead_letter_sweeper as _dl_sweeper
+        _dl_sweeper.start()
+    except Exception as e:
+        log.warning("dead-letter sweeper start failed: %s", e)
+
     # AutoResearch — nightly UW-signal mining job. Discovered candidates
     # land in `autoresearch_features` with status='shadow' for an admin
     # to promote (see /api/admin/autoresearch/*). Disabled by setting
@@ -683,6 +693,11 @@ async def lifespan(_: FastAPI):
             await rc_billing.stop()
         except Exception as e:
             log.warning("rc webhook silence loop stop error: %s", e)
+        try:
+            from .kalshi import dead_letter_sweeper as _dl_sweeper
+            await _dl_sweeper.stop()
+        except Exception as e:
+            log.warning("dead-letter sweeper stop error: %s", e)
         try:
             from .swarm import fallback_monitor as _fallback_monitor
             await _fallback_monitor.stop()
@@ -5298,6 +5313,36 @@ class AdminSnoozeDriftRequest(BaseModel):
     reason: str | None = Field(default=None, max_length=500)
 
 
+# Operator dead-letter resolve actions (task #710). One of:
+#   * ``mark_cancelled``  — declare the order canceled at the venue
+#                            (no fill, no exchange truth recovery).
+#   * ``force_retry``     — clear the recovery row so the next
+#                            orchestrator cycle re-submits a fresh
+#                            ``client_order_id`` for the same intent.
+#   * ``claim_filled``    — assert the operator has confirmed a fill
+#                            at ``fill_price_cents``; back-fills
+#                            ``order_fills`` (source ``operator_manual``)
+#                            and the ``positions`` rollup.
+class AdminResolveDeadLetterRequest(BaseModel):
+    """Operator action body for the dead-letter resolve endpoint."""
+    action: str = Field(
+        description=(
+            "One of ``mark_cancelled``, ``force_retry``, "
+            "``claim_filled``."
+        ),
+    )
+    reason: str | None = Field(default=None, max_length=500)
+    fill_price_cents: int | None = Field(
+        default=None,
+        ge=0,
+        le=100,
+        description=(
+            "Required when action='claim_filled'. Per-contract fill "
+            "price in cents (Kalshi yes/no markets are 0..100)."
+        ),
+    )
+
+
 class AdminHaltVerticalRequest(BaseModel):
     reason: str | None = Field(
         default=None,
@@ -5535,6 +5580,430 @@ async def admin_snooze_reconciler_drift(
         reason=body.reason,
     )
     return result
+
+
+# ---------------------------------------------------------------------------
+# Order-submit recovery dead-letter console (task #710). Reads the
+# ``order_recovery_attempts`` queue populated by
+# ``app.kalshi.lifecycle._record_recovery_attempt`` and promoted into
+# the queue by ``app.kalshi.dead_letter_sweeper``. Operators resolve
+# rows with one of three actions:
+#
+#   * ``mark_cancelled``  declare the order canceled at the venue
+#   * ``force_retry``     clear the row so the next orchestrator
+#                          cycle re-submits a fresh ``client_order_id``
+#   * ``claim_filled``    back-fill ``order_fills`` (source
+#                          ``operator_manual``) + the ``positions``
+#                          rollup at ``fill_price_cents``
+#
+# Both endpoints are admin-gated and audit-logged via
+# ``admin_audit_log`` so the trade-by-trade audit trail covers manual
+# recoveries.
+# ---------------------------------------------------------------------------
+
+
+@app.get("/api/admin/orders/dead-lettered")
+async def admin_list_dead_lettered_orders(
+    state: str = "open",
+    limit: int = 100,
+    _: AuthedUser = Depends(require_admin),
+) -> dict[str, object]:
+    """List dead-lettered order-recovery rows for the operator console.
+
+    ``state`` ∈
+      * ``open``     dead-lettered, not yet resolved (default queue)
+      * ``resolved`` resolved by an operator
+      * ``failing``  not yet dead-lettered but recovery_attempts>0
+                     (pre-promotion view; useful for spotting trends)
+      * ``all``      every row regardless of state
+
+    Each item carries the original order intent (market, side, action,
+    contracts, limit_price), the per-attempt counters, and the
+    eventual resolution metadata (when present).
+    """
+    state = (state or "open").lower()
+    if state not in {"open", "resolved", "failing", "all"}:
+        raise HTTPException(status_code=400, detail="invalid state")
+    limit = max(1, min(500, int(limit or 100)))
+
+    if state == "open":
+        where = "WHERE dead_lettered_at IS NOT NULL AND resolved_at IS NULL"
+        order_by = "ORDER BY dead_lettered_at DESC"
+    elif state == "resolved":
+        where = "WHERE resolved_at IS NOT NULL"
+        order_by = "ORDER BY resolved_at DESC"
+    elif state == "failing":
+        where = "WHERE dead_lettered_at IS NULL AND resolved_at IS NULL"
+        order_by = "ORDER BY first_failed_at ASC"
+    else:  # all
+        where = ""
+        order_by = "ORDER BY updated_at DESC"
+
+    try:
+        rows = await db.fetch(
+            f"""
+            SELECT client_order_id, market_ticker, side, action, contracts,
+                   limit_price_cents, vertical,
+                   recovery_attempts, last_recovery_at, last_recovery_outcome,
+                   last_error,
+                   first_failed_at, dead_lettered_at,
+                   resolved_at, resolution_action, resolver_email,
+                   resolution_reason, fill_price_cents,
+                   created_at, updated_at,
+                   EXTRACT(EPOCH FROM (now() - first_failed_at))::bigint
+                       AS age_seconds
+              FROM order_recovery_attempts
+            {where}
+            {order_by}
+             LIMIT $1
+            """,
+            limit,
+        )
+    except Exception as e:
+        log.warning("dead-letter list query failed: %s", e)
+        return {"items": [], "state": state, "error": str(e)[:200]}
+
+    items: list[dict[str, object]] = []
+    for r in rows or []:
+        d: dict[str, object] = dict(r)
+        # asyncpg returns datetimes; serialize to ISO so the JSON
+        # response stays stable for the front-end.
+        for k in (
+            "last_recovery_at", "first_failed_at", "dead_lettered_at",
+            "resolved_at", "created_at", "updated_at",
+        ):
+            v = d.get(k)
+            if v is not None and hasattr(v, "isoformat"):
+                d[k] = v.isoformat()
+        items.append(d)
+    return {"items": items, "state": state}
+
+
+@app.post("/api/admin/orders/{client_order_id}/resolve")
+async def admin_resolve_dead_lettered_order(
+    client_order_id: str,
+    body: AdminResolveDeadLetterRequest,
+    actor: AuthedUser = Depends(require_admin),
+) -> dict[str, object]:
+    """Operator resolution for a dead-lettered order. See
+    :class:`AdminResolveDeadLetterRequest` for the action menu. The
+    selected row must already be dead-lettered (``dead_lettered_at IS
+    NOT NULL``) and not yet resolved — otherwise returns 404 (no
+    such open dead-letter)."""
+    from .kalshi import lifecycle as _life
+    from .notifications import alerts as _alerts
+    import json as _json
+    import time as _time
+
+    coid = (client_order_id or "").strip()
+    if not coid:
+        raise HTTPException(status_code=400, detail="client_order_id required")
+
+    action = (body.action or "").strip().lower()
+    if action not in {"mark_cancelled", "force_retry", "claim_filled"}:
+        raise HTTPException(status_code=400, detail="invalid action")
+    if action == "claim_filled" and body.fill_price_cents is None:
+        raise HTTPException(
+            status_code=400,
+            detail="fill_price_cents required for claim_filled",
+        )
+
+    # Audit-trail fallback chain — same pattern the reconciler uses.
+    actor_email: str | None = None
+    try:
+        actor_email = (await check_approval(actor))[1]
+    except Exception:
+        pass
+    if not actor_email:
+        actor_email = _email_from_claims(actor.claims)
+    if not actor_email:
+        actor_email = f"unknown_resolver:{actor.user_id}"
+
+    # Snapshot the row up-front so we have side/contracts/etc. for
+    # the optional `claim_filled` rollup AND the audit row, regardless
+    # of whether the resolution UPDATE returns it.
+    row = await db.fetchrow(
+        """
+        SELECT client_order_id, market_ticker, side, action, contracts,
+               limit_price_cents, vertical, recovery_attempts,
+               last_recovery_outcome, last_error, dead_lettered_at,
+               resolved_at
+          FROM order_recovery_attempts
+         WHERE client_order_id = $1
+        """,
+        coid,
+    )
+    if row is None:
+        raise HTTPException(status_code=404, detail="no recovery row for coid")
+    if row.get("resolved_at") is not None:
+        raise HTTPException(
+            status_code=409,
+            detail="already resolved",
+        )
+    if row.get("dead_lettered_at") is None:
+        # Caller wants to resolve a row that hasn't been promoted yet.
+        # Allow only ``force_retry`` here (the operator wants to
+        # short-circuit the wait); the other two actions imply the
+        # sweeper has already given up.
+        if action != "force_retry":
+            raise HTTPException(
+                status_code=409,
+                detail="row not dead-lettered (only force_retry allowed)",
+            )
+
+    market_ticker = str(row.get("market_ticker") or "")
+    side = str(row.get("side") or "")
+    intent_action = str(row.get("action") or "")
+    contracts = int(row.get("contracts") or 0)
+    vertical = (
+        str(row["vertical"]) if row.get("vertical") is not None else None
+    )
+    _dl_at = row.get("dead_lettered_at")
+    before = {
+        "recovery_attempts": int(row.get("recovery_attempts") or 0),
+        "last_recovery_outcome": row.get("last_recovery_outcome"),
+        "last_error": row.get("last_error"),
+        "dead_lettered_at": (
+            _dl_at.isoformat() if hasattr(_dl_at, "isoformat") else _dl_at
+        ),
+    }
+
+    # ---- claim_filled fill INSERT: write the manual fill BEFORE the
+    # resolution UPDATE so a DB blip on the UPDATE leaves the row
+    # dead-lettered (caller can retry) rather than resolved with no
+    # fill recorded. The position rollup is INTENTIONALLY deferred
+    # until AFTER the rowcount-win check (see comment block below)
+    # to prevent a losing concurrent claim_filled or force_retry
+    # from poisoning the position state.
+    #
+    # ``fill_id`` is DETERMINISTIC per coid (no millisecond suffix)
+    # so two concurrent ``claim_filled`` requests for the same coid
+    # cannot both insert distinct manual-fill rows: the second hits
+    # ON CONFLICT (order_id, fill_id) DO NOTHING in the helper. We
+    # detect that case via the helper's bool return and bail with
+    # 409 BEFORE issuing the resolution UPDATE — without that early
+    # return the loser would still UPDATE-race the row and could
+    # corrupt the resolver_email/reason/price on the winning row.
+    #
+    # Helpers are called with ``strict=True`` so a real DB failure
+    # raises (→ 500) instead of the WS-path's fail-open behavior.
+    if action == "claim_filled":
+        fill_id = f"manual:{coid}"
+        try:
+            inserted = await _life._record_fill_idempotent(
+                order_id=coid,
+                fill_id=fill_id,
+                count=contracts,
+                price_cents=int(body.fill_price_cents or 0),
+                source="operator_manual",
+                strict=True,
+            )
+        except Exception as e:
+            log.warning(
+                "claim_filled order_fills insert failed for %s: %s", coid, e,
+            )
+            raise HTTPException(
+                status_code=500,
+                detail=f"manual fill insert failed: {e!s}",
+            ) from e
+        if not inserted:
+            # ON CONFLICT DO NOTHING — a concurrent claim_filled
+            # already wrote the fill row under the deterministic key.
+            # That request will (or did) win the resolution UPDATE;
+            # ours must NOT race it.
+            raise HTTPException(
+                status_code=409,
+                detail="manual fill already recorded for this coid",
+            )
+
+    # ---- resolution UPDATE. Idempotent in the sense that a second
+    # call sees ``resolved_at IS NOT NULL`` and bails above.
+    #
+    # The rowcount check below catches the concurrency window where
+    # two operators (or a double-click) raced through the precheck:
+    # asyncpg returns ``"UPDATE N"``; we treat ONLY a confirmed
+    # "UPDATE 1" as success. ``UPDATE 0`` → 409 (concurrent winner).
+    # Any other rowcount, OR a non-conforming command tag, is a
+    # data-integrity violation (coid is the PK so >1 should be
+    # impossible) → 500. Critically, the position rollup runs only
+    # AFTER we have confirmed exclusive ownership of the resolution.
+    try:
+        update_result = await db.execute(
+            """
+            UPDATE order_recovery_attempts
+               SET resolved_at       = now(),
+                   resolution_action = $2,
+                   resolver_email    = $3,
+                   resolution_reason = $4,
+                   fill_price_cents  = $5,
+                   updated_at        = now()
+             WHERE client_order_id   = $1
+               AND resolved_at       IS NULL
+            """,
+            coid, action, actor_email, body.reason,
+            (
+                int(body.fill_price_cents)
+                if body.fill_price_cents is not None
+                else None
+            ),
+        )
+    except Exception as e:
+        log.warning("dead-letter resolve UPDATE failed for %s: %s", coid, e)
+        raise HTTPException(
+            status_code=500,
+            detail=f"resolve update failed: {e!s}",
+        ) from e
+
+    affected: int | None = None
+    if isinstance(update_result, str) and update_result.startswith("UPDATE "):
+        try:
+            affected = int(update_result.rsplit(" ", 1)[-1])
+        except ValueError:
+            affected = None
+    if affected == 0:
+        # Concurrent resolver won the race — DO NOT emit success.
+        raise HTTPException(
+            status_code=409,
+            detail="resolution lost concurrency race (already resolved)",
+        )
+    if affected != 1:
+        # Non-conforming command tag OR rowcount > 1 (PK violation).
+        # Fail closed — never trust silent success in this path.
+        log.error(
+            "dead-letter resolve UPDATE returned unexpected tag %r "
+            "for coid=%s — refusing to emit success",
+            update_result, coid,
+        )
+        raise HTTPException(
+            status_code=500,
+            detail="resolve update returned unexpected rowcount",
+        )
+
+    # ---- post-win position rollup. Runs ONLY when the UPDATE
+    # rowcount check has confirmed we own the resolution; this
+    # prevents a losing concurrent claim_filled (or a winning
+    # force_retry / mark_cancelled) from overwriting the position
+    # rollup with stale data.
+    if action == "claim_filled":
+        try:
+            await _life._upsert_position_rollup(
+                order_id=coid,
+                market_id=market_ticker,
+                side=side,  # type: ignore[arg-type]
+                vertical=vertical or "",
+                quantity=contracts,
+                avg_price_cents=int(body.fill_price_cents or 0),
+                over_filled=False,
+                closed=False,
+                strict=True,
+            )
+        except Exception as e:
+            # The fill row + resolution row are already on disk; the
+            # rollup is a denormalized projection that the
+            # reconciler/PnL pipeline can rebuild on its next pass.
+            # Log loudly but don't 500 the request — the operator's
+            # resolution intent IS recorded in the audit trail.
+            log.warning(
+                "claim_filled position rollup failed for %s "
+                "(fill+resolution already persisted; reconciler will heal): %s",
+                coid, e,
+            )
+
+    after = {
+        "resolution_action": action,
+        "resolver_email": actor_email,
+        "resolution_reason": body.reason,
+        "fill_price_cents": body.fill_price_cents,
+    }
+    # Audit row — best-effort; never blocks the resolution response.
+    try:
+        await db.execute(
+            """
+            INSERT INTO admin_audit_log (
+                actor_user_id, actor_email, target_user_id, target_email,
+                action, before_value, after_value
+            ) VALUES ($1, $2, NULL, NULL, $3, $4::jsonb, $5::jsonb)
+            """,
+            actor.user_id, actor_email,
+            f"order_dead_letter_resolve:{action}",
+            _json.dumps({"client_order_id": coid, **before}),
+            _json.dumps(after),
+        )
+    except Exception as e:
+        log.warning("admin_audit_log insert failed for %s: %s", coid, e)
+
+    # Operator confirmation alert (off the hot path).
+    try:
+        loop = asyncio.get_running_loop()
+        loop.create_task(
+            _send_dead_letter_resolved_alert(
+                client_order_id=coid,
+                market_ticker=market_ticker,
+                side=side,
+                intent_action=intent_action,
+                contracts=contracts,
+                vertical=vertical,
+                resolution_action=action,
+                resolver_email=actor_email,
+                reason=body.reason,
+                fill_price_cents=body.fill_price_cents,
+            )
+        )
+    except RuntimeError:
+        # Best-effort: no running loop is exotic for an HTTP handler.
+        pass
+
+    return {
+        "ok": True,
+        "client_order_id": coid,
+        "action": action,
+        "resolver_email": actor_email,
+    }
+
+
+async def _send_dead_letter_resolved_alert(
+    *,
+    client_order_id: str,
+    market_ticker: str,
+    side: str,
+    intent_action: str,
+    contracts: int,
+    vertical: str | None,
+    resolution_action: str,
+    resolver_email: str | None,
+    reason: str | None,
+    fill_price_cents: int | None,
+) -> None:
+    """Off-hot-path dispatcher for ``order_dead_letter_resolved``.
+    Deduped on ``f"{coid}:{resolution_action}"`` with a 7-day TTL so a
+    rapid double-click doesn't double-page the operator rotation.
+    """
+    from .notifications import alerts as _alerts
+    try:
+        ok = await _alerts.dedupe_or_skip(
+            "order_dead_letter_resolved",
+            f"{client_order_id}:{resolution_action}",
+            ttl_seconds=7 * 24 * 3600,
+        )
+        if not ok:
+            return
+        _alerts.order_dead_letter_resolved(
+            client_order_id=client_order_id,
+            market_ticker=market_ticker,
+            side=side,
+            action=intent_action,
+            contracts=contracts,
+            resolution_action=resolution_action,
+            resolver_email=resolver_email,
+            reason=reason,
+            fill_price_cents=fill_price_cents,
+            vertical=vertical,
+        )
+    except Exception as e:  # pragma: no cover
+        log.warning(
+            "order_dead_letter_resolved dispatch failed for %s: %s",
+            client_order_id, e,
+        )
 
 
 @app.get("/api/dashboard/recent-cycles")

@@ -55,6 +55,9 @@ _TAG_TO_USER_PREF: dict[str, str] = {
     "weekly-roundup":        "email_weekly_roundup",
     "soccer-settlement-drift": "email_drift",
     "position-drift-resolved": "email_drift",
+    "order-submit-stuck":      "email_halt",
+    "order-dead-lettered":     "email_halt",
+    "order-dead-letter-resolved": "email_halt",
 }
 
 
@@ -232,6 +235,21 @@ USER_VISIBLE_ALERTS: dict[str, dict[str, Any]] = {
         "label": "Subscription change",
         "scope": "user",
         "channels": [("email", None)],
+    },
+    "order_submit_stuck": {
+        "label": "Order submit stuck",
+        "scope": "broadcast",
+        "channels": [("email", "email_halt")],
+    },
+    "order_dead_lettered": {
+        "label": "Order dead-lettered",
+        "scope": "broadcast",
+        "channels": [("email", "email_halt")],
+    },
+    "order_dead_letter_resolved": {
+        "label": "Order dead-letter resolved",
+        "scope": "broadcast",
+        "channels": [("email", "email_halt")],
     },
 }
 
@@ -2853,3 +2871,207 @@ def _render_weekly_roundup_html(
   </table>
 </body>
 </html>"""
+
+
+# ---------------------------------------------------------------------------
+# Order-submit recovery hardening (task #710)
+#
+# These three operator alerts page the rotation when an individual
+# `client_order_id` repeatedly fails the submit-recovery path. The
+# aggregate `_submit_recovery` counters surface "the system is
+# degraded" but never identify *which* order is stuck — these alerts
+# do.
+#
+# Caller is responsible for dedupe (`dedupe_or_skip` keyed on the
+# coid) so a sustained outage pages once, not once per recovery tick.
+# ---------------------------------------------------------------------------
+
+
+def _order_recovery_lines(
+    *,
+    client_order_id: str,
+    market_ticker: str,
+    side: str,
+    action: str,
+    contracts: int,
+    limit_price_cents: int | None,
+    vertical: str | None,
+    recovery_attempts: int,
+    last_recovery_outcome: str | None,
+    last_error: str | None,
+    extra: list[tuple[str, Any]] | None = None,
+) -> list[tuple[str, Any]]:
+    rows: list[tuple[str, Any]] = [
+        ("client_order_id", client_order_id),
+        ("market_ticker", market_ticker or "(unknown)"),
+        ("side", side or "(unknown)"),
+        ("action", action or "(unknown)"),
+        ("contracts", int(contracts or 0)),
+        (
+            "limit_price_cents",
+            int(limit_price_cents) if limit_price_cents is not None else "(market)",
+        ),
+        ("vertical", vertical or "(none)"),
+        ("recovery_attempts", int(recovery_attempts or 0)),
+        ("last_recovery_outcome", last_recovery_outcome or "(unknown)"),
+        ("last_error", (last_error or "")[:200]),
+    ]
+    if extra:
+        rows.extend(extra)
+    rows.append(("at", _utc_now_iso()))
+    return rows
+
+
+def order_submit_stuck(
+    *,
+    client_order_id: str,
+    market_ticker: str,
+    side: str,
+    action: str,
+    contracts: int,
+    threshold: int,
+    limit_price_cents: int | None = None,
+    vertical: str | None = None,
+    recovery_attempts: int,
+    last_recovery_outcome: str | None = None,
+    last_error: str | None = None,
+    dry_run: bool = False,
+) -> dict[str, Any]:
+    """Operator alert: a single ``client_order_id`` has crossed the
+    per-order recovery-attempt threshold without resolving.
+
+    Caller (``app.kalshi.lifecycle._attempt_submit_recovery``) is
+    responsible for dedupe (``dedupe_or_skip`` keyed on
+    ``client_order_id`` with a multi-day TTL) so sustained recovery
+    failures only page once until the operator either resolves the
+    coid via the dead-letter console or the alert TTL elapses.
+    """
+    subject = (
+        f"[axiom][ORDER-STUCK] {market_ticker or '(unknown)'} :: "
+        f"{client_order_id} attempts={int(recovery_attempts)}/{int(threshold)}"
+    )
+    body = (
+        "An order's submit-recovery path has crossed the per-order "
+        "attempt threshold without recovering venue truth. Inspect the "
+        "order in the operator dead-letter console (Stuck orders tab) "
+        "and either let the sweeper dead-letter it or resolve manually.\n\n"
+        + _format_lines(
+            _order_recovery_lines(
+                client_order_id=client_order_id,
+                market_ticker=market_ticker,
+                side=side,
+                action=action,
+                contracts=contracts,
+                limit_price_cents=limit_price_cents,
+                vertical=vertical,
+                recovery_attempts=recovery_attempts,
+                last_recovery_outcome=last_recovery_outcome,
+                last_error=last_error,
+                extra=[("threshold", int(threshold))],
+            )
+        )
+        + "\n"
+    )
+    return _dispatch(subject, body, tag="order-submit-stuck", dry_run=dry_run)
+
+
+def order_dead_lettered(
+    *,
+    client_order_id: str,
+    market_ticker: str,
+    side: str,
+    action: str,
+    contracts: int,
+    limit_price_cents: int | None = None,
+    vertical: str | None = None,
+    recovery_attempts: int,
+    last_recovery_outcome: str | None = None,
+    last_error: str | None = None,
+    dry_run: bool = False,
+) -> dict[str, Any]:
+    """Operator alert: an order has been promoted into the dead-letter
+    queue by the sweeper.
+
+    Fired by ``app.kalshi.dead_letter_sweeper`` after the sweep marks
+    the row's ``dead_lettered_at`` timestamp. Caller is responsible
+    for dedupe (``dedupe_or_skip`` keyed on the coid) so a sustained
+    outage that promotes many orders pages per coid, not per sweep
+    iteration.
+    """
+    subject = (
+        f"[axiom][ORDER-DEAD-LETTERED] {market_ticker or '(unknown)'} :: "
+        f"{client_order_id}"
+    )
+    body = (
+        "An order has been moved into the operator dead-letter queue "
+        "after exceeding the failure-window threshold. The order will "
+        "no longer be retried automatically. Resolve it from the "
+        "operator console (Stuck orders tab): mark_cancelled, "
+        "force_retry, or claim_filled.\n\n"
+        + _format_lines(
+            _order_recovery_lines(
+                client_order_id=client_order_id,
+                market_ticker=market_ticker,
+                side=side,
+                action=action,
+                contracts=contracts,
+                limit_price_cents=limit_price_cents,
+                vertical=vertical,
+                recovery_attempts=recovery_attempts,
+                last_recovery_outcome=last_recovery_outcome,
+                last_error=last_error,
+            )
+        )
+        + "\n"
+    )
+    return _dispatch(subject, body, tag="order-dead-lettered", dry_run=dry_run)
+
+
+def order_dead_letter_resolved(
+    *,
+    client_order_id: str,
+    market_ticker: str,
+    side: str,
+    action: str,
+    contracts: int,
+    resolution_action: str,
+    resolver_email: str | None,
+    reason: str | None = None,
+    fill_price_cents: int | None = None,
+    vertical: str | None = None,
+    dry_run: bool = False,
+) -> dict[str, Any]:
+    """Operator confirmation email after a dead-letter resolution.
+
+    ``resolution_action`` is the path taken — one of
+    ``mark_cancelled``, ``force_retry``, ``claim_filled`` — recorded
+    so the audit trail lives in inboxes as well as
+    ``admin_audit_log``.
+    """
+    subject = (
+        f"[axiom][ORDER-DEAD-LETTER][RESOLVED] {market_ticker or '(unknown)'} :: "
+        f"{client_order_id} -> {resolution_action}"
+    )
+    rows: list[tuple[str, Any]] = [
+        ("client_order_id", client_order_id),
+        ("market_ticker", market_ticker or "(unknown)"),
+        ("side", side or "(unknown)"),
+        ("action", action or "(unknown)"),
+        ("contracts", int(contracts or 0)),
+        ("resolution_action", resolution_action),
+        ("resolver", resolver_email or "(unknown)"),
+        ("vertical", vertical or "(none)"),
+        ("reason", (reason or "")[:200]),
+    ]
+    if fill_price_cents is not None:
+        rows.append(("fill_price_cents", int(fill_price_cents)))
+    rows.append(("at", _utc_now_iso()))
+    body = (
+        "An operator resolved a dead-lettered order. The order is no "
+        "longer in the dead-letter queue.\n\n"
+        + _format_lines(rows)
+        + "\n"
+    )
+    return _dispatch(
+        subject, body, tag="order-dead-letter-resolved", dry_run=dry_run
+    )

@@ -44,7 +44,7 @@ import EmergencyStop from "@/components/telemetry/emergency-stop";
 import AccessRequests from "@/components/telemetry/access-requests";
 import AutoResearchPanel from "@/components/intelligence/autoresearch-panel";
 
-const ALL_TABS = ["health", "controls", "risk", "reconciler", "settings", "research", "audit", "users", "leads"] as const;
+const ALL_TABS = ["health", "controls", "risk", "reconciler", "stuck-orders", "settings", "research", "audit", "users", "leads"] as const;
 type TabKey = (typeof ALL_TABS)[number];
 
 const TAB_DEFS: Record<TabKey, TabDef<TabKey> & { adminOnly: boolean; subtitle: string }> = {
@@ -71,6 +71,12 @@ const TAB_DEFS: Record<TabKey, TabDef<TabKey> & { adminOnly: boolean; subtitle: 
     label: "Reconciler",
     adminOnly: true,
     subtitle: "Position-drift queue · accept-truth, snooze, or audit auto-skeletons.",
+  },
+  "stuck-orders": {
+    key: "stuck-orders",
+    label: "Stuck orders",
+    adminOnly: true,
+    subtitle: "Order-submit dead-letter queue · mark-cancelled, force-retry, or claim-filled.",
   },
   settings: {
     key: "settings",
@@ -300,6 +306,14 @@ export default function SystemPage() {
         <div data-testid="panel-system-reconciler">
           <GlassCard tone="solid" padding="md">
             <ReconcilerDriftsPanel />
+          </GlassCard>
+        </div>
+      )}
+
+      {tab === "stuck-orders" && isAdmin && (
+        <div data-testid="panel-system-stuck-orders">
+          <GlassCard tone="solid" padding="md">
+            <StuckOrdersPanel />
           </GlassCard>
         </div>
       )}
@@ -1156,5 +1170,540 @@ function DailyLossPanel() {
         </div>
       )}
     </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Stuck-orders dead-letter console (task #710). Reads
+// ``GET /api/admin/orders/dead-lettered`` and operator-resolves rows
+// via ``POST /api/admin/orders/{coid}/resolve``. Mirrors the
+// reconciler-drift pattern: a state filter (open / failing / resolved
+// / all), a 30s auto-refresh, a confirmation dialog that always shows
+// the original order intent (market, side, action, contracts) so the
+// operator never picks an action without seeing what they're
+// committing to.
+// ---------------------------------------------------------------------------
+
+type StuckOrderRow = {
+  client_order_id: string;
+  market_ticker: string;
+  side: string;
+  action: string;
+  contracts: number;
+  limit_price_cents: number | null;
+  vertical: string | null;
+  recovery_attempts: number;
+  last_recovery_at: string | null;
+  last_recovery_outcome: string | null;
+  last_error: string | null;
+  first_failed_at: string;
+  dead_lettered_at: string | null;
+  resolved_at: string | null;
+  resolution_action: string | null;
+  resolver_email: string | null;
+  resolution_reason: string | null;
+  fill_price_cents: number | null;
+  age_seconds: number;
+};
+
+type StuckOrderListResponse = {
+  items: StuckOrderRow[];
+  state: string;
+  error?: string;
+};
+
+type StuckPendingAction =
+  | { kind: "mark_cancelled"; row: StuckOrderRow }
+  | { kind: "force_retry"; row: StuckOrderRow }
+  | { kind: "claim_filled"; row: StuckOrderRow }
+  | null;
+
+type StuckStateFilter = "open" | "failing" | "resolved" | "all";
+
+function StuckOrdersPanel() {
+  const { getToken, isSignedIn } = useAuth();
+  const tokenFn = useMemo(
+    () => () => getToken().then((t) => t ?? null),
+    [getToken],
+  );
+  const [stateFilter, setStateFilter] = useState<StuckStateFilter>("open");
+  const [busyCoid, setBusyCoid] = useState<string | null>(null);
+  const [actionMsg, setActionMsg] = useState<string | null>(null);
+  const [pending, setPending] = useState<StuckPendingAction>(null);
+  const [reasonInput, setReasonInput] = useState<string>("");
+  const [fillPriceCents, setFillPriceCents] = useState<number>(50);
+
+  const openAction = (
+    kind: "mark_cancelled" | "force_retry" | "claim_filled",
+    row: StuckOrderRow,
+  ) => {
+    setReasonInput("");
+    // Default the claim_filled price to the original limit_price if we
+    // have one — operators almost always want to confirm at-or-near
+    // their original cap, so save them a typing step but keep them
+    // free to override.
+    setFillPriceCents(
+      row.limit_price_cents != null ? row.limit_price_cents : 50,
+    );
+    setPending({ kind, row });
+  };
+  const closeModal = () => {
+    setPending(null);
+    setReasonInput("");
+    setFillPriceCents(50);
+  };
+
+  const { data, isLoading, error, refetch } = useQuery<StuckOrderListResponse>({
+    queryKey: ["admin", "orders", "dead-lettered", stateFilter],
+    queryFn: () =>
+      apiFetch<StuckOrderListResponse>(
+        `/api/admin/orders/dead-lettered?state=${stateFilter}&limit=200`,
+        { getToken: tokenFn },
+      ),
+    enabled: !!isSignedIn,
+    refetchInterval: 30_000,
+  });
+
+  const submitResolve = async (
+    coid: string,
+    action: "mark_cancelled" | "force_retry" | "claim_filled",
+    reason: string,
+    priceCents: number | null,
+  ) => {
+    setBusyCoid(coid);
+    setActionMsg(null);
+    try {
+      const body: Record<string, unknown> = { action, reason };
+      if (action === "claim_filled") {
+        body.fill_price_cents = priceCents;
+      }
+      const res = await apiFetch<Record<string, unknown>>(
+        `/api/admin/orders/${encodeURIComponent(coid)}/resolve`,
+        { method: "POST", body, getToken: tokenFn },
+      );
+      const tag =
+        action === "mark_cancelled"
+          ? "marked cancelled"
+          : action === "force_retry"
+            ? "cleared for retry"
+            : `claimed filled @ ${priceCents}¢`;
+      setActionMsg(`Resolved ${coid}: ${tag} (resolver=${res.resolver_email}).`);
+      await refetch();
+    } catch (e) {
+      setActionMsg(`Failed: ${(e as Error).message}`);
+    } finally {
+      setBusyCoid(null);
+      closeModal();
+    }
+  };
+
+  if (isLoading) return <div className="h-10 animate-pulse bg-muted/30" />;
+  if (error) {
+    return (
+      <p className="text-xs text-destructive" data-testid="stuck-orders-error">
+        Failed to load stuck-orders queue: {(error as Error).message}
+      </p>
+    );
+  }
+  const items = data?.items ?? [];
+  return (
+    <div className="space-y-3" data-testid="stuck-orders-panel">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-accent-cyan/80">
+          Dead-letter queue · {items.length} {stateFilter}
+        </div>
+        <div className="flex gap-1" role="tablist">
+          {(["open", "failing", "resolved", "all"] as const).map((s) => (
+            <button
+              key={s}
+              type="button"
+              onClick={() => setStateFilter(s)}
+              className={`border px-2 py-1 text-[10px] uppercase tracking-widest transition ${
+                stateFilter === s
+                  ? "border-primary bg-primary/10 text-primary"
+                  : "border-border bg-card text-muted-foreground hover:border-primary"
+              }`}
+              data-testid={`stuck-orders-filter-${s}`}
+            >
+              {s}
+            </button>
+          ))}
+        </div>
+      </div>
+      {data?.error && (
+        <p className="border border-amber-500/30 bg-amber-500/10 px-2 py-1 text-[11px] text-amber-300">
+          Server reported a load error: {data.error}
+        </p>
+      )}
+      {actionMsg && (
+        <p className="text-[11px] text-muted-foreground" data-testid="stuck-orders-action-msg">
+          {actionMsg}
+        </p>
+      )}
+      {items.length === 0 ? (
+        <p className="text-[11px] text-muted-foreground">
+          No {stateFilter} stuck orders. The order-submit recovery queue is clean.
+        </p>
+      ) : (
+        <div className="overflow-x-auto">
+          <table className="w-full border-collapse text-[11px]">
+            <thead>
+              <tr className="border-b border-border text-left text-[10px] uppercase tracking-widest text-muted-foreground">
+                <th className="px-2 py-1">CoID</th>
+                <th className="px-2 py-1">Market</th>
+                <th className="px-2 py-1">Side</th>
+                <th className="px-2 py-1">Act</th>
+                <th className="px-2 py-1">Qty</th>
+                <th className="px-2 py-1">Limit¢</th>
+                <th className="px-2 py-1">Tries</th>
+                <th className="px-2 py-1">Last outcome</th>
+                <th className="px-2 py-1">Age</th>
+                <th className="px-2 py-1">State</th>
+                <th className="px-2 py-1 text-right">Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              {items.map((row) => {
+                const isOpen =
+                  row.dead_lettered_at !== null && row.resolved_at === null;
+                const isFailing =
+                  row.dead_lettered_at === null && row.resolved_at === null;
+                const stateTag = row.resolved_at
+                  ? `resolved:${row.resolution_action ?? "?"}`
+                  : row.dead_lettered_at
+                    ? "dead-lettered"
+                    : "failing";
+                return (
+                  <tr
+                    key={row.client_order_id}
+                    className="border-b border-border/40"
+                    data-testid={`stuck-row-${row.client_order_id}`}
+                  >
+                    <td
+                      className="max-w-[200px] truncate px-2 py-1 font-mono"
+                      title={row.client_order_id}
+                    >
+                      {row.client_order_id}
+                    </td>
+                    <td
+                      className="max-w-[200px] truncate px-2 py-1 text-muted-foreground"
+                      title={row.market_ticker}
+                    >
+                      {row.market_ticker}
+                    </td>
+                    <td className="px-2 py-1 uppercase">{row.side}</td>
+                    <td className="px-2 py-1 uppercase">{row.action}</td>
+                    <td className="px-2 py-1 tabular-nums">{row.contracts}</td>
+                    <td className="px-2 py-1 tabular-nums">
+                      {row.limit_price_cents ?? "—"}
+                    </td>
+                    <td
+                      className="px-2 py-1 tabular-nums"
+                      data-testid={`stuck-tries-${row.client_order_id}`}
+                    >
+                      {row.recovery_attempts}
+                    </td>
+                    <td
+                      className="max-w-[180px] truncate px-2 py-1 text-muted-foreground"
+                      title={row.last_error ?? row.last_recovery_outcome ?? ""}
+                    >
+                      {row.last_recovery_outcome ?? "—"}
+                    </td>
+                    <td
+                      className="px-2 py-1 tabular-nums"
+                      data-testid={`stuck-age-${row.client_order_id}`}
+                    >
+                      {formatAge(row.age_seconds)}
+                    </td>
+                    <td className="px-2 py-1 uppercase tracking-widest">
+                      {stateTag}
+                    </td>
+                    <td className="px-2 py-1 text-right">
+                      {(isOpen || isFailing) && (
+                        <span className="space-x-1">
+                          <button
+                            type="button"
+                            onClick={() => openAction("mark_cancelled", row)}
+                            disabled={busyCoid === row.client_order_id || isFailing}
+                            title={
+                              isFailing
+                                ? "Only force-retry is available before dead-letter promotion"
+                                : "Declare cancelled at venue (no fill recorded)"
+                            }
+                            className="border border-border px-2 py-0.5 text-[10px] uppercase tracking-widest text-muted-foreground hover:border-primary hover:text-foreground disabled:opacity-50"
+                            data-testid={`button-cancel-${row.client_order_id}`}
+                          >
+                            Mark cancelled
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => openAction("force_retry", row)}
+                            disabled={busyCoid === row.client_order_id}
+                            className="border border-primary px-2 py-0.5 text-[10px] uppercase tracking-widest text-primary hover:bg-primary/10 disabled:opacity-50"
+                            data-testid={`button-retry-${row.client_order_id}`}
+                          >
+                            Force retry
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => openAction("claim_filled", row)}
+                            disabled={busyCoid === row.client_order_id || isFailing}
+                            title={
+                              isFailing
+                                ? "Only force-retry is available before dead-letter promotion"
+                                : "Confirm operator-verified fill"
+                            }
+                            className="border border-destructive px-2 py-0.5 text-[10px] uppercase tracking-widest text-destructive hover:bg-destructive/10 disabled:opacity-50"
+                            data-testid={`button-claim-${row.client_order_id}`}
+                          >
+                            Claim filled
+                          </button>
+                        </span>
+                      )}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
+      <StuckOrderActionDialog
+        pending={pending}
+        reasonInput={reasonInput}
+        setReasonInput={setReasonInput}
+        fillPriceCents={fillPriceCents}
+        setFillPriceCents={setFillPriceCents}
+        busyCoid={busyCoid}
+        onCancel={closeModal}
+        onConfirm={(coid, action, reason, price) =>
+          submitResolve(coid, action, reason, price)
+        }
+      />
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Stuck-orders confirmation modal — always renders the original
+// intent (market / side / action / contracts / limit) and the
+// per-row recovery counters so the operator can never resolve
+// without seeing exactly what they're committing the system to.
+// ---------------------------------------------------------------------------
+
+type StuckOrderActionDialogProps = {
+  pending: StuckPendingAction;
+  reasonInput: string;
+  setReasonInput: (v: string) => void;
+  fillPriceCents: number;
+  setFillPriceCents: (v: number) => void;
+  busyCoid: string | null;
+  onCancel: () => void;
+  onConfirm: (
+    coid: string,
+    action: "mark_cancelled" | "force_retry" | "claim_filled",
+    reason: string,
+    fillPriceCents: number | null,
+  ) => void;
+};
+
+function StuckOrderActionDialog(props: StuckOrderActionDialogProps) {
+  const {
+    pending,
+    reasonInput,
+    setReasonInput,
+    fillPriceCents,
+    setFillPriceCents,
+    busyCoid,
+    onCancel,
+    onConfirm,
+  } = props;
+  const open = pending !== null;
+  const row = pending?.row;
+  const kind = pending?.kind;
+  const busy = !!row && busyCoid === row.client_order_id;
+
+  const title =
+    kind === "mark_cancelled"
+      ? `Mark ${row?.client_order_id ?? ""} cancelled?`
+      : kind === "force_retry"
+        ? `Force retry on ${row?.client_order_id ?? ""}?`
+        : `Claim ${row?.client_order_id ?? ""} as filled?`;
+  const description =
+    kind === "mark_cancelled"
+      ? "Declares the order cancelled at the venue. No fill is recorded; no position rollup is touched. Use only when you've confirmed the order will never reach a terminal state at Kalshi."
+      : kind === "force_retry"
+        ? "Clears the recovery row so the next orchestrator cycle will re-submit a fresh client_order_id for the same intent. Use when the upstream blocker (rate-limit, transient 5xx, etc.) is gone."
+        : "Asserts an operator-verified fill at the supplied price. Inserts an order_fills row (source='operator_manual') and updates the positions rollup. This is irreversible from the UI — double-check the price.";
+  const validClaim =
+    kind !== "claim_filled" ||
+    (Number.isFinite(fillPriceCents) &&
+      fillPriceCents >= 0 &&
+      fillPriceCents <= 100);
+
+  return (
+    <Dialog
+      open={open}
+      onOpenChange={(o) => {
+        if (!o && !busy) onCancel();
+      }}
+    >
+      <DialogContent
+        className="max-w-lg"
+        data-testid="stuck-orders-dialog"
+      >
+        {row && kind && (
+          <>
+            <DialogHeader>
+              <DialogTitle>{title}</DialogTitle>
+              <DialogDescription>{description}</DialogDescription>
+            </DialogHeader>
+
+            <div
+              className="grid grid-cols-2 gap-2 border border-border bg-muted/20 p-3 text-[11px]"
+              data-testid="stuck-orders-dialog-summary"
+            >
+              <div>
+                <div className="text-[10px] uppercase tracking-widest text-muted-foreground">
+                  Market
+                </div>
+                <div className="font-mono">{row.market_ticker}</div>
+              </div>
+              <div>
+                <div className="text-[10px] uppercase tracking-widest text-muted-foreground">
+                  Intent
+                </div>
+                <div className="font-mono uppercase">
+                  {row.action} {row.side} × {row.contracts}
+                  {row.limit_price_cents != null
+                    ? ` @ ${row.limit_price_cents}¢`
+                    : ""}
+                </div>
+              </div>
+              <div>
+                <div className="text-[10px] uppercase tracking-widest text-muted-foreground">
+                  Recovery attempts
+                </div>
+                <div className="text-lg font-bold tabular-nums">
+                  {row.recovery_attempts}
+                </div>
+              </div>
+              <div>
+                <div className="text-[10px] uppercase tracking-widest text-muted-foreground">
+                  Age
+                </div>
+                <div className="text-lg font-bold tabular-nums">
+                  {formatAge(row.age_seconds)}
+                </div>
+              </div>
+              <div className="col-span-2 border-t border-border pt-2 text-[11px] text-muted-foreground">
+                <div>
+                  <span className="font-semibold text-foreground">
+                    Last outcome:
+                  </span>{" "}
+                  {row.last_recovery_outcome ?? "—"}
+                </div>
+                {row.last_error && (
+                  <div className="break-all">
+                    <span className="font-semibold text-foreground">
+                      Last error:
+                    </span>{" "}
+                    {row.last_error}
+                  </div>
+                )}
+              </div>
+            </div>
+
+            {kind === "claim_filled" && (
+              <label className="block text-[11px]">
+                <span className="text-[10px] uppercase tracking-widest text-muted-foreground">
+                  Fill price (cents, 0–100)
+                </span>
+                <input
+                  type="number"
+                  min={0}
+                  max={100}
+                  step={1}
+                  value={fillPriceCents}
+                  onChange={(e) =>
+                    setFillPriceCents(Number(e.target.value))
+                  }
+                  disabled={busy}
+                  data-testid="stuck-orders-dialog-price"
+                  className="mt-1 w-full border border-border bg-card px-2 py-1 font-mono"
+                />
+                {!validClaim && (
+                  <span className="mt-1 block text-[10px] text-destructive">
+                    Price must be 0–100 (Kalshi yes/no markets are 1¢
+                    increments).
+                  </span>
+                )}
+              </label>
+            )}
+
+            <label className="block text-[11px]">
+              <span className="text-[10px] uppercase tracking-widest text-muted-foreground">
+                Reason (optional)
+              </span>
+              <textarea
+                rows={3}
+                value={reasonInput}
+                onChange={(e) => setReasonInput(e.target.value)}
+                placeholder={
+                  kind === "mark_cancelled"
+                    ? "e.g. Kalshi support confirmed order rejected"
+                    : kind === "force_retry"
+                      ? "e.g. upstream 502s cleared, requeue"
+                      : "e.g. fills feed gap, manual confirmation from venue"
+                }
+                disabled={busy}
+                data-testid="stuck-orders-dialog-reason"
+                className="mt-1 w-full border border-border bg-card px-2 py-1 font-mono"
+              />
+            </label>
+
+            <DialogFooter>
+              <button
+                type="button"
+                onClick={onCancel}
+                disabled={busy}
+                className="border border-border px-3 py-1 text-[11px] uppercase tracking-widest text-muted-foreground hover:border-primary hover:text-foreground disabled:opacity-50"
+                data-testid="stuck-orders-dialog-cancel"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                disabled={busy || !validClaim}
+                onClick={() =>
+                  onConfirm(
+                    row.client_order_id,
+                    kind,
+                    reasonInput,
+                    kind === "claim_filled" ? fillPriceCents : null,
+                  )
+                }
+                className={`border px-3 py-1 text-[11px] uppercase tracking-widest disabled:opacity-50 ${
+                  kind === "claim_filled"
+                    ? "border-destructive bg-destructive/10 text-destructive hover:bg-destructive/20"
+                    : kind === "mark_cancelled"
+                      ? "border-amber-500 bg-amber-500/10 text-amber-300 hover:bg-amber-500/20"
+                      : "border-primary bg-primary/10 text-primary hover:bg-primary/20"
+                }`}
+                data-testid="stuck-orders-dialog-confirm"
+              >
+                {busy
+                  ? "Working…"
+                  : kind === "claim_filled"
+                    ? "Confirm claim filled"
+                    : kind === "mark_cancelled"
+                      ? "Confirm mark cancelled"
+                      : "Confirm force retry"}
+              </button>
+            </DialogFooter>
+          </>
+        )}
+      </DialogContent>
+    </Dialog>
   );
 }

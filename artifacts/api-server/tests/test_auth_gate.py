@@ -87,6 +87,8 @@ PROTECTED_ROUTES: tuple[str, ...] = (
     "/api/admin/landing-leads/interests",
     # Task #709 — operator drift-resolution console queue (GET).
     "/api/admin/reconciler/drifts",
+    # Task #710 — operator order-submit dead-letter console queue (GET).
+    "/api/admin/orders/dead-lettered",
     "/api/me/access",
     "/api/me/subscription",
     "/api/me/notification-prefs",
@@ -257,6 +259,9 @@ PROTECTED_MUTATING_ENDPOINTS: tuple[tuple[str, str], ...] = (
     # the alert until an absolute UTC timestamp).
     ("POST", "/api/admin/reconciler/drifts/{ticker}/accept-exchange-truth"),
     ("POST", "/api/admin/reconciler/drifts/{ticker}/snooze"),
+    # Task #710 — operator dead-letter resolution actions
+    # (mark_cancelled / force_retry / claim_filled).
+    ("POST", "/api/admin/orders/{client_order_id}/resolve"),
 )
 
 # Path-only view of the mutating-endpoint inventory, used by the
