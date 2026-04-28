@@ -1309,6 +1309,40 @@ async def run_cycle(vertical: str = "sports") -> CycleResult:
                 "vertical": vertical,
                 **sweep_stats,
             })
+        # Run the rolling-baseline anomaly evaluator + persist this
+        # cycle's counters (task #711). Order matters: evaluate FIRST
+        # against prior history (24h excluding this cycle), then record
+        # after — otherwise the just-inserted row dilutes the z-score it
+        # is itself being scored against. Both calls fail open so a
+        # telemetry write or alert dispatch failure never blocks the
+        # cycle.
+        try:
+            from . import stale_cancel_baseline as _sc_baseline
+            anomaly = await _sc_baseline.evaluate_and_alert(
+                vertical, overrides, sweep_stats, cycle_id=result.cycle_id,
+            )
+            if anomaly.get("alerts"):
+                await _publish({
+                    "type": "stale_cancel_anomaly",
+                    "cycle_id": result.cycle_id,
+                    "vertical": vertical,
+                    "alerts": anomaly["alerts"],
+                    "volume": anomaly.get("volume"),
+                    "failure": anomaly.get("failure"),
+                })
+            await _sc_baseline.record_observation(
+                vertical=vertical,
+                cycle_id=result.cycle_id,
+                scanned=int(sweep_stats.get("scanned") or 0),
+                cancelled=int(sweep_stats.get("cancelled") or 0),
+                failed=int(sweep_stats.get("failed") or 0),
+                max_age=int(sweep_stats.get("max_age") or 0),
+            )
+        except Exception as e:  # pragma: no cover — defensive
+            log.warning(
+                "stale_cancel baseline/anomaly path crashed (cycle continues): %s",
+                e,
+            )
     except Exception as e:  # pragma: no cover — defensive: sweep must never block the cycle
         log.warning("stale resting sweep crashed (cycle continues): %s", e)
 

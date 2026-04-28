@@ -58,6 +58,8 @@ _TAG_TO_USER_PREF: dict[str, str] = {
     "order-submit-stuck":      "email_halt",
     "order-dead-lettered":     "email_halt",
     "order-dead-letter-resolved": "email_halt",
+    "stale-cancel-volume-anomaly": "email_drift",
+    "stale-cancel-failure-spike":  "email_halt",
 }
 
 
@@ -248,6 +250,16 @@ USER_VISIBLE_ALERTS: dict[str, dict[str, Any]] = {
     },
     "order_dead_letter_resolved": {
         "label": "Order dead-letter resolved",
+        "scope": "broadcast",
+        "channels": [("email", "email_halt")],
+    },
+    "stale_cancel_volume_anomaly": {
+        "label": "Stale-cancel volume anomaly",
+        "scope": "broadcast",
+        "channels": [("email", "email_drift")],
+    },
+    "stale_cancel_failure_spike": {
+        "label": "Stale-cancel failure spike",
         "scope": "broadcast",
         "channels": [("email", "email_halt")],
     },
@@ -3074,4 +3086,136 @@ def order_dead_letter_resolved(
     )
     return _dispatch(
         subject, body, tag="order-dead-letter-resolved", dry_run=dry_run
+    )
+
+
+# ---------------------------------------------------------------------------
+# Stale-cancel sweep anomaly alerting (task #711)
+#
+# The cycle-start sweep cancels resting Kalshi orders older than the
+# per-vertical TTL. The aggregate `stale_resting_cancelled` health card
+# only surfaces "the sweep is unhappy" — these two alerts page the
+# rotation when the rolling 24h baseline of cancel volume is exceeded
+# (volume anomaly) or when the venue-side cancel API has been failing
+# for multiple consecutive cycles (failure spike).
+#
+# Caller (`app.orchestrator.stale_cancel_baseline.evaluate_and_alert`)
+# is responsible for dedupe — keyed on `vertical` with a 30m default
+# TTL, configurable via `risk.stale_cancel_volume_ttl_secs.<vertical>`
+# / `risk.stale_cancel_failure_ttl_secs.<vertical>`.
+# ---------------------------------------------------------------------------
+
+
+def stale_cancel_volume_anomaly(
+    *,
+    vertical: str,
+    cycle_id: int | None,
+    current: int,
+    mean: float,
+    stdev: float,
+    z_score: float,
+    sigma_threshold: float,
+    floor: int,
+    sample_count: int,
+    dry_run: bool = False,
+) -> dict[str, Any]:
+    """Operator alert: this cycle's stale-cancel count is anomalously
+    high vs. the rolling 24h baseline for this vertical.
+
+    The sweep itself is functioning — we are *successfully* cancelling
+    a lot more resting orders than usual. The likely upstream cause is
+    a model / odds / strategy thrash producing many candidates whose
+    edge evaporates between cycles. Investigate by:
+
+      * Diffing the most recent cycles' candidate / placement counts
+        in `/pipeline` — has placement volume jumped?
+      * Checking the line-snapshot freshness card — stale odds will
+        produce candidates that get repriced away within seconds.
+      * Looking at calibration drift for the affected vertical.
+    """
+    subject = (
+        f"[axiom][STALE-CANCEL-VOLUME] {vertical} :: "
+        f"cycle cancelled={int(current)} "
+        f"(mean={mean:.1f} σ={stdev:.1f} z={z_score:.1f})"
+    )
+    rows: list[tuple[str, Any]] = [
+        ("vertical", vertical),
+        ("cycle_id", cycle_id if cycle_id is not None else "(unknown)"),
+        ("current_cancelled", int(current)),
+        ("baseline_mean", round(float(mean), 3)),
+        ("baseline_stdev", round(float(stdev), 3)),
+        ("baseline_samples", int(sample_count)),
+        ("z_score", round(float(z_score), 3)),
+        ("sigma_threshold", round(float(sigma_threshold), 2)),
+        ("volume_floor", int(floor)),
+        ("at", _utc_now_iso()),
+    ]
+    body = (
+        "The cycle-start stale-cancel sweep cancelled significantly "
+        "more resting orders than the 24h rolling baseline for this "
+        "vertical. The sweep is functioning correctly — the likely "
+        "upstream cause is a model / odds / strategy thrash producing "
+        "candidates whose edge evaporates between cycles. See the "
+        "runbook §14 'Stale-cancel anomaly triage' for diagnosis "
+        "steps.\n\n"
+        + _format_lines(rows)
+        + "\n"
+    )
+    return _dispatch(
+        subject, body, tag="stale-cancel-volume-anomaly", dry_run=dry_run
+    )
+
+
+def stale_cancel_failure_spike(
+    *,
+    vertical: str,
+    cycle_id: int | None,
+    failed_cycles: int,
+    failed_total: int,
+    failure_window: int,
+    floor: int,
+    dry_run: bool = False,
+) -> dict[str, Any]:
+    """Operator alert: the venue-side cancel API has been failing for
+    multiple consecutive cycles within the rolling window.
+
+    Unlike the aggregate `stale_resting_cancelled` health card (which
+    surfaces a `degraded` badge but never pages), this fires only when
+    failures sustain across `failure_window` cycles AND total failures
+    cross the absolute floor — i.e. the swallow-and-continue path is
+    masking a real venue outage. The sweep itself is fine; the venue's
+    cancel endpoint is not. Triage:
+
+      * Is the Kalshi REST card on health degraded? Are 5xx counts
+        spiking on `/api/notifications/status`?
+      * Spot-check `cancel_order` failures in the orchestrator log —
+        if they are all 503/504, the venue is the issue.
+      * If the failures are 4xx (e.g. "order not found"), the
+        reconciler has likely already cancelled them — look for a
+        ws-vs-rest race.
+    """
+    subject = (
+        f"[axiom][STALE-CANCEL-FAIL] {vertical} :: "
+        f"failed_cycles={int(failed_cycles)} failed_total={int(failed_total)}"
+    )
+    rows: list[tuple[str, Any]] = [
+        ("vertical", vertical),
+        ("cycle_id", cycle_id if cycle_id is not None else "(unknown)"),
+        ("failed_cycles_in_window", int(failed_cycles)),
+        ("failed_total_in_window", int(failed_total)),
+        ("failure_window", int(failure_window)),
+        ("failure_floor", int(floor)),
+        ("at", _utc_now_iso()),
+    ]
+    body = (
+        "The cycle-start stale-cancel sweep has hit cancel failures "
+        "across multiple cycles in this vertical. The cycle continues "
+        "(the sweep is best-effort by design), but resting orders may "
+        "be staying live past their TTL. See the runbook §14 "
+        "'Stale-cancel anomaly triage' for diagnosis steps.\n\n"
+        + _format_lines(rows)
+        + "\n"
+    )
+    return _dispatch(
+        subject, body, tag="stale-cancel-failure-spike", dry_run=dry_run
     )

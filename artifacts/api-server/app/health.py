@@ -1062,6 +1062,73 @@ def _probe_stale_resting_cancelled() -> dict:
     )
 
 
+async def _probe_stale_cancel_baselines() -> list[dict]:
+    """Per-vertical cards for the rolling 24h stale-cancel baseline.
+
+    One card per vertical seen in the rolling window; the baseline
+    computer also surfaces the trailing values for the UI sparkline
+    (``recent_cancelled``) and recent failure tally so the dashboard
+    can render the history without a second round-trip.
+
+    Status policy:
+      * ``unconfigured`` when the rolling window is empty (fresh deploy).
+      * ``degraded`` when any failures have been observed in the window
+        (the matching alert is keyed on the *spike* — this card just
+        flags "venue cancel API not 100%").
+      * ``ok`` otherwise. The volume-anomaly alert is fired by the cycle
+        path; this card never crosses to ``down`` because the sweep is
+        best-effort by design.
+    """
+    try:
+        from .orchestrator import stale_cancel_baseline as _sc_baseline
+        baselines = await _sc_baseline.list_baselines()
+    except Exception as e:  # pragma: no cover — defensive
+        log.warning("stale_cancel baselines fetch failed: %s", e)
+        return []
+    out: list[dict] = []
+    for b in baselines:
+        vertical = str(b.get("vertical") or "")
+        count = int(b.get("count") or 0)
+        failed_total = int(b.get("recent_failures_total") or 0)
+        failed_cycles = int(b.get("recent_failed_cycles") or 0)
+        if count == 0:
+            status = "unconfigured"
+            detail = "no observations in 24h window"
+        elif failed_total > 0:
+            status = "degraded"
+            detail = (
+                f"window={count} cycles · failed_cycles={failed_cycles} "
+                f"failed_total={failed_total} · "
+                f"mean={float(b.get('mean') or 0):.1f} σ={float(b.get('stdev') or 0):.1f}"
+            )
+        else:
+            status = "ok"
+            detail = (
+                f"window={count} cycles · "
+                f"mean={float(b.get('mean') or 0):.1f} σ={float(b.get('stdev') or 0):.1f} "
+                f"max={int(b.get('max') or 0)}"
+            )
+        out.append(_card(
+            key=f"stale_cancel_baseline:{vertical}",
+            label=f"Stale-cancel baseline · {vertical}",
+            category="passive",
+            status=status,
+            detail=detail,
+            extras={
+                "vertical": vertical,
+                "window_secs": int(b.get("window_secs") or 0),
+                "count": count,
+                "mean": float(b.get("mean") or 0.0),
+                "stdev": float(b.get("stdev") or 0.0),
+                "max": int(b.get("max") or 0),
+                "recent_failed_cycles": failed_cycles,
+                "recent_failures_total": failed_total,
+                "recent_cancelled": list(b.get("recent_cancelled") or []),
+            },
+        ))
+    return out
+
+
 def _probe_submit_dedupe() -> dict:
     """Surface the in-process duplicate-client_order_id rejection counters.
 
@@ -2386,6 +2453,13 @@ async def _build_snapshot() -> _Snapshot:
         _probe_crypto_freshness(),
         return_exceptions=False,
     )
+    # Per-vertical stale-cancel baseline cards (task #711) require a
+    # DB read so they're computed up front and spliced in below.
+    try:
+        sc_baseline_cards = await _probe_stale_cancel_baselines()
+    except Exception as e:  # pragma: no cover — defensive
+        log.warning("stale_cancel baselines probe failed: %s", e)
+        sc_baseline_cards = []
     passive = [
         _probe_kalshi_ws(),
         _probe_kalshi_cluster(),
@@ -2400,6 +2474,7 @@ async def _build_snapshot() -> _Snapshot:
         _probe_bankroll_sync(),
         _probe_submit_recovery(),
         _probe_stale_resting_cancelled(),
+        *sc_baseline_cards,
         _probe_submit_dedupe(),
         _probe_orderbook_guard(),
         *_probe_feeds(),

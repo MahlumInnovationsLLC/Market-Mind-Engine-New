@@ -1791,12 +1791,92 @@ export function CardTile({ card }: { card: Card }) {
           )}
         </div>
       )}
+      {card.key.startsWith("stale_cancel_baseline:") && (
+        <StaleCancelBaselineBlock extras={extras} />
+      )}
       <div className="text-muted-foreground break-all">
         {card.detail || "(no detail)"}
       </div>
       <div className="flex items-center justify-between text-[10px] text-muted-foreground/70">
         <span>{card.checked_at ?? "(no check yet)"}</span>
         {card.latency_ms !== null && <span>{card.latency_ms}ms</span>}
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Per-vertical stale-cancel baseline detail block (task #711).
+ *
+ * Renders a compact 24h sparkline of `cancelled` per cycle plus the
+ * mean / σ / max badges. Operators read this card to verify the
+ * volume-anomaly alert that just paged them is real (peak well above
+ * the trailing baseline) or noise (single tall bar, flat history).
+ */
+function StaleCancelBaselineBlock({
+  extras,
+}: {
+  extras: Record<string, unknown>;
+}) {
+  const recent = Array.isArray(extras.recent_cancelled)
+    ? (extras.recent_cancelled as unknown[]).map((v) =>
+        typeof v === "number" && Number.isFinite(v) ? v : 0,
+      )
+    : [];
+  const mean = typeof extras.mean === "number" ? (extras.mean as number) : 0;
+  const stdev = typeof extras.stdev === "number" ? (extras.stdev as number) : 0;
+  const max = typeof extras.max === "number" ? (extras.max as number) : 0;
+  const failedCycles =
+    typeof extras.recent_failed_cycles === "number"
+      ? (extras.recent_failed_cycles as number)
+      : 0;
+  const failedTotal =
+    typeof extras.recent_failures_total === "number"
+      ? (extras.recent_failures_total as number)
+      : 0;
+  const peak = Math.max(max, ...recent, 1);
+  return (
+    <div
+      className="space-y-1"
+      data-testid={`stale-cancel-baseline-${String(extras.vertical ?? "")}`}
+    >
+      {recent.length > 0 ? (
+        <div
+          className="flex items-end gap-px h-8 border border-border/40 bg-card p-0.5"
+          data-testid={`stale-cancel-sparkline-${String(extras.vertical ?? "")}`}
+        >
+          {recent.map((v, i) => {
+            const h = Math.max(1, Math.round((v / peak) * 28));
+            const tone =
+              v >= mean + 3 * stdev && stdev > 0
+                ? "bg-destructive"
+                : v >= mean + 2 * stdev && stdev > 0
+                  ? "bg-warning"
+                  : "bg-foreground/60";
+            return (
+              <div
+                key={i}
+                style={{ height: `${h}px` }}
+                className={`w-1 ${tone}`}
+                title={`cycle -${recent.length - i}: cancelled=${v}`}
+              />
+            );
+          })}
+        </div>
+      ) : (
+        <div className="text-[10px] text-muted-foreground italic">
+          (no cycles in window — sparkline empty)
+        </div>
+      )}
+      <div className="flex items-center gap-2 flex-wrap text-[10px] uppercase tracking-widest text-muted-foreground">
+        <span>μ {mean.toFixed(1)}</span>
+        <span>σ {stdev.toFixed(1)}</span>
+        <span>peak {max}</span>
+        {failedTotal > 0 && (
+          <span className="text-warning">
+            ⚠ failed_cycles={failedCycles} failed_total={failedTotal}
+          </span>
+        )}
       </div>
     </div>
   );

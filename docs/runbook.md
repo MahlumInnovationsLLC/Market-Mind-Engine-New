@@ -1327,3 +1327,110 @@ The migration is purely additive; rollback is the standard alembic
 downgrade (`alembic downgrade 0031_position_drift_resolutions`),
 which drops `order_recovery_attempts` and the `order_fills.source`
 column.  Old recovery code paths continue to work uninstrumented.
+
+---
+
+## 14. Stale-cancel anomaly triage
+
+The cycle-start sweep (§4 "stale_resting_cancelled" health card)
+cancels resting Kalshi orders older than the per-vertical TTL before
+new candidates are evaluated. Per task #711 the sweep also writes one
+row per cycle to `stale_cancel_observations` and runs a rolling 24h
+baseline + anomaly evaluator with two operator alerts.
+
+### Volume anomaly: `[axiom][STALE-CANCEL-VOLUME]`
+
+You were paged because this cycle's cancel count is `>=` the
+configured σ multiple above the rolling 24h mean for the vertical
+(default `>= 3σ`, with a hard floor of 10 cancellations to avoid
+noise alerts). The sweep itself is functioning — we are
+*successfully* cancelling many more resting orders than usual.
+
+Triage steps:
+
+1. **Check the `Stale-cancel baseline · <vertical>` card** at
+   `/system → health`. The sparkline shows the trailing ~30 cycles
+   with the same scale as the alert telemetry. A single tall bar
+   against a flat history is usually a transient model thrash; a
+   sustained climb is a persistent issue.
+2. **Diff `/pipeline`** — has placement volume jumped in the same
+   window? If yes, candidates are being created and immediately
+   superseded by the next cycle's view.
+3. **Check the line-snapshot freshness card** for the affected
+   vertical. Stale odds will produce candidates that get repriced
+   away within seconds and immediately become stale.
+4. **Calibration drift** — look at `/calibration` for the vertical.
+   A drifted model produces marginal-edge candidates that get
+   cancelled when the next prediction recomputes the prob.
+
+This alert is dedupe-keyed on `vertical` with a 60m TTL by default
+(`AXIOM_STALE_CANCEL_FAILURE_TTL_SECS=3600`), so a sustained failure
+pages at most once per hour per vertical. Volume anomalies use a
+shorter 30m TTL because volume self-corrects faster than venue
+infrastructure failures.
+
+### Failure spike: `[axiom][STALE-CANCEL-FAIL]`
+
+You were paged because the venue-side cancel API has been failing
+across multiple cycles (default `>= 2 cycles` with `failed > 0`
+**and** `>= 3 total failures` in the rolling window). Unlike the
+aggregate `stale_resting_cancelled` health card (which surfaces a
+quiet `degraded` badge but never pages), this fires only when the
+swallow-and-continue path is masking a real venue outage. Resting
+orders may be staying live past their TTL.
+
+Triage steps:
+
+1. **Check the Kalshi REST card** on `/system → health` — is it
+   degraded? Are 5xx counts spiking on
+   `/api/notifications/status → http retry counters`?
+2. **Spot-check `cancel_order` failures** in the orchestrator log:
+   ```
+   grep "stale resting cancel failed" /tmp/logs/artifacts*api-server*.log | tail -50
+   ```
+   - All 503/504 → venue is the issue. Wait it out, monitor.
+   - Mostly 4xx ("order not found") → ws-vs-rest race; the
+     reconciler has likely already cancelled them. Investigate but
+     not user-facing impact.
+3. **Consider operator action**:
+   - If venue is down for an extended period and resting orders are
+     piling up, halt the affected vertical (§9) until cancels work
+     again.
+   - If the failure pattern is just one specific market, ack the
+     alert (this dedupe-suppresses for 30m) and continue.
+
+### Tuning knobs
+
+All thresholds support the same `risk.<key>.<vertical>` >
+`risk.<key>` > env > default precedence as the rest of the risk
+gate chain. Set system_settings rows via the dashboard so changes
+survive a redeploy.
+
+| Setting key (env name) | Default | Effect |
+|---|---|---|
+| `risk.stale_cancel_volume_sigma` (`AXIOM_STALE_CANCEL_VOLUME_SIGMA`) | `3.0` | σ multiple above the 24h mean to fire the volume anomaly alert. |
+| `risk.stale_cancel_volume_floor` (`AXIOM_STALE_CANCEL_VOLUME_FLOOR`) | `10` | Absolute minimum cancellations per cycle to even consider the volume alert. |
+| `risk.stale_cancel_failure_window` (`AXIOM_STALE_CANCEL_FAILURE_WINDOW`) | `2` | Cycles with `failed > 0` in the rolling 24h window to fire the failure spike alert. |
+| `risk.stale_cancel_failure_floor` (`AXIOM_STALE_CANCEL_FAILURE_FLOOR`) | `3` | Total failures across the window required alongside the cycle threshold. |
+| `risk.stale_cancel_volume_ttl_secs` (`AXIOM_STALE_CANCEL_VOLUME_TTL_SECS`) | `1800` | Dedupe TTL for the volume anomaly alert. |
+| `risk.stale_cancel_failure_ttl_secs` (`AXIOM_STALE_CANCEL_FAILURE_TTL_SECS`) | `3600` | Dedupe TTL for the failure spike alert. Longer than volume TTL (1800s) because venue infrastructure failures recover slower than queue saturation. |
+
+Override per-vertical by appending `.<vertical>` to the key, e.g.
+`risk.stale_cancel_volume_floor.crypto = 50` keeps the global default
+but raises the bar for crypto where natural cancel volume is higher.
+
+### Observation table retention
+
+The `stale_cancel_observations` table is GC'd to a 7-day window —
+the anomaly evaluator only needs 24h, but operators get a week of
+history for after-the-fact triage and the UI sparkline. The retention
+sweep is fail-open: if the GC fails, rows accumulate but no alert
+behavior changes.
+
+### Rollback
+
+The migration is purely additive; rollback is the standard alembic
+downgrade (`alembic downgrade 0032_order_recovery_attempts`), which
+drops `stale_cancel_observations`. The cycle's alert path is wrapped
+in a try/except so a missing table is logged but never blocks. Old
+recovery code paths continue to work uninstrumented.
