@@ -1363,19 +1363,24 @@ Triage steps:
    A drifted model produces marginal-edge candidates that get
    cancelled when the next prediction recomputes the prob.
 
-This alert is dedupe-keyed on `vertical` with a 60m TTL by default
-(`AXIOM_STALE_CANCEL_FAILURE_TTL_SECS=3600`), so a sustained failure
-pages at most once per hour per vertical. Volume anomalies use a
-shorter 30m TTL because volume self-corrects faster than venue
-infrastructure failures.
+This alert (and the failure-spike alert below) is dedupe-keyed on
+`vertical` with a single shared 30m TTL by default
+(`AXIOM_STALE_CANCEL_ALERT_COOLDOWN_SECS=1800`), so each alert type
+pages at most twice per hour per vertical. The two alert types
+deliberately share one cooldown dial — earlier revisions split it
+into separate volume/failure TTLs and operators kept miscalibrating
+them; #711 collapsed them back to one knob.
 
 ### Failure spike: `[axiom][STALE-CANCEL-FAIL]`
 
-You were paged because the venue-side cancel API has been failing
-across multiple cycles (default `>= 2 cycles` with `failed > 0`
-**and** `>= 3 total failures` in the rolling window). Unlike the
-aggregate `stale_resting_cancelled` health card (which surfaces a
-quiet `degraded` badge but never pages), this fires only when the
+You were paged because the venue-side cancel API has been failing in
+each of the last `failure_window` cycles (default 2). The check is
+strict per-cycle: every cycle in the rolling tail must independently
+have `failed >= floor` (default 3) — a single clean cycle in the tail
+suppresses the alert and a recovered cycle flips it false immediately
+(no 24h-aggregate latch). Unlike the aggregate
+`stale_resting_cancelled` health card (which surfaces a quiet
+`degraded` badge but never pages), this fires only when the
 swallow-and-continue path is masking a real venue outage. Resting
 orders may be staying live past their TTL.
 
@@ -1410,10 +1415,9 @@ survive a redeploy.
 |---|---|---|
 | `risk.stale_cancel_volume_sigma` (`AXIOM_STALE_CANCEL_VOLUME_SIGMA`) | `3.0` | σ multiple above the 24h mean to fire the volume anomaly alert. |
 | `risk.stale_cancel_volume_floor` (`AXIOM_STALE_CANCEL_VOLUME_FLOOR`) | `10` | Absolute minimum cancellations per cycle to even consider the volume alert. |
-| `risk.stale_cancel_failure_window` (`AXIOM_STALE_CANCEL_FAILURE_WINDOW`) | `2` | Cycles with `failed > 0` in the rolling 24h window to fire the failure spike alert. |
-| `risk.stale_cancel_failure_floor` (`AXIOM_STALE_CANCEL_FAILURE_FLOOR`) | `3` | Total failures across the window required alongside the cycle threshold. |
-| `risk.stale_cancel_volume_ttl_secs` (`AXIOM_STALE_CANCEL_VOLUME_TTL_SECS`) | `1800` | Dedupe TTL for the volume anomaly alert. |
-| `risk.stale_cancel_failure_ttl_secs` (`AXIOM_STALE_CANCEL_FAILURE_TTL_SECS`) | `3600` | Dedupe TTL for the failure spike alert. Longer than volume TTL (1800s) because venue infrastructure failures recover slower than queue saturation. |
+| `risk.stale_cancel_failure_window` (`AXIOM_STALE_CANCEL_FAILURE_WINDOW`) | `2` | Number of consecutive most-recent cycles that must each have `failed >= floor` to fire the failure spike alert. Strict-tail check — recovery flips false on the first clean cycle. |
+| `risk.stale_cancel_failure_floor` (`AXIOM_STALE_CANCEL_FAILURE_FLOOR`) | `3` | Per-cycle minimum failed-cancel count. Each cycle in the rolling tail (size = `failure_window`) must clear this floor independently. |
+| `risk.stale_cancel_alert_cooldown_secs` (`AXIOM_STALE_CANCEL_ALERT_COOLDOWN_SECS`) | `1800` | Single dedupe TTL shared by both volume and failure alerts per vertical. Originally split into separate `volume_ttl`/`failure_ttl` keys but operators consistently miscalibrated them — collapsed back to one dial in #711. Per-vertical override available (see below). |
 
 Override per-vertical by appending `.<vertical>` to the key, e.g.
 `risk.stale_cancel_volume_floor.crypto = 50` keeps the global default

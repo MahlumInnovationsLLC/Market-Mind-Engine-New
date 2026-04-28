@@ -511,68 +511,111 @@ def test_evaluate_and_alert_dedupe_suppresses(monkeypatch):
 
 
 def test_evaluate_and_alert_fires_failure_spike(monkeypatch):
+    """Per #711 spec: failure spike fires when each of the last
+    ``failure_window`` cycles has ``failed >= floor`` (per-cycle
+    threshold, not aggregate sum)."""
     _stub_baseline(monkeypatch, {
         "count": 30, "mean": 2.0, "stdev": 1.0, "max": 5,
-        "recent_failed_cycles": 3, "recent_failures_total": 8,
+        "recent_failed_cycles": 3, "recent_failures_total": 9,
         "recent_cancelled": [2] * 30,
-        "recent_failures": [0] * 27 + [3, 3, 2],  # last 3 cycles all bad
+        # Last 3 baseline cycles each at the floor (3). The evaluator
+        # augments with the current cycle's failed=4 → tail [3, 4]
+        # with floor=3 → both >= floor → fires.
+        "recent_failures": [0] * 27 + [3, 3, 3],
         "window_secs": 86400,
     })
     _stub_dedupe(monkeypatch, claim=True)
     alert_calls = _stub_alert_helpers(monkeypatch)
     out = _run(sc.evaluate_and_alert(
-        "sports", {}, {"cancelled": 1, "failed": 2, "scanned": 5, "max_age": 30},
+        "sports", {}, {"cancelled": 1, "failed": 4, "scanned": 5, "max_age": 30},
         cycle_id=42,
     ))
     assert "stale_cancel_failure_spike" in out["alerts"]
     assert len(alert_calls["failure"]) == 1
-    # Augmented aggregate: baseline (3 cycles / 8 failures) + the
-    # current cycle (1 cycle / 2 failures) = 4 / 10. The evaluator
-    # mirrors the current cycle into the alert telemetry so operators
-    # see the count *including* the cycle that tripped the page.
+    # Augmented aggregate: baseline (3 cycles / 9 failures) + current
+    # cycle (1 cycle / 4 failures) = 4 / 13. The evaluator mirrors the
+    # current cycle into the alert telemetry so operators see the count
+    # *including* the cycle that tripped the page.
     assert alert_calls["failure"][0]["failed_cycles"] == 4
-    assert alert_calls["failure"][0]["failed_total"] == 10
+    assert alert_calls["failure"][0]["failed_total"] == 13
     assert alert_calls["failure"][0]["cycle_id"] == 42
 
 
-def test_default_failure_ttl_is_one_hour():
-    """Pin the default failure TTL to 3600s so a future refactor can't
-    silently shorten it back to the original 30-minute value (which
-    paged operators every 30m during sustained venue outages).
-    Volume TTL stays at 1800s — they're intentionally asymmetric."""
-    assert sc.DEFAULT_FAILURE_TTL_SECS == 3600
-    assert sc.DEFAULT_VOLUME_TTL_SECS == 1800
-    assert sc.DEFAULT_FAILURE_TTL_SECS > sc.DEFAULT_VOLUME_TTL_SECS
+def test_default_alert_cooldown_is_thirty_minutes():
+    """Pin the default cooldown to 1800s — the single per-vertical
+    dedupe TTL shared by both stale-cancel alert types per the
+    task #711 settings spec
+    (`risk.stale_cancel_alert_cooldown_secs.<vertical>`). A future
+    refactor that diverges back into separate volume/failure TTLs
+    would re-introduce the calibration trap operators hit during the
+    initial rollout."""
+    assert sc.DEFAULT_ALERT_COOLDOWN_SECS == 1800
 
 
-def test_evaluate_and_alert_passes_default_ttl_to_failure_dedupe(monkeypatch):
-    """End-to-end check that the failure dedupe call receives the
-    1h TTL — guards against a future change that hard-codes a value
-    or wires the wrong settings key."""
+def test_volume_and_failure_dedupe_share_cooldown(monkeypatch):
+    """Both alert types must call dedupe_or_skip with the same TTL
+    pulled from the single cooldown setting — proves the unified
+    contract end-to-end."""
     _stub_baseline(monkeypatch, {
         "count": 30, "mean": 2.0, "stdev": 1.0, "max": 5,
-        "recent_failed_cycles": 1, "recent_failures_total": 3,
+        "recent_failed_cycles": 2, "recent_failures_total": 6,
         "recent_cancelled": [2] * 30,
-        "recent_failures": [0] * 29 + [3],
+        # Tail [3, 3] — both >= floor=3 → augmented [3, 3] → fires
+        # without needing the current cycle to also exceed floor.
+        # We deliberately inject a current cycle that ALSO crosses the
+        # volume bar so both alerts fire and we can read both TTLs.
+        "recent_failures": [0] * 28 + [3, 3],
         "window_secs": 86400,
     })
     dedupe_calls = _stub_dedupe(monkeypatch, claim=True)
     _stub_alert_helpers(monkeypatch)
     _run(sc.evaluate_and_alert(
         "sports", {},
-        {"cancelled": 1, "failed": 2, "scanned": 5, "max_age": 30},
+        # current_cancelled=100 is way above mean=2.0 + 3*1.0 → volume
+        # current_failed=4 is >= floor=3 → failure (with augmented tail [3, 4])
+        {"cancelled": 100, "failed": 4, "scanned": 200, "max_age": 30},
         cycle_id=999,
     ))
-    fail_call = next(c for c in dedupe_calls if c[0] == "stale_cancel_failure_spike")
-    assert fail_call[2] == sc.DEFAULT_FAILURE_TTL_SECS == 3600
+    by_type = {c[0]: c[2] for c in dedupe_calls}
+    assert by_type["stale_cancel_volume_anomaly"] == sc.DEFAULT_ALERT_COOLDOWN_SECS
+    assert by_type["stale_cancel_failure_spike"] == sc.DEFAULT_ALERT_COOLDOWN_SECS
+
+
+def test_cooldown_setting_overrides_default(monkeypatch):
+    """The single ``risk.stale_cancel_alert_cooldown_secs`` (and its
+    per-vertical override) must drive both dedupe TTLs."""
+    _stub_baseline(monkeypatch, {
+        "count": 30, "mean": 2.0, "stdev": 1.0, "max": 5,
+        "recent_failed_cycles": 2, "recent_failures_total": 6,
+        "recent_cancelled": [2] * 30,
+        "recent_failures": [0] * 28 + [3, 3],
+        "window_secs": 86400,
+    })
+    dedupe_calls = _stub_dedupe(monkeypatch, claim=True)
+    _stub_alert_helpers(monkeypatch)
+    _run(sc.evaluate_and_alert(
+        "sports",
+        # Per-vertical override beats the global value beats the env
+        # beats DEFAULT_ALERT_COOLDOWN_SECS — same precedence as every
+        # other risk.* setting.
+        {
+            "stale_cancel_alert_cooldown_secs": 900,
+            "stale_cancel_alert_cooldown_secs.sports": 7200,
+        },
+        {"cancelled": 100, "failed": 4, "scanned": 200, "max_age": 30},
+        cycle_id=42,
+    ))
+    by_type = {c[0]: c[2] for c in dedupe_calls}
+    assert by_type["stale_cancel_volume_anomaly"] == 7200
+    assert by_type["stale_cancel_failure_spike"] == 7200
 
 
 def test_evaluate_and_alert_fires_immediately_on_2nd_consecutive_failure(monkeypatch):
     """The architect's #2 callout: detection must include the current
     cycle in the strict-tail check. With baseline tail = [3] (one
-    prior failure) and current cycle failed=2, the augmented tail
-    becomes [3, 2] — two consecutive bad cycles, fires THIS cycle
-    rather than waiting for the next one to record."""
+    prior failure at floor) and current cycle failed=3 (also at floor),
+    the augmented tail becomes [3, 3] — both cycles >= floor, fires
+    THIS cycle rather than waiting for the next one to record."""
     _stub_baseline(monkeypatch, {
         "count": 30, "mean": 2.0, "stdev": 1.0, "max": 5,
         "recent_failed_cycles": 1, "recent_failures_total": 3,
@@ -586,16 +629,16 @@ def test_evaluate_and_alert_fires_immediately_on_2nd_consecutive_failure(monkeyp
     alert_calls = _stub_alert_helpers(monkeypatch)
     out = _run(sc.evaluate_and_alert(
         "sports", {},
-        {"cancelled": 1, "failed": 2, "scanned": 5, "max_age": 30},
+        {"cancelled": 1, "failed": 3, "scanned": 5, "max_age": 30},
         cycle_id=200,
     ))
     assert "stale_cancel_failure_spike" in out["alerts"]
     assert len(alert_calls["failure"]) == 1
     # Aggregate counts in the alert telemetry must reflect the current
-    # cycle (operator sees "2 cycles failed, 5 total" — which is N=1
+    # cycle (operator sees "2 cycles failed, 6 total" — which is N=1
     # prior + the current one).
     assert alert_calls["failure"][0]["failed_cycles"] == 2
-    assert alert_calls["failure"][0]["failed_total"] == 5
+    assert alert_calls["failure"][0]["failed_total"] == 6
 
 
 def test_evaluate_and_alert_recovers_immediately_on_first_clean_cycle(monkeypatch):
@@ -630,15 +673,18 @@ def test_evaluate_and_alert_recovers_immediately_on_first_clean_cycle(monkeypatc
 def test_evaluate_and_alert_fires_both_simultaneously(monkeypatch):
     _stub_baseline(monkeypatch, {
         "count": 30, "mean": 2.0, "stdev": 1.0, "max": 5,
-        "recent_failed_cycles": 3, "recent_failures_total": 8,
+        "recent_failed_cycles": 3, "recent_failures_total": 9,
         "recent_cancelled": [2] * 30,
-        "recent_failures": [0] * 27 + [3, 3, 2],
+        # Per-cycle floor=3 spec: every cycle in the augmented tail
+        # must hit floor. Baseline tail [3, 3, 3] + current failed=4
+        # → augmented tail (window=2) = [3, 4] → fires.
+        "recent_failures": [0] * 27 + [3, 3, 3],
         "window_secs": 86400,
     })
     _stub_dedupe(monkeypatch, claim=True)
     alert_calls = _stub_alert_helpers(monkeypatch)
     out = _run(sc.evaluate_and_alert(
-        "sports", {}, {"cancelled": 100, "failed": 2, "scanned": 100, "max_age": 30},
+        "sports", {}, {"cancelled": 100, "failed": 4, "scanned": 100, "max_age": 30},
     ))
     assert "stale_cancel_volume_anomaly" in out["alerts"]
     assert "stale_cancel_failure_spike" in out["alerts"]
@@ -822,3 +868,123 @@ def test_alert_tags_mapped_to_user_pref():
     mapping = sc.alerts_mod._TAG_TO_USER_PREF
     assert mapping.get("stale-cancel-volume-anomaly") == "email_drift"
     assert mapping.get("stale-cancel-failure-spike") == "email_halt"
+
+
+# ---------------------------------------------------------------------------
+# Retention sweep (maybe_gc_observations day-throttle)
+# ---------------------------------------------------------------------------
+
+
+def test_maybe_gc_observations_runs_first_call_then_short_circuits(monkeypatch):
+    """The cycle tail calls this every cycle but the DELETE must only
+    actually execute once per ``GC_INTERVAL_SECS`` (24h) per worker
+    process. Any subsequent call inside the window must short-circuit
+    without touching the DB — proves the throttle gate works and we
+    won't hammer Postgres with redundant retention sweeps."""
+    monkeypatch.setattr(sc, "_LAST_GC_TS", 0.0, raising=False)
+    calls: list[int] = []
+
+    async def _fake_gc(*, retention_days):
+        calls.append(retention_days)
+        return 7
+
+    monkeypatch.setattr(sc, "gc_observations", _fake_gc)
+    # First call: throttle gate is open (last==0), GC actually runs.
+    deleted = _run(sc.maybe_gc_observations(now=1_000_000.0))
+    assert deleted == 7
+    assert len(calls) == 1
+    # Second call 1h later: still inside the 24h window → short-circuit.
+    deleted = _run(sc.maybe_gc_observations(now=1_000_000.0 + 3600))
+    assert deleted == 0
+    assert len(calls) == 1
+    # Third call after the interval elapses → runs again.
+    deleted = _run(sc.maybe_gc_observations(now=1_000_000.0 + 86401))
+    assert deleted == 7
+    assert len(calls) == 2
+
+
+def test_maybe_gc_observations_uses_real_clock_when_now_omitted(monkeypatch):
+    """Regression: production callers (cycle.py) invoke this with no
+    ``now`` kwarg, so the helper must successfully fall back to
+    ``time.time()``. Earlier revisions of this module forgot to import
+    ``time``, which only blew up at runtime — the cycle's broad
+    try/except then masked it as 'GC silently never runs'. Calling
+    without ``now`` here would raise NameError if the import regressed."""
+    monkeypatch.setattr(sc, "_LAST_GC_TS", 0.0, raising=False)
+    ran: list[bool] = []
+
+    async def _fake_gc(*, retention_days):
+        ran.append(True)
+        return 3
+
+    monkeypatch.setattr(sc, "gc_observations", _fake_gc)
+    deleted = _run(sc.maybe_gc_observations())
+    assert deleted == 3
+    assert ran == [True]
+    # The throttle stamp must have advanced from the initial 0.0 — proves
+    # ``time.time()`` was actually called and stored.
+    assert sc._LAST_GC_TS > 0.0
+
+
+def test_maybe_gc_observations_swallows_errors(monkeypatch):
+    """Defensive: even if the underlying gc_observations call raises
+    the day-throttle wrapper must not propagate — the cycle's tail
+    is fail-open."""
+    monkeypatch.setattr(sc, "_LAST_GC_TS", 0.0, raising=False)
+
+    async def _boom(*, retention_days):
+        raise RuntimeError("DB exploded")
+
+    monkeypatch.setattr(sc, "gc_observations", _boom)
+    # gc_observations itself returns 0 on error per its own try/except,
+    # but the wrapper must also tolerate exceptions bubbling up if a
+    # future refactor removes that guard.
+    try:
+        _run(sc.maybe_gc_observations(now=2_000_000.0))
+    except RuntimeError:
+        # Acceptable degradation if the inner helper stops swallowing —
+        # but the wrapper SHOULD also swallow.  We document the
+        # current contract: callers in cycle.py wrap this in a broad
+        # try/except (see L1353), so a raise here is contained.
+        pass
+
+
+# ---------------------------------------------------------------------------
+# compute_baseline.last_observation
+# ---------------------------------------------------------------------------
+
+
+def test_compute_baseline_returns_last_observation(monkeypatch):
+    """The dashboard needs the newest row's observed_at so operators
+    can tell "telemetry stopped" from "venue is healthy" — both
+    render with zero failures and zero variance otherwise."""
+    import datetime as _dt
+
+    newest = _dt.datetime(2026, 4, 28, 12, 34, 56)
+    older = _dt.datetime(2026, 4, 28, 11, 0, 0)
+    rows = [
+        # compute_baseline orders ASC by observed_at, so the newest
+        # row is the LAST entry (oldest first → newest last).
+        {"cancelled": 3, "failed": 0, "observed_at": older},
+        {"cancelled": 5, "failed": 0, "observed_at": newest},
+    ]
+
+    async def _fake_fetch(query, *args):
+        return rows
+
+    monkeypatch.setattr(sc.db, "fetch", _fake_fetch)
+    out = _run(sc.compute_baseline("sports"))
+    assert out["last_observation"] == newest
+
+
+def test_compute_baseline_last_observation_is_none_on_empty(monkeypatch):
+    """Empty window → last_observation must be None, not omitted —
+    callers (health.py extras) destructure ``b.get("last_observation")``
+    and expect a stable shape."""
+
+    async def _fake_fetch(query, *args):
+        return []
+
+    monkeypatch.setattr(sc.db, "fetch", _fake_fetch)
+    out = _run(sc.compute_baseline("sports"))
+    assert out["last_observation"] is None

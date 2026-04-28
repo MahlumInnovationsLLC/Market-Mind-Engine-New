@@ -3101,8 +3101,8 @@ def order_dead_letter_resolved(
 #
 # Caller (`app.orchestrator.stale_cancel_baseline.evaluate_and_alert`)
 # is responsible for dedupe — keyed on `vertical` with a 30m default
-# TTL, configurable via `risk.stale_cancel_volume_ttl_secs.<vertical>`
-# / `risk.stale_cancel_failure_ttl_secs.<vertical>`.
+# TTL, configurable via `risk.stale_cancel_alert_cooldown_secs[.<vertical>]`
+# (single dial shared by both volume + failure alert types per #711).
 # ---------------------------------------------------------------------------
 
 

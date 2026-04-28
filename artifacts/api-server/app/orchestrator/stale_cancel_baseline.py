@@ -32,6 +32,7 @@ from __future__ import annotations
 import logging
 import math
 import os
+import time
 from typing import Any
 
 from .. import db
@@ -50,21 +51,26 @@ log = logging.getLogger(__name__)
 DEFAULT_BASELINE_WINDOW_SECS: int = 24 * 60 * 60   # 24h rolling window
 DEFAULT_VOLUME_SIGMA: float = 3.0                  # >= 3σ above mean
 DEFAULT_VOLUME_FLOOR: int = 10                     # ignore alerts below this absolute count
-DEFAULT_FAILURE_WINDOW: int = 2                    # consecutive cycles with failed > 0
-DEFAULT_FAILURE_FLOOR: int = 3                     # min total failures across the window
-DEFAULT_VOLUME_TTL_SECS: int = 1800                # 30m dedupe window
-DEFAULT_FAILURE_TTL_SECS: int = 3600               # 1h dedupe window — failure
-                                                   # spikes are sticky (the 24h
-                                                   # window stays "bad" for a
-                                                   # long time after recovery
-                                                   # since failed_total counts
-                                                   # cumulatively), so we don't
-                                                   # want pager fatigue. Volume
-                                                   # spikes self-correct as
-                                                   # the cancel count returns
-                                                   # to baseline so 30m there
-                                                   # is fine.
+DEFAULT_FAILURE_WINDOW: int = 2                    # consecutive cycles
+DEFAULT_FAILURE_FLOOR: int = 3                     # per-cycle threshold: each
+                                                   # cycle in the tail must
+                                                   # have ``failed >= floor``
+                                                   # for the spike to fire.
+DEFAULT_ALERT_COOLDOWN_SECS: int = 1800            # 30m dedupe window — single
+                                                   # cooldown shared by the
+                                                   # volume anomaly + failure
+                                                   # spike alerts per the
+                                                   # task #711 settings spec
+                                                   # (`risk.stale_cancel_alert_cooldown_secs(.<vertical>)`).
 RETENTION_DAYS: int = 7                            # observation table GC
+GC_INTERVAL_SECS: int = 86400                      # at most one GC run per
+                                                   # day per process — wired
+                                                   # via ``maybe_gc_observations``
+                                                   # from the cycle tail.
+
+# In-process throttle for ``maybe_gc_observations``. Module-level so it
+# survives across run_cycle invocations within the same worker process.
+_LAST_GC_TS: float = 0.0
 
 
 def _env_int(name: str, default: int) -> int:
@@ -171,6 +177,35 @@ async def record_observation(
         )
 
 
+async def maybe_gc_observations(
+    *,
+    retention_days: int = RETENTION_DAYS,
+    interval_secs: int = GC_INTERVAL_SECS,
+    now: float | None = None,
+) -> int:
+    """Day-throttled wrapper around :func:`gc_observations`.
+
+    The cycle tail calls this every cycle but it only actually runs the
+    DELETE once per ``interval_secs`` per worker process — the module
+    keeps a ``_LAST_GC_TS`` mark and short-circuits otherwise. This
+    avoids needing a separate scheduler/cron just for one daily
+    housekeeping query while still keeping retention bounded.
+
+    Returns the row-delete count from the run that actually executed
+    (i.e. when the throttle gate opened) or ``0`` for short-circuit
+    calls.
+
+    The ``now`` kwarg is for tests; production callers can omit it.
+    """
+    global _LAST_GC_TS
+    current = float(now if now is not None else time.time())
+    if current - _LAST_GC_TS < float(interval_secs):
+        return 0
+    deleted = await gc_observations(retention_days=retention_days)
+    _LAST_GC_TS = current
+    return deleted
+
+
 async def gc_observations(*, retention_days: int = RETENTION_DAYS) -> int:
     """Delete observations older than the retention window.
 
@@ -247,6 +282,12 @@ async def compute_baseline(
         "recent_failures_total": 0,
         "recent_cancelled": [],
         "recent_failures": [],
+        # Newest observation timestamp in the window (None when empty).
+        # Surfaced to the operator dashboard as the "last observation"
+        # marker so a vertical with stale telemetry (sweep stopped
+        # writing rows) is visually distinct from a quiet but healthy
+        # one.
+        "last_observation": None,
     }
     try:
         if exclude_cycle_id is not None:
@@ -293,6 +334,8 @@ async def compute_baseline(
     # rather than the 24h aggregate, which would latch the alert.
     sparkline = cancelled_vals[-30:]
     failure_tail = failed_vals[-30:]
+    # Rows are ORDER BY observed_at ASC, so the last row is the newest.
+    last_obs = rows[-1].get("observed_at")
     out.update(
         count=n,
         mean=float(mean),
@@ -302,6 +345,7 @@ async def compute_baseline(
         recent_failures_total=int(sum(failed_vals)),
         recent_cancelled=sparkline,
         recent_failures=failure_tail,
+        last_observation=last_obs,
     )
     return out
 
@@ -389,25 +433,19 @@ def _is_failure_spike(
 ) -> tuple[bool, dict[str, Any]]:
     """Return (is_anomaly, telemetry).
 
-    Fires when the *strict tail* — the most recent ``failure_window``
-    cycles in the rolling window — are *all* failing (each cycle has
-    ``failed > 0``) AND the sum of failures across that tail is at
-    least ``floor``. This is intentionally an edge-triggered shape:
+    Per task #711 spec: fires when *each* of the most recent
+    ``failure_window`` cycles has ``failed >= floor``. This is an
+    edge-triggered, per-cycle threshold check:
 
-      * One bad cycle followed by a clean one drops out of the tail
-        immediately, so a flapping venue does NOT page repeatedly.
-      * Sustained failures (every cycle in the tail bad) keep the
-        condition true, dedupe-throttled by ``DEFAULT_FAILURE_TTL_SECS``.
-      * After recovery (one clean cycle in the tail), the condition
-        flips false on the next evaluation, regardless of how big the
-        rolling 24h sum is. That avoids the "alert latched for hours
-        after the venue came back" pathology that the original
-        24h-aggregate version had.
+      * Tail ``[3, 3]`` with floor=3 fires (each cycle hits the bar).
+      * Tail ``[1, 2]`` with floor=3 does NOT fire (neither cycle
+        reaches the per-cycle threshold even though the sum is 3).
+      * Tail ``[5, 0]`` does NOT fire — recovery is immediate, no
+        latching on the 24h aggregate.
 
-    ``floor`` still applies so a tail of `[1, 1]` (two cycles, one
-    failure each, total=2) won't fire if the floor is 3 — calibrating
-    the floor against the cycle cadence is the operator's lever for
-    "how many failed cancels do I tolerate per cycle before paging".
+    ``floor`` is the *per-cycle* failure count tolerated before paging
+    — operators tune it against cycle cadence ("how bad does a single
+    cycle have to be before I want a page?").
 
     The telemetry returned still surfaces the *24h aggregate* counts
     (``failed_cycles``, ``failed_total``) for the alert email so the
@@ -421,9 +459,10 @@ def _is_failure_spike(
     tail = baseline.get("recent_failures") or []
     # Take the strictly-most-recent ``failure_window`` entries.
     strict_tail = list(tail)[-failure_window:]
-    tail_all_bad = (
+    # Spec: each cycle in the tail must satisfy ``failed >= floor``.
+    tail_all_above_floor = (
         len(strict_tail) >= failure_window
-        and all(int(v) > 0 for v in strict_tail)
+        and all(int(v) >= floor for v in strict_tail)
     )
     tail_sum = int(sum(int(v) for v in strict_tail))
     telemetry = {
@@ -433,9 +472,11 @@ def _is_failure_spike(
         "floor": floor,
         "tail": [int(v) for v in strict_tail],
         "tail_sum": tail_sum,
-        "tail_all_bad": tail_all_bad,
+        # Naming kept stable across the schema for dashboard consumers,
+        # but the semantics are now "all >= floor", not "all > 0".
+        "tail_all_bad": tail_all_above_floor,
     }
-    return (tail_all_bad and tail_sum >= floor), telemetry
+    return tail_all_above_floor, telemetry
 
 
 async def evaluate_and_alert(
@@ -476,18 +517,20 @@ async def evaluate_and_alert(
         "AXIOM_STALE_CANCEL_FAILURE_FLOOR",
         DEFAULT_FAILURE_FLOOR,
     )
-    vol_ttl = _resolve_int(
+    # Single per-vertical cooldown shared by both alert types per the
+    # task #711 settings spec. Operators tune one knob
+    # (`risk.stale_cancel_alert_cooldown_secs.<vertical>`) and both the
+    # volume anomaly and the failure spike use it for dedupe TTL —
+    # avoids the calibration trap of "I changed one and forgot the
+    # other and now my pager is misbehaving asymmetrically".
+    cooldown_secs = _resolve_int(
         vertical, overrides,
-        "stale_cancel_volume_ttl_secs",
-        "AXIOM_STALE_CANCEL_VOLUME_TTL_SECS",
-        DEFAULT_VOLUME_TTL_SECS,
+        "stale_cancel_alert_cooldown_secs",
+        "AXIOM_STALE_CANCEL_ALERT_COOLDOWN_SECS",
+        DEFAULT_ALERT_COOLDOWN_SECS,
     )
-    fail_ttl = _resolve_int(
-        vertical, overrides,
-        "stale_cancel_failure_ttl_secs",
-        "AXIOM_STALE_CANCEL_FAILURE_TTL_SECS",
-        DEFAULT_FAILURE_TTL_SECS,
-    )
+    vol_ttl = cooldown_secs
+    fail_ttl = cooldown_secs
 
     out: dict[str, Any] = {
         "vertical": vertical,

@@ -1338,6 +1338,15 @@ async def run_cycle(vertical: str = "sports") -> CycleResult:
                 failed=int(sweep_stats.get("failed") or 0),
                 max_age=int(sweep_stats.get("max_age") or 0),
             )
+            # Retention sweep: prunes stale_cancel_observations rows
+            # older than the configured window (7 days). The helper is
+            # day-throttled per worker process so the DELETE only
+            # actually executes once per 24h regardless of how often
+            # the cycle ticks; in-between calls return immediately.
+            # Wired here (rather than via a separate scheduler) so
+            # retention is automatically active as soon as the cycle
+            # is — one fewer moving part for ops.
+            await _sc_baseline.maybe_gc_observations()
         except Exception as e:  # pragma: no cover — defensive
             log.warning(
                 "stale_cancel baseline/anomaly path crashed (cycle continues): %s",

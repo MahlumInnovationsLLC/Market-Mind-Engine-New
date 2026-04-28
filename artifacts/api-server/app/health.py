@@ -1085,12 +1085,53 @@ async def _probe_stale_cancel_baselines() -> list[dict]:
     except Exception as e:  # pragma: no cover — defensive
         log.warning("stale_cancel baselines fetch failed: %s", e)
         return []
+
+    # Per-vertical "last alert" lookup: when did stale_cancel_volume_anomaly
+    # or stale_cancel_failure_spike last fire for this vertical? Pulled
+    # from notification_dedupe so the operator dashboard can render
+    # "last paged: 14m ago" next to each baseline card without a
+    # second round-trip from the frontend. Failure mode is "no row
+    # found" → field is None and the card just omits the marker.
+    from . import db as _db
+    last_alert_map: dict[str, dict[str, Any]] = {}
+    try:
+        rows = await _db.fetch(
+            """
+            SELECT key, sent_at
+              FROM notification_dedupe
+             WHERE key LIKE 'stale_cancel_volume_anomaly:%'
+                OR key LIKE 'stale_cancel_failure_spike:%'
+            """
+        )
+        for r in rows:
+            k = str(r["key"] or "")
+            # key format: "<alert_type>:<vertical>"
+            try:
+                alert_type, vertical_key = k.split(":", 1)
+            except ValueError:
+                continue
+            slot = last_alert_map.setdefault(vertical_key, {})
+            existing = slot.get(alert_type)
+            ts = r["sent_at"]
+            if existing is None or (ts and existing and ts > existing):
+                slot[alert_type] = ts
+    except Exception as e:  # pragma: no cover — defensive
+        log.warning("stale_cancel last_alert lookup failed: %s", e)
+
     out: list[dict] = []
     for b in baselines:
         vertical = str(b.get("vertical") or "")
         count = int(b.get("count") or 0)
         failed_total = int(b.get("recent_failures_total") or 0)
         failed_cycles = int(b.get("recent_failed_cycles") or 0)
+        per_vert_alerts = last_alert_map.get(vertical) or {}
+        last_volume_alert = per_vert_alerts.get("stale_cancel_volume_anomaly")
+        last_failure_alert = per_vert_alerts.get("stale_cancel_failure_spike")
+        # Operator-facing "any alert" timestamp = max of the two.
+        last_alert_ts = max(
+            (t for t in (last_volume_alert, last_failure_alert) if t is not None),
+            default=None,
+        )
         if count == 0:
             status = "unconfigured"
             detail = "no observations in 24h window"
@@ -1124,6 +1165,34 @@ async def _probe_stale_cancel_baselines() -> list[dict]:
                 "recent_failed_cycles": failed_cycles,
                 "recent_failures_total": failed_total,
                 "recent_cancelled": list(b.get("recent_cancelled") or []),
+                # Newest stale_cancel_observations row's observed_at
+                # for this vertical — surfaces "telemetry stopped"
+                # vs. "venue is healthy" on the dashboard. ISO8601
+                # string for JSON-friendly transport.
+                "last_observation": (
+                    b["last_observation"].isoformat()
+                    if b.get("last_observation") is not None
+                    else None
+                ),
+                # Most recent dispatch timestamp for either anomaly
+                # alert tied to this vertical (max of the two). None
+                # when neither has fired in the dedupe table's
+                # retention window.
+                "last_alert": (
+                    last_alert_ts.isoformat()
+                    if last_alert_ts is not None
+                    else None
+                ),
+                "last_volume_alert": (
+                    last_volume_alert.isoformat()
+                    if last_volume_alert is not None
+                    else None
+                ),
+                "last_failure_alert": (
+                    last_failure_alert.isoformat()
+                    if last_failure_alert is not None
+                    else None
+                ),
             },
         ))
     return out
