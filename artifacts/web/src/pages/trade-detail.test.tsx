@@ -133,5 +133,56 @@ describe("TradeDetailPage", () => {
     // No series → the chart placeholder must surface so the operator
     // knows there's no time-series rather than thinking the chart broke.
     expect(screen.getByTestId("text-no-series")).toBeTruthy();
+    // No soccer summary attached → the match banner must be omitted.
+    expect(screen.queryByTestId("card-trade-soccer-match")).toBeNull();
+  });
+
+  it("renders the soccer match banner with team names + scoreline when present", () => {
+    state.detail.isSuccess = true;
+    state.detail.data = {
+      trade: {
+        id: 9,
+        trade_id: "T-9",
+        market_id: "KX-EPL-DRAW",
+        market_title: "EPL: Arsenal vs Chelsea — Draw",
+        side: "yes",
+        action: "buy",
+        quantity: 5,
+        price: 0.32,
+        model_prob: 0.4,
+        model_edge: 0.08,
+        pnl: 3.4,
+        kelly_fraction: 0.02,
+        executed_at: "2026-04-22T10:00:00Z",
+        exchange: "kalshi",
+        trading_mode: "live",
+        vertical: "soccer",
+        league: "EPL",
+      },
+      series: [],
+      soccer_match: {
+        result: "draw",
+        home_team: "Arsenal",
+        away_team: "Chelsea",
+        home_score: 1,
+        away_score: 1,
+        status: "closed",
+      },
+    };
+    renderAt("/trade/abc");
+    const banner = screen.getByTestId("card-trade-soccer-match");
+    expect(banner).toBeTruthy();
+    expect(screen.getByTestId("text-trade-soccer-teams").textContent).toMatch(
+      /Arsenal/,
+    );
+    expect(screen.getByTestId("text-trade-soccer-teams").textContent).toMatch(
+      /Chelsea/,
+    );
+    expect(screen.getByTestId("text-trade-soccer-score").textContent).toMatch(
+      /1\s*–\s*1/,
+    );
+    expect(screen.getByTestId("badge-trade-soccer-result").textContent).toMatch(
+      /DRAW/,
+    );
   });
 });

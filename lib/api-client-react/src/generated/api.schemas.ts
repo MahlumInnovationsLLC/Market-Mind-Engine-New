@@ -768,6 +768,34 @@ export interface TradeDetailQuota {
   limit: number;
 }
 
+/**
+ * Resolved 3-way match result.
+ */
+export type SoccerMatchSummaryResult =
+  (typeof SoccerMatchSummaryResult)[keyof typeof SoccerMatchSummaryResult];
+
+export const SoccerMatchSummaryResult = {
+  home: "home",
+  draw: "draw",
+  away: "away",
+} as const;
+
+/**
+ * Final scoreline + h/d/a result for a soccer trade, joined from `swarm_debates.game_id` into `sportradar_live_state` and the `sportradar_schedules` cache.
+ */
+export interface SoccerMatchSummary {
+  /** Resolved 3-way match result. */
+  result: SoccerMatchSummaryResult;
+  /** Home team display name (may be null when the schedule cache hasn't been populated yet). */
+  home_team?: string | null;
+  /** Away team display name. */
+  away_team?: string | null;
+  home_score?: number | null;
+  away_score?: number | null;
+  /** Sportradar live-state status (e.g. `closed`, `ended`). */
+  status?: string | null;
+}
+
 export interface TradeDetail {
   trade: TradeDetailRow;
   series: TradeDetailPoint[];
@@ -777,6 +805,8 @@ export interface TradeDetail {
   delay_minutes?: number;
   /** Free-tier daily distinct-market quota snapshot taken after recording this view. Present only for free callers. */
   quota?: TradeDetailQuota | null;
+  /** For soccer (3-way h/d/a) trades whose Sportradar match has finalised: home/away team names plus the final scoreline and resolved `home`/`draw`/`away` result. Absent (or null) for non-soccer markets and for soccer markets whose match has not yet finalised. */
+  soccer_match?: SoccerMatchSummary | null;
 }
 
 export type UpgradeRequiredPayloadError =
@@ -968,6 +998,19 @@ export interface SettlementTodaySummary {
   by_vertical: SettlementVerticalToday[];
 }
 
+/**
+ * For soccer (3-way h/d/a) markets: which side actually won. Drives the HOME/DRAW/AWAY badge on the recent-settlements row.  Absent / null for non-3-way markets.
+ */
+export type SettlementRecentEventResult3way =
+  | (typeof SettlementRecentEventResult3way)[keyof typeof SettlementRecentEventResult3way]
+  | null;
+
+export const SettlementRecentEventResult3way = {
+  home: "home",
+  draw: "draw",
+  away: "away",
+} as const;
+
 export interface SettlementRecentEvent {
   type?: string;
   market_id?: string | null;
@@ -976,6 +1019,16 @@ export interface SettlementRecentEvent {
   persona_metrics_updated?: number | null;
   alerts_raised?: number | null;
   verticals?: string[];
+  /** For soccer (3-way h/d/a) markets: which side actually won. Drives the HOME/DRAW/AWAY badge on the recent-settlements row.  Absent / null for non-3-way markets. */
+  result_3way?: SettlementRecentEventResult3way;
+  /** Home team display name for 3-way soccer settlements. */
+  home_team?: string | null;
+  /** Away team display name for 3-way soccer settlements. */
+  away_team?: string | null;
+  /** Final home score (Sportradar) for 3-way soccer settlements. */
+  home_score?: number | null;
+  /** Final away score (Sportradar) for 3-way soccer settlements. */
+  away_score?: number | null;
   [key: string]: unknown;
 }
 

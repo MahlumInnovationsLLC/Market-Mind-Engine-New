@@ -825,6 +825,7 @@ async def settle_market(
     market_id: str, *, outcome_yes: int, settle_price: float | None = None,
     result_3way: str | None = None,
     n_way_winner: dict[str, str] | None = None,
+    match_summary: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Settle every un-settled trade against `market_id` with the given
     binary outcome.  Cascades through positions, postmortems, persona
@@ -1039,6 +1040,17 @@ async def settle_market(
         "alerts_raised": alerts_raised,
         "details": settled,
     }
+    # Soccer 3-way match summary — surfaces home/away team names and
+    # final scoreline on the operator console's recent-settlements
+    # panel so an operator can confirm the per-leg derivation matched
+    # the real result without leaving the dashboard.  Absent for non-
+    # 3-way markets and for soccer markets settled before Sportradar
+    # publishes the final score.
+    if match_summary is not None:
+        for k in ("home_team", "away_team", "home_score", "away_score"):
+            v = match_summary.get(k)
+            if v is not None:
+                result[k] = v
     await _publish({"type": "market_settle_complete", **{k: v for k, v in result.items() if k != "details"}})
     return result
 
@@ -1139,6 +1151,30 @@ async def _sportradar_three_way_result(market_id: str) -> str | None:
     has finalised with a scoreline; ``None`` otherwise (no debate /
     no live-state row / not yet final / scoreline missing).
     """
+    summary = await _sportradar_soccer_match_summary(market_id)
+    if summary is None:
+        return None
+    return summary.get("result")  # type: ignore[return-value]
+
+
+async def _sportradar_soccer_match_summary(
+    market_id: str,
+) -> dict[str, Any] | None:
+    """Resolve the full soccer match summary for a kalshi market —
+    h/d/a result plus the home/away team names and final scoreline —
+    by joining ``swarm_debates`` (for ``game_id`` + ``league``) into
+    the ``sportradar_live_state`` and ``sportradar_schedules`` caches.
+
+    Returns ``{"result", "home_team", "away_team", "home_score",
+    "away_score", "status"}`` once the match has finalised with a
+    scoreline; ``None`` if there is no debate/league mapping, the
+    market is not a 3-way soccer leg, the live-state row is missing,
+    the match is not yet final, or the scoreline is unavailable.
+
+    The recent-settlements panel and the trade-detail page both call
+    this so a single query encodes the "is the match final + here is
+    the scoreboard" contract for soccer markets.
+    """
     try:
         debate = await db.fetchrow(
             """
@@ -1189,10 +1225,40 @@ async def _sportradar_three_way_result(market_id: str) -> str | None:
     except (TypeError, ValueError):
         return None
     if h > a:
-        return "home"
-    if h < a:
-        return "away"
-    return "draw"
+        result = "home"
+    elif h < a:
+        result = "away"
+    else:
+        result = "draw"
+    # Look up the team names from the schedules cache.  Best-effort —
+    # missing names just leave the labels empty so the UI can fall back
+    # to "Home / Away" placeholders without breaking.
+    home_team: str | None = None
+    away_team: str | None = None
+    try:
+        sched = await db.fetchrow(
+            """
+            SELECT home_team, away_team
+              FROM sportradar_schedules
+             WHERE game_id = $1
+             ORDER BY updated_at DESC
+             LIMIT 1
+            """,
+            game_id,
+        )
+        if sched is not None:
+            home_team = sched["home_team"] or None
+            away_team = sched["away_team"] or None
+    except Exception as e:
+        log.debug("sportradar schedules read failed for %s: %s", game_id, e)
+    return {
+        "result": result,
+        "home_team": home_team,
+        "away_team": away_team,
+        "home_score": h,
+        "away_score": a,
+        "status": status,
+    }
 
 
 def _parse_kalshi_outcome(market: dict[str, Any]) -> tuple[int, float | None] | None:
@@ -1279,11 +1345,14 @@ async def run_cycle(*, market_limit: int = 50) -> CycleResult:
                 # correctly settles BOTH the home and away YES legs as
                 # NO without being treated as a 2-way moneyline miss.
                 result_3way: str | None = None
+                match_summary: dict[str, Any] | None = None
                 try:
                     league = await _league_for_market(ticker)
                     cfg = get_league_config(league) if league else None
                     if cfg is not None and cfg.three_way_market:
-                        result_3way = await _sportradar_three_way_result(ticker)
+                        match_summary = await _sportradar_soccer_match_summary(ticker)
+                        if match_summary is not None:
+                            result_3way = match_summary.get("result")
                 except Exception as e:
                     log.debug("3-way result lookup failed for %s: %s", ticker, e)
 
@@ -1307,6 +1376,7 @@ async def run_cycle(*, market_limit: int = 50) -> CycleResult:
                         outcome_yes=outcome_yes,
                         settle_price=settle_price,
                         result_3way=result_3way,
+                        match_summary=match_summary,
                     )
                     cr.markets_settled += 1
                     cr.trades_settled += int(res.get("trades_settled", 0))

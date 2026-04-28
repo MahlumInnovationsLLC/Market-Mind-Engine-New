@@ -1784,7 +1784,48 @@ components:
           description: >-
             Free-tier daily distinct-market quota snapshot taken after
             recording this view. Present only for free callers.
+        soccer_match:
+          allOf:
+            - $ref: "#/components/schemas/SoccerMatchSummary"
+          nullable: true
+          description: >-
+            For soccer (3-way h/d/a) trades whose Sportradar match has
+            finalised: home/away team names plus the final scoreline
+            and resolved `home`/`draw`/`away` result. Absent (or null)
+            for non-soccer markets and for soccer markets whose match
+            has not yet finalised.
       required: [trade, series]
+
+    SoccerMatchSummary:
+      type: object
+      description: >-
+        Final scoreline + h/d/a result for a soccer trade, joined from
+        `swarm_debates.game_id` into `sportradar_live_state` and the
+        `sportradar_schedules` cache.
+      properties:
+        result:
+          type: string
+          enum: [home, draw, away]
+          description: Resolved 3-way match result.
+        home_team:
+          type: string
+          nullable: true
+          description: Home team display name (may be null when the schedule cache hasn't been populated yet).
+        away_team:
+          type: string
+          nullable: true
+          description: Away team display name.
+        home_score:
+          type: integer
+          nullable: true
+        away_score:
+          type: integer
+          nullable: true
+        status:
+          type: string
+          nullable: true
+          description: Sportradar live-state status (e.g. `closed`, `ended`).
+      required: [result]
 
     TradeDetailQuota:
       type: object
@@ -2091,6 +2132,30 @@ components:
         verticals:
           type: array
           items: { type: string }
+        result_3way:
+          type: string
+          nullable: true
+          enum: [home, draw, away, null]
+          description: >-
+            For soccer (3-way h/d/a) markets: which side actually won.
+            Drives the HOME/DRAW/AWAY badge on the recent-settlements
+            row.  Absent / null for non-3-way markets.
+        home_team:
+          type: string
+          nullable: true
+          description: Home team display name for 3-way soccer settlements.
+        away_team:
+          type: string
+          nullable: true
+          description: Away team display name for 3-way soccer settlements.
+        home_score:
+          type: integer
+          nullable: true
+          description: Final home score (Sportradar) for 3-way soccer settlements.
+        away_score:
+          type: integer
+          nullable: true
+          description: Final away score (Sportradar) for 3-way soccer settlements.
 
     ModelHealthAlert:
       type: object

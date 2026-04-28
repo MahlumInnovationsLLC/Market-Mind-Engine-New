@@ -5,6 +5,7 @@
  * Axiom-Predict API — backend for the prediction-market trading platform.
  * OpenAPI spec version: 0.1.0
  */
+import type { SoccerMatchSummary } from "./soccerMatchSummary";
 import type { TradeDetailPoint } from "./tradeDetailPoint";
 import type { TradeDetailQuota } from "./tradeDetailQuota";
 import type { TradeDetailRow } from "./tradeDetailRow";
@@ -18,4 +19,6 @@ export interface TradeDetail {
   delay_minutes?: number;
   /** Free-tier daily distinct-market quota snapshot taken after recording this view. Present only for free callers. */
   quota?: TradeDetailQuota | null;
+  /** For soccer (3-way h/d/a) trades whose Sportradar match has finalised: home/away team names plus the final scoreline and resolved `home`/`draw`/`away` result. Absent (or null) for non-soccer markets and for soccer markets whose match has not yet finalised. */
+  soccer_match?: SoccerMatchSummary | null;
 }

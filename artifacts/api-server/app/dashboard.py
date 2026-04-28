@@ -1808,7 +1808,29 @@ async def get_trade_detail(trade_ref: str) -> dict[str, Any] | None:
             )
             series.sort(key=lambda p: p.get("t") or "")
 
-    return {"trade": trade, "series": series}
+    # For soccer trades whose Sportradar match has finalised, include
+    # the home/away team names and final scoreline so the trade-detail
+    # page can show the operator the actual result the per-leg
+    # derivation matched against.  Best-effort — failures here must
+    # never break the trade-detail render.
+    soccer_match: dict[str, Any] | None = None
+    if market_id and trade.get("league"):
+        try:
+            from .sports.leagues import get_league_config
+            cfg = get_league_config(trade.get("league"))
+            if cfg is not None and cfg.three_way_market:
+                from .settlement.pipeline import (
+                    _sportradar_soccer_match_summary,
+                )
+                soccer_match = await _sportradar_soccer_match_summary(market_id)
+        except Exception as e:
+            log.debug("trade detail soccer match lookup failed: %s", e)
+            soccer_match = None
+
+    out: dict[str, Any] = {"trade": trade, "series": series}
+    if soccer_match is not None:
+        out["soccer_match"] = soccer_match
+    return out
 
 
 async def get_vertical_performance(days: int = 30) -> dict[str, Any]:

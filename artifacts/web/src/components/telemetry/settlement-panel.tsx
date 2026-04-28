@@ -245,6 +245,22 @@ export default function SettlementPanel() {
                 const alerts =
                   typeof r.alerts_raised === "number" ? r.alerts_raised : 0;
                 const outcome = r.outcome_yes === 1 ? "YES" : r.outcome_yes === 0 ? "NO" : "—";
+                // Soccer 3-way result: when present, render a small
+                // HOME/DRAW/AWAY badge so the operator can validate
+                // the per-leg derivation against the Sportradar
+                // scoreline at a glance.
+                const result3way =
+                  r.result_3way === "home" || r.result_3way === "draw" || r.result_3way === "away"
+                    ? r.result_3way
+                    : null;
+                const homeTeam = typeof r.home_team === "string" ? r.home_team : null;
+                const awayTeam = typeof r.away_team === "string" ? r.away_team : null;
+                const homeScore = typeof r.home_score === "number" ? r.home_score : null;
+                const awayScore = typeof r.away_score === "number" ? r.away_score : null;
+                const hasScore = homeScore !== null && awayScore !== null;
+                const scoreLine = hasScore
+                  ? `${homeTeam ?? "Home"} ${homeScore} – ${awayScore} ${awayTeam ?? "Away"}`
+                  : null;
                 return (
                   <li
                     key={`${r.market_id ?? "m"}-${idx}`}
@@ -258,6 +274,15 @@ export default function SettlementPanel() {
                       <div className="text-[10px] uppercase tracking-widest text-muted-foreground">
                         {verticals.join(", ") || "—"}
                       </div>
+                      {scoreLine && (
+                        <div
+                          className="text-[10px] text-muted-foreground truncate"
+                          title={scoreLine}
+                          data-testid="text-settlement-soccer-score"
+                        >
+                          {scoreLine}
+                        </div>
+                      )}
                     </div>
                     <div className="text-right shrink-0">
                       <div
@@ -267,6 +292,14 @@ export default function SettlementPanel() {
                       >
                         {outcome}
                       </div>
+                      {result3way && (
+                        <div
+                          className="mt-0.5 inline-block border border-border px-1.5 py-px text-[9px] font-bold uppercase tracking-widest text-foreground"
+                          data-testid="badge-settlement-soccer-result"
+                        >
+                          {result3way}
+                        </div>
+                      )}
                       <div className="text-[10px] text-muted-foreground">
                         {trades} trades
                         {alerts > 0 && <span className="text-loss"> • {alerts} alerts</span>}

@@ -410,6 +410,65 @@ def test_persona_brier_uses_per_leg_outcome_on_draw_leg_win(monkeypatch):
     assert cap["debate_stamps"][0]["outcome"] == "DRAW_RESULT_WIN"
 
 
+def test_sportradar_soccer_match_summary_returns_teams_and_score(monkeypatch):
+    """The new helper underpins the operator-console UI: trade-detail
+    + recent-settlements both render the home/away team names and the
+    final scoreline.  Verify it joins through swarm_debates ->
+    sportradar_live_state + sportradar_schedules and returns the full
+    summary once the match has finalised.
+    """
+    async def _fake_fetchrow(query: str, *args):
+        if "FROM swarm_debates" in query:
+            return {"league": "EPL", "game_id": "sr:match:42"}
+        if "FROM sportradar_live_state" in query:
+            return {"status": "closed", "home_score": 2, "away_score": 1}
+        if "FROM sportradar_schedules" in query:
+            return {"home_team": "Arsenal", "away_team": "Chelsea"}
+        return None
+
+    monkeypatch.setattr(_pipeline.db, "fetchrow", _fake_fetchrow)
+
+    summary = asyncio.run(
+        _pipeline._sportradar_soccer_match_summary("KX-EPL-1")
+    )
+
+    assert summary is not None
+    assert summary["result"] == "home"
+    assert summary["home_team"] == "Arsenal"
+    assert summary["away_team"] == "Chelsea"
+    assert summary["home_score"] == 2
+    assert summary["away_score"] == 1
+    assert summary["status"] == "closed"
+
+
+def test_sportradar_soccer_match_summary_tolerates_missing_schedule(monkeypatch):
+    """If the schedules cache has no row yet, the helper must still
+    surface the result + scoreline — the UI falls back to "Home"/
+    "Away" placeholders rather than failing.
+    """
+    async def _fake_fetchrow(query: str, *args):
+        if "FROM swarm_debates" in query:
+            return {"league": "EPL", "game_id": "sr:match:99"}
+        if "FROM sportradar_live_state" in query:
+            return {"status": "ended", "home_score": 0, "away_score": 0}
+        if "FROM sportradar_schedules" in query:
+            return None
+        return None
+
+    monkeypatch.setattr(_pipeline.db, "fetchrow", _fake_fetchrow)
+
+    summary = asyncio.run(
+        _pipeline._sportradar_soccer_match_summary("KX-EPL-2")
+    )
+
+    assert summary is not None
+    assert summary["result"] == "draw"
+    assert summary["home_team"] is None
+    assert summary["away_team"] is None
+    assert summary["home_score"] == 0
+    assert summary["away_score"] == 0
+
+
 def test_run_cycle_passes_sportradar_three_way_result_to_settle(monkeypatch):
     """End-to-end cycle integration: a soccer kalshi market with NO
     Kalshi resolution yet but a final Sportradar match score must
@@ -468,20 +527,23 @@ def test_run_cycle_passes_sportradar_three_way_result_to_settle(monkeypatch):
             return {"league": "EPL"}
         if "FROM swarm_debates" in query:
             # Used by both _league_for_market fallback and
-            # _sportradar_three_way_result. Returning a debate row
+            # _sportradar_soccer_match_summary. Returning a debate row
             # carrying the game_id is enough for both.
             return {"league": "EPL", "game_id": "sr:match:42"}
         if "FROM sportradar_live_state" in query:
             return {"status": "closed", "home_score": 1, "away_score": 1}
+        if "FROM sportradar_schedules" in query:
+            return {"home_team": "Arsenal", "away_team": "Chelsea"}
         return None
 
     async def _fake_settle(market_id, *, outcome_yes, settle_price=None,
-                           result_3way=None):
+                           result_3way=None, match_summary=None):
         captured["settle_calls"].append({
             "market_id": market_id,
             "outcome_yes": outcome_yes,
             "settle_price": settle_price,
             "result_3way": result_3way,
+            "match_summary": match_summary,
         })
         return {
             "trades_settled": 1,
@@ -505,6 +567,16 @@ def test_run_cycle_passes_sportradar_three_way_result_to_settle(monkeypatch):
     # Binary fallback is the safe 0 — settle_market overrides it
     # per-trade based on each row's `three_way_leg` metadata.
     assert call["outcome_yes"] == 0
+    # The full match summary must also be threaded through so that
+    # settle_market can publish home/away team names + scoreline onto
+    # the recent-settlements feed for the operator console.
+    summary = call["match_summary"]
+    assert summary is not None
+    assert summary["result"] == "draw"
+    assert summary["home_team"] == "Arsenal"
+    assert summary["away_team"] == "Chelsea"
+    assert summary["home_score"] == 1
+    assert summary["away_score"] == 1
 
 
 def test_run_cycle_skips_market_when_sportradar_has_no_final_score(monkeypatch):

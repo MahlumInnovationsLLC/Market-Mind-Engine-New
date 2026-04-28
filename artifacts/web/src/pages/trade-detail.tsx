@@ -16,6 +16,7 @@ import {
   ApiError,
   getGetTradeDetailQueryKey,
   useGetTradeDetail,
+  type SoccerMatchSummary,
   type UpgradeRequiredPayload,
 } from "@workspace/api-client-react";
 import UpgradeRequiredModal from "@/components/upgrade-required-modal";
@@ -147,6 +148,7 @@ export default function TradeDetailPage() {
 
   const trade = data?.trade;
   const series = data?.series ?? [];
+  const soccer = data?.soccer_match ?? null;
   if (!trade) return <Empty message="Trade not found" />;
 
   // Recharts expects raw numeric series. We carry a `tsMs` field for
@@ -196,6 +198,8 @@ export default function TradeDetailPage() {
           ← dashboard
         </Link>
       </div>
+
+      {soccer && <SoccerMatchBanner summary={soccer} />}
 
       <dl className="mb-6 grid grid-cols-2 gap-3 text-xs md:grid-cols-4 lg:grid-cols-6">
         <Stat label="Side / Action" value={`${(trade.side ?? "—").toUpperCase()} / ${(trade.action ?? "—").toUpperCase()}`} />
@@ -352,5 +356,59 @@ function Stat({
         {value}
       </div>
     </div>
+  );
+}
+
+function SoccerMatchBanner({ summary }: { summary: SoccerMatchSummary }) {
+  const home = summary.home_team ?? "Home";
+  const away = summary.away_team ?? "Away";
+  const homeScore = summary.home_score;
+  const awayScore = summary.away_score;
+  const hasScore =
+    typeof homeScore === "number" && typeof awayScore === "number";
+  const result = summary.result;
+  const resultLabel =
+    result === "home" ? "HOME WIN" : result === "away" ? "AWAY WIN" : "DRAW";
+  return (
+    <section
+      className="mb-4 border border-border bg-card p-3"
+      data-testid="card-trade-soccer-match"
+    >
+      <div className="flex flex-wrap items-baseline justify-between gap-3">
+        <div>
+          <div className="text-[10px] uppercase tracking-widest text-muted-foreground">
+            FINAL :: SPORTRADAR
+          </div>
+          <div
+            className="mt-1 text-base font-bold tracking-tight text-foreground"
+            data-testid="text-trade-soccer-teams"
+          >
+            <span>{home}</span>
+            {hasScore ? (
+              <>
+                {" "}
+                <span className="text-primary" data-testid="text-trade-soccer-score">
+                  {homeScore} – {awayScore}
+                </span>{" "}
+              </>
+            ) : (
+              " vs "
+            )}
+            <span>{away}</span>
+          </div>
+          {summary.status && (
+            <div className="mt-1 text-[10px] uppercase tracking-widest text-muted-foreground">
+              status :: {summary.status}
+            </div>
+          )}
+        </div>
+        <div
+          className="border border-border px-2 py-1 text-[10px] font-bold uppercase tracking-widest text-foreground"
+          data-testid="badge-trade-soccer-result"
+        >
+          {resultLabel}
+        </div>
+      </div>
+    </section>
   );
 }

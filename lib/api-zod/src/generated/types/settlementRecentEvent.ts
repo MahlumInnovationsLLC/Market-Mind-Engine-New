@@ -5,6 +5,7 @@
  * Axiom-Predict API — backend for the prediction-market trading platform.
  * OpenAPI spec version: 0.1.0
  */
+import type { SettlementRecentEventResult3way } from "./settlementRecentEventResult3way";
 
 export interface SettlementRecentEvent {
   type?: string;
@@ -14,5 +15,15 @@ export interface SettlementRecentEvent {
   persona_metrics_updated?: number | null;
   alerts_raised?: number | null;
   verticals?: string[];
+  /** For soccer (3-way h/d/a) markets: which side actually won. Drives the HOME/DRAW/AWAY badge on the recent-settlements row.  Absent / null for non-3-way markets. */
+  result_3way?: SettlementRecentEventResult3way;
+  /** Home team display name for 3-way soccer settlements. */
+  home_team?: string | null;
+  /** Away team display name for 3-way soccer settlements. */
+  away_team?: string | null;
+  /** Final home score (Sportradar) for 3-way soccer settlements. */
+  home_score?: number | null;
+  /** Final away score (Sportradar) for 3-way soccer settlements. */
+  away_score?: number | null;
   [key: string]: unknown;
 }

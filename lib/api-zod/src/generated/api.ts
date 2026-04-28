@@ -315,6 +315,32 @@ export const GetTradeDetailResponse = zod.object({
     .describe(
       "Free-tier daily distinct-market quota snapshot taken after recording this view. Present only for free callers.",
     ),
+  soccer_match: zod
+    .object({
+      result: zod
+        .enum(["home", "draw", "away"])
+        .describe("Resolved 3-way match result."),
+      home_team: zod
+        .string()
+        .nullish()
+        .describe(
+          "Home team display name (may be null when the schedule cache hasn't been populated yet).",
+        ),
+      away_team: zod.string().nullish().describe("Away team display name."),
+      home_score: zod.number().nullish(),
+      away_score: zod.number().nullish(),
+      status: zod
+        .string()
+        .nullish()
+        .describe("Sportradar live-state status (e.g. `closed`, `ended`)."),
+    })
+    .describe(
+      "Final scoreline + h\/d\/a result for a soccer trade, joined from `swarm_debates.game_id` into `sportradar_live_state` and the `sportradar_schedules` cache.",
+    )
+    .nullish()
+    .describe(
+      "For soccer (3-way h\/d\/a) trades whose Sportradar match has finalised: home\/away team names plus the final scoreline and resolved `home`\/`draw`\/`away` result. Absent (or null) for non-soccer markets and for soccer markets whose match has not yet finalised.",
+    ),
 });
 
 /**
@@ -1160,6 +1186,37 @@ export const GetSettlementStatusResponse = zod.object({
         persona_metrics_updated: zod.number().nullish(),
         alerts_raised: zod.number().nullish(),
         verticals: zod.array(zod.string()).optional(),
+        result_3way: zod
+          .union([
+            zod.literal("home"),
+            zod.literal("draw"),
+            zod.literal("away"),
+            zod.literal(null),
+          ])
+          .nullish()
+          .describe(
+            "For soccer (3-way h\/d\/a) markets: which side actually won. Drives the HOME\/DRAW\/AWAY badge on the recent-settlements row.  Absent \/ null for non-3-way markets.",
+          ),
+        home_team: zod
+          .string()
+          .nullish()
+          .describe("Home team display name for 3-way soccer settlements."),
+        away_team: zod
+          .string()
+          .nullish()
+          .describe("Away team display name for 3-way soccer settlements."),
+        home_score: zod
+          .number()
+          .nullish()
+          .describe(
+            "Final home score (Sportradar) for 3-way soccer settlements.",
+          ),
+        away_score: zod
+          .number()
+          .nullish()
+          .describe(
+            "Final away score (Sportradar) for 3-way soccer settlements.",
+          ),
       }),
     )
     .optional(),
