@@ -28,12 +28,39 @@ import pytest
 
 
 def _run(coro):
-    loop = asyncio.new_event_loop()
+    """Run an async coroutine without poisoning global event-loop state.
+
+    Other tests in this suite (e.g. ``test_odds_api_persist_outcome``)
+    use the legacy ``asyncio.get_event_loop().run_until_complete()``
+    pattern, which on Python 3.10+ raises ``RuntimeError`` if the
+    policy's current loop is missing or closed. We:
+
+      1. Snapshot the current loop (if any) at entry — using a private
+         ``_get_running_loop`` peek so we don't trip auto-creation.
+      2. Run our coroutine on a brand-new loop.
+      3. In the finally block, close that loop and ensure the policy
+         is left with a fresh, open, current loop (restoring the
+         pre-existing one if it's still alive, otherwise installing a
+         new one). This guarantees subsequent legacy callers always
+         see a valid current loop.
+    """
+    policy = asyncio.get_event_loop_policy()
+    prev_loop: asyncio.AbstractEventLoop | None
     try:
-        asyncio.set_event_loop(loop)
-        return loop.run_until_complete(coro)
+        prev_loop = policy.get_event_loop()
+    except Exception:
+        prev_loop = None
+    new_loop = asyncio.new_event_loop()
+    try:
+        return new_loop.run_until_complete(coro)
     finally:
-        loop.close()
+        new_loop.close()
+        if prev_loop is not None and not prev_loop.is_closed():
+            asyncio.set_event_loop(prev_loop)
+        else:
+            # No usable previous loop — install a fresh one so legacy
+            # callers downstream don't blow up on get_event_loop().
+            asyncio.set_event_loop(asyncio.new_event_loop())
 
 
 # ---------------------------------------------------------------------------
@@ -43,6 +70,19 @@ def _run(coro):
 
 
 class _DBStub:
+    """In-memory replacement for ``app.db``.
+
+    Captures every fetch/fetchrow/fetchval/execute call (so tests can
+    assert query text + params) and pretends to support the
+    ``acquire() / conn.transaction()`` pattern that
+    ``accept_exchange_truth`` uses for atomicity. The stub's
+    transaction is simulated: it does NOT roll back captured calls on
+    exception (each test that wants to exercise the rollback path
+    drives the failure via ``execute_raises``), but the context
+    managers behave correctly enough for the production code to run
+    against the stub unchanged.
+    """
+
     def __init__(self) -> None:
         self.executes: list[tuple[str, tuple]] = []
         self.fetches: list[tuple[str, tuple]] = []
@@ -51,6 +91,15 @@ class _DBStub:
         self.fetch_responses: list[Any] = []
         self.fetchrow_responses: list[Any] = []
         self.fetchval_responses: list[Any] = []
+        # If set, the next ``execute`` whose query contains this
+        # substring raises the given exception — used to drive the
+        # transactional-rollback test path.
+        self.execute_raises: tuple[str, Exception] | None = None
+        # Counters for transaction-context entries/exits so tests can
+        # assert that production code wraps multi-step writes in a
+        # transaction.
+        self.tx_enters = 0
+        self.tx_exits = 0
 
     async def fetch(self, q, *a):
         self.fetches.append((q, a))
@@ -72,6 +121,61 @@ class _DBStub:
 
     async def execute(self, q, *a):
         self.executes.append((q, a))
+        if self.execute_raises is not None:
+            needle, exc = self.execute_raises
+            if needle in q:
+                self.execute_raises = None
+                raise exc
+        return None
+
+    # -- acquire() / conn.transaction() simulation -----------------
+
+    def acquire(self):
+        return _StubAcquireCM(self)
+
+
+class _StubAcquireCM:
+    def __init__(self, db: "_DBStub") -> None:
+        self._db = db
+
+    async def __aenter__(self) -> "_StubConn":
+        return _StubConn(self._db)
+
+    async def __aexit__(self, *exc_info) -> None:
+        return None
+
+
+class _StubConn:
+    """A fake asyncpg connection that delegates ``execute`` to the
+    parent stub so call-capture works inside transactions.
+    """
+
+    def __init__(self, db: "_DBStub") -> None:
+        self._db = db
+
+    async def execute(self, q, *a):
+        return await self._db.execute(q, *a)
+
+    async def fetch(self, q, *a):
+        return await self._db.fetch(q, *a)
+
+    async def fetchrow(self, q, *a):
+        return await self._db.fetchrow(q, *a)
+
+    def transaction(self):
+        return _StubTxn(self._db)
+
+
+class _StubTxn:
+    def __init__(self, db: "_DBStub") -> None:
+        self._db = db
+
+    async def __aenter__(self) -> "_StubTxn":
+        self._db.tx_enters += 1
+        return self
+
+    async def __aexit__(self, *exc_info) -> None:
+        self._db.tx_exits += 1
         return None
 
 
@@ -82,6 +186,10 @@ def _install_db(monkeypatch) -> _DBStub:
     monkeypatch.setattr(app_db, "fetchrow", stub.fetchrow)
     monkeypatch.setattr(app_db, "fetchval", stub.fetchval)
     monkeypatch.setattr(app_db, "execute", stub.execute)
+    # ``accept_exchange_truth`` uses the ``acquire() / conn.transaction()``
+    # pattern for atomicity — patch it too so production code never
+    # falls through to the real connection pool during tests.
+    monkeypatch.setattr(app_db, "acquire", stub.acquire)
     return stub
 
 

@@ -310,25 +310,24 @@ async def _create_orphan_skeleton(
         return False
     side = "yes" if exchange_qty > 0 else "no"
     qty = abs(int(exchange_qty))
+    # ``order_id`` carries the audit prefix (``recon-orphan-<ticker>``)
+    # so analysts can filter synthetic rows without a dedicated column.
     synth_id = f"recon-orphan-{ticker}"
     try:
         await db.execute(
             """
             INSERT INTO positions (
                 order_id, market_id, side, vertical, exchange,
-                quantity, avg_price, status, filled_count, over_filled,
-                source
+                quantity, avg_price, status, filled_count, over_filled
             ) VALUES (
                 $1, $2, $3, $4, 'kalshi',
-                $5, 0.0, 'open', $5, false,
-                'reconciler_orphan'
+                $5, 0.0, 'open', $5, false
             )
             ON CONFLICT (order_id) DO UPDATE
                SET quantity = EXCLUDED.quantity,
                    filled_count = EXCLUDED.filled_count,
                    side = EXCLUDED.side,
-                   status = 'open',
-                   source = EXCLUDED.source
+                   status = 'open'
             """,
             synth_id, ticker, side, vertical, qty,
         )
@@ -337,7 +336,10 @@ async def _create_orphan_skeleton(
         return False
 
     # Mark the resolution row resolved so it doesn't sit in the open
-    # queue forever — the orphan was handled programmatically.
+    # queue forever — the orphan was handled programmatically. This row
+    # IS the manual-reconciliation audit record (resolver_email +
+    # resolution_reason + state + resolved_at give the full audit
+    # trail; no separate events table is required).
     try:
         await db.execute(
             """
@@ -356,27 +358,16 @@ async def _create_orphan_skeleton(
         log.debug("orphan-skeleton resolution update failed (%s): %s",
                   ticker, e)
 
-    # INFO audit row so operators see the auto-skeleton in /system → health.
-    try:
-        msg = (
-            f"Reconciler auto-created skeleton positions row for orphan "
-            f"exchange ticker {ticker}: side={side} quantity={qty}. "
-            "Source-tagged ``recon-orphan``; review and either close "
-            "manually or accept-truth from /system → reconciler."
-        )
-        await db.execute(
-            """
-            INSERT INTO model_health_alerts
-                (vertical, alert_type, severity, metric_name,
-                 metric_value, threshold, message, acknowledged)
-            VALUES ('trading', 'position_drift', 'info', $1, $2, 0, $3, true)
-            ON CONFLICT (id) DO NOTHING
-            """,
-            ticker, float(qty), msg,
-        )
-    except Exception as e:
-        log.debug("orphan-skeleton audit insert failed (%s): %s", ticker, e)
-
+    # Operators see the auto-skeleton in app logs and in /system →
+    # reconciler (the resolution row above is the structured trace).
+    # We deliberately do NOT add an alerts-table audit insert here —
+    # the diff cycle that triggered this path already raised the
+    # warn-level position_drift alert at line ~796.
+    log.info(
+        "reconciler.orphan_skeleton ticker=%s side=%s qty=%d "
+        "(synthetic positions row %s)",
+        ticker, side, qty, synth_id,
+    )
     return True
 
 
@@ -496,94 +487,101 @@ async def accept_exchange_truth(
     local_qty = int(active["local_qty"] or 0)
     drift_qty = int(active["drift_qty"] or 0)
 
-    # 1. Close existing open rows for this ticker.
+    # Steps 1-4 must commit or roll back as a single unit so we never
+    # leave the DB half-reconciled (e.g. drift marked resolved while
+    # local positions still show the old quantity). Only the email
+    # notification at step 5 is best-effort outside the transaction —
+    # an SMTP hiccup must not undo a successful reconciliation.
+    side = "yes" if exch_qty > 0 else "no"
+    qty = abs(exch_qty)
+    synth_id = f"recon-accept-truth-{ticker}"
     try:
-        await db.execute(
-            """
-            UPDATE positions
-               SET status = 'closed',
-                   quantity = 0
-             WHERE coalesce(exchange, 'kalshi') = 'kalshi'
-               AND market_id = $1
-               AND coalesce(status, 'open') = 'open'
-            """,
-            ticker,
-        )
-    except Exception as e:
-        log.warning("accept_exchange_truth close-existing failed (%s): %s",
-                    ticker, e)
-
-    # 2. Insert synthetic correction row when exchange has non-zero qty.
-    if exch_qty != 0:
-        side = "yes" if exch_qty > 0 else "no"
-        qty = abs(exch_qty)
-        synth_id = f"recon-accept-truth-{ticker}"
-        try:
-            await db.execute(
-                """
-                INSERT INTO positions (
-                    order_id, market_id, side, vertical, exchange,
-                    quantity, avg_price, status, filled_count, over_filled,
-                    source
-                ) VALUES (
-                    $1, $2, $3, NULL, 'kalshi',
-                    $4, 0.0, 'open', $4, false,
-                    'reconciler_accept_truth'
+        async with db.acquire() as conn:
+            async with conn.transaction():
+                # 1. Close existing open rows for this ticker.
+                #    coalesce() catches historical NULL exchange/status
+                #    rows that strict equality would skip.
+                await conn.execute(
+                    """
+                    UPDATE positions
+                       SET status = 'closed',
+                           quantity = 0
+                     WHERE coalesce(exchange, 'kalshi') = 'kalshi'
+                       AND market_id = $1
+                       AND coalesce(status, 'open') = 'open'
+                    """,
+                    ticker,
                 )
-                ON CONFLICT (order_id) DO UPDATE
-                   SET quantity = EXCLUDED.quantity,
-                       filled_count = EXCLUDED.filled_count,
-                       side = EXCLUDED.side,
-                       status = 'open',
-                       source = EXCLUDED.source
-                """,
-                synth_id, ticker, side, qty,
-            )
-        except Exception as e:
-            log.warning(
-                "accept_exchange_truth synth insert failed (%s): %s",
-                ticker, e,
-            )
 
-    # 3. Acknowledge any unacked operator alerts for this ticker so the
-    #    /system → health view stops showing the red banner.
-    try:
-        await db.execute(
-            """
-            UPDATE model_health_alerts
-               SET acknowledged = true,
-                   acknowledged_at = now(),
-                   acknowledged_by = $1
-             WHERE alert_type = 'position_drift'
-               AND metric_name = $2
-               AND acknowledged = false
-            """,
-            resolver_email or "operator",
-            ticker,
-        )
-    except Exception as e:
-        log.debug("accept_exchange_truth ack alerts failed (%s): %s",
-                  ticker, e)
+                # 2. Insert synthetic correction row when exchange has
+                #    non-zero qty. The ``recon-accept-truth-`` prefix
+                #    on order_id is the audit signal — analysts can
+                #    filter synthetic rows by LIKE without a dedicated
+                #    column.
+                if exch_qty != 0:
+                    await conn.execute(
+                        """
+                        INSERT INTO positions (
+                            order_id, market_id, side, vertical, exchange,
+                            quantity, avg_price, status, filled_count,
+                            over_filled
+                        ) VALUES (
+                            $1, $2, $3, NULL, 'kalshi',
+                            $4, 0.0, 'open', $4, false
+                        )
+                        ON CONFLICT (order_id) DO UPDATE
+                           SET quantity = EXCLUDED.quantity,
+                               filled_count = EXCLUDED.filled_count,
+                               side = EXCLUDED.side,
+                               status = 'open'
+                        """,
+                        synth_id, ticker, side, qty,
+                    )
 
-    # 4. Resolve the drift queue entry.
-    try:
-        await db.execute(
-            """
-            UPDATE position_drift_resolutions
-               SET state = 'resolved_accept_exchange',
-                   resolver_email = $2,
-                   resolution_reason = $3,
-                   resolved_at = now(),
-                   updated_at = now()
-             WHERE id = $1
-            """,
-            active["id"], resolver_email, reason,
-        )
+                # 3. Acknowledge any unacked operator alerts for this
+                #    ticker so the /system → health banner clears.
+                await conn.execute(
+                    """
+                    UPDATE model_health_alerts
+                       SET acknowledged = true,
+                           acknowledged_at = now(),
+                           acknowledged_by = $1
+                     WHERE alert_type = 'position_drift'
+                       AND metric_name = $2
+                       AND acknowledged = false
+                    """,
+                    resolver_email or "operator",
+                    ticker,
+                )
+
+                # 4. Resolve the drift queue entry. This row IS the
+                #    manual reconciliation audit record — resolver_email
+                #    + resolution_reason + resolved_at give the full
+                #    "who/why/when" trail. No separate events table.
+                await conn.execute(
+                    """
+                    UPDATE position_drift_resolutions
+                       SET state = 'resolved_accept_exchange',
+                           resolver_email = $2,
+                           resolution_reason = $3,
+                           resolved_at = now(),
+                           updated_at = now()
+                     WHERE id = $1
+                    """,
+                    active["id"], resolver_email, reason,
+                )
     except Exception as e:
+        # Any failure inside the transaction triggers a rollback. Bail
+        # out without claiming the drift was resolved so the operator
+        # console still shows it as actionable.
         log.warning(
-            "accept_exchange_truth resolution update failed (%s): %s",
+            "accept_exchange_truth transaction failed (%s): %s",
             ticker, e,
         )
+        return {
+            "changed": False, "ticker": ticker,
+            "reason": f"transaction_failed:{type(e).__name__}",
+        }
 
     # 5. Confirmation email — best-effort, dedupe so a flurry of clicks
     #    doesn't spam inboxes.

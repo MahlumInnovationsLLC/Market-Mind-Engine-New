@@ -125,7 +125,20 @@ def _totals_payload() -> list[dict[str, Any]]:
 
 
 def _run(coro):
-    return asyncio.get_event_loop().run_until_complete(coro)
+    """Run a coroutine in a fresh event loop.
+
+    Earlier tests in the suite (e.g. ``test_model_health_alerts_seq_repair``)
+    use ``asyncio.run()``, which on Python 3.10+ leaves the policy's
+    current loop unset. The legacy ``asyncio.get_event_loop()``
+    pattern then raises ``RuntimeError: There is no current event
+    loop``. Always create our own fresh loop and tear it down cleanly
+    so this test file works regardless of execution order.
+    """
+    loop = asyncio.new_event_loop()
+    try:
+        return loop.run_until_complete(coro)
+    finally:
+        loop.close()
 
 
 def test_h2h_persists_one_row_per_outcome_with_outcome_name() -> None:

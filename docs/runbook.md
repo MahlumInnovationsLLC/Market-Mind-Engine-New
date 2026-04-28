@@ -1051,12 +1051,21 @@ now and rejects anything outside that window.
 When the exchange reports a position for a ticker we have NO local
 row for at all (open or closed), the reconciler creates a synthetic
 `positions` row tagged `recon-orphan-<ticker>` and writes the drift
-resolution row directly to `resolved_orphan_skeleton`. An INFO
-`model_health_alerts` row records the event for audit. This stops
-the diff from re-firing on the same orphan every cycle without
-waking anyone — the operator can review the synth row in
-`/system → Reconciler` (under the **resolved** tab) and either
-close it or accept-truth it as needed.
+resolution row directly to `resolved_orphan_skeleton`. The event is
+logged (`reconciler.orphan_skeleton ticker=… side=… qty=…`) and the
+new resolution row is the audit record — orphan auto-skeleton does
+**not** raise a `model_health_alerts` row, by design (it is a
+non-paging, automatic correction). This stops the diff from
+re-firing on the same orphan every cycle without waking anyone —
+the operator can review the synth row in `/system → Reconciler`
+(under the **resolved** tab) and either close it or accept-truth it
+as needed. To audit recent orphan skeletons in SQL:
+
+```sql
+SELECT * FROM position_drift_resolutions
+WHERE state = 'resolved_orphan_skeleton'
+ORDER BY resolved_at DESC LIMIT 50;
+```
 
 ### Self-heal sweep
 
@@ -1072,9 +1081,14 @@ Unset (or set to `0`) `AXIOM_RECONCILER_RESOLUTION_ENABLED` and
 restart the API workflow. The reconciler stops writing new rows.
 Existing rows stay in `position_drift_resolutions` and remain
 actionable from `/system → Reconciler` so an in-progress triage
-isn't lost. Migrations `0031` (table) and `0032` (`positions.source`
-column) are purely additive — no rollback of the schema is needed
-unless you want to drop them outright (`alembic downgrade -2`).
+isn't lost. Migration `0031` (the `position_drift_resolutions`
+table) is purely additive — no rollback of the schema is needed
+unless you want to drop it outright (`alembic downgrade -1`). No
+existing tables (including `positions`) are mutated by this
+workflow; the synthetic correction rows the operator action inserts
+are tagged via the `order_id` prefix `recon-accept-truth-<ticker>`
+/ `recon-orphan-<ticker>` so audit views can filter them by
+`positions.order_id LIKE 'recon-%'` without a dedicated column.
 
 ### API-down SQL fallback
 
@@ -1133,19 +1147,21 @@ UPDATE positions
 -- 2. Insert the synthetic correction row matching the exchange.
 --    Replace <SIDE> with 'yes' (positive exchange qty) or 'no'
 --    (negative exchange qty) and <ABSQTY> with abs(exchange_qty).
+--    The 'recon-accept-truth-' prefix on order_id is the audit
+--    signal — it's how we tell synthetic correction rows apart
+--    from real fills without a dedicated source column.
 INSERT INTO positions (
     order_id, market_id, side, vertical, exchange,
-    quantity, avg_price, status, filled_count, over_filled, source
+    quantity, avg_price, status, filled_count, over_filled
 ) VALUES (
     'recon-accept-truth-<TICKER>', '<TICKER>', '<SIDE>', NULL, 'kalshi',
-    <ABSQTY>, 0.0, 'open', <ABSQTY>, false, 'reconciler_accept_truth'
+    <ABSQTY>, 0.0, 'open', <ABSQTY>, false
 )
 ON CONFLICT (order_id) DO UPDATE
    SET quantity = EXCLUDED.quantity,
        filled_count = EXCLUDED.filled_count,
        side = EXCLUDED.side,
-       status = 'open',
-       source = EXCLUDED.source;
+       status = 'open';
 
 -- 3. Mark the drift resolution row terminal.
 UPDATE position_drift_resolutions
@@ -1165,9 +1181,7 @@ If `<ABSQTY>` is zero (the exchange says "no position") skip step 2
 branch, and so should you.
 
 After the API recovers, the next reconciler cycle confirms the
-drift is gone. The `source = 'reconciler_accept_truth'` /
-`'reconciler_orphan'` tag on the synthetic `positions` row keeps
-audit views able to distinguish operator-corrected rows from real
-fills.
+drift is gone. Audit views can list operator-corrected rows with
+`SELECT * FROM positions WHERE order_id LIKE 'recon-%'`.
 
 ---

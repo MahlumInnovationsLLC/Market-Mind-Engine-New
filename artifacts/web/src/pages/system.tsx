@@ -9,6 +9,14 @@ import {
 import { apiFetch } from "@/lib/api";
 import { useFocusFromQuery } from "@/hooks/use-focus-from-query";
 import { GlassCard } from "@/components/ui/glass-card";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { TabBar, useTabState, type TabDef } from "@/components/shell/tab-bar";
 import { HealthPanel } from "@/pages/health";
 import { NotificationPrefsPanel } from "@/pages/settings-notifications";
@@ -500,6 +508,15 @@ function formatAge(seconds: number | null): string {
   return `${Math.round(seconds / 86400)}d`;
 }
 
+// Modal state for the operator confirm flow. Both actions reuse the
+// same dialog so the operator always sees the local-vs-exchange diff
+// before submitting — this is a real-money path, browser prompts are
+// not enough.
+type PendingAction =
+  | { kind: "accept"; row: DriftRow }
+  | { kind: "snooze"; row: DriftRow }
+  | null;
+
 function ReconcilerDriftsPanel() {
   const { getToken, isSignedIn } = useAuth();
   const tokenFn = useMemo(
@@ -509,6 +526,27 @@ function ReconcilerDriftsPanel() {
   const [stateFilter, setStateFilter] = useState<"open" | "snoozed" | "resolved">("open");
   const [busyTicker, setBusyTicker] = useState<string | null>(null);
   const [actionMsg, setActionMsg] = useState<string | null>(null);
+  const [pending, setPending] = useState<PendingAction>(null);
+  // Form fields live in panel state so they survive re-renders while
+  // the modal is open and reset cleanly when it closes.
+  const [reasonInput, setReasonInput] = useState<string>("");
+  const [snoozeHours, setSnoozeHours] = useState<number>(24);
+
+  const openAccept = (row: DriftRow) => {
+    setReasonInput("");
+    setPending({ kind: "accept", row });
+  };
+  const openSnooze = (row: DriftRow) => {
+    setReasonInput("");
+    setSnoozeHours(24);
+    setPending({ kind: "snooze", row });
+  };
+  const closeModal = () => {
+    setPending(null);
+    setReasonInput("");
+    setSnoozeHours(24);
+  };
+
   const { data, isLoading, error, refetch } = useQuery<DriftListResponse>({
     queryKey: ["admin", "reconciler", "drifts", stateFilter],
     queryFn: () =>
@@ -520,15 +558,7 @@ function ReconcilerDriftsPanel() {
     refetchInterval: 30_000,
   });
 
-  const accept = async (ticker: string) => {
-    const reason = window.prompt(
-      `Accept exchange truth for ${ticker}? Optional reason:`,
-      "",
-    );
-    if (reason === null) return; // cancel
-    if (!window.confirm(
-      `This will close all local positions on ${ticker} and create a synthetic row matching the exchange. Continue?`,
-    )) return;
+  const submitAccept = async (ticker: string, reason: string) => {
     setBusyTicker(ticker);
     setActionMsg(null);
     try {
@@ -546,31 +576,21 @@ function ReconcilerDriftsPanel() {
       setActionMsg(`Failed: ${(e as Error).message}`);
     } finally {
       setBusyTicker(null);
+      closeModal();
     }
   };
 
-  const snooze = async (ticker: string) => {
-    const hoursStr = window.prompt(
-      `Snooze ${ticker} drift alerts for how many hours? (1–720)`,
-      "24",
-    );
-    if (hoursStr === null) return;
-    const hours = Math.max(1, Math.min(720, Number(hoursStr) || 24));
-    const reason = window.prompt(`Reason for snoozing ${ticker}? (optional)`, "");
-    if (reason === null) return;
-    // Convert hours-from-now into the absolute UTC timestamp the API
-    // contract expects. Server validates +5min ≤ until ≤ +30 days.
-    const until = new Date(Date.now() + hours * 3600 * 1000).toISOString();
+  const submitSnooze = async (ticker: string, hours: number, reason: string) => {
+    // Clamp to API bounds (server will also reject) so a fat-finger
+    // doesn't bounce off the wire.
+    const safeHours = Math.max(1, Math.min(720, Number(hours) || 24));
+    const until = new Date(Date.now() + safeHours * 3600 * 1000).toISOString();
     setBusyTicker(ticker);
     setActionMsg(null);
     try {
       const res = await apiFetch<Record<string, unknown>>(
         `/api/admin/reconciler/drifts/${encodeURIComponent(ticker)}/snooze`,
-        {
-          method: "POST",
-          body: { until, reason },
-          getToken: tokenFn,
-        },
+        { method: "POST", body: { until, reason }, getToken: tokenFn },
       );
       setActionMsg(
         res.changed
@@ -582,6 +602,7 @@ function ReconcilerDriftsPanel() {
       setActionMsg(`Failed: ${(e as Error).message}`);
     } finally {
       setBusyTicker(null);
+      closeModal();
     }
   };
 
@@ -686,7 +707,7 @@ function ReconcilerDriftsPanel() {
                       <span className="space-x-1">
                         <button
                           type="button"
-                          onClick={() => accept(row.ticker)}
+                          onClick={() => openAccept(row)}
                           disabled={busyTicker === row.ticker}
                           className="border border-primary px-2 py-0.5 text-[10px] uppercase tracking-widest text-primary hover:bg-primary/10 disabled:opacity-50"
                           data-testid={`button-accept-${row.ticker}`}
@@ -695,7 +716,7 @@ function ReconcilerDriftsPanel() {
                         </button>
                         <button
                           type="button"
-                          onClick={() => snooze(row.ticker)}
+                          onClick={() => openSnooze(row)}
                           disabled={busyTicker === row.ticker}
                           className="border border-border px-2 py-0.5 text-[10px] uppercase tracking-widest text-muted-foreground hover:border-primary hover:text-foreground disabled:opacity-50"
                           data-testid={`button-snooze-${row.ticker}`}
@@ -711,7 +732,231 @@ function ReconcilerDriftsPanel() {
           </table>
         </div>
       )}
+      <ReconcilerActionDialog
+        pending={pending}
+        reasonInput={reasonInput}
+        setReasonInput={setReasonInput}
+        snoozeHours={snoozeHours}
+        setSnoozeHours={setSnoozeHours}
+        busyTicker={busyTicker}
+        onCancel={closeModal}
+        onConfirmAccept={(ticker, reason) => submitAccept(ticker, reason)}
+        onConfirmSnooze={(ticker, hours, reason) =>
+          submitSnooze(ticker, hours, reason)
+        }
+      />
     </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Confirmation modal — shows the local-vs-exchange diff explicitly so
+// the operator can never accept-truth without seeing what they're
+// actually committing to. Browser ``window.prompt`` / ``window.confirm``
+// don't show structured data and aren't acceptable for a real-money
+// path.
+// ---------------------------------------------------------------------------
+
+type ReconcilerActionDialogProps = {
+  pending: PendingAction;
+  reasonInput: string;
+  setReasonInput: (v: string) => void;
+  snoozeHours: number;
+  setSnoozeHours: (v: number) => void;
+  busyTicker: string | null;
+  onCancel: () => void;
+  onConfirmAccept: (ticker: string, reason: string) => void;
+  onConfirmSnooze: (ticker: string, hours: number, reason: string) => void;
+};
+
+function ReconcilerActionDialog(props: ReconcilerActionDialogProps) {
+  const {
+    pending,
+    reasonInput,
+    setReasonInput,
+    snoozeHours,
+    setSnoozeHours,
+    busyTicker,
+    onCancel,
+    onConfirmAccept,
+    onConfirmSnooze,
+  } = props;
+  const open = pending !== null;
+  const row = pending?.row;
+  const isAccept = pending?.kind === "accept";
+  const busy = !!row && busyTicker === row.ticker;
+
+  // Preview snooze deadline so the operator can sanity-check the
+  // hours-from-now math against an absolute clock time before
+  // submitting.
+  const snoozeUntilLabel = useMemo(() => {
+    const safe = Math.max(1, Math.min(720, Number(snoozeHours) || 24));
+    return new Date(Date.now() + safe * 3600 * 1000).toLocaleString();
+  }, [snoozeHours]);
+
+  return (
+    <Dialog
+      open={open}
+      onOpenChange={(o) => {
+        if (!o && !busy) onCancel();
+      }}
+    >
+      <DialogContent
+        className="max-w-lg"
+        data-testid="reconciler-action-dialog"
+      >
+        {row && (
+          <>
+            <DialogHeader>
+              <DialogTitle>
+                {isAccept
+                  ? `Accept exchange truth for ${row.ticker}?`
+                  : `Snooze drift alerts for ${row.ticker}?`}
+              </DialogTitle>
+              <DialogDescription>
+                {isAccept
+                  ? "This closes every open local position on this ticker (status='closed', quantity=0) and inserts a synthetic correction row matching the exchange's reported quantity. The operation runs in a single database transaction — partial failure rolls back."
+                  : "This silences alerts for the ticker until the chosen deadline. It does NOT touch the positions table — use Accept truth if the local quantity is genuinely wrong."}
+              </DialogDescription>
+            </DialogHeader>
+
+            {/* Local vs exchange diff — the whole point of the modal. */}
+            <div
+              className="grid grid-cols-3 gap-2 border border-border bg-muted/20 p-3 text-[11px]"
+              data-testid="reconciler-dialog-diff"
+            >
+              <div>
+                <div className="text-[10px] uppercase tracking-widest text-muted-foreground">
+                  Local
+                </div>
+                <div className="text-lg font-bold tabular-nums">
+                  {row.local_qty}
+                </div>
+              </div>
+              <div>
+                <div className="text-[10px] uppercase tracking-widest text-muted-foreground">
+                  Exchange
+                </div>
+                <div className="text-lg font-bold tabular-nums">
+                  {row.exchange_qty}
+                </div>
+              </div>
+              <div>
+                <div className="text-[10px] uppercase tracking-widest text-muted-foreground">
+                  Drift
+                </div>
+                <div
+                  className={`text-lg font-bold tabular-nums ${
+                    row.drift_qty === 0
+                      ? "text-muted-foreground"
+                      : "text-destructive"
+                  }`}
+                >
+                  {row.drift_qty > 0 ? `+${row.drift_qty}` : row.drift_qty}
+                </div>
+              </div>
+              <div className="col-span-3 border-t border-border pt-2 text-[11px] text-muted-foreground">
+                <div>
+                  <span className="font-semibold text-foreground">Title:</span>{" "}
+                  {row.market_title ?? "—"}
+                </div>
+                <div>
+                  <span className="font-semibold text-foreground">Age:</span>{" "}
+                  {formatAge(row.age_seconds)} · first seen{" "}
+                  {new Date(row.first_seen_at).toLocaleString()}
+                </div>
+                {row.last_alert_severity && (
+                  <div>
+                    <span className="font-semibold text-foreground">
+                      Last alert:
+                    </span>{" "}
+                    [{row.last_alert_severity}] {row.last_alert_message}
+                  </div>
+                )}
+              </div>
+            </div>
+
+            {!isAccept && (
+              <label className="block text-[11px]">
+                <span className="text-[10px] uppercase tracking-widest text-muted-foreground">
+                  Snooze for (hours, 1–720)
+                </span>
+                <input
+                  type="number"
+                  min={1}
+                  max={720}
+                  step={1}
+                  value={snoozeHours}
+                  onChange={(e) =>
+                    setSnoozeHours(Number(e.target.value) || 24)
+                  }
+                  disabled={busy}
+                  data-testid="reconciler-dialog-hours"
+                  className="mt-1 w-full border border-border bg-card px-2 py-1 font-mono"
+                />
+                <span className="mt-1 block text-[10px] text-muted-foreground">
+                  Until: {snoozeUntilLabel}
+                </span>
+              </label>
+            )}
+
+            <label className="block text-[11px]">
+              <span className="text-[10px] uppercase tracking-widest text-muted-foreground">
+                Reason {isAccept ? "(optional)" : "(optional)"}
+              </span>
+              <textarea
+                rows={3}
+                value={reasonInput}
+                onChange={(e) => setReasonInput(e.target.value)}
+                placeholder={
+                  isAccept
+                    ? "e.g. exchange settled, our fill never landed"
+                    : "e.g. waiting on Kalshi support ticket #1234"
+                }
+                disabled={busy}
+                data-testid="reconciler-dialog-reason"
+                className="mt-1 w-full border border-border bg-card px-2 py-1 font-mono"
+              />
+            </label>
+
+            <DialogFooter>
+              <button
+                type="button"
+                onClick={onCancel}
+                disabled={busy}
+                className="border border-border px-3 py-1 text-[11px] uppercase tracking-widest text-muted-foreground hover:border-primary hover:text-foreground disabled:opacity-50"
+                data-testid="reconciler-dialog-cancel"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                disabled={busy}
+                onClick={() => {
+                  if (isAccept) {
+                    onConfirmAccept(row.ticker, reasonInput);
+                  } else {
+                    onConfirmSnooze(row.ticker, snoozeHours, reasonInput);
+                  }
+                }}
+                className={`border px-3 py-1 text-[11px] uppercase tracking-widest disabled:opacity-50 ${
+                  isAccept
+                    ? "border-destructive bg-destructive/10 text-destructive hover:bg-destructive/20"
+                    : "border-primary bg-primary/10 text-primary hover:bg-primary/20"
+                }`}
+                data-testid="reconciler-dialog-confirm"
+              >
+                {busy
+                  ? "Working…"
+                  : isAccept
+                    ? "Confirm accept truth"
+                    : "Confirm snooze"}
+              </button>
+            </DialogFooter>
+          </>
+        )}
+      </DialogContent>
+    </Dialog>
   );
 }
 
