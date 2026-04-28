@@ -3847,7 +3847,15 @@ export function VerticalHaltsPanel() {
 
   const submitPending = () => {
     if (!pending) return;
-    const reason = pending.reason.trim() || null;
+    const reason = pending.reason.trim();
+    // Reason is mandatory for manual operator halts/resumes — blank
+    // entries hollow out the audit trail. Server falls back to
+    // ``DEFAULT_NO_REASON`` for body-less direct API calls, but the
+    // operator console must always force a real explanation.
+    if (!reason) {
+      window.alert("Reason is required.");
+      return;
+    }
     if (pending.action === "halt") {
       const mins = pending.ttlMinutes.trim();
       let ttlSecs: number | null = null;
@@ -4011,7 +4019,7 @@ export function VerticalHaltsPanel() {
                           {pending.action === "halt"
                             ? "Halt reason"
                             : "Resume note"}{" "}
-                          (optional)
+                          (required)
                         </label>
                         <input
                           id={`reason-${entry.vertical}`}
@@ -4245,7 +4253,7 @@ export function VerticalHaltSchedulePanel() {
       if (!body.vertical) throw new Error("Vertical required.");
       if (!body.cron_expr) throw new Error("Cron expression required.");
       if (!body.reason) throw new Error("Reason required.");
-      return apiFetch<VerticalHaltSchedule>(
+      return apiFetch<{ schedule: VerticalHaltSchedule }>(
         "/api/admin/verticals/halts/schedule",
         {
           method: "POST",
@@ -4264,6 +4272,23 @@ export function VerticalHaltSchedulePanel() {
       qc.invalidateQueries({ queryKey: ["admin", "vertical-halt-schedules"] });
     },
     onError: (e: Error) => setError(e.message ?? "Create failed."),
+  });
+
+  const toggleMutation = useMutation({
+    mutationFn: async (vars: { id: number; enabled: boolean }) =>
+      apiFetch<{ schedule: VerticalHaltSchedule }>(
+        `/api/admin/verticals/halts/schedule/${vars.id}`,
+        {
+          method: "PATCH",
+          getToken: tokenFn,
+          body: JSON.stringify({ enabled: vars.enabled }),
+          headers: { "Content-Type": "application/json" },
+        },
+      ),
+    onSuccess: () =>
+      qc.invalidateQueries({
+        queryKey: ["admin", "vertical-halt-schedules"],
+      }),
   });
 
   const deleteMutation = useMutation({
@@ -4365,15 +4390,16 @@ export function VerticalHaltSchedulePanel() {
             <th className="text-left p-2">Cron (UTC)</th>
             <th className="text-left p-2">Duration</th>
             <th className="text-left p-2">Reason</th>
+            <th className="text-left p-2">Status</th>
             <th className="text-left p-2">Last fired</th>
-            <th className="text-left p-2 w-24">Action</th>
+            <th className="text-left p-2 w-40">Actions</th>
           </tr>
         </thead>
         <tbody>
           {schedules.length === 0 ? (
             <tr>
               <td
-                colSpan={6}
+                colSpan={7}
                 className="p-3 text-center text-muted-foreground italic"
                 data-testid="text-no-schedules"
               >
@@ -4384,7 +4410,9 @@ export function VerticalHaltSchedulePanel() {
             schedules.map((s) => (
               <tr
                 key={s.id}
-                className="border-t border-border"
+                className={`border-t border-border ${
+                  s.enabled ? "" : "opacity-50"
+                }`}
                 data-testid={`row-schedule-${s.id}`}
               >
                 <td className="p-2 uppercase font-bold text-primary">
@@ -4397,10 +4425,29 @@ export function VerticalHaltSchedulePanel() {
                 <td className="p-2 text-muted-foreground italic normal-case tracking-normal">
                   “{s.reason}”
                 </td>
+                <td
+                  className={`p-2 uppercase tracking-widest text-[10px] ${
+                    s.enabled ? "text-primary" : "text-muted-foreground"
+                  }`}
+                  data-testid={`text-schedule-status-${s.id}`}
+                >
+                  {s.enabled ? "Enabled" : "Disabled"}
+                </td>
                 <td className="p-2 text-muted-foreground">
                   {s.last_fired_at ? _fmtRelative(s.last_fired_at) : "never"}
                 </td>
-                <td className="p-2">
+                <td className="p-2 space-x-1">
+                  <button
+                    type="button"
+                    disabled={toggleMutation.isPending}
+                    onClick={() =>
+                      toggleMutation.mutate({ id: s.id, enabled: !s.enabled })
+                    }
+                    className="px-2 py-0.5 border border-primary text-primary text-[10px] uppercase tracking-widest hover:bg-primary/10 disabled:opacity-50"
+                    data-testid={`button-toggle-schedule-${s.id}`}
+                  >
+                    {s.enabled ? "Disable" : "Enable"}
+                  </button>
                   <button
                     type="button"
                     disabled={deleteMutation.isPending}
@@ -4435,6 +4482,10 @@ export function VerticalHaltHistoryPanel() {
     [getToken],
   );
   const [verticalFilter, setVerticalFilter] = useState<string>("");
+  // ``sinceFilter`` is a date-only string (yyyy-mm-dd) interpreted as
+  // 00:00 UTC — keeps the input simple while still narrowing the
+  // window meaningfully for operators chasing a recent incident.
+  const [sinceFilter, setSinceFilter] = useState<string>("");
 
   const overview = useGetVerticalsOverview(
     { days: 7 },
@@ -4449,13 +4500,17 @@ export function VerticalHaltHistoryPanel() {
   const verticals = overview.data?.verticals.map((v) => v.vertical) ?? [];
 
   const historyQuery = useQuery<VerticalHaltHistoryPayload>({
-    queryKey: ["admin", "vertical-halt-history", verticalFilter],
+    queryKey: ["admin", "vertical-halt-history", verticalFilter, sinceFilter],
     queryFn: () => {
-      const qs = verticalFilter
-        ? `?vertical=${encodeURIComponent(verticalFilter)}&limit=200`
-        : "?limit=200";
+      const params = new URLSearchParams();
+      if (verticalFilter) params.set("vertical", verticalFilter);
+      if (sinceFilter) {
+        // yyyy-mm-dd → 00:00 UTC ISO string.
+        params.set("since", `${sinceFilter}T00:00:00Z`);
+      }
+      params.set("limit", "200");
       return apiFetch<VerticalHaltHistoryPayload>(
-        `/api/admin/verticals/halts/history${qs}`,
+        `/api/admin/verticals/halts/history?${params.toString()}`,
         { getToken: tokenFn },
       );
     },
@@ -4473,7 +4528,7 @@ export function VerticalHaltHistoryPanel() {
         TTL-expired. Mirrors <code>admin_audit_log</code> but joined with the
         scheduling rule that fired (if any).
       </p>
-      <div className="mb-3 flex items-center gap-2">
+      <div className="mb-3 flex flex-wrap items-center gap-2">
         <label
           className="text-[10px] uppercase tracking-widest text-muted-foreground"
           htmlFor="halt-history-vertical"
@@ -4494,6 +4549,30 @@ export function VerticalHaltHistoryPanel() {
             </option>
           ))}
         </select>
+        <label
+          className="text-[10px] uppercase tracking-widest text-muted-foreground ml-2"
+          htmlFor="halt-history-since"
+        >
+          Since (UTC)
+        </label>
+        <input
+          id="halt-history-since"
+          type="date"
+          value={sinceFilter}
+          onChange={(e) => setSinceFilter(e.target.value)}
+          className="bg-background border border-border px-2 py-1 text-xs font-mono"
+          data-testid="input-history-since"
+        />
+        {sinceFilter ? (
+          <button
+            type="button"
+            onClick={() => setSinceFilter("")}
+            className="px-2 py-1 border border-border text-muted-foreground text-[10px] uppercase tracking-widest hover:bg-muted/40"
+            data-testid="button-history-clear-since"
+          >
+            Clear
+          </button>
+        ) : null}
       </div>
 
       {historyQuery.isLoading && !historyQuery.data ? (

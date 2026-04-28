@@ -1715,6 +1715,33 @@ async def create_vertical_halt_schedule(
     return dict(row) if row else {}
 
 
+async def update_vertical_halt_schedule_enabled(
+    schedule_id: int, enabled: bool
+) -> dict[str, Any] | None:
+    """Toggle a schedule rule's ``enabled`` flag without deleting it.
+
+    Returns the updated row, or ``None`` if the id was not found.
+    Disabling a rule preserves its history + creation metadata so an
+    operator can re-enable it later without losing context.
+    """
+    try:
+        sid = int(schedule_id)
+    except (TypeError, ValueError) as e:
+        raise ValueError(f"invalid schedule id {schedule_id!r}") from e
+    row = await db.fetchrow(
+        """
+        UPDATE vertical_halt_schedules
+           SET enabled = $1, updated_at = now()
+         WHERE id = $2
+        RETURNING id, vertical, cron_expr, duration_secs, reason, enabled,
+                  created_by_user_id, created_by_email,
+                  created_at, updated_at, last_fired_at
+        """,
+        bool(enabled), sid,
+    )
+    return dict(row) if row else None
+
+
 async def delete_vertical_halt_schedule(schedule_id: int) -> bool:
     """Delete a schedule rule by id. Returns True iff a row was removed."""
     try:

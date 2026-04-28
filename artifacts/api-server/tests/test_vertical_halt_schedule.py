@@ -113,6 +113,17 @@ class _MemoryDb:
             }
             self.schedules[sid] = row
             return dict(row)
+        if (
+            "UPDATE vertical_halt_schedules" in sql
+            and "SET enabled" in sql
+        ):
+            enabled, sid = args[0], args[1]
+            row = self.schedules.get(sid)
+            if row is None:
+                return None
+            row["enabled"] = bool(enabled)
+            row["updated_at"] = datetime.now(timezone.utc)
+            return dict(row)
         return None
 
     class _Conn:
@@ -437,6 +448,77 @@ def test_create_schedule_rejects_bad_duration(mem_db) -> None:
                 reason="r", actor_user_id="u1", actor_email=None,
             )
         )
+
+
+def test_update_schedule_enabled_round_trip(mem_db) -> None:
+    """``update_vertical_halt_schedule_enabled`` must flip ``enabled``
+    in place, return the updated row, and the disabled rule must be
+    skipped by ``list_due_vertical_halt_schedules``.
+    """
+    v = _vertical()
+    row = asyncio.run(
+        runtime_settings_mod.create_vertical_halt_schedule(
+            vertical=v, cron_expr="* * * * *", duration_secs=60,
+            reason="every minute", actor_user_id="u1", actor_email=None,
+        )
+    )
+    assert row["enabled"] is True
+    # Disable and confirm the row's enabled flag flipped.
+    updated = asyncio.run(
+        runtime_settings_mod.update_vertical_halt_schedule_enabled(
+            row["id"], False,
+        )
+    )
+    assert updated is not None
+    assert updated["enabled"] is False
+    # Disabled rules must not appear in due-list (scheduler skip).
+    due = asyncio.run(
+        runtime_settings_mod.list_due_vertical_halt_schedules(
+            now=datetime.now(timezone.utc).replace(microsecond=0),
+        )
+    )
+    assert all(r["id"] != row["id"] for r in due)
+    # Re-enable + 404 on missing id.
+    re_enabled = asyncio.run(
+        runtime_settings_mod.update_vertical_halt_schedule_enabled(
+            row["id"], True,
+        )
+    )
+    assert re_enabled is not None and re_enabled["enabled"] is True
+    missing = asyncio.run(
+        runtime_settings_mod.update_vertical_halt_schedule_enabled(
+            999_999_999, False,
+        )
+    )
+    assert missing is None
+
+
+def test_history_since_filters_old_rows(mem_db) -> None:
+    """The new ``since`` param must filter rows whose ``effective_at``
+    is older than the cutoff (used by the operator console date picker).
+    """
+    v = _vertical()
+    # Seed a halt — generates a single ``halted`` history row.
+    asyncio.run(
+        runtime_settings_mod.set_vertical_halted(
+            v, actor_user_id="u1", actor_email=None,
+            reason="r", source="manual_admin",
+        )
+    )
+    # Backdate the row so it is provably ``< since``.
+    long_ago = datetime.now(timezone.utc) - timedelta(days=30)
+    for r in mem_db.history:
+        r["effective_at"] = long_ago
+    cutoff = datetime.now(timezone.utc) - timedelta(days=1)
+    rows = asyncio.run(
+        runtime_settings_mod.list_vertical_halt_history(since=cutoff, limit=50)
+    )
+    assert rows == []
+    # No since → returns the row.
+    rows_all = asyncio.run(
+        runtime_settings_mod.list_vertical_halt_history(limit=50)
+    )
+    assert len(rows_all) == 1
 
 
 def test_delete_schedule_idempotent(mem_db) -> None:

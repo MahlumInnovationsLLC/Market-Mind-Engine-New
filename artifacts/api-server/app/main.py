@@ -5532,7 +5532,11 @@ async def admin_halt_vertical(
         actor_email = (await check_approval(actor))[1]
     except Exception:
         pass
-    reason = body.reason if body else None
+    raw_reason = (body.reason if body else None) or ""
+    # Reason is mandatory in the operator console; for body-less or
+    # body-without-reason direct API calls we fall back to the
+    # documented default so the audit trail is never blank.
+    reason = raw_reason.strip() or runtime_settings_mod.DEFAULT_NO_REASON
     ttl_secs = body.ttl_secs if body else None
     try:
         meta, changed = await runtime_settings_mod.set_vertical_halted(
@@ -5578,7 +5582,10 @@ async def admin_resume_vertical(
         actor_email = (await check_approval(actor))[1]
     except Exception:
         pass
-    reason = body.reason if body else None
+    raw_reason = (body.reason if body else None) or ""
+    # Mirror the halt path so a body-less direct API call still
+    # produces a non-blank audit row.
+    reason = raw_reason.strip() or runtime_settings_mod.DEFAULT_NO_REASON
     try:
         prev_meta, changed = await runtime_settings_mod.clear_vertical_halt(
             vertical,
@@ -5637,6 +5644,37 @@ async def admin_create_vertical_halt_schedule(
     return {"schedule": row}
 
 
+@app.patch("/api/admin/verticals/halts/schedule/{schedule_id}")
+async def admin_update_vertical_halt_schedule(
+    schedule_id: int,
+    body: dict[str, object],
+    _: AuthedUser = Depends(require_admin),
+) -> dict[str, object]:
+    """Toggle a recurring halt rule's ``enabled`` flag without
+    deleting it. Currently the only mutable field is ``enabled``;
+    other fields are immutable so an operator can't drift a rule's
+    cron / duration silently — they must delete and re-create.
+
+    Returns ``404`` if no row matches the id.
+    """
+    enabled_raw = body.get("enabled") if isinstance(body, dict) else None
+    if not isinstance(enabled_raw, bool):
+        raise HTTPException(
+            status_code=400, detail="`enabled` (bool) is required"
+        )
+    try:
+        row = await runtime_settings_mod.update_vertical_halt_schedule_enabled(
+            schedule_id, enabled_raw,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    if row is None:
+        raise HTTPException(
+            status_code=404, detail=f"schedule {schedule_id} not found"
+        )
+    return {"schedule": row}
+
+
 @app.delete("/api/admin/verticals/halts/schedule/{schedule_id}")
 async def admin_delete_vertical_halt_schedule(
     schedule_id: int,
@@ -5658,17 +5696,35 @@ async def admin_delete_vertical_halt_schedule(
 @app.get("/api/admin/verticals/halts/history")
 async def admin_list_vertical_halt_history(
     vertical: str | None = None,
+    since: str | None = None,
     limit: int = 100,
     _: AuthedUser = Depends(require_admin),
 ) -> dict[str, object]:
     """Return the per-vertical halt audit history (newest first).
 
     Optional ``vertical`` filter does an exact case-insensitive match
-    against the row's stored ``vertical`` field. ``limit`` is clamped
-    to [1, 500] server-side so a misuse can't hammer the database.
+    against the row's stored ``vertical`` field.  Optional ``since``
+    is an ISO-8601 UTC timestamp (e.g. ``2026-04-21T00:00:00Z``);
+    only rows with ``effective_at >= since`` are returned. ``limit``
+    is clamped to [1, 500] server-side so a misuse can't hammer the
+    database.
     """
+    since_dt = None
+    if since:
+        try:
+            from datetime import datetime, timezone
+            # Accept both `2026-04-21T00:00:00Z` and `2026-04-21T00:00:00+00:00`.
+            normalised = since.strip().replace("Z", "+00:00")
+            since_dt = datetime.fromisoformat(normalised)
+            if since_dt.tzinfo is None:
+                since_dt = since_dt.replace(tzinfo=timezone.utc)
+        except (ValueError, TypeError) as e:
+            raise HTTPException(
+                status_code=400,
+                detail=f"`since` must be ISO-8601 UTC: {e}",
+            )
     rows = await runtime_settings_mod.list_vertical_halt_history(
-        vertical=vertical, limit=limit,
+        vertical=vertical, since=since_dt, limit=limit,
     )
     out: list[dict[str, object]] = []
     for r in rows:
