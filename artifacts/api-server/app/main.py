@@ -5501,6 +5501,35 @@ async def dashboard_tournament_leaderboards(
     )
 
 
+@app.get("/api/dashboard/tournament-leaderboard-timeline")
+async def dashboard_tournament_leaderboard_timeline(
+    event_id: str,
+    max_snapshots: int | None = None,
+    per_snapshot_limit: int = 200,
+    _: object = Depends(require_approved_user),
+) -> dict[str, object]:
+    """Per-snapshot timeline of one PGA / F1 tournament (task #698).
+
+    Backed by ``app.dashboard.get_tournament_leaderboard_timeline``,
+    which walks every saved snapshot for ``event_id`` and joins each
+    position-ordered roster with the Plackett-Luce probability the
+    orchestrator priced off at the time so operators can scrub the
+    timeline and see exactly how the field evolved.
+
+    By default returns *every* saved snapshot — the panel needs the
+    full history to do its job.  Pass ``max_snapshots`` to keep only
+    the trailing N snapshots when a caller wants a bounded slice.
+
+    Returns ``{event_id, league, name, status, snapshots: []}`` when
+    no history exists yet.
+    """
+    return await dashboard.get_tournament_leaderboard_timeline(
+        event_id,
+        max_snapshots=max_snapshots,
+        per_snapshot_limit=per_snapshot_limit,
+    )
+
+
 @app.get("/api/dashboard/crypto-ohlcv-retention")
 async def dashboard_crypto_ohlcv_retention(
     _: object = Depends(require_approved_user),

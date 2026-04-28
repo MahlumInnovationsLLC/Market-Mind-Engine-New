@@ -2889,6 +2889,182 @@ async def get_tournament_leaderboards(
     return {"events": events}
 
 
+async def get_tournament_leaderboard_timeline(
+    event_id: str,
+    *,
+    max_snapshots: int | None = None,
+    per_snapshot_limit: int = 200,
+) -> dict[str, Any]:
+    """Per-snapshot timeline for one PGA / F1 tournament so operators
+    can scrub through how the field (and our priced Plackett-Luce
+    probabilities) evolved over the life of the event (task #698).
+
+    Reads every row of ``sportradar_tournament_leaderboards`` for the
+    requested ``event_id``, groups them by ``fetched_at`` (one
+    "snapshot" per unique timestamp), and for each snapshot returns
+    the position-ordered roster joined with the Plackett-Luce
+    probability the orchestrator would price off — derived through the
+    same :func:`derive_field_ratings_from_leaderboard` →
+    :func:`plackett_luce_from_mapping` chain the live cycle uses, so
+    the timeline reproduces exactly what the live pipeline saw.
+
+    Snapshots whose entries are too thin to drive Plackett-Luce
+    (fewer than 2 named entrants) still surface in the timeline so
+    operators can see the gap, but their entries carry
+    ``probability=None`` rather than a degenerate uniform prior.
+
+    The ``sportradar_schedules`` join surfaces the league + display
+    name so the panel header can read ``PGA · The Masters`` instead
+    of a raw event id.
+
+    By default the helper returns *every* saved snapshot for the
+    event so operators can scrub the full timeline — the whole point
+    of the panel is "show me how the field evolved over the life of
+    the tournament", and a silent truncation would betray that
+    promise.  ``max_snapshots`` is left available as an explicit cap
+    for callers that want to keep the trailing portion of a very long
+    history; pass ``None`` (the default) for unbounded.
+
+    Returns ``{event_id, league, name, status, snapshots: [...]}``
+    with ``snapshots=[]`` when no history has been recorded yet
+    (operators see "no snapshots recorded yet" in the UI).  The
+    helper never raises: a missing table or DB hiccup degrades to the
+    empty shape so a fresh dev DB doesn't blank the panel.
+    """
+    if not event_id:
+        return {
+            "event_id": "",
+            "league": "",
+            "name": "",
+            "status": "",
+            "snapshots": [],
+        }
+
+    if max_snapshots is not None:
+        max_snapshots = max(1, int(max_snapshots))
+    per_snapshot_limit = max(1, min(500, int(per_snapshot_limit)))
+
+    event_id_str = str(event_id)
+    try:
+        rows = await db.fetch(
+            """
+            SELECT position, name, fetched_at
+              FROM sportradar_tournament_leaderboards
+             WHERE event_id = $1
+             ORDER BY fetched_at ASC, position NULLS LAST, name
+            """,
+            event_id_str,
+        )
+    except Exception as e:
+        log.info(
+            "get_tournament_leaderboard_timeline lookup skipped for %s: %s",
+            event_id_str, e,
+        )
+        return {
+            "event_id": event_id_str,
+            "league": "",
+            "name": "",
+            "status": "",
+            "snapshots": [],
+        }
+
+    meta = {"league": "", "name": "", "status": ""}
+    try:
+        sched_rows = await db.fetch(
+            """
+            SELECT league, home_team, away_team, status
+              FROM sportradar_schedules
+             WHERE game_id = $1
+               AND upper(league) IN ('PGA', 'F1')
+             LIMIT 1
+            """,
+            event_id_str,
+        )
+        if sched_rows:
+            sr = sched_rows[0]
+            meta["league"] = (sr["league"] or "").upper()
+            meta["name"] = (sr["home_team"] or sr["away_team"] or "").strip()
+            meta["status"] = (sr["status"] or "").lower()
+    except Exception as e:
+        log.debug(
+            "get_tournament_leaderboard_timeline schedule lookup skipped "
+            "for %s: %s", event_id_str, e,
+        )
+
+    if not rows:
+        return {
+            "event_id": event_id_str,
+            "league": meta["league"],
+            "name": meta["name"],
+            "status": meta["status"],
+            "snapshots": [],
+        }
+
+    from .sports import derive_field_ratings_from_leaderboard
+    from .predictor_n_way import plackett_luce_from_mapping
+
+    grouped: dict[Any, list[dict[str, Any]]] = {}
+    order: list[Any] = []
+    for r in rows:
+        ts = r["fetched_at"]
+        if ts not in grouped:
+            grouped[ts] = []
+            order.append(ts)
+        grouped[ts].append({"position": r["position"], "name": r["name"]})
+
+    # By default operators see *every* saved snapshot — the panel's
+    # whole purpose is "let me scrub the full history of this
+    # tournament", and a silent truncation here would betray that.
+    # An explicit ``max_snapshots`` keeps the trailing window for
+    # callers that want a bounded slice (e.g. a future "last 24h"
+    # toggle).
+    if max_snapshots is not None and len(order) > max_snapshots:
+        order = order[-max_snapshots:]
+
+    snapshots: list[dict[str, Any]] = []
+    for ts in order:
+        entries_raw = grouped[ts]
+        # Drop blank-name rows so the panel never renders an empty
+        # "name" cell — mirrors get_tournament_leaderboards.
+        entries_clean = [
+            {"position": e["position"], "name": e["name"]}
+            for e in entries_raw if (e["name"] or "").strip()
+        ]
+
+        ratings = derive_field_ratings_from_leaderboard(entries_clean)
+        if len(ratings) >= 2:
+            probs = plackett_luce_from_mapping(ratings)
+        else:
+            probs = {}
+
+        capped = entries_clean[:per_snapshot_limit]
+        rendered = [
+            {
+                "position": e["position"],
+                "name": e["name"],
+                "probability": probs.get(e["name"]),
+            }
+            for e in capped
+        ]
+
+        if hasattr(ts, "isoformat"):
+            ts_iso = ts.isoformat()
+        elif ts is None:
+            ts_iso = None
+        else:
+            ts_iso = str(ts)
+
+        snapshots.append({"fetched_at": ts_iso, "entries": rendered})
+
+    return {
+        "event_id": event_id_str,
+        "league": meta["league"],
+        "name": meta["name"],
+        "status": meta["status"],
+        "snapshots": snapshots,
+    }
+
+
 async def get_per_league_calibration() -> dict[str, Any]:
     """Most-recent per-league calibrator snapshots for the dashboard.
 

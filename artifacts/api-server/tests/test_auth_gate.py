@@ -164,6 +164,8 @@ PROTECTED_ROUTES: tuple[str, ...] = (
     # backtest runs + admin-only listing of the same persisted runs.
     "/api/dashboard/tournament-backtest/recent",
     "/api/admin/tournament-backtest/recent",
+    # Task #698 — per-event tournament leaderboard timeline scrubber.
+    "/api/dashboard/tournament-leaderboard-timeline",
     # Per-source weather freshness badge — operator dashboard only.
     "/api/weather/freshness",
 )

@@ -83,6 +83,9 @@ vi.mock("@/components/dashboard/telegram-concierge", () => ({
 vi.mock("@/components/dashboard/tournament-leaderboards-panel", () => ({
   default: stub("stub-tournament-leaderboards"),
 }));
+vi.mock("@/components/dashboard/tournament-timeline-panel", () => ({
+  default: stub("stub-tournament-timeline"),
+}));
 vi.mock("@/components/dashboard/trade-stats-panel", () => ({
   default: stub("stub-trade-stats"),
 }));
@@ -167,6 +170,7 @@ describe("Dashboard", () => {
       "stub-vertical-cards",
       "stub-leagues-exposure",
       "stub-tournament-leaderboards",
+      "stub-tournament-timeline",
       "stub-per-league-calibration",
       "stub-macro-surprises",
       "stub-vertical-performance",
