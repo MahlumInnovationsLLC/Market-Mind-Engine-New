@@ -316,16 +316,19 @@ async def _create_orphan_skeleton(
             """
             INSERT INTO positions (
                 order_id, market_id, side, vertical, exchange,
-                quantity, avg_price, status, filled_count, over_filled
+                quantity, avg_price, status, filled_count, over_filled,
+                source
             ) VALUES (
                 $1, $2, $3, $4, 'kalshi',
-                $5, 0.0, 'open', $5, false
+                $5, 0.0, 'open', $5, false,
+                'reconciler_orphan'
             )
             ON CONFLICT (order_id) DO UPDATE
                SET quantity = EXCLUDED.quantity,
                    filled_count = EXCLUDED.filled_count,
                    side = EXCLUDED.side,
-                   status = 'open'
+                   status = 'open',
+                   source = EXCLUDED.source
             """,
             synth_id, ticker, side, vertical, qty,
         )
@@ -378,41 +381,85 @@ async def _create_orphan_skeleton(
 
 
 async def list_drifts(
-    *, state_filter: str = "open", limit: int = 100
+    *, state: str = "open", limit: int = 100
 ) -> list[dict[str, Any]]:
-    """Operator-console view of the drift-resolution queue.
+    """Operator-console view of the drift-resolution queue, enriched
+    with the context an operator needs to triage each row at a glance:
 
-    ``state_filter`` is one of ``open`` (the default — actionable
-    queue), ``snoozed`` (silenced drifts), ``resolved`` (any of the
-    ``resolved_*`` terminal states), or ``all``.
+      * ``market_title`` — human-readable market title (resolved via
+        the market-title cache; falls back to ``None`` if unknown).
+      * ``age_seconds`` — wall-clock time since ``first_seen_at`` so
+        the UI can sort/colour by staleness without parsing dates.
+      * ``last_alert_at`` / ``last_alert_severity`` /
+        ``last_alert_message`` — the latest matching
+        ``model_health_alerts`` row (``alert_type='position_drift'``,
+        ``metric_name=ticker``) so the operator sees the same context
+        the alert email contained.
+
+    ``state`` is one of ``open`` (default — actionable queue),
+    ``snoozed``, ``resolved`` (any ``resolved_*`` terminal), or
+    ``all``.
     """
-    state_filter = (state_filter or "open").lower()
+    state = (state or "open").lower()
     limit = max(1, min(500, int(limit or 100)))
     where = "true"
-    params: list[Any] = [limit]
-    if state_filter == "open":
-        where = "state = 'open'"
-    elif state_filter == "snoozed":
-        where = "state = 'snoozed'"
-    elif state_filter == "resolved":
-        where = "state LIKE 'resolved_%'"
+    if state == "open":
+        where = "pdr.state = 'open'"
+    elif state == "snoozed":
+        where = "pdr.state = 'snoozed'"
+    elif state == "resolved":
+        where = "pdr.state LIKE 'resolved_%'"
     try:
         rows = await db.fetch(
             f"""
-            SELECT id, ticker, vertical, local_qty, exchange_qty, drift_qty,
-                   state, resolver_email, resolution_reason, snoozed_until,
-                   first_seen_at, last_seen_at, resolved_at, created_at
-              FROM position_drift_resolutions
+            SELECT pdr.id, pdr.ticker, pdr.vertical,
+                   pdr.local_qty, pdr.exchange_qty, pdr.drift_qty,
+                   pdr.state, pdr.resolver_email, pdr.resolution_reason,
+                   pdr.snoozed_until, pdr.first_seen_at, pdr.last_seen_at,
+                   pdr.resolved_at, pdr.created_at,
+                   GREATEST(0,
+                     EXTRACT(EPOCH FROM (now() - pdr.first_seen_at)))::bigint
+                     AS age_seconds,
+                   alert.created_at  AS last_alert_at,
+                   alert.severity    AS last_alert_severity,
+                   alert.message     AS last_alert_message
+              FROM position_drift_resolutions pdr
+              LEFT JOIN LATERAL (
+                  SELECT created_at, severity, message
+                    FROM model_health_alerts
+                   WHERE alert_type = 'position_drift'
+                     AND metric_name = pdr.ticker
+                   ORDER BY created_at DESC
+                   LIMIT 1
+              ) alert ON true
              WHERE {where}
-             ORDER BY last_seen_at DESC
+             ORDER BY pdr.last_seen_at DESC
              LIMIT $1
             """,
-            *params,
+            limit,
         )
-        return [dict(r) for r in rows]
     except Exception as e:
         log.warning("list_drifts query failed: %s", e)
         return []
+
+    out = [dict(r) for r in rows]
+    # Best-effort title enrichment — failures here are non-fatal, the
+    # row already has ticker + drift context to be actionable.
+    try:
+        from .market_titles import resolve_titles
+        tickers = [r["ticker"] for r in out if r.get("ticker")]
+        if tickers:
+            titles = await resolve_titles(tickers)
+            for r in out:
+                r["market_title"] = titles.get(r["ticker"])
+        else:
+            for r in out:
+                r["market_title"] = None
+    except Exception as e:
+        log.debug("list_drifts title enrichment failed: %s", e)
+        for r in out:
+            r.setdefault("market_title", None)
+    return out
 
 
 async def accept_exchange_truth(
@@ -476,16 +523,19 @@ async def accept_exchange_truth(
                 """
                 INSERT INTO positions (
                     order_id, market_id, side, vertical, exchange,
-                    quantity, avg_price, status, filled_count, over_filled
+                    quantity, avg_price, status, filled_count, over_filled,
+                    source
                 ) VALUES (
                     $1, $2, $3, NULL, 'kalshi',
-                    $4, 0.0, 'open', $4, false
+                    $4, 0.0, 'open', $4, false,
+                    'reconciler_accept_truth'
                 )
                 ON CONFLICT (order_id) DO UPDATE
                    SET quantity = EXCLUDED.quantity,
                        filled_count = EXCLUDED.filled_count,
                        side = EXCLUDED.side,
-                       status = 'open'
+                       status = 'open',
+                       source = EXCLUDED.source
                 """,
                 synth_id, ticker, side, qty,
             )
@@ -570,12 +620,17 @@ async def accept_exchange_truth(
 async def snooze_drift(
     *,
     ticker: str,
-    snooze_seconds: int,
+    until: "datetime | str",
     resolver_email: str | None,
     reason: str | None = None,
 ) -> dict[str, Any]:
-    """Operator action: silence drift alerts for ``ticker`` for
-    ``snooze_seconds`` (clamped to 1 hour … 30 days).
+    """Operator action: silence drift alerts for ``ticker`` until the
+    absolute timestamp ``until``.
+
+    ``until`` accepts either a timezone-aware ``datetime`` or an ISO
+    8601 string. The value is validated to be in the future (≥ 5
+    minutes from now to leave room for clock skew) and within 30 days
+    (so a fat-fingered ``2099`` doesn't silence the alert forever).
 
     Does NOT touch ``positions`` — snooze is for drifts the operator
     has acknowledged as known-benign (e.g. a settled market the
@@ -585,7 +640,35 @@ async def snooze_drift(
     Idempotent on re-snooze: extends the TTL on an existing snoozed
     row.
     """
-    snooze_seconds = max(3600, min(int(snooze_seconds or 0), 30 * 86400))
+    from datetime import datetime, timedelta, timezone
+    if isinstance(until, str):
+        try:
+            # Accept "Z" suffix for UTC.
+            iso = until.replace("Z", "+00:00")
+            until_dt = datetime.fromisoformat(iso)
+        except ValueError:
+            return {
+                "changed": False, "ticker": ticker,
+                "reason": f"invalid_until:{until!r}",
+            }
+    else:
+        until_dt = until
+    if until_dt.tzinfo is None:
+        until_dt = until_dt.replace(tzinfo=timezone.utc)
+    now_utc = datetime.now(timezone.utc)
+    min_until = now_utc + timedelta(minutes=5)
+    max_until = now_utc + timedelta(days=30)
+    if until_dt < min_until:
+        return {
+            "changed": False, "ticker": ticker,
+            "reason": "until_too_soon (must be ≥ 5 min from now)",
+        }
+    if until_dt > max_until:
+        return {
+            "changed": False, "ticker": ticker,
+            "reason": "until_too_far (must be ≤ 30 days from now)",
+        }
+
     active = await db.fetchrow(
         """
         SELECT id, local_qty, exchange_qty, drift_qty
@@ -605,13 +688,13 @@ async def snooze_drift(
             """
             UPDATE position_drift_resolutions
                SET state = 'snoozed',
-                   snoozed_until = now() + ($2 || ' seconds')::interval,
+                   snoozed_until = $2,
                    resolver_email = $3,
                    resolution_reason = $4,
                    updated_at = now()
              WHERE id = $1
             """,
-            active["id"], str(snooze_seconds), resolver_email, reason,
+            active["id"], until_dt, resolver_email, reason,
         )
     except Exception as e:
         log.warning("snooze_drift update failed (%s): %s", ticker, e)
@@ -632,7 +715,7 @@ async def snooze_drift(
                 drift_qty=int(active["drift_qty"] or 0),
                 resolver_email=resolver_email,
                 reason=reason,
-                snoozed_until=f"{snooze_seconds}s",
+                snoozed_until=until_dt.isoformat(),
             )
     except Exception as e:  # pragma: no cover
         log.warning("snooze confirmation email failed (%s): %s", ticker, e)
@@ -640,7 +723,7 @@ async def snooze_drift(
     return {
         "changed": True,
         "ticker": ticker,
-        "snoozed_for_seconds": snooze_seconds,
+        "snoozed_until": until_dt.isoformat(),
         "resolution_id": int(active["id"]),
     }
 

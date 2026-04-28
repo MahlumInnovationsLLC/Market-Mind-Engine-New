@@ -5285,7 +5285,15 @@ class AdminAcceptDriftRequest(BaseModel):
 
 
 class AdminSnoozeDriftRequest(BaseModel):
-    snooze_seconds: int = Field(default=86400, ge=3600, le=30 * 86400)
+    """Snooze a drift alert until an absolute UTC timestamp.
+
+    ``until`` is an ISO-8601 datetime (e.g. ``2026-04-29T12:00:00Z``).
+    The reconciler validates the value is between +5 minutes and +30
+    days from now and rejects anything outside that window.
+    """
+    until: datetime = Field(
+        description="Absolute UTC timestamp at which the snooze expires."
+    )
     reason: str | None = Field(default=None, max_length=500)
 
 
@@ -5443,18 +5451,20 @@ async def admin_resume_vertical(
 
 @app.get("/api/admin/reconciler/drifts")
 async def admin_list_reconciler_drifts(
-    state_filter: str = "open",
+    state: str = "open",
     limit: int = 100,
     _: AuthedUser = Depends(require_admin),
 ) -> dict[str, object]:
-    """List drift-resolution rows. ``state_filter`` ∈ ``open`` (default,
-    actionable queue), ``snoozed``, ``resolved``, ``all``.
+    """List drift-resolution rows. ``state`` ∈ ``open`` (default,
+    actionable queue), ``snoozed``, ``resolved``, ``all``. Rows are
+    enriched with ``market_title``, ``age_seconds``, and the latest
+    ``last_alert_*`` triple from ``model_health_alerts``.
     """
     from .kalshi import reconciler as _recon
-    items = await _recon.list_drifts(state_filter=state_filter, limit=limit)
+    items = await _recon.list_drifts(state=state, limit=limit)
     return {
         "items": items,
-        "state_filter": state_filter,
+        "state": state,
         "resolution_enabled": _recon._resolution_enabled(),
     }
 
@@ -5487,13 +5497,13 @@ async def admin_accept_drift_exchange_truth(
 @app.post("/api/admin/reconciler/drifts/{ticker}/snooze")
 async def admin_snooze_reconciler_drift(
     ticker: str,
-    body: AdminSnoozeDriftRequest | None = None,
+    body: AdminSnoozeDriftRequest,
     actor: AuthedUser = Depends(require_admin),
 ) -> dict[str, object]:
-    """Operator action: silence drift alerts for ``ticker`` for
-    ``snooze_seconds`` (default 24h, clamped to 1h … 30d). Does NOT
-    touch ``positions`` — the position is left as-is and the alert
-    stops re-firing until the snooze expires.
+    """Operator action: silence drift alerts for ``ticker`` until the
+    absolute UTC timestamp ``body.until``. Does NOT touch
+    ``positions`` — the position is left as-is and the alert stops
+    re-firing until the snooze expires (≥ 5 min from now, ≤ 30 days).
     """
     from .kalshi import reconciler as _recon
     actor_email: str | None = None
@@ -5501,13 +5511,11 @@ async def admin_snooze_reconciler_drift(
         actor_email = (await check_approval(actor))[1]
     except Exception:
         pass
-    snooze_seconds = body.snooze_seconds if body else 86400
-    reason = body.reason if body else None
     result = await _recon.snooze_drift(
         ticker=ticker.strip(),
-        snooze_seconds=snooze_seconds,
+        until=body.until,
         resolver_email=actor_email,
-        reason=reason,
+        reason=body.reason,
     )
     return result
 

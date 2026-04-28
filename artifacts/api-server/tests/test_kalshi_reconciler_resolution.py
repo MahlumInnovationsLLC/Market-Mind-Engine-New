@@ -28,7 +28,12 @@ import pytest
 
 
 def _run(coro):
-    return asyncio.get_event_loop().run_until_complete(coro)
+    loop = asyncio.new_event_loop()
+    try:
+        asyncio.set_event_loop(loop)
+        return loop.run_until_complete(coro)
+    finally:
+        loop.close()
 
 
 # ---------------------------------------------------------------------------
@@ -279,33 +284,135 @@ def test_accept_exchange_truth_zero_skips_synth_insert(monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def test_snooze_drift_clamps_and_writes(monkeypatch):
+def test_snooze_drift_writes_absolute_until(monkeypatch):
+    from datetime import datetime, timedelta, timezone
     from app.kalshi import reconciler
     db = _install_db(monkeypatch)
     db.fetchrow_responses.append({
         "id": 21, "local_qty": 3, "exchange_qty": 5, "drift_qty": 2,
     })
 
+    until = datetime.now(timezone.utc) + timedelta(hours=24)
     res = _run(reconciler.snooze_drift(
-        ticker="MKT-A", snooze_seconds=60,  # clamped up to 1h
+        ticker="MKT-A", until=until,
         resolver_email="ops@axiom.dev", reason="known stale",
     ))
 
     assert res["changed"] is True
-    assert res["snoozed_for_seconds"] == 3600
-    assert any("state = 'snoozed'" in q for q, _ in db.executes)
+    assert res["snoozed_until"] == until.isoformat()
+    # The UPDATE must persist the absolute datetime, not a relative
+    # interval — verify both the SQL shape and the bound parameter.
+    update_calls = [(q, p) for q, p in db.executes if "state = 'snoozed'" in q]
+    assert len(update_calls) == 1
+    assert update_calls[0][1][1] == until
+
+
+def test_snooze_drift_rejects_past_until(monkeypatch):
+    """A past ``until`` is rejected with a stable, non-DB reason — the
+    UI relies on this to show "no active drift" vs "bad input"."""
+    from datetime import datetime, timedelta, timezone
+    from app.kalshi import reconciler
+    db = _install_db(monkeypatch)
+    until = datetime.now(timezone.utc) - timedelta(hours=1)
+    res = _run(reconciler.snooze_drift(
+        ticker="MKT-A", until=until,
+        resolver_email="ops@axiom.dev", reason=None,
+    ))
+    assert res["changed"] is False
+    assert "until_too_soon" in res["reason"]
+    # Critically: no DB writes happen when validation fails.
+    assert db.executes == []
+
+
+def test_snooze_drift_rejects_far_future_until(monkeypatch):
+    """A fat-fingered far-future ``until`` (e.g. year 2099) is rejected
+    so a typo can't permanently silence the alert."""
+    from datetime import datetime, timedelta, timezone
+    from app.kalshi import reconciler
+    db = _install_db(monkeypatch)
+    until = datetime.now(timezone.utc) + timedelta(days=400)
+    res = _run(reconciler.snooze_drift(
+        ticker="MKT-A", until=until,
+        resolver_email="ops@axiom.dev", reason=None,
+    ))
+    assert res["changed"] is False
+    assert "until_too_far" in res["reason"]
+    assert db.executes == []
 
 
 def test_snooze_drift_idempotent_no_active(monkeypatch):
+    from datetime import datetime, timedelta, timezone
     from app.kalshi import reconciler
     db = _install_db(monkeypatch)
     db.fetchrow_responses.append(None)
 
+    until = datetime.now(timezone.utc) + timedelta(hours=24)
     res = _run(reconciler.snooze_drift(
-        ticker="MKT-A", snooze_seconds=86400, resolver_email=None,
+        ticker="MKT-A", until=until, resolver_email=None,
     ))
     assert res["changed"] is False
     assert all("state = 'snoozed'" not in q for q, _ in db.executes)
+
+
+def test_snooze_drift_treats_naive_datetime_as_utc(monkeypatch):
+    """A timezone-naive ``until`` (e.g. ``datetime.utcnow()``) must be
+    interpreted as UTC, not the host's local timezone — operators
+    running shells in PST would otherwise snooze for the wrong number
+    of hours.
+    """
+    from datetime import datetime, timedelta, timezone
+    from app.kalshi import reconciler
+    db = _install_db(monkeypatch)
+    db.fetchrow_responses.append({
+        "id": 22, "local_qty": 1, "exchange_qty": 4, "drift_qty": 3,
+    })
+
+    naive_until = (
+        datetime.now(timezone.utc) + timedelta(hours=24)
+    ).replace(tzinfo=None)
+    res = _run(reconciler.snooze_drift(
+        ticker="MKT-NAIVE", until=naive_until, resolver_email=None,
+    ))
+    assert res["changed"] is True
+    # The persisted snoozed_until must be tz-aware UTC even though we
+    # passed naive in.
+    update_calls = [(q, p) for q, p in db.executes if "state = 'snoozed'" in q]
+    assert len(update_calls) == 1
+    persisted = update_calls[0][1][1]
+    assert persisted.tzinfo is not None
+    assert persisted.utcoffset().total_seconds() == 0
+
+
+def test_snooze_drift_parses_iso_string(monkeypatch):
+    """The admin endpoint receives a Pydantic-parsed datetime, but
+    operators calling the reconciler from a shell (or the SQL fallback
+    path) may pass an ISO string. Both must work.
+    """
+    from datetime import datetime, timedelta, timezone
+    from app.kalshi import reconciler
+    db = _install_db(monkeypatch)
+    db.fetchrow_responses.append({
+        "id": 23, "local_qty": 0, "exchange_qty": 7, "drift_qty": 7,
+    })
+
+    until_iso = (
+        datetime.now(timezone.utc) + timedelta(hours=12)
+    ).isoformat().replace("+00:00", "Z")
+    res = _run(reconciler.snooze_drift(
+        ticker="MKT-ISO", until=until_iso, resolver_email=None,
+    ))
+    assert res["changed"] is True
+
+
+def test_snooze_drift_rejects_garbage_iso_string(monkeypatch):
+    from app.kalshi import reconciler
+    db = _install_db(monkeypatch)
+    res = _run(reconciler.snooze_drift(
+        ticker="MKT-X", until="not-a-date", resolver_email=None,
+    ))
+    assert res["changed"] is False
+    assert "invalid_until" in res["reason"]
+    assert db.executes == []
 
 
 # ---------------------------------------------------------------------------

@@ -478,13 +478,27 @@ type DriftRow = {
   last_seen_at: string;
   resolved_at: string | null;
   created_at: string;
+  // Server-enriched fields (LEFT JOIN markets / model_health_alerts):
+  market_title: string | null;
+  age_seconds: number | null;
+  last_alert_at: string | null;
+  last_alert_severity: string | null;
+  last_alert_message: string | null;
 };
 
 type DriftListResponse = {
   items: DriftRow[];
-  state_filter: string;
+  state: string;
   resolution_enabled: boolean;
 };
+
+function formatAge(seconds: number | null): string {
+  if (seconds == null || seconds < 0) return "—";
+  if (seconds < 60) return `${Math.round(seconds)}s`;
+  if (seconds < 3600) return `${Math.round(seconds / 60)}m`;
+  if (seconds < 86400) return `${Math.round(seconds / 3600)}h`;
+  return `${Math.round(seconds / 86400)}d`;
+}
 
 function ReconcilerDriftsPanel() {
   const { getToken, isSignedIn } = useAuth();
@@ -499,7 +513,7 @@ function ReconcilerDriftsPanel() {
     queryKey: ["admin", "reconciler", "drifts", stateFilter],
     queryFn: () =>
       apiFetch<DriftListResponse>(
-        `/api/admin/reconciler/drifts?state_filter=${stateFilter}&limit=200`,
+        `/api/admin/reconciler/drifts?state=${stateFilter}&limit=200`,
         { getToken: tokenFn },
       ),
     enabled: !!isSignedIn,
@@ -544,6 +558,9 @@ function ReconcilerDriftsPanel() {
     const hours = Math.max(1, Math.min(720, Number(hoursStr) || 24));
     const reason = window.prompt(`Reason for snoozing ${ticker}? (optional)`, "");
     if (reason === null) return;
+    // Convert hours-from-now into the absolute UTC timestamp the API
+    // contract expects. Server validates +5min ≤ until ≤ +30 days.
+    const until = new Date(Date.now() + hours * 3600 * 1000).toISOString();
     setBusyTicker(ticker);
     setActionMsg(null);
     try {
@@ -551,14 +568,14 @@ function ReconcilerDriftsPanel() {
         `/api/admin/reconciler/drifts/${encodeURIComponent(ticker)}/snooze`,
         {
           method: "POST",
-          body: { snooze_seconds: hours * 3600, reason },
+          body: { until, reason },
           getToken: tokenFn,
         },
       );
       setActionMsg(
         res.changed
-          ? `Snoozed ${ticker} for ${hours}h.`
-          : `No active drift for ${ticker}.`,
+          ? `Snoozed ${ticker} until ${new Date(until).toLocaleString()}.`
+          : `No active drift for ${ticker} (${res.reason ?? "unknown"}).`,
       );
       await refetch();
     } catch (e) {
@@ -624,10 +641,12 @@ function ReconcilerDriftsPanel() {
             <thead>
               <tr className="border-b border-border text-left text-[10px] uppercase tracking-widest text-muted-foreground">
                 <th className="px-2 py-1">Ticker</th>
+                <th className="px-2 py-1">Title</th>
                 <th className="px-2 py-1">Local</th>
                 <th className="px-2 py-1">Exch</th>
                 <th className="px-2 py-1">Drift</th>
                 <th className="px-2 py-1">State</th>
+                <th className="px-2 py-1">Age</th>
                 <th className="px-2 py-1">Last seen</th>
                 <th className="px-2 py-1">Resolver</th>
                 <th className="px-2 py-1 text-right">Actions</th>
@@ -641,10 +660,23 @@ function ReconcilerDriftsPanel() {
                   data-testid={`drift-row-${row.ticker}`}
                 >
                   <td className="px-2 py-1 font-bold">{row.ticker}</td>
+                  <td
+                    className="max-w-[260px] truncate px-2 py-1 text-muted-foreground"
+                    title={row.market_title ?? ""}
+                    data-testid={`drift-title-${row.ticker}`}
+                  >
+                    {row.market_title ?? "—"}
+                  </td>
                   <td className="px-2 py-1">{row.local_qty}</td>
                   <td className="px-2 py-1">{row.exchange_qty}</td>
                   <td className="px-2 py-1">{row.drift_qty}</td>
                   <td className="px-2 py-1 uppercase tracking-widest">{row.state}</td>
+                  <td
+                    className="px-2 py-1 tabular-nums"
+                    data-testid={`drift-age-${row.ticker}`}
+                  >
+                    {formatAge(row.age_seconds)}
+                  </td>
                   <td className="px-2 py-1">
                     {new Date(row.last_seen_at).toLocaleString()}
                   </td>

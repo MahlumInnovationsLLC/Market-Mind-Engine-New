@@ -1031,17 +1031,20 @@ re-clicks return `changed=False` without touching `positions`.
 
 For known-benign drifts (e.g. the exchange will propagate the
 correction once the next settlement cycle runs), click **Snooze**.
-Choose a duration in hours (1–720, default 24).
+Choose a duration in hours (1–720, default 24); the UI converts
+this into the absolute UTC ISO timestamp the API expects in the
+`{ "until": "...", "reason": "..." }` body. The reconciler
+validates `until` is between **+5 minutes** and **+30 days** from
+now and rejects anything outside that window.
 
-- Marks the row `state='snoozed'` with `snoozed_until = now() +
-  duration`.
+- Marks the row `state='snoozed'` with `snoozed_until = body.until`.
 - Suppresses the operator alert path for the ticker until the
   snooze expires.
 - Does NOT touch `positions` — this is purely a noise filter.
 - Auto-expires: the next reconciler cycle after `snoozed_until`
   passes flips the row back to `open` and the alert fires again.
-- Re-snoozing extends the TTL on the same row (same operator
-  email + new reason).
+- Re-snoozing replaces `snoozed_until` on the same row (new
+  operator email + new reason recorded).
 
 ### Auto-skeleton (orphan exchange positions)
 
@@ -1069,8 +1072,102 @@ Unset (or set to `0`) `AXIOM_RECONCILER_RESOLUTION_ENABLED` and
 restart the API workflow. The reconciler stops writing new rows.
 Existing rows stay in `position_drift_resolutions` and remain
 actionable from `/system → Reconciler` so an in-progress triage
-isn't lost. Migration `0031` is purely additive — no rollback of
-the schema is needed unless you want to drop the table outright
-(`alembic downgrade -1`).
+isn't lost. Migrations `0031` (table) and `0032` (`positions.source`
+column) are purely additive — no rollback of the schema is needed
+unless you want to drop them outright (`alembic downgrade -2`).
+
+### API-down SQL fallback
+
+If `/system → Reconciler` is unreachable (web outage, JWT misconfig,
+Clerk down) and a drift alert is keeping the on-call operator awake,
+both operator actions can be performed directly against Postgres
+with the same effect as the admin API. Always paste the operator's
+email into `resolver_email` for audit.
+
+**Inspect the open queue:**
+
+```sql
+SELECT id, ticker, local_qty, exchange_qty, drift_qty,
+       first_seen_at, last_seen_at
+  FROM position_drift_resolutions
+ WHERE state = 'open'
+ ORDER BY first_seen_at;
+```
+
+**Snooze a drift (no `positions` change).** Use an absolute UTC
+timestamp — this matches the API contract (`{until, reason}`) and
+makes the snooze easy to audit later:
+
+```sql
+UPDATE position_drift_resolutions
+   SET state = 'snoozed',
+       snoozed_until = TIMESTAMP WITH TIME ZONE '<YYYY-MM-DDTHH:MM:SSZ>',
+       resolver_email = '<operator>@axiom-predict.com',
+       resolution_reason = 'API down — manual SQL snooze',
+       updated_at = now()
+ WHERE ticker = '<TICKER>'
+   AND state IN ('open', 'snoozed');
+```
+
+**Accept exchange truth (closes locals + inserts synthetic).** The
+SQL below mirrors `reconciler.accept_exchange_truth` exactly — same
+`coalesce` defaults on `exchange` / `status` (so historical rows
+with NULL columns are still caught) and the same `quantity = 0`
+zero-out on the close step (the synthetic row carries the new
+quantity, the closed rows must show zero so PnL roll-ups don't
+double-count):
+
+```sql
+BEGIN;
+
+-- 1. Close every open local row for the ticker. coalesce() matches
+--    the reconciler's filter — historical rows have NULL exchange
+--    or NULL status and would be missed by strict equality.
+UPDATE positions
+   SET status = 'closed',
+       quantity = 0
+ WHERE coalesce(exchange, 'kalshi') = 'kalshi'
+   AND market_id = '<TICKER>'
+   AND coalesce(status, 'open') = 'open';
+
+-- 2. Insert the synthetic correction row matching the exchange.
+--    Replace <SIDE> with 'yes' (positive exchange qty) or 'no'
+--    (negative exchange qty) and <ABSQTY> with abs(exchange_qty).
+INSERT INTO positions (
+    order_id, market_id, side, vertical, exchange,
+    quantity, avg_price, status, filled_count, over_filled, source
+) VALUES (
+    'recon-accept-truth-<TICKER>', '<TICKER>', '<SIDE>', NULL, 'kalshi',
+    <ABSQTY>, 0.0, 'open', <ABSQTY>, false, 'reconciler_accept_truth'
+)
+ON CONFLICT (order_id) DO UPDATE
+   SET quantity = EXCLUDED.quantity,
+       filled_count = EXCLUDED.filled_count,
+       side = EXCLUDED.side,
+       status = 'open',
+       source = EXCLUDED.source;
+
+-- 3. Mark the drift resolution row terminal.
+UPDATE position_drift_resolutions
+   SET state = 'resolved_accept_exchange',
+       resolved_at = now(),
+       resolver_email = '<operator>@axiom-predict.com',
+       resolution_reason = 'API down — manual SQL accept-truth',
+       updated_at = now()
+ WHERE ticker = '<TICKER>'
+   AND state IN ('open', 'snoozed');
+
+COMMIT;
+```
+
+If `<ABSQTY>` is zero (the exchange says "no position") skip step 2
+— `accept_exchange_truth` skips the synthetic insert in that
+branch, and so should you.
+
+After the API recovers, the next reconciler cycle confirms the
+drift is gone. The `source = 'reconciler_accept_truth'` /
+`'reconciler_orphan'` tag on the synthetic `positions` row keeps
+audit views able to distinguish operator-corrected rows from real
+fills.
 
 ---

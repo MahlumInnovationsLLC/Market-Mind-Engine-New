@@ -85,6 +85,8 @@ PROTECTED_ROUTES: tuple[str, ...] = (
     "/api/admin/landing-leads",
     "/api/admin/landing-leads.csv",
     "/api/admin/landing-leads/interests",
+    # Task #709 — operator drift-resolution console queue (GET).
+    "/api/admin/reconciler/drifts",
     "/api/me/access",
     "/api/me/subscription",
     "/api/me/notification-prefs",
@@ -250,6 +252,11 @@ PROTECTED_MUTATING_ENDPOINTS: tuple[tuple[str, str], ...] = (
     # Task #697 — admin-triggered tournament backtest replay
     # (single-event or date-range sweep).
     ("POST", "/api/admin/tournament-backtest/replay"),
+    # Task #709 — operator drift-resolution actions: accept exchange
+    # truth (closes local rows + inserts synthetic) and snooze (silence
+    # the alert until an absolute UTC timestamp).
+    ("POST", "/api/admin/reconciler/drifts/{ticker}/accept-exchange-truth"),
+    ("POST", "/api/admin/reconciler/drifts/{ticker}/snooze"),
 )
 
 # Path-only view of the mutating-endpoint inventory, used by the
