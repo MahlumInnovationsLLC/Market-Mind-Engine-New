@@ -969,3 +969,108 @@ will show the resolved `maxsize` falling back through the
 precedence chain to `256`.
 
 ---
+## 13. Resolve a stuck position drift
+
+Symptom: the Kalshi reconciler keeps re-firing
+`[axiom][POSITION-DRIFT]` alerts for the same ticker every cycle —
+either because the exchange is correct and the local DB is wrong,
+or because the drift is known-benign (e.g. a settled market the
+exchange hasn't propagated yet) and the noise is masking real
+alerts. Drift detection lives in `app.kalshi.reconciler` and is
+audited via the `position_drift_resolutions` table (migration
+`0031`). The operator console for it is `/system → Reconciler`
+(admin-only).
+
+### Enable the resolution workflow
+
+The schema lands disabled. Set the env flag to start writing rows:
+
+```
+AXIOM_RECONCILER_RESOLUTION_ENABLED=1
+```
+
+Restart the API workflow. With the flag off, the queue UI still
+loads (it just shows "no rows") and operator actions still work on
+any pre-existing rows — the flag only gates the reconciler's
+periodic `INSERT/UPDATE` into `position_drift_resolutions`.
+
+### Triage the queue
+
+1. Open `/system → Reconciler`. The default tab is the **open**
+   queue — drifts the reconciler has detected but no operator has
+   resolved. Each row shows `local_qty` vs `exchange_qty` and how
+   long it has been outstanding (`first_seen_at`).
+2. Scan `/system → Health` for the matching `position_drift`
+   `model_health_alerts` entry to see the alert message dispatched
+   to operators.
+3. Cross-check against Kalshi's `/portfolio/positions` (or the
+   exchange UI) to confirm the exchange's number is correct.
+
+### Action: accept exchange truth
+
+For drifts where the exchange is right and the local DB is wrong
+(missed-fill, manual close, recovery edge case), click **Accept
+truth**. This:
+
+- Closes every open `positions` row for the ticker
+  (`status='closed'`, history preserved).
+- Inserts one synthetic row tagged `recon-accept-truth-<ticker>`
+  carrying the exchange's signed quantity (side derived from the
+  sign).
+- Acknowledges the open `model_health_alerts` rows for the ticker.
+- Marks the drift resolution row `resolved_accept_exchange` with
+  the operator's email and reason.
+- Sends a `[axiom][POSITION-DRIFT][RESOLVED]` confirmation email
+  (subject includes the ticker and `accept_exchange_truth`).
+
+The action is idempotent — if the drift has already been resolved
+(e.g. a teammate clicked first, or the reconciler self-healed it),
+re-clicks return `changed=False` without touching `positions`.
+
+### Action: snooze
+
+For known-benign drifts (e.g. the exchange will propagate the
+correction once the next settlement cycle runs), click **Snooze**.
+Choose a duration in hours (1–720, default 24).
+
+- Marks the row `state='snoozed'` with `snoozed_until = now() +
+  duration`.
+- Suppresses the operator alert path for the ticker until the
+  snooze expires.
+- Does NOT touch `positions` — this is purely a noise filter.
+- Auto-expires: the next reconciler cycle after `snoozed_until`
+  passes flips the row back to `open` and the alert fires again.
+- Re-snoozing extends the TTL on the same row (same operator
+  email + new reason).
+
+### Auto-skeleton (orphan exchange positions)
+
+When the exchange reports a position for a ticker we have NO local
+row for at all (open or closed), the reconciler creates a synthetic
+`positions` row tagged `recon-orphan-<ticker>` and writes the drift
+resolution row directly to `resolved_orphan_skeleton`. An INFO
+`model_health_alerts` row records the event for audit. This stops
+the diff from re-firing on the same orphan every cycle without
+waking anyone — the operator can review the synth row in
+`/system → Reconciler` (under the **resolved** tab) and either
+close it or accept-truth it as needed.
+
+### Self-heal sweep
+
+At the end of every reconciler cycle, any `open` resolution row
+whose ticker is no longer drifting (e.g. a delayed WebSocket fill
+arrived) gets marked `resolved_self_healed`. **Snoozed rows are
+left alone** — a transient zero-drift cycle does not cancel the
+operator's deliberate snooze.
+
+### Disable the workflow (rollback)
+
+Unset (or set to `0`) `AXIOM_RECONCILER_RESOLUTION_ENABLED` and
+restart the API workflow. The reconciler stops writing new rows.
+Existing rows stay in `position_drift_resolutions` and remain
+actionable from `/system → Reconciler` so an in-progress triage
+isn't lost. Migration `0031` is purely additive — no rollback of
+the schema is needed unless you want to drop the table outright
+(`alembic downgrade -1`).
+
+---

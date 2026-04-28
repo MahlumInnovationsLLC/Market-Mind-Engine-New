@@ -54,6 +54,7 @@ _TAG_TO_USER_PREF: dict[str, str] = {
     "crypto-backtest-drift": "email_drift",
     "weekly-roundup":        "email_weekly_roundup",
     "soccer-settlement-drift": "email_drift",
+    "position-drift-resolved": "email_drift",
 }
 
 
@@ -178,6 +179,11 @@ USER_VISIBLE_ALERTS: dict[str, dict[str, Any]] = {
     },
     "position_drift": {
         "label": "Position drift alert",
+        "scope": "broadcast",
+        "channels": [("email", "email_drift")],
+    },
+    "position_drift_resolved": {
+        "label": "Position drift resolved",
         "scope": "broadcast",
         "channels": [("email", "email_drift")],
     },
@@ -1069,6 +1075,54 @@ def drift(
         + "\n"
     )
     return _dispatch(subject, body, tag="drift", dry_run=dry_run)
+
+
+# ---------------------------------------------------------------------------
+# Position-drift resolution (raised from the operator console)
+# ---------------------------------------------------------------------------
+
+
+def position_drift_resolved(
+    *,
+    ticker: str,
+    action: str,
+    local_qty: int,
+    exchange_qty: int,
+    drift_qty: int,
+    resolver_email: str | None,
+    reason: str | None = None,
+    snoozed_until: str | None = None,
+    dry_run: bool = False,
+) -> dict[str, Any]:
+    """Operator confirmation email after a position-drift resolution.
+
+    ``action`` is the human-readable resolution path (one of
+    ``accept_exchange_truth``, ``snooze``, ``unsnooze``). The body
+    captures the before / after numbers and the operator who took the
+    action so the trade-by-trade audit trail remains complete in
+    inboxes as well as the database.
+    """
+    subject = f"[axiom][POSITION-DRIFT][RESOLVED] {ticker} :: {action}"
+    fields: list[tuple[str, Any]] = [
+        ("ticker", ticker),
+        ("action", action),
+        ("local_qty_before", local_qty),
+        ("exchange_qty", exchange_qty),
+        ("drift_qty", drift_qty),
+        ("resolver", resolver_email or "(unknown)"),
+        ("reason", reason or ""),
+    ]
+    if snoozed_until:
+        fields.append(("snoozed_until", snoozed_until))
+    fields.append(("at", _utc_now_iso()))
+    body = (
+        "A Kalshi position-drift alert was resolved by an operator.\n\n"
+        + _format_lines(fields)
+        + "\n"
+    )
+    return _dispatch(
+        subject, body, tag="position-drift-resolved", dry_run=dry_run
+    )
 
 
 # ---------------------------------------------------------------------------

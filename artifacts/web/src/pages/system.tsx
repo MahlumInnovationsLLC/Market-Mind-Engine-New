@@ -36,7 +36,7 @@ import EmergencyStop from "@/components/telemetry/emergency-stop";
 import AccessRequests from "@/components/telemetry/access-requests";
 import AutoResearchPanel from "@/components/intelligence/autoresearch-panel";
 
-const ALL_TABS = ["health", "controls", "risk", "settings", "research", "audit", "users", "leads"] as const;
+const ALL_TABS = ["health", "controls", "risk", "reconciler", "settings", "research", "audit", "users", "leads"] as const;
 type TabKey = (typeof ALL_TABS)[number];
 
 const TAB_DEFS: Record<TabKey, TabDef<TabKey> & { adminOnly: boolean; subtitle: string }> = {
@@ -57,6 +57,12 @@ const TAB_DEFS: Record<TabKey, TabDef<TabKey> & { adminOnly: boolean; subtitle: 
     label: "Risk",
     adminOnly: true,
     subtitle: "Edge / Kelly / agreement / confidence-band gating thresholds.",
+  },
+  reconciler: {
+    key: "reconciler",
+    label: "Reconciler",
+    adminOnly: true,
+    subtitle: "Position-drift queue · accept-truth, snooze, or audit auto-skeletons.",
   },
   settings: {
     key: "settings",
@@ -282,6 +288,14 @@ export default function SystemPage() {
         </div>
       )}
 
+      {tab === "reconciler" && isAdmin && (
+        <div data-testid="panel-system-reconciler">
+          <GlassCard tone="solid" padding="md">
+            <ReconcilerDriftsPanel />
+          </GlassCard>
+        </div>
+      )}
+
       {tab === "settings" && (
         <div className="space-y-5" data-testid="panel-system-settings">
           <GlassCard tone="solid" padding="md">
@@ -445,6 +459,226 @@ function ThemePickerPanel() {
           );
         })}
       </div>
+    </div>
+  );
+}
+
+type DriftRow = {
+  id: number;
+  ticker: string;
+  vertical: string | null;
+  local_qty: number;
+  exchange_qty: number;
+  drift_qty: number;
+  state: string;
+  resolver_email: string | null;
+  resolution_reason: string | null;
+  snoozed_until: string | null;
+  first_seen_at: string;
+  last_seen_at: string;
+  resolved_at: string | null;
+  created_at: string;
+};
+
+type DriftListResponse = {
+  items: DriftRow[];
+  state_filter: string;
+  resolution_enabled: boolean;
+};
+
+function ReconcilerDriftsPanel() {
+  const { getToken, isSignedIn } = useAuth();
+  const tokenFn = useMemo(
+    () => () => getToken().then((t) => t ?? null),
+    [getToken],
+  );
+  const [stateFilter, setStateFilter] = useState<"open" | "snoozed" | "resolved">("open");
+  const [busyTicker, setBusyTicker] = useState<string | null>(null);
+  const [actionMsg, setActionMsg] = useState<string | null>(null);
+  const { data, isLoading, error, refetch } = useQuery<DriftListResponse>({
+    queryKey: ["admin", "reconciler", "drifts", stateFilter],
+    queryFn: () =>
+      apiFetch<DriftListResponse>(
+        `/api/admin/reconciler/drifts?state_filter=${stateFilter}&limit=200`,
+        { getToken: tokenFn },
+      ),
+    enabled: !!isSignedIn,
+    refetchInterval: 30_000,
+  });
+
+  const accept = async (ticker: string) => {
+    const reason = window.prompt(
+      `Accept exchange truth for ${ticker}? Optional reason:`,
+      "",
+    );
+    if (reason === null) return; // cancel
+    if (!window.confirm(
+      `This will close all local positions on ${ticker} and create a synthetic row matching the exchange. Continue?`,
+    )) return;
+    setBusyTicker(ticker);
+    setActionMsg(null);
+    try {
+      const res = await apiFetch<Record<string, unknown>>(
+        `/api/admin/reconciler/drifts/${encodeURIComponent(ticker)}/accept-exchange-truth`,
+        { method: "POST", body: { reason }, getToken: tokenFn },
+      );
+      setActionMsg(
+        res.changed
+          ? `Resolved ${ticker} (accepted exchange = ${res.exchange_qty}).`
+          : `No active drift for ${ticker}.`,
+      );
+      await refetch();
+    } catch (e) {
+      setActionMsg(`Failed: ${(e as Error).message}`);
+    } finally {
+      setBusyTicker(null);
+    }
+  };
+
+  const snooze = async (ticker: string) => {
+    const hoursStr = window.prompt(
+      `Snooze ${ticker} drift alerts for how many hours? (1–720)`,
+      "24",
+    );
+    if (hoursStr === null) return;
+    const hours = Math.max(1, Math.min(720, Number(hoursStr) || 24));
+    const reason = window.prompt(`Reason for snoozing ${ticker}? (optional)`, "");
+    if (reason === null) return;
+    setBusyTicker(ticker);
+    setActionMsg(null);
+    try {
+      const res = await apiFetch<Record<string, unknown>>(
+        `/api/admin/reconciler/drifts/${encodeURIComponent(ticker)}/snooze`,
+        {
+          method: "POST",
+          body: { snooze_seconds: hours * 3600, reason },
+          getToken: tokenFn,
+        },
+      );
+      setActionMsg(
+        res.changed
+          ? `Snoozed ${ticker} for ${hours}h.`
+          : `No active drift for ${ticker}.`,
+      );
+      await refetch();
+    } catch (e) {
+      setActionMsg(`Failed: ${(e as Error).message}`);
+    } finally {
+      setBusyTicker(null);
+    }
+  };
+
+  if (isLoading) return <div className="h-10 animate-pulse bg-muted/30" />;
+  if (error) {
+    return (
+      <p className="text-xs text-destructive" data-testid="reconciler-error">
+        Failed to load drift queue: {(error as Error).message}
+      </p>
+    );
+  }
+  const items = data?.items ?? [];
+  const flagOff = data && !data.resolution_enabled;
+  return (
+    <div className="space-y-3" data-testid="reconciler-panel">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-accent-cyan/80">
+          Drift queue · {items.length} {stateFilter}
+        </div>
+        <div className="flex gap-1" role="tablist">
+          {(["open", "snoozed", "resolved"] as const).map((s) => (
+            <button
+              key={s}
+              type="button"
+              onClick={() => setStateFilter(s)}
+              className={`border px-2 py-1 text-[10px] uppercase tracking-widest transition ${
+                stateFilter === s
+                  ? "border-primary bg-primary/10 text-primary"
+                  : "border-border bg-card text-muted-foreground hover:border-primary"
+              }`}
+              data-testid={`reconciler-filter-${s}`}
+            >
+              {s}
+            </button>
+          ))}
+        </div>
+      </div>
+      {flagOff && (
+        <p className="border border-amber-500/30 bg-amber-500/10 px-2 py-1 text-[11px] text-amber-300">
+          Resolution workflow flag (AXIOM_RECONCILER_RESOLUTION_ENABLED) is off — the
+          reconciler is detecting drift but not writing rows here. Manual
+          accept-truth / snooze still work for any pre-existing rows.
+        </p>
+      )}
+      {actionMsg && (
+        <p className="text-[11px] text-muted-foreground" data-testid="reconciler-action-msg">
+          {actionMsg}
+        </p>
+      )}
+      {items.length === 0 ? (
+        <p className="text-[11px] text-muted-foreground">
+          No {stateFilter} drift rows. The reconciler queue is clean.
+        </p>
+      ) : (
+        <div className="overflow-x-auto">
+          <table className="w-full border-collapse text-[11px]">
+            <thead>
+              <tr className="border-b border-border text-left text-[10px] uppercase tracking-widest text-muted-foreground">
+                <th className="px-2 py-1">Ticker</th>
+                <th className="px-2 py-1">Local</th>
+                <th className="px-2 py-1">Exch</th>
+                <th className="px-2 py-1">Drift</th>
+                <th className="px-2 py-1">State</th>
+                <th className="px-2 py-1">Last seen</th>
+                <th className="px-2 py-1">Resolver</th>
+                <th className="px-2 py-1 text-right">Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              {items.map((row) => (
+                <tr
+                  key={row.id}
+                  className="border-b border-border/40"
+                  data-testid={`drift-row-${row.ticker}`}
+                >
+                  <td className="px-2 py-1 font-bold">{row.ticker}</td>
+                  <td className="px-2 py-1">{row.local_qty}</td>
+                  <td className="px-2 py-1">{row.exchange_qty}</td>
+                  <td className="px-2 py-1">{row.drift_qty}</td>
+                  <td className="px-2 py-1 uppercase tracking-widest">{row.state}</td>
+                  <td className="px-2 py-1">
+                    {new Date(row.last_seen_at).toLocaleString()}
+                  </td>
+                  <td className="px-2 py-1">{row.resolver_email ?? "—"}</td>
+                  <td className="px-2 py-1 text-right">
+                    {(row.state === "open" || row.state === "snoozed") && (
+                      <span className="space-x-1">
+                        <button
+                          type="button"
+                          onClick={() => accept(row.ticker)}
+                          disabled={busyTicker === row.ticker}
+                          className="border border-primary px-2 py-0.5 text-[10px] uppercase tracking-widest text-primary hover:bg-primary/10 disabled:opacity-50"
+                          data-testid={`button-accept-${row.ticker}`}
+                        >
+                          Accept truth
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => snooze(row.ticker)}
+                          disabled={busyTicker === row.ticker}
+                          className="border border-border px-2 py-0.5 text-[10px] uppercase tracking-widest text-muted-foreground hover:border-primary hover:text-foreground disabled:opacity-50"
+                          data-testid={`button-snooze-${row.ticker}`}
+                        >
+                          Snooze
+                        </button>
+                      </span>
+                    )}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
     </div>
   );
 }

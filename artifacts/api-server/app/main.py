@@ -5280,6 +5280,15 @@ async def admin_get_vertical_visibility(
 # ---------------------------------------------------------------------------
 
 
+class AdminAcceptDriftRequest(BaseModel):
+    reason: str | None = Field(default=None, max_length=500)
+
+
+class AdminSnoozeDriftRequest(BaseModel):
+    snooze_seconds: int = Field(default=86400, ge=3600, le=30 * 86400)
+    reason: str | None = Field(default=None, max_length=500)
+
+
 class AdminHaltVerticalRequest(BaseModel):
     reason: str | None = Field(
         default=None,
@@ -5420,6 +5429,87 @@ async def admin_resume_vertical(
         "changed": changed,
         "previous_meta": prev_meta,
     }
+
+
+# ---------------------------------------------------------------------------
+# Reconciler — operator-resolution workflow (task #709). Backed by
+# ``app.kalshi.reconciler.list_drifts / accept_exchange_truth /
+# snooze_drift``. The reconciler module persists rows behind the
+# ``AXIOM_RECONCILER_RESOLUTION_ENABLED`` flag, but these endpoints are
+# always live so an operator can read the (empty) queue and we don't
+# need a flag flip on top of the schema migration to ship the UI.
+# ---------------------------------------------------------------------------
+
+
+@app.get("/api/admin/reconciler/drifts")
+async def admin_list_reconciler_drifts(
+    state_filter: str = "open",
+    limit: int = 100,
+    _: AuthedUser = Depends(require_admin),
+) -> dict[str, object]:
+    """List drift-resolution rows. ``state_filter`` ∈ ``open`` (default,
+    actionable queue), ``snoozed``, ``resolved``, ``all``.
+    """
+    from .kalshi import reconciler as _recon
+    items = await _recon.list_drifts(state_filter=state_filter, limit=limit)
+    return {
+        "items": items,
+        "state_filter": state_filter,
+        "resolution_enabled": _recon._resolution_enabled(),
+    }
+
+
+@app.post("/api/admin/reconciler/drifts/{ticker}/accept-exchange-truth")
+async def admin_accept_drift_exchange_truth(
+    ticker: str,
+    body: AdminAcceptDriftRequest | None = None,
+    actor: AuthedUser = Depends(require_admin),
+) -> dict[str, object]:
+    """Operator action: overwrite local positions with the exchange's
+    reported quantity for ``ticker``. Idempotent — returns
+    ``changed=False`` if there is no active drift row for the ticker.
+    """
+    from .kalshi import reconciler as _recon
+    actor_email: str | None = None
+    try:
+        actor_email = (await check_approval(actor))[1]
+    except Exception:
+        pass
+    reason = body.reason if body else None
+    result = await _recon.accept_exchange_truth(
+        ticker=ticker.strip(),
+        resolver_email=actor_email,
+        reason=reason,
+    )
+    return result
+
+
+@app.post("/api/admin/reconciler/drifts/{ticker}/snooze")
+async def admin_snooze_reconciler_drift(
+    ticker: str,
+    body: AdminSnoozeDriftRequest | None = None,
+    actor: AuthedUser = Depends(require_admin),
+) -> dict[str, object]:
+    """Operator action: silence drift alerts for ``ticker`` for
+    ``snooze_seconds`` (default 24h, clamped to 1h … 30d). Does NOT
+    touch ``positions`` — the position is left as-is and the alert
+    stops re-firing until the snooze expires.
+    """
+    from .kalshi import reconciler as _recon
+    actor_email: str | None = None
+    try:
+        actor_email = (await check_approval(actor))[1]
+    except Exception:
+        pass
+    snooze_seconds = body.snooze_seconds if body else 86400
+    reason = body.reason if body else None
+    result = await _recon.snooze_drift(
+        ticker=ticker.strip(),
+        snooze_seconds=snooze_seconds,
+        resolver_email=actor_email,
+        reason=reason,
+    )
+    return result
 
 
 @app.get("/api/dashboard/recent-cycles")
