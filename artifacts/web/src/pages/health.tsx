@@ -1464,6 +1464,35 @@ export function CardTile({ card }: { card: Card }) {
     typeof metadata.zero_rows_since === "string"
       ? (metadata.zero_rows_since as string)
       : null;
+  // Per-event breakdown: the refresher stashes one row per tournament
+  // it touched this cycle (sport + event id + entrants, plus an
+  // optional error string) so operators can tell whether a single
+  // flaky tournament is dragging the cycle total down vs. a
+  // system-wide issue.
+  const leaderboardPerEvent: Array<{
+    sport: string;
+    event_id: string;
+    entrants: number;
+    error?: string;
+  }> =
+    isTournamentLeaderboards && metadata && Array.isArray(metadata.per_event)
+      ? (metadata.per_event as unknown[]).flatMap((entry) => {
+          if (!entry || typeof entry !== "object") return [];
+          const row = entry as Record<string, unknown>;
+          const sport = typeof row.sport === "string" ? row.sport : null;
+          const eventId =
+            typeof row.event_id === "string"
+              ? row.event_id
+              : typeof row.event_id === "number"
+                ? String(row.event_id)
+                : null;
+          const entrants =
+            typeof row.entrants === "number" ? row.entrants : null;
+          if (!sport || !eventId || entrants == null) return [];
+          const error = typeof row.error === "string" ? row.error : undefined;
+          return [{ sport, event_id: eventId, entrants, error }];
+        })
+      : [];
   const leaderboardLastSuccessAt = isTournamentLeaderboards
     ? ((extras.last_ok_at as string | null) ?? null)
     : null;
@@ -1597,6 +1626,39 @@ export function CardTile({ card }: { card: Card }) {
                 </>
               )}
           </div>
+          {leaderboardPerEvent.length > 0 && (
+            <ul
+              className="mt-1 space-y-0.5 normal-case tracking-normal"
+              data-testid={`feed-leaderboard-per-event-${card.key}`}
+            >
+              {leaderboardPerEvent.map((row) => {
+                const isZero = row.entrants === 0;
+                return (
+                  <li
+                    key={`${row.sport}:${row.event_id}`}
+                    className={`flex items-center justify-between gap-2 border px-1 py-0.5 ${
+                      isZero
+                        ? "border-destructive/60 bg-destructive/10 text-destructive"
+                        : "border-border/40 text-foreground"
+                    }`}
+                    data-testid={`feed-leaderboard-event-${card.key}-${row.sport}-${row.event_id}`}
+                    data-zero={isZero ? "true" : "false"}
+                    title={row.error ?? undefined}
+                  >
+                    <span className="flex items-center gap-1 truncate">
+                      <span className="uppercase tracking-widest text-[10px]">
+                        {row.sport}
+                      </span>
+                      <span className="break-all">{row.event_id}</span>
+                    </span>
+                    <span className="shrink-0 tabular-nums">
+                      {row.entrants} entrants
+                    </span>
+                  </li>
+                );
+              })}
+            </ul>
+          )}
         </div>
       )}
       {isFeed && metadata && (seasonId || seasonStuck) && (

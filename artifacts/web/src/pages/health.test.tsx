@@ -1064,6 +1064,121 @@ describe("Tournament leaderboard refresh (rendered via CardTile)", () => {
     ).toBeNull();
   });
 
+  it("lists each refreshed event with sport, id, and entrant count", () => {
+    render(
+      <CardTile
+        card={{
+          ...baseLeaderboardCard,
+          status: "ok",
+          detail: "wrote 142 row(s)",
+          extras: {
+            cadence_seconds: 120,
+            last_ok_at: "2026-04-26T00:00:00+00:00",
+            metadata: {
+              events_live: 2,
+              last_refresh_count: 142,
+              last_refresh_at: "2026-04-26T00:00:00+00:00",
+              zero_rows_since: null,
+              per_event: [
+                { sport: "PGA", event_id: "tid-123", entrants: 130 },
+                { sport: "F1", event_id: "eid-456", entrants: 12 },
+              ],
+            },
+          },
+        }}
+      />,
+    );
+    const list = screen.getByTestId(
+      "feed-leaderboard-per-event-feed:sportradar_tournament_leaderboards",
+    );
+    expect(list.textContent).toMatch(/PGA/);
+    expect(list.textContent).toMatch(/tid-123/);
+    expect(list.textContent).toMatch(/130 entrants/);
+    expect(list.textContent).toMatch(/F1/);
+    expect(list.textContent).toMatch(/eid-456/);
+    expect(list.textContent).toMatch(/12 entrants/);
+    // Healthy rows should NOT carry the destructive palette.
+    const pgaRow = screen.getByTestId(
+      "feed-leaderboard-event-feed:sportradar_tournament_leaderboards-PGA-tid-123",
+    );
+    expect(pgaRow.getAttribute("data-zero")).toBe("false");
+    expect(pgaRow.className).not.toMatch(/destructive/);
+  });
+
+  it("visually distinguishes events that refreshed 0 entrants this cycle", () => {
+    render(
+      <CardTile
+        card={{
+          ...baseLeaderboardCard,
+          status: "ok",
+          detail: "wrote 130 row(s)",
+          extras: {
+            cadence_seconds: 120,
+            last_ok_at: "2026-04-26T00:00:00+00:00",
+            metadata: {
+              events_live: 2,
+              last_refresh_count: 130,
+              last_refresh_at: "2026-04-26T00:00:00+00:00",
+              zero_rows_since: null,
+              per_event: [
+                { sport: "PGA", event_id: "tid-123", entrants: 130 },
+                {
+                  sport: "F1",
+                  event_id: "eid-456",
+                  entrants: 0,
+                  error: "HTTP 500 from sportradar",
+                },
+              ],
+            },
+          },
+        }}
+      />,
+    );
+    const healthy = screen.getByTestId(
+      "feed-leaderboard-event-feed:sportradar_tournament_leaderboards-PGA-tid-123",
+    );
+    const zeroed = screen.getByTestId(
+      "feed-leaderboard-event-feed:sportradar_tournament_leaderboards-F1-eid-456",
+    );
+    expect(healthy.getAttribute("data-zero")).toBe("false");
+    expect(zeroed.getAttribute("data-zero")).toBe("true");
+    // The zero-entrant row should pick up the destructive palette so
+    // it stands out from the healthy ones; the healthy row must not.
+    expect(zeroed.className).toMatch(/destructive/);
+    expect(healthy.className).not.toMatch(/destructive/);
+    // Per-event errors surface via tooltip so the operator can see
+    // why a particular tournament refreshed 0 entrants.
+    expect(zeroed.getAttribute("title")).toMatch(/HTTP 500/);
+  });
+
+  it("omits the per-event list when the refresher hasn't reported any events yet", () => {
+    render(
+      <CardTile
+        card={{
+          ...baseLeaderboardCard,
+          status: "ok",
+          detail: "wrote 0 row(s)",
+          extras: {
+            cadence_seconds: 120,
+            last_ok_at: "2026-04-26T00:00:00+00:00",
+            metadata: {
+              events_live: 0,
+              last_refresh_count: 0,
+              last_refresh_at: "2026-04-26T00:00:00+00:00",
+              zero_rows_since: null,
+              per_event: [],
+            },
+          },
+        }}
+      />,
+    );
+    expect(
+      screen.queryByTestId(
+        "feed-leaderboard-per-event-feed:sportradar_tournament_leaderboards",
+      ),
+    ).toBeNull();
+  });
+
   it("does not render the leaderboard block on unrelated feed cards", () => {
     // The block must be gated on the leaderboard feed key — otherwise
     // every Sportradar feed would sprout an empty 'events live: 0'
