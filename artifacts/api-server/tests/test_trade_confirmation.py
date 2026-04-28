@@ -120,6 +120,15 @@ def harness(monkeypatch: pytest.MonkeyPatch) -> _Harness:
     # Operator live_trade alert is a separate concern — stub it.
     monkeypatch.setattr(_alerts, "live_trade", lambda **_kw: {"stub": True})
 
+    # Operator branded HTML alert (task #712) is also a separate
+    # concern in this suite — stub so it doesn't pull in extra
+    # postmark.send calls that would inflate `call_count` in
+    # test_trade_confirmation_postmark_failure_is_non_fatal.
+    async def _stub_operator_alert(**_kw: Any) -> dict[str, Any]:
+        return {"stub": True}
+
+    monkeypatch.setattr(_alerts, "operator_trade_alert", _stub_operator_alert)
+
     return h
 
 

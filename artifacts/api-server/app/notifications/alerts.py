@@ -1265,6 +1265,7 @@ def _render_operator_trade_alert_html(
     pnl: dict[str, Any],
     gates: list[tuple[str, Any]],
     trade_url: str,
+    fees_cents: int | None = None,
 ) -> str:
     side_label = (side or "").upper()
     action_label = (action or "").upper()
@@ -1278,6 +1279,12 @@ def _render_operator_trade_alert_html(
         ("Price", _html_escape(f"{avg_price_cents}¢")),
         ("Total", _html_escape(_fmt_cents_usd(total_cost_cents))),
     ]
+    # Task #712 — surface exchange fees when the WS fill payload
+    # carried them (Kalshi includes `fee` only on some message
+    # variants). Omit the row entirely when missing so triage isn't
+    # misled by a phantom $0.00.
+    if fees_cents is not None:
+        fill_rows.append(("Fees", _html_escape(_fmt_cents_usd(int(fees_cents)))))
     if vertical:
         fill_rows.append(("Vertical", _html_escape(vertical)))
     fill_rows.extend([
@@ -1437,6 +1444,7 @@ def _render_operator_trade_alert_text(
     pnl: dict[str, Any],
     gates: list[tuple[str, Any]],
     trade_url: str,
+    fees_cents: int | None = None,
 ) -> str:
     lines: list[tuple[str, Any]] = [
         ("market", f"{market_title} ({market_ticker})"),
@@ -1446,6 +1454,8 @@ def _render_operator_trade_alert_text(
         ("price", f"{avg_price_cents}¢"),
         ("total", _fmt_cents_usd(total_cost_cents)),
     ]
+    if fees_cents is not None:
+        lines.append(("fees", _fmt_cents_usd(int(fees_cents))))
     if vertical:
         lines.append(("vertical", vertical))
     lines.extend([
@@ -1509,10 +1519,15 @@ async def _send_one_operator_trade_alert(
     dedupe row so a paused operator who later un-mutes doesn't replay
     historical fills.
 
-    On Postmark send failure we release the dedupe claim so the next
-    fill (or a manual retry) can re-attempt — without this, a single
-    Postmark hiccup would suppress this (operator, order, fill) tuple
-    for 7 days and the operator would silently miss the alert.
+    Critical: ``postmark.send`` is contractually never-raises and
+    instead returns a per-recipient ``ok`` boolean (False on missing
+    token, HTTP failure, no-recipients, suppression, etc.). We MUST
+    inspect each result and treat ``ok=False`` as a send failure —
+    otherwise a transient Postmark issue would mark the alert "sent"
+    and the dedupe row would silence retries for 7 days.
+
+    On any send failure (raise OR ok=False) the dedupe claim is
+    released so a follow-up fill / manual retry can re-attempt.
     """
     claimed = await dedupe_or_skip(
         OPERATOR_TRADE_ALERT_TYPE, dedupe_key, ttl_seconds=7 * 24 * 3600
@@ -1528,11 +1543,34 @@ async def _send_one_operator_trade_alert(
             to=[email],
             tag="operator-trade-alert",
         )
-        return {"sent": True, "to": email, "results": results}
     except Exception as e:  # pragma: no cover
-        log.warning("operator_trade_alert send failed for %s: %s", email, e)
+        log.warning("operator_trade_alert send raised for %s: %s", email, e)
         await _release_operator_dedupe_claim(dedupe_key)
         return {"sent": False, "to": email, "error": str(e)}
+    # Inspect per-recipient results — any False ok means the email did
+    # not actually leave Postmark for that address.
+    delivered = bool(results) and all(
+        bool(r.get("ok")) for r in results
+    )
+    if not delivered:
+        first_err = next(
+            (
+                (r.get("error") or r.get("skipped_reason") or "unknown")
+                for r in results or []
+                if not r.get("ok")
+            ),
+            "unknown",
+        )
+        log.warning(
+            "operator_trade_alert undelivered for %s: %s (results=%s)",
+            email, first_err, results,
+        )
+        await _release_operator_dedupe_claim(dedupe_key)
+        return {
+            "sent": False, "to": email, "error": first_err,
+            "results": results,
+        }
+    return {"sent": True, "to": email, "results": results}
 
 
 async def operator_trade_alert(
@@ -1550,6 +1588,7 @@ async def operator_trade_alert(
     pnl: dict[str, Any] | None = None,
     gates_context: dict[str, Any] | None = None,
     recipients: Iterable[str] | None = None,
+    fees_cents: int | None = None,
     dry_run: bool = False,
 ) -> dict[str, Any]:
     """Compose + dispatch the branded HTML operator trade alert.
@@ -1593,6 +1632,7 @@ async def operator_trade_alert(
         timestamp_iso=ts,
         position=pos or {}, pnl=pnl_ctx or {}, gates=gates,
         trade_url=trade_url,
+        fees_cents=int(fees_cents) if fees_cents is not None else None,
     )
     text_body = _render_operator_trade_alert_text(
         market_title=title, market_ticker=market_ticker,
@@ -1603,6 +1643,7 @@ async def operator_trade_alert(
         timestamp_iso=ts,
         position=pos or {}, pnl=pnl_ctx or {}, gates=gates,
         trade_url=trade_url,
+        fees_cents=int(fees_cents) if fees_cents is not None else None,
     )
 
     raw_recipients = (

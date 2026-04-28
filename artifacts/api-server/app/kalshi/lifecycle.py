@@ -1343,6 +1343,19 @@ async def handle_ws_fill(message: dict[str, Any]) -> None:
     # (e.g. "BUY YES 25x") so on-call triage isn't misled by
     # `rec.request.count` which would be the unrelated total order.
     try:
+        # Task #712 — extract exchange fees if the WS payload carried
+        # them. Kalshi's fill payloads include `fee` only on some
+        # variants (REST poll vs WS push, taker vs maker); we surface
+        # whatever's present and omit the row otherwise.
+        _raw_fee = (
+            fill.get("fee")
+            if isinstance(fill.get("fee"), (int, float))
+            else fill.get("fee_cents")
+            if isinstance(fill.get("fee_cents"), (int, float))
+            else fill.get("taker_fee")
+            if isinstance(fill.get("taker_fee"), (int, float))
+            else None
+        )
         operator_alert_snapshot = {
             "market_ticker": rec.request.market_ticker,
             "side": rec.request.side,
@@ -1352,6 +1365,7 @@ async def handle_ws_fill(message: dict[str, Any]) -> None:
             "order_id": rec.order_id,
             "fill_id": fill_id,
             "vertical": rec.request.vertical,
+            "fees_cents": int(_raw_fee) if _raw_fee is not None else None,
         }
         try:
             loop = asyncio.get_running_loop()

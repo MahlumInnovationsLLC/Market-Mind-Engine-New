@@ -89,6 +89,8 @@ PROTECTED_ROUTES: tuple[str, ...] = (
     "/api/admin/reconciler/drifts",
     # Task #710 — operator order-submit dead-letter console queue (GET).
     "/api/admin/orders/dead-lettered",
+    # Task #712 — operator per-trade alert opt-out preferences (GET).
+    "/api/admin/operator-alerts/preferences",
     "/api/me/access",
     "/api/me/subscription",
     "/api/me/notification-prefs",
@@ -262,6 +264,8 @@ PROTECTED_MUTATING_ENDPOINTS: tuple[tuple[str, str], ...] = (
     # Task #710 — operator dead-letter resolution actions
     # (mark_cancelled / force_retry / claim_filled).
     ("POST", "/api/admin/orders/{client_order_id}/resolve"),
+    # Task #712 — operator per-trade alert opt-out preferences (POST).
+    ("POST", "/api/admin/operator-alerts/preferences"),
 )
 
 # Path-only view of the mutating-endpoint inventory, used by the

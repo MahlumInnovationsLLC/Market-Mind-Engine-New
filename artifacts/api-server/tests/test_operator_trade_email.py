@@ -342,12 +342,12 @@ def test_dry_run_does_not_send(shim, captured_sends):
     assert captured_sends == []
 
 
-def test_dedupe_released_on_send_failure_allows_retry(shim, monkeypatch):
-    """If Postmark send raises, the dedupe row must be released so
-    a follow-up retry of the same (operator, order, fill) can land —
-    otherwise a single transient Postmark error would silently
-    suppress the alert for 7 days."""
-    # First call: postmark.send raises.
+def test_dedupe_released_on_send_exception_allows_retry(shim, monkeypatch):
+    """If Postmark send raises (defensive path — the SDK is contractually
+    never-raises, but a future bug could change that), the dedupe row
+    must be released so a follow-up retry of the same (operator, order,
+    fill) can land — otherwise a single transient Postmark error would
+    silently suppress the alert for 7 days."""
     sent_calls = {"n": 0}
 
     async def _flaky_send(**_kwargs):
@@ -375,6 +375,201 @@ def test_dedupe_released_on_send_failure_allows_retry(shim, monkeypatch):
     # released, so the second attempt should claim it cleanly and send.
     out2 = asyncio.run(_alerts.operator_trade_alert(**args))
     assert out2["sends"][0]["sent"] is True
+
+
+def test_dedupe_released_on_postmark_ok_false_allows_retry(shim, monkeypatch):
+    """``postmark.send`` is contractually never-raises and instead
+    returns ``[{"ok": False, "error": "..."}]`` on real failures
+    (missing token, HTTP 5xx, suppression hit). Without inspecting the
+    ``ok`` field, the alert would be marked sent and the dedupe row
+    would silence the same (operator, order, fill) tuple for 7 days
+    despite Postmark having rejected the message — the architect-flagged
+    bug in code review.
+
+    This test pins the real-world shape: first call returns ok=False,
+    retry returns ok=True, the dedupe row must have been released so
+    the retry actually goes out."""
+    call_idx = {"n": 0}
+
+    async def _send(**kwargs):
+        call_idx["n"] += 1
+        to = kwargs.get("to") or []
+        if call_idx["n"] == 1:
+            return [
+                {"to": to[0] if to else None, "ok": False,
+                 "error": "postmark 502: bad gateway"}
+            ]
+        return [{"to": to[0] if to else None, "ok": True}]
+
+    monkeypatch.setattr(_postmark, "send", _send)
+    monkeypatch.setattr(_postmark, "is_configured", lambda: True)
+    from app.kalshi import market_titles as _mt
+    async def _t(_t): return "Title"
+    monkeypatch.setattr(_mt, "get_title", _t)
+
+    args = dict(
+        market_ticker="KX-MKT-OKF",
+        side="yes", action="buy", contracts=4, price_cents=27,
+        order_id="ord-okf", fill_id="fill-okf", vertical="sports",
+        recipients=["alice@example.com"],
+    )
+    out1 = asyncio.run(_alerts.operator_trade_alert(**args))
+    # Critical: the helper must inspect ok=False and report not-sent,
+    # NOT silently mark it delivered.
+    assert out1["sends"][0]["sent"] is False, (
+        "ok=False from postmark.send must be treated as a send failure "
+        "— otherwise the dedupe row silences this fill for 7 days "
+        "despite it never being delivered."
+    )
+    assert "error" in out1["sends"][0]
+    # Retry with the same (operator, order, fill): the released dedupe
+    # row lets the second attempt actually land.
+    out2 = asyncio.run(_alerts.operator_trade_alert(**args))
+    assert out2["sends"][0]["sent"] is True
+    assert call_idx["n"] == 2, (
+        f"expected exactly two send attempts (1 fail, 1 retry), got "
+        f"{call_idx['n']} — dedupe was likely not released after ok=False"
+    )
+
+
+def test_fees_cents_renders_in_subject_and_body(shim, captured_sends):
+    """Task #712 explicitly asked for 'fees if available' in the
+    operator email. When the lifecycle snapshot carries `fees_cents`
+    the renderer must surface it in both HTML and plain-text bodies.
+    When absent (the common WS-fill case), no phantom $0.00 row
+    should appear that would mislead on-call triage."""
+    # With fees: row appears in both bodies.
+    asyncio.run(_alerts.operator_trade_alert(
+        market_ticker="KX-MKT-FEE",
+        side="yes", action="buy", contracts=10, price_cents=42,
+        order_id="ord-fee", fill_id="fill-fee", vertical="sports",
+        recipients=["alice@example.com"],
+        fees_cents=37,
+    ))
+    assert len(captured_sends) == 1
+    sent = captured_sends[0]
+    assert "$0.37" in sent["text_body"], (
+        "fees_cents=37 should render as $0.37 in the plain-text body"
+    )
+    assert "$0.37" in sent["html_body"], (
+        "fees_cents=37 should render in the HTML body too"
+    )
+    # The 'Fees' label should be present so triage can scan for it.
+    assert "Fees" in sent["html_body"]
+    assert "fees" in sent["text_body"].lower()
+
+    # Without fees: no Fees row at all (different order/fill so the
+    # dedupe doesn't suppress).
+    captured_sends.clear()
+    asyncio.run(_alerts.operator_trade_alert(
+        market_ticker="KX-MKT-NOFEE",
+        side="yes", action="buy", contracts=10, price_cents=42,
+        order_id="ord-nofee", fill_id="fill-nofee", vertical="sports",
+        recipients=["alice@example.com"],
+        # fees_cents omitted
+    ))
+    assert len(captured_sends) == 1
+    sent = captured_sends[0]
+    assert ">Fees<" not in sent["html_body"], (
+        "no Fees row should appear when fees_cents is omitted"
+    )
+    # Text body uses lowercase key 'fees:' — guard explicitly.
+    assert "\nfees" not in sent["text_body"].lower()
+
+
+def test_lifecycle_operator_alert_failure_does_not_block_live_trade(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Architect-flagged coverage gap: even if the branded HTML
+    operator alert worker raises (render bug, DB hiccup, postmark
+    misconfiguration), the plain-text firehose ``live_trade`` alert
+    MUST still go out. They're independent failure boundaries — a
+    bug in the rich email path must never silence the on-call
+    firehose that operators actually rely on for paging.
+
+    We exercise the full lifecycle path (handle_ws_fill → both
+    background tasks) and assert: live_trade was invoked exactly
+    once, even though operator_trade_alert raised."""
+    from app.kalshi import lifecycle as _lc
+    from app.notifications import alerts as _al
+
+    live_trade_calls: list[dict[str, Any]] = []
+
+    def _capture_live_trade(**kwargs: Any) -> dict[str, Any]:
+        live_trade_calls.append(kwargs)
+        return {"ok": True}
+
+    async def _operator_alert_explodes(**_kwargs: Any) -> dict[str, Any]:
+        raise RuntimeError("simulated render bug in operator alert")
+
+    monkeypatch.setattr(_al, "live_trade", _capture_live_trade)
+    monkeypatch.setattr(_al, "operator_trade_alert", _operator_alert_explodes)
+
+    # Stub everything else lifecycle touches so we can run offline.
+    async def _noop(*_a: Any, **_kw: Any) -> None:
+        return None
+
+    async def _always_fresh(**_kw: Any) -> bool:
+        return True
+
+    monkeypatch.setattr(_lc, "_record", _noop)
+    monkeypatch.setattr(_lc, "_emit", _noop)
+    monkeypatch.setattr(_lc, "_record_fill_idempotent", _always_fresh)
+    monkeypatch.setattr(_lc, "_upsert_position_rollup", _noop)
+
+    # Stub the dedupe DB lookup used by the live_trade background
+    # worker so it actually invokes the captured live_trade fn.
+    async def _claim_ok(*_a, **_kw) -> bool:
+        return True
+
+    monkeypatch.setattr(_al, "dedupe_or_skip", _claim_ok)
+
+    req = _lc.OrderRequest(
+        market_ticker="KXISO-FAIL-TEST",
+        side="yes", action="buy",
+        count=5, limit_price_cents=42,
+        vertical="sports",
+        client_order_id="coid_iso_fail",
+        context={"user_id": "user_iso_fail"},
+    )
+    rec = _lc.OrderRecord(
+        order_id="ord_iso_fail",
+        request=req,
+        paper=False,
+        state="resting",
+        exchange_order_id="exch_iso_fail",
+    )
+
+    async def go() -> None:
+        async with _lc._resting_lock:
+            _lc._resting[req.client_order_id] = rec
+        msg = {
+            "msg": {
+                "type": "fill",
+                "msg": {
+                    "client_order_id": req.client_order_id,
+                    "count": 5, "yes_price": 42,
+                    "trade_id": "f_iso_fail",
+                    "created_time": "2026-04-23T12:00:00Z",
+                },
+            }
+        }
+        await _lc.handle_ws_fill(msg)
+        # Background tasks need a tick to settle; the operator path
+        # raises immediately, the live_trade path gates on a 1s
+        # dedupe sleep.
+        for _ in range(40):
+            await asyncio.sleep(0.05)
+            if live_trade_calls:
+                break
+
+    asyncio.run(go())
+
+    assert len(live_trade_calls) == 1, (
+        f"live_trade firehose must fire exactly once even when "
+        f"operator_trade_alert raises; got {len(live_trade_calls)} calls"
+    )
+    assert live_trade_calls[0].get("market_ticker") == "KXISO-FAIL-TEST"
 
 
 def test_snapshot_contracts_from_helper_match_input(shim, captured_sends):
