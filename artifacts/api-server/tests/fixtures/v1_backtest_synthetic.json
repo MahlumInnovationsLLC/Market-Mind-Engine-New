@@ -1,0 +1,12 @@
+[
+  {"league": "NBA", "predicted_prob": 0.72, "actual_outcome": 1, "side": "yes"},
+  {"league": "NBA", "predicted_prob": 0.68, "actual_outcome": 1, "side": "yes"},
+  {"league": "NBA", "predicted_prob": 0.55, "actual_outcome": 0, "side": "yes"},
+  {"league": "NBA", "predicted_prob": 0.31, "actual_outcome": 0, "side": "yes"},
+  {"league": "NBA", "predicted_prob": 0.85, "actual_outcome": 1, "side": "yes"},
+  {"league": "NFL", "predicted_prob": 0.62, "actual_outcome": 1, "side": "yes"},
+  {"league": "NFL", "predicted_prob": 0.40, "actual_outcome": 0, "side": "yes"},
+  {"league": "NFL", "predicted_prob": 0.78, "actual_outcome": 0, "side": "no"},
+  {"league": "NFL", "predicted_prob": 0.22, "actual_outcome": 0, "side": "buy"},
+  {"league": "NFL", "predicted_prob": 0.91, "actual_outcome": 1, "side": "yes"}
+]

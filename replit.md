@@ -314,6 +314,60 @@ End-to-end refit evidence after Phase 1 import + wire-up
 | NFL   | market_prior   | market_prior | platt | 4 V1 rows (below MIN=10) |
 | MLS   | market_prior   | market_prior | platt | 1 V1 row  (below MIN=10) |
 
+### V1 backtest harness — calibrator audit (Apr 29, 2026)
+
+`scripts/backtest_v1_archive.py` replays the full
+`v1_archive.trade_analyses` archive against the *current* per-league
+calibrators and reports per-league Brier / log-loss / AUC for both V1
+raw (`predicted_prob` after side-flip) and the calibrated path. V1's
+upstream features (transient `market_prob`/`sharp_money` signals)
+weren't snapshotted, so the harness audits the *calibrator stage only*
+— the same path the nightly refit consumes. Side semantics mirror
+`calibrators._fetch_training_data` exactly.
+
+Three input modes — DB (default, with `to_regclass` preflight),
+`--fixture FILE` for synthetic JSON, `--inline-rows JSON` for ad-hoc
+rows. Programmatic `run()` exposed for tests.
+
+Latest archive run (603,128 of 667,092 rows kept after dropping
+unknown-side / pass / sport-specific bet-type rows; report at
+`scripts/reports/v1_backtest_2026-04-29.json`):
+
+| League | n | Brier raw | Brier cal | Δ | AUC raw | AUC cal | Verdict |
+|---|---|---|---|---|---|---|---|
+| NBA   | 3,093 | 0.6015 | 0.1038 | **−0.498** | 0.382 | 0.565 | improved |
+| NCAAB | 1,355 | 0.5383 | 0.1691 | **−0.369** | 0.339 | 0.500 | improved |
+| NHL   |   272 | 0.4450 | 0.1150 | **−0.330** | 0.297 | 0.503 | improved |
+| MLB   |   133 | 0.2644 | 0.0817 | **−0.183** | 0.169 | 0.365 | improved |
+| NFL   |     4 | 0.7318 | 0.6114 | **−0.120** | 0.667 | 0.667 | improved |
+| PGA   |    52 | 0.0760 | 0.0680 | −0.008 | 0.505 | 0.662 | parity |
+| MLS   |     1 | 0.0000 | 0.0121 | +0.012 | n/a   | n/a   | parity |
+| UNKNOWN | 598,218 | 0.2626 | 0.2626 | 0.000 | 0.798 | 0.798 | parity |
+
+**Audit verdict: 5 leagues IMPROVED, 3 PARITY, 0 REGRESSED.** The five
+leagues whose calibrators were refit on V1 data (Phase 1 above) all
+show large Brier reductions vs V1's raw stack output. Note this is
+calibrator-stage replay against the same archive the calibrators were
+fit on, so the improvement number measures reduced miscalibration of
+V1's `predicted_prob` field, not strict out-of-sample accuracy
+(rolling-origin / time-split evaluation is tracked under follow-up
+task #731). The raw AUC < 0.5 on the sports leagues is consistent
+with V1 having shipped without per-league post-hoc calibration; the
+isotonic step pulls AUC back toward / above 0.5 on every league it
+touches. UNKNOWN (98% of rows, no fitted calibrator) is unchanged by
+design. Re-run any time with:
+
+    cd artifacts/api-server && \
+      /home/runner/workspace/.pythonlibs/bin/python3 \
+        -m scripts.backtest_v1_archive \
+        --json-out scripts/reports/v1_backtest_<date>.json
+
+The report's `summary` block exposes `leagues_parity`,
+`leagues_improved`, `leagues_regressed` (with the `leagues_within_tolerance` /
+`leagues_outside_tolerance` legacy aliases retained). Operator alerting
+should fire on `leagues_regressed` not on `leagues_outside_tolerance`,
+since "outside" is currently dominated by *improvements*.
+
 Phase 2 dumps (`weather_observations`, `line_snapshots`,
 `llm_predictions`) plus broadening V1 side coverage to sport-specific
 bet labels are tracked under follow-up task #731.

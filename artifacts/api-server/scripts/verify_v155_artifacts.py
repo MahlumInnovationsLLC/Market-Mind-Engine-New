@@ -33,9 +33,11 @@ Run with::
 """
 from __future__ import annotations
 
+import argparse
 import asyncio
 import json
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -115,7 +117,17 @@ async def _bucket_inventory() -> tuple[list[storage.StorageEntry], list[str]]:
     return files, problems
 
 
-async def main() -> int:
+async def main(json_out: Path | None = None) -> int:
+    report: dict = {
+        "started_at": datetime.now(timezone.utc).isoformat(),
+        "bucket": None,
+        "bucket_problems": [],
+        "loader": {},
+        "manifest_check": {},
+        "canonical": [],
+        "verdict": None,
+    }
+
     print("=" * 78)
     print(" v155 artifact verification — end to end")
     print("=" * 78)
@@ -126,7 +138,14 @@ async def main() -> int:
         _files, problems = await _bucket_inventory()
     except Exception as e:
         print(f"  FAIL: bucket inventory failed: {type(e).__name__}: {e}")
+        report["bucket_problems"] = [f"inventory: {type(e).__name__}: {e}"]
+        report["verdict"] = "FAIL"
+        if json_out is not None:
+            json_out.parent.mkdir(parents=True, exist_ok=True)
+            json_out.write_text(json.dumps(report, indent=2, default=str))
         return 1
+    report["bucket"] = get_settings().supabase_bucket
+    report["bucket_problems"] = list(problems)
     if problems:
         print("  PROBLEMS detected before download:")
         for p in problems:
@@ -138,6 +157,22 @@ async def main() -> int:
     # Force a clean run so we don't get a confusingly-cached PASS when
     # the on-disk cache was populated during a previous boot.
     state = await models_loader.ensure_artifacts(force=True)
+    report["loader"] = {
+        "ready": bool(state.ready),
+        "error": state.error,
+        "manifest_version": (state.manifest or {}).get("version"),
+        "manifest_predictor_count": (state.manifest or {}).get("predictor_count"),
+        "manifest_signature": (state.manifest or {}).get("signature"),
+        "predictor_catalog_size": len(state.predictors),
+        "archives": {
+            name: {
+                "extracted_bytes": info.extracted_bytes,
+                "file_count": info.file_count,
+                "cached": info.cached,
+            }
+            for name, info in (state.archives or {}).items()
+        },
+    }
     if state.error:
         print(f"  loader.error = {state.error}")
     print(f"  loader.ready = {state.ready}")
@@ -156,6 +191,16 @@ async def main() -> int:
                 f"files={info.file_count} cached={info.cached}"
             )
     check = state.manifest_check or {}
+    report["manifest_check"] = {
+        "ok": check.get("ok"),
+        "matched_count": check.get("matched_count"),
+        "manifest_predictor_count": check.get("manifest_predictor_count"),
+        "signature": check.get("signature"),
+        "reason": check.get("reason"),
+        "missing_count": len(check.get("missing") or []),
+        "mismatch_count": len(check.get("mismatch") or []),
+        "unexpected_count": len(check.get("unexpected") or []),
+    }
     if check:
         print(
             f"  manifest_check: ok={check.get('ok')} "
@@ -190,6 +235,18 @@ async def main() -> int:
         result = loaded.get(name) or {}
         present = name in state.predictors
         sha = (state.predictors.get(name) or {}).get("version")
+        entry = {
+            "name": name,
+            "present": present,
+            "sha12": sha,
+            "ok": bool(result.get("ok")),
+            "type": result.get("type"),
+            "module": result.get("module"),
+            "load_seconds": result.get("load_seconds"),
+            "error": result.get("error"),
+            "soft_fail_reason": FAIL_SOFT_PREDICTORS.get(name),
+        }
+        report["canonical"].append(entry)
         if result.get("ok"):
             ok_count += 1
             print(
@@ -235,6 +292,18 @@ async def main() -> int:
     )
     print(f"  predictor catalog     = {len(state.predictors)} files")
     print(f"  bucket problems       = {len(problems)}")
+
+    report["completed_at"] = datetime.now(timezone.utc).isoformat()
+    report["canonical_ok_count"] = ok_count
+    report["canonical_soft_fail_count"] = len(soft_fail)
+    report["canonical_hard_fail_count"] = len(hard_fail)
+    report["verdict"] = "PASS" if required_ok else "FAIL"
+
+    if json_out is not None:
+        json_out.parent.mkdir(parents=True, exist_ok=True)
+        json_out.write_text(json.dumps(report, indent=2, default=str))
+        print(f"\n  JSON report written: {json_out}")
+
     if required_ok:
         print("\n  VERDICT: PASS — v155 artifacts are reachable through models_loader.")
         if soft_fail:
@@ -252,8 +321,17 @@ async def main() -> int:
 
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--json-out",
+        type=Path,
+        default=None,
+        help="Write a structured JSON report to this path "
+             "(in addition to the human-readable console output).",
+    )
+    args = parser.parse_args()
     try:
-        rc = asyncio.run(main())
+        rc = asyncio.run(main(json_out=args.json_out))
     except KeyboardInterrupt:
         rc = 130
     sys.exit(rc)

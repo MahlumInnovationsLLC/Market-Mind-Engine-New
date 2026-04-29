@@ -1,0 +1,108 @@
+{
+  "started_at": "2026-04-29T18:24:38.512239+00:00",
+  "bucket": "axiom-predict-artifacts",
+  "bucket_problems": [],
+  "loader": {
+    "ready": true,
+    "error": null,
+    "manifest_version": "2026.04.02-rebuild",
+    "manifest_predictor_count": 237,
+    "manifest_signature": "skipped",
+    "predictor_catalog_size": 237,
+    "archives": {
+      "models": {
+        "extracted_bytes": 289117980,
+        "file_count": 500,
+        "cached": true
+      },
+      "source": {
+        "extracted_bytes": 275733761,
+        "file_count": 25329,
+        "cached": true
+      }
+    }
+  },
+  "manifest_check": {
+    "ok": true,
+    "matched_count": 237,
+    "manifest_predictor_count": 237,
+    "signature": "skipped",
+    "reason": null,
+    "missing_count": 0,
+    "mismatch_count": 0,
+    "unexpected_count": 0
+  },
+  "canonical": [
+    {
+      "name": "models/saved/meta_model.pkl",
+      "present": true,
+      "sha12": "3d208e80a006",
+      "ok": true,
+      "type": "LogisticRegressionCV",
+      "module": "sklearn.linear_model._logistic",
+      "load_seconds": 2.284,
+      "error": null,
+      "soft_fail_reason": null
+    },
+    {
+      "name": "models/saved/calibrator_isotonic.joblib",
+      "present": true,
+      "sha12": "3aac421b3b2f",
+      "ok": true,
+      "type": "IsotonicRegression",
+      "module": "sklearn.isotonic",
+      "load_seconds": 0.004,
+      "error": null,
+      "soft_fail_reason": null
+    },
+    {
+      "name": "models/saved/temperature_gru.pkl",
+      "present": false,
+      "sha12": null,
+      "ok": false,
+      "type": null,
+      "module": null,
+      "load_seconds": null,
+      "error": "not present in catalog",
+      "soft_fail_reason": "v155 does not ship a trained temperature GRU; weather/predictor.py falls back to gru.baseline_weights()"
+    },
+    {
+      "name": "models/saved/precip_gru.pkl",
+      "present": false,
+      "sha12": null,
+      "ok": false,
+      "type": null,
+      "module": null,
+      "load_seconds": null,
+      "error": "not present in catalog",
+      "soft_fail_reason": "v155 does not ship a trained precipitation GRU; weather/precip_predictor.py falls back to baseline weights"
+    },
+    {
+      "name": "models/archive/meta_model.pkl",
+      "present": true,
+      "sha12": "97f7589fe9f8",
+      "ok": true,
+      "type": "LogisticRegressionCV",
+      "module": "sklearn.linear_model._logistic",
+      "load_seconds": 0.002,
+      "error": null,
+      "soft_fail_reason": null
+    },
+    {
+      "name": "models/archive/calibrator.pkl",
+      "present": true,
+      "sha12": "40d97cd87b06",
+      "ok": true,
+      "type": "IsotonicRegression",
+      "module": "sklearn.isotonic",
+      "load_seconds": 0.001,
+      "error": null,
+      "soft_fail_reason": null
+    }
+  ],
+  "verdict": "PASS",
+  "completed_at": "2026-04-29T18:25:00.634793+00:00",
+  "canonical_ok_count": 4,
+  "canonical_soft_fail_count": 2,
+  "canonical_hard_fail_count": 0
+}
