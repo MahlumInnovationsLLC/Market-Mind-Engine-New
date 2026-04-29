@@ -428,7 +428,11 @@ def test_full_stack_attempt_skips_when_features_missing():
 
 
 def test_full_stack_attempt_invokes_predictor_when_features_present():
-    """End-to-end: predictor stub feeds score_grouped; skips counted by reason."""
+    """End-to-end: predictor stub feeds score_grouped; skips counted by reason.
+
+    Each row needs ``predicted_prob`` + ``side`` so the paired V1-baseline
+    metric is computed on the same row set as the full-stack output.
+    """
     seen_calls: list[tuple[list[float], str]] = []
 
     async def _stub_predict(features, *, league):
@@ -437,15 +441,16 @@ def test_full_stack_attempt_invokes_predictor_when_features_present():
         return _StubPrediction(max(0.0, min(1.0, m)))
 
     rows = [
-        {"league": "NBA", "actual_outcome": 1,
-         "analysis_json": {"feature_vector": [0.7, 0.8, 0.9]}},
-        {"league": "NBA", "actual_outcome": 0,
-         "analysis_json": {"feature_vector": [0.1, 0.2, 0.3]}},
-        {"league": "NFL", "actual_outcome": 1,
-         "analysis_json": {"feature_vector": [0.6, 0.6, 0.6]}},
-        {"league": "MLB", "actual_outcome": 1, "analysis_json": {"side": "yes"}},
-        {"league": "NHL", "actual_outcome": "tied",
-         "analysis_json": {"feature_vector": [0.5]}},
+        {"league": "NBA", "actual_outcome": 1, "predicted_prob": 0.65,
+         "analysis_json": {"side": "yes", "feature_vector": [0.7, 0.8, 0.9]}},
+        {"league": "NBA", "actual_outcome": 0, "predicted_prob": 0.35,
+         "analysis_json": {"side": "yes", "feature_vector": [0.1, 0.2, 0.3]}},
+        {"league": "NFL", "actual_outcome": 1, "predicted_prob": 0.55,
+         "analysis_json": {"side": "yes", "feature_vector": [0.6, 0.6, 0.6]}},
+        {"league": "MLB", "actual_outcome": 1, "predicted_prob": 0.7,
+         "analysis_json": {"side": "yes"}},
+        {"league": "NHL", "actual_outcome": "tied", "predicted_prob": 0.5,
+         "analysis_json": {"side": "yes", "feature_vector": [0.5]}},
     ]
     grouped, summary = asyncio.run(
         bt._attempt_full_stack_inference(rows, leagues_filter=None,
@@ -459,6 +464,9 @@ def test_full_stack_attempt_invokes_predictor_when_features_present():
     assert summary["skip_reasons"]["non_binary_outcome"] == 1
     scored = bt.score_grouped(grouped)
     assert set(scored["per_league"]) == {"NBA", "NFL"}
+    # New: each bucket also carries paired V1 archived probs.
+    assert grouped["NBA"]["v1_probs"] == [0.65, 0.35]
+    assert grouped["NFL"]["v1_probs"] == [0.55]
 
 
 def test_full_stack_attempt_uses_surrogate_when_features_missing():
@@ -478,8 +486,8 @@ def test_full_stack_attempt_uses_surrogate_when_features_missing():
          "analysis_json": {"side": "yes"}},
         {"league": "NBA", "actual_outcome": 0, "predicted_prob": 0.3,
          "analysis_json": {"side": "yes"}},
-        {"league": "NFL", "actual_outcome": 1,
-         "analysis_json": {"feature_vector": [0.6, 0.6, 0.6]}},
+        {"league": "NFL", "actual_outcome": 1, "predicted_prob": 0.55,
+         "analysis_json": {"side": "yes", "feature_vector": [0.6, 0.6, 0.6]}},
     ]
     grouped, summary = asyncio.run(
         bt._attempt_full_stack_inference(
@@ -495,6 +503,10 @@ def test_full_stack_attempt_uses_surrogate_when_features_missing():
     scored = bt.score_grouped(grouped)
     assert scored["per_league"]["NBA"]["sample_count"] == 2
     assert scored["per_league"]["NFL"]["sample_count"] == 1
+    # Per-row feature_source recorded so the paired-delta surface can
+    # break out archived vs surrogate provenance per league.
+    assert grouped["NBA"]["feature_sources"] == ["surrogate", "surrogate"]
+    assert grouped["NFL"]["feature_sources"] == ["archived"]
 
 
 def test_run_full_stack_emits_triage_and_surrogate_counts():
@@ -587,15 +599,134 @@ def test_run_full_stack_bypasses_double_calibration_end_to_end():
     assert nba_cal["calibrator_applied_count"] == 3
     assert nba_cal["brier_delta"] != pytest.approx(0.0, abs=1e-9)
 
-    nba_fs = report["full_stack_scored"]["per_league"]["NBA"]
-    assert nba_fs["calibrator_applied_count"] == 0
-    assert nba_fs["calibrator_type"] is None
-    assert nba_fs["brier_delta"] == pytest.approx(0.0, abs=1e-12)
-    expected = ((0.7 - 1) ** 2 + (0.7 - 0) ** 2 + (0.7 - 1) ** 2) / 3
-    assert nba_fs["brier_calibrated"] == pytest.approx(expected, abs=1e-9)
+    # full_stack_scored is now the paired-delta surface: brier_full_stack
+    # vs brier_v1_baseline (V1's archived predicted_prob). Top-level
+    # audit_path label disambiguates it from the calibrator-only path.
+    fs_scored = report["full_stack_scored"]
+    assert fs_scored["audit_path"] == (
+        "full_stack_paired_vs_v1_archived_predicted_prob"
+    )
+    nba_fs = fs_scored["per_league"]["NBA"]
+    assert nba_fs["paired_sample_count"] == 3
+    expected_fs = ((0.7 - 1) ** 2 + (0.7 - 0) ** 2 + (0.7 - 1) ** 2) / 3
+    assert nba_fs["brier_full_stack"] == pytest.approx(expected_fs, abs=1e-9)
+    expected_v1 = ((0.7 - 1) ** 2 + (0.4 - 0) ** 2 + (0.6 - 1) ** 2) / 3
+    assert nba_fs["brier_v1_baseline"] == pytest.approx(expected_v1, abs=1e-9)
+    assert nba_fs["delta_vs_v1"] == pytest.approx(
+        expected_fs - expected_v1, abs=1e-9
+    )
     # Spy invoked only on the calibrator-only path (3 NBA rows). 6 would
-    # mean the full-stack path also re-calibrated.
+    # mean the full-stack path also re-calibrated — the regression we want
+    # to keep pinned shut.
     assert len(spy_calls) == 3
+
+
+def test_score_full_stack_paired_emits_three_verdicts_and_breakdown():
+    """Per-league delta_vs_v1 + verdict + feature_source_breakdown."""
+    grouped = {
+        # Parity: full_stack ≈ v1 (delta within tolerance).
+        "NBA": {
+            "probs": [0.7, 0.4],
+            "ys": [1, 0],
+            "v1_probs": [0.7, 0.4],
+            "feature_sources": ["archived", "archived"],
+        },
+        # Regressed: full_stack much worse than v1.
+        "NFL": {
+            "probs": [0.1, 0.1],
+            "ys": [1, 1],
+            "v1_probs": [0.9, 0.9],
+            "feature_sources": ["archived", "surrogate"],
+        },
+        # Improved: full_stack much better than v1.
+        "MLB": {
+            "probs": [0.95, 0.05],
+            "ys": [1, 0],
+            "v1_probs": [0.5, 0.5],
+            "feature_sources": ["surrogate", "surrogate"],
+        },
+    }
+    out = bt.score_full_stack_paired(grouped)
+    nba = out["per_league"]["NBA"]
+    nfl = out["per_league"]["NFL"]
+    mlb = out["per_league"]["MLB"]
+    assert nba["paired_sample_count"] == 2
+    assert nba["verdict"] == "parity"
+    assert nba["delta_vs_v1"] == pytest.approx(0.0, abs=1e-9)
+    assert nfl["verdict"] == "regressed"
+    assert nfl["delta_vs_v1"] > bt._BRIER_TOLERANCE
+    assert mlb["verdict"] == "improved"
+    assert mlb["delta_vs_v1"] < -bt._BRIER_TOLERANCE
+    assert nfl["feature_source_breakdown"] == {"archived": 1, "surrogate": 1}
+    assert mlb["feature_source_breakdown"] == {"archived": 0, "surrogate": 2}
+    # Summary rollup.
+    assert sorted(out["summary"]["leagues_parity"]) == ["NBA"]
+    assert sorted(out["summary"]["leagues_improved"]) == ["MLB"]
+    assert sorted(out["summary"]["leagues_regressed"]) == ["NFL"]
+
+
+def test_score_full_stack_paired_handles_empty_v1_probs_gracefully():
+    """Rows with v1_prob=None contribute to sample_count but not paired."""
+    grouped = {
+        "NBA": {
+            "probs": [0.7, 0.6],
+            "ys": [1, 0],
+            "v1_probs": [None, None],
+            "feature_sources": ["surrogate", "surrogate"],
+        },
+    }
+    out = bt.score_full_stack_paired(grouped)
+    nba = out["per_league"]["NBA"]
+    assert nba["sample_count"] == 2
+    assert nba["paired_sample_count"] == 0
+    assert nba["delta_vs_v1"] is None
+    assert nba["verdict"] is None
+    assert nba["within_brier_tolerance"] is None
+
+
+def test_build_parity_2pct_gate_classifies_evaluable_vs_degraded():
+    """Real archived → EVALUABLE+PASS/FAIL, surrogate → EVALUABLE_DEGRADED."""
+    fss_per_league_pass = {
+        "NBA": {"delta_vs_v1": 0.005, "within_brier_tolerance": True,
+                "verdict": "parity", "paired_sample_count": 100},
+    }
+    g_pass = bt._build_parity_2pct_gate(
+        fss_paired_count=100, archived_used=100, surrogate_used=0,
+        surrogate_enabled=False, fss_per_league=fss_per_league_pass,
+        fss_leagues_parity=["NBA"], fss_leagues_regressed=[],
+    )
+    assert g_pass["status"] == "EVALUABLE"
+    assert g_pass["verdict"] == "PASS"
+    assert "raw, pre-calibrator" in g_pass["baseline_caveat"]
+
+    fss_per_league_fail = {
+        "MLB": {"delta_vs_v1": 0.05, "within_brier_tolerance": False,
+                "verdict": "regressed", "paired_sample_count": 80},
+    }
+    g_fail_real = bt._build_parity_2pct_gate(
+        fss_paired_count=80, archived_used=80, surrogate_used=0,
+        surrogate_enabled=False, fss_per_league=fss_per_league_fail,
+        fss_leagues_parity=[], fss_leagues_regressed=["MLB"],
+    )
+    assert g_fail_real["status"] == "EVALUABLE"
+    assert g_fail_real["verdict"] == "FAIL"
+
+    g_fail_surr = bt._build_parity_2pct_gate(
+        fss_paired_count=80, archived_used=0, surrogate_used=80,
+        surrogate_enabled=True, fss_per_league=fss_per_league_fail,
+        fss_leagues_parity=[], fss_leagues_regressed=["MLB"],
+    )
+    assert g_fail_surr["status"] == "EVALUABLE_DEGRADED"
+    assert g_fail_surr["verdict"] == "DEGRADED_FAIL"
+    assert "DEGRADED baseline" in g_fail_surr["baseline_caveat"]
+
+    g_unevaluable = bt._build_parity_2pct_gate(
+        fss_paired_count=0, archived_used=0, surrogate_used=0,
+        surrogate_enabled=False, fss_per_league={},
+        fss_leagues_parity=[], fss_leagues_regressed=[],
+    )
+    assert g_unevaluable["status"] == "UNEVALUABLE"
+    assert "blocked_by" in g_unevaluable
 
 
 # --- triage + parity_gate_status -------------------------------------------
@@ -637,10 +768,15 @@ def test_build_parity_gate_status_emits_blocked_and_evaluable_buckets():
     assert surr["status"] == "EVALUABLE_DEGRADED"
     assert surr["evidence"]["rows_predicted_via_surrogate"] == 1000
     assert pg["gates"]["parity_within_2pct_vs_v1_calibrated"]["status"] == "UNEVALUABLE"
-    assert pg["summary"] == {
-        "total_gates": 3, "blocked_or_unevaluable": 2,
-        "evaluable_degraded": 1, "pass": 0,
-    }
+    # Summary now exposes the two-tier classification: status counts plus
+    # PASS/FAIL counts inside EVALUABLE / EVALUABLE_DEGRADED.
+    assert pg["summary"]["total_gates"] == 3
+    assert pg["summary"]["blocked_or_unevaluable"] == 2
+    assert pg["summary"]["evaluable_degraded"] == 1
+    assert pg["summary"]["pass"] == 0
+    assert pg["summary"]["fail"] == 0
+    # No paired full_stack data → surrogate gate has no verdict yet, so it
+    # falls into degraded_pass by default. Still pending backfill overall.
     assert pg["overall"] == "DEGRADED_PARTIAL_PENDING_BACKFILL"
     assert "#731" in pg["overall_blocked_by"]
 
@@ -653,3 +789,50 @@ def test_build_parity_gate_status_marks_surrogate_not_run_when_disabled():
     pg = bt._build_parity_gate_status(scored, fs)
     assert pg["gates"]["full_stack_replay_via_surrogate_features"]["status"] == "NOT_RUN"
     assert pg["gates"]["full_stack_replay_via_archived_features"]["status"] == "BLOCKED"
+    # Blocked archived-features gate: verdict is None so _gate_class()
+    # routes via the BLOCKED branch (returns "blocked"), not "fail".
+    assert pg["gates"]["full_stack_replay_via_archived_features"]["verdict"] is None
+
+
+def test_archived_features_gate_passes_once_backfill_activates():
+    """Regression for v7 architect note: when #731 backfill lands and
+    archived_used > 0, the archived-features gate must classify as PASS,
+    not FAIL. Without an explicit verdict, _gate_class() would treat
+    status=EVALUABLE + missing verdict as fail.
+    """
+    scored = {"summary": {"leagues_improved": ["NBA"], "leagues_parity": [],
+                          "leagues_regressed": []}}
+    fs = {"rows_attempted": 1000, "rows_predicted": 1000,
+          "skip_reasons": {"feature_vector_unavailable": 0},
+          "feature_source": {"surrogate": 0, "archived": 1000},
+          "surrogate_features_enabled": False}
+    fss = {
+        "summary": {
+            "paired_row_count": 1000,
+            "leagues_parity": [],
+            "leagues_improved": ["NBA"],
+            "leagues_regressed": [],
+        },
+        "per_league": {
+            "NBA": {"delta_vs_v1": -0.05, "within_brier_tolerance": True,
+                    "verdict": "improved", "paired_sample_count": 1000},
+        },
+    }
+    pg = bt._build_parity_gate_status(scored, fs, fss)
+    arch = pg["gates"]["full_stack_replay_via_archived_features"]
+    assert arch["status"] == "EVALUABLE"
+    assert arch["verdict"] == "PASS"
+    assert arch["blocked_by"] is None
+    # The parity gate should also evaluate (not degraded) since we have
+    # archived features and no surrogate fallback.
+    parity = pg["gates"]["parity_within_2pct_vs_v1_calibrated"]
+    assert parity["status"] == "EVALUABLE"
+    assert parity["verdict"] == "PASS"
+    # Overall must NOT be FAIL — the EVALUABLE/no-verdict bug would have
+    # forced fail_count=1 here. With the fix, both EVALUABLE gates classify
+    # as pass; only the surrogate gate (NOT_RUN, since surrogate_features
+    # is disabled when archived data is available) folds into blocked.
+    # That yields MIXED, not FAIL.
+    assert pg["overall"] != "FAIL"
+    assert pg["summary"]["fail"] == 0
+    assert pg["summary"]["pass"] == 2  # archived + parity gates pass

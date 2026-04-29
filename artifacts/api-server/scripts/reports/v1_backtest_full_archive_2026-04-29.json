@@ -1,6 +1,6 @@
 {
-  "started_at": "2026-04-29T21:00:39.094107+00:00",
-  "completed_at": "2026-04-29T21:04:44.033521+00:00",
+  "started_at": "2026-04-29T21:50:10.273013+00:00",
+  "completed_at": "2026-04-29T21:54:33.523401+00:00",
   "source": "db",
   "row_input_count": 667092,
   "row_kept_count": 603128,
@@ -41,7 +41,7 @@
         "loaded": true,
         "type": "isotonic",
         "fit_at": 1777481414.721987,
-        "age_seconds": 15269.3,
+        "age_seconds": 18258.8,
         "stale": false,
         "sample_count": 3158
       },
@@ -49,7 +49,7 @@
         "loaded": true,
         "type": "isotonic",
         "fit_at": 1777481416.306042,
-        "age_seconds": 15267.7,
+        "age_seconds": 18257.2,
         "stale": false,
         "sample_count": 300
       },
@@ -57,7 +57,7 @@
         "loaded": true,
         "type": "isotonic",
         "fit_at": 1777481416.366513,
-        "age_seconds": 15267.7,
+        "age_seconds": 18257.2,
         "stale": false,
         "sample_count": 163
       },
@@ -65,7 +65,7 @@
         "loaded": true,
         "type": "isotonic",
         "fit_at": 1777481416.408817,
-        "age_seconds": 15267.6,
+        "age_seconds": 18257.1,
         "stale": false,
         "sample_count": 1356
       },
@@ -73,7 +73,7 @@
         "loaded": true,
         "type": "platt",
         "fit_at": 1777471105.808493,
-        "age_seconds": 25578.2,
+        "age_seconds": 28567.7,
         "stale": false,
         "sample_count": 2168
       },
@@ -81,7 +81,7 @@
         "loaded": true,
         "type": "platt",
         "fit_at": 1777471105.065261,
-        "age_seconds": 25579.0,
+        "age_seconds": 28568.5,
         "stale": false,
         "sample_count": 4560
       },
@@ -89,7 +89,7 @@
         "loaded": true,
         "type": "platt",
         "fit_at": 1777471105.14409,
-        "age_seconds": 25578.9,
+        "age_seconds": 28568.4,
         "stale": false,
         "sample_count": 4560
       },
@@ -97,7 +97,7 @@
         "loaded": true,
         "type": "platt",
         "fit_at": 1777471105.194317,
-        "age_seconds": 25578.8,
+        "age_seconds": 28568.3,
         "stale": false,
         "sample_count": 4560
       },
@@ -105,7 +105,7 @@
         "loaded": true,
         "type": "platt",
         "fit_at": 1777471105.245317,
-        "age_seconds": 25578.8,
+        "age_seconds": 28568.3,
         "stale": false,
         "sample_count": 3672
       },
@@ -113,7 +113,7 @@
         "loaded": true,
         "type": "platt",
         "fit_at": 1777471105.293656,
-        "age_seconds": 25578.7,
+        "age_seconds": 28568.2,
         "stale": false,
         "sample_count": 4116
       },
@@ -121,7 +121,7 @@
         "loaded": true,
         "type": "platt",
         "fit_at": 1777471105.343607,
-        "age_seconds": 25578.7,
+        "age_seconds": 28568.2,
         "stale": false,
         "sample_count": 4704
       },
@@ -129,7 +129,7 @@
         "loaded": true,
         "type": "isotonic",
         "fit_at": 1777469365.36844,
-        "age_seconds": 27318.7,
+        "age_seconds": 30308.2,
         "stale": false,
         "sample_count": 0
       },
@@ -137,7 +137,7 @@
         "loaded": true,
         "type": "isotonic",
         "fit_at": 1777469365.450857,
-        "age_seconds": 27318.6,
+        "age_seconds": 30308.1,
         "stale": false,
         "sample_count": 0
       },
@@ -145,7 +145,7 @@
         "loaded": true,
         "type": "platt",
         "fit_at": 1777471105.572939,
-        "age_seconds": 25578.5,
+        "age_seconds": 28568.0,
         "stale": false,
         "sample_count": 21060
       },
@@ -153,7 +153,7 @@
         "loaded": true,
         "type": "platt",
         "fit_at": 1777471105.752305,
-        "age_seconds": 25578.3,
+        "age_seconds": 28567.8,
         "stale": false,
         "sample_count": 19382
       },
@@ -161,7 +161,7 @@
         "loaded": true,
         "type": "isotonic",
         "fit_at": 1777469365.702279,
-        "age_seconds": 27318.3,
+        "age_seconds": 30307.8,
         "stale": false,
         "sample_count": 0
       },
@@ -169,7 +169,7 @@
         "loaded": true,
         "type": "isotonic",
         "fit_at": 1777481416.450356,
-        "age_seconds": 15267.6,
+        "age_seconds": 18257.1,
         "stale": false,
         "sample_count": 52
       },
@@ -177,7 +177,7 @@
         "loaded": true,
         "type": "isotonic",
         "fit_at": 1777469365.869148,
-        "age_seconds": 27318.2,
+        "age_seconds": 30307.7,
         "stale": false,
         "sample_count": 0
       },
@@ -185,7 +185,7 @@
         "loaded": true,
         "type": "isotonic",
         "fit_at": 1777469365.952067,
-        "age_seconds": 27318.1,
+        "age_seconds": 30307.6,
         "stale": false,
         "sample_count": 0
       },
@@ -193,7 +193,7 @@
         "loaded": true,
         "type": "isotonic",
         "fit_at": 1777469366.036278,
-        "age_seconds": 27318.0,
+        "age_seconds": 30307.5,
         "stale": false,
         "sample_count": 0
       },
@@ -201,7 +201,7 @@
         "loaded": true,
         "type": "isotonic",
         "fit_at": 1777469366.120064,
-        "age_seconds": 27317.9,
+        "age_seconds": 30307.4,
         "stale": false,
         "sample_count": 0
       },
@@ -209,7 +209,7 @@
         "loaded": true,
         "type": "isotonic",
         "fit_at": 1777469366.202642,
-        "age_seconds": 27317.8,
+        "age_seconds": 30307.3,
         "stale": false,
         "sample_count": 0
       }
@@ -222,9 +222,12 @@
     "overall_blocked_by": "#731 (V1 feature snapshot dumps)",
     "summary": {
       "total_gates": 3,
-      "blocked_or_unevaluable": 2,
-      "evaluable_degraded": 1,
-      "pass": 0
+      "blocked_or_unevaluable": 1,
+      "evaluable_degraded": 2,
+      "evaluable_degraded_pass": 2,
+      "evaluable_degraded_fail": 0,
+      "pass": 0,
+      "fail": 0
     },
     "gates": {
       "full_stack_replay_via_archived_features": {
@@ -233,7 +236,7 @@
         "evidence": {
           "rows_attempted": 603128,
           "rows_predicted_via_archived_features": 0,
-          "rows_skipped_missing_features": 63964
+          "rows_skipped_missing_features": 0
         },
         "note": "V1 archive does not snapshot the upstream LGB+XGB feature vector."
       },
@@ -247,21 +250,82 @@
             "NBA",
             "NCAAB",
             "NFL",
-            "NHL"
+            "NHL",
+            "UNKNOWN"
           ],
           "leagues_parity": [
             "MLS",
-            "PGA",
-            "UNKNOWN"
+            "PGA"
           ],
           "leagues_regressed": []
         },
         "caveat": "DEGRADED baseline: ~10 of 32 feature slots populated from V1; rest fall to per-spec defaults. Compares against V1's *raw* predicted_prob, not its final calibrated probability."
       },
       "parity_within_2pct_vs_v1_calibrated": {
-        "status": "UNEVALUABLE",
-        "blocked_by": "#731 (V1 feature snapshot dumps) AND historical V1 calibrated-probability dump (archive stores pre-calibrator output)",
-        "note": "See replit.md V1 backtest section for the full audit narrative."
+        "status": "EVALUABLE_DEGRADED",
+        "verdict": "DEGRADED_PASS",
+        "evidence": {
+          "paired_row_count": 603128,
+          "rows_via_archived_features": 0,
+          "rows_via_surrogate_features": 603128,
+          "leagues_parity": [
+            "MLS",
+            "PGA"
+          ],
+          "leagues_regressed": [],
+          "per_league_delta_vs_v1": {
+            "MLB": {
+              "delta_vs_v1": -0.17456822692462853,
+              "within_brier_tolerance": false,
+              "verdict": "improved",
+              "paired_sample_count": 133
+            },
+            "MLS": {
+              "delta_vs_v1": 0.019133155458579194,
+              "within_brier_tolerance": true,
+              "verdict": "parity",
+              "paired_sample_count": 1
+            },
+            "NBA": {
+              "delta_vs_v1": -0.4959820047638872,
+              "within_brier_tolerance": false,
+              "verdict": "improved",
+              "paired_sample_count": 3093
+            },
+            "NCAAB": {
+              "delta_vs_v1": -0.36919672286184724,
+              "within_brier_tolerance": false,
+              "verdict": "improved",
+              "paired_sample_count": 1355
+            },
+            "NFL": {
+              "delta_vs_v1": -0.3709404173520147,
+              "within_brier_tolerance": false,
+              "verdict": "improved",
+              "paired_sample_count": 4
+            },
+            "NHL": {
+              "delta_vs_v1": -0.32998734995199547,
+              "within_brier_tolerance": false,
+              "verdict": "improved",
+              "paired_sample_count": 272
+            },
+            "PGA": {
+              "delta_vs_v1": 0.005981648459949043,
+              "within_brier_tolerance": true,
+              "verdict": "parity",
+              "paired_sample_count": 52
+            },
+            "UNKNOWN": {
+              "delta_vs_v1": -0.1698728953584968,
+              "within_brier_tolerance": false,
+              "verdict": "improved",
+              "paired_sample_count": 598218
+            }
+          }
+        },
+        "tolerance_pp": 0.02,
+        "baseline_caveat": "DEGRADED baseline: full_stack ran on surrogate features (~10/32 slots from V1, rest defaulted), against V1's RAW predicted_prob. Not a final-form parity verdict \u2014 wait on #731 for archived feature snapshots."
       }
     }
   },
@@ -270,7 +334,7 @@
     "rows_predicted": 603128,
     "rows_skipped": 63964,
     "skip_reasons": {
-      "feature_vector_unavailable": 63964
+      "v1_prob_unaligned_side": 63964
     },
     "error_samples": [],
     "feature_source": {
@@ -286,7 +350,7 @@
         "full_stack_attempted": true,
         "rows_attempted": 603128,
         "rows_predicted_via_models_loader": 603128,
-        "rows_skipped_missing_features": 63964,
+        "rows_skipped_missing_features": 0,
         "surrogate_features_enabled": true,
         "rows_predicted_via_surrogate": 603128
       },
@@ -318,6 +382,7 @@
       "note": "Per-league calibrated Brier worse than V1 raw beyond tolerance \u2014 would indicate on-disk calibrator drift."
     }
   },
+  "audit_path": "calibrator_only_via_v1_predicted_prob",
   "per_league": {
     "MLB": {
       "sample_count": 133,
@@ -474,152 +539,172 @@
     "per_league": {
       "MLB": {
         "sample_count": 133,
-        "calibrator_applied_count": 0,
-        "calibrator_type": null,
-        "brier_v1_raw": 0.08982947284980758,
-        "brier_calibrated": 0.08982947284980758,
-        "brier_delta": 0.0,
-        "delta_vs_v1": 0.0,
-        "log_loss_v1_raw": 0.3374669487393997,
-        "log_loss_calibrated": 0.3374669487393997,
-        "auc_v1_raw": 0.27049180327868855,
-        "auc_calibrated": 0.27049180327868855,
-        "within_brier_tolerance": true,
-        "verdict": "parity"
+        "paired_sample_count": 133,
+        "brier_full_stack": 0.08982947284980758,
+        "brier_v1_baseline": 0.2643976997744361,
+        "delta_vs_v1": -0.17456822692462853,
+        "log_loss_full_stack": 0.3374669487393997,
+        "log_loss_v1_baseline": 0.8650459001473062,
+        "auc_full_stack": 0.27049180327868855,
+        "auc_v1_baseline": 0.1687779433681073,
+        "within_brier_tolerance": false,
+        "verdict": "improved",
+        "feature_source_breakdown": {
+          "archived": 0,
+          "surrogate": 133
+        }
       },
       "MLS": {
         "sample_count": 1,
-        "calibrator_applied_count": 0,
-        "calibrator_type": null,
-        "brier_v1_raw": 0.019144715458579195,
-        "brier_calibrated": 0.019144715458579195,
-        "brier_delta": 0.0,
-        "delta_vs_v1": 0.0,
-        "log_loss_v1_raw": 0.14892287020526868,
-        "log_loss_calibrated": 0.14892287020526868,
-        "auc_v1_raw": null,
-        "auc_calibrated": null,
+        "paired_sample_count": 1,
+        "brier_full_stack": 0.019144715458579195,
+        "brier_v1_baseline": 1.156e-05,
+        "delta_vs_v1": 0.019133155458579194,
+        "log_loss_full_stack": 0.14892287020526868,
+        "log_loss_v1_baseline": 0.003405793134832821,
+        "auc_full_stack": null,
+        "auc_v1_baseline": null,
         "within_brier_tolerance": true,
-        "verdict": "parity"
+        "verdict": "parity",
+        "feature_source_breakdown": {
+          "archived": 0,
+          "surrogate": 1
+        }
       },
       "NBA": {
         "sample_count": 3093,
-        "calibrator_applied_count": 0,
-        "calibrator_type": null,
-        "brier_v1_raw": 0.10549138446016625,
-        "brier_calibrated": 0.10549138446016625,
-        "brier_delta": 0.0,
-        "delta_vs_v1": 0.0,
-        "log_loss_v1_raw": 0.36773190341722234,
-        "log_loss_calibrated": 0.36773190341722234,
-        "auc_v1_raw": 0.5,
-        "auc_calibrated": 0.5,
-        "within_brier_tolerance": true,
-        "verdict": "parity"
+        "paired_sample_count": 3093,
+        "brier_full_stack": 0.10549138446016625,
+        "brier_v1_baseline": 0.6014733892240535,
+        "delta_vs_v1": -0.4959820047638872,
+        "log_loss_full_stack": 0.36773190341722234,
+        "log_loss_v1_baseline": 14.325398165850237,
+        "auc_full_stack": 0.5,
+        "auc_v1_baseline": 0.38191613482249703,
+        "within_brier_tolerance": false,
+        "verdict": "improved",
+        "feature_source_breakdown": {
+          "archived": 0,
+          "surrogate": 3093
+        }
       },
       "NCAAB": {
         "sample_count": 1355,
-        "calibrator_applied_count": 0,
-        "calibrator_type": null,
-        "brier_v1_raw": 0.16905917679128935,
-        "brier_calibrated": 0.16905917679128935,
-        "brier_delta": 0.0,
-        "delta_vs_v1": 0.0,
-        "log_loss_v1_raw": 0.5211521905956669,
-        "log_loss_calibrated": 0.5211521905956669,
-        "auc_v1_raw": 0.5,
-        "auc_calibrated": 0.5,
-        "within_brier_tolerance": true,
-        "verdict": "parity"
+        "paired_sample_count": 1355,
+        "brier_full_stack": 0.16905917679128935,
+        "brier_v1_baseline": 0.5382558996531366,
+        "delta_vs_v1": -0.36919672286184724,
+        "log_loss_full_stack": 0.5211521905956669,
+        "log_loss_v1_baseline": 11.252268394531537,
+        "auc_full_stack": 0.5,
+        "auc_v1_baseline": 0.33921828889547545,
+        "within_brier_tolerance": false,
+        "verdict": "improved",
+        "feature_source_breakdown": {
+          "archived": 0,
+          "surrogate": 1355
+        }
       },
       "NFL": {
         "sample_count": 4,
-        "calibrator_applied_count": 0,
-        "calibrator_type": null,
-        "brier_v1_raw": 0.3609018326479852,
-        "brier_calibrated": 0.3609018326479852,
-        "brier_delta": 0.0,
-        "delta_vs_v1": 0.0,
-        "log_loss_v1_raw": 0.9783194511946987,
-        "log_loss_calibrated": 0.9783194511946987,
-        "auc_v1_raw": 0.0,
-        "auc_calibrated": 0.0,
-        "within_brier_tolerance": true,
-        "verdict": "parity"
+        "paired_sample_count": 4,
+        "brier_full_stack": 0.3609018326479852,
+        "brier_v1_baseline": 0.7318422499999999,
+        "delta_vs_v1": -0.3709404173520147,
+        "log_loss_full_stack": 0.9783194511946987,
+        "log_loss_v1_baseline": 14.639719899549002,
+        "auc_full_stack": 0.0,
+        "auc_v1_baseline": 0.6666666666666666,
+        "within_brier_tolerance": false,
+        "verdict": "improved",
+        "feature_source_breakdown": {
+          "archived": 0,
+          "surrogate": 4
+        }
       },
       "NHL": {
         "sample_count": 272,
-        "calibrator_applied_count": 0,
-        "calibrator_type": null,
-        "brier_v1_raw": 0.11501096232741619,
-        "brier_calibrated": 0.11501096232741619,
-        "brier_delta": 0.0,
-        "delta_vs_v1": 0.0,
-        "log_loss_v1_raw": 0.39155849623909894,
-        "log_loss_calibrated": 0.39155849623909894,
-        "auc_v1_raw": 0.5,
-        "auc_calibrated": 0.5,
-        "within_brier_tolerance": true,
-        "verdict": "parity"
+        "paired_sample_count": 272,
+        "brier_full_stack": 0.11501096232741619,
+        "brier_v1_baseline": 0.44499831227941167,
+        "delta_vs_v1": -0.32998734995199547,
+        "log_loss_full_stack": 0.39155849623909894,
+        "log_loss_v1_baseline": 8.313718477056813,
+        "auc_full_stack": 0.5,
+        "auc_v1_baseline": 0.2969632768361582,
+        "within_brier_tolerance": false,
+        "verdict": "improved",
+        "feature_source_breakdown": {
+          "archived": 0,
+          "surrogate": 272
+        }
       },
       "PGA": {
         "sample_count": 52,
-        "calibrator_applied_count": 0,
-        "calibrator_type": null,
-        "brier_v1_raw": 0.08200890019071828,
-        "brier_calibrated": 0.08200890019071828,
-        "brier_delta": 0.0,
-        "delta_vs_v1": 0.0,
-        "log_loss_v1_raw": 0.3163689567526337,
-        "log_loss_calibrated": 0.3163689567526337,
-        "auc_v1_raw": 0.5,
-        "auc_calibrated": 0.5,
+        "paired_sample_count": 52,
+        "brier_full_stack": 0.08200890019071828,
+        "brier_v1_baseline": 0.07602725173076924,
+        "delta_vs_v1": 0.005981648459949043,
+        "log_loss_full_stack": 0.3163689567526337,
+        "log_loss_v1_baseline": 0.4287798071844088,
+        "auc_full_stack": 0.5,
+        "auc_v1_baseline": 0.5052083333333334,
         "within_brier_tolerance": true,
-        "verdict": "parity"
+        "verdict": "parity",
+        "feature_source_breakdown": {
+          "archived": 0,
+          "surrogate": 52
+        }
       },
       "UNKNOWN": {
         "sample_count": 598218,
-        "calibrator_applied_count": 0,
-        "calibrator_type": null,
-        "brier_v1_raw": 0.0927770280460115,
-        "brier_calibrated": 0.0927770280460115,
-        "brier_delta": 0.0,
-        "delta_vs_v1": 0.0,
-        "log_loss_v1_raw": 2.5310659458806115,
-        "log_loss_calibrated": 2.5310659458806115,
-        "auc_v1_raw": 0.5041772682109771,
-        "auc_calibrated": 0.5041772682109771,
-        "within_brier_tolerance": true,
-        "verdict": "parity"
+        "paired_sample_count": 598218,
+        "brier_full_stack": 0.0927770280460115,
+        "brier_v1_baseline": 0.2626499234045083,
+        "delta_vs_v1": -0.1698728953584968,
+        "log_loss_full_stack": 2.5310659458806115,
+        "log_loss_v1_baseline": 0.8018257305062826,
+        "auc_full_stack": 0.5041772682109771,
+        "auc_v1_baseline": 0.7976292910683449,
+        "within_brier_tolerance": false,
+        "verdict": "improved",
+        "feature_source_breakdown": {
+          "archived": 0,
+          "surrogate": 598218
+        }
       }
     },
     "summary": {
       "league_count": 8,
       "row_count": 603128,
+      "paired_row_count": 603128,
       "brier_tolerance": 0.02,
       "leagues_parity": [
-        "MLB",
         "MLS",
+        "PGA"
+      ],
+      "leagues_improved": [
+        "MLB",
         "NBA",
         "NCAAB",
         "NFL",
         "NHL",
-        "PGA",
         "UNKNOWN"
       ],
-      "leagues_improved": [],
       "leagues_regressed": [],
       "leagues_within_tolerance": [
-        "MLB",
         "MLS",
+        "PGA"
+      ],
+      "leagues_outside_tolerance": [
+        "MLB",
         "NBA",
         "NCAAB",
         "NFL",
         "NHL",
-        "PGA",
         "UNKNOWN"
-      ],
-      "leagues_outside_tolerance": []
-    }
+      ]
+    },
+    "audit_path": "full_stack_paired_vs_v1_archived_predicted_prob"
   }
 }

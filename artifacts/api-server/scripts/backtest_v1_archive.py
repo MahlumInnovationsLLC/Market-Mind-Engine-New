@@ -379,6 +379,22 @@ async def _attempt_full_stack_inference(
             skipped += 1
             _bump("non_binary_outcome")
             continue
+        # Capture V1's archived (raw, side-aligned) probability so the
+        # paired full_stack vs V1 delta is computed on the same row set.
+        v1_prob_raw = r.get("predicted_prob")
+        if v1_prob_raw is None:
+            skipped += 1
+            _bump("missing_v1_predicted_prob")
+            continue
+        try:
+            v1_prob_aligned = _side_align(float(v1_prob_raw), _resolve_side(r))
+        except (TypeError, ValueError):
+            v1_prob_aligned = None
+        if v1_prob_aligned is None:
+            skipped += 1
+            _bump("v1_prob_unaligned_side")
+            continue
+
         features = _extract_feature_vector(r)
         feature_source = "archived" if features is not None else None
         if features is None and feature_builder is not None:
@@ -422,9 +438,13 @@ async def _attempt_full_stack_inference(
             _bump("bad_predict_shape")
             continue
         p = max(0.0, min(1.0, p))
-        bucket = grouped.setdefault(league, {"probs": [], "ys": []})
+        bucket = grouped.setdefault(
+            league, {"probs": [], "ys": [], "v1_probs": [], "feature_sources": []}
+        )
         bucket["probs"].append(p)
         bucket["ys"].append(y)
+        bucket["v1_probs"].append(v1_prob_aligned)
+        bucket["feature_sources"].append(feature_source)
         predicted += 1
 
     return grouped, {
@@ -526,6 +546,111 @@ def score_grouped(
     }
 
 
+def score_full_stack_paired(
+    fs_grouped: dict[str, dict[str, list]],
+) -> dict[str, Any]:
+    """Per-league paired metrics: full_stack vs V1 archived predicted_prob.
+
+    For each league, computes brier/log_loss/auc on BOTH the full-stack
+    model output and V1's archived predicted_prob, restricted to the same
+    row set (only rows where the full-stack stack actually predicted).
+
+    ``delta_vs_v1 = brier_full_stack - brier_v1_baseline`` is the spec's
+    parity metric. Tolerance is ±_BRIER_TOLERANCE (2pp). Per-league
+    ``feature_source_breakdown`` flags whether the row set rests on real
+    archived feature vectors or on the degraded surrogate path.
+    """
+    per_league: dict[str, Any] = {}
+    leagues_parity: list[str] = []
+    leagues_improved: list[str] = []
+    leagues_regressed: list[str] = []
+    for league in sorted(fs_grouped.keys()):
+        bucket = fs_grouped[league]
+        fs_probs = bucket.get("probs", [])
+        ys = bucket.get("ys", [])
+        v1_probs = bucket.get("v1_probs", [])
+        sources = bucket.get("feature_sources", [])
+        n = len(fs_probs)
+        # Drop rows where v1_prob was missing (paired metric requires both).
+        paired = [
+            (fs, v1, y) for fs, v1, y in zip(fs_probs, v1_probs, ys) if v1 is not None
+        ]
+        if not paired:
+            per_league[league] = {
+                "sample_count": n,
+                "paired_sample_count": 0,
+                "brier_full_stack": None,
+                "brier_v1_baseline": None,
+                "delta_vs_v1": None,
+                "log_loss_full_stack": None,
+                "log_loss_v1_baseline": None,
+                "auc_full_stack": None,
+                "auc_v1_baseline": None,
+                "within_brier_tolerance": None,
+                "verdict": None,
+                "feature_source_breakdown": _count_sources(sources),
+            }
+            continue
+        fs_p = [p for p, _v, _y in paired]
+        v1_p = [v for _p, v, _y in paired]
+        ys_p = [y for _p, _v, y in paired]
+        brier_fs = _brier(fs_p, ys_p)
+        brier_v1 = _brier(v1_p, ys_p)
+        log_fs = _log_loss(fs_p, ys_p)
+        log_v1 = _log_loss(v1_p, ys_p)
+        auc_fs = _auc(fs_p, ys_p)
+        auc_v1 = _auc(v1_p, ys_p)
+        delta = (brier_fs - brier_v1) if (brier_fs is not None and brier_v1 is not None) else None
+        within_tol: bool | None = None
+        verdict: str | None = None
+        if delta is not None:
+            within_tol = abs(delta) <= _BRIER_TOLERANCE
+            if within_tol:
+                verdict = "parity"
+                leagues_parity.append(league)
+            elif delta < 0:
+                verdict = "improved"
+                leagues_improved.append(league)
+            else:
+                verdict = "regressed"
+                leagues_regressed.append(league)
+        per_league[league] = {
+            "sample_count": n,
+            "paired_sample_count": len(paired),
+            "brier_full_stack": brier_fs,
+            "brier_v1_baseline": brier_v1,
+            "delta_vs_v1": delta,
+            "log_loss_full_stack": log_fs,
+            "log_loss_v1_baseline": log_v1,
+            "auc_full_stack": auc_fs,
+            "auc_v1_baseline": auc_v1,
+            "within_brier_tolerance": within_tol,
+            "verdict": verdict,
+            "feature_source_breakdown": _count_sources(sources),
+        }
+    return {
+        "per_league": per_league,
+        "summary": {
+            "league_count": len(per_league),
+            "row_count": sum(v["sample_count"] for v in per_league.values()),
+            "paired_row_count": sum(v["paired_sample_count"] for v in per_league.values()),
+            "brier_tolerance": _BRIER_TOLERANCE,
+            "leagues_parity": leagues_parity,
+            "leagues_improved": leagues_improved,
+            "leagues_regressed": leagues_regressed,
+            "leagues_within_tolerance": leagues_parity,
+            "leagues_outside_tolerance": leagues_improved + leagues_regressed,
+        },
+    }
+
+
+def _count_sources(sources: list[str]) -> dict[str, int]:
+    out: dict[str, int] = {"archived": 0, "surrogate": 0}
+    for s in sources:
+        out[s] = out.get(s, 0) + 1
+    return out
+
+
 def _parse_leagues(arg: str | None) -> set[str] | None:
     if not arg:
         return None
@@ -533,9 +658,79 @@ def _parse_leagues(arg: str | None) -> set[str] | None:
     return out or None
 
 
+def _build_parity_2pct_gate(
+    *,
+    fss_paired_count: int,
+    archived_used: int,
+    surrogate_used: int,
+    surrogate_enabled: bool,
+    fss_per_league: dict[str, Any],
+    fss_leagues_parity: list[str],
+    fss_leagues_regressed: list[str],
+) -> dict[str, Any]:
+    """Decide PASS/FAIL/UNEVALUABLE for the parity-vs-V1 hard gate.
+
+    Decision tree:
+      - No paired data → UNEVALUABLE (full_stack never ran).
+      - Paired data but only via surrogate → EVALUABLE_DEGRADED with
+        DEGRADED_PASS / DEGRADED_FAIL verdict on the surrogate baseline.
+      - Paired data via real archived features → EVALUABLE with PASS/FAIL.
+    Baseline is V1's archived ``predicted_prob`` (RAW, pre-calibrator);
+    the spec wording says "V1 calibrated" but V1 only persisted its
+    pre-calibrator output — see replit.md for the audit narrative.
+    """
+    if fss_paired_count == 0:
+        return {
+            "status": "UNEVALUABLE",
+            "blocked_by": "full_stack predict() produced zero paired rows",
+            "note": "Run with --full-stack to populate this gate.",
+        }
+    per_league_deltas = {
+        lg: {
+            "delta_vs_v1": m.get("delta_vs_v1"),
+            "within_brier_tolerance": m.get("within_brier_tolerance"),
+            "verdict": m.get("verdict"),
+            "paired_sample_count": m.get("paired_sample_count"),
+        }
+        for lg, m in fss_per_league.items()
+    }
+    fail = bool(fss_leagues_regressed)
+    if archived_used > 0 and surrogate_used == 0:
+        verdict = "FAIL" if fail else "PASS"
+        status = "EVALUABLE"
+        baseline_caveat = (
+            "Baseline = V1's archived predicted_prob (raw, pre-calibrator); "
+            "V1 did not persist its post-calibrator output."
+        )
+    else:
+        verdict = "DEGRADED_FAIL" if fail else "DEGRADED_PASS"
+        status = "EVALUABLE_DEGRADED"
+        baseline_caveat = (
+            "DEGRADED baseline: full_stack ran on surrogate features (~10/32 "
+            "slots from V1, rest defaulted), against V1's RAW predicted_prob. "
+            "Not a final-form parity verdict — wait on #731 for archived "
+            "feature snapshots."
+        )
+    return {
+        "status": status,
+        "verdict": verdict,
+        "evidence": {
+            "paired_row_count": fss_paired_count,
+            "rows_via_archived_features": archived_used,
+            "rows_via_surrogate_features": surrogate_used,
+            "leagues_parity": fss_leagues_parity,
+            "leagues_regressed": fss_leagues_regressed,
+            "per_league_delta_vs_v1": per_league_deltas,
+        },
+        "tolerance_pp": _BRIER_TOLERANCE,
+        "baseline_caveat": baseline_caveat,
+    }
+
+
 def _build_parity_gate_status(
     scored: dict[str, Any],
     full_stack_summary: dict[str, Any] | None,
+    full_stack_scored: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Top-level hard-gate manifest: 3 named gates + an ``overall`` verdict."""
     fs = full_stack_summary or {}
@@ -546,12 +741,27 @@ def _build_parity_gate_status(
     feature_source = fs.get("feature_source") or {}
     surrogate_used = int(feature_source.get("surrogate", 0))
     archived_used = int(feature_source.get("archived", 0))
-    summary = scored.get("summary", {})
+
+    fss = full_stack_scored or {}
+    fss_summary = fss.get("summary", {}) if fss else {}
+    fss_per_league = fss.get("per_league", {}) if fss else {}
+    fss_paired_count = int(fss_summary.get("paired_row_count", 0))
+    fss_leagues_parity = fss_summary.get("leagues_parity", [])
+    fss_leagues_improved = fss_summary.get("leagues_improved", [])
+    fss_leagues_regressed = fss_summary.get("leagues_regressed", [])
 
     gates: dict[str, Any] = {
         "full_stack_replay_via_archived_features": {
-            "status": "BLOCKED",
-            "blocked_by": "#731 (V1 feature snapshot dumps required)",
+            "status": "EVALUABLE" if archived_used > 0 else "BLOCKED",
+            # Availability gate: PASS once the archived-features replay path
+            # produced any rows. Without an explicit verdict, _gate_class()
+            # would (incorrectly) treat status=EVALUABLE as fail once #731
+            # backfill activates this path.
+            "verdict": "PASS" if archived_used > 0 else None,
+            "blocked_by": (
+                None if archived_used > 0
+                else "#731 (V1 feature snapshot dumps required)"
+            ),
             "evidence": {
                 "rows_attempted": fs_attempted,
                 "rows_predicted_via_archived_features": archived_used,
@@ -567,9 +777,11 @@ def _build_parity_gate_status(
             "evidence": {
                 "surrogate_features_enabled": surrogate_enabled,
                 "rows_predicted_via_surrogate": surrogate_used,
-                "leagues_improved": summary.get("leagues_improved", []),
-                "leagues_parity": summary.get("leagues_parity", []),
-                "leagues_regressed": summary.get("leagues_regressed", []),
+                # Per-league breakdown of the *paired* full_stack-vs-V1 metric
+                # (only populated when full_stack_scored was computed).
+                "leagues_improved": fss_leagues_improved,
+                "leagues_parity": fss_leagues_parity,
+                "leagues_regressed": fss_leagues_regressed,
             },
             "caveat": (
                 "DEGRADED baseline: ~10 of 32 feature slots populated from "
@@ -577,40 +789,76 @@ def _build_parity_gate_status(
                 "*raw* predicted_prob, not its final calibrated probability."
             ),
         },
-        "parity_within_2pct_vs_v1_calibrated": {
-            "status": "UNEVALUABLE",
-            "blocked_by": (
-                "#731 (V1 feature snapshot dumps) AND historical V1 "
-                "calibrated-probability dump (archive stores pre-calibrator output)"
-            ),
-            "note": "See replit.md V1 backtest section for the full audit narrative.",
-        },
+        "parity_within_2pct_vs_v1_calibrated": _build_parity_2pct_gate(
+            fss_paired_count=fss_paired_count,
+            archived_used=archived_used,
+            surrogate_used=surrogate_used,
+            surrogate_enabled=surrogate_enabled,
+            fss_per_league=fss_per_league,
+            fss_leagues_parity=fss_leagues_parity,
+            fss_leagues_regressed=fss_leagues_regressed,
+        ),
     }
-    blocked_count = sum(
-        1 for g in gates.values() if g["status"] in {"BLOCKED", "UNEVALUABLE"}
+    # Two-tier classification: status (gate evaluability) and verdict
+    # (pass/fail when evaluable). Verdict can be PASS / FAIL /
+    # DEGRADED_PASS / DEGRADED_FAIL or absent.
+    def _gate_class(g: dict[str, Any]) -> str:
+        st = g.get("status")
+        v = g.get("verdict")
+        if st == "PASS":
+            return "pass"
+        if st == "EVALUABLE":
+            return "pass" if v == "PASS" else "fail"
+        if st == "EVALUABLE_DEGRADED":
+            return "degraded_fail" if v == "DEGRADED_FAIL" else "degraded_pass"
+        if st in {"BLOCKED", "UNEVALUABLE"}:
+            return "blocked"
+        if st == "NOT_RUN":
+            return "blocked"  # folds into blocked semantics
+        return "blocked"
+
+    counts: dict[str, int] = {
+        "pass": 0, "fail": 0, "degraded_pass": 0, "degraded_fail": 0, "blocked": 0,
+    }
+    for g in gates.values():
+        counts[_gate_class(g)] += 1
+
+    pass_count = counts["pass"]
+    fail_count = counts["fail"]
+    degraded_pass_count = counts["degraded_pass"]
+    degraded_fail_count = counts["degraded_fail"]
+    blocked_count = counts["blocked"]
+    degraded_count = degraded_pass_count + degraded_fail_count
+    blocked_or_unevaluable = sum(
+        1 for g in gates.values() if g["status"] in {"BLOCKED", "UNEVALUABLE", "NOT_RUN"}
     )
-    pass_count = sum(1 for g in gates.values() if g["status"] == "PASS")
-    degraded_count = sum(
-        1 for g in gates.values() if g["status"] == "EVALUABLE_DEGRADED"
-    )
-    not_run_count = sum(1 for g in gates.values() if g["status"] == "NOT_RUN")
-    # NOT_RUN folds into "blocked" semantics for the verdict.
-    if pass_count == len(gates):
+
+    if fail_count > 0:
+        overall = "FAIL"
+    elif pass_count == len(gates):
         overall = "PASS"
+    elif degraded_fail_count > 0 and pass_count + degraded_pass_count == 0:
+        overall = "DEGRADED_FAIL_PENDING_BACKFILL"
     elif degraded_count > 0 and pass_count == 0:
         overall = "DEGRADED_PARTIAL_PENDING_BACKFILL"
-    elif blocked_count + not_run_count == len(gates):
+    elif blocked_count == len(gates):
         overall = "BLOCKED_PENDING_BACKFILL"
     else:
         overall = "MIXED"
+
     return {
         "overall": overall,
-        "overall_blocked_by": "#731 (V1 feature snapshot dumps)" if blocked_count > 0 else None,
+        "overall_blocked_by": (
+            "#731 (V1 feature snapshot dumps)" if blocked_or_unevaluable > 0 else None
+        ),
         "summary": {
             "total_gates": len(gates),
-            "blocked_or_unevaluable": blocked_count,
+            "blocked_or_unevaluable": blocked_or_unevaluable,
             "evaluable_degraded": degraded_count,
+            "evaluable_degraded_pass": degraded_pass_count,
+            "evaluable_degraded_fail": degraded_fail_count,
             "pass": pass_count,
+            "fail": fail_count,
         },
         "gates": gates,
     }
@@ -734,9 +982,13 @@ async def run(
                 feature_builder=feature_builder,
             )
             for lg, bucket in fs_g.items():
-                target = fs_grouped.setdefault(lg, {"probs": [], "ys": []})
+                target = fs_grouped.setdefault(
+                    lg, {"probs": [], "ys": [], "v1_probs": [], "feature_sources": []}
+                )
                 target["probs"].extend(bucket["probs"])
                 target["ys"].extend(bucket["ys"])
+                target["v1_probs"].extend(bucket.get("v1_probs", []))
+                target["feature_sources"].extend(bucket.get("feature_sources", []))
             full_stack_summary["rows_attempted"] += fs_s["rows_attempted"]
             full_stack_summary["rows_predicted"] += fs_s["rows_predicted"]
             full_stack_summary["rows_skipped"] += fs_s["rows_skipped"]
@@ -769,11 +1021,12 @@ async def run(
     scored = score_grouped(grouped)
     full_stack_scored: dict[str, Any] | None = None
     if full_stack:
-        # apply_calibrator=False — predict() already calibrated upstream.
-        full_stack_scored = score_grouped(fs_grouped, apply_calibrator=False)
+        full_stack_scored = score_full_stack_paired(fs_grouped)
 
     triage = _build_triage(scored, full_stack_summary)
-    parity_gate_status = _build_parity_gate_status(scored, full_stack_summary)
+    parity_gate_status = _build_parity_gate_status(
+        scored, full_stack_summary, full_stack_scored,
+    )
     report: dict[str, Any] = {
         "started_at": started_at,
         "completed_at": datetime.now(timezone.utc).isoformat(),
@@ -788,9 +1041,20 @@ async def run(
         "parity_gate_status": parity_gate_status,
         "full_stack_attempt": full_stack_summary,
         "triage": triage,
+        # ``per_league``/``summary`` below are the CALIBRATOR-ONLY audit:
+        # V1 archived predicted_prob → current calibrators. ``brier_v1_raw``
+        # is V1's pre-calibrator output, ``brier_calibrated`` is that same
+        # prob run through current calibrators. NOT the spec's full-stack
+        # parity metric — that lives in ``full_stack_scored.per_league``.
+        "audit_path": "calibrator_only_via_v1_predicted_prob",
         **scored,
     }
     if full_stack_scored is not None:
+        # ``full_stack_scored.per_league[lg]`` carries:
+        #   brier_full_stack vs brier_v1_baseline (paired on same row set)
+        #   delta_vs_v1 = brier_full_stack - brier_v1_baseline
+        # plus a feature_source_breakdown flagging archived vs surrogate.
+        full_stack_scored["audit_path"] = "full_stack_paired_vs_v1_archived_predicted_prob"
         report["full_stack_scored"] = full_stack_scored
     return report
 
