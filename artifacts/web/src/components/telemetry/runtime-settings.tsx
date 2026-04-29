@@ -10,6 +10,13 @@ type PersonaWeight = {
   weight: number;
 };
 
+type LlmModeState = {
+  mode: string;
+  ollama_model_fast: string;
+  ollama_model_reasoning: string;
+  ollama_model_backup: string;
+};
+
 type RuntimeSettings = {
   aggression_mode: string;
   thresholds: {
@@ -22,6 +29,13 @@ type RuntimeSettings = {
   updated_at: string | null;
   updated_by: string | null;
   persona_weights: PersonaWeight[];
+  llm_mode?: LlmModeState;
+};
+
+const LLM_MODE_COLOR: Record<string, string> = {
+  cloud: "text-foreground",
+  local: "text-info",
+  hybrid: "text-warning",
 };
 
 const MODE_COLOR: Record<string, string> = {
@@ -88,6 +102,29 @@ export default function RuntimeSettingsPanel() {
           {mode}
         </span>
       </div>
+      {data.llm_mode ? (
+        <div
+          className="border-b border-border px-3 py-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-[10px] uppercase tracking-widest"
+          data-testid="row-llm-mode"
+        >
+          <span className="text-muted-foreground">LLM_MODE</span>
+          <span
+            className={`font-bold ${LLM_MODE_COLOR[data.llm_mode.mode] ?? "text-foreground"}`}
+            data-testid="text-llm-mode"
+          >
+            {data.llm_mode.mode}
+          </span>
+          <span className="text-muted-foreground">
+            FAST <span className="text-foreground normal-case">{data.llm_mode.ollama_model_fast}</span>
+          </span>
+          <span className="text-muted-foreground">
+            REASON <span className="text-foreground normal-case">{data.llm_mode.ollama_model_reasoning}</span>
+          </span>
+          <span className="text-muted-foreground">
+            BACKUP <span className="text-foreground normal-case">{data.llm_mode.ollama_model_backup}</span>
+          </span>
+        </div>
+      ) : null}
       <div className="p-3 grid grid-cols-2 md:grid-cols-4 gap-3 text-xs border-b border-border">
         <Stat label="MIN_EDGE" value={`${data.thresholds.min_edge_pp.toFixed(1)}pp`} />
         <Stat

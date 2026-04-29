@@ -588,6 +588,35 @@ def test_local_mode_5xx_does_not_fall_back_to_cloud(monkeypatch):
     assert verdict["cost"] == 0.0
 
 
+def test_local_mode_blocks_cloud_gatekeeper_override(monkeypatch):
+    """`AXIOM_LLM_MODE=local` is a hard guarantee: no persona —
+    including the gatekeeper — may silently route to OpenAI/Anthropic
+    just because a stale `runtime_settings.gatekeeper_model_override`
+    row was left over from a previous mode. Without this guard, a
+    leftover ('openai','gpt-4o-mini') override would burn hosted-LLM
+    credit on every debate. Companion check: in `hybrid` mode the same
+    override IS honored (operator-curated knob)."""
+    _stub_settings_for_mode(monkeypatch, "local")
+
+    async def _fake_override():
+        return ("openai", "gpt-4o-mini")
+
+    from app import runtime_settings as _rs
+    monkeypatch.setattr(_rs, "get_gatekeeper_model_override", _fake_override)
+
+    gk = _run(runner._resolve_gatekeeper_persona())
+    # Local mode must keep the gatekeeper on Ollama using the
+    # llm-mode-resolved reasoning model — NOT the cloud override.
+    assert gk.provider == "ollama"
+    assert gk.model_id == "llama-test:70b"
+
+    # Sanity: under hybrid the same override IS honored.
+    _stub_settings_for_mode(monkeypatch, "hybrid")
+    gk2 = _run(runner._resolve_gatekeeper_persona())
+    assert gk2.provider == "openai"
+    assert gk2.model_id == "gpt-4o-mini"
+
+
 def test_active_llm_mode_state_returns_resolved_triple(monkeypatch):
     _stub_settings_for_mode(monkeypatch, "local")
     state = personas.active_llm_mode_state()

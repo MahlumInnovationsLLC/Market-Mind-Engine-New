@@ -27,6 +27,7 @@ from .personas import (
     PERSONAS,
     Persona,
     active_gatekeeper,
+    active_llm_mode_state,
     active_moderator,
     estimate_cost,
     fallback_for,
@@ -609,6 +610,55 @@ async def run_debate(candidate: dict[str, Any]) -> dict[str, Any]:
         _current_debate_id.reset(token)
 
 
+async def _resolve_gatekeeper_persona() -> Persona:
+    """Resolve the gatekeeper persona that will actually be called for
+    this debate, applying — in this order — the LLM-mode rewrite (so a
+    Mac Studio operator with `AXIOM_LLM_MODE=local` gets an Ollama-
+    backed gatekeeper) and the operator-curated runtime override (so a
+    `cloud`/`hybrid` deployment can pin a specific gatekeeper model
+    from the admin UI).
+
+    `local` mode IGNORES the runtime override entirely: `local` is a
+    hard guarantee that no persona — including the gatekeeper — can
+    silently route to OpenAI/Anthropic just because a stale override
+    row was left over from a previous mode. Without this guard, a
+    leftover `("openai","gpt-4o-mini")` override would burn hosted-LLM
+    credit on every debate even though the operator asked for an all-
+    local swarm. Lookup failures are non-fatal — we never let a
+    settings-table hiccup silence the gatekeeper.
+    """
+    gk_persona = active_gatekeeper()
+    try:
+        from .. import runtime_settings as _rs
+
+        override = await _rs.get_gatekeeper_model_override()
+    except Exception as e:  # noqa: BLE001
+        log.debug("gatekeeper override lookup failed; using default: %s", e)
+        override = None
+    llm_mode = active_llm_mode_state().get("mode", "cloud")
+    if override is not None and llm_mode == "local":
+        log.info(
+            "ignoring gatekeeper override %s/%s under AXIOM_LLM_MODE=local",
+            override[0],
+            override[1],
+        )
+        override = None
+    if override is not None:
+        ov_provider, ov_model = override
+        gk_persona = dataclasses.replace(
+            gk_persona,
+            provider=ov_provider,
+            model_id=ov_model,
+            # Disable cross-provider fallback for the operator-selected
+            # model so the verdict reflects the chosen provider — the
+            # outer try/except in the caller already fail-closes on
+            # any error.
+            fallback_provider="",
+            fallback_model_id="",
+        )
+    return gk_persona
+
+
 async def _run_debate_inner(
     candidate: dict[str, Any], stream_debate_id: str
 ) -> dict[str, Any]:
@@ -862,29 +912,15 @@ async def _run_debate_inner(
     # silence the gatekeeper.
     # Mac Studio cutover: start from the LLM-mode-resolved gatekeeper so
     # `local`/`hybrid` operators get an Ollama-backed gatekeeper by
-    # default. The runtime_settings override below still wins (it's an
-    # operator-curated knob) so a hybrid deployment can keep cloud-backed
-    # gatekeeper guardrails even while the rest of the swarm is local.
-    gk_persona = active_gatekeeper()
-    try:
-        from .. import runtime_settings as _rs
-
-        override = await _rs.get_gatekeeper_model_override()
-    except Exception as e:  # noqa: BLE001
-        log.debug("gatekeeper override lookup failed; using default: %s", e)
-        override = None
-    if override is not None:
-        ov_provider, ov_model = override
-        gk_persona = dataclasses.replace(
-            gk_persona,
-            provider=ov_provider,
-            model_id=ov_model,
-            # Disable cross-provider fallback for the operator-selected
-            # model so the verdict reflects the chosen provider — the
-            # outer `try/except` already fail-closes on any error.
-            fallback_provider="",
-            fallback_model_id="",
-        )
+    # default. In `hybrid` mode the runtime_settings override below still
+    # wins (operator-curated knob) so a hybrid deployment can keep cloud-
+    # backed gatekeeper guardrails even while the rest of the swarm is
+    # local. In `local` mode we IGNORE the override entirely — `local`
+    # is a hard guarantee that no persona (including gatekeeper) reaches
+    # OpenAI/Anthropic, regardless of stale operator settings. Without
+    # this, an old override pointing at a hosted model would silently
+    # burn cloud credit on every debate and contradict the env contract.
+    gk_persona = await _resolve_gatekeeper_persona()
     try:
         gk_verdict = await _call_persona(gk_persona, gk_input)
     except Exception as e:  # noqa: BLE001 — fail-closed by design
