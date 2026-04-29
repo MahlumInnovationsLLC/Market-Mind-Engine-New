@@ -1476,22 +1476,36 @@ export function CardTile({ card }: { card: Card }) {
     error?: string;
   }> =
     isTournamentLeaderboards && metadata && Array.isArray(metadata.per_event)
-      ? (metadata.per_event as unknown[]).flatMap((entry) => {
-          if (!entry || typeof entry !== "object") return [];
-          const row = entry as Record<string, unknown>;
-          const sport = typeof row.sport === "string" ? row.sport : null;
-          const eventId =
-            typeof row.event_id === "string"
-              ? row.event_id
-              : typeof row.event_id === "number"
-                ? String(row.event_id)
-                : null;
-          const entrants =
-            typeof row.entrants === "number" ? row.entrants : null;
-          if (!sport || !eventId || entrants == null) return [];
-          const error = typeof row.error === "string" ? row.error : undefined;
-          return [{ sport, event_id: eventId, entrants, error }];
-        })
+      ? (metadata.per_event as unknown[])
+          .flatMap((entry) => {
+            if (!entry || typeof entry !== "object") return [];
+            const row = entry as Record<string, unknown>;
+            const sport = typeof row.sport === "string" ? row.sport : null;
+            const eventId =
+              typeof row.event_id === "string"
+                ? row.event_id
+                : typeof row.event_id === "number"
+                  ? String(row.event_id)
+                  : null;
+            const entrants =
+              typeof row.entrants === "number" ? row.entrants : null;
+            if (!sport || !eventId || entrants == null) return [];
+            const error = typeof row.error === "string" ? row.error : undefined;
+            return [{ sport, event_id: eventId, entrants, error }];
+          })
+          // Sort so zero-entrant rows pin to the top (operators must
+          // notice them first), then the remaining rows by entrant
+          // count descending so the heavy hitters float up. Sport +
+          // event id provide a stable tiebreaker so rows don't
+          // shuffle on equal counts between renders.
+          .sort((a, b) => {
+            const aZero = a.entrants === 0;
+            const bZero = b.entrants === 0;
+            if (aZero !== bZero) return aZero ? -1 : 1;
+            if (a.entrants !== b.entrants) return b.entrants - a.entrants;
+            if (a.sport !== b.sport) return a.sport < b.sport ? -1 : 1;
+            return a.event_id < b.event_id ? -1 : a.event_id > b.event_id ? 1 : 0;
+          })
       : [];
   const leaderboardLastSuccessAt = isTournamentLeaderboards
     ? ((extras.last_ok_at as string | null) ?? null)

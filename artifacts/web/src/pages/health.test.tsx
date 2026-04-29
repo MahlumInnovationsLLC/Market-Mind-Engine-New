@@ -1151,6 +1151,60 @@ describe("Tournament leaderboard refresh (rendered via CardTile)", () => {
     expect(zeroed.getAttribute("title")).toMatch(/HTTP 500/);
   });
 
+  it("sorts per-event rows so zero-entrant rows pin to the top, then the rest by entrant count descending", () => {
+    // The refresher walks tournaments in whatever order it stashed
+    // them (PGA bucket first, then F1). On a busy cycle operators
+    // need the zero-entrant rows pinned to the top so they're
+    // impossible to miss, then the heavy hitters float up so the
+    // card scans at a glance. Ties on entrant count break by
+    // sport + event id so equal-count rows stay put across renders.
+    render(
+      <CardTile
+        card={{
+          ...baseLeaderboardCard,
+          status: "ok",
+          detail: "wrote 220 row(s)",
+          extras: {
+            cadence_seconds: 120,
+            last_ok_at: "2026-04-26T00:00:00+00:00",
+            metadata: {
+              events_live: 5,
+              last_refresh_count: 220,
+              last_refresh_at: "2026-04-26T00:00:00+00:00",
+              zero_rows_since: null,
+              per_event: [
+                { sport: "PGA", event_id: "tid-mid", entrants: 50 },
+                { sport: "PGA", event_id: "tid-big", entrants: 130 },
+                { sport: "F1", event_id: "eid-zero-b", entrants: 0 },
+                { sport: "F1", event_id: "eid-tie", entrants: 50 },
+                { sport: "F1", event_id: "eid-zero-a", entrants: 0 },
+              ],
+            },
+          },
+        }}
+      />,
+    );
+    const list = screen.getByTestId(
+      "feed-leaderboard-per-event-feed:sportradar_tournament_leaderboards",
+    );
+    const rowKeys = Array.from(list.querySelectorAll("li")).map((li) =>
+      li.getAttribute("data-testid"),
+    );
+    expect(rowKeys).toEqual([
+      // Zero-entrant rows first, ordered by sport + event id so the
+      // list is stable across renders.
+      "feed-leaderboard-event-feed:sportradar_tournament_leaderboards-F1-eid-zero-a",
+      "feed-leaderboard-event-feed:sportradar_tournament_leaderboards-F1-eid-zero-b",
+      // Then the biggest refresh.
+      "feed-leaderboard-event-feed:sportradar_tournament_leaderboards-PGA-tid-big",
+      // Then the two 50-entrant rows; F1 sorts before PGA on the
+      // tiebreaker so the order is deterministic regardless of how
+      // the refresher walked them.
+      "feed-leaderboard-event-feed:sportradar_tournament_leaderboards-F1-eid-tie",
+      "feed-leaderboard-event-feed:sportradar_tournament_leaderboards-PGA-tid-mid",
+    ]);
+  });
+
   it("omits the per-event list when the refresher hasn't reported any events yet", () => {
     render(
       <CardTile
