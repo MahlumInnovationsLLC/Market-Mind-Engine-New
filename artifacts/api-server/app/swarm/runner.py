@@ -26,9 +26,12 @@ from .personas import (
     MODERATOR,
     PERSONAS,
     Persona,
+    active_gatekeeper,
+    active_moderator,
     estimate_cost,
     fallback_for,
     normalize_aggression_mode,
+    resolve_active_personas,
 )
 from .profiles import resolve_for_vertical
 from .streams import llm_log_hub
@@ -643,7 +646,11 @@ async def _run_debate_inner(
     resolved = resolve_for_vertical(
         persona_profile, disabled_persona_ids=disabled_ids
     )
-    active_personas: tuple[Persona, ...] = resolved.active
+    # Mac Studio cutover (task #735): apply the active LLM-mode rewrite
+    # so a `local` / `hybrid` operator gets ollama-backed personas
+    # transparently — `cloud` mode is identity so existing replay /
+    # Brier history continues to apply byte-for-byte.
+    active_personas: tuple[Persona, ...] = resolve_active_personas(resolved.active)
 
     # `stream_debate_id` is set into `_current_debate_id` by the public
     # `run_debate` wrapper above, which also handles reset() in finally.
@@ -786,7 +793,12 @@ async def _run_debate_inner(
             indent=2,
         )
     )
-    mod_verdict = await _call_persona(MODERATOR, mod_input)
+    # Mac Studio cutover: pull the moderator through the LLM-mode resolver
+    # so a `local`/`hybrid` operator routes the moderator at the same
+    # provider as the personas instead of silently staying on the cloud
+    # baseline.
+    mod_persona = active_moderator()
+    mod_verdict = await _call_persona(mod_persona, mod_input)
     mod_parsed = _extract_json(mod_verdict["raw_text"]) or {}
     consensus = _coerce_prob(mod_parsed.get("consensus_probability"))
     band_low = _coerce_prob(mod_parsed.get("confidence_band_low"))
@@ -848,7 +860,12 @@ async def _run_debate_inner(
     # catalogue, so we fall back to the persona default in that case.
     # Failures are non-fatal — we never let a settings-table hiccup
     # silence the gatekeeper.
-    gk_persona = GATEKEEPER
+    # Mac Studio cutover: start from the LLM-mode-resolved gatekeeper so
+    # `local`/`hybrid` operators get an Ollama-backed gatekeeper by
+    # default. The runtime_settings override below still wins (it's an
+    # operator-curated knob) so a hybrid deployment can keep cloud-backed
+    # gatekeeper guardrails even while the rest of the swarm is local.
+    gk_persona = active_gatekeeper()
     try:
         from .. import runtime_settings as _rs
 
@@ -859,7 +876,7 @@ async def _run_debate_inner(
     if override is not None:
         ov_provider, ov_model = override
         gk_persona = dataclasses.replace(
-            GATEKEEPER,
+            gk_persona,
             provider=ov_provider,
             model_id=ov_model,
             # Disable cross-provider fallback for the operator-selected

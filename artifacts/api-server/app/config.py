@@ -100,6 +100,33 @@ class Settings:
     ollama_api_key: str | None
     ollama_request_timeout_s: float
 
+    # ----- Mac Studio cutover (task #735) -----
+    # ``axiom_llm_mode`` selects how the swarm picks providers per
+    # persona at startup:
+    #   * ``cloud``  (default) → today's behaviour, every persona keeps
+    #     its hard-coded OpenAI/Anthropic provider.
+    #   * ``local``  → every persona is rewritten to ``provider="ollama"``
+    #     using the model triple below; the cross-provider fallback chain
+    #     is replaced with a same-provider fallback to
+    #     ``ollama_model_backup`` so a primary-model outage on the local
+    #     box never silently burns hosted-LLM credit.
+    #   * ``hybrid`` → primary set is the ``local`` mapping but the
+    #     existing cross-provider fallback chain stays, so a downed
+    #     Ollama node still produces a verdict via the cheapest hosted
+    #     model.
+    # The triple (``ollama_model_fast`` for line-movement / form /
+    # public-fade / matchup / moderator personas, ``ollama_model_reasoning``
+    # for injury / risk / gatekeeper personas, and
+    # ``ollama_model_backup`` for the per-persona fallback model) is
+    # consumed by ``app.swarm.personas._apply_llm_mode``.  Defaults
+    # match the audit's Mac Studio runbook (qwen2.5:14b /
+    # llama3.3:70b / deepseek-v2:16b).  Omitting any of these env vars
+    # keeps today's exact ``cloud`` behaviour.
+    axiom_llm_mode: str
+    ollama_model_fast: str
+    ollama_model_reasoning: str
+    ollama_model_backup: str
+
     # Trading
     kalshi_api_key_id: str | None
     kalshi_private_key: str | None
@@ -315,6 +342,13 @@ def get_settings() -> Settings:
             f"'auto' (got {venue_routing!r})"
         )
 
+    axiom_llm_mode = (os.environ.get("AXIOM_LLM_MODE") or "cloud").strip().lower()
+    if axiom_llm_mode not in ("cloud", "local", "hybrid"):
+        raise RuntimeError(
+            "AXIOM_LLM_MODE must be 'cloud', 'local', or 'hybrid' "
+            f"(got {axiom_llm_mode!r})"
+        )
+
     return Settings(
         supabase_db_password=pwd,
         supabase_service_key=svc,
@@ -335,6 +369,16 @@ def get_settings() -> Settings:
         ollama_api_key=os.environ.get("OLLAMA_API_KEY") or None,
         ollama_request_timeout_s=float(
             os.environ.get("OLLAMA_REQUEST_TIMEOUT_S") or "120"
+        ),
+        axiom_llm_mode=axiom_llm_mode,
+        ollama_model_fast=(
+            (os.environ.get("OLLAMA_MODEL_FAST") or "qwen2.5:14b").strip()
+        ),
+        ollama_model_reasoning=(
+            (os.environ.get("OLLAMA_MODEL_REASONING") or "llama3.3:70b").strip()
+        ),
+        ollama_model_backup=(
+            (os.environ.get("OLLAMA_MODEL_BACKUP") or "deepseek-v2:16b").strip()
         ),
         kalshi_api_key_id=os.environ.get("KALSHI_API_KEY_ID"),
         kalshi_private_key=os.environ.get("KALSHI_API_PRIVATE_KEY"),

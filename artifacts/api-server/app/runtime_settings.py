@@ -2188,6 +2188,23 @@ async def get_state() -> dict[str, Any]:
     history = await get_aggression_mode_history(limit=5)
     pending_revert = await get_pending_revert()
     presets = await list_aggression_presets()
+    # Mac Studio cutover (task #735): surface the active LLM mode + the
+    # resolved Ollama model triple read-only so operators can confirm
+    # which provider/models the swarm will actually call without
+    # grepping logs.  Best-effort — a settings hiccup falls back to
+    # `cloud` rather than blocking the admin panel.
+    try:
+        from .swarm.personas import active_llm_mode_state as _llm_state
+
+        llm_mode = _llm_state()
+    except Exception as e:  # noqa: BLE001
+        log.debug("active_llm_mode_state read failed (best-effort): %s", e)
+        llm_mode = {
+            "mode": "cloud",
+            "ollama_model_fast": "",
+            "ollama_model_reasoning": "",
+            "ollama_model_backup": "",
+        }
     return {
         "aggression_mode": mode,
         "trading_halted": trading_halted,
@@ -2198,6 +2215,7 @@ async def get_state() -> dict[str, Any]:
         "history": history,
         "pending_revert": pending_revert,
         "presets": presets,
+        "llm_mode": llm_mode,
     }
 
 

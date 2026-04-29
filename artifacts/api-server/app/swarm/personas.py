@@ -11,9 +11,19 @@ already populated in `swarm_analyst_metrics` — production-canonical.
 Aggression-mode bias is applied at runtime by `runner.run_debate`
 (see `_aggression_mode_directive`); the moderator and gatekeeper
 prompts include placeholders that the runner fills in per request.
+
+Mac Studio cutover (task #735) — the static ``PERSONAS`` /
+``MODERATOR`` / ``GATEKEEPER`` tuples below are the *cloud* baseline.
+The active set the runner consumes is built by ``resolve_active_personas``
+(and the matching ``active_moderator`` / ``active_gatekeeper`` getters),
+which rewrite each persona's ``provider`` / ``model_id`` /
+``fallback_*`` fields when ``settings.axiom_llm_mode`` is ``local`` or
+``hybrid``.  See ``_apply_llm_mode`` for the auditable persona-id →
+fast/reasoning mapping.
 """
 from __future__ import annotations
 
+import dataclasses
 from dataclasses import dataclass
 
 
@@ -229,6 +239,199 @@ _AGGRESSION_MODES = ("conservative", "balanced", "aggressive")
 def normalize_aggression_mode(mode: str | None) -> str:
     m = (mode or "balanced").strip().lower()
     return m if m in _AGGRESSION_MODES else "balanced"
+
+
+# ---------------------------------------------------------------------------
+# Mac Studio cutover (task #735): persona-id → local-model tier mapping.
+#
+# When ``settings.axiom_llm_mode in ("local", "hybrid")`` every persona
+# is rewritten to ``provider="ollama"`` and pointed at one of the model
+# slots configured in ``app.config.Settings``.  The split below is
+# auditable on purpose — operator hardware on a Mac Studio can run a
+# small/fast model on every core but only one or two heavy reasoning
+# models concurrently, so we reserve the ``reasoning`` slot for the
+# personas whose verdict carries the most asymmetric downside (the
+# injury / risk / gatekeeper trio).  Anything not listed here defaults
+# to the ``fast`` slot — same as a vertical-pack persona inherits the
+# fast model unless its id is explicitly added below.
+# ---------------------------------------------------------------------------
+LIGHT_PERSONA_IDS: frozenset[str] = frozenset(
+    {
+        "sharp_edge",
+        "momentum_form",
+        "matchup_historian",
+        "public_contrarian",
+        "moderator",
+    }
+)
+REASONING_PERSONA_IDS: frozenset[str] = frozenset(
+    {
+        "injury_roster",
+        "risk_guardian",
+        "gatekeeper",
+    }
+)
+
+
+def _ollama_model_for_persona(persona_id: str, settings: "Settings") -> str:
+    """Pick the Ollama model slot for a persona.
+
+    Reasoning slot iff the id is in ``REASONING_PERSONA_IDS`` — every
+    other persona (including unknown vertical-pack ids) gets the fast
+    model so a typo in a vertical-pack persona id never silently
+    promotes it onto the heavy model.
+    """
+    if persona_id in REASONING_PERSONA_IDS:
+        return settings.ollama_model_reasoning
+    return settings.ollama_model_fast
+
+
+def _apply_llm_mode(persona: "Persona", mode: str, settings: "Settings") -> "Persona":
+    """Return ``persona`` rewritten for the active LLM mode.
+
+    * ``cloud``  → identity (returns the same instance).
+    * ``local``  → provider rewritten to ``ollama``; model picked from
+      the fast/reasoning split; fallback rewritten to a same-provider
+      Ollama backup model so a primary-model outage on the local box
+      stays on local hardware (operators wanted no surprise spend on
+      hosted LLMs in this mode).
+    * ``hybrid`` → primary rewritten exactly like ``local`` but
+      ``fallback_provider`` / ``fallback_model_id`` left unset so the
+      runner's default cross-provider chain (``_FALLBACK_BY_PROVIDER``)
+      kicks in — a downed Ollama box still produces a verdict via the
+      cheapest hosted model.
+    """
+    m = (mode or "cloud").strip().lower()
+    if m not in ("local", "hybrid"):
+        return persona
+    new_model = _ollama_model_for_persona(persona.id, settings)
+    if m == "local":
+        # Same-provider backup; the runner's _is_retryable_provider_error
+        # already restricts ollama→fallback to transport / 5xx / 429 so
+        # a 4xx (bad model name, missing auth) stays surfaced.
+        backup = settings.ollama_model_backup
+        # Don't bother with a backup that points at the same model id —
+        # would be a no-op retry.
+        if backup and backup != new_model:
+            fallback_provider, fallback_model_id = "ollama", backup
+        else:
+            # Explicitly disable cross-provider fallback in local mode.
+            fallback_provider, fallback_model_id = "", ""
+    else:  # hybrid
+        # Leave fallback_* as None so fallback_for() resolves the
+        # default cross-provider chain (ollama → openai gpt-4o-mini).
+        fallback_provider, fallback_model_id = None, None
+    return dataclasses.replace(
+        persona,
+        provider="ollama",
+        model_id=new_model,
+        fallback_provider=fallback_provider,
+        fallback_model_id=fallback_model_id,
+    )
+
+
+def _current_mode() -> str:
+    """Best-effort read of the active LLM mode.
+
+    Defaults to ``cloud`` when settings cannot be loaded (e.g. import
+    time in a test that hasn't stubbed the env yet) so no caller ever
+    crashes just because ``AXIOM_LLM_MODE`` was not set.
+    """
+    try:
+        from ..config import get_settings
+
+        return (get_settings().axiom_llm_mode or "cloud").strip().lower()
+    except Exception:
+        return "cloud"
+
+
+def resolve_active_personas(
+    personas: "tuple[Persona, ...]",
+    *,
+    mode: str | None = None,
+) -> "tuple[Persona, ...]":
+    """Apply the active LLM mode to a persona tuple.
+
+    The runner calls this with the post-deny-list, post-profile tuple
+    from ``profiles.resolve_for_vertical`` so the rewrite covers both
+    the default 6 personas AND any vertical-pack persona that lands in
+    the active set.  Returns the same tuple (identity) in ``cloud``
+    mode so existing tests that check ``personas.PERSONAS`` byte
+    equality continue to hold.
+    """
+    m = (mode or _current_mode()).strip().lower()
+    if m == "cloud":
+        return personas
+    try:
+        from ..config import get_settings
+
+        settings = get_settings()
+    except Exception:
+        return personas
+    return tuple(_apply_llm_mode(p, m, settings) for p in personas)
+
+
+def active_moderator(*, mode: str | None = None) -> "Persona":
+    """Return the moderator with the active LLM mode applied."""
+    m = (mode or _current_mode()).strip().lower()
+    if m == "cloud":
+        return MODERATOR
+    try:
+        from ..config import get_settings
+
+        settings = get_settings()
+    except Exception:
+        return MODERATOR
+    return _apply_llm_mode(MODERATOR, m, settings)
+
+
+def active_gatekeeper(*, mode: str | None = None) -> "Persona":
+    """Return the gatekeeper with the active LLM mode applied.
+
+    Note: a *different* surface — the per-vertical
+    ``runtime_settings.set_gatekeeper_model`` override — can still
+    re-target the gatekeeper to a curated cloud model regardless of
+    LLM mode.  That override is read inside
+    ``runner._call_persona`` AFTER this resolver runs, so the operator
+    can keep cloud-backed gatekeeper guardrails even while the rest of
+    the swarm is on local hardware.
+    """
+    m = (mode or _current_mode()).strip().lower()
+    if m == "cloud":
+        return GATEKEEPER
+    try:
+        from ..config import get_settings
+
+        settings = get_settings()
+    except Exception:
+        return GATEKEEPER
+    return _apply_llm_mode(GATEKEEPER, m, settings)
+
+
+def active_llm_mode_state() -> dict[str, str]:
+    """Read-only snapshot for the admin runtime-settings response.
+
+    Exposes the active mode plus the resolved Ollama model triple so
+    operators can confirm at a glance which models the swarm will
+    actually call without grepping logs.
+    """
+    try:
+        from ..config import get_settings
+
+        s = get_settings()
+        return {
+            "mode": (s.axiom_llm_mode or "cloud").strip().lower(),
+            "ollama_model_fast": s.ollama_model_fast,
+            "ollama_model_reasoning": s.ollama_model_reasoning,
+            "ollama_model_backup": s.ollama_model_backup,
+        }
+    except Exception:
+        return {
+            "mode": "cloud",
+            "ollama_model_fast": "",
+            "ollama_model_reasoning": "",
+            "ollama_model_backup": "",
+        }
 
 
 # Per-1M-token prices in USD.  Used only for cost_estimate persistence; not

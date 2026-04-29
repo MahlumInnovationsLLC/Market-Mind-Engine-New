@@ -390,6 +390,215 @@ def test_is_retryable_recognises_ollama_provider_error():
     assert runner._is_retryable_provider_error(ValueError("nope")) is False
 
 
+# ---------------------------------------------------------------------------
+# Mac Studio cutover (task #735) — `AXIOM_LLM_MODE` rewrites the active
+# persona set to point at Ollama (`local` / `hybrid`) or leaves it
+# untouched (`cloud`).  These tests exercise the resolver directly and
+# end-to-end through `_call_persona`, including a tripwire that
+# `_stream_openai` / `_stream_anthropic` are NEVER invoked in `local`
+# mode (a downed local box must surface as an error, not silently spend
+# hosted-LLM credit).
+# ---------------------------------------------------------------------------
+
+
+def _stub_settings_for_mode(monkeypatch, mode: str) -> None:
+    """Patch `personas.get_settings` (re-imported lazily inside the
+    resolver) to return a stub with the requested mode + a known
+    Ollama model triple, without touching the rest of the Settings
+    surface.  Uses SimpleNamespace so we don't have to construct the
+    full frozen dataclass.
+    """
+    from types import SimpleNamespace
+
+    from app import config as app_config
+
+    stub = SimpleNamespace(
+        axiom_llm_mode=mode,
+        ollama_model_fast="qwen-test:14b",
+        ollama_model_reasoning="llama-test:70b",
+        ollama_model_backup="deepseek-test:16b",
+    )
+    monkeypatch.setattr(app_config, "get_settings", lambda: stub)
+
+
+def test_resolve_active_personas_cloud_mode_is_identity(monkeypatch):
+    _stub_settings_for_mode(monkeypatch, "cloud")
+    out = personas.resolve_active_personas(personas.PERSONAS)
+    # Identity (same tuple) so existing replay / Brier paths are
+    # byte-identical to today.
+    assert out is personas.PERSONAS
+    # And the moderator / gatekeeper getters are unchanged too.
+    assert personas.active_moderator() is personas.MODERATOR
+    assert personas.active_gatekeeper() is personas.GATEKEEPER
+
+
+def test_resolve_active_personas_local_mode_rewrites_to_ollama(monkeypatch):
+    _stub_settings_for_mode(monkeypatch, "local")
+
+    out = personas.resolve_active_personas(personas.PERSONAS)
+    assert len(out) == len(personas.PERSONAS)
+
+    # Every persona — including the moderator + gatekeeper — must now
+    # point at Ollama.  Light personas land on the fast model, the
+    # injury / risk trio land on the reasoning model.
+    expected_fast = {"sharp_edge", "momentum_form", "matchup_historian", "public_contrarian"}
+    expected_reasoning = {"injury_roster", "risk_guardian"}
+    for p in out:
+        assert p.provider == "ollama", f"{p.id} stayed on {p.provider}"
+        if p.id in expected_reasoning:
+            assert p.model_id == "llama-test:70b"
+        elif p.id in expected_fast:
+            assert p.model_id == "qwen-test:14b"
+
+    # Moderator → fast slot.
+    mod = personas.active_moderator()
+    assert mod.provider == "ollama"
+    assert mod.model_id == "qwen-test:14b"
+
+    # Gatekeeper → reasoning slot.
+    gk = personas.active_gatekeeper()
+    assert gk.provider == "ollama"
+    assert gk.model_id == "llama-test:70b"
+
+    # Local-mode fallback is the same-provider Ollama backup model — no
+    # hosted-LLM model in the chain.  ``fallback_for`` must round-trip
+    # to the configured backup, NOT the cross-provider default.
+    for p in out:
+        fb = personas.fallback_for(p)
+        assert fb == ("ollama", "deepseek-test:16b"), (
+            f"{p.id} fallback escaped local mode: {fb!r}"
+        )
+
+    # Backwards-compat tripwire: the underlying static PERSONAS tuple
+    # is untouched so other callers (replay, weights) still see the
+    # cloud baseline.
+    assert personas.PERSONAS[0].provider == "openai"
+
+
+def test_resolve_active_personas_hybrid_keeps_cross_provider_fallback(monkeypatch):
+    _stub_settings_for_mode(monkeypatch, "hybrid")
+
+    out = personas.resolve_active_personas(personas.PERSONAS)
+    assert all(p.provider == "ollama" for p in out)
+
+    # Hybrid leaves fallback_provider/model_id unset → resolver picks
+    # up the default `_FALLBACK_BY_PROVIDER["ollama"]` chain so a
+    # downed local node still produces a verdict via the cheapest
+    # hosted model.
+    for p in out:
+        assert p.fallback_provider is None
+        assert p.fallback_model_id is None
+        fb = personas.fallback_for(p)
+        assert fb == ("openai", "gpt-4o-mini"), (
+            f"{p.id} hybrid fallback unexpectedly: {fb!r}"
+        )
+
+
+def test_local_mode_never_invokes_cloud_sdk_paths(monkeypatch):
+    """End-to-end: in `local` mode every persona resolves to ollama
+    and a primary failure on the local box must NOT trigger the
+    OpenAI/Anthropic fallback (which would silently burn hosted-LLM
+    credit on what is really a local-hardware outage).
+    """
+    _stub_settings_for_mode(monkeypatch, "local")
+
+    body = '{"probability":0.6,"confidence":0.7,"lean":"YES","reasoning":"local"}'
+
+    def _ok_handler(req):
+        import httpx
+        return httpx.Response(200, content=_ollama_ndjson_chunks(body, 30, 15))
+
+    captured = _patch_httpx_with_mock(monkeypatch, _ok_handler)
+
+    # Tripwire: any cloud SDK call fails the test.
+    async def explode_openai(*a, **kw):
+        raise AssertionError(
+            "local mode must NEVER call _stream_openai"
+        )
+
+    async def explode_anthropic(*a, **kw):
+        raise AssertionError(
+            "local mode must NEVER call _stream_anthropic"
+        )
+
+    monkeypatch.setattr(runner, "_stream_openai", explode_openai)
+    monkeypatch.setattr(runner, "_stream_anthropic", explode_anthropic)
+
+    # Run every default persona + the moderator + the gatekeeper
+    # through `_call_persona` after the local-mode rewrite.  All must
+    # succeed against the mocked Ollama transport, none must touch the
+    # cloud SDKs.
+    active = personas.resolve_active_personas(personas.PERSONAS)
+    for p in list(active) + [personas.active_moderator(), personas.active_gatekeeper()]:
+        verdict = _run(runner._call_persona(p, "prompt"))
+        assert verdict["provider"] == "ollama"
+        assert verdict["fallback_used"] is False
+        assert verdict["error"] is None
+        # Local inference is free.
+        assert verdict["cost"] == 0.0
+
+    # Sanity: the mocked Ollama endpoint received one request per
+    # persona (8 total — 6 personas + moderator + gatekeeper).
+    assert len(captured) == 8
+    assert all(req["url"].endswith("/api/chat") for req in captured)
+
+
+def test_local_mode_5xx_does_not_fall_back_to_cloud(monkeypatch):
+    """Same tripwire on the failure path: a 503 from the local Ollama
+    box in `local` mode must surface to the operator instead of
+    silently retrying against OpenAI.  In contrast `hybrid` mode keeps
+    the cross-provider fallback (covered by
+    `test_ollama_5xx_falls_back_to_openai`)."""
+    _stub_settings_for_mode(monkeypatch, "local")
+
+    def _503_handler(req):
+        import httpx
+        return httpx.Response(503, content=b'{"error":"model loading"}')
+
+    _patch_httpx_with_mock(monkeypatch, _503_handler)
+
+    async def explode_openai(*a, **kw):
+        raise AssertionError(
+            "local mode must NEVER fall back to _stream_openai on Ollama 5xx"
+        )
+
+    async def explode_anthropic(*a, **kw):
+        raise AssertionError(
+            "local mode must NEVER fall back to _stream_anthropic on Ollama 5xx"
+        )
+
+    monkeypatch.setattr(runner, "_stream_openai", explode_openai)
+    monkeypatch.setattr(runner, "_stream_anthropic", explode_anthropic)
+
+    sharp = personas.resolve_active_personas(personas.PERSONAS)[0]
+    assert sharp.provider == "ollama"
+    fb = personas.fallback_for(sharp)
+    # Same-provider Ollama backup, NOT the cross-provider default.
+    assert fb == ("ollama", "deepseek-test:16b")
+
+    # Both primary and backup will 503 against the same mocked
+    # transport — verdict must surface the failure, fallback_used is
+    # True (local→local), and no cloud SDK was ever touched.
+    verdict = _run(runner._call_persona(sharp, "prompt"))
+    assert verdict["provider"] == "ollama"
+    # Both attempts failed (primary + same-provider backup) → error
+    # must surface to the operator.
+    assert verdict["error"] is not None
+    assert "fallback" in verdict["error"]
+    assert verdict["cost"] == 0.0
+
+
+def test_active_llm_mode_state_returns_resolved_triple(monkeypatch):
+    _stub_settings_for_mode(monkeypatch, "local")
+    state = personas.active_llm_mode_state()
+    assert state == {
+        "mode": "local",
+        "ollama_model_fast": "qwen-test:14b",
+        "ollama_model_reasoning": "llama-test:70b",
+        "ollama_model_backup": "deepseek-test:16b",
+    }
+
+
 @pytest.mark.parametrize("status_code", [400, 401, 403, 404, 422])
 def test_ollama_4xx_does_not_trigger_fallback(status_code):
     """A 4xx from Ollama (bad model, missing auth, malformed request)
