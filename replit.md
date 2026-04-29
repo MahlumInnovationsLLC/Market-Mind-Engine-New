@@ -240,32 +240,196 @@ last run (2026-04-29):
   land in `app/models_loader.py` (filename mapping, manifest parsing,
   version selection). Do not modify the bucket from this script.**
 
-### V1 historical-data import — BLOCKED on V1 source access
+### V1 historical-data import — UNBLOCKED via bucket pg_dumps
 
-The second half of the same task — porting V1's ~60,503 settled games
-and ~1,249 settled trades into Supabase under new `sports_games` /
-`trade_history` tables (so calibrators can cross `MIN_REFIT_SAMPLES=10`
-per league and replace the `market_prior` rows seeded by
-`scripts/seed_market_prior_calibrators.py`) — is currently blocked.
-The audit referenced `https://github.com/MahlumInnovationsLLC/Axiom-Predict-V1.git`
-as a public source, but the GitHub API returns HTTP 404 for that exact
-repo slug, every plausible alternate spelling, and every plausible
-alternate org. There is no `GITHUB_TOKEN` secret configured, no GitHub
-connection set up, and no V1 SQL/CSV dump in `attached_assets/`.
+The second half of the same task — porting V1 historical data into
+Supabase so calibrators can cross `MIN_REFIT_SAMPLES=10` per league and
+replace `market_prior` rows seeded by
+`scripts/seed_market_prior_calibrators.py` — was originally blocked on
+the audit-named GitHub repo `MahlumInnovationsLLC/Axiom-Predict-V1`,
+which returns HTTP 404 for every plausible spelling. The 2026-04-29
+bucket walk discovered the V1 data is **already in the same Supabase
+storage bucket** under `replit-port/archives/pg_dumps/` — eighteen
+gzipped `pg_dump` files plus split-archive `.manifest.json` companions,
+totalling roughly 2.8 GB compressed. The multi-part-cat scheme is the
+same idea as `exports/models_part_aa..ac` (sha256 + chunk count in a
+sibling `*.manifest.json`), but **the part-suffix format is different**:
+`exports/` uses GNU `split` two-letter suffixes (`aa/ab/ac`), while the
+V1 dumps use numeric `partNNN`. `app/storage.py::download_split_artifact`
+matches only the alphabetic pattern (see `expected_suffix(i)` at
+line 131), so the V1 importer must either (a) add a numeric-suffix
+reassembler alongside it, or (b) cat the parts directly with
+`download_to_path` per part + local `cat *.partNNN > out.gz`. No
+external GitHub access is needed; no new secret is needed.
 
-To unblock, one of the following is needed:
-1. Make the V1 repo public under its real slug, OR
-2. Provide a Personal Access Token (`GITHUB_TOKEN`) with `repo:read`
-   scope, OR
-3. Drop a V1 SQL dump (`.sql` / `.sql.gz` / `pg_dump -Fc`) or
-   per-table CSV exports into `attached_assets/`.
+See the next section ("Bucket inventory") for the classified list of
+every file in the bucket. Of the 18 V1 dump tables, only three are
+already referenced by MME app code:
 
-Until V1 is reachable, the migration `0037_v1_history_tables.py` and
-the ETL script `scripts/import_v1_history.py` are intentionally
-deferred — writing speculative table DDL against a schema we cannot
-verify would just have to be rewritten once V1's real column shapes
-land. The audit-reported V1 row counts (60,503 games / 1,249 trades)
-remain the smoke-test target.
+- **`weather_observations`** (970 KB, single-file) — referenced 6× in
+  app code (`weather/training.py`, `feeds/weather*.py`, `swarm/runner.py`,
+  `margin_regressor.py`, etc.). MME defines this table via the lazy
+  `ensure_table` path captured in migration `0001_baseline.py`. Direct
+  fit — feeds the weather GRU training that today falls back to
+  `baseline_weights()`.
+- **`line_snapshots`** (86 MB, 2-part numeric-split) — `feeds/odds_api.py`,
+  `feeds/positive_ev.py`, `margin_regressor.py`, plus migrations
+  `0029` and `0030`. Schema MUST be diff-checked against current
+  MME `line_snapshots` before any insert. **Critical caveat:** migration
+  `0030` added an `outcome` column and made it part of the unique index,
+  with NULL-distinct semantics. The V1 dump almost certainly predates
+  this column. Do NOT coerce NULLs to empty string on import — that
+  would collapse what Postgres treats as distinct rows into duplicate-key
+  collisions. The right approach is to insert with `outcome = NULL` for
+  V1 rows (they'll never collide with each other or with newer
+  outcome-bearing rows by index design), and run any reader that needs
+  per-outcome rows only against post-`0030` data.
+- **`llm_predictions`** (12.8 MB, single-file) — referenced 5× in app
+  code (`main.py`, `config.py`, `swarm/__init__.py`, `swarm/runner.py`,
+  `swarm/fallback_monitor.py`), plus 1 migration. Diff-check schema
+  before bulk insert.
+
+The other 15 tables (`crypto_*`, `uw_*`, `trade_analyses`,
+`autoresearch_experiments`, `mid_phase_trade_decomposition`,
+`research_journal`, `feature_drift_alerts`) are V1-only — MME does NOT
+reference them in any migration or app file. The most important of
+these is **`trade_analyses.sql.gz`** (29 MB) — by row-count and content
+shape this is the closest match to the audit's "1,249 settled trades"
+smoke-test target, and is the V1 source the calibrator refit loop
+needs to cross `MIN_REFIT_SAMPLES=10` and replace `market_prior` rows.
+Phase ordering for `scripts/import_v1_history.py` should therefore be:
+
+1. **`trade_analyses`** (calibrator-unblock target). First step:
+   gunzip → grep the `CREATE TABLE trade_analyses` block to confirm the
+   schema actually contains the columns calibrators need (settled
+   outcome, model probability at decision time, league/sport, market
+   type, settled_at). Confirm row count is in the audit-reported order
+   of magnitude (~1,249). Map onto a new MME table — either
+   `trade_history` (the audit-named target) or `v1_archive.trade_analyses`
+   if V1's column shape doesn't cleanly project onto MME's intended
+   `trade_history` schema.
+2. **`weather_observations`** (already-referenced direct fit).
+3. **`line_snapshots` + `llm_predictions`** (after schema diff-check).
+4. *(optional Phase 4)* crypto_* and uw_* tables under new schema
+   `v1_archive` so they don't pollute MME's namespace.
+
+The DDL for each new table comes from the dump itself. **Important
+tooling note:** these are PLAIN-format `pg_dump` outputs (gzipped SQL),
+not custom or directory format, so `pg_restore` does NOT apply — use
+`zgrep -A 9999 'CREATE TABLE <name>' <dump>.sql.gz` (or stream-parse in
+Python) to lift the `CREATE TABLE` + index statements into a new
+Alembic migration `00NN_v1_history_tables.py`, then run an ETL that
+either pipes the gunzipped dump through `psql` directly, or parses the
+`COPY ... FROM stdin;` blocks and re-emits them via
+`asyncpg.copy_records_to_table` against the new tables.
+
+## Bucket inventory — `axiom-predict-artifacts/`
+
+Full recursive walk performed 2026-04-29 — 189 objects across three
+top-level prefixes. Every file is classified below by what (if
+anything) consumes it in the current Replit codebase. Re-walk any time
+with `app.storage.list_path("", limit=500)` recursively.
+
+### `cutover/` (1 file) — V1→Replit cutover middleware
+
+| File | Size | Purpose | Used by MME? |
+|---|---|---|---|
+| `cutover/mac_studio_proxy.py` | 2.5 KB | FastAPI middleware that, when env var `MAC_STUDIO_BACKEND_URL` is set, forwards every `/api/*` and `/health` request to the original Mac Studio backend. Lets MME stand in as the frontend while the heavy V1 inference still runs on the Mac. | **NO** — not imported anywhere. Useful as the canonical fallback path if we ever want to run MME's UI against V1's compute during a side-by-side comparison. Drop it into `app/middlewares/` and register on `app.add_middleware(MacStudioProxyMiddleware)` to enable. |
+
+### `exports/` (7 files, 230 MB) — v155 model bundle ✅ VERIFIED
+
+| File | Size | Used by MME? |
+|---|---|---|
+| `exports/models_manifest.json` | 51 KB | YES — `models_loader.py::_fetch_manifest`. Lists 237 predictors with sha256 + version. |
+| `exports/models_part_a{a,b,c}` | 116 MB | YES — reassembled by `download_split_artifact` into `models.tar.gz`, then `_safe_extract_tar` lays it out under the cache dir (default `~/.cache/axiom-models/models/`, with `saved/` underneath). |
+| `exports/source_part_a{a,b,c}` | 116 MB | YES — same pattern, extracted under the cache dir's `source/` tree and added to `sys.path` so the runtime can import V1's helper modules. Used by health endpoint to report bundle provenance. |
+
+Already verified end-to-end by `scripts/verify_v155_artifacts.py` (PASS).
+
+### `replit-port/archives/pg_dumps/` (33 files, ~2.0 GB) — V1 pg_dumps
+
+All are `pg_dump` v16.10 plain-format gzipped output. Files >40 MB are
+split with sibling `*.manifest.json` ({ size, chunks, sha256,
+reassemble }) — same scheme as `exports/`. Reassemble via
+`storage.download_split_artifact` or `cat *.partXXX > out.gz`.
+
+| Table dump | Size | MME schema | App refs | Action |
+|---|---|---|---|---|
+| `weather_observations.sql.gz` | 970 KB | YES (lazy `ensure_table`) | 6 | **PHASE 1.** Highest-value direct fit. Feeds GRU training. |
+| `line_snapshots.sql.gz` (2 parts) | 86 MB | YES (`0001` + `0029` + `0030`) | 4 | **PHASE 1** after schema diff (V1 likely predates `outcome` column). |
+| `llm_predictions.sql.gz` | 12.8 MB | YES (1 migration) | 5 | **PHASE 1** after schema diff. |
+| `trade_analyses.sql.gz` | 29 MB | NO | 0 | **PHASE 2.** Likely the audit's "1,249 settled trades" smoke-test target. Import under `v1_archive` schema. |
+| `autoresearch_experiments.sql.gz` (14 parts) | 638 MB | NO | 0 | Phase 3 / archival. Hypothesis log — useful for backtest-of-backtests. |
+| `crypto_predictions.sql.gz` | 2.2 MB | NO | 0 | Phase 3 — V1 ran a crypto vertical MME doesn't. Keep for ML training corpus. |
+| `crypto_features.sql.gz` | 31 MB | NO | 0 | Phase 3 — same. |
+| `crypto_prices.sql.gz` | 49 MB | NO | 0 | Phase 3 — same. |
+| `crypto_training_data.sql.gz` | 26 MB | NO | 0 | Phase 3 — same. |
+| `crypto_lob_snapshots.sql.gz` | 2.5 MB | NO | 0 | Phase 3 — order-book L2. |
+| `crypto_orderbook_snapshots.sql.gz` | 10 MB | NO | 0 | Phase 3 — order-book L1. |
+| `crypto_binary_decisions.sql.gz` | 29 MB | NO | 0 | Phase 3 — V1 binary-classifier outputs. |
+| `mid_phase_trade_decomposition.sql.gz` | 1 MB | NO | 0 | Phase 3 — research notebook output. |
+| `feature_drift_alerts.sql.gz` | 2.7 MB | NO | 0 | Phase 3 — drift-monitor history. |
+| `research_journal.sql.gz` | 8 MB | NO | 0 | Phase 3 — researcher's notes table. |
+| `uw_market_snapshots.sql.gz` (9 parts) | 412 MB | NO | 0 | Phase 3 — Unusual Whales options snapshots. |
+| `uw_dark_pool.sql.gz` | 24 MB | NO | 0 | Phase 3 — UW dark-pool prints. |
+| `uw_flow_alerts.sql.gz` | 32 MB | NO | 0 | Phase 3 — UW flow alerts. |
+
+### `replit-port/archives/` (5 tar.gz archives) — V1 raw payloads
+
+| File | Size | What's inside (inferred from name) | Action |
+|---|---|---|---|
+| `attached_assets.tar.gz` | 26 MB | V1's `attached_assets/` dir — uploads, screenshots, ad-hoc CSVs the V1 chat session received. | **Inspect first**: extract to `/tmp/v1_attached/` and grep for any CSV/JSON we might want surfaced. Most likely junk-drawer; expand only on demand. |
+| `live.tar.gz` | 5 MB | V1's runtime-cache `live/` snapshots (recent odds / lines / weather payloads). | Reference only; staler than what MME polls today. **Skip.** |
+| `odds.tar.gz` | 33 MB | V1's full `odds/` cache directory — historical Odds API JSON snapshots. | Useful as a free backfill source if MME's `line_snapshots` is sparse for any sport-window. **Phase 2.** |
+| `sportsradar_cache.tar.gz` | 9 MB | Cached Sportradar API responses from V1. | **Useful as a free backfill source.** MME does have an active Sportradar code path (`app/sports/{ratings,leagues,nfl_context,soccer_context,nfl_stadiums,tournament_backtest}.py`, `app/margin_regressor.py`, `app/sportradar_leaderboards_retention.py`, plus `http_retry.py` quota tracking). Extract this tarball and we can hydrate Sportradar-derived features for any window without burning a single live API call. **Phase 2.** |
+| `uw_raw_responses_00.tar.gz` (single) + `uw_raw_responses_0{1..4}.tar.gz` (split, 3-part each) | ~675 MB combined | Raw Unusual Whales API responses — pre-parse, before the `uw_*` pg_dumps. | **Skip unless** Phase 3 crypto/options work spins up. The pg_dumps already give the parsed form. |
+
+### `replit-port/catboost_info/` (40 files) — V1 CatBoost training metadata
+
+| Path | Purpose | Action |
+|---|---|---|
+| `catboost_training.json` (22 KB), `learn_error.tsv`, `test_error.tsv`, `time_left.tsv` | Final-run training-curve telemetry from V1's CatBoost margin-regressor training. | **Reference only** — useful if we ever need to compare convergence behavior of a re-trained MME margin model against V1's. **Do not consume at runtime.** |
+| `learn/events.out.tfevents`, `test/events.out.tfevents` | TensorBoard event files for the same training run. | **Reference only.** |
+| `tmp/cat_feature_index.*.tmp` (33 files, all 4–264 B) | Half-empty CatBoost scratch-temp files left over from an aborted training session. **Junk.** | **Safe to ignore / delete from bucket.** |
+
+### `replit-port/config/` (61 files) — V1 reference configs
+
+**None of these filenames are referenced by name in MME app code** —
+MME's config system is `app/config.py` + Pydantic settings + env vars
+(per `replit-port/config/README.md`'s `AXIOM_*` table). They're
+**reference material**: if MME ever needs to add a knob V1 already
+tuned, the V1 calibrated value lives here.
+
+| File | Purpose | When you'd consume it |
+|---|---|---|
+| `risk_limits.json`, `risk_config.json` | Per-vertical max_open_positions, kelly_fraction, daily_loss_limit. | When tuning `app/risk/*.py` thresholds. |
+| `governance_rules.json` | Sport-go-live rules (min_samples=200, brier_max=0.22, auc_min=0.65, ece_max=0.05). | When implementing `app/governance/` — these are the V1 thresholds. |
+| `optimized_hyperparams.json`, `hpo_result_{NBA,MLB,NHL}.json` | HPO-tuned XGBoost/CatBoost hyperparameters per league. | When re-training models, use as warm-start defaults. |
+| `production_features.json` (187 KB), `feature_contract.json` (65 KB), `feature_mapping.json`, `feature_parity_audit.json` | Master feature schema + canonicalization aliases (e.g. `home_rest_days → home_days_rest`). | When debugging feature-name drift between training and serving. |
+| `sport_features/{CFB,MLB,NBA,NCAAB,NFL,NHL}.json` (6 files) | Per-sport feature whitelist. | When adding a new feature, check what V1 used. |
+| `weather_model_config.json`, `weather_training_config.json`, `weather_sigma_sweep_report.json` | Weather GRU config + sigma-sweep results. | **Directly relevant** to the weather GRU baseline-fallback in `app/weather/predictor.py` — read these before re-training. |
+| `mlb_parks.json`, `venues.json` | Stadium/park metadata. | When implementing park-factor adjustments. |
+| `bankroll_config.json`, `bet_toggles.json`, `metric_ladders.json`, `category_kelly_adjustments.json` | Bet-sizing / category metadata. | Bankroll engine reference. |
+| `adverse_selection_params.json`, `fill_model_params.json`, `lifecycle_clv_params.json` | Microstructure / fill-model knobs. | Microstructure engine reference. |
+| `sport_status_overrides.json`, `crypto_binary_config.json`, `crypto_binary_training_config.json`, `midgame_config.json`, `ml_training_config.json`, `online_learning_config.json`, `orchestrator_config.json`, `realtime.json`, `realtime_config.yaml`, `engine_state.json`, `retrain_scheduler_state.json`, `unified_improvement_config.json`, `auto_trading_config.json`, `autoresearch_config.json` | Misc V1 subsystem configs. | Reference material — open the matching one when implementing the corresponding subsystem in MME. |
+| `production.py` (12 KB), `settings.py` (6.8 KB), `validate_config.py` (4.6 KB) | V1's Python config-loading code. | Reference for porting any missing config logic to `app/config.py`. |
+| `features/{city_coords,feature_config,rivalries,shap_interactions,sport_configs}.yaml` | Misc feature-engineering YAMLs. | Reference when porting feature code. |
+| `data/pipeline_config.yaml`, `evaluation/eval_config.yaml`, `model-upgrade/model_config.yaml` | V1 service configs. | Reference when implementing matching MME subsystem. |
+| `__init__.py`, `__pycache__/*` (5 files), `.gitkeep` | Python package boilerplate / build artifacts. | **Skip.** |
+
+### `replit-port/data/` (17 files) — V1 runtime state snapshots
+
+JSON snapshots of V1's last-known runtime state at the time the bucket
+was populated. Useful as **smoke-test fixtures** ("what shape did V1
+actually emit?"), not as live data.
+
+| File | Purpose | Use as |
+|---|---|---|
+| `axiom-llm-status.json`, `axiom-llm-eval.json`, `axiom-llm-eval-history.json`, `axiom-llm-picks.json`, `axiom-llm-promotion.json`, `axiom-llm-drift.json`, `axiom-llm-dataset-meta.json`, `axiom-llm-train.log` | V1's LLM-pick subsystem's last-emitted state (last picks, last eval, training log). Picks were Mistral-7B-generated for upcoming NBA games. | **Test fixture** for the `app/llm_predictions` schema — confirm field names match before importing the `llm_predictions` pg_dump. |
+| `advanced-metrics-latest.json`, `agent-health.json`, `all-sports-odds.json`, `aggregator-run-2026-02-20-1104.txt` | V1 dashboard / health snapshots. | **Reference** — what the V1 dashboard last looked like. |
+| `autoresearch_checkpoint.json` | V1 autoresearch loop's last checkpoint. | **Reference** for porting autoresearch. |
+| `backtesting-history.jsonl`, `backtesting-report.json`, `backtesting-report-v2.json` | V1 backtest output. | **High-value reference** — these are the V1 backtest numbers we'll need to reproduce / beat after the V1 import lands. Stash a copy under `docs/v1_backtest_baseline/`. |
+| `axiom.db` (0 B) | Empty SQLite stub. | **Skip.** |
 
 ## Operations Runbook — quick links
 
