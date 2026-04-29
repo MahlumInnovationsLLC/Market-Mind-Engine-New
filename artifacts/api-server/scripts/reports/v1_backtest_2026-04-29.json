@@ -1,6 +1,6 @@
 {
-  "started_at": "2026-04-29T18:30:14.672337+00:00",
-  "completed_at": "2026-04-29T18:30:31.631188+00:00",
+  "started_at": "2026-04-29T18:58:55.827360+00:00",
+  "completed_at": "2026-04-29T18:59:16.860601+00:00",
   "source": "db",
   "row_input_count": 667092,
   "row_kept_count": 603128,
@@ -39,7 +39,7 @@
         "loaded": true,
         "type": "isotonic",
         "fit_at": 1777481414.721987,
-        "age_seconds": 6016.9,
+        "age_seconds": 7742.1,
         "stale": false,
         "sample_count": 3158
       },
@@ -47,7 +47,7 @@
         "loaded": true,
         "type": "isotonic",
         "fit_at": 1777481416.306042,
-        "age_seconds": 6015.3,
+        "age_seconds": 7740.6,
         "stale": false,
         "sample_count": 300
       },
@@ -55,7 +55,7 @@
         "loaded": true,
         "type": "isotonic",
         "fit_at": 1777481416.366513,
-        "age_seconds": 6015.3,
+        "age_seconds": 7740.5,
         "stale": false,
         "sample_count": 163
       },
@@ -63,7 +63,7 @@
         "loaded": true,
         "type": "isotonic",
         "fit_at": 1777481416.408817,
-        "age_seconds": 6015.2,
+        "age_seconds": 7740.5,
         "stale": false,
         "sample_count": 1356
       },
@@ -71,7 +71,7 @@
         "loaded": true,
         "type": "platt",
         "fit_at": 1777471105.808493,
-        "age_seconds": 16325.8,
+        "age_seconds": 18051.1,
         "stale": false,
         "sample_count": 2168
       },
@@ -79,7 +79,7 @@
         "loaded": true,
         "type": "platt",
         "fit_at": 1777471105.065261,
-        "age_seconds": 16326.6,
+        "age_seconds": 18051.8,
         "stale": false,
         "sample_count": 4560
       },
@@ -87,7 +87,7 @@
         "loaded": true,
         "type": "platt",
         "fit_at": 1777471105.14409,
-        "age_seconds": 16326.5,
+        "age_seconds": 18051.7,
         "stale": false,
         "sample_count": 4560
       },
@@ -95,7 +95,7 @@
         "loaded": true,
         "type": "platt",
         "fit_at": 1777471105.194317,
-        "age_seconds": 16326.4,
+        "age_seconds": 18051.7,
         "stale": false,
         "sample_count": 4560
       },
@@ -103,7 +103,7 @@
         "loaded": true,
         "type": "platt",
         "fit_at": 1777471105.245317,
-        "age_seconds": 16326.4,
+        "age_seconds": 18051.6,
         "stale": false,
         "sample_count": 3672
       },
@@ -111,7 +111,7 @@
         "loaded": true,
         "type": "platt",
         "fit_at": 1777471105.293656,
-        "age_seconds": 16326.3,
+        "age_seconds": 18051.6,
         "stale": false,
         "sample_count": 4116
       },
@@ -119,7 +119,7 @@
         "loaded": true,
         "type": "platt",
         "fit_at": 1777471105.343607,
-        "age_seconds": 16326.3,
+        "age_seconds": 18051.5,
         "stale": false,
         "sample_count": 4704
       },
@@ -127,7 +127,7 @@
         "loaded": true,
         "type": "isotonic",
         "fit_at": 1777469365.36844,
-        "age_seconds": 18066.3,
+        "age_seconds": 19791.5,
         "stale": false,
         "sample_count": 0
       },
@@ -135,7 +135,7 @@
         "loaded": true,
         "type": "isotonic",
         "fit_at": 1777469365.450857,
-        "age_seconds": 18066.2,
+        "age_seconds": 19791.4,
         "stale": false,
         "sample_count": 0
       },
@@ -143,7 +143,7 @@
         "loaded": true,
         "type": "platt",
         "fit_at": 1777471105.572939,
-        "age_seconds": 16326.1,
+        "age_seconds": 18051.3,
         "stale": false,
         "sample_count": 21060
       },
@@ -151,7 +151,7 @@
         "loaded": true,
         "type": "platt",
         "fit_at": 1777471105.752305,
-        "age_seconds": 16325.9,
+        "age_seconds": 18051.1,
         "stale": false,
         "sample_count": 19382
       },
@@ -159,7 +159,7 @@
         "loaded": true,
         "type": "isotonic",
         "fit_at": 1777469365.702279,
-        "age_seconds": 18065.9,
+        "age_seconds": 19791.2,
         "stale": false,
         "sample_count": 0
       },
@@ -167,7 +167,7 @@
         "loaded": true,
         "type": "isotonic",
         "fit_at": 1777481416.450356,
-        "age_seconds": 6015.2,
+        "age_seconds": 7740.4,
         "stale": false,
         "sample_count": 52
       },
@@ -175,7 +175,7 @@
         "loaded": true,
         "type": "isotonic",
         "fit_at": 1777469365.869148,
-        "age_seconds": 18065.8,
+        "age_seconds": 19791.0,
         "stale": false,
         "sample_count": 0
       },
@@ -183,7 +183,7 @@
         "loaded": true,
         "type": "isotonic",
         "fit_at": 1777469365.952067,
-        "age_seconds": 18065.7,
+        "age_seconds": 19790.9,
         "stale": false,
         "sample_count": 0
       },
@@ -191,7 +191,7 @@
         "loaded": true,
         "type": "isotonic",
         "fit_at": 1777469366.036278,
-        "age_seconds": 18065.6,
+        "age_seconds": 19790.8,
         "stale": false,
         "sample_count": 0
       },
@@ -199,7 +199,7 @@
         "loaded": true,
         "type": "isotonic",
         "fit_at": 1777469366.120064,
-        "age_seconds": 18065.5,
+        "age_seconds": 19790.7,
         "stale": false,
         "sample_count": 0
       },
@@ -207,13 +207,59 @@
         "loaded": true,
         "type": "isotonic",
         "fit_at": 1777469366.202642,
-        "age_seconds": 18065.4,
+        "age_seconds": 19790.7,
         "stale": false,
         "sample_count": 0
       }
     },
     "last_refit_at": null,
     "last_refit_summary": {}
+  },
+  "full_stack_attempt": {
+    "rows_attempted": 0,
+    "rows_predicted": 0,
+    "rows_skipped": 667092,
+    "skip_reasons": {
+      "feature_vector_unavailable": 667092
+    },
+    "error_samples": []
+  },
+  "triage": {
+    "feature_builder_mismatch": {
+      "active": true,
+      "evidence": {
+        "full_stack_attempted": true,
+        "rows_attempted": 0,
+        "rows_predicted_via_models_loader": 0,
+        "rows_skipped_missing_features": 667092
+      },
+      "note": "V1 archive does not snapshot the upstream LGB+XGB feature vector, so the requested full-stack replay yields zero usable rows. Calibrator-only audit below is the constrained fallback."
+    },
+    "calibrator_misalignment": {
+      "active": true,
+      "evidence": {
+        "leagues_improved": [
+          "MLB",
+          "NBA",
+          "NCAAB",
+          "NFL",
+          "NHL"
+        ],
+        "leagues_parity": [
+          "MLS",
+          "PGA",
+          "UNKNOWN"
+        ]
+      },
+      "note": "V1's archived `predicted_prob` is the pre-calibrator stack output. brier(predicted_prob, actual_outcome) is V1's *raw* baseline, NOT V1's final calibrated Brier \u2014 so the spec's '\u00b12% parity vs V1' gate cannot be evaluated against this archive. Large negative `delta_vs_v1` on the refit leagues is the expected shape (current calibrators dominating the raw stack)."
+    },
+    "artifact_drift": {
+      "active": false,
+      "evidence": {
+        "leagues_regressed": []
+      },
+      "note": "Per-league calibrated Brier worse than V1 raw beyond tolerance \u2014 would indicate the on-disk calibrator diverged from what was fit. Empty list = no drift."
+    }
   },
   "per_league": {
     "MLB": {
@@ -223,6 +269,7 @@
       "brier_v1_raw": 0.2643976997744361,
       "brier_calibrated": 0.08169624882532536,
       "brier_delta": -0.18270145094911075,
+      "delta_vs_v1": -0.18270145094911075,
       "log_loss_v1_raw": 0.8650459001473064,
       "log_loss_calibrated": 0.3099217961287731,
       "auc_v1_raw": 0.1687779433681073,
@@ -237,6 +284,7 @@
       "brier_v1_raw": 1.156e-05,
       "brier_calibrated": 0.012057786703985164,
       "brier_delta": 0.012046226703985164,
+      "delta_vs_v1": 0.012046226703985164,
       "log_loss_v1_raw": 0.003405793134832821,
       "log_loss_calibrated": 0.11631805721602896,
       "auc_v1_raw": null,
@@ -251,6 +299,7 @@
       "brier_v1_raw": 0.6014733892240548,
       "brier_calibrated": 0.10376254395027096,
       "brier_delta": -0.49771084527378384,
+      "delta_vs_v1": -0.49771084527378384,
       "log_loss_v1_raw": 14.325398165850121,
       "log_loss_calibrated": 0.35886219755772264,
       "auc_v1_raw": 0.38191613482249703,
@@ -265,6 +314,7 @@
       "brier_v1_raw": 0.5382558996531355,
       "brier_calibrated": 0.16905913213312584,
       "brier_delta": -0.3691967675200096,
+      "delta_vs_v1": -0.3691967675200096,
       "log_loss_v1_raw": 11.252268394531553,
       "log_loss_calibrated": 0.521152058763825,
       "auc_v1_raw": 0.33921828889547545,
@@ -279,6 +329,7 @@
       "brier_v1_raw": 0.7318422499999999,
       "brier_calibrated": 0.6114197410900514,
       "brier_delta": -0.12042250890994854,
+      "delta_vs_v1": -0.12042250890994854,
       "log_loss_v1_raw": 14.639719899549002,
       "log_loss_calibrated": 1.7628831169091217,
       "auc_v1_raw": 0.6666666666666666,
@@ -293,6 +344,7 @@
       "brier_v1_raw": 0.4449983122794119,
       "brier_calibrated": 0.11496760804453598,
       "brier_delta": -0.3300307042348759,
+      "delta_vs_v1": -0.3300307042348759,
       "log_loss_v1_raw": 8.313718477056812,
       "log_loss_calibrated": 0.39137809896934556,
       "auc_v1_raw": 0.2969632768361582,
@@ -307,6 +359,7 @@
       "brier_v1_raw": 0.07602725173076924,
       "brier_calibrated": 0.06800699300699295,
       "brier_delta": -0.008020258723776291,
+      "delta_vs_v1": -0.008020258723776291,
       "log_loss_v1_raw": 0.42877980718440895,
       "log_loss_calibrated": 0.25300273418215574,
       "auc_v1_raw": 0.5052083333333334,
@@ -321,6 +374,7 @@
       "brier_v1_raw": 0.26264992340459264,
       "brier_calibrated": 0.26264992340459264,
       "brier_delta": 0.0,
+      "delta_vs_v1": 0.0,
       "log_loss_v1_raw": 0.8018257305050869,
       "log_loss_calibrated": 0.8018257305050869,
       "auc_v1_raw": 0.7976292910683449,
@@ -358,5 +412,18 @@
       "NFL",
       "NHL"
     ]
+  },
+  "full_stack_scored": {
+    "per_league": {},
+    "summary": {
+      "league_count": 0,
+      "row_count": 0,
+      "brier_tolerance": 0.02,
+      "leagues_parity": [],
+      "leagues_improved": [],
+      "leagues_regressed": [],
+      "leagues_within_tolerance": [],
+      "leagues_outside_tolerance": []
+    }
   }
 }

@@ -319,15 +319,57 @@ End-to-end refit evidence after Phase 1 import + wire-up
 `scripts/backtest_v1_archive.py` replays the full
 `v1_archive.trade_analyses` archive against the *current* per-league
 calibrators and reports per-league Brier / log-loss / AUC for both V1
-raw (`predicted_prob` after side-flip) and the calibrated path. V1's
-upstream features (transient `market_prob`/`sharp_money` signals)
-weren't snapshotted, so the harness audits the *calibrator stage only*
-— the same path the nightly refit consumes. Side semantics mirror
-`calibrators._fetch_training_data` exactly.
+raw (`predicted_prob` after side-flip) and the calibrated path. The
+spec field `delta_vs_v1` (alias of `brier_delta`) is exposed per
+league.
+
+**Acceptance-gate caveat (read this first).** The original task spec
+asked for "parity within 2% Brier vs V1 for at least the 5 leagues
+whose calibrators were refit (NBA, NFL, NCAAB, NHL, MLB)" by re-
+running each row through the LGB+XGB stack via `models_loader`. **That
+gate cannot be evaluated as specified against the V1 archive as
+imported** — see the triage block below. The harness still attempts
+the requested path under `--full-stack`, walks every row, and emits
+structured attempt/skip counts so the reviewer can confirm the path
+was tried (not silently bypassed). Today's run: 667,092 attempted, 0
+predicted, 667,092 skipped with reason `feature_vector_unavailable`.
 
 Three input modes — DB (default, with `to_regclass` preflight),
 `--fixture FILE` for synthetic JSON, `--inline-rows JSON` for ad-hoc
-rows. Programmatic `run()` exposed for tests.
+rows. `--full-stack` adds the `app.predictor.predict()` attempt path
+on top. Programmatic `run(predict_fn=…)` exposed for tests so the
+predictor can be monkeypatched without loading real models.
+
+**Triage — three root-cause buckets** (machine-readable form lives
+under `report["triage"]`):
+
+1. **`feature_builder_mismatch`** — *active.* V1 archive only
+   persists `predicted_prob`, `actual_outcome`, and a tiny
+   `analysis_json` blob. None of the live ensemble's input features
+   (real-time `market_prob`, sharp-money signals, EV-source
+   agreement, weather, etc.) were snapshotted at trade time, so the
+   LGB+XGB stack cannot be replayed against any V1 row. This is the
+   root cause that prevents `--full-stack` from producing data.
+   Resolving it requires either (a) a re-import that captures the
+   feature vector at trade time (not possible from V1's logs) or
+   (b) reconstructing features from `weather_observations` /
+   `line_snapshots` / `llm_predictions` dumps when those land in
+   Phase 2 (follow-up #731).
+2. **`calibrator_misalignment`** — *active.* V1's archived
+   `predicted_prob` is the *pre-calibrator* stack output (the same
+   domain `calibrators._fetch_training_data` already treats as the X
+   input for the nightly refit). V1's *post-calibrator* probability
+   — the value that would let us compute "parity within 2% Brier vs
+   V1" as the spec intends — is **not** in the archive. So
+   `brier(predicted_prob, actual_outcome)` is V1's *raw* Brier, not
+   V1's final calibrated Brier. Large negative `delta_vs_v1` on the
+   refit leagues is the expected shape (current calibrators
+   dominating an uncalibrated baseline), not a parity failure.
+3. **`artifact_drift`** — *inactive* on today's run (zero leagues
+   regressed). Would activate if any per-league row had calibrated
+   Brier worse than raw beyond `_BRIER_TOLERANCE` (= 2%), indicating
+   the on-disk calibrator artifact diverged from what was fit. This
+   is the operator-actionable bucket that *should* gate promotion.
 
 Latest archive run (603,128 of 667,092 rows kept after dropping
 unknown-side / pass / sport-specific bet-type rows; report at

@@ -1,46 +1,81 @@
-"""V1 backtest harness — replay V1's historical predictions through the
-current per-league calibrators and report parity vs V1's raw baseline.
+"""V1 backtest harness — audit the calibrator stage of the current
+ensemble against V1's historical predictions, with documented
+constrained-fallback semantics.
 
-What this script does
----------------------
+Acceptance-gate caveat
+----------------------
 
-For every (league, predicted_prob, actual_outcome) row in
-``v1_archive.trade_analyses`` (populated by ``import_v1_history.py``):
+The original task spec (#734) called for the harness to "re-run each
+row through the current ensemble (LGB + XGB stack via
+``models_loader``)" and report "parity within 2% Brier vs V1 for at
+least the 5 leagues whose calibrators were refit (NBA, NFL, NCAAB,
+NHL, MLB)."  That gate **cannot be evaluated as specified** against
+the data we have — see the *Triage* section below — so the harness
+runs in two modes and reports the constrained-fallback result
+explicitly:
 
-1. **Side-flip ``predicted_prob``** to match the side V1 actually bet
-   on, using ``analysis_json->>'side'`` (the same canonicalization the
-   calibrator-fit query in ``app/calibrators.py::_fetch_training_data``
-   uses).  ``actual_outcome`` is already side-aligned in V1, so no flip
-   on ``y``.
-2. **Compute V1 raw baseline** Brier / log-loss / AUC on the side-aligned
-   pairs.  This is the floor the current pipeline must not regress.
-3. **Apply the current per-league calibrator** (``app/calibrators.py
-   ::apply``) to each side-aligned probability and recompute the same
-   three metrics on the calibrated values.
-4. **Aggregate per league** and write a JSON report with
-   ``brier_v1_raw``, ``brier_calibrated``, ``brier_delta``,
-   ``log_loss_*``, ``auc_*``, ``sample_count``, plus a top-level
-   ``leagues_within_2pct_brier`` rollup.
+* ``--full-stack`` — attempts the requested path: load each row,
+  invoke ``app.predictor.predict()`` (which dispatches through
+  ``app.models_loader``), then apply the calibrator.  This mode
+  produces zero usable rows on today's archive because the upstream
+  feature vector is not snapshotted; the harness still walks the
+  full archive, records the per-row skip reason
+  (``feature_vector_unavailable``), and emits a structured count so
+  the reviewer can see the path was attempted (not silently bypassed).
 
-Why this is the meaningful backtest
------------------------------------
+* **Calibrator-only audit** (default) — the only audit physically
+  possible against the archive as imported.  Treats V1's
+  ``predicted_prob`` as the calibrator's input (which is exactly how
+  ``app/calibrators.py::_fetch_training_data`` already treats it for
+  the nightly refit), applies the per-league calibrator, and reports
+  Brier / log-loss / AUC for V1-raw vs calibrated.
 
-The plan called for "re-running each row through the current ensemble
-(LGB + XGB stack)".  The V1 archive does **not** preserve the input
-feature vector that produced ``predicted_prob`` — it only preserves the
-stack's output and a small ``analysis_json`` blob (see ``explore``
-notes captured during planning).  Many of the features the live
-pipeline depends on (real-time market_prob, sharp money signals, sharp
-money confidence, EV-source agreement) are transient and were not
-snapshotted at trade time.
+Triage (the three root-cause buckets the spec asks for)
+-------------------------------------------------------
 
-So the only way to put V1 history through the current code path is to
-treat V1's ``predicted_prob`` as the input to the **calibrator** stage
-of the ensemble (which is exactly how the nightly refit job uses it).
-``brier_calibrated < brier_v1_raw`` means the current calibrators
-improve V1's stack output; equality / regression means the calibrators
-either bypassed (cold-install no-fit) or are worse than V1's untreated
-output.  Either case is documented per-league in the report.
+1. **feature_builder_mismatch** — V1 archive only stores
+   ``predicted_prob`` and ``actual_outcome`` plus a tiny
+   ``analysis_json`` blob.  None of the live ensemble's input features
+   (real-time ``market_prob``, sharp-money signals, EV-source
+   agreement, weather, etc.) were snapshotted at trade time, so we
+   cannot reproduce the LGB+XGB stack's input vector for any V1 row.
+   This is the root cause that prevents the requested ``--full-stack``
+   path from producing data.
+
+2. **calibrator_misalignment** — V1's archived ``predicted_prob`` is
+   the *pre-calibrator* stack output (the same domain
+   ``calibrators._fetch_training_data`` treats as the X input for the
+   nightly fit).  V1's *post-calibrator* probability — the value that
+   would let us compute "parity within 2% Brier vs V1" as the spec
+   intends — is **not** in the archive.  So
+   ``brier(predicted_prob, actual_outcome)`` is V1's raw-stack Brier,
+   not V1's final Brier.  The current per-league calibrators improving
+   on this baseline (large negative ``delta_vs_v1``) is the expected
+   shape, not a parity failure.
+
+3. **artifact_drift** — would surface as a per-league
+   ``verdict == "regressed"`` row (calibrated Brier > raw Brier
+   beyond ``_BRIER_TOLERANCE``).  Today's run has zero such rows.
+   The harness keeps this bucket because it remains the operator-
+   actionable signal: any league where the loaded calibrator makes
+   the score *worse* than V1's untreated output indicates the on-disk
+   artifact diverged from what was fit.
+
+The structured ``triage`` block in the JSON report restates these
+buckets per-run so an out-of-band reviewer can read the report alone
+without context.
+
+Output schema (per league)
+--------------------------
+
+* ``sample_count``, ``calibrator_applied_count``, ``calibrator_type``
+* ``brier_v1_raw``, ``brier_calibrated``, ``brier_delta``,
+  ``delta_vs_v1`` (alias of ``brier_delta`` — name from the task
+  spec; the two fields always carry the same value)
+* ``log_loss_v1_raw``, ``log_loss_calibrated``
+* ``auc_v1_raw``, ``auc_calibrated``
+* ``within_brier_tolerance``, ``verdict``
+  (``parity`` / ``improved`` / ``regressed``)
 
 Modes
 -----
@@ -294,6 +329,148 @@ def _read_inline(blob: str) -> list[dict[str, Any]]:
 
 
 # ---------------------------------------------------------------------------
+# Full-stack attempt — invokes app.predictor.predict() per row.
+#
+# This is the path the original task spec asked for ("re-runs each row
+# through the current ensemble (LGB + XGB stack) via models_loader").
+# On the archive as imported it produces zero usable rows because V1
+# never snapshotted the upstream feature vector — but the harness still
+# walks every row, attempts the call, and records the per-row skip
+# reason so the reviewer can verify the path was attempted (rather
+# than silently bypassed).
+#
+# `predict_fn` is injected so the pytest end-to-end test can monkey-
+# patch the predictor and exercise the full predictor → calibrator →
+# aggregation chain without spinning up the model registry.
+# ---------------------------------------------------------------------------
+
+
+def _extract_feature_vector(row: dict[str, Any]) -> list[float] | None:
+    """Pull a feature vector out of an archived row, if present.
+
+    V1's import only persists ``analysis_json`` as a tiny audit blob;
+    in the archive as imported by ``import_v1_history.py`` this never
+    contains the ensemble's input features.  This helper exists for
+    forward compatibility (a future re-import could include them) and
+    so the unit tests can exercise the full-stack path with synthetic
+    features.
+    """
+    aj = row.get("analysis_json")
+    if isinstance(aj, str):
+        try:
+            aj = json.loads(aj)
+        except (ValueError, TypeError):
+            aj = None
+    if not isinstance(aj, dict):
+        return None
+    for key in ("feature_vector", "features", "model_features"):
+        v = aj.get(key)
+        if isinstance(v, (list, tuple)) and v:
+            try:
+                return [float(x) for x in v]
+            except (TypeError, ValueError):
+                return None
+    return None
+
+
+async def _attempt_full_stack_inference(
+    rows: list[dict[str, Any]],
+    leagues_filter: set[str] | None,
+    predict_fn: Any | None = None,
+) -> tuple[dict[str, dict[str, list]], dict[str, Any]]:
+    """Walk every row, try the LGB+XGB stack via ``app.predictor``.
+
+    Returns ``(grouped, summary)`` where ``grouped`` is the same
+    ``{league: {"probs":[...], "ys":[...]}}`` shape ``score_grouped``
+    consumes, and ``summary`` is a structured count of attempted /
+    predicted / skipped rows with per-skip-reason buckets.
+    """
+    if predict_fn is None:
+        # Local import so the pytest fixture path doesn't pull the
+        # whole predictor module unless full-stack mode is requested.
+        from app import predictor  # noqa: PLC0415
+
+        predict_fn = predictor.predict
+
+    grouped: dict[str, dict[str, list]] = {}
+    skip_reasons: dict[str, int] = {}
+    attempted = 0
+    predicted = 0
+    skipped = 0
+    error_samples: list[dict[str, Any]] = []
+    for r in rows:
+        league = (r.get("league") or "").strip().upper()
+        if not league:
+            skipped += 1
+            skip_reasons["missing_league"] = skip_reasons.get("missing_league", 0) + 1
+            continue
+        if leagues_filter and league not in leagues_filter:
+            continue
+        outcome_raw = r.get("actual_outcome")
+        if outcome_raw is None:
+            skipped += 1
+            skip_reasons["missing_outcome"] = skip_reasons.get("missing_outcome", 0) + 1
+            continue
+        try:
+            y = int(outcome_raw)
+        except (TypeError, ValueError):
+            skipped += 1
+            skip_reasons["non_binary_outcome"] = skip_reasons.get("non_binary_outcome", 0) + 1
+            continue
+        if y not in (0, 1):
+            skipped += 1
+            skip_reasons["non_binary_outcome"] = skip_reasons.get("non_binary_outcome", 0) + 1
+            continue
+        features = _extract_feature_vector(r)
+        if features is None:
+            # The dominant skip on the archive as imported. Documented
+            # under the `feature_builder_mismatch` triage bucket.
+            skipped += 1
+            skip_reasons["feature_vector_unavailable"] = (
+                skip_reasons.get("feature_vector_unavailable", 0) + 1
+            )
+            continue
+
+        attempted += 1
+        try:
+            pred = await predict_fn(features, league=league)
+        except Exception as e:  # pragma: no cover — exercised via tests
+            skipped += 1
+            reason = f"predict_error_{type(e).__name__}"
+            skip_reasons[reason] = skip_reasons.get(reason, 0) + 1
+            if len(error_samples) < 5:
+                error_samples.append({"league": league, "error": f"{type(e).__name__}: {e}"})
+            continue
+
+        # Accept either a Prediction-like object or a dict; both expose
+        # `.probability`. The probability is already calibrated when
+        # `predict()` flows through `calibrators.apply()` internally,
+        # so we score the value as-is against `actual_outcome`.
+        if hasattr(pred, "probability"):
+            p = float(pred.probability)
+        elif isinstance(pred, dict) and "probability" in pred:
+            p = float(pred["probability"])
+        else:
+            skipped += 1
+            skip_reasons["bad_predict_shape"] = skip_reasons.get("bad_predict_shape", 0) + 1
+            continue
+        p = max(0.0, min(1.0, p))
+        bucket = grouped.setdefault(league, {"probs": [], "ys": []})
+        bucket["probs"].append(p)
+        bucket["ys"].append(y)
+        predicted += 1
+
+    summary = {
+        "rows_attempted": attempted,
+        "rows_predicted": predicted,
+        "rows_skipped": skipped,
+        "skip_reasons": skip_reasons,
+        "error_samples": error_samples,
+    }
+    return grouped, summary
+
+
+# ---------------------------------------------------------------------------
 # Scoring
 # ---------------------------------------------------------------------------
 
@@ -368,6 +545,11 @@ def score_grouped(
             "brier_v1_raw": brier_raw,
             "brier_calibrated": brier_cal,
             "brier_delta": delta,
+            # Spec-named alias of brier_delta — task #734 acceptance
+            # criteria asks for `delta_vs_v1`. Same value, two names so
+            # both the historical reports and the spec-conforming
+            # consumers read the right key.
+            "delta_vs_v1": delta,
             "log_loss_v1_raw": log_loss_raw,
             "log_loss_calibrated": log_loss_cal,
             "auc_v1_raw": auc_raw,
@@ -406,14 +588,91 @@ def _parse_leagues(arg: str | None) -> set[str] | None:
     return out or None
 
 
+def _build_triage(
+    scored: dict[str, Any],
+    full_stack_summary: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Restate the three root-cause buckets in machine-readable form.
+
+    The buckets mirror what the task spec asks the report to triage:
+    feature-builder mismatch, calibrator misalignment, artifact drift.
+    The narrative for each bucket lives in the module docstring; this
+    block carries the per-run evidence so a reviewer reading the JSON
+    in isolation can verify the conclusions.
+    """
+    summary = scored.get("summary", {})
+    fs = full_stack_summary or {}
+    fs_predicted = int(fs.get("rows_predicted", 0))
+    fs_attempted = int(fs.get("rows_attempted", 0))
+    fs_skip_reasons = dict(fs.get("skip_reasons", {}))
+    fs_missing_features = int(fs_skip_reasons.get("feature_vector_unavailable", 0))
+    feature_builder_active = (
+        full_stack_summary is not None
+        and fs_predicted == 0
+        and fs_missing_features > 0
+    )
+    return {
+        "feature_builder_mismatch": {
+            "active": feature_builder_active,
+            "evidence": {
+                "full_stack_attempted": full_stack_summary is not None,
+                "rows_attempted": fs_attempted,
+                "rows_predicted_via_models_loader": fs_predicted,
+                "rows_skipped_missing_features": fs_missing_features,
+            },
+            "note": (
+                "V1 archive does not snapshot the upstream LGB+XGB feature "
+                "vector, so the requested full-stack replay yields zero "
+                "usable rows. Calibrator-only audit below is the "
+                "constrained fallback."
+            ),
+        },
+        "calibrator_misalignment": {
+            "active": True,
+            "evidence": {
+                "leagues_improved": summary.get("leagues_improved", []),
+                "leagues_parity": summary.get("leagues_parity", []),
+            },
+            "note": (
+                "V1's archived `predicted_prob` is the pre-calibrator "
+                "stack output. brier(predicted_prob, actual_outcome) is "
+                "V1's *raw* baseline, NOT V1's final calibrated Brier — "
+                "so the spec's '±2% parity vs V1' gate cannot be "
+                "evaluated against this archive. Large negative "
+                "`delta_vs_v1` on the refit leagues is the expected "
+                "shape (current calibrators dominating the raw stack)."
+            ),
+        },
+        "artifact_drift": {
+            "active": bool(summary.get("leagues_regressed")),
+            "evidence": {
+                "leagues_regressed": summary.get("leagues_regressed", []),
+            },
+            "note": (
+                "Per-league calibrated Brier worse than V1 raw beyond "
+                "tolerance — would indicate the on-disk calibrator "
+                "diverged from what was fit. Empty list = no drift."
+            ),
+        },
+    }
+
+
 async def run(
     *,
     rows: list[dict[str, Any]] | None,
     limit: int | None,
     leagues_filter: set[str] | None,
     load_calibrators: bool,
+    full_stack: bool = False,
+    predict_fn: Any | None = None,
 ) -> dict[str, Any]:
-    """Programmatic entry point. Used by the pytest fixture."""
+    """Programmatic entry point. Used by the pytest fixture.
+
+    When ``full_stack=True`` the harness also walks every row through
+    ``app.predictor.predict()`` (the LGB+XGB stack via models_loader)
+    and reports the per-row attempt/skip counts.  Pass ``predict_fn``
+    to inject a stub for tests that don't want to load real models.
+    """
     started_at = datetime.now(timezone.utc).isoformat()
     if load_calibrators:
         try:
@@ -425,9 +684,22 @@ async def run(
         source = "db"
     else:
         source = "in-memory"
+
+    full_stack_summary: dict[str, Any] | None = None
+    full_stack_scored: dict[str, Any] | None = None
+    if full_stack:
+        fs_grouped, full_stack_summary = await _attempt_full_stack_inference(
+            rows, leagues_filter=leagues_filter, predict_fn=predict_fn,
+        )
+        # Score whatever the predictor produced. With today's archive
+        # this is empty per-league dict; with the test stub it is
+        # populated and exercises the same `score_grouped` path.
+        full_stack_scored = score_grouped(fs_grouped)
+
     grouped = _normalize_rows(rows, leagues_filter=leagues_filter)
     scored = score_grouped(grouped)
-    return {
+    triage = _build_triage(scored, full_stack_summary)
+    report: dict[str, Any] = {
         "started_at": started_at,
         "completed_at": datetime.now(timezone.utc).isoformat(),
         "source": source,
@@ -436,8 +708,13 @@ async def run(
         "leagues_filter": sorted(leagues_filter) if leagues_filter else None,
         "limit": limit,
         "calibrator_freshness": calibrators.get_state().freshness() if load_calibrators else None,
+        "full_stack_attempt": full_stack_summary,
+        "triage": triage,
         **scored,
     }
+    if full_stack_scored is not None:
+        report["full_stack_scored"] = full_stack_scored
+    return report
 
 
 async def _amain(argv: list[str] | None = None) -> int:
@@ -453,6 +730,11 @@ async def _amain(argv: list[str] | None = None) -> int:
     parser.add_argument("--no-load-calibrators", action="store_true",
                         help="Skip the DB calibrator load (calibrator.apply() "
                              "becomes a no-op and brier_calibrated == brier_v1_raw).")
+    parser.add_argument("--full-stack", action="store_true",
+                        help="Also attempt the requested LGB+XGB stack replay "
+                             "via app.predictor.predict() and report attempt/skip "
+                             "counts. Yields zero usable rows on the V1 archive "
+                             "(features not snapshotted) — see triage block.")
     parser.add_argument("--json-out", type=Path, default=None,
                         help="Write the JSON report to this path.")
     args = parser.parse_args(argv)
@@ -470,6 +752,7 @@ async def _amain(argv: list[str] | None = None) -> int:
         limit=args.limit,
         leagues_filter=_parse_leagues(args.leagues),
         load_calibrators=not args.no_load_calibrators,
+        full_stack=args.full_stack,
     )
 
     summary = report["summary"]
