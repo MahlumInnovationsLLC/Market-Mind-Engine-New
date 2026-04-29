@@ -1,0 +1,435 @@
+{
+  "started_at": "2026-04-29T19:46:27.349631+00:00",
+  "completed_at": "2026-04-29T19:46:31.828128+00:00",
+  "source": "db",
+  "row_input_count": 4000,
+  "row_kept_count": 542,
+  "batch_count": 1,
+  "batch_size": 50000,
+  "leagues_filter": [
+    "MLB",
+    "NBA",
+    "NCAAB",
+    "NHL"
+  ],
+  "limit": 4000,
+  "calibrator_freshness": {
+    "supported": [
+      "NBA",
+      "NHL",
+      "MLB",
+      "NCAAB",
+      "NFL",
+      "EPL",
+      "LALIGA",
+      "SERIEA",
+      "BUNDES",
+      "LIGUE1",
+      "MLS",
+      "UCL",
+      "UFC",
+      "ATP",
+      "WTA",
+      "F1",
+      "PGA",
+      "COMMODITIES",
+      "TECH_AI",
+      "ELECTIONS",
+      "EVENTS_ECON",
+      "ENTERTAINMENT"
+    ],
+    "loaded_count": 22,
+    "missing_count": 0,
+    "stale_count": 0,
+    "per_league": {
+      "NBA": {
+        "loaded": true,
+        "type": "isotonic",
+        "fit_at": 1777481414.721987,
+        "age_seconds": 10577.1,
+        "stale": false,
+        "sample_count": 3158
+      },
+      "NHL": {
+        "loaded": true,
+        "type": "isotonic",
+        "fit_at": 1777481416.306042,
+        "age_seconds": 10575.5,
+        "stale": false,
+        "sample_count": 300
+      },
+      "MLB": {
+        "loaded": true,
+        "type": "isotonic",
+        "fit_at": 1777481416.366513,
+        "age_seconds": 10575.5,
+        "stale": false,
+        "sample_count": 163
+      },
+      "NCAAB": {
+        "loaded": true,
+        "type": "isotonic",
+        "fit_at": 1777481416.408817,
+        "age_seconds": 10575.4,
+        "stale": false,
+        "sample_count": 1356
+      },
+      "NFL": {
+        "loaded": true,
+        "type": "platt",
+        "fit_at": 1777471105.808493,
+        "age_seconds": 20886.0,
+        "stale": false,
+        "sample_count": 2168
+      },
+      "EPL": {
+        "loaded": true,
+        "type": "platt",
+        "fit_at": 1777471105.065261,
+        "age_seconds": 20886.8,
+        "stale": false,
+        "sample_count": 4560
+      },
+      "LALIGA": {
+        "loaded": true,
+        "type": "platt",
+        "fit_at": 1777471105.14409,
+        "age_seconds": 20886.7,
+        "stale": false,
+        "sample_count": 4560
+      },
+      "SERIEA": {
+        "loaded": true,
+        "type": "platt",
+        "fit_at": 1777471105.194317,
+        "age_seconds": 20886.6,
+        "stale": false,
+        "sample_count": 4560
+      },
+      "BUNDES": {
+        "loaded": true,
+        "type": "platt",
+        "fit_at": 1777471105.245317,
+        "age_seconds": 20886.6,
+        "stale": false,
+        "sample_count": 3672
+      },
+      "LIGUE1": {
+        "loaded": true,
+        "type": "platt",
+        "fit_at": 1777471105.293656,
+        "age_seconds": 20886.5,
+        "stale": false,
+        "sample_count": 4116
+      },
+      "MLS": {
+        "loaded": true,
+        "type": "platt",
+        "fit_at": 1777471105.343607,
+        "age_seconds": 20886.5,
+        "stale": false,
+        "sample_count": 4704
+      },
+      "UCL": {
+        "loaded": true,
+        "type": "isotonic",
+        "fit_at": 1777469365.36844,
+        "age_seconds": 22626.5,
+        "stale": false,
+        "sample_count": 0
+      },
+      "UFC": {
+        "loaded": true,
+        "type": "isotonic",
+        "fit_at": 1777469365.450857,
+        "age_seconds": 22626.4,
+        "stale": false,
+        "sample_count": 0
+      },
+      "ATP": {
+        "loaded": true,
+        "type": "platt",
+        "fit_at": 1777471105.572939,
+        "age_seconds": 20886.3,
+        "stale": false,
+        "sample_count": 21060
+      },
+      "WTA": {
+        "loaded": true,
+        "type": "platt",
+        "fit_at": 1777471105.752305,
+        "age_seconds": 20886.1,
+        "stale": false,
+        "sample_count": 19382
+      },
+      "F1": {
+        "loaded": true,
+        "type": "isotonic",
+        "fit_at": 1777469365.702279,
+        "age_seconds": 22626.1,
+        "stale": false,
+        "sample_count": 0
+      },
+      "PGA": {
+        "loaded": true,
+        "type": "isotonic",
+        "fit_at": 1777481416.450356,
+        "age_seconds": 10575.4,
+        "stale": false,
+        "sample_count": 52
+      },
+      "COMMODITIES": {
+        "loaded": true,
+        "type": "isotonic",
+        "fit_at": 1777469365.869148,
+        "age_seconds": 22626.0,
+        "stale": false,
+        "sample_count": 0
+      },
+      "TECH_AI": {
+        "loaded": true,
+        "type": "isotonic",
+        "fit_at": 1777469365.952067,
+        "age_seconds": 22625.9,
+        "stale": false,
+        "sample_count": 0
+      },
+      "ELECTIONS": {
+        "loaded": true,
+        "type": "isotonic",
+        "fit_at": 1777469366.036278,
+        "age_seconds": 22625.8,
+        "stale": false,
+        "sample_count": 0
+      },
+      "EVENTS_ECON": {
+        "loaded": true,
+        "type": "isotonic",
+        "fit_at": 1777469366.120064,
+        "age_seconds": 22625.7,
+        "stale": false,
+        "sample_count": 0
+      },
+      "ENTERTAINMENT": {
+        "loaded": true,
+        "type": "isotonic",
+        "fit_at": 1777469366.202642,
+        "age_seconds": 22625.6,
+        "stale": false,
+        "sample_count": 0
+      }
+    },
+    "last_refit_at": null,
+    "last_refit_summary": {}
+  },
+  "full_stack_attempt": {
+    "rows_attempted": 4000,
+    "rows_predicted": 4000,
+    "rows_skipped": 0,
+    "skip_reasons": {},
+    "error_samples": [],
+    "feature_source": {
+      "archived": 0,
+      "surrogate": 4000
+    },
+    "surrogate_features_enabled": true
+  },
+  "triage": {
+    "feature_builder_mismatch": {
+      "active": false,
+      "evidence": {
+        "full_stack_attempted": true,
+        "rows_attempted": 4000,
+        "rows_predicted_via_models_loader": 4000,
+        "rows_skipped_missing_features": 0
+      },
+      "note": "V1 archive does not snapshot the upstream LGB+XGB feature vector, so the requested full-stack replay yields zero usable rows. Calibrator-only audit below is the constrained fallback."
+    },
+    "calibrator_misalignment": {
+      "active": true,
+      "evidence": {
+        "leagues_improved": [
+          "MLB",
+          "NBA",
+          "NCAAB",
+          "NHL"
+        ],
+        "leagues_parity": []
+      },
+      "note": "V1's archived `predicted_prob` is the pre-calibrator stack output. brier(predicted_prob, actual_outcome) is V1's *raw* baseline, NOT V1's final calibrated Brier \u2014 so the spec's '\u00b12% parity vs V1' gate cannot be evaluated against this archive. Large negative `delta_vs_v1` on the refit leagues is the expected shape (current calibrators dominating the raw stack)."
+    },
+    "artifact_drift": {
+      "active": false,
+      "evidence": {
+        "leagues_regressed": []
+      },
+      "note": "Per-league calibrated Brier worse than V1 raw beyond tolerance \u2014 would indicate the on-disk calibrator diverged from what was fit. Empty list = no drift."
+    }
+  },
+  "per_league": {
+    "MLB": {
+      "sample_count": 31,
+      "calibrator_applied_count": 31,
+      "calibrator_type": "isotonic",
+      "brier_v1_raw": 0.1881448667741935,
+      "brier_calibrated": 0.019854438803078578,
+      "brier_delta": -0.16829042797111493,
+      "delta_vs_v1": -0.16829042797111493,
+      "log_loss_v1_raw": 0.5110221544586858,
+      "log_loss_calibrated": 0.15014661158926626,
+      "auc_v1_raw": null,
+      "auc_calibrated": null,
+      "within_brier_tolerance": false,
+      "verdict": "improved"
+    },
+    "NBA": {
+      "sample_count": 264,
+      "calibrator_applied_count": 264,
+      "calibrator_type": "isotonic",
+      "brier_v1_raw": 0.3364505738257579,
+      "brier_calibrated": 0.24707920741860262,
+      "brier_delta": -0.08937136640715526,
+      "delta_vs_v1": -0.08937136640715526,
+      "log_loss_v1_raw": 2.101673849328213,
+      "log_loss_calibrated": 0.731731897890096,
+      "auc_v1_raw": 0.47706849497437265,
+      "auc_calibrated": 0.48369167276842173,
+      "within_brier_tolerance": false,
+      "verdict": "improved"
+    },
+    "NCAAB": {
+      "sample_count": 202,
+      "calibrator_applied_count": 202,
+      "calibrator_type": "isotonic",
+      "brier_v1_raw": 0.4219698837623766,
+      "brier_calibrated": 0.2912143125903157,
+      "brier_delta": -0.13075557117206088,
+      "delta_vs_v1": -0.13075557117206088,
+      "log_loss_v1_raw": 2.6195914899088932,
+      "log_loss_calibrated": 0.7983434765944546,
+      "auc_v1_raw": 0.5755622188905547,
+      "auc_calibrated": 0.5117941029485258,
+      "within_brier_tolerance": false,
+      "verdict": "improved"
+    },
+    "NHL": {
+      "sample_count": 45,
+      "calibrator_applied_count": 45,
+      "calibrator_type": "isotonic",
+      "brier_v1_raw": 0.2947994813333332,
+      "brier_calibrated": 0.147558274621769,
+      "brier_delta": -0.14724120671156424,
+      "delta_vs_v1": -0.14724120671156424,
+      "log_loss_v1_raw": 1.6938080005990057,
+      "log_loss_calibrated": 0.4734248989052823,
+      "auc_v1_raw": 0.22804054054054054,
+      "auc_calibrated": 0.4780405405405405,
+      "within_brier_tolerance": false,
+      "verdict": "improved"
+    }
+  },
+  "summary": {
+    "league_count": 4,
+    "row_count": 542,
+    "brier_tolerance": 0.02,
+    "leagues_parity": [],
+    "leagues_improved": [
+      "MLB",
+      "NBA",
+      "NCAAB",
+      "NHL"
+    ],
+    "leagues_regressed": [],
+    "leagues_within_tolerance": [],
+    "leagues_outside_tolerance": [
+      "MLB",
+      "NBA",
+      "NCAAB",
+      "NHL"
+    ]
+  },
+  "full_stack_scored": {
+    "per_league": {
+      "MLB": {
+        "sample_count": 31,
+        "calibrator_applied_count": 0,
+        "calibrator_type": null,
+        "brier_v1_raw": 0.03443118019867995,
+        "brier_calibrated": 0.03443118019867995,
+        "brier_delta": 0.0,
+        "delta_vs_v1": 0.0,
+        "log_loss_v1_raw": 0.19998268250673248,
+        "log_loss_calibrated": 0.19998268250673248,
+        "auc_v1_raw": null,
+        "auc_calibrated": null,
+        "within_brier_tolerance": true,
+        "verdict": "parity"
+      },
+      "NBA": {
+        "sample_count": 1982,
+        "calibrator_applied_count": 0,
+        "calibrator_type": null,
+        "brier_v1_raw": 0.07437823743878971,
+        "brier_calibrated": 0.07437823743878971,
+        "brier_delta": 0.0,
+        "delta_vs_v1": 0.0,
+        "log_loss_v1_raw": 0.28995538719786307,
+        "log_loss_calibrated": 0.28995538719786307,
+        "auc_v1_raw": 0.5,
+        "auc_calibrated": 0.5,
+        "within_brier_tolerance": true,
+        "verdict": "parity"
+      },
+      "NCAAB": {
+        "sample_count": 1545,
+        "calibrator_applied_count": 0,
+        "calibrator_type": null,
+        "brier_v1_raw": 0.1580577073543504,
+        "brier_calibrated": 0.1580577073543504,
+        "brier_delta": 0.0,
+        "delta_vs_v1": 0.0,
+        "log_loss_v1_raw": 0.4961882821698568,
+        "log_loss_calibrated": 0.4961882821698568,
+        "auc_v1_raw": 0.5,
+        "auc_calibrated": 0.5,
+        "within_brier_tolerance": true,
+        "verdict": "parity"
+      },
+      "NHL": {
+        "sample_count": 442,
+        "calibrator_applied_count": 0,
+        "calibrator_type": null,
+        "brier_v1_raw": 0.10458725261364518,
+        "brier_calibrated": 0.10458725261364518,
+        "brier_delta": 0.0,
+        "delta_vs_v1": 0.0,
+        "log_loss_v1_raw": 0.36553517841948524,
+        "log_loss_calibrated": 0.36553517841948524,
+        "auc_v1_raw": 0.5,
+        "auc_calibrated": 0.5,
+        "within_brier_tolerance": true,
+        "verdict": "parity"
+      }
+    },
+    "summary": {
+      "league_count": 4,
+      "row_count": 4000,
+      "brier_tolerance": 0.02,
+      "leagues_parity": [
+        "MLB",
+        "NBA",
+        "NCAAB",
+        "NHL"
+      ],
+      "leagues_improved": [],
+      "leagues_regressed": [],
+      "leagues_within_tolerance": [
+        "MLB",
+        "NBA",
+        "NCAAB",
+        "NHL"
+      ],
+      "leagues_outside_tolerance": []
+    }
+  }
+}

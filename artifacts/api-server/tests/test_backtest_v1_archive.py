@@ -794,3 +794,248 @@ def test_run_streams_in_batches_and_reports_batch_count() -> None:
             big["per_league"][lg]["sample_count"]
             == small["per_league"][lg]["sample_count"]
         )
+
+
+def test_archive_to_candidate_maps_known_fields_and_returns_kelly_override() -> None:
+    """Locks down the canonical V1-archive -> live-candidate mapping
+    table documented in scripts/backtest_v1_archive.py.  Every field
+    the surrogate path depends on is covered here so a future rename
+    on either side trips a clear test failure rather than silently
+    poisoning the surrogate output."""
+    row = {
+        "league": "nba",
+        "predicted_prob": 0.62,
+        "market_type": "moneyline",
+        "analysis_json": {
+            "side": "yes",
+            "market_implied_prob": 0.55,
+            "signal_strength": 0.18,
+            "edge_at_entry": 0.07,
+            "kelly_used": 0.025,
+        },
+    }
+    result = bt._archive_to_candidate(row)
+    assert result is not None
+    candidate, kelly_override = result
+    assert candidate["consensus_probability"] == pytest.approx(0.62)
+    assert candidate["market_prob"] == pytest.approx(0.55)
+    assert candidate["signal_strength"] == pytest.approx(0.18)
+    assert candidate["edge"] == pytest.approx(0.07)
+    assert candidate["side"] == "yes"
+    assert candidate["league"] == "NBA"  # upper-cased
+    assert candidate["market_type"] == "moneyline"
+    assert kelly_override == pytest.approx(0.025)
+    # None-valued mappings are dropped so build_vector falls back to
+    # the documented per-spec defaults rather than coercing None.
+    sparse = bt._archive_to_candidate(
+        {"league": "NBA", "predicted_prob": 0.5,
+         "analysis_json": {"side": "no"}}
+    )
+    assert sparse is not None
+    candidate, kelly_override = sparse
+    assert "market_prob" not in candidate
+    assert "signal_strength" not in candidate
+    assert kelly_override is None
+
+
+def test_archive_to_candidate_rejects_rows_missing_minimum_inputs() -> None:
+    """Surrogate is opt-in but still requires predicted_prob + side —
+    otherwise build_vector would emit a degenerate vector and produce
+    misleading metrics."""
+    # Missing predicted_prob -> reject.
+    assert bt._archive_to_candidate(
+        {"league": "NBA", "analysis_json": {"side": "yes"}}
+    ) is None
+    # Missing side -> reject (build_vector needs it for side_val).
+    assert bt._archive_to_candidate(
+        {"league": "NBA", "predicted_prob": 0.5, "analysis_json": {}}
+    ) is None
+    # Non-numeric predicted_prob -> reject.
+    assert bt._archive_to_candidate(
+        {"league": "NBA", "predicted_prob": "n/a",
+         "analysis_json": {"side": "yes"}}
+    ) is None
+
+
+def test_full_stack_attempt_uses_surrogate_when_features_missing() -> None:
+    """When --surrogate-features is on, rows without an archived
+    feature_vector are routed through a feature builder (injected
+    here as a stub) and the predictor IS invoked.  Counts split into
+    archived vs surrogate; the report's surrogate-rate is auditable."""
+
+    class _StubPrediction:
+        def __init__(self, p: float) -> None:
+            self.probability = p
+
+    seen_calls: list[tuple[list[float], str]] = []
+
+    async def _stub_predict(features, *, league):
+        seen_calls.append((list(features), league))
+        m = sum(features) / max(1, len(features))
+        return _StubPrediction(max(0.0, min(1.0, m)))
+
+    # Stub feature builder: just returns predicted_prob expanded.
+    def _stub_builder(row):
+        pp = row.get("predicted_prob") or 0.5
+        return [float(pp)] * 32
+
+    rows = [
+        # No feature_vector → goes through surrogate builder.
+        {"league": "NBA", "actual_outcome": 1, "predicted_prob": 0.7,
+         "analysis_json": {"side": "yes"}},
+        {"league": "NBA", "actual_outcome": 0, "predicted_prob": 0.3,
+         "analysis_json": {"side": "yes"}},
+        # Has direct feature_vector → archived path (still preferred).
+        {"league": "NFL", "actual_outcome": 1,
+         "analysis_json": {"feature_vector": [0.6, 0.6, 0.6]}},
+    ]
+    grouped, summary = asyncio.run(
+        bt._attempt_full_stack_inference(
+            rows, leagues_filter=None, predict_fn=_stub_predict,
+            surrogate_features=True, feature_builder=_stub_builder,
+        )
+    )
+    # All 3 rows produce predictions (vs the 1 they would without surrogate).
+    assert len(seen_calls) == 3
+    assert summary["rows_predicted"] == 3
+    assert summary["rows_skipped"] == 0
+    assert summary["feature_source"]["archived"] == 1
+    assert summary["feature_source"]["surrogate"] == 2
+    # Aggregation still works.
+    scored = bt.score_grouped(grouped)
+    assert scored["per_league"]["NBA"]["sample_count"] == 2
+    assert scored["per_league"]["NFL"]["sample_count"] == 1
+
+
+def test_run_full_stack_surrogate_flag_propagates_to_summary() -> None:
+    """End-to-end: run() with surrogate_features=True surfaces the
+    surrogate counts on the final report so reviewers can audit how
+    many rows landed via the degraded baseline."""
+
+    class _StubPrediction:
+        def __init__(self, p: float) -> None:
+            self.probability = p
+
+    async def _stub_predict(features, *, league):
+        return _StubPrediction(0.55)
+
+    def _stub_builder(row):
+        return [0.55] * 32
+
+    rows = [
+        {"league": "NBA", "actual_outcome": 1, "predicted_prob": 0.6,
+         "analysis_json": {"side": "yes"}},
+        {"league": "NBA", "actual_outcome": 0, "predicted_prob": 0.4,
+         "analysis_json": {"side": "yes"}},
+    ]
+    report = asyncio.run(
+        bt.run(rows=rows, limit=None, leagues_filter=None,
+               load_calibrators=False, full_stack=True,
+               predict_fn=_stub_predict, surrogate_features=True,
+               feature_builder=_stub_builder)
+    )
+    fs = report["full_stack_attempt"]
+    assert fs["surrogate_features_enabled"] is True
+    assert fs["rows_predicted"] == 2
+    assert fs["feature_source"]["surrogate"] == 2
+    assert fs["feature_source"]["archived"] == 0
+    # full_stack_scored block populated.
+    assert "full_stack_scored" in report
+    assert report["full_stack_scored"]["per_league"]["NBA"]["sample_count"] == 2
+
+
+# ---------------------------------------------------------------------------
+# v4 follow-ups: side-alias canonicalization + real build_vector integration
+# (architect review pass — locks down the highest-risk mapping path so a
+# regression in _resolve_side or in the V1 archive's side vocabulary trips
+# a clear test rather than silently poisoning surrogate predictions).
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("raw_side,expected", [
+    ("yes", "yes"), ("YES", "yes"), ("buy", "yes"),
+    ("live_yes", "yes"), ("buy yes", "yes"), ("Buy Yes", "yes"),
+    ("no", "no"), ("NO", "no"), ("sell", "no"),
+    ("live_no", "no"), ("buy no", "no"), ("  Sell  ", "no"),
+])
+def test_archive_to_candidate_canonicalizes_side_aliases(
+    raw_side: str, expected: str,
+) -> None:
+    """V1 archive uses several side aliases (sell, live_no, buy no, ...).
+    The live builder's _resolve_side() only treats literal 'NO' as no-side
+    and would mis-classify the rest as YES, poisoning side_val.  The
+    surrogate path canonicalizes to 'yes'/'no' before handing the dict
+    to build_vector — this test pins that contract per alias."""
+    result = bt._archive_to_candidate(
+        {"league": "NBA", "predicted_prob": 0.55,
+         "analysis_json": {"side": raw_side}}
+    )
+    assert result is not None, f"alias {raw_side!r} should canonicalize"
+    candidate, _kelly = result
+    assert candidate["side"] == expected
+
+
+def test_archive_to_candidate_rejects_unknown_side_alias() -> None:
+    """Unknown side strings are rejected outright rather than silently
+    bucketed as YES — guessing here would corrupt side-flip math."""
+    assert bt._archive_to_candidate(
+        {"league": "NBA", "predicted_prob": 0.55,
+         "analysis_json": {"side": "maybe"}}
+    ) is None
+    assert bt._archive_to_candidate(
+        {"league": "NBA", "predicted_prob": 0.55,
+         "analysis_json": {"side": ""}}
+    ) is None
+
+
+def test_build_surrogate_vector_against_real_build_vector() -> None:
+    """Direct integration: feed an archive row through the real
+    app.features.build_vector via _build_surrogate_vector and assert it
+    returns the expected 32-slot vector with the side alias correctly
+    routed (sell -> no -> side_val=0.0)."""
+    from app.features.builders import _SPECS
+
+    row = {"league": "NBA", "predicted_prob": 0.62,
+           "market_type": "moneyline",
+           "analysis_json": {"side": "sell", "market_implied_prob": 0.55,
+                              "edge_at_entry": 0.07,
+                              "signal_strength": 0.18}}
+    vec = bt._build_surrogate_vector(row)
+    assert vec is not None
+    assert len(vec) == len(_SPECS)
+    side_idx = next(i for i, s in enumerate(_SPECS) if s.name == "side_val")
+    assert vec[side_idx] == 0.0  # 'sell' -> 'no' -> side_val=0.0
+
+    # And a YES alias routes to 1.0.
+    row_yes = {"league": "NBA", "predicted_prob": 0.62,
+               "analysis_json": {"side": "buy yes"}}
+    vec_yes = bt._build_surrogate_vector(row_yes)
+    assert vec_yes is not None
+    assert vec_yes[side_idx] == 1.0
+
+
+def test_build_triage_note_reflects_surrogate_mode_when_active() -> None:
+    """When --surrogate-features predicts rows, the triage note must stop
+    claiming 'zero usable rows' and explicitly mention the degraded
+    surrogate baseline + #731 follow-up — otherwise reviewers reading
+    the JSON in isolation get a contradictory picture."""
+    scored = {"summary": {"leagues_improved": [], "leagues_parity": [],
+                          "leagues_regressed": []}}
+    fs = {"rows_attempted": 100, "rows_predicted": 100,
+          "skip_reasons": {}, "feature_source": {"surrogate": 100,
+                                                   "archived": 0},
+          "surrogate_features_enabled": True}
+    triage = bt._build_triage(scored, fs)
+    note = triage["feature_builder_mismatch"]["note"]
+    assert "surrogate" in note.lower()
+    assert "degraded" in note.lower()
+    assert "zero usable rows" not in note.lower()
+    ev = triage["feature_builder_mismatch"]["evidence"]
+    assert ev["surrogate_features_enabled"] is True
+    assert ev["rows_predicted_via_surrogate"] == 100
+
+    # And without the flag, the original "zero usable rows" framing stands.
+    fs_off = {"rows_attempted": 100, "rows_predicted": 0,
+              "skip_reasons": {"feature_vector_unavailable": 100}}
+    triage_off = bt._build_triage(scored, fs_off)
+    assert "zero" in triage_off["feature_builder_mismatch"]["note"].lower()
+    assert triage_off["feature_builder_mismatch"]["active"] is True

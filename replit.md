@@ -425,6 +425,79 @@ test_run_full_stack_bypasses_double_calibration_end_to_end` spies on
 `calibrators.apply`, asserts it is never called from the full-stack
 scoring branch, and verifies `full_stack_scored.<lg>.brier_delta == 0`.
 
+**Surrogate-features path — opt-in real LGB+XGB inference on archive
+rows (Apr 29, 2026 v4 update).** The archive as imported never
+snapshotted V1's upstream feature vector, so `--full-stack` alone
+produced `rows_predicted=0`. Pass `--surrogate-features` (gated on
+`--full-stack`) to instead build the live 32-slot vector via
+`app.features.build_vector()` from the V1 `analysis_json` plus the
+top-level row fields, falling back to per-spec defaults for slots
+the archive doesn't carry (sharp_money_*, tz_arb_*, ev_source_*,
+tipster_divergence_pct, game_context). The canonical mapping is
+documented in `scripts/backtest_v1_archive.py::_archive_to_candidate`:
+
+| V1 archive source                  | live candidate key       |
+| ---------------------------------- | ------------------------ |
+| `row.predicted_prob`               | `consensus_probability`  |
+| `row.market_type`                  | `market_type`            |
+| `row.league` (upper-cased)         | `league`                 |
+| `analysis_json.market_implied_prob`| `market_prob`            |
+| `analysis_json.signal_strength`    | `signal_strength`        |
+| `analysis_json.edge_at_entry`      | `edge`                   |
+| `analysis_json.kelly_used`         | `kelly` (override)       |
+| `analysis_json.side`               | `side`                   |
+
+Approximately 10 of the live builder's 32 slots are populated from
+the V1 archive; the remaining ~22 fall through to the spec-declared
+defaults in `app/features/builders.py::_SPECS`. **This is a DEGRADED
+baseline, not V1 parity** — full reconstruction (joining
+`weather_observations`, `line_snapshots`, `llm_predictions` to
+recover sharp_money / tz_arb / ev_source signals at trade time) is
+tracked under follow-up task #731.
+
+`_amain()` calls `models_loader.ensure_artifacts()` automatically
+when `--full-stack` is set so the LGB+XGB ensemble is bootstrapped
+before the first surrogate row hits `predict()`. Bootstrap failures
+are non-fatal — the script logs and continues so the report still
+documents the failure mode rather than crashing.
+
+The full-stack `summary` block grows two new keys:
+- `surrogate_features_enabled` (bool) — operator-auditable on/off.
+- `feature_source: {archived: N, surrogate: M}` — per-row origin
+  counts so reviewers can verify exactly how many rows landed via
+  the degraded baseline vs the (currently empty) archived path.
+
+Validation run on 4000 archive rows filtered to NBA/NCAAB/NHL/MLB
+(see `scripts/reports/v1_backtest_surrogate_2026-04-29.json`):
+- `rows_predicted = 4000 / 4000 attempted` (was 0 before v4)
+- `feature_source.surrogate = 4000`
+- `triage.feature_builder_mismatch.active = False` (was True)
+- Per-league surrogate Brier vs V1's calibrated Brier:
+  - NBA   (n=1982): 0.0744 vs 0.2471 → -0.1727 IMPROVED
+  - NCAAB (n=1545): 0.1581 vs 0.2912 → -0.1332 IMPROVED
+  - NHL   (n=442):  0.1046 vs 0.1476 → -0.0430 IMPROVED
+  - MLB   (n=31):   0.0344 vs 0.0199 → +0.0146 small-sample regress
+
+Caveat: surrogate Brier is reduced-feature so the absolute numbers
+should NOT be cited as the live ensemble's quality bar — they show
+the chain runs, not that it matches V1. The V1-vs-live parity
+verdict still requires Phase 2 dump reconstruction (#731).
+
+Re-run any time with:
+
+    cd artifacts/api-server && \
+      /home/runner/workspace/.pythonlibs/bin/python3 \
+        -m scripts.backtest_v1_archive \
+        --full-stack --surrogate-features \
+        --leagues NBA,NCAAB,NHL,MLB --limit 4000 \
+        --json-out scripts/reports/v1_backtest_surrogate_<date>.json
+
+Regression coverage in `tests/test_backtest_v1_archive.py`:
+`_archive_to_candidate` mapping table (covers happy-path + sparse +
+reject-on-missing-minimums) plus surrogate dispatch through
+`_attempt_full_stack_inference` and `run()` with feature_source
+counts asserted on the report.
+
 Phase 2 dumps (`weather_observations`, `line_snapshots`,
 `llm_predictions`) plus broadening V1 side coverage to sport-specific
 bet labels are tracked under follow-up task #731.

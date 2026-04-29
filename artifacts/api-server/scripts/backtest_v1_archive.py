@@ -458,10 +458,139 @@ def _extract_feature_vector(row: dict[str, Any]) -> list[float] | None:
     return None
 
 
+# ---------------------------------------------------------------------------
+# Surrogate candidate builder — declared, documented, REDUCED-FEATURE
+# mapping from V1 archive rows into the live feature builder's input
+# dict shape.  Opt-in via ``--surrogate-features``.
+#
+# Stakeholder note: this is a DEGRADED baseline, not the spec's
+# requested "true V1 feature reconstruction".  V1 only snapshotted a
+# handful of the 32-slot live feature vector — the rest fall back to
+# the documented per-feature defaults declared in
+# ``app/features/builders.py::_SPECS``.  Use this path to verify the
+# end-to-end predict() chain runs against archive rows; it is NOT a
+# substitute for the Phase 2 dump reconstruction tracked under
+# follow-up #731 (joining ``line_snapshots`` /
+# ``weather_observations`` / ``llm_predictions`` to recover the
+# remaining live signals at trade time).
+#
+# Mapping table (V1 source -> live candidate key):
+#   row.predicted_prob          -> candidate.consensus_probability
+#   row.market_type             -> candidate.market_type
+#   row.league                  -> candidate.league
+#   analysis_json.market_implied_prob -> candidate.market_prob
+#   analysis_json.signal_strength     -> candidate.signal_strength
+#   analysis_json.edge_at_entry       -> candidate.edge
+#   analysis_json.kelly_used          -> candidate.kelly (override)
+#   analysis_json.side                -> candidate.side
+# Everything not listed (sharp_money_*, tz_arb_*, ev_source_*,
+# tipster_divergence_pct, game_context, etc.) is absent on the
+# archive and falls through to the spec's declared default.
+# ---------------------------------------------------------------------------
+
+
+_LIVE_FEATURE_COUNT = 32  # length of _SPECS in app/features/builders.py
+
+
+def _archive_to_candidate(
+    row: dict[str, Any],
+) -> tuple[dict[str, Any], float | None] | None:
+    """Build a live-shaped candidate dict + a ``kelly`` override from
+    one V1 archive row. Returns ``None`` if the row lacks the minimum
+    inputs (predicted_prob + side) the surrogate needs.
+    """
+    aj = row.get("analysis_json")
+    if isinstance(aj, str):
+        try:
+            aj = json.loads(aj)
+        except (ValueError, TypeError):
+            aj = None
+    if not isinstance(aj, dict):
+        aj = {}
+
+    pred_prob = row.get("predicted_prob")
+    if pred_prob is None:
+        pred_prob = aj.get("predicted_prob")
+    if pred_prob is None:
+        return None
+    try:
+        pred_prob = float(pred_prob)
+    except (TypeError, ValueError):
+        return None
+
+    raw_side = aj.get("side")
+    if raw_side is None:
+        return None  # side required for side_val + side-flip
+    # Canonicalize V1 archive side aliases (sell, live_no, buy no, etc.)
+    # into the literal "yes"/"no" the live builder's _resolve_side()
+    # expects.  Without this, _resolve_side treats "sell" as YES (it
+    # only checks `.upper() != "NO"`), poisoning side_val for a
+    # non-trivial subset of NO-family rows.  Reuses the same canonical
+    # sets the calibrator-only path uses (_YES_SIDES / _NO_SIDES).
+    s = str(raw_side).strip().lower()
+    if s in _NO_SIDES:
+        side = "no"
+    elif s in _YES_SIDES:
+        side = "yes"
+    else:
+        return None  # unknown side alias — refuse to guess
+
+    candidate: dict[str, Any] = {
+        # YES-aligned live consensus probability — the live builder
+        # treats this as the model's primary input slot.
+        "consensus_probability": pred_prob,
+        # market_implied_prob -> market_prob feature.
+        "market_prob": aj.get("market_implied_prob"),
+        # signal_strength carries straight through.
+        "signal_strength": aj.get("signal_strength"),
+        # edge — the live builder will derive (pred-market) if absent.
+        "edge": aj.get("edge_at_entry"),
+        # categorical / time / side fields (side already canonicalized).
+        "side": side,
+        "league": (row.get("league") or "").strip().upper() or None,
+        "market_type": row.get("market_type"),
+    }
+    # Drop None values so build_vector falls back to declared defaults
+    # rather than coercing None -> 0.0 silently.
+    candidate = {k: v for k, v in candidate.items() if v is not None}
+
+    # kelly_used in the archive is the *fraction actually staked* —
+    # passed as the build_vector ``kelly`` override so it lands in the
+    # `kelly` slot directly without being re-derived.
+    kelly_override: float | None = None
+    ku = aj.get("kelly_used")
+    if ku is not None:
+        try:
+            kelly_override = float(ku)
+        except (TypeError, ValueError):
+            kelly_override = None
+    return candidate, kelly_override
+
+
+def _build_surrogate_vector(row: dict[str, Any]) -> list[float] | None:
+    """Run the live ``app.features.build_vector`` on a candidate dict
+    constructed from the V1 archive row.  Returns the 32-slot live
+    feature vector, or ``None`` if the row can't be mapped.
+
+    Local import keeps the calibrator-only path (default) from
+    pulling the feature builder graph.
+    """
+    mapped = _archive_to_candidate(row)
+    if mapped is None:
+        return None
+    candidate, kelly_override = mapped
+    from app.features.vector import build_vector  # noqa: PLC0415
+
+    fv = build_vector(candidate, kelly=kelly_override)
+    return list(fv.values)
+
+
 async def _attempt_full_stack_inference(
     rows: list[dict[str, Any]],
     leagues_filter: set[str] | None,
     predict_fn: Any | None = None,
+    surrogate_features: bool = False,
+    feature_builder: Any | None = None,
 ) -> tuple[dict[str, dict[str, list]], dict[str, Any]]:
     """Walk every row, try the LGB+XGB stack via ``app.predictor``.
 
@@ -469,6 +598,14 @@ async def _attempt_full_stack_inference(
     ``{league: {"probs":[...], "ys":[...]}}`` shape ``score_grouped``
     consumes, and ``summary`` is a structured count of attempted /
     predicted / skipped rows with per-skip-reason buckets.
+
+    When ``surrogate_features=True`` and the row lacks a directly
+    snapshotted feature vector, the harness falls back to
+    :func:`_build_surrogate_vector` (mapping V1 archive fields into
+    the live feature builder's input dict).  The summary then breaks
+    out ``feature_source`` counts so the report makes the surrogate
+    rate explicit.  Pass ``feature_builder`` to inject a stub for
+    tests that don't want to import the live builder graph.
     """
     if predict_fn is None:
         # Local import so the pytest fixture path doesn't pull the
@@ -477,8 +614,12 @@ async def _attempt_full_stack_inference(
 
         predict_fn = predictor.predict
 
+    if surrogate_features and feature_builder is None:
+        feature_builder = _build_surrogate_vector
+
     grouped: dict[str, dict[str, list]] = {}
     skip_reasons: dict[str, int] = {}
+    feature_source_counts: dict[str, int] = {"archived": 0, "surrogate": 0}
     attempted = 0
     predicted = 0
     skipped = 0
@@ -507,6 +648,25 @@ async def _attempt_full_stack_inference(
             skip_reasons["non_binary_outcome"] = skip_reasons.get("non_binary_outcome", 0) + 1
             continue
         features = _extract_feature_vector(r)
+        feature_source = "archived" if features is not None else None
+        if features is None and feature_builder is not None:
+            # Surrogate fallback: build the live 32-slot vector from
+            # the archive's analysis_json + row fields, falling back
+            # to per-spec defaults for everything not snapshotted.
+            try:
+                features = feature_builder(r)
+            except Exception as e:  # pragma: no cover — defensive
+                skipped += 1
+                reason = f"surrogate_build_error_{type(e).__name__}"
+                skip_reasons[reason] = skip_reasons.get(reason, 0) + 1
+                if len(error_samples) < 5:
+                    error_samples.append({
+                        "league": league, "outcome": y, "error": str(e),
+                        "type": type(e).__name__, "source": "surrogate_builder",
+                    })
+                continue
+            if features is not None:
+                feature_source = "surrogate"
         if features is None:
             # The dominant skip on the archive as imported. Documented
             # under the `feature_builder_mismatch` triage bucket.
@@ -515,6 +675,9 @@ async def _attempt_full_stack_inference(
                 skip_reasons.get("feature_vector_unavailable", 0) + 1
             )
             continue
+        feature_source_counts[feature_source] = (
+            feature_source_counts.get(feature_source, 0) + 1
+        )
 
         attempted += 1
         try:
@@ -551,6 +714,7 @@ async def _attempt_full_stack_inference(
         "rows_skipped": skipped,
         "skip_reasons": skip_reasons,
         "error_samples": error_samples,
+        "feature_source": feature_source_counts,
     }
     return grouped, summary
 
@@ -713,11 +877,30 @@ def _build_triage(
     fs_attempted = int(fs.get("rows_attempted", 0))
     fs_skip_reasons = dict(fs.get("skip_reasons", {}))
     fs_missing_features = int(fs_skip_reasons.get("feature_vector_unavailable", 0))
+    surrogate_enabled = bool(fs.get("surrogate_features_enabled", False))
+    surrogate_used = int((fs.get("feature_source") or {}).get("surrogate", 0))
     feature_builder_active = (
         full_stack_summary is not None
         and fs_predicted == 0
         and fs_missing_features > 0
     )
+    if surrogate_enabled and surrogate_used > 0:
+        note = (
+            f"--surrogate-features active: {surrogate_used} archive rows "
+            "mapped into a degraded build_vector input dict (~10 of 32 "
+            "feature slots populated; rest fall to spec defaults). The "
+            "full LGB+XGB+calibrator chain ran end-to-end on the surrogate "
+            "vector — this is NOT V1 parity, just a stand-in baseline "
+            "until #731 dumps the real V1 feature snapshots."
+        )
+    else:
+        note = (
+            "V1 archive does not snapshot the upstream LGB+XGB feature "
+            "vector, so the requested full-stack replay yields zero "
+            "usable rows. Pass --surrogate-features for the degraded "
+            "stand-in path, or wait on #731 for real V1 feature dumps. "
+            "Calibrator-only audit below is the constrained fallback."
+        )
     return {
         "feature_builder_mismatch": {
             "active": feature_builder_active,
@@ -726,13 +909,10 @@ def _build_triage(
                 "rows_attempted": fs_attempted,
                 "rows_predicted_via_models_loader": fs_predicted,
                 "rows_skipped_missing_features": fs_missing_features,
+                "surrogate_features_enabled": surrogate_enabled,
+                "rows_predicted_via_surrogate": surrogate_used,
             },
-            "note": (
-                "V1 archive does not snapshot the upstream LGB+XGB feature "
-                "vector, so the requested full-stack replay yields zero "
-                "usable rows. Calibrator-only audit below is the "
-                "constrained fallback."
-            ),
+            "note": note,
         },
         "calibrator_misalignment": {
             "active": True,
@@ -773,6 +953,8 @@ async def run(
     full_stack: bool = False,
     predict_fn: Any | None = None,
     batch_size: int = _DEFAULT_BATCH_SIZE,
+    surrogate_features: bool = False,
+    feature_builder: Any | None = None,
 ) -> dict[str, Any]:
     """Programmatic entry point. Used by the pytest fixture.
 
@@ -802,6 +984,8 @@ async def run(
             "rows_skipped": 0,
             "skip_reasons": {},
             "error_samples": [],
+            "feature_source": {"archived": 0, "surrogate": 0},
+            "surrogate_features_enabled": bool(surrogate_features),
         }
         if full_stack
         else None
@@ -817,7 +1001,11 @@ async def run(
         _normalize_into(grouped, batch_rows, leagues_filter=leagues_filter)
         if full_stack and full_stack_summary is not None:
             fs_g, fs_s = await _attempt_full_stack_inference(
-                batch_rows, leagues_filter=leagues_filter, predict_fn=predict_fn,
+                batch_rows,
+                leagues_filter=leagues_filter,
+                predict_fn=predict_fn,
+                surrogate_features=surrogate_features,
+                feature_builder=feature_builder,
             )
             # Merge per-batch grouped into the running fs_grouped.
             for lg, bucket in fs_g.items():
@@ -831,6 +1019,10 @@ async def run(
             for k, v in fs_s["skip_reasons"].items():
                 full_stack_summary["skip_reasons"][k] = (
                     full_stack_summary["skip_reasons"].get(k, 0) + v
+                )
+            for k, v in fs_s.get("feature_source", {}).items():
+                full_stack_summary["feature_source"][k] = (
+                    full_stack_summary["feature_source"].get(k, 0) + v
                 )
             # Cap retained error samples so the summary doesn't grow.
             for sample in fs_s["error_samples"]:
@@ -901,6 +1093,17 @@ async def _amain(argv: list[str] | None = None) -> int:
                              "via app.predictor.predict() and report attempt/skip "
                              "counts. Yields zero usable rows on the V1 archive "
                              "(features not snapshotted) — see triage block.")
+    parser.add_argument("--surrogate-features", action="store_true",
+                        help="Opt-in DEGRADED-baseline path: when --full-stack is "
+                             "on and a row has no archived feature vector, build "
+                             "the live 32-slot vector via app.features.build_vector "
+                             "from the V1 analysis_json + row fields, falling back "
+                             "to per-spec defaults for unmapped slots (sharp_money, "
+                             "tz_arb, ev_source, etc.). Lets the LGB+XGB chain "
+                             "produce non-zero row counts so the report shows the "
+                             "live predictor's calibrated Brier on archive rows. "
+                             "NOT V1 parity — see scripts/backtest_v1_archive.py "
+                             "module docstring + replit.md V1 backtest section.")
     parser.add_argument("--batch-size", type=int, default=_DEFAULT_BATCH_SIZE,
                         help=f"Rows pulled per DB batch (keyset paginated on id). "
                              f"Default {_DEFAULT_BATCH_SIZE}.")
@@ -916,6 +1119,22 @@ async def _amain(argv: list[str] | None = None) -> int:
     else:
         rows = None
 
+    # Bootstrap the LGB+XGB ensemble so app.predictor.predict() doesn't
+    # raise PredictorUnavailable on the first surrogate row.  Skipped
+    # unless --full-stack is requested (calibrator-only path doesn't
+    # need models).  Failures are non-fatal so the script still emits
+    # a report describing the bootstrap error rather than crashing.
+    if args.full_stack:
+        try:
+            from app import models_loader  # noqa: PLC0415
+
+            await models_loader.ensure_artifacts()
+            print("[backtest] models_loader.ensure_artifacts() OK")
+        except Exception as e:
+            print(f"[backtest] models_loader.ensure_artifacts() FAILED: "
+                  f"{type(e).__name__}: {e}")
+            print("[backtest]   full-stack rows will skip with PredictorUnavailable.")
+
     report = await run(
         rows=rows,
         limit=args.limit,
@@ -923,6 +1142,7 @@ async def _amain(argv: list[str] | None = None) -> int:
         load_calibrators=not args.no_load_calibrators,
         full_stack=args.full_stack,
         batch_size=args.batch_size,
+        surrogate_features=args.surrogate_features,
     )
 
     summary = report["summary"]
