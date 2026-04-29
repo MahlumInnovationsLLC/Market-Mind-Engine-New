@@ -112,12 +112,67 @@ export interface ApiFetchOptions extends Omit<RequestInit, "body"> {
   getToken?: AuthTokenGetter;
 }
 
+/**
+ * Resolve a request path against the configured backend base URL.
+ *
+ * `VITE_API_URL` is the Mac-Studio-cutover knob: when empty (default,
+ * Replit deployment) every request uses a relative path so the proxied
+ * frontend hits the FastAPI server on the same origin. When set
+ * (e.g. `https://api.example.com`) every relative path is prepended
+ * with that origin so the same Replit-hosted operator console can be
+ * pointed at a self-hosted backend without rebuilding the bundle for
+ * a different environment.
+ *
+ * Absolute URLs (`http://` / `https://`) are returned unchanged so
+ * one-off integrations can still call third-party endpoints directly.
+ *
+ * Read inside the function (not at module scope) so tests can flip the
+ * env via `vi.stubEnv("VITE_API_URL", ...)` between assertions.
+ */
+export function resolveApiUrl(path: string): string {
+  if (/^https?:\/\//i.test(path)) return path;
+  const raw = (import.meta.env.VITE_API_URL ?? "").toString().trim();
+  if (!raw) return path;
+
+  // Validate strictly. A malformed `VITE_API_URL` (typo, missing
+  // protocol, accidental whitespace) MUST NOT silently route an
+  // authenticated request — `apiFetch` attaches the bearer token —
+  // to wherever the URL parser lands. Fall back to the same-origin
+  // relative path so a misconfigured deploy degrades to today's
+  // behavior instead of leaking credentials.
+  let parsed: URL;
+  try {
+    parsed = new URL(raw);
+  } catch {
+    if (typeof console !== "undefined") {
+      console.warn(
+        `[resolveApiUrl] VITE_API_URL is not a valid URL (${raw!}); ` +
+          "falling back to same-origin requests.",
+      );
+    }
+    return path;
+  }
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+    if (typeof console !== "undefined") {
+      console.warn(
+        `[resolveApiUrl] VITE_API_URL has unsupported protocol ` +
+          `(${parsed.protocol}); falling back to same-origin requests.`,
+      );
+    }
+    return path;
+  }
+
+  const base = raw.replace(/\/+$/, "");
+  const cleanPath = path.startsWith("/") ? path : `/${path}`;
+  return `${base}${cleanPath}`;
+}
+
 export async function apiFetch<T = unknown>(
   path: string,
   opts: ApiFetchOptions = {},
 ): Promise<T> {
   const { body, getToken, headers: headersInit, ...init } = opts;
-  const url = path.startsWith("http") ? path : path;
+  const url = resolveApiUrl(path);
   const headers = new Headers(headersInit ?? undefined);
   if (body !== undefined && !headers.has("content-type")) {
     headers.set("content-type", "application/json");

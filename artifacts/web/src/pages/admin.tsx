@@ -11,7 +11,12 @@ import {
   XAxis,
   YAxis,
 } from "recharts";
-import { apiFetch, REQUEST_ID_HEADER, newRequestId } from "@/lib/api";
+import {
+  apiFetch,
+  REQUEST_ID_HEADER,
+  newRequestId,
+  resolveApiUrl,
+} from "@/lib/api";
 import { usePipelineSubscription } from "@/components/realtime/websocket-provider";
 import {
   AdminAuditLogEntry,
@@ -1658,7 +1663,7 @@ export function AuditLogPanel() {
       });
       const token = await tokenFn();
       if (token) headers.set("authorization", `Bearer ${token}`);
-      const res = await fetch(url, { headers });
+      const res = await fetch(resolveApiUrl(url), { headers });
       if (!res.ok) {
         const id = res.headers.get(REQUEST_ID_HEADER);
         const base = `HTTP ${res.status} ${res.statusText}`;
@@ -5284,7 +5289,7 @@ export function LeadsPanel() {
       });
       const token = await tokenFn();
       if (token) headers.set("authorization", `Bearer ${token}`);
-      const res = await fetch(url, { headers });
+      const res = await fetch(resolveApiUrl(url), { headers });
       if (!res.ok) {
         const id = res.headers.get(REQUEST_ID_HEADER);
         const base = `HTTP ${res.status} ${res.statusText}`;

@@ -17,10 +17,12 @@ import {
 import {
   getGetMyAccessQueryKey,
   setAuthTokenGetter,
+  setBaseUrl,
   setSilentRefreshHandler,
   setUnauthorizedHandler,
   useGetMyAccess,
 } from "@workspace/api-client-react";
+import { resolveApiUrl } from "@/lib/api";
 import { toast } from "@/hooks/use-toast";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -30,6 +32,24 @@ import MarketingPage from "@/pages/marketing";
 import SessionExpiredOverlay from "@/components/session-expired-overlay";
 import GlobalSearch from "@/components/global-search";
 import { AppShell } from "@/components/shell/app-shell";
+
+// Mac-Studio cutover knob: when `VITE_API_URL` is set, point the
+// generated OpenAPI client at the configured backend so EVERY hook
+// (`useGetRecentTrades`, `useGetMyAccess`, etc.) honors the same
+// host as `apiFetch`. Empty default → null base → relative requests
+// → today's same-origin Replit behavior, byte-for-byte. Goes through
+// `resolveApiUrl("")` so the URL validation (malformed values fall
+// back to relative, never silently rerouted) is shared with the
+// `lib/api.ts` path. Runs at module load — `setBaseUrl` is a plain
+// module-state setter, idempotent, and the value is build-time fixed
+// so a single call at boot is correct.
+{
+  const resolved = resolveApiUrl("");
+  // `resolveApiUrl("")` returns `""` when no host is configured (or
+  // the configured host failed validation) → leave the client on
+  // same-origin requests by passing null.
+  setBaseUrl(resolved && /^https?:\/\//i.test(resolved) ? resolved : null);
+}
 
 // Route-level code splitting. Each page becomes its own JS chunk so
 // the operator console's first paint is just the shell + dashboard,

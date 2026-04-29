@@ -1,5 +1,6 @@
 import { useMemo } from "react";
 import { useQuery } from "@tanstack/react-query";
+import { resolveApiUrl } from "@/lib/api";
 import {
   Area,
   AreaChart,
@@ -50,8 +51,11 @@ export default function EquityCharts() {
   const { data, isLoading, isError } = useQuery<EquityCurve>({
     queryKey: ["public-equity-curve", days],
     queryFn: async () => {
+      // Goes through `resolveApiUrl` so the Mac-Studio cutover knob
+      // (`VITE_API_URL`) reroutes the public equity curve to the
+      // configured backend just like every other API call.
       const r = await fetch(
-        `${import.meta.env.BASE_URL}api/public/equity-curve?days=${days}`,
+        resolveApiUrl(`${import.meta.env.BASE_URL}api/public/equity-curve?days=${days}`),
       );
       if (!r.ok) throw new Error(`equity-curve ${r.status}`);
       return r.json();

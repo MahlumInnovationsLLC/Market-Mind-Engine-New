@@ -40,10 +40,41 @@ export interface UseWebSocketResult {
 
 const basePath = import.meta.env.BASE_URL.replace(/\/$/, "");
 
-function buildWsUrl(path: string, token: string | null): string {
-  const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
+/**
+ * Build the absolute `ws(s)://` URL for a relative socket path.
+ *
+ * Mirrors `resolveApiUrl` in `lib/api.ts`: when the operator sets
+ * `VITE_API_URL` (the Mac-Studio cutover knob) the WebSocket connects
+ * to that origin with the protocol auto-upgraded http→ws / https→wss,
+ * and the artifact `BASE_URL` prefix is dropped because the configured
+ * backend owns its own routing. When `VITE_API_URL` is empty (default,
+ * Replit deployment) we fall back to the same-origin behavior the app
+ * has always had.
+ *
+ * Exported so unit tests can cover both branches without needing to
+ * stand up a `useWebSocket` render harness.
+ */
+export function buildWsUrl(path: string, token: string | null): string {
   const cleanPath = path.startsWith("/") ? path : `/${path}`;
-  const url = `${proto}//${window.location.host}${basePath}${cleanPath}`;
+  const apiBase = (import.meta.env.VITE_API_URL ?? "").toString().replace(/\/$/, "");
+  let url: string;
+  if (apiBase) {
+    try {
+      const parsed = new URL(apiBase);
+      const wsProto = parsed.protocol === "https:" ? "wss:" : "ws:";
+      const apiPathPrefix = parsed.pathname.replace(/\/$/, "");
+      url = `${wsProto}//${parsed.host}${apiPathPrefix}${cleanPath}`;
+    } catch {
+      // Malformed `VITE_API_URL` — never silently swap to a different
+      // host. Fall back to the same-origin path so a typo'd env var
+      // can't redirect every WebSocket to wherever the parser landed.
+      const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
+      url = `${proto}//${window.location.host}${basePath}${cleanPath}`;
+    }
+  } else {
+    const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
+    url = `${proto}//${window.location.host}${basePath}${cleanPath}`;
+  }
   return token ? `${url}?token=${encodeURIComponent(token)}` : url;
 }
 

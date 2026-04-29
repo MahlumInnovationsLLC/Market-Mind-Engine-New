@@ -7,6 +7,7 @@ import {
   useGetRecentTrades,
   useGetVerticalsOverview,
 } from "@workspace/api-client-react";
+import { resolveApiUrl } from "@/lib/api";
 import { GlassCard } from "@/components/ui/glass-card";
 import { usePeriod } from "./period-context";
 
@@ -130,8 +131,11 @@ export default function KpiSummaryBar() {
   const equityQ = useQuery<EquityCurve>({
     queryKey: ["public-equity-curve", days],
     queryFn: async () => {
+      // Goes through `resolveApiUrl` so the Mac-Studio cutover knob
+      // (`VITE_API_URL`) reroutes the public equity curve to the
+      // configured backend just like every other API call.
       const r = await fetch(
-        `${import.meta.env.BASE_URL}api/public/equity-curve?days=${days}`,
+        resolveApiUrl(`${import.meta.env.BASE_URL}api/public/equity-curve?days=${days}`),
       );
       if (!r.ok) throw new Error(`equity-curve ${r.status}`);
       return r.json();

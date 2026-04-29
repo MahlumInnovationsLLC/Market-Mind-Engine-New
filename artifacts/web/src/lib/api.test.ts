@@ -4,6 +4,7 @@ import {
   apiFetch,
   formatErrorMessage,
   getErrorRequestId,
+  resolveApiUrl,
 } from "./api";
 
 type FetchMock = ReturnType<typeof vi.fn>;
@@ -98,5 +99,69 @@ describe("formatErrorMessage", () => {
     expect(getErrorRequestId(new Error("boom"))).toBeNull();
     expect(getErrorRequestId(null)).toBeNull();
     expect(getErrorRequestId("string error")).toBeNull();
+  });
+});
+
+describe("resolveApiUrl + apiFetch host knob (VITE_API_URL)", () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  it("returns the path unchanged when VITE_API_URL is empty (Replit default)", () => {
+    vi.stubEnv("VITE_API_URL", "");
+    expect(resolveApiUrl("/api/widgets")).toBe("/api/widgets");
+  });
+
+  it("prepends VITE_API_URL when set, stripping trailing slash", () => {
+    vi.stubEnv("VITE_API_URL", "https://api.example.com/");
+    expect(resolveApiUrl("/api/widgets")).toBe(
+      "https://api.example.com/api/widgets",
+    );
+  });
+
+  it("treats absolute URLs as-is regardless of VITE_API_URL", () => {
+    vi.stubEnv("VITE_API_URL", "https://api.example.com");
+    expect(resolveApiUrl("https://elsewhere.test/extern")).toBe(
+      "https://elsewhere.test/extern",
+    );
+  });
+
+  it("apiFetch hits the relative path when VITE_API_URL is empty", async () => {
+    vi.stubEnv("VITE_API_URL", "");
+    fetchMock.mockResolvedValueOnce(new Response("{}", { status: 200 }));
+    await apiFetch("/api/widgets");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock.mock.calls[0][0]).toBe("/api/widgets");
+  });
+
+  it("apiFetch hits the absolute URL when VITE_API_URL is set", async () => {
+    vi.stubEnv("VITE_API_URL", "https://api.example.com");
+    fetchMock.mockResolvedValueOnce(new Response("{}", { status: 200 }));
+    await apiFetch("/api/widgets");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock.mock.calls[0][0]).toBe(
+      "https://api.example.com/api/widgets",
+    );
+  });
+
+  it("falls back to same-origin on a malformed VITE_API_URL", () => {
+    // Critical security property: a typo'd env var must NEVER silently
+    // route an authenticated request (apiFetch attaches the bearer
+    // token) to wherever the URL parser lands. Degrade to today's
+    // same-origin behavior instead.
+    vi.stubEnv("VITE_API_URL", "not a url");
+    expect(resolveApiUrl("/api/widgets")).toBe("/api/widgets");
+  });
+
+  it("rejects unsupported protocols (e.g. javascript:, file:)", () => {
+    vi.stubEnv("VITE_API_URL", "javascript:alert(1)");
+    expect(resolveApiUrl("/api/widgets")).toBe("/api/widgets");
+  });
+
+  it("trims whitespace before validating VITE_API_URL", () => {
+    vi.stubEnv("VITE_API_URL", "  https://api.example.com  ");
+    expect(resolveApiUrl("/api/widgets")).toBe(
+      "https://api.example.com/api/widgets",
+    );
   });
 });

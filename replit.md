@@ -226,6 +226,14 @@ Task #730 wired the Ollama provider but left every default persona pointing at O
 - **Operator UI surface** (`app/runtime_settings.py::get_state`): the existing admin runtime-settings response now includes a read-only `llm_mode` block (`mode` + the resolved model triple) so operators can confirm which provider/models the swarm will actually call without grepping logs. No new screens.
 - **Tests** (`tests/test_swarm_provider_routing.py`): six new tests cover (a) `cloud` is identity, (b) `local` rewrites every persona + moderator + gatekeeper to ollama with the correct fast/reasoning split and same-provider backup, (c) `hybrid` keeps the cross-provider fallback, (d) end-to-end tripwire: in `local` mode `_stream_openai` / `_stream_anthropic` are NEVER invoked even on Ollama 5xx, (e) `active_llm_mode_state` returns the resolved triple. Final api-server suite: 4347 passed / 3 skipped / 0 failed in 130.85s. Mobile + api-client-react suites unchanged (190 / 9).
 
+### Mac Studio cutover runbook + frontend host knob (task #736)
+
+The full cutover from a clean Mac Studio to a paper-trading Axiom-Predict deployment lives in `MIGRATION_MAC_STUDIO.md` at the repo root — Homebrew bootstrap, Ollama model pull list, `.env` template that wires the task-#735 `AXIOM_LLM_MODE` + `OLLAMA_MODEL_*` knobs, `alembic upgrade head`, the four-gate preflight, launchd plists, Cloudflare tunnel, paper soak, and the live-cutover step. The runbook is the source of truth — fix it in the same PR as any drift.
+
+The four mandatory pre-cutover gates run via a single thin bash wrapper at `scripts/preflight_mac_studio.sh`: (1) `verify_v155_artifacts.py`, (2) `preflight_calibrators.py` (per-league Platt curves fitted for NBA/NFL/NCAAB/NHL/MLB), (3) `preflight_swarm_smoke.py` (forced `AXIOM_LLM_MODE=local` so the Ollama path is exercised end-to-end), (4) `preflight_paper_cycle.py` (one full `orchestrator.cycle.run_cycle('sports')` in `AXIOM_TRADING_MODE=paper`). Non-zero exit on the first failure; passing all four is the gate to flip the trading mode.
+
+The frontend gained one env knob: `VITE_API_URL` (documented in `artifacts/web/.env.example`). Default empty preserves today's same-origin Replit behaviour byte-for-byte; setting it to `https://api.yourdomain.com` repoints every `apiFetch` (via `lib/api.ts::resolveApiUrl`) and every WebSocket connection (via `hooks/use-websocket.ts::buildWsUrl`, with auto http→ws / https→wss upgrade) at the configured backend without rebuilding the bundle. Coverage in `lib/api.test.ts` and `hooks/use-websocket.url.test.ts` exercises both branches (relative default + explicit absolute base, including a malformed-URL fallback that refuses to silently swap origins).
+
 ## Model artifacts (v155) — verification + V1 import status
 
 ### v155 artifact wiring — verified end-to-end
