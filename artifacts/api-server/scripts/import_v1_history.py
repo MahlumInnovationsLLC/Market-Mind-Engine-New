@@ -145,66 +145,69 @@ def _run_psql(sql: str, dsn: str) -> str:
     return result.stdout.strip()
 
 
-def _truncate_target(dsn: str) -> None:
-    _log("TRUNCATE v1_archive.trade_analyses")
-    _run_psql("TRUNCATE TABLE v1_archive.trade_analyses", dsn)
+def _atomic_load(dsn: str, dry_run: bool, max_mismatch_pct: float) -> dict:
+    """Atomically TRUNCATE + load + verify-or-rollback in a single tx.
 
+    The previous version called TRUNCATE in one psql session and the
+    load in another; if the load failed mid-flight the truncate was
+    already committed, leaving the table empty in production.  This
+    version streams a BEGIN / TRUNCATE / <dump body> / verify-via-DO /
+    COMMIT block through ``psql --single-transaction`` so any failure
+    rolls EVERYTHING back, including the truncate.
+    """
+    _log(f"atomic load BEGIN; TRUNCATE; <dump>; verify; COMMIT "
+         f"(dry_run={dry_run})")
+    with open(REWRITTEN_SQL, "rb") as src:
+        dump_bytes = src.read()
 
-def _load_dump(dsn: str, dry_run: bool) -> None:
-    _log(f"psql --single-transaction -f {REWRITTEN_SQL} (dry_run={dry_run})")
-    cmd = [
-        "psql",
-        dsn,
-        "-X",
-        "-v",
-        "ON_ERROR_STOP=1",
-        "--single-transaction",
-        "-f",
-        str(REWRITTEN_SQL),
-    ]
-    if dry_run:
-        # Wrap in BEGIN/ROLLBACK by streaming through stdin instead.
-        cmd = [
-            "psql",
-            dsn,
-            "-X",
-            "-v",
-            "ON_ERROR_STOP=1",
-        ]
-        with open(REWRITTEN_SQL, "rb") as src:
-            payload = b"BEGIN;\n" + src.read() + b"\nROLLBACK;\n"
-        completed = subprocess.run(
-            cmd, input=payload, capture_output=True, check=False
-        )
-    else:
-        completed = subprocess.run(cmd, capture_output=True, check=False)
+    # The verify block runs INSIDE the transaction and uses RAISE
+    # EXCEPTION to abort+rollback if the row count diverges.
+    final_keyword = b"ROLLBACK" if dry_run else b"COMMIT"
+    verify_sql = (
+        f"DO $$\n"
+        f"DECLARE n bigint; expected bigint := {EXPECTED_ROWS}; "
+        f"tol_pct float := {max_mismatch_pct};\n"
+        f"BEGIN\n"
+        f"  SELECT count(*) INTO n FROM v1_archive.trade_analyses;\n"
+        f"  IF abs(n - expected) * 100.0 / expected > tol_pct THEN\n"
+        f"    RAISE EXCEPTION 'V1 import row-count divergence: % rows "
+        f"vs expected %; abort+rollback.', n, expected;\n"
+        f"  END IF;\n"
+        f"  RAISE NOTICE 'V1 import OK: % rows loaded (expected ~%)', "
+        f"n, expected;\n"
+        f"END$$;\n"
+    ).encode("utf-8")
 
+    payload = (
+        b"BEGIN;\n"
+        b"TRUNCATE TABLE v1_archive.trade_analyses;\n"
+        + dump_bytes
+        + b"\n"
+        + verify_sql
+        + final_keyword
+        + b";\n"
+    )
+
+    cmd = ["psql", dsn, "-X", "-v", "ON_ERROR_STOP=1"]
+    completed = subprocess.run(
+        cmd, input=payload, capture_output=True, check=False
+    )
     if completed.returncode != 0:
         sys.stderr.write(completed.stderr.decode("utf-8", errors="replace"))
         raise SystemExit(
-            f"psql exited {completed.returncode} loading rewritten dump"
+            f"psql exited {completed.returncode}; transaction rolled back"
         )
-    _log("psql load OK")
+    # Surface the RAISE NOTICE line so the operator sees the row count.
+    stderr_txt = completed.stderr.decode("utf-8", errors="replace")
+    for line in stderr_txt.splitlines():
+        if "V1 import OK" in line:
+            _log(line.strip())
 
+    if dry_run:
+        _log("DRY-RUN complete (transaction rolled back).")
+        return {"total": None, "diff_pct": None, "dry_run": True}
 
-def _verify_counts(dsn: str, max_mismatch_pct: float) -> dict:
-    total_str = _run_psql(
-        "SELECT count(*) FROM v1_archive.trade_analyses", dsn
-    )
-    total = int(total_str)
-    diff_pct = (
-        abs(total - EXPECTED_ROWS) / EXPECTED_ROWS * 100.0
-        if EXPECTED_ROWS
-        else 0.0
-    )
-    _log(f"row count: {total:,} (expected ~{EXPECTED_ROWS:,}, "
-         f"diff {diff_pct:.2f}%)")
-    if diff_pct > max_mismatch_pct:
-        raise SystemExit(
-            f"FAIL: row count diverged {diff_pct:.2f}% > "
-            f"{max_mismatch_pct}% threshold; aborting."
-        )
-
+    # Post-commit per-league summary (read-only, separate session).
     per_league = _run_psql(
         """
         SELECT league || '|' || count(*)::text
@@ -219,7 +222,11 @@ def _verify_counts(dsn: str, max_mismatch_pct: float) -> dict:
     for line in per_league.splitlines():
         _log(f"  {line}")
 
-    return {"total": total, "diff_pct": diff_pct}
+    total = int(_run_psql(
+        "SELECT count(*) FROM v1_archive.trade_analyses", dsn
+    ))
+    diff_pct = abs(total - EXPECTED_ROWS) / EXPECTED_ROWS * 100.0
+    return {"total": total, "diff_pct": diff_pct, "dry_run": False}
 
 
 async def _amain() -> int:
@@ -249,16 +256,9 @@ async def _amain() -> int:
     await _ensure_dump_local(force=args.force_download)
     _rewrite_for_v1_archive()
 
-    if not args.dry_run:
-        _truncate_target(dsn)
-
-    _load_dump(dsn, dry_run=args.dry_run)
-
-    if args.dry_run:
-        _log("DRY-RUN complete (transaction rolled back); skipping verify.")
-        return 0
-
-    summary = _verify_counts(dsn, args.max_mismatch_pct)
+    summary = _atomic_load(
+        dsn, dry_run=args.dry_run, max_mismatch_pct=args.max_mismatch_pct
+    )
     _log(f"DONE: {summary}")
     return 0
 

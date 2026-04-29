@@ -437,32 +437,95 @@ async def _fetch_training_data() -> dict[str, dict[str, list]]:
     Returns ``{LEAGUE: {"probs":[...], "ys":[...]}}``.  Trades are
     aligned to the side they were placed on so the calibrator learns
     P(side wins), matching how ``apply()`` is invoked downstream.
+
+    Two sources are UNION'd:
+
+    * **Live** — current ``trades`` x ``trade_postmortems`` join.  YES-
+      aligned ``actual_outcome`` is flipped to side-aligned
+      ``y_side`` per the side label.
+    * **V1 archive** — ``v1_archive.trade_analyses``, the historical
+      data set imported by ``scripts/import_v1_history.py``.  V1's
+      ``actual_outcome`` is **already side-aligned** (1 = bet won), so
+      no flip on ``y``; the **prob** is YES-aligned in V1's stack
+      output, so it's flipped per side identically to the live path.
+      Only sides whose semantics are unambiguous in V1 are kept
+      (``yes/buy/live_yes/buy yes/no/sell/live_no/buy no``); rows for
+      ``pass``, sport-specific bet types, and crypto buy/sell over
+      ``league='Unknown'`` are filtered out.
+
+    The V1 union can be disabled at runtime via
+    ``AXIOM_USE_V1_ARCHIVE_FOR_CALIBRATION=0`` for kill-switch safety.
+    The V1 subquery is wrapped in ``to_regclass()`` so missing-table
+    environments (fresh dev DBs that never ran the import) silently
+    contribute zero rows rather than failing.
     """
+    import os
+
+    use_v1 = (
+        os.getenv("AXIOM_USE_V1_ARCHIVE_FOR_CALIBRATION", "1").lower()
+        not in ("0", "false", "no", "off")
+    )
+
+    live_cte = f"""
+        live_settled AS (
+          SELECT upper(t.league)                              AS league,
+                 CASE
+                   WHEN lower(coalesce(t.side, '')) IN ('no','n','sell')
+                     THEN 1.0 - t.model_prob::float
+                   ELSE t.model_prob::float
+                 END                                          AS p_side,
+                 CASE
+                   WHEN lower(coalesce(t.side, '')) IN ('no','n','sell')
+                     THEN 1 - pm.actual_outcome::int
+                   ELSE pm.actual_outcome::int
+                 END                                          AS y_side
+            FROM trades t
+            JOIN trade_postmortems pm
+              ON pm.trade_id = coalesce(t.trade_id, t.id::text)
+           WHERE t.settled_at IS NOT NULL
+             AND t.settled_at > now() - interval '{int(REFIT_WINDOW_DAYS)} days'
+             AND t.model_prob IS NOT NULL
+             AND pm.actual_outcome IS NOT NULL
+             AND t.league IS NOT NULL
+        )"""
+
+    if use_v1:
+        v1_cte = f""",
+        v1_settled AS (
+          SELECT upper(league)                                AS league,
+                 CASE
+                   WHEN lower(coalesce(analysis_json->>'side', '')) IN
+                        ('no','sell','live_no','buy no')
+                     THEN greatest(0.0, least(1.0,
+                            1.0 - predicted_prob::float))
+                   ELSE greatest(0.0, least(1.0,
+                            predicted_prob::float))
+                 END                                          AS p_side,
+                 actual_outcome::int                          AS y_side
+            FROM v1_archive.trade_analyses
+           WHERE to_regclass('v1_archive.trade_analyses') IS NOT NULL
+             AND created_at IS NOT NULL
+             AND created_at > now() - interval '{int(REFIT_WINDOW_DAYS)} days'
+             AND predicted_prob IS NOT NULL
+             AND actual_outcome IS NOT NULL
+             AND league IS NOT NULL
+             AND lower(coalesce(analysis_json->>'side', '')) IN
+                 ('yes','buy','live_yes','buy yes',
+                  'no','sell','live_no','buy no')
+        )"""
+        union_tail = """
+            SELECT league, p_side, y_side FROM live_settled
+            UNION ALL
+            SELECT league, p_side, y_side FROM v1_settled"""
+    else:
+        v1_cte = ""
+        union_tail = """
+            SELECT league, p_side, y_side FROM live_settled"""
+
+    sql = f"WITH {live_cte}{v1_cte}{union_tail}"
+
     try:
-        rows = await db.fetch(
-            f"""
-            WITH settled AS (
-              SELECT upper(t.league)                           AS league,
-                     t.model_prob::float                       AS p_yes,
-                     lower(coalesce(t.side, ''))               AS side_lc,
-                     pm.actual_outcome::int                    AS y
-                FROM trades t
-                JOIN trade_postmortems pm
-                  ON pm.trade_id = coalesce(t.trade_id, t.id::text)
-               WHERE t.settled_at IS NOT NULL
-                 AND t.settled_at > now() - interval '{int(REFIT_WINDOW_DAYS)} days'
-                 AND t.model_prob IS NOT NULL
-                 AND pm.actual_outcome IS NOT NULL
-                 AND t.league IS NOT NULL
-            )
-            SELECT league,
-                   CASE WHEN side_lc IN ('no','n','sell')
-                        THEN 1.0 - p_yes ELSE p_yes END AS p_side,
-                   CASE WHEN side_lc IN ('no','n','sell')
-                        THEN 1 - y       ELSE y       END AS y_side
-              FROM settled
-            """
-        )
+        rows = await db.fetch(sql)
     except Exception as e:
         log.warning("[calibrators] training fetch failed: %s", e)
         return {}

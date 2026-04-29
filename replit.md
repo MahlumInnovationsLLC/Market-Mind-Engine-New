@@ -275,12 +275,35 @@ calibrator refit once the calibrator query is extended to read from
 | NFL   | 4      | no  |
 | MLS   | 1      | no  |
 
-The remaining wire-up (extending `app/calibrators.py::_fetch_training_data`
-to `UNION ALL` from `v1_archive.trade_analyses`, with careful
-side-semantics handling because V1's `actual_outcome` is side-aligned
-while MME's `pm.actual_outcome` is YES-aligned) plus Phase 2 dumps
-(`weather_observations`, `line_snapshots`, `llm_predictions`) is
-tracked under follow-up task #731.
+The calibrator query is now wired to consume V1 archive data:
+`app/calibrators.py::_fetch_training_data` UNIONs in
+`v1_archive.trade_analyses` with conservative side semantics — V1's
+`actual_outcome` is side-aligned (1 = bet won) so it maps directly
+onto `y_side`, while V1's `predicted_prob` is YES-aligned and gets
+the same per-side flip as the live path. Only unambiguous side
+labels (`yes/buy/live_yes/buy yes/no/sell/live_no/buy no`) are kept;
+sport-specific bet types (`bet_home_ml`, `bet_*_spread`, etc.) and
+`pass` rows are filtered out. The union is gated by env var
+`AXIOM_USE_V1_ARCHIVE_FOR_CALIBRATION` (default ON; set to `0` for
+kill-switch) and wrapped in `to_regclass()` so dev DBs that haven't
+run the import contribute zero rows rather than failing.
+
+End-to-end refit evidence after Phase 1 import + wire-up
+(`refit_all()` against live Supabase, 2026-04-29):
+
+| League | Status before | Status after | Kind | n | Brier |
+|---|---|---|---|---|---|
+| NBA   | market_prior   | **fitted** | isotonic | 3,158 | 0.1090 |
+| NCAAB | market_prior   | **fitted** | isotonic | 1,356 | 0.1694 |
+| NHL   | market_prior   | **fitted** | isotonic |   300 | 0.1228 |
+| MLB   | market_prior   | **fitted** | isotonic |   163 | 0.1205 |
+| PGA   | identity_seed  | **fitted** | isotonic |    52 | 0.0680 |
+| NFL   | market_prior   | market_prior | platt | 4 V1 rows (below MIN=10) |
+| MLS   | market_prior   | market_prior | platt | 1 V1 row  (below MIN=10) |
+
+Phase 2 dumps (`weather_observations`, `line_snapshots`,
+`llm_predictions`) plus broadening V1 side coverage to sport-specific
+bet labels are tracked under follow-up task #731.
 
 **Tooling notes for Phase 2** (whoever extends this to other dumps):
 
