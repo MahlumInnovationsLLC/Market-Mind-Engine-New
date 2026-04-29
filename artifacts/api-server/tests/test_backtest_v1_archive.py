@@ -590,3 +590,207 @@ def test_run_full_stack_uses_predictor_when_features_present() -> None:
     assert triage["feature_builder_mismatch"]["active"] is False
     assert triage["feature_builder_mismatch"]["evidence"][
         "rows_predicted_via_models_loader"] == 3
+
+
+# ---------------------------------------------------------------------------
+# v3 rework — regression tests (apply_calibrator=False + DB batching)
+# ---------------------------------------------------------------------------
+
+
+def test_score_grouped_apply_calibrator_false_skips_calibration() -> None:
+    """Direct unit test of the new ``apply_calibrator=False`` mode.
+
+    With this flag set, score_grouped MUST NOT call calibrators.apply()
+    on the input probabilities. Both raw and calibrated metrics will
+    therefore be identical and ``brier_delta``/``delta_vs_v1`` will
+    be exactly 0.0. ``calibrator_applied_count`` is set to 0 and
+    ``calibrator_type`` to None so the report makes the bypass
+    explicit.
+
+    Regression guard: an earlier draft of the full-stack path called
+    score_grouped() with the default ``apply_calibrator=True`` —
+    re-applying the per-league calibrator on top of probabilities that
+    app.predictor.predict() had already calibrated. The double-call
+    silently produced bogus brier_calibrated numbers.
+    """
+    apply_calls: list[tuple[float, str | None]] = []
+
+    def _spy_apply(p: float, league: str | None):
+        apply_calls.append((p, league))
+        # Move probabilities aggressively so test would fail if called.
+        return (1.0 - p, {"applied": True, "type": "spy"})
+
+    grouped = {
+        "NBA": {"probs": [0.7, 0.3, 0.6], "ys": [1, 0, 1]},
+    }
+    original = bt.calibrators.apply
+    bt.calibrators.apply = _spy_apply  # type: ignore[assignment]
+    try:
+        scored = bt.score_grouped(grouped, apply_calibrator=False)
+    finally:
+        bt.calibrators.apply = original  # type: ignore[assignment]
+
+    # The spy was never invoked — the bypass branch ran instead.
+    assert apply_calls == [], (
+        f"calibrators.apply must not be called when apply_calibrator=False; "
+        f"got {len(apply_calls)} call(s): {apply_calls}"
+    )
+    nba = scored["per_league"]["NBA"]
+    assert nba["calibrator_applied_count"] == 0
+    assert nba["calibrator_type"] is None
+    # Raw == calibrated because no calibration happened.
+    assert nba["brier_v1_raw"] == pytest.approx(nba["brier_calibrated"])
+    assert nba["brier_delta"] == pytest.approx(0.0, abs=1e-12)
+    assert nba["delta_vs_v1"] == pytest.approx(0.0, abs=1e-12)
+    assert scored["summary"]["leagues_parity"] == ["NBA"]
+    assert scored["summary"]["leagues_improved"] == []
+    assert scored["summary"]["leagues_regressed"] == []
+
+
+def test_run_full_stack_bypasses_double_calibration_end_to_end() -> None:
+    """End-to-end regression: when run() invokes the full-stack path,
+    ``full_stack_scored`` MUST be free of double-calibration even when
+    a fitted calibrator IS active.
+
+    Setup: monkeypatch calibrators.apply() to return a wildly different
+    probability whenever called (would corrupt brier_calibrated if the
+    full-stack path naively re-applied it). The predictor stub returns
+    a fixed p=0.7 regardless of features.
+
+    Expectations:
+      * calibrator-only ``per_league`` block shows brier_delta != 0
+        (the spy calibrator IS applied to V1.predicted_prob — that's
+        the whole point of the calibrator-only path).
+      * ``full_stack_scored.per_league.<lg>.brier_delta`` is exactly 0
+        (no double-calibration), and brier_calibrated == Brier(0.7, ys).
+    """
+
+    class _StubPrediction:
+        def __init__(self, p: float) -> None:
+            self.probability = p
+
+    async def _stub_predict(features, *, league):
+        # Constant 0.7 — deterministic so we can compute expected Brier.
+        return _StubPrediction(0.7)
+
+    spy_apply_calls: list[tuple[float, str | None]] = []
+
+    def _spy_apply(p: float, league: str | None):
+        spy_apply_calls.append((p, league))
+        return (1.0 - p, {"applied": True, "type": "spy"})
+
+    # NB: predicted_prob values must NOT be 0.5 — the spy returns 1-p
+    # which would map 0.5 → 0.5 and the calibrator-only Brier delta
+    # would (correctly) be zero, defeating the regression contrast.
+    rows = [
+        {"league": "NBA", "predicted_prob": 0.7, "actual_outcome": 1,
+         "analysis_json": {"side": "yes", "feature_vector": [0.8, 0.8, 0.8]}},
+        {"league": "NBA", "predicted_prob": 0.4, "actual_outcome": 0,
+         "analysis_json": {"side": "yes", "feature_vector": [0.2, 0.2, 0.2]}},
+        {"league": "NBA", "predicted_prob": 0.6, "actual_outcome": 1,
+         "analysis_json": {"side": "yes", "feature_vector": [0.6, 0.6, 0.6]}},
+    ]
+
+    original = bt.calibrators.apply
+    bt.calibrators.apply = _spy_apply  # type: ignore[assignment]
+    try:
+        report = asyncio.run(
+            bt.run(rows=rows, limit=None, leagues_filter=None,
+                   load_calibrators=False, full_stack=True,
+                   predict_fn=_stub_predict)
+        )
+    finally:
+        bt.calibrators.apply = original  # type: ignore[assignment]
+
+    # Calibrator-only path: spy IS applied (would-flip every prob).
+    nba_cal = report["per_league"]["NBA"]
+    assert nba_cal["calibrator_applied_count"] == 3
+    assert nba_cal["brier_delta"] != pytest.approx(0.0, abs=1e-9), (
+        "spy calibrator should have moved brier_calibrated away from "
+        "brier_v1_raw on the calibrator-only path"
+    )
+
+    # Full-stack path: no double-calibration.
+    fss = report["full_stack_scored"]
+    nba_fs = fss["per_league"]["NBA"]
+    assert nba_fs["calibrator_applied_count"] == 0
+    assert nba_fs["calibrator_type"] is None
+    assert nba_fs["brier_delta"] == pytest.approx(0.0, abs=1e-12)
+    assert nba_fs["delta_vs_v1"] == pytest.approx(0.0, abs=1e-12)
+    # brier_calibrated must equal Brier(0.7, ys=[1,0,1]) =
+    #   ((0.7-1)^2 + (0.7-0)^2 + (0.7-1)^2)/3 = (0.09+0.49+0.09)/3 = 0.2233...
+    expected_brier = ((0.7 - 1) ** 2 + (0.7 - 0) ** 2 + (0.7 - 1) ** 2) / 3
+    assert nba_fs["brier_calibrated"] == pytest.approx(expected_brier, abs=1e-9)
+    # Spy calls came only from the calibrator-only path (3 NBA rows),
+    # NOT from the full-stack path. If the full-stack path had double-
+    # calibrated we'd see 6 calls instead of 3.
+    assert len(spy_apply_calls) == 3, (
+        f"expected exactly 3 spy calls (calibrator-only path) — got "
+        f"{len(spy_apply_calls)}, suggesting double-calibration regression"
+    )
+
+
+def test_normalize_into_matches_normalize_rows() -> None:
+    """``_normalize_into`` (streaming) and ``_normalize_rows`` (one-shot)
+    must produce identical grouped dicts for the same input. Guards the
+    streaming refactor against silent divergence."""
+    rows = [
+        {"league": "NBA", "predicted_prob": 0.7, "actual_outcome": 1,
+         "analysis_json": {"side": "yes"}},
+        {"league": "nba", "predicted_prob": 0.3, "actual_outcome": 0,
+         "analysis_json": {"side": "no"}},  # → flipped to 0.7
+        {"league": "NFL", "predicted_prob": 0.55, "actual_outcome": 1,
+         "analysis_json": '{"side": "yes"}'},
+        # Dropped: missing prob.
+        {"league": "MLB", "predicted_prob": None, "actual_outcome": 1,
+         "analysis_json": {"side": "yes"}},
+    ]
+    one_shot = bt._normalize_rows(rows, leagues_filter=None)
+    streamed: dict[str, dict[str, list]] = {}
+    appended = bt._normalize_into(streamed, rows, leagues_filter=None)
+    assert appended == sum(len(v["probs"]) for v in one_shot.values())
+    assert set(streamed.keys()) == set(one_shot.keys())
+    for lg in one_shot:
+        assert streamed[lg]["probs"] == one_shot[lg]["probs"]
+        assert streamed[lg]["ys"] == one_shot[lg]["ys"]
+
+
+def test_run_streams_in_batches_and_reports_batch_count() -> None:
+    """In-memory mode uses the same streaming code path as DB mode:
+    rows are chunked into batches of ``batch_size`` and the report
+    surfaces ``batch_count`` so operators can verify batching is on.
+
+    Also checks that final scored output is identical to the
+    non-batched reference — i.e. batching is observationally
+    invariant."""
+    rows = [
+        {"league": "NBA", "predicted_prob": 0.6, "actual_outcome": 1,
+         "analysis_json": {"side": "yes"}},
+        {"league": "NBA", "predicted_prob": 0.4, "actual_outcome": 0,
+         "analysis_json": {"side": "yes"}},
+        {"league": "NFL", "predicted_prob": 0.55, "actual_outcome": 1,
+         "analysis_json": {"side": "yes"}},
+        {"league": "MLB", "predicted_prob": 0.5, "actual_outcome": 0,
+         "analysis_json": {"side": "yes"}},
+        {"league": "MLB", "predicted_prob": 0.7, "actual_outcome": 1,
+         "analysis_json": {"side": "yes"}},
+    ]
+    big = asyncio.run(bt.run(rows=rows, limit=None, leagues_filter=None,
+                             load_calibrators=False, batch_size=1000))
+    small = asyncio.run(bt.run(rows=rows, limit=None, leagues_filter=None,
+                               load_calibrators=False, batch_size=2))
+    # batch_count reflects the number of chunks consumed.
+    assert big["batch_count"] == 1
+    assert small["batch_count"] == 3  # ceil(5/2) = 3
+    # Same input → same kept-row count, same per-league math.
+    assert big["row_kept_count"] == small["row_kept_count"]
+    assert big["row_input_count"] == small["row_input_count"] == 5
+    for lg in big["per_league"]:
+        assert (
+            big["per_league"][lg]["brier_v1_raw"]
+            == pytest.approx(small["per_league"][lg]["brier_v1_raw"], abs=1e-12)
+        )
+        assert (
+            big["per_league"][lg]["sample_count"]
+            == small["per_league"][lg]["sample_count"]
+        )

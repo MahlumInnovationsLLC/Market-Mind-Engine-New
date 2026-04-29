@@ -272,14 +272,24 @@ def _normalize_rows(
 # ---------------------------------------------------------------------------
 
 
-async def _fetch_db_rows(
+_DEFAULT_BATCH_SIZE = 50_000
+
+
+async def _fetch_db_rows_batched(
     limit: int | None,
     leagues_filter: set[str] | None,
-) -> list[dict[str, Any]]:
-    """Pull rows from ``v1_archive.trade_analyses``.
+    batch_size: int = _DEFAULT_BATCH_SIZE,
+):
+    """Async generator: yield rows from ``v1_archive.trade_analyses``
+    in batches of at most ``batch_size``.
+
+    Uses keyset pagination on the ``id`` PRIMARY KEY (text/UUID) so
+    memory stays bounded — the harness scored 667k rows on the
+    initial run by materializing them all; with this generator the
+    grouped per-league dict is the only thing that grows.
 
     Preflights via ``to_regclass`` so a fresh dev DB without migration
-    0037 returns an empty list rather than raising ``UndefinedTable``.
+    0037 yields nothing rather than raising ``UndefinedTable``.
     """
     from app import db  # local import — avoids triggering pool setup at parse time
 
@@ -288,9 +298,9 @@ async def _fetch_db_rows(
     )
     if not present:
         print("[backtest] v1_archive.trade_analyses not found; nothing to do.")
-        return []
+        return
 
-    where: list[str] = [
+    where_static: list[str] = [
         "predicted_prob IS NOT NULL",
         "actual_outcome IS NOT NULL",
         "league IS NOT NULL",
@@ -301,17 +311,92 @@ async def _fetch_db_rows(
         cleaned = ",".join(
             "'" + lg.replace("'", "''").upper() + "'" for lg in leagues_filter
         )
-        where.append(f"upper(league) IN ({cleaned})")
-    sql = (
-        "SELECT league, predicted_prob, actual_outcome, analysis_json "
-        "FROM v1_archive.trade_analyses "
-        f"WHERE {' AND '.join(where)} "
-        "ORDER BY created_at DESC NULLS LAST"
-    )
-    if limit is not None:
-        sql += f" LIMIT {int(limit)}"
-    rows = await db.fetch(sql)
-    return [dict(r) for r in rows]
+        where_static.append(f"upper(league) IN ({cleaned})")
+
+    last_id: str | None = None
+    total_yielded = 0
+    bs = max(1, int(batch_size))
+    while True:
+        # Cap batch to remaining limit if a global limit was set.
+        if limit is not None:
+            remaining = limit - total_yielded
+            if remaining <= 0:
+                return
+            this_batch = min(bs, remaining)
+        else:
+            this_batch = bs
+
+        where_clauses = list(where_static)
+        params: list[Any] = []
+        if last_id is not None:
+            where_clauses.append("id > $1")
+            params.append(last_id)
+        sql = (
+            "SELECT id, league, predicted_prob, actual_outcome, analysis_json "
+            "FROM v1_archive.trade_analyses "
+            f"WHERE {' AND '.join(where_clauses)} "
+            f"ORDER BY id ASC LIMIT {int(this_batch)}"
+        )
+        if params:
+            rows = await db.fetch(sql, *params)
+        else:
+            rows = await db.fetch(sql)
+        if not rows:
+            return
+        batch_rows = [dict(r) for r in rows]
+        last_id = batch_rows[-1]["id"]
+        total_yielded += len(batch_rows)
+        yield batch_rows
+        if len(batch_rows) < this_batch:
+            return
+
+
+def _normalize_into(
+    grouped: dict[str, dict[str, list]],
+    rows: list[dict[str, Any]],
+    leagues_filter: set[str] | None,
+) -> int:
+    """Merge a batch of raw rows into ``grouped`` in place. Returns
+    the number of rows actually appended (skips dropped rows).
+
+    Same per-row drop semantics as ``_normalize_rows`` — split out so
+    the streaming path can reuse the logic without re-grouping.
+    """
+    appended = 0
+    for r in rows:
+        league = (r.get("league") or "").strip().upper()
+        if not league:
+            continue
+        if leagues_filter and league not in leagues_filter:
+            continue
+        prob_raw = r.get("predicted_prob")
+        outcome_raw = r.get("actual_outcome")
+        if prob_raw is None or outcome_raw is None:
+            continue
+        side = r.get("side")
+        if side is None:
+            aj = r.get("analysis_json")
+            if isinstance(aj, str):
+                try:
+                    aj = json.loads(aj)
+                except (ValueError, TypeError):
+                    aj = None
+            if isinstance(aj, dict):
+                side = aj.get("side")
+        p_side = _side_align(float(prob_raw), side)
+        if p_side is None:
+            continue
+        try:
+            y = int(outcome_raw)
+        except (TypeError, ValueError):
+            continue
+        if y not in (0, 1):
+            continue
+        bucket = grouped.setdefault(league, {"probs": [], "ys": []})
+        bucket["probs"].append(p_side)
+        bucket["ys"].append(y)
+        appended += 1
+    return appended
 
 
 def _read_fixture(path: Path) -> list[dict[str, Any]]:
@@ -477,8 +562,21 @@ async def _attempt_full_stack_inference(
 
 def score_grouped(
     grouped: dict[str, dict[str, list]],
+    *,
+    apply_calibrator: bool = True,
 ) -> dict[str, Any]:
     """Compute per-league raw + calibrated metrics. Pure function — no IO.
+
+    ``apply_calibrator=False`` is the no-op-calibration mode used by
+    the full-stack scoring path: the probabilities coming in have
+    *already* been calibrated by ``app.predictor.predict()`` (which
+    internally calls ``calibrators.apply()``), so re-running them
+    through ``calibrators.apply()`` here would double-calibrate them
+    and produce nonsense ``brier_calibrated`` numbers.  In that mode
+    ``brier_v1_raw`` and ``brier_calibrated`` carry the same value
+    (the predict() output), ``brier_delta`` / ``delta_vs_v1`` is
+    always ``0.0``, and ``calibrator_applied_count`` is set to ``0``
+    so the report makes the bypass explicit.
 
     Rollup semantics for ``brier_delta`` (= ``brier_calibrated - brier_v1_raw``):
 
@@ -504,17 +602,26 @@ def score_grouped(
         probs = grouped[league]["probs"]
         ys = grouped[league]["ys"]
         n = len(probs)
-        # Apply current calibrator.  When no fitted artifact exists for
-        # this league, calibrators.apply() is a documented no-op and
-        # returns the raw probability — `applied` flips False so the
-        # report can call out the bypass.
-        calibrated_pairs = [calibrators.apply(p, league) for p in probs]
-        cal_probs = [cp for cp, _info in calibrated_pairs]
-        applied_count = sum(1 for _cp, info in calibrated_pairs if info.get("applied"))
-        cal_type = next(
-            (info.get("type") for _cp, info in calibrated_pairs if info.get("applied")),
-            None,
-        )
+        if apply_calibrator:
+            # Apply current calibrator.  When no fitted artifact exists for
+            # this league, calibrators.apply() is a documented no-op and
+            # returns the raw probability — `applied` flips False so the
+            # report can call out the bypass.
+            calibrated_pairs = [calibrators.apply(p, league) for p in probs]
+            cal_probs = [cp for cp, _info in calibrated_pairs]
+            applied_count = sum(1 for _cp, info in calibrated_pairs if info.get("applied"))
+            cal_type = next(
+                (info.get("type") for _cp, info in calibrated_pairs if info.get("applied")),
+                None,
+            )
+        else:
+            # Full-stack scoring path: probabilities have already been
+            # calibrated by app.predictor.predict() upstream. Re-applying
+            # would double-calibrate — instead pass them through as-is
+            # so brier_v1_raw == brier_calibrated and brier_delta == 0.
+            cal_probs = list(probs)
+            applied_count = 0
+            cal_type = None
 
         brier_raw = _brier(probs, ys)
         brier_cal = _brier(cal_probs, ys)
@@ -665,13 +772,19 @@ async def run(
     load_calibrators: bool,
     full_stack: bool = False,
     predict_fn: Any | None = None,
+    batch_size: int = _DEFAULT_BATCH_SIZE,
 ) -> dict[str, Any]:
     """Programmatic entry point. Used by the pytest fixture.
 
-    When ``full_stack=True`` the harness also walks every row through
-    ``app.predictor.predict()`` (the LGB+XGB stack via models_loader)
-    and reports the per-row attempt/skip counts.  Pass ``predict_fn``
-    to inject a stub for tests that don't want to load real models.
+    DB mode walks ``v1_archive.trade_analyses`` in keyset-paginated
+    batches of ``batch_size`` rows so peak memory stays bounded
+    (the per-league grouped dict is the only thing that grows).
+
+    When ``full_stack=True`` the harness also walks every row
+    (per batch in DB mode) through ``app.predictor.predict()`` (the
+    LGB+XGB stack via models_loader) and reports the per-row
+    attempt/skip counts.  Pass ``predict_fn`` to inject a stub for
+    tests that don't want to load real models.
     """
     started_at = datetime.now(timezone.utc).isoformat()
     if load_calibrators:
@@ -679,32 +792,85 @@ async def run(
             await calibrators.load_all()
         except Exception as e:  # pragma: no cover — defensive
             print(f"[backtest] calibrator load failed (continuing with no-op): {e}")
+
+    grouped: dict[str, dict[str, list]] = {}
+    fs_grouped: dict[str, dict[str, list]] = {}
+    full_stack_summary: dict[str, Any] | None = (
+        {
+            "rows_attempted": 0,
+            "rows_predicted": 0,
+            "rows_skipped": 0,
+            "skip_reasons": {},
+            "error_samples": [],
+        }
+        if full_stack
+        else None
+    )
+    row_input_count = 0
+    batch_count = 0
+
+    async def _process_batch(batch_rows: list[dict[str, Any]]) -> None:
+        """Merge a batch into the calibrator-only grouped dict and,
+        when full_stack is on, also into the predictor-output dict."""
+        nonlocal batch_count
+        batch_count += 1
+        _normalize_into(grouped, batch_rows, leagues_filter=leagues_filter)
+        if full_stack and full_stack_summary is not None:
+            fs_g, fs_s = await _attempt_full_stack_inference(
+                batch_rows, leagues_filter=leagues_filter, predict_fn=predict_fn,
+            )
+            # Merge per-batch grouped into the running fs_grouped.
+            for lg, bucket in fs_g.items():
+                target = fs_grouped.setdefault(lg, {"probs": [], "ys": []})
+                target["probs"].extend(bucket["probs"])
+                target["ys"].extend(bucket["ys"])
+            # Merge per-batch summary counters.
+            full_stack_summary["rows_attempted"] += fs_s["rows_attempted"]
+            full_stack_summary["rows_predicted"] += fs_s["rows_predicted"]
+            full_stack_summary["rows_skipped"] += fs_s["rows_skipped"]
+            for k, v in fs_s["skip_reasons"].items():
+                full_stack_summary["skip_reasons"][k] = (
+                    full_stack_summary["skip_reasons"].get(k, 0) + v
+                )
+            # Cap retained error samples so the summary doesn't grow.
+            for sample in fs_s["error_samples"]:
+                if len(full_stack_summary["error_samples"]) < 5:
+                    full_stack_summary["error_samples"].append(sample)
+
     if rows is None:
-        rows = await _fetch_db_rows(limit, leagues_filter)
         source = "db"
+        async for batch in _fetch_db_rows_batched(
+            limit=limit, leagues_filter=leagues_filter, batch_size=batch_size,
+        ):
+            row_input_count += len(batch)
+            await _process_batch(batch)
     else:
         source = "in-memory"
+        row_input_count = len(rows)
+        # Stream the in-memory list in same-size chunks so the full-stack
+        # path executes against fixture rows the same way it does
+        # against DB rows (good test coverage of the streaming code path).
+        bs = max(1, int(batch_size))
+        for start in range(0, len(rows), bs):
+            await _process_batch(rows[start:start + bs])
 
-    full_stack_summary: dict[str, Any] | None = None
+    scored = score_grouped(grouped)
     full_stack_scored: dict[str, Any] | None = None
     if full_stack:
-        fs_grouped, full_stack_summary = await _attempt_full_stack_inference(
-            rows, leagues_filter=leagues_filter, predict_fn=predict_fn,
-        )
-        # Score whatever the predictor produced. With today's archive
-        # this is empty per-league dict; with the test stub it is
-        # populated and exercises the same `score_grouped` path.
-        full_stack_scored = score_grouped(fs_grouped)
+        # apply_calibrator=False — predict() already calibrated internally;
+        # re-applying here would double-calibrate. See score_grouped's
+        # docstring for the full explanation.
+        full_stack_scored = score_grouped(fs_grouped, apply_calibrator=False)
 
-    grouped = _normalize_rows(rows, leagues_filter=leagues_filter)
-    scored = score_grouped(grouped)
     triage = _build_triage(scored, full_stack_summary)
     report: dict[str, Any] = {
         "started_at": started_at,
         "completed_at": datetime.now(timezone.utc).isoformat(),
         "source": source,
-        "row_input_count": len(rows),
+        "row_input_count": row_input_count,
         "row_kept_count": scored["summary"]["row_count"],
+        "batch_count": batch_count,
+        "batch_size": batch_size,
         "leagues_filter": sorted(leagues_filter) if leagues_filter else None,
         "limit": limit,
         "calibrator_freshness": calibrators.get_state().freshness() if load_calibrators else None,
@@ -735,6 +901,9 @@ async def _amain(argv: list[str] | None = None) -> int:
                              "via app.predictor.predict() and report attempt/skip "
                              "counts. Yields zero usable rows on the V1 archive "
                              "(features not snapshotted) — see triage block.")
+    parser.add_argument("--batch-size", type=int, default=_DEFAULT_BATCH_SIZE,
+                        help=f"Rows pulled per DB batch (keyset paginated on id). "
+                             f"Default {_DEFAULT_BATCH_SIZE}.")
     parser.add_argument("--json-out", type=Path, default=None,
                         help="Write the JSON report to this path.")
     args = parser.parse_args(argv)
@@ -753,6 +922,7 @@ async def _amain(argv: list[str] | None = None) -> int:
         leagues_filter=_parse_leagues(args.leagues),
         load_calibrators=not args.no_load_calibrators,
         full_stack=args.full_stack,
+        batch_size=args.batch_size,
     )
 
     summary = report["summary"]

@@ -410,6 +410,21 @@ The report's `summary` block exposes `leagues_parity`,
 should fire on `leagues_regressed` not on `leagues_outside_tolerance`,
 since "outside" is currently dominated by *improvements*.
 
+**Internals — DB batching + no double-calibration on full-stack path.**
+`run()` walks the V1 archive in keyset-paginated batches (default
+`--batch-size 50000`, ordered by the `id` PRIMARY KEY) so memory
+stays bounded; the per-league grouped dict is the only thing that
+grows. The report surfaces `batch_count` / `batch_size` for operator
+verification. On the `--full-stack` path, `score_grouped()` is
+called with `apply_calibrator=False` because `app.predictor.predict()`
+already invokes `calibrators.apply()` internally (see
+`app/predictor.py::predict`) — re-applying here would double-
+calibrate the probability and produce bogus `brier_calibrated`.
+Regression coverage: `tests/test_backtest_v1_archive.py::
+test_run_full_stack_bypasses_double_calibration_end_to_end` spies on
+`calibrators.apply`, asserts it is never called from the full-stack
+scoring branch, and verifies `full_stack_scored.<lg>.brier_delta == 0`.
+
 Phase 2 dumps (`weather_observations`, `line_snapshots`,
 `llm_predictions`) plus broadening V1 side coverage to sport-specific
 bet labels are tracked under follow-up task #731.
