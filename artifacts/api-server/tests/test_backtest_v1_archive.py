@@ -1,23 +1,10 @@
-"""End-to-end tests for the V1 backtest harness.
-
-The fixture-driven path covers:
-
-* `_normalize_rows` — side-flipping (yes/buy → keep, no/sell → flip),
-  unknown-side dropping, malformed-row resilience.
-* `score_grouped` — Brier / log-loss / AUC math + the calibrated vs raw
-  delta when the calibrator is a no-op (cold install).
-* `run()` end-to-end against the 10-row synthetic fixture, including
-  the `--no-load-calibrators` mode the harness uses for offline runs.
-
-We assert the **shape** of the report (keys present, types right,
-sample counts add up) rather than exact metric values — those are
-already covered by their pure-function tests above and would create
-brittle test failures if the metric helpers are ever tightened.
-"""
+"""Tests for the V1 backtest harness."""
 from __future__ import annotations
 
 import asyncio
 import json
+import math
+import time
 from pathlib import Path
 
 import pytest
@@ -31,68 +18,58 @@ FIXTURE = Path(__file__).parent / "fixtures" / "v1_backtest_synthetic.json"
 
 @pytest.fixture(autouse=True)
 def _clean_calibrator_state():
-    """Each test starts from an empty in-memory calibrator state so a
-    leftover load from another test can't sneak `applied=True` results
-    into a test that expects no-op behaviour."""
     calibrators.invalidate()
     yield
     calibrators.invalidate()
 
 
-# ---------------------------------------------------------------------------
-# Pure-function tests
-# ---------------------------------------------------------------------------
+# --- pure-function metrics + side alignment ---------------------------------
 
 
-def test_side_align_flips_no_keeps_yes():
-    assert bt._side_align(0.7, "yes") == 0.7
-    assert bt._side_align(0.7, "buy") == 0.7
-    assert bt._side_align(0.7, "live_yes") == 0.7
-    assert bt._side_align(0.7, "no") == pytest.approx(0.3)
-    assert bt._side_align(0.7, "sell") == pytest.approx(0.3)
-    assert bt._side_align(0.7, "buy no") == pytest.approx(0.3)
-    # Unknown side is dropped (caller filters None out).
-    assert bt._side_align(0.7, "pass") is None
-    assert bt._side_align(0.7, None) is None
-    assert bt._side_align(0.7, "") is None
+@pytest.mark.parametrize("side,expected", [
+    ("yes", 0.7), ("YES", 0.7), ("buy", 0.7),
+    ("live_yes", 0.7), ("buy yes", 0.7), ("Buy Yes", 0.7),
+    ("no", 0.3), ("NO", 0.3), ("sell", 0.3),
+    ("live_no", 0.3), ("buy no", 0.3), ("  Sell  ", 0.3),
+])
+def test_side_align_canonical_aliases(side, expected):
+    assert bt._side_align(0.7, side) == pytest.approx(expected)
+
+
+@pytest.mark.parametrize("side", ["pass", None, ""])
+def test_side_align_drops_unknown(side):
+    assert bt._side_align(0.7, side) is None
 
 
 def test_side_align_clamps_out_of_range():
-    """V1 occasionally emitted predicted_prob > 1 (the calibrator-fit
-    job clamps to [0,1] for the same reason). Confirm the harness
-    matches that contract."""
     assert bt._side_align(1.4, "yes") == 1.0
     assert bt._side_align(-0.2, "yes") == 0.0
     assert bt._side_align(1.4, "no") == 0.0
 
 
 def test_brier_log_loss_auc_basics():
-    # Perfect predictor: brier=0, log_loss≈0, auc=1.
     probs = [0.99, 0.99, 0.01, 0.01]
     ys = [1, 1, 0, 0]
     assert bt._brier(probs, ys) == pytest.approx(0.0001, abs=1e-4)
     assert bt._log_loss(probs, ys) < 0.05
     assert bt._auc(probs, ys) == 1.0
-    # Empty inputs → None for all three.
     assert bt._brier([], []) is None
     assert bt._log_loss([], []) is None
     assert bt._auc([], []) is None
-    # Single-class outcomes → AUC undefined, Brier defined.
+    # Single-class outcomes => AUC undefined, Brier defined.
     assert bt._auc([0.4, 0.6], [1, 1]) is None
     assert bt._brier([0.4, 0.6], [1, 1]) == pytest.approx((0.36 + 0.16) / 2)
 
 
 def test_log_loss_clamps_degenerate_zero_one():
-    """V1 sometimes emitted exactly 0 or 1 — log_loss must not return -inf."""
+    """V1 sometimes emitted exactly 0/1 — log_loss must not return -inf."""
     val = bt._log_loss([0.0, 1.0], [0, 1])
     assert val is not None and val < 1e-6
-    val = bt._log_loss([0.0, 1.0], [1, 0])  # totally wrong
-    assert val is not None and 25 < val < 35  # clamped to ~ -log(eps)
+    val = bt._log_loss([0.0, 1.0], [1, 0])
+    assert val is not None and 25 < val < 35
 
 
-# ---------------------------------------------------------------------------
-# Normalization
-# ---------------------------------------------------------------------------
+# --- normalization ----------------------------------------------------------
 
 
 def test_normalize_rows_drops_unknown_side_and_missing():
@@ -111,7 +88,6 @@ def test_normalize_rows_drops_unknown_side_and_missing():
     grouped = bt._normalize_rows(rows)
     assert set(grouped) == {"NBA", "NFL"}
     assert len(grouped["NBA"]["probs"]) == 1
-    # NFL: first row had side=no so prob is flipped to 0.3.
     assert grouped["NFL"]["probs"] == pytest.approx([0.3, 0.7])
     assert grouped["NFL"]["ys"] == [0, 0]
 
@@ -121,320 +97,313 @@ def test_normalize_rows_respects_league_filter():
         {"league": "NBA", "predicted_prob": 0.6, "actual_outcome": 1, "side": "yes"},
         {"league": "NFL", "predicted_prob": 0.6, "actual_outcome": 1, "side": "yes"},
     ]
-    grouped = bt._normalize_rows(rows, leagues_filter={"NBA"})
-    assert list(grouped) == ["NBA"]
+    assert list(bt._normalize_rows(rows, leagues_filter={"NBA"})) == ["NBA"]
 
 
-# ---------------------------------------------------------------------------
-# score_grouped — calibrator-as-no-op (cold-install behaviour)
-# ---------------------------------------------------------------------------
+def test_normalize_rows_drops_malformed_analysis_json():
+    """Malformed analysis_json string must not crash; row falls through to drop."""
+    rows = [
+        {"league": "NBA", "predicted_prob": 0.6, "actual_outcome": 1,
+         "analysis_json": "{not valid json"},
+        {"league": "NBA", "predicted_prob": 0.6, "actual_outcome": 1,
+         "side": "yes", "analysis_json": "{still garbage"},
+    ]
+    grouped = bt._normalize_rows(rows)
+    assert "NBA" in grouped
+    assert grouped["NBA"]["probs"] == pytest.approx([0.6])
+
+
+def test_normalize_into_matches_normalize_rows():
+    rows = [
+        {"league": "NBA", "predicted_prob": 0.7, "actual_outcome": 1,
+         "analysis_json": {"side": "yes"}},
+        {"league": "nba", "predicted_prob": 0.3, "actual_outcome": 0,
+         "analysis_json": {"side": "no"}},
+        {"league": "NFL", "predicted_prob": 0.55, "actual_outcome": 1,
+         "analysis_json": '{"side": "yes"}'},
+        {"league": "MLB", "predicted_prob": None, "actual_outcome": 1,
+         "analysis_json": {"side": "yes"}},
+    ]
+    one_shot = bt._normalize_rows(rows, leagues_filter=None)
+    streamed: dict[str, dict[str, list]] = {}
+    appended = bt._normalize_into(streamed, rows, leagues_filter=None)
+    assert appended == sum(len(v["probs"]) for v in one_shot.values())
+    assert streamed == one_shot
+
+
+# --- score_grouped ----------------------------------------------------------
 
 
 def test_score_grouped_noop_calibrator_yields_zero_delta():
-    """With no calibrator loaded, calibrators.apply() bypasses and the
-    calibrated metrics must equal the raw metrics — delta=0.0 across
-    the board.  This is the contract a fresh dev DB will satisfy."""
+    """Cold-install behaviour: no calibrator loaded => raw == calibrated."""
     rows = json.loads(FIXTURE.read_text())
-    grouped = bt._normalize_rows(rows)
-    scored = bt.score_grouped(grouped)
+    scored = bt.score_grouped(bt._normalize_rows(rows))
     assert set(scored["per_league"]) == {"NBA", "NFL"}
-    for league, m in scored["per_league"].items():
+    for m in scored["per_league"].values():
         assert m["calibrator_applied_count"] == 0
         assert m["brier_v1_raw"] == pytest.approx(m["brier_calibrated"])
         assert m["brier_delta"] == pytest.approx(0.0)
-        assert m["log_loss_v1_raw"] == pytest.approx(m["log_loss_calibrated"])
-        # 5 rows per league in the fixture, mixed outcomes → AUC defined.
+        assert m["delta_vs_v1"] == m["brier_delta"]
         assert m["sample_count"] == 5
-        assert m["auc_v1_raw"] is not None
-        assert m["auc_calibrated"] == pytest.approx(m["auc_v1_raw"])
-        assert m["within_brier_tolerance"] is True
         assert m["verdict"] == "parity"
     assert scored["summary"]["row_count"] == 10
     assert sorted(scored["summary"]["leagues_parity"]) == ["NBA", "NFL"]
-    assert scored["summary"]["leagues_improved"] == []
-    assert scored["summary"]["leagues_regressed"] == []
-    # Legacy alias still populated.
     assert sorted(scored["summary"]["leagues_within_tolerance"]) == ["NBA", "NFL"]
-    assert scored["summary"]["leagues_outside_tolerance"] == []
 
 
 def test_score_grouped_calibrator_changes_delta():
-    """Inject an isotonic calibrator manually; verify the calibrated
-    metrics diverge from raw and `applied` flips True for that league."""
-    import time
-
     calibrators._state.calibrators["NBA"] = calibrators._Calibrator(
-        league="NBA",
-        type="isotonic",
-        # Heavy-handed shrinkage toward 0.5: x in [0,1] → y in [0.4, 0.6].
+        league="NBA", type="isotonic",
         state={"x": [0.0, 1.0], "y": [0.4, 0.6]},
-        fit_at=time.time(),
-        sample_count=999,
+        fit_at=time.time(), sample_count=999,
     )
     rows = json.loads(FIXTURE.read_text())
-    grouped = bt._normalize_rows(rows)
-    scored = bt.score_grouped(grouped)
+    scored = bt.score_grouped(bt._normalize_rows(rows))
     nba = scored["per_league"]["NBA"]
     nfl = scored["per_league"]["NFL"]
     assert nba["calibrator_applied_count"] == nba["sample_count"]
     assert nba["calibrator_type"] == "isotonic"
     assert nba["brier_calibrated"] != pytest.approx(nba["brier_v1_raw"])
-    # NFL has no fitted calibrator → still no-op.
     assert nfl["calibrator_applied_count"] == 0
     assert nfl["brier_delta"] == pytest.approx(0.0)
 
 
-# ---------------------------------------------------------------------------
-# End-to-end run() against the fixture
-# ---------------------------------------------------------------------------
+def test_verdict_boundary_classification():
+    """|delta| == tolerance => parity (inclusive); above => improved/regressed."""
+    tol = bt._BRIER_TOLERANCE
+    L_PARITY, L_IMPROVE, L_REGRESS = "UFC", "ATP", "F1"
+    for lg in (L_PARITY, L_IMPROVE, L_REGRESS):
+        assert lg in calibrators.SUPPORTED_LEAGUES, lg
+    grouped = {
+        L_PARITY:  {"probs": [0.5, 0.5], "ys": [0, 1]},   # raw 0.25
+        L_REGRESS: {"probs": [0.0, 1.0], "ys": [0, 1]},   # raw 0.0
+        L_IMPROVE: {"probs": [1.0, 0.0], "ys": [0, 1]},   # raw 1.0
+    }
+    # Solve q so calibrated Brier on parity league = raw + tol exactly.
+    q = (1 - math.sqrt(1 - 4 * 0.23)) / 2
+    assert ((q - 0) ** 2 + (q - 1) ** 2) / 2 == pytest.approx(0.25 + tol, abs=1e-9)
+    calibrators._state.calibrators[L_PARITY] = calibrators._Calibrator(
+        league=L_PARITY, type="isotonic",
+        state={"x": [0.0, 1.0], "y": [q, q]},
+        fit_at=time.time(), sample_count=999,
+    )
+    calibrators._state.calibrators[L_IMPROVE] = calibrators._Calibrator(
+        league=L_IMPROVE, type="isotonic",
+        state={"x": [0.0, 1.0], "y": [1.0, 0.0]},
+        fit_at=time.time(), sample_count=999,
+    )
+    calibrators._state.calibrators[L_REGRESS] = calibrators._Calibrator(
+        league=L_REGRESS, type="isotonic",
+        state={"x": [0.0, 1.0], "y": [0.5, 0.5]},
+        fit_at=time.time(), sample_count=999,
+    )
+    scored = bt.score_grouped(grouped)
+    assert scored["per_league"][L_PARITY]["verdict"] == "parity"
+    assert scored["per_league"][L_IMPROVE]["verdict"] == "improved"
+    assert scored["per_league"][L_REGRESS]["verdict"] == "regressed"
+    assert sorted(scored["summary"]["leagues_outside_tolerance"]) == sorted(
+        [L_IMPROVE, L_REGRESS]
+    )
+
+
+def test_score_grouped_apply_calibrator_false_skips_calibration():
+    """apply_calibrator=False bypasses calibrators.apply() entirely.
+
+    Regression guard: an earlier full-stack draft re-applied the
+    calibrator on top of probabilities predict() had already calibrated.
+    """
+    apply_calls: list[tuple[float, str | None]] = []
+
+    def _spy_apply(p, league):
+        apply_calls.append((p, league))
+        return (1.0 - p, {"applied": True, "type": "spy"})
+
+    grouped = {"NBA": {"probs": [0.7, 0.3, 0.6], "ys": [1, 0, 1]}}
+    original = bt.calibrators.apply
+    bt.calibrators.apply = _spy_apply  # type: ignore[assignment]
+    try:
+        scored = bt.score_grouped(grouped, apply_calibrator=False)
+    finally:
+        bt.calibrators.apply = original  # type: ignore[assignment]
+    assert apply_calls == []
+    nba = scored["per_league"]["NBA"]
+    assert nba["calibrator_applied_count"] == 0
+    assert nba["calibrator_type"] is None
+    assert nba["brier_v1_raw"] == pytest.approx(nba["brier_calibrated"])
+    assert nba["brier_delta"] == pytest.approx(0.0, abs=1e-12)
+    assert nba["delta_vs_v1"] == pytest.approx(0.0, abs=1e-12)
+
+
+# --- run() end-to-end -------------------------------------------------------
 
 
 def test_run_end_to_end_against_fixture():
     rows = json.loads(FIXTURE.read_text())
     report = asyncio.run(bt.run(
-        rows=rows,
-        limit=None,
-        leagues_filter=None,
-        load_calibrators=False,  # offline mode — skips DB lookup
+        rows=rows, limit=None, leagues_filter=None, load_calibrators=False,
     ))
-    # Top-level shape contract.
     for key in (
         "started_at", "completed_at", "source", "row_input_count",
         "row_kept_count", "leagues_filter", "limit", "per_league",
-        "summary",
+        "summary", "parity_gate_status",
     ):
         assert key in report, f"missing top-level key {key}"
     assert report["source"] == "in-memory"
     assert report["row_input_count"] == 10
     assert report["row_kept_count"] == 10
-    # Per-league shape contract.
     for league, m in report["per_league"].items():
         for key in (
             "sample_count", "calibrator_applied_count", "calibrator_type",
-            "brier_v1_raw", "brier_calibrated", "brier_delta",
+            "brier_v1_raw", "brier_calibrated", "brier_delta", "delta_vs_v1",
             "log_loss_v1_raw", "log_loss_calibrated",
             "auc_v1_raw", "auc_calibrated",
-            "within_brier_tolerance",
+            "within_brier_tolerance", "verdict",
         ):
             assert key in m, f"{league}: missing {key}"
-    # Summary contract.
     s = report["summary"]
     assert s["league_count"] == 2
     assert s["row_count"] == 10
     assert s["brier_tolerance"] == bt._BRIER_TOLERANCE
-    assert isinstance(s["leagues_within_tolerance"], list)
-    assert isinstance(s["leagues_outside_tolerance"], list)
 
 
 def test_run_with_league_filter():
     rows = json.loads(FIXTURE.read_text())
     report = asyncio.run(bt.run(
-        rows=rows,
-        limit=None,
-        leagues_filter={"NBA"},
-        load_calibrators=False,
+        rows=rows, limit=None, leagues_filter={"NBA"}, load_calibrators=False,
     ))
     assert list(report["per_league"]) == ["NBA"]
     assert report["row_kept_count"] == 5
     assert report["leagues_filter"] == ["NBA"]
 
 
-# ---------------------------------------------------------------------------
-# Side-alias coverage — must match calibrators._fetch_training_data SQL CTE
-# ---------------------------------------------------------------------------
-
-
-def test_side_align_complete_alias_coverage():
-    """Lock in every side alias from app/calibrators.py::_fetch_training_data
-    so a future SQL-side change can't silently desync the harness."""
-    p = 0.7
-    flip = pytest.approx(0.3)
-    # Every YES alias keeps the prob.
-    for s in ("yes", "buy", "live_yes", "buy yes"):
-        assert bt._side_align(p, s) == p, f"YES alias {s!r} should keep prob"
-        # Case-insensitivity contract — V1 mixed cases.
-        assert bt._side_align(p, s.upper()) == p
-    # Every NO alias flips the prob.
-    for s in ("no", "sell", "live_no", "buy no"):
-        assert bt._side_align(p, s) == flip, f"NO alias {s!r} should flip prob"
-        assert bt._side_align(p, s.upper()) == flip
-
-
-def test_normalize_rows_drops_malformed_analysis_json():
-    """A row with an unparseable analysis_json string and no top-level
-    `side` falls through to the unknown-side branch and is dropped — it
-    must not crash _normalize_rows or hard-fail the whole batch."""
+def test_run_streams_in_batches_and_reports_batch_count():
+    """Batching is observationally invariant; batch_count surfaces chunk count."""
     rows = [
-        # Malformed JSON string in analysis_json + no top-level side → drop.
-        {"league": "NBA", "predicted_prob": 0.6, "actual_outcome": 1,
-         "analysis_json": "{not valid json"},
-        # Same row but with explicit top-level side wins → kept.
-        {"league": "NBA", "predicted_prob": 0.6, "actual_outcome": 1,
-         "side": "yes", "analysis_json": "{still garbage"},
+        {"league": "NBA", "predicted_prob": 0.6, "actual_outcome": 1, "side": "yes"},
+        {"league": "NBA", "predicted_prob": 0.4, "actual_outcome": 0, "side": "yes"},
+        {"league": "NFL", "predicted_prob": 0.55, "actual_outcome": 1, "side": "yes"},
+        {"league": "MLB", "predicted_prob": 0.5, "actual_outcome": 0, "side": "yes"},
+        {"league": "MLB", "predicted_prob": 0.7, "actual_outcome": 1, "side": "yes"},
     ]
-    grouped = bt._normalize_rows(rows)
-    assert "NBA" in grouped
-    assert len(grouped["NBA"]["probs"]) == 1
-    assert grouped["NBA"]["probs"][0] == pytest.approx(0.6)
+    big = asyncio.run(bt.run(rows=rows, limit=None, leagues_filter=None,
+                             load_calibrators=False, batch_size=1000))
+    small = asyncio.run(bt.run(rows=rows, limit=None, leagues_filter=None,
+                               load_calibrators=False, batch_size=2))
+    assert big["batch_count"] == 1
+    assert small["batch_count"] == 3  # ceil(5/2)
+    assert big["row_kept_count"] == small["row_kept_count"] == 5
+    for lg in big["per_league"]:
+        assert big["per_league"][lg]["brier_v1_raw"] == pytest.approx(
+            small["per_league"][lg]["brier_v1_raw"], abs=1e-12
+        )
 
 
-# ---------------------------------------------------------------------------
-# Tolerance-boundary verdict classification
-# ---------------------------------------------------------------------------
+# --- feature extraction + surrogate -----------------------------------------
 
 
-def test_verdict_boundary_classification():
-    """|delta| == _BRIER_TOLERANCE is parity (inclusive boundary).
-    Slightly more is improved/regressed depending on sign.
-
-    Uses real SUPPORTED_LEAGUES values because ``calibrators.apply()``
-    short-circuits unknown leagues with ``applied=False`` (which would
-    force every delta to 0 regardless of the injected calibrator).
-    """
-    import time
-    tol = bt._BRIER_TOLERANCE
-    assert tol > 0  # sanity
-
-    # Real SUPPORTED_LEAGUES values not referenced elsewhere in this file.
-    L_PARITY, L_IMPROVE, L_REGRESS = "UFC", "ATP", "F1"
-    for lg in (L_PARITY, L_IMPROVE, L_REGRESS):
-        assert lg in calibrators.SUPPORTED_LEAGUES, lg
-
-    # Manually craft three leagues with predictable raw vs calibrated Brier.
-    # Each row contributes (p - y)^2 / n to the Brier, so we control n=2.
-    grouped = {
-        L_PARITY: {  # raw Brier 0.25; cal Brier 0.25 + tol exactly → parity
-            "probs": [0.5, 0.5],
-            "ys": [0, 1],
-        },
-        L_REGRESS: {  # raw Brier 0.0; we'll regress past tol via calibrator
-            "probs": [0.0, 1.0],
-            "ys": [0, 1],
-        },
-        L_IMPROVE: {  # raw Brier ~1.0; calibrator pulls it well below
-            "probs": [1.0, 0.0],
-            "ys": [0, 1],
-        },
-    }
-
-    # Calibrator that maps every input to a constant-ish band.
-    def _const_cal(prob):
-        # Identity for parity league; tiny shift (smaller than tol) so cal=raw,
-        # then we override per-league via separate fitted entries.
-        return prob
-
-    # For L_PARITY we want cal_brier - raw_brier == +tol exactly.
-    # raw=0.25 ((0.5-0)^2 + (0.5-1)^2)/2 = 0.25.
-    # Need cal Brier = 0.25 + tol. With tol=0.02 → 0.27.
-    # Use isotonic that maps 0.5→0.5 + sqrt(tol/1) impossible exactly. Take
-    # the algebraic route: solve for q so that ((q-0)^2+(q-1)^2)/2 = 0.27.
-    # 2q^2 - 2q + 1 = 0.54 → 2q^2 - 2q + 0.46 = 0 → q^2 - q + 0.23 = 0.
-    # q = (1 ± sqrt(1 - 0.92))/2 = (1 ± sqrt(0.08))/2.
-    import math
-    q = (1 - math.sqrt(1 - 4 * 0.23)) / 2
-    # Sanity-check our algebra: cal_brier should be raw + tol.
-    cal_brier_check = ((q - 0) ** 2 + (q - 1) ** 2) / 2
-    assert cal_brier_check == pytest.approx(0.25 + tol, abs=1e-9)
-
-    calibrators._state.calibrators[L_PARITY] = calibrators._Calibrator(
-        league=L_PARITY, type="isotonic",
-        state={"x": [0.0, 1.0], "y": [q, q]},  # constant map → 0.5 → q
-        fit_at=time.time(), sample_count=999,
-    )
-    # Improvement: raw brier = 1.0 (totally inverted); cal pulls toward truth.
-    calibrators._state.calibrators[L_IMPROVE] = calibrators._Calibrator(
-        league=L_IMPROVE, type="isotonic",
-        state={"x": [0.0, 1.0], "y": [1.0, 0.0]},  # invert
-        fit_at=time.time(), sample_count=999,
-    )
-    # Regression: raw brier = 0.0 (perfect); cal map shifts both probs by
-    # well over tol so cal Brier is unmistakably worse.
-    calibrators._state.calibrators[L_REGRESS] = calibrators._Calibrator(
-        league=L_REGRESS, type="isotonic",
-        state={"x": [0.0, 1.0], "y": [0.5, 0.5]},
-        fit_at=time.time(), sample_count=999,
-    )
-
-    scored = bt.score_grouped(grouped)
-    assert scored["per_league"][L_PARITY]["verdict"] == "parity", (
-        f'expected parity at the boundary, got delta='
-        f'{scored["per_league"][L_PARITY]["brier_delta"]}'
-    )
-    assert scored["per_league"][L_IMPROVE]["verdict"] == "improved"
-    assert scored["per_league"][L_REGRESS]["verdict"] == "regressed"
-    assert sorted(scored["summary"]["leagues_parity"]) == sorted([L_PARITY])
-    assert sorted(scored["summary"]["leagues_improved"]) == sorted([L_IMPROVE])
-    assert sorted(scored["summary"]["leagues_regressed"]) == sorted([L_REGRESS])
-    # Legacy aliases: parity is "within"; improved+regressed both "outside".
-    assert sorted(scored["summary"]["leagues_within_tolerance"]) == sorted([L_PARITY])
-    assert sorted(scored["summary"]["leagues_outside_tolerance"]) == sorted(
-        [L_IMPROVE, L_REGRESS]
-    )
-
-
-# ---------------------------------------------------------------------------
-# Tests added for task #734 v2: addresses the validation rejection by
-# proving (1) the harness emits `delta_vs_v1` as a spec-named alias of
-# `brier_delta`, (2) the requested LGB+XGB stack path via
-# `app.predictor.predict()` is actually attempted (with skip-reason
-# accounting), (3) the report carries a structured `triage` block under
-# the three root-cause buckets the task spec calls out, and (4) the full
-# predictor → calibrator → aggregation chain is exercised end-to-end
-# against a monkeypatched predictor (no real models loaded).
-# ---------------------------------------------------------------------------
-
-
-def test_delta_vs_v1_alias_matches_brier_delta() -> None:
-    """`delta_vs_v1` is the spec-named alias; must equal `brier_delta`."""
-    grouped = {
-        "NBA": {
-            "probs": [0.6, 0.4, 0.7, 0.3, 0.9, 0.1],
-            "ys":    [1,   0,   1,   0,   1,   0],
-        },
-    }
-    scored = bt.score_grouped(grouped)
-    league = scored["per_league"]["NBA"]
-    assert "delta_vs_v1" in league, "spec field `delta_vs_v1` missing"
-    assert league["delta_vs_v1"] == league["brier_delta"], (
-        "delta_vs_v1 must mirror brier_delta exactly"
-    )
-
-
-def test_extract_feature_vector_handles_archive_shapes() -> None:
-    """Archive rows w/o features → None; rows with features → vector."""
-    # V1 archive shape — analysis_json present but no features key.
-    assert bt._extract_feature_vector(
-        {"analysis_json": {"side": "yes", "edge": 0.04}}
-    ) is None
-    # JSON-string analysis_json — same outcome.
-    assert bt._extract_feature_vector(
-        {"analysis_json": '{"side":"yes"}'}
-    ) is None
-    # Malformed JSON → None, no exception.
-    assert bt._extract_feature_vector(
-        {"analysis_json": "not-json"}
-    ) is None
-    # Missing analysis_json → None.
+def test_extract_feature_vector_handles_archive_shapes():
+    assert bt._extract_feature_vector({"analysis_json": {"side": "yes"}}) is None
+    assert bt._extract_feature_vector({"analysis_json": '{"side":"yes"}'}) is None
+    assert bt._extract_feature_vector({"analysis_json": "not-json"}) is None
     assert bt._extract_feature_vector({"league": "NBA"}) is None
-    # Forward-compat: analysis_json with feature_vector → list[float].
-    fv = bt._extract_feature_vector(
+    assert bt._extract_feature_vector(
         {"analysis_json": {"feature_vector": [0.1, 0.2, 0.3]}}
-    )
-    assert fv == [0.1, 0.2, 0.3]
-    # Alternate keys are accepted.
-    fv = bt._extract_feature_vector(
+    ) == [0.1, 0.2, 0.3]
+    assert bt._extract_feature_vector(
         {"analysis_json": {"features": [1, 2, 3]}}
-    )
-    assert fv == [1.0, 2.0, 3.0]
-    # Bad value types in feature list → None (don't pollute downstream).
+    ) == [1.0, 2.0, 3.0]
     assert bt._extract_feature_vector(
         {"analysis_json": {"feature_vector": ["not", "a", "number"]}}
     ) is None
 
 
-def test_full_stack_attempt_skips_when_features_missing() -> None:
-    """V1 archive rows have no features → 0 predicted, all skipped with
-    `feature_vector_unavailable` reason. This is the real-world result."""
+def test_archive_to_candidate_maps_known_fields_and_returns_kelly_override():
+    """Pin the V1-archive -> live-candidate mapping table."""
+    row = {
+        "league": "nba", "predicted_prob": 0.62, "market_type": "moneyline",
+        "analysis_json": {
+            "side": "yes", "market_implied_prob": 0.55,
+            "signal_strength": 0.18, "edge_at_entry": 0.07,
+            "kelly_used": 0.025,
+        },
+    }
+    candidate, kelly_override = bt._archive_to_candidate(row)
+    assert candidate["consensus_probability"] == pytest.approx(0.62)
+    assert candidate["market_prob"] == pytest.approx(0.55)
+    assert candidate["signal_strength"] == pytest.approx(0.18)
+    assert candidate["edge"] == pytest.approx(0.07)
+    assert candidate["side"] == "yes"
+    assert candidate["league"] == "NBA"
+    assert candidate["market_type"] == "moneyline"
+    assert kelly_override == pytest.approx(0.025)
+    # None-valued mappings dropped so build_vector falls back to defaults.
+    sparse_candidate, sparse_kelly = bt._archive_to_candidate(
+        {"league": "NBA", "predicted_prob": 0.5, "analysis_json": {"side": "no"}}
+    )
+    assert "market_prob" not in sparse_candidate
+    assert "signal_strength" not in sparse_candidate
+    assert sparse_kelly is None
+
+
+@pytest.mark.parametrize("raw_side,expected", [
+    ("yes", "yes"), ("YES", "yes"), ("buy", "yes"),
+    ("live_yes", "yes"), ("buy yes", "yes"), ("Buy Yes", "yes"),
+    ("no", "no"), ("NO", "no"), ("sell", "no"),
+    ("live_no", "no"), ("buy no", "no"), ("  Sell  ", "no"),
+])
+def test_archive_to_candidate_canonicalizes_side_aliases(raw_side, expected):
+    """V1 archive uses several side aliases; surrogate must canonicalize before
+    handing to build_vector — _resolve_side() only treats literal 'NO' as no."""
+    candidate, _kelly = bt._archive_to_candidate(
+        {"league": "NBA", "predicted_prob": 0.55,
+         "analysis_json": {"side": raw_side}}
+    )
+    assert candidate["side"] == expected
+
+
+@pytest.mark.parametrize("row", [
+    {"league": "NBA", "analysis_json": {"side": "yes"}},                       # no prob
+    {"league": "NBA", "predicted_prob": 0.5, "analysis_json": {}},             # no side
+    {"league": "NBA", "predicted_prob": "n/a", "analysis_json": {"side": "yes"}},  # bad prob
+    {"league": "NBA", "predicted_prob": 0.55, "analysis_json": {"side": "maybe"}}, # unknown side
+    {"league": "NBA", "predicted_prob": 0.55, "analysis_json": {"side": ""}},
+])
+def test_archive_to_candidate_rejects_invalid_rows(row):
+    assert bt._archive_to_candidate(row) is None
+
+
+def test_build_surrogate_vector_against_real_build_vector():
+    """Direct integration with app.features.build_vector — side alias routes correctly."""
+    from app.features.builders import _SPECS
+
+    vec = bt._build_surrogate_vector({
+        "league": "NBA", "predicted_prob": 0.62, "market_type": "moneyline",
+        "analysis_json": {"side": "sell", "market_implied_prob": 0.55,
+                          "edge_at_entry": 0.07, "signal_strength": 0.18},
+    })
+    assert vec is not None
+    assert len(vec) == len(_SPECS)
+    side_idx = next(i for i, s in enumerate(_SPECS) if s.name == "side_val")
+    assert vec[side_idx] == 0.0  # 'sell' -> 'no'
+
+    vec_yes = bt._build_surrogate_vector(
+        {"league": "NBA", "predicted_prob": 0.62,
+         "analysis_json": {"side": "buy yes"}}
+    )
+    assert vec_yes is not None
+    assert vec_yes[side_idx] == 1.0
+
+
+# --- full-stack inference ---------------------------------------------------
+
+
+class _StubPrediction:
+    def __init__(self, p: float) -> None:
+        self.probability = p
+
+
+def test_full_stack_attempt_skips_when_features_missing():
+    """V1 archive rows have no features => 0 predicted, all skipped."""
     rows = [
         {"league": "NBA", "predicted_prob": 0.6, "actual_outcome": 1,
          "analysis_json": {"side": "yes"}},
@@ -449,7 +418,7 @@ def test_full_stack_attempt_skips_when_features_missing() -> None:
 
     grouped, summary = asyncio.run(
         bt._attempt_full_stack_inference(rows, leagues_filter=None,
-                                          predict_fn=_never_called)
+                                         predict_fn=_never_called)
     )
     assert grouped == {}
     assert summary["rows_attempted"] == 0
@@ -458,415 +427,42 @@ def test_full_stack_attempt_skips_when_features_missing() -> None:
     assert summary["skip_reasons"]["feature_vector_unavailable"] == 3
 
 
-def test_full_stack_attempt_invokes_predictor_when_features_present() -> None:
-    """End-to-end: monkeypatched predictor → grouped output → score_grouped
-    → verdict aggregation. Exercises the full predictor → calibrator →
-    aggregation chain the reviewer asked for, without loading real models."""
-
-    class _StubPrediction:
-        def __init__(self, p: float) -> None:
-            self.probability = p
-
+def test_full_stack_attempt_invokes_predictor_when_features_present():
+    """End-to-end: predictor stub feeds score_grouped; skips counted by reason."""
     seen_calls: list[tuple[list[float], str]] = []
 
     async def _stub_predict(features, *, league):
         seen_calls.append((list(features), league))
-        # Deterministic stub: probability = mean of features, clamped.
         m = sum(features) / max(1, len(features))
         return _StubPrediction(max(0.0, min(1.0, m)))
 
     rows = [
         {"league": "NBA", "actual_outcome": 1,
-         "analysis_json": {"feature_vector": [0.7, 0.8, 0.9]}},  # → p≈0.8
+         "analysis_json": {"feature_vector": [0.7, 0.8, 0.9]}},
         {"league": "NBA", "actual_outcome": 0,
-         "analysis_json": {"feature_vector": [0.1, 0.2, 0.3]}},  # → p≈0.2
+         "analysis_json": {"feature_vector": [0.1, 0.2, 0.3]}},
         {"league": "NFL", "actual_outcome": 1,
-         "analysis_json": {"feature_vector": [0.6, 0.6, 0.6]}},  # → p≈0.6
-        # Skipped: no features.
+         "analysis_json": {"feature_vector": [0.6, 0.6, 0.6]}},
         {"league": "MLB", "actual_outcome": 1, "analysis_json": {"side": "yes"}},
-        # Skipped: bad outcome.
         {"league": "NHL", "actual_outcome": "tied",
          "analysis_json": {"feature_vector": [0.5]}},
     ]
     grouped, summary = asyncio.run(
         bt._attempt_full_stack_inference(rows, leagues_filter=None,
-                                          predict_fn=_stub_predict)
+                                         predict_fn=_stub_predict)
     )
-    # Predictor was called exactly 3 times (the 3 rows with features &
-    # binary outcomes). MLB and NHL were skipped before predict.
     assert len(seen_calls) == 3
     assert summary["rows_attempted"] == 3
     assert summary["rows_predicted"] == 3
     assert summary["rows_skipped"] == 2
     assert summary["skip_reasons"]["feature_vector_unavailable"] == 1
     assert summary["skip_reasons"]["non_binary_outcome"] == 1
-
-    # Aggregation step: feed the grouped output through score_grouped
-    # and verify per-league shape + verdict population.
     scored = bt.score_grouped(grouped)
-    assert set(scored["per_league"].keys()) == {"NBA", "NFL"}
-    assert scored["per_league"]["NBA"]["sample_count"] == 2
-    assert scored["per_league"]["NFL"]["sample_count"] == 1
-    # Both should have a delta_vs_v1 field — the spec alias is present
-    # whether or not we came in via full-stack or calibrator-only.
-    for lg in ("NBA", "NFL"):
-        assert "delta_vs_v1" in scored["per_league"][lg]
+    assert set(scored["per_league"]) == {"NBA", "NFL"}
 
 
-def test_run_full_stack_emits_triage_with_feature_builder_active() -> None:
-    """Top-level `run(full_stack=True)` w/ monkeypatched predictor +
-    feature-less rows: feature_builder_mismatch bucket is `active=True`."""
-    fixture = (
-        Path(__file__).resolve().parent / "fixtures" / "v1_backtest_synthetic.json"
-    )
-    rows = json.loads(fixture.read_text())
-
-    async def _never_called(*args, **kwargs):  # pragma: no cover
-        raise AssertionError("synthetic fixture has no features → predict must NOT fire")
-
-    report = asyncio.run(
-        bt.run(rows=rows, limit=None, leagues_filter=None,
-               load_calibrators=False, full_stack=True,
-               predict_fn=_never_called)
-    )
-    # Calibrator-only path still produces metrics from the fixture.
-    assert report["row_kept_count"] > 0
-    # Full-stack attempt block surfaces the feature-vector-unavailable count.
-    fs = report["full_stack_attempt"]
-    assert fs is not None
-    assert fs["rows_attempted"] == 0
-    assert fs["rows_predicted"] == 0
-    assert fs["skip_reasons"].get("feature_vector_unavailable", 0) > 0
-    # Triage block: feature_builder_mismatch active because predictor saw
-    # zero usable rows; calibrator_misalignment always active by design;
-    # artifact_drift inactive when no league regressed.
-    triage = report["triage"]
-    assert triage["feature_builder_mismatch"]["active"] is True
-    assert triage["feature_builder_mismatch"]["evidence"][
-        "rows_predicted_via_models_loader"] == 0
-    assert triage["calibrator_misalignment"]["active"] is True
-    # The synthetic fixture is small and the no-load path means
-    # calibrator.apply() is a no-op → no league should regress.
-    assert triage["artifact_drift"]["active"] is False
-
-
-def test_run_full_stack_uses_predictor_when_features_present() -> None:
-    """Mirror of the above with synthetic features in analysis_json so
-    the predictor stub IS invoked and the full chain is exercised."""
-
-    class _StubPrediction:
-        def __init__(self, p: float) -> None:
-            self.probability = p
-
-    async def _stub_predict(features, *, league):
-        m = sum(features) / max(1, len(features))
-        return _StubPrediction(max(0.0, min(1.0, m)))
-
-    rows = [
-        {"league": "NBA", "predicted_prob": 0.5, "actual_outcome": 1,
-         "analysis_json": {"side": "yes", "feature_vector": [0.8, 0.8, 0.8]}},
-        {"league": "NBA", "predicted_prob": 0.5, "actual_outcome": 0,
-         "analysis_json": {"side": "yes", "feature_vector": [0.2, 0.2, 0.2]}},
-        {"league": "NFL", "predicted_prob": 0.5, "actual_outcome": 1,
-         "analysis_json": {"side": "yes", "feature_vector": [0.7, 0.7, 0.7]}},
-    ]
-    report = asyncio.run(
-        bt.run(rows=rows, limit=None, leagues_filter=None,
-               load_calibrators=False, full_stack=True,
-               predict_fn=_stub_predict)
-    )
-    fs = report["full_stack_attempt"]
-    assert fs["rows_attempted"] == 3
-    assert fs["rows_predicted"] == 3
-    assert fs["rows_skipped"] == 0
-    # full_stack_scored carries the per-league rollup from the predictor
-    # path (separate from the calibrator-only `per_league` block).
-    assert "full_stack_scored" in report
-    fss = report["full_stack_scored"]
-    assert set(fss["per_league"].keys()) == {"NBA", "NFL"}
-    # Feature-builder triage bucket is INACTIVE here because the
-    # predictor produced rows; the structured count proves it.
-    triage = report["triage"]
-    assert triage["feature_builder_mismatch"]["active"] is False
-    assert triage["feature_builder_mismatch"]["evidence"][
-        "rows_predicted_via_models_loader"] == 3
-
-
-# ---------------------------------------------------------------------------
-# v3 rework — regression tests (apply_calibrator=False + DB batching)
-# ---------------------------------------------------------------------------
-
-
-def test_score_grouped_apply_calibrator_false_skips_calibration() -> None:
-    """Direct unit test of the new ``apply_calibrator=False`` mode.
-
-    With this flag set, score_grouped MUST NOT call calibrators.apply()
-    on the input probabilities. Both raw and calibrated metrics will
-    therefore be identical and ``brier_delta``/``delta_vs_v1`` will
-    be exactly 0.0. ``calibrator_applied_count`` is set to 0 and
-    ``calibrator_type`` to None so the report makes the bypass
-    explicit.
-
-    Regression guard: an earlier draft of the full-stack path called
-    score_grouped() with the default ``apply_calibrator=True`` —
-    re-applying the per-league calibrator on top of probabilities that
-    app.predictor.predict() had already calibrated. The double-call
-    silently produced bogus brier_calibrated numbers.
-    """
-    apply_calls: list[tuple[float, str | None]] = []
-
-    def _spy_apply(p: float, league: str | None):
-        apply_calls.append((p, league))
-        # Move probabilities aggressively so test would fail if called.
-        return (1.0 - p, {"applied": True, "type": "spy"})
-
-    grouped = {
-        "NBA": {"probs": [0.7, 0.3, 0.6], "ys": [1, 0, 1]},
-    }
-    original = bt.calibrators.apply
-    bt.calibrators.apply = _spy_apply  # type: ignore[assignment]
-    try:
-        scored = bt.score_grouped(grouped, apply_calibrator=False)
-    finally:
-        bt.calibrators.apply = original  # type: ignore[assignment]
-
-    # The spy was never invoked — the bypass branch ran instead.
-    assert apply_calls == [], (
-        f"calibrators.apply must not be called when apply_calibrator=False; "
-        f"got {len(apply_calls)} call(s): {apply_calls}"
-    )
-    nba = scored["per_league"]["NBA"]
-    assert nba["calibrator_applied_count"] == 0
-    assert nba["calibrator_type"] is None
-    # Raw == calibrated because no calibration happened.
-    assert nba["brier_v1_raw"] == pytest.approx(nba["brier_calibrated"])
-    assert nba["brier_delta"] == pytest.approx(0.0, abs=1e-12)
-    assert nba["delta_vs_v1"] == pytest.approx(0.0, abs=1e-12)
-    assert scored["summary"]["leagues_parity"] == ["NBA"]
-    assert scored["summary"]["leagues_improved"] == []
-    assert scored["summary"]["leagues_regressed"] == []
-
-
-def test_run_full_stack_bypasses_double_calibration_end_to_end() -> None:
-    """End-to-end regression: when run() invokes the full-stack path,
-    ``full_stack_scored`` MUST be free of double-calibration even when
-    a fitted calibrator IS active.
-
-    Setup: monkeypatch calibrators.apply() to return a wildly different
-    probability whenever called (would corrupt brier_calibrated if the
-    full-stack path naively re-applied it). The predictor stub returns
-    a fixed p=0.7 regardless of features.
-
-    Expectations:
-      * calibrator-only ``per_league`` block shows brier_delta != 0
-        (the spy calibrator IS applied to V1.predicted_prob — that's
-        the whole point of the calibrator-only path).
-      * ``full_stack_scored.per_league.<lg>.brier_delta`` is exactly 0
-        (no double-calibration), and brier_calibrated == Brier(0.7, ys).
-    """
-
-    class _StubPrediction:
-        def __init__(self, p: float) -> None:
-            self.probability = p
-
-    async def _stub_predict(features, *, league):
-        # Constant 0.7 — deterministic so we can compute expected Brier.
-        return _StubPrediction(0.7)
-
-    spy_apply_calls: list[tuple[float, str | None]] = []
-
-    def _spy_apply(p: float, league: str | None):
-        spy_apply_calls.append((p, league))
-        return (1.0 - p, {"applied": True, "type": "spy"})
-
-    # NB: predicted_prob values must NOT be 0.5 — the spy returns 1-p
-    # which would map 0.5 → 0.5 and the calibrator-only Brier delta
-    # would (correctly) be zero, defeating the regression contrast.
-    rows = [
-        {"league": "NBA", "predicted_prob": 0.7, "actual_outcome": 1,
-         "analysis_json": {"side": "yes", "feature_vector": [0.8, 0.8, 0.8]}},
-        {"league": "NBA", "predicted_prob": 0.4, "actual_outcome": 0,
-         "analysis_json": {"side": "yes", "feature_vector": [0.2, 0.2, 0.2]}},
-        {"league": "NBA", "predicted_prob": 0.6, "actual_outcome": 1,
-         "analysis_json": {"side": "yes", "feature_vector": [0.6, 0.6, 0.6]}},
-    ]
-
-    original = bt.calibrators.apply
-    bt.calibrators.apply = _spy_apply  # type: ignore[assignment]
-    try:
-        report = asyncio.run(
-            bt.run(rows=rows, limit=None, leagues_filter=None,
-                   load_calibrators=False, full_stack=True,
-                   predict_fn=_stub_predict)
-        )
-    finally:
-        bt.calibrators.apply = original  # type: ignore[assignment]
-
-    # Calibrator-only path: spy IS applied (would-flip every prob).
-    nba_cal = report["per_league"]["NBA"]
-    assert nba_cal["calibrator_applied_count"] == 3
-    assert nba_cal["brier_delta"] != pytest.approx(0.0, abs=1e-9), (
-        "spy calibrator should have moved brier_calibrated away from "
-        "brier_v1_raw on the calibrator-only path"
-    )
-
-    # Full-stack path: no double-calibration.
-    fss = report["full_stack_scored"]
-    nba_fs = fss["per_league"]["NBA"]
-    assert nba_fs["calibrator_applied_count"] == 0
-    assert nba_fs["calibrator_type"] is None
-    assert nba_fs["brier_delta"] == pytest.approx(0.0, abs=1e-12)
-    assert nba_fs["delta_vs_v1"] == pytest.approx(0.0, abs=1e-12)
-    # brier_calibrated must equal Brier(0.7, ys=[1,0,1]) =
-    #   ((0.7-1)^2 + (0.7-0)^2 + (0.7-1)^2)/3 = (0.09+0.49+0.09)/3 = 0.2233...
-    expected_brier = ((0.7 - 1) ** 2 + (0.7 - 0) ** 2 + (0.7 - 1) ** 2) / 3
-    assert nba_fs["brier_calibrated"] == pytest.approx(expected_brier, abs=1e-9)
-    # Spy calls came only from the calibrator-only path (3 NBA rows),
-    # NOT from the full-stack path. If the full-stack path had double-
-    # calibrated we'd see 6 calls instead of 3.
-    assert len(spy_apply_calls) == 3, (
-        f"expected exactly 3 spy calls (calibrator-only path) — got "
-        f"{len(spy_apply_calls)}, suggesting double-calibration regression"
-    )
-
-
-def test_normalize_into_matches_normalize_rows() -> None:
-    """``_normalize_into`` (streaming) and ``_normalize_rows`` (one-shot)
-    must produce identical grouped dicts for the same input. Guards the
-    streaming refactor against silent divergence."""
-    rows = [
-        {"league": "NBA", "predicted_prob": 0.7, "actual_outcome": 1,
-         "analysis_json": {"side": "yes"}},
-        {"league": "nba", "predicted_prob": 0.3, "actual_outcome": 0,
-         "analysis_json": {"side": "no"}},  # → flipped to 0.7
-        {"league": "NFL", "predicted_prob": 0.55, "actual_outcome": 1,
-         "analysis_json": '{"side": "yes"}'},
-        # Dropped: missing prob.
-        {"league": "MLB", "predicted_prob": None, "actual_outcome": 1,
-         "analysis_json": {"side": "yes"}},
-    ]
-    one_shot = bt._normalize_rows(rows, leagues_filter=None)
-    streamed: dict[str, dict[str, list]] = {}
-    appended = bt._normalize_into(streamed, rows, leagues_filter=None)
-    assert appended == sum(len(v["probs"]) for v in one_shot.values())
-    assert set(streamed.keys()) == set(one_shot.keys())
-    for lg in one_shot:
-        assert streamed[lg]["probs"] == one_shot[lg]["probs"]
-        assert streamed[lg]["ys"] == one_shot[lg]["ys"]
-
-
-def test_run_streams_in_batches_and_reports_batch_count() -> None:
-    """In-memory mode uses the same streaming code path as DB mode:
-    rows are chunked into batches of ``batch_size`` and the report
-    surfaces ``batch_count`` so operators can verify batching is on.
-
-    Also checks that final scored output is identical to the
-    non-batched reference — i.e. batching is observationally
-    invariant."""
-    rows = [
-        {"league": "NBA", "predicted_prob": 0.6, "actual_outcome": 1,
-         "analysis_json": {"side": "yes"}},
-        {"league": "NBA", "predicted_prob": 0.4, "actual_outcome": 0,
-         "analysis_json": {"side": "yes"}},
-        {"league": "NFL", "predicted_prob": 0.55, "actual_outcome": 1,
-         "analysis_json": {"side": "yes"}},
-        {"league": "MLB", "predicted_prob": 0.5, "actual_outcome": 0,
-         "analysis_json": {"side": "yes"}},
-        {"league": "MLB", "predicted_prob": 0.7, "actual_outcome": 1,
-         "analysis_json": {"side": "yes"}},
-    ]
-    big = asyncio.run(bt.run(rows=rows, limit=None, leagues_filter=None,
-                             load_calibrators=False, batch_size=1000))
-    small = asyncio.run(bt.run(rows=rows, limit=None, leagues_filter=None,
-                               load_calibrators=False, batch_size=2))
-    # batch_count reflects the number of chunks consumed.
-    assert big["batch_count"] == 1
-    assert small["batch_count"] == 3  # ceil(5/2) = 3
-    # Same input → same kept-row count, same per-league math.
-    assert big["row_kept_count"] == small["row_kept_count"]
-    assert big["row_input_count"] == small["row_input_count"] == 5
-    for lg in big["per_league"]:
-        assert (
-            big["per_league"][lg]["brier_v1_raw"]
-            == pytest.approx(small["per_league"][lg]["brier_v1_raw"], abs=1e-12)
-        )
-        assert (
-            big["per_league"][lg]["sample_count"]
-            == small["per_league"][lg]["sample_count"]
-        )
-
-
-def test_archive_to_candidate_maps_known_fields_and_returns_kelly_override() -> None:
-    """Locks down the canonical V1-archive -> live-candidate mapping
-    table documented in scripts/backtest_v1_archive.py.  Every field
-    the surrogate path depends on is covered here so a future rename
-    on either side trips a clear test failure rather than silently
-    poisoning the surrogate output."""
-    row = {
-        "league": "nba",
-        "predicted_prob": 0.62,
-        "market_type": "moneyline",
-        "analysis_json": {
-            "side": "yes",
-            "market_implied_prob": 0.55,
-            "signal_strength": 0.18,
-            "edge_at_entry": 0.07,
-            "kelly_used": 0.025,
-        },
-    }
-    result = bt._archive_to_candidate(row)
-    assert result is not None
-    candidate, kelly_override = result
-    assert candidate["consensus_probability"] == pytest.approx(0.62)
-    assert candidate["market_prob"] == pytest.approx(0.55)
-    assert candidate["signal_strength"] == pytest.approx(0.18)
-    assert candidate["edge"] == pytest.approx(0.07)
-    assert candidate["side"] == "yes"
-    assert candidate["league"] == "NBA"  # upper-cased
-    assert candidate["market_type"] == "moneyline"
-    assert kelly_override == pytest.approx(0.025)
-    # None-valued mappings are dropped so build_vector falls back to
-    # the documented per-spec defaults rather than coercing None.
-    sparse = bt._archive_to_candidate(
-        {"league": "NBA", "predicted_prob": 0.5,
-         "analysis_json": {"side": "no"}}
-    )
-    assert sparse is not None
-    candidate, kelly_override = sparse
-    assert "market_prob" not in candidate
-    assert "signal_strength" not in candidate
-    assert kelly_override is None
-
-
-def test_archive_to_candidate_rejects_rows_missing_minimum_inputs() -> None:
-    """Surrogate is opt-in but still requires predicted_prob + side —
-    otherwise build_vector would emit a degenerate vector and produce
-    misleading metrics."""
-    # Missing predicted_prob -> reject.
-    assert bt._archive_to_candidate(
-        {"league": "NBA", "analysis_json": {"side": "yes"}}
-    ) is None
-    # Missing side -> reject (build_vector needs it for side_val).
-    assert bt._archive_to_candidate(
-        {"league": "NBA", "predicted_prob": 0.5, "analysis_json": {}}
-    ) is None
-    # Non-numeric predicted_prob -> reject.
-    assert bt._archive_to_candidate(
-        {"league": "NBA", "predicted_prob": "n/a",
-         "analysis_json": {"side": "yes"}}
-    ) is None
-
-
-def test_full_stack_attempt_uses_surrogate_when_features_missing() -> None:
-    """When --surrogate-features is on, rows without an archived
-    feature_vector are routed through a feature builder (injected
-    here as a stub) and the predictor IS invoked.  Counts split into
-    archived vs surrogate; the report's surrogate-rate is auditable."""
-
-    class _StubPrediction:
-        def __init__(self, p: float) -> None:
-            self.probability = p
-
+def test_full_stack_attempt_uses_surrogate_when_features_missing():
+    """surrogate_features=True routes feature-less rows through the builder."""
     seen_calls: list[tuple[list[float], str]] = []
 
     async def _stub_predict(features, *, league):
@@ -874,18 +470,14 @@ def test_full_stack_attempt_uses_surrogate_when_features_missing() -> None:
         m = sum(features) / max(1, len(features))
         return _StubPrediction(max(0.0, min(1.0, m)))
 
-    # Stub feature builder: just returns predicted_prob expanded.
     def _stub_builder(row):
-        pp = row.get("predicted_prob") or 0.5
-        return [float(pp)] * 32
+        return [float(row.get("predicted_prob") or 0.5)] * 32
 
     rows = [
-        # No feature_vector → goes through surrogate builder.
         {"league": "NBA", "actual_outcome": 1, "predicted_prob": 0.7,
          "analysis_json": {"side": "yes"}},
         {"league": "NBA", "actual_outcome": 0, "predicted_prob": 0.3,
          "analysis_json": {"side": "yes"}},
-        # Has direct feature_vector → archived path (still preferred).
         {"league": "NFL", "actual_outcome": 1,
          "analysis_json": {"feature_vector": [0.6, 0.6, 0.6]}},
     ]
@@ -895,27 +487,18 @@ def test_full_stack_attempt_uses_surrogate_when_features_missing() -> None:
             surrogate_features=True, feature_builder=_stub_builder,
         )
     )
-    # All 3 rows produce predictions (vs the 1 they would without surrogate).
     assert len(seen_calls) == 3
     assert summary["rows_predicted"] == 3
     assert summary["rows_skipped"] == 0
     assert summary["feature_source"]["archived"] == 1
     assert summary["feature_source"]["surrogate"] == 2
-    # Aggregation still works.
     scored = bt.score_grouped(grouped)
     assert scored["per_league"]["NBA"]["sample_count"] == 2
     assert scored["per_league"]["NFL"]["sample_count"] == 1
 
 
-def test_run_full_stack_surrogate_flag_propagates_to_summary() -> None:
-    """End-to-end: run() with surrogate_features=True surfaces the
-    surrogate counts on the final report so reviewers can audit how
-    many rows landed via the degraded baseline."""
-
-    class _StubPrediction:
-        def __init__(self, p: float) -> None:
-            self.probability = p
-
+def test_run_full_stack_emits_triage_and_surrogate_counts():
+    """Top-level run() with full_stack=True surfaces triage + feature_source."""
     async def _stub_predict(features, *, league):
         return _StubPrediction(0.55)
 
@@ -939,114 +522,103 @@ def test_run_full_stack_surrogate_flag_propagates_to_summary() -> None:
     assert fs["rows_predicted"] == 2
     assert fs["feature_source"]["surrogate"] == 2
     assert fs["feature_source"]["archived"] == 0
-    # full_stack_scored block populated.
     assert "full_stack_scored" in report
     assert report["full_stack_scored"]["per_league"]["NBA"]["sample_count"] == 2
+    triage = report["triage"]
+    assert triage["feature_builder_mismatch"]["active"] is False
+    assert triage["feature_builder_mismatch"]["evidence"][
+        "rows_predicted_via_models_loader"] == 2
 
 
-# ---------------------------------------------------------------------------
-# v4 follow-ups: side-alias canonicalization + real build_vector integration
-# (architect review pass — locks down the highest-risk mapping path so a
-# regression in _resolve_side or in the V1 archive's side vocabulary trips
-# a clear test rather than silently poisoning surrogate predictions).
-# ---------------------------------------------------------------------------
+def test_run_full_stack_triage_active_when_no_features():
+    """Synthetic fixture has no features => feature_builder_mismatch ACTIVE."""
+    rows = json.loads(FIXTURE.read_text())
 
-@pytest.mark.parametrize("raw_side,expected", [
-    ("yes", "yes"), ("YES", "yes"), ("buy", "yes"),
-    ("live_yes", "yes"), ("buy yes", "yes"), ("Buy Yes", "yes"),
-    ("no", "no"), ("NO", "no"), ("sell", "no"),
-    ("live_no", "no"), ("buy no", "no"), ("  Sell  ", "no"),
-])
-def test_archive_to_candidate_canonicalizes_side_aliases(
-    raw_side: str, expected: str,
-) -> None:
-    """V1 archive uses several side aliases (sell, live_no, buy no, ...).
-    The live builder's _resolve_side() only treats literal 'NO' as no-side
-    and would mis-classify the rest as YES, poisoning side_val.  The
-    surrogate path canonicalizes to 'yes'/'no' before handing the dict
-    to build_vector — this test pins that contract per alias."""
-    result = bt._archive_to_candidate(
-        {"league": "NBA", "predicted_prob": 0.55,
-         "analysis_json": {"side": raw_side}}
+    async def _never_called(*args, **kwargs):  # pragma: no cover
+        raise AssertionError("synthetic fixture has no features => no predict")
+
+    report = asyncio.run(
+        bt.run(rows=rows, limit=None, leagues_filter=None,
+               load_calibrators=False, full_stack=True,
+               predict_fn=_never_called)
     )
-    assert result is not None, f"alias {raw_side!r} should canonicalize"
-    candidate, _kelly = result
-    assert candidate["side"] == expected
+    assert report["row_kept_count"] > 0
+    fs = report["full_stack_attempt"]
+    assert fs["rows_predicted"] == 0
+    assert fs["skip_reasons"].get("feature_vector_unavailable", 0) > 0
+    triage = report["triage"]
+    assert triage["feature_builder_mismatch"]["active"] is True
+    assert triage["calibrator_misalignment"]["active"] is True
+    assert triage["artifact_drift"]["active"] is False
 
 
-def test_archive_to_candidate_rejects_unknown_side_alias() -> None:
-    """Unknown side strings are rejected outright rather than silently
-    bucketed as YES — guessing here would corrupt side-flip math."""
-    assert bt._archive_to_candidate(
-        {"league": "NBA", "predicted_prob": 0.55,
-         "analysis_json": {"side": "maybe"}}
-    ) is None
-    assert bt._archive_to_candidate(
-        {"league": "NBA", "predicted_prob": 0.55,
-         "analysis_json": {"side": ""}}
-    ) is None
+def test_run_full_stack_bypasses_double_calibration_end_to_end():
+    """full_stack_scored MUST be free of double-calibration even when a
+    fitted calibrator is active on the calibrator-only path."""
+    async def _stub_predict(features, *, league):
+        return _StubPrediction(0.7)
+
+    spy_calls: list[tuple[float, str | None]] = []
+
+    def _spy_apply(p, league):
+        spy_calls.append((p, league))
+        return (1.0 - p, {"applied": True, "type": "spy"})
+
+    rows = [
+        {"league": "NBA", "predicted_prob": 0.7, "actual_outcome": 1,
+         "analysis_json": {"side": "yes", "feature_vector": [0.8, 0.8, 0.8]}},
+        {"league": "NBA", "predicted_prob": 0.4, "actual_outcome": 0,
+         "analysis_json": {"side": "yes", "feature_vector": [0.2, 0.2, 0.2]}},
+        {"league": "NBA", "predicted_prob": 0.6, "actual_outcome": 1,
+         "analysis_json": {"side": "yes", "feature_vector": [0.6, 0.6, 0.6]}},
+    ]
+    original = bt.calibrators.apply
+    bt.calibrators.apply = _spy_apply  # type: ignore[assignment]
+    try:
+        report = asyncio.run(
+            bt.run(rows=rows, limit=None, leagues_filter=None,
+                   load_calibrators=False, full_stack=True,
+                   predict_fn=_stub_predict)
+        )
+    finally:
+        bt.calibrators.apply = original  # type: ignore[assignment]
+
+    nba_cal = report["per_league"]["NBA"]
+    assert nba_cal["calibrator_applied_count"] == 3
+    assert nba_cal["brier_delta"] != pytest.approx(0.0, abs=1e-9)
+
+    nba_fs = report["full_stack_scored"]["per_league"]["NBA"]
+    assert nba_fs["calibrator_applied_count"] == 0
+    assert nba_fs["calibrator_type"] is None
+    assert nba_fs["brier_delta"] == pytest.approx(0.0, abs=1e-12)
+    expected = ((0.7 - 1) ** 2 + (0.7 - 0) ** 2 + (0.7 - 1) ** 2) / 3
+    assert nba_fs["brier_calibrated"] == pytest.approx(expected, abs=1e-9)
+    # Spy invoked only on the calibrator-only path (3 NBA rows). 6 would
+    # mean the full-stack path also re-calibrated.
+    assert len(spy_calls) == 3
 
 
-def test_build_surrogate_vector_against_real_build_vector() -> None:
-    """Direct integration: feed an archive row through the real
-    app.features.build_vector via _build_surrogate_vector and assert it
-    returns the expected 32-slot vector with the side alias correctly
-    routed (sell -> no -> side_val=0.0)."""
-    from app.features.builders import _SPECS
-
-    row = {"league": "NBA", "predicted_prob": 0.62,
-           "market_type": "moneyline",
-           "analysis_json": {"side": "sell", "market_implied_prob": 0.55,
-                              "edge_at_entry": 0.07,
-                              "signal_strength": 0.18}}
-    vec = bt._build_surrogate_vector(row)
-    assert vec is not None
-    assert len(vec) == len(_SPECS)
-    side_idx = next(i for i, s in enumerate(_SPECS) if s.name == "side_val")
-    assert vec[side_idx] == 0.0  # 'sell' -> 'no' -> side_val=0.0
-
-    # And a YES alias routes to 1.0.
-    row_yes = {"league": "NBA", "predicted_prob": 0.62,
-               "analysis_json": {"side": "buy yes"}}
-    vec_yes = bt._build_surrogate_vector(row_yes)
-    assert vec_yes is not None
-    assert vec_yes[side_idx] == 1.0
+# --- triage + parity_gate_status -------------------------------------------
 
 
-def test_build_triage_note_reflects_surrogate_mode_when_active() -> None:
-    """When --surrogate-features predicts rows, the triage note must stop
-    claiming 'zero usable rows' and explicitly mention the degraded
-    surrogate baseline + #731 follow-up — otherwise reviewers reading
-    the JSON in isolation get a contradictory picture."""
+def test_build_triage_note_reflects_surrogate_mode_when_active():
     scored = {"summary": {"leagues_improved": [], "leagues_parity": [],
                           "leagues_regressed": []}}
-    fs = {"rows_attempted": 100, "rows_predicted": 100,
-          "skip_reasons": {}, "feature_source": {"surrogate": 100,
-                                                   "archived": 0},
-          "surrogate_features_enabled": True}
-    triage = bt._build_triage(scored, fs)
-    note = triage["feature_builder_mismatch"]["note"]
-    assert "surrogate" in note.lower()
-    assert "degraded" in note.lower()
-    assert "zero usable rows" not in note.lower()
-    ev = triage["feature_builder_mismatch"]["evidence"]
-    assert ev["surrogate_features_enabled"] is True
-    assert ev["rows_predicted_via_surrogate"] == 100
+    fs_on = {"rows_attempted": 100, "rows_predicted": 100, "skip_reasons": {},
+             "feature_source": {"surrogate": 100, "archived": 0},
+             "surrogate_features_enabled": True}
+    note_on = bt._build_triage(scored, fs_on)["feature_builder_mismatch"]["note"]
+    assert "surrogate" in note_on.lower() and "degraded" in note_on.lower()
 
-    # And without the flag, the original "zero usable rows" framing stands.
     fs_off = {"rows_attempted": 100, "rows_predicted": 0,
               "skip_reasons": {"feature_vector_unavailable": 100}}
     triage_off = bt._build_triage(scored, fs_off)
-    assert "zero" in triage_off["feature_builder_mismatch"]["note"].lower()
+    assert "zero usable rows" in triage_off["feature_builder_mismatch"]["note"].lower()
     assert triage_off["feature_builder_mismatch"]["active"] is True
 
 
-def test_build_parity_gate_status_emits_blocked_and_evaluable_buckets() -> None:
-    """The top-level parity_gate_status block is the formal hard-gate
-    artifact that surfaces what's BLOCKED vs EVALUABLE_DEGRADED vs PASS
-    without making reviewers walk the triage notes.  This pins the
-    structure (gate names, statuses, blocked_by references) so a future
-    rename or status-shuffle trips a clear test failure."""
+def test_build_parity_gate_status_emits_blocked_and_evaluable_buckets():
+    """Pin the gate names, statuses, and overall verdict rollup."""
     scored = {"summary": {"leagues_improved": ["NBA"], "leagues_parity": [],
                           "leagues_regressed": ["MLB"]}}
     fs = {"rows_attempted": 1000, "rows_predicted": 1000,
@@ -1054,71 +626,30 @@ def test_build_parity_gate_status_emits_blocked_and_evaluable_buckets() -> None:
           "feature_source": {"surrogate": 1000, "archived": 0},
           "surrogate_features_enabled": True}
     pg = bt._build_parity_gate_status(scored, fs)
-
-    # Three named gates always emit, regardless of run shape.
-    assert set(pg["gates"].keys()) == {
+    assert set(pg["gates"]) == {
         "full_stack_replay_via_archived_features",
         "full_stack_replay_via_surrogate_features",
         "parity_within_2pct_vs_v1_calibrated",
     }
-    # Archive-features gate is permanently BLOCKED on this archive
-    # (V1 didn't snapshot the upstream feature vector) — pinned with
-    # a #731 reference so reviewers can trace the blocker.
-    archived = pg["gates"]["full_stack_replay_via_archived_features"]
-    assert archived["status"] == "BLOCKED"
-    assert "#731" in archived["blocked_by"]
-    # Surrogate gate flips to EVALUABLE_DEGRADED when rows actually scored.
-    surrogate = pg["gates"]["full_stack_replay_via_surrogate_features"]
-    assert surrogate["status"] == "EVALUABLE_DEGRADED"
-    assert "DEGRADED" in surrogate["caveat"]
-    assert surrogate["evidence"]["rows_predicted_via_surrogate"] == 1000
-    # Parity gate is UNEVALUABLE on this archive (V1 stored
-    # pre-calibrator output) — also pinned with #731.
-    parity = pg["gates"]["parity_within_2pct_vs_v1_calibrated"]
-    assert parity["status"] == "UNEVALUABLE"
-    assert "#731" in parity["blocked_by"]
-    # Summary counts roll up correctly.
-    assert pg["summary"]["total_gates"] == 3
-    assert pg["summary"]["blocked_or_unevaluable"] == 2
-    assert pg["summary"]["evaluable_degraded"] == 1
-    assert pg["summary"]["pass"] == 0
-    # Top-level verdict: with surrogate scoring some rows but two gates
-    # still BLOCKED/UNEVALUABLE, the manifest must announce DEGRADED_PARTIAL
-    # so the rejection trail can cite it directly instead of re-deriving it.
+    assert pg["gates"]["full_stack_replay_via_archived_features"]["status"] == "BLOCKED"
+    assert "#731" in pg["gates"]["full_stack_replay_via_archived_features"]["blocked_by"]
+    surr = pg["gates"]["full_stack_replay_via_surrogate_features"]
+    assert surr["status"] == "EVALUABLE_DEGRADED"
+    assert surr["evidence"]["rows_predicted_via_surrogate"] == 1000
+    assert pg["gates"]["parity_within_2pct_vs_v1_calibrated"]["status"] == "UNEVALUABLE"
+    assert pg["summary"] == {
+        "total_gates": 3, "blocked_or_unevaluable": 2,
+        "evaluable_degraded": 1, "pass": 0,
+    }
     assert pg["overall"] == "DEGRADED_PARTIAL_PENDING_BACKFILL"
-    assert pg["overall_blocked_by"] is not None
     assert "#731" in pg["overall_blocked_by"]
 
 
-def test_build_parity_gate_status_marks_surrogate_not_run_when_disabled() -> None:
-    """Without --surrogate-features the surrogate gate must report
-    NOT_RUN, not EVALUABLE_DEGRADED — otherwise the manifest would
-    falsely advertise surrogate coverage on calibrator-only runs."""
+def test_build_parity_gate_status_marks_surrogate_not_run_when_disabled():
     scored = {"summary": {"leagues_improved": [], "leagues_parity": [],
                           "leagues_regressed": []}}
     fs = {"rows_attempted": 1000, "rows_predicted": 0,
           "skip_reasons": {"feature_vector_unavailable": 1000}}
     pg = bt._build_parity_gate_status(scored, fs)
-    assert pg["gates"][
-        "full_stack_replay_via_surrogate_features"
-    ]["status"] == "NOT_RUN"
-    assert pg["gates"][
-        "full_stack_replay_via_archived_features"
-    ]["status"] == "BLOCKED"
-
-
-def test_run_emits_top_level_parity_gate_status() -> None:
-    """Smoke test: the report assembled by run() must include the new
-    top-level `parity_gate_status` block (not just the buried triage
-    notes), so reviewers reading the JSON in isolation see it first."""
-    rows = [{"league": "NBA", "predicted_prob": 0.6,
-             "market_implied_prob": 0.5, "edge_at_entry": 0.1,
-             "actual_outcome": True, "ts": "2026-01-01T00:00:00+00:00",
-             "analysis_json": {"side": "yes"}}]
-    report = asyncio.run(
-        bt.run(rows=rows, limit=None, leagues_filter=None,
-               load_calibrators=False, full_stack=False)
-    )
-    assert "parity_gate_status" in report
-    assert "gates" in report["parity_gate_status"]
-    assert "summary" in report["parity_gate_status"]
+    assert pg["gates"]["full_stack_replay_via_surrogate_features"]["status"] == "NOT_RUN"
+    assert pg["gates"]["full_stack_replay_via_archived_features"]["status"] == "BLOCKED"

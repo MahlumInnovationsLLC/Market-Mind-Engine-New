@@ -1,105 +1,24 @@
-"""V1 backtest harness — audit the calibrator stage of the current
-ensemble against V1's historical predictions, with documented
-constrained-fallback semantics.
+"""V1 backtest harness — score V1 archive rows against the current
+ensemble's calibrators and (optionally) the LGB+XGB stack via
+``app.predictor.predict()``.
 
-Acceptance-gate caveat
-----------------------
+Three run modes (see ``--help``):
 
-The original task spec (#734) called for the harness to "re-run each
-row through the current ensemble (LGB + XGB stack via
-``models_loader``)" and report "parity within 2% Brier vs V1 for at
-least the 5 leagues whose calibrators were refit (NBA, NFL, NCAAB,
-NHL, MLB)."  That gate **cannot be evaluated as specified** against
-the data we have — see the *Triage* section below — so the harness
-runs in two modes and reports the constrained-fallback result
-explicitly:
+* default — calibrator-only audit on V1's archived ``predicted_prob``.
+* ``--full-stack`` — also invoke ``app.predictor.predict()`` per row;
+  rows without an archived feature vector are skipped (V1 did not
+  snapshot the upstream vector).
+* ``--full-stack --surrogate-features`` — DEGRADED stand-in: build a
+  live 32-slot vector from V1's ``analysis_json`` (see
+  ``_archive_to_candidate``); rest fall to per-spec defaults.
 
-* ``--full-stack`` — attempts the requested path: load each row,
-  invoke ``app.predictor.predict()`` (which dispatches through
-  ``app.models_loader``), then apply the calibrator.  This mode
-  produces zero usable rows on today's archive because the upstream
-  feature vector is not snapshotted; the harness still walks the
-  full archive, records the per-row skip reason
-  (``feature_vector_unavailable``), and emits a structured count so
-  the reviewer can see the path was attempted (not silently bypassed).
-
-* **Calibrator-only audit** (default) — the only audit physically
-  possible against the archive as imported.  Treats V1's
-  ``predicted_prob`` as the calibrator's input (which is exactly how
-  ``app/calibrators.py::_fetch_training_data`` already treats it for
-  the nightly refit), applies the per-league calibrator, and reports
-  Brier / log-loss / AUC for V1-raw vs calibrated.
-
-Triage (the three root-cause buckets the spec asks for)
--------------------------------------------------------
-
-1. **feature_builder_mismatch** — V1 archive only stores
-   ``predicted_prob`` and ``actual_outcome`` plus a tiny
-   ``analysis_json`` blob.  None of the live ensemble's input features
-   (real-time ``market_prob``, sharp-money signals, EV-source
-   agreement, weather, etc.) were snapshotted at trade time, so we
-   cannot reproduce the LGB+XGB stack's input vector for any V1 row.
-   This is the root cause that prevents the requested ``--full-stack``
-   path from producing data.
-
-2. **calibrator_misalignment** — V1's archived ``predicted_prob`` is
-   the *pre-calibrator* stack output (the same domain
-   ``calibrators._fetch_training_data`` treats as the X input for the
-   nightly fit).  V1's *post-calibrator* probability — the value that
-   would let us compute "parity within 2% Brier vs V1" as the spec
-   intends — is **not** in the archive.  So
-   ``brier(predicted_prob, actual_outcome)`` is V1's raw-stack Brier,
-   not V1's final Brier.  The current per-league calibrators improving
-   on this baseline (large negative ``delta_vs_v1``) is the expected
-   shape, not a parity failure.
-
-3. **artifact_drift** — would surface as a per-league
-   ``verdict == "regressed"`` row (calibrated Brier > raw Brier
-   beyond ``_BRIER_TOLERANCE``).  Today's run has zero such rows.
-   The harness keeps this bucket because it remains the operator-
-   actionable signal: any league where the loaded calibrator makes
-   the score *worse* than V1's untreated output indicates the on-disk
-   artifact diverged from what was fit.
-
-The structured ``triage`` block in the JSON report restates these
-buckets per-run so an out-of-band reviewer can read the report alone
-without context.
-
-Output schema (per league)
---------------------------
-
-* ``sample_count``, ``calibrator_applied_count``, ``calibrator_type``
-* ``brier_v1_raw``, ``brier_calibrated``, ``brier_delta``,
-  ``delta_vs_v1`` (alias of ``brier_delta`` — name from the task
-  spec; the two fields always carry the same value)
-* ``log_loss_v1_raw``, ``log_loss_calibrated``
-* ``auc_v1_raw``, ``auc_calibrated``
-* ``within_brier_tolerance``, ``verdict``
-  (``parity`` / ``improved`` / ``regressed``)
-
-Modes
------
-
-Three run modes:
-
-* **DB mode** (default): pulls from ``v1_archive.trade_analyses``
-  through ``app.db``.  Optional ``--limit N`` and ``--leagues NBA,NFL``
-  filters.  Optional ``--no-load-calibrators`` runs against an empty
-  calibrator state — useful for confirming the harness math itself
-  reproduces V1's baseline metrics when the calibrator is a no-op.
-* **Fixture mode**: ``--fixture path/to/rows.json`` reads a JSON list of
-  ``{league, predicted_prob, actual_outcome, side}`` rows and skips the
-  DB.  Used by the pytest harness.
-* **Inline-rows mode**: ``--inline-rows '<json-list>'`` for ad-hoc
-  smoke tests.
-
-The output report is identical across modes.
-
-Run with::
-
-    python -m scripts.backtest_v1_archive \\
-        --json-out scripts/reports/v1_backtest_2026-04-29.json
-    python -m scripts.backtest_v1_archive --limit 5000  # quick sanity
+The output JSON carries a top-level ``parity_gate_status`` manifest
+with three named gates and an ``overall`` verdict
+(``PASS`` / ``DEGRADED_PARTIAL_PENDING_BACKFILL`` /
+``BLOCKED_PENDING_BACKFILL`` / ``MIXED``).  Full audit narrative —
+why ±2% parity vs V1 calibrated is UNEVALUABLE on this archive,
+which gates fold into which verdict, and the canonical evidence
+report — lives in ``replit.md`` under the "V1 backtest" section.
 """
 from __future__ import annotations
 
@@ -112,9 +31,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-# Make `app.*` imports work whether the script is invoked as
-# `python scripts/backtest_v1_archive.py` (cwd=api-server) or
-# `python -m scripts.backtest_v1_archive`.
 _HERE = Path(__file__).resolve()
 _API_SERVER_ROOT = _HERE.parent.parent
 if str(_API_SERVER_ROOT) not in sys.path:
@@ -122,38 +38,23 @@ if str(_API_SERVER_ROOT) not in sys.path:
 
 from app import calibrators  # noqa: E402
 
-
-# Sides V1 wrote ``predicted_prob`` as YES-aligned for. Anything in the
-# NO/SELL family must be flipped to side-aligned before scoring against
-# the side-aligned ``actual_outcome`` column.  The set mirrors
-# `app/calibrators.py::_fetch_training_data` exactly so the backtest
-# scores rows the same way the nightly refit job scores them.
+# Side aliases mirror app/calibrators.py::_fetch_training_data so the
+# backtest groups rows the same way the nightly refit does.
 _NO_SIDES = frozenset({"no", "sell", "live_no", "buy no"})
 _YES_SIDES = frozenset({"yes", "buy", "live_yes", "buy yes"})
 
-# Brier-delta tolerance used by the rollup line in the report.  The
-# plan calls for "parity within 2% Brier vs V1 for at least the 5
-# leagues whose calibrators were refit".  We measure |delta| vs V1
-# baseline where delta = brier_calibrated - brier_v1_raw; positive
-# delta = regression, negative = improvement.
+# |delta| <= tolerance => parity; below => improved; above => regressed.
 _BRIER_TOLERANCE = 0.02
 
 
-# ---------------------------------------------------------------------------
-# Metric helpers
-# ---------------------------------------------------------------------------
-
-
 def _brier(probs: list[float], ys: list[int]) -> float | None:
-    """Mean squared error between probability and 0/1 outcome."""
     if not probs:
         return None
     return sum((p - y) * (p - y) for p, y in zip(probs, ys)) / len(probs)
 
 
 def _log_loss(probs: list[float], ys: list[int]) -> float | None:
-    """Binary cross-entropy. Clamps probabilities away from 0/1 to
-    avoid -inf when V1 emitted a degenerate 0.0 / 1.0 prediction."""
+    """Binary cross-entropy with [eps, 1-eps] clamp to avoid -inf on 0/1."""
     if not probs:
         return None
     eps = 1e-12
@@ -165,30 +66,24 @@ def _log_loss(probs: list[float], ys: list[int]) -> float | None:
 
 
 def _auc(probs: list[float], ys: list[int]) -> float | None:
-    """Area under the ROC curve via the Mann–Whitney U identity.
-
-    Returns ``None`` when only one class is present (AUC undefined).
-    Uses a stable rank average so ties don't bias the score.
-    """
+    """ROC AUC via Mann–Whitney U with average-rank tie handling."""
     if not probs or not ys:
         return None
     pos = [p for p, y in zip(probs, ys) if y == 1]
     neg = [p for p, y in zip(probs, ys) if y == 0]
     if not pos or not neg:
         return None
-    # Average-rank Mann–Whitney U.
     pairs = sorted(
         ((float(p), 1) for p in pos), key=lambda t: t[0]
     ) + sorted(((float(p), 0) for p in neg), key=lambda t: t[0])
     pairs.sort(key=lambda t: t[0])
-    # Assign average ranks for ties.
     ranks: list[float] = [0.0] * len(pairs)
     i = 0
     while i < len(pairs):
         j = i
         while j + 1 < len(pairs) and pairs[j + 1][0] == pairs[i][0]:
             j += 1
-        avg_rank = (i + 1 + j + 1) / 2.0  # 1-indexed
+        avg_rank = (i + 1 + j + 1) / 2.0
         for k in range(i, j + 1):
             ranks[k] = avg_rank
         i = j + 1
@@ -199,18 +94,8 @@ def _auc(probs: list[float], ys: list[int]) -> float | None:
     return u / (n_pos * n_neg)
 
 
-# ---------------------------------------------------------------------------
-# Row normalization
-# ---------------------------------------------------------------------------
-
-
 def _side_align(predicted_prob: float, side: str | None) -> float | None:
-    """Flip ``predicted_prob`` from YES-aligned to side-aligned.
-
-    Returns ``None`` for unrecognized sides — those rows are dropped
-    from the backtest the same way they're dropped from the calibrator
-    fit (no useful training signal when we can't tell which side won).
-    """
+    """Flip ``predicted_prob`` to side-aligned. Returns ``None`` for unknown sides."""
     s = (side or "").strip().lower()
     if s in _NO_SIDES:
         return max(0.0, min(1.0, 1.0 - float(predicted_prob)))
@@ -219,40 +104,47 @@ def _side_align(predicted_prob: float, side: str | None) -> float | None:
     return None
 
 
+def _resolve_side(row: dict[str, Any]) -> str | None:
+    side = row.get("side")
+    if side is not None:
+        return side
+    aj = row.get("analysis_json")
+    if isinstance(aj, str):
+        try:
+            aj = json.loads(aj)
+        except (ValueError, TypeError):
+            return None
+    if isinstance(aj, dict):
+        return aj.get("side")
+    return None
+
+
 def _normalize_rows(
     rows: list[dict[str, Any]],
     leagues_filter: set[str] | None = None,
 ) -> dict[str, dict[str, list]]:
-    """Group raw rows into ``{league: {"probs":[...], "ys":[...]}}``.
-
-    Drops rows with unknown side, missing probability, or missing
-    outcome.  ``analysis_json`` may arrive as either a dict (asyncpg
-    JSON decoding) or a JSON string (older drivers / fixtures).
-    """
+    """Group raw rows into ``{league: {"probs":[...], "ys":[...]}}``."""
     grouped: dict[str, dict[str, list]] = {}
+    _normalize_into(grouped, rows, leagues_filter)
+    return grouped
+
+
+def _normalize_into(
+    grouped: dict[str, dict[str, list]],
+    rows: list[dict[str, Any]],
+    leagues_filter: set[str] | None,
+) -> int:
+    """Merge ``rows`` into ``grouped`` in place. Returns rows appended."""
+    appended = 0
     for r in rows:
         league = (r.get("league") or "").strip().upper()
-        if not league:
-            continue
-        if leagues_filter and league not in leagues_filter:
+        if not league or (leagues_filter and league not in leagues_filter):
             continue
         prob_raw = r.get("predicted_prob")
         outcome_raw = r.get("actual_outcome")
         if prob_raw is None or outcome_raw is None:
             continue
-        # Resolve `side`: prefer top-level `side`, then dig into
-        # analysis_json (live DB rows) which may be dict or str.
-        side = r.get("side")
-        if side is None:
-            aj = r.get("analysis_json")
-            if isinstance(aj, str):
-                try:
-                    aj = json.loads(aj)
-                except (ValueError, TypeError):
-                    aj = None
-            if isinstance(aj, dict):
-                side = aj.get("side")
-        p_side = _side_align(float(prob_raw), side)
+        p_side = _side_align(float(prob_raw), _resolve_side(r))
         if p_side is None:
             continue
         try:
@@ -264,12 +156,8 @@ def _normalize_rows(
         bucket = grouped.setdefault(league, {"probs": [], "ys": []})
         bucket["probs"].append(p_side)
         bucket["ys"].append(y)
-    return grouped
-
-
-# ---------------------------------------------------------------------------
-# Row sources
-# ---------------------------------------------------------------------------
+        appended += 1
+    return appended
 
 
 _DEFAULT_BATCH_SIZE = 50_000
@@ -280,18 +168,8 @@ async def _fetch_db_rows_batched(
     leagues_filter: set[str] | None,
     batch_size: int = _DEFAULT_BATCH_SIZE,
 ):
-    """Async generator: yield rows from ``v1_archive.trade_analyses``
-    in batches of at most ``batch_size``.
-
-    Uses keyset pagination on the ``id`` PRIMARY KEY (text/UUID) so
-    memory stays bounded — the harness scored 667k rows on the
-    initial run by materializing them all; with this generator the
-    grouped per-league dict is the only thing that grows.
-
-    Preflights via ``to_regclass`` so a fresh dev DB without migration
-    0037 yields nothing rather than raising ``UndefinedTable``.
-    """
-    from app import db  # local import — avoids triggering pool setup at parse time
+    """Yield batches of v1_archive.trade_analyses rows (keyset paginated on id)."""
+    from app import db  # noqa: PLC0415
 
     present = await db.fetchval(
         "SELECT to_regclass('v1_archive.trade_analyses') IS NOT NULL"
@@ -306,8 +184,6 @@ async def _fetch_db_rows_batched(
         "league IS NOT NULL",
     ]
     if leagues_filter:
-        # Quote+upper each league so the SQL stays parameterless and
-        # readable; values come from the operator's CLI argv only.
         cleaned = ",".join(
             "'" + lg.replace("'", "''").upper() + "'" for lg in leagues_filter
         )
@@ -317,7 +193,6 @@ async def _fetch_db_rows_batched(
     total_yielded = 0
     bs = max(1, int(batch_size))
     while True:
-        # Cap batch to remaining limit if a global limit was set.
         if limit is not None:
             remaining = limit - total_yielded
             if remaining <= 0:
@@ -337,10 +212,7 @@ async def _fetch_db_rows_batched(
             f"WHERE {' AND '.join(where_clauses)} "
             f"ORDER BY id ASC LIMIT {int(this_batch)}"
         )
-        if params:
-            rows = await db.fetch(sql, *params)
-        else:
-            rows = await db.fetch(sql)
+        rows = await db.fetch(sql, *params) if params else await db.fetch(sql)
         if not rows:
             return
         batch_rows = [dict(r) for r in rows]
@@ -349,54 +221,6 @@ async def _fetch_db_rows_batched(
         yield batch_rows
         if len(batch_rows) < this_batch:
             return
-
-
-def _normalize_into(
-    grouped: dict[str, dict[str, list]],
-    rows: list[dict[str, Any]],
-    leagues_filter: set[str] | None,
-) -> int:
-    """Merge a batch of raw rows into ``grouped`` in place. Returns
-    the number of rows actually appended (skips dropped rows).
-
-    Same per-row drop semantics as ``_normalize_rows`` — split out so
-    the streaming path can reuse the logic without re-grouping.
-    """
-    appended = 0
-    for r in rows:
-        league = (r.get("league") or "").strip().upper()
-        if not league:
-            continue
-        if leagues_filter and league not in leagues_filter:
-            continue
-        prob_raw = r.get("predicted_prob")
-        outcome_raw = r.get("actual_outcome")
-        if prob_raw is None or outcome_raw is None:
-            continue
-        side = r.get("side")
-        if side is None:
-            aj = r.get("analysis_json")
-            if isinstance(aj, str):
-                try:
-                    aj = json.loads(aj)
-                except (ValueError, TypeError):
-                    aj = None
-            if isinstance(aj, dict):
-                side = aj.get("side")
-        p_side = _side_align(float(prob_raw), side)
-        if p_side is None:
-            continue
-        try:
-            y = int(outcome_raw)
-        except (TypeError, ValueError):
-            continue
-        if y not in (0, 1):
-            continue
-        bucket = grouped.setdefault(league, {"probs": [], "ys": []})
-        bucket["probs"].append(p_side)
-        bucket["ys"].append(y)
-        appended += 1
-    return appended
 
 
 def _read_fixture(path: Path) -> list[dict[str, Any]]:
@@ -413,33 +237,8 @@ def _read_inline(blob: str) -> list[dict[str, Any]]:
     return data
 
 
-# ---------------------------------------------------------------------------
-# Full-stack attempt — invokes app.predictor.predict() per row.
-#
-# This is the path the original task spec asked for ("re-runs each row
-# through the current ensemble (LGB + XGB stack) via models_loader").
-# On the archive as imported it produces zero usable rows because V1
-# never snapshotted the upstream feature vector — but the harness still
-# walks every row, attempts the call, and records the per-row skip
-# reason so the reviewer can verify the path was attempted (rather
-# than silently bypassed).
-#
-# `predict_fn` is injected so the pytest end-to-end test can monkey-
-# patch the predictor and exercise the full predictor → calibrator →
-# aggregation chain without spinning up the model registry.
-# ---------------------------------------------------------------------------
-
-
 def _extract_feature_vector(row: dict[str, Any]) -> list[float] | None:
-    """Pull a feature vector out of an archived row, if present.
-
-    V1's import only persists ``analysis_json`` as a tiny audit blob;
-    in the archive as imported by ``import_v1_history.py`` this never
-    contains the ensemble's input features.  This helper exists for
-    forward compatibility (a future re-import could include them) and
-    so the unit tests can exercise the full-stack path with synthetic
-    features.
-    """
+    """Pull a feature vector out of an archived row, if one was snapshotted."""
     aj = row.get("analysis_json")
     if isinstance(aj, str):
         try:
@@ -458,47 +257,13 @@ def _extract_feature_vector(row: dict[str, Any]) -> list[float] | None:
     return None
 
 
-# ---------------------------------------------------------------------------
-# Surrogate candidate builder — declared, documented, REDUCED-FEATURE
-# mapping from V1 archive rows into the live feature builder's input
-# dict shape.  Opt-in via ``--surrogate-features``.
-#
-# Stakeholder note: this is a DEGRADED baseline, not the spec's
-# requested "true V1 feature reconstruction".  V1 only snapshotted a
-# handful of the 32-slot live feature vector — the rest fall back to
-# the documented per-feature defaults declared in
-# ``app/features/builders.py::_SPECS``.  Use this path to verify the
-# end-to-end predict() chain runs against archive rows; it is NOT a
-# substitute for the Phase 2 dump reconstruction tracked under
-# follow-up #731 (joining ``line_snapshots`` /
-# ``weather_observations`` / ``llm_predictions`` to recover the
-# remaining live signals at trade time).
-#
-# Mapping table (V1 source -> live candidate key):
-#   row.predicted_prob          -> candidate.consensus_probability
-#   row.market_type             -> candidate.market_type
-#   row.league                  -> candidate.league
-#   analysis_json.market_implied_prob -> candidate.market_prob
-#   analysis_json.signal_strength     -> candidate.signal_strength
-#   analysis_json.edge_at_entry       -> candidate.edge
-#   analysis_json.kelly_used          -> candidate.kelly (override)
-#   analysis_json.side                -> candidate.side
-# Everything not listed (sharp_money_*, tz_arb_*, ev_source_*,
-# tipster_divergence_pct, game_context, etc.) is absent on the
-# archive and falls through to the spec's declared default.
-# ---------------------------------------------------------------------------
-
-
-_LIVE_FEATURE_COUNT = 32  # length of _SPECS in app/features/builders.py
+_LIVE_FEATURE_COUNT = 32
 
 
 def _archive_to_candidate(
     row: dict[str, Any],
 ) -> tuple[dict[str, Any], float | None] | None:
-    """Build a live-shaped candidate dict + a ``kelly`` override from
-    one V1 archive row. Returns ``None`` if the row lacks the minimum
-    inputs (predicted_prob + side) the surrogate needs.
-    """
+    """Map a V1 archive row to a live-shaped candidate dict + kelly override."""
     aj = row.get("analysis_json")
     if isinstance(aj, str):
         try:
@@ -520,43 +285,26 @@ def _archive_to_candidate(
 
     raw_side = aj.get("side")
     if raw_side is None:
-        return None  # side required for side_val + side-flip
-    # Canonicalize V1 archive side aliases (sell, live_no, buy no, etc.)
-    # into the literal "yes"/"no" the live builder's _resolve_side()
-    # expects.  Without this, _resolve_side treats "sell" as YES (it
-    # only checks `.upper() != "NO"`), poisoning side_val for a
-    # non-trivial subset of NO-family rows.  Reuses the same canonical
-    # sets the calibrator-only path uses (_YES_SIDES / _NO_SIDES).
+        return None
     s = str(raw_side).strip().lower()
     if s in _NO_SIDES:
         side = "no"
     elif s in _YES_SIDES:
         side = "yes"
     else:
-        return None  # unknown side alias — refuse to guess
+        return None
 
     candidate: dict[str, Any] = {
-        # YES-aligned live consensus probability — the live builder
-        # treats this as the model's primary input slot.
         "consensus_probability": pred_prob,
-        # market_implied_prob -> market_prob feature.
         "market_prob": aj.get("market_implied_prob"),
-        # signal_strength carries straight through.
         "signal_strength": aj.get("signal_strength"),
-        # edge — the live builder will derive (pred-market) if absent.
         "edge": aj.get("edge_at_entry"),
-        # categorical / time / side fields (side already canonicalized).
         "side": side,
         "league": (row.get("league") or "").strip().upper() or None,
         "market_type": row.get("market_type"),
     }
-    # Drop None values so build_vector falls back to declared defaults
-    # rather than coercing None -> 0.0 silently.
     candidate = {k: v for k, v in candidate.items() if v is not None}
 
-    # kelly_used in the archive is the *fraction actually staked* —
-    # passed as the build_vector ``kelly`` override so it lands in the
-    # `kelly` slot directly without being re-derived.
     kelly_override: float | None = None
     ku = aj.get("kelly_used")
     if ku is not None:
@@ -568,13 +316,7 @@ def _archive_to_candidate(
 
 
 def _build_surrogate_vector(row: dict[str, Any]) -> list[float] | None:
-    """Run the live ``app.features.build_vector`` on a candidate dict
-    constructed from the V1 archive row.  Returns the 32-slot live
-    feature vector, or ``None`` if the row can't be mapped.
-
-    Local import keeps the calibrator-only path (default) from
-    pulling the feature builder graph.
-    """
+    """Build a live 32-slot feature vector from a V1 archive row."""
     mapped = _archive_to_candidate(row)
     if mapped is None:
         return None
@@ -592,26 +334,14 @@ async def _attempt_full_stack_inference(
     surrogate_features: bool = False,
     feature_builder: Any | None = None,
 ) -> tuple[dict[str, dict[str, list]], dict[str, Any]]:
-    """Walk every row, try the LGB+XGB stack via ``app.predictor``.
+    """Run the LGB+XGB stack via ``app.predictor`` per row.
 
-    Returns ``(grouped, summary)`` where ``grouped`` is the same
-    ``{league: {"probs":[...], "ys":[...]}}`` shape ``score_grouped``
-    consumes, and ``summary`` is a structured count of attempted /
-    predicted / skipped rows with per-skip-reason buckets.
-
-    When ``surrogate_features=True`` and the row lacks a directly
-    snapshotted feature vector, the harness falls back to
-    :func:`_build_surrogate_vector` (mapping V1 archive fields into
-    the live feature builder's input dict).  The summary then breaks
-    out ``feature_source`` counts so the report makes the surrogate
-    rate explicit.  Pass ``feature_builder`` to inject a stub for
-    tests that don't want to import the live builder graph.
+    Returns ``(grouped, summary)`` with per-row attempt/predicted/skipped
+    counts, skip-reason buckets, and an ``archived`` vs ``surrogate``
+    feature-source split.
     """
     if predict_fn is None:
-        # Local import so the pytest fixture path doesn't pull the
-        # whole predictor module unless full-stack mode is requested.
         from app import predictor  # noqa: PLC0415
-
         predict_fn = predictor.predict
 
     if surrogate_features and feature_builder is None:
@@ -620,45 +350,43 @@ async def _attempt_full_stack_inference(
     grouped: dict[str, dict[str, list]] = {}
     skip_reasons: dict[str, int] = {}
     feature_source_counts: dict[str, int] = {"archived": 0, "surrogate": 0}
-    attempted = 0
-    predicted = 0
-    skipped = 0
+    attempted = predicted = skipped = 0
     error_samples: list[dict[str, Any]] = []
+
+    def _bump(reason: str) -> None:
+        skip_reasons[reason] = skip_reasons.get(reason, 0) + 1
+
     for r in rows:
         league = (r.get("league") or "").strip().upper()
         if not league:
             skipped += 1
-            skip_reasons["missing_league"] = skip_reasons.get("missing_league", 0) + 1
+            _bump("missing_league")
             continue
         if leagues_filter and league not in leagues_filter:
             continue
         outcome_raw = r.get("actual_outcome")
         if outcome_raw is None:
             skipped += 1
-            skip_reasons["missing_outcome"] = skip_reasons.get("missing_outcome", 0) + 1
+            _bump("missing_outcome")
             continue
         try:
             y = int(outcome_raw)
         except (TypeError, ValueError):
             skipped += 1
-            skip_reasons["non_binary_outcome"] = skip_reasons.get("non_binary_outcome", 0) + 1
+            _bump("non_binary_outcome")
             continue
         if y not in (0, 1):
             skipped += 1
-            skip_reasons["non_binary_outcome"] = skip_reasons.get("non_binary_outcome", 0) + 1
+            _bump("non_binary_outcome")
             continue
         features = _extract_feature_vector(r)
         feature_source = "archived" if features is not None else None
         if features is None and feature_builder is not None:
-            # Surrogate fallback: build the live 32-slot vector from
-            # the archive's analysis_json + row fields, falling back
-            # to per-spec defaults for everything not snapshotted.
             try:
                 features = feature_builder(r)
-            except Exception as e:  # pragma: no cover — defensive
+            except Exception as e:  # pragma: no cover
                 skipped += 1
-                reason = f"surrogate_build_error_{type(e).__name__}"
-                skip_reasons[reason] = skip_reasons.get(reason, 0) + 1
+                _bump(f"surrogate_build_error_{type(e).__name__}")
                 if len(error_samples) < 5:
                     error_samples.append({
                         "league": league, "outcome": y, "error": str(e),
@@ -668,12 +396,8 @@ async def _attempt_full_stack_inference(
             if features is not None:
                 feature_source = "surrogate"
         if features is None:
-            # The dominant skip on the archive as imported. Documented
-            # under the `feature_builder_mismatch` triage bucket.
             skipped += 1
-            skip_reasons["feature_vector_unavailable"] = (
-                skip_reasons.get("feature_vector_unavailable", 0) + 1
-            )
+            _bump("feature_vector_unavailable")
             continue
         feature_source_counts[feature_source] = (
             feature_source_counts.get(feature_source, 0) + 1
@@ -682,25 +406,20 @@ async def _attempt_full_stack_inference(
         attempted += 1
         try:
             pred = await predict_fn(features, league=league)
-        except Exception as e:  # pragma: no cover — exercised via tests
+        except Exception as e:  # pragma: no cover
             skipped += 1
-            reason = f"predict_error_{type(e).__name__}"
-            skip_reasons[reason] = skip_reasons.get(reason, 0) + 1
+            _bump(f"predict_error_{type(e).__name__}")
             if len(error_samples) < 5:
                 error_samples.append({"league": league, "error": f"{type(e).__name__}: {e}"})
             continue
 
-        # Accept either a Prediction-like object or a dict; both expose
-        # `.probability`. The probability is already calibrated when
-        # `predict()` flows through `calibrators.apply()` internally,
-        # so we score the value as-is against `actual_outcome`.
         if hasattr(pred, "probability"):
             p = float(pred.probability)
         elif isinstance(pred, dict) and "probability" in pred:
             p = float(pred["probability"])
         else:
             skipped += 1
-            skip_reasons["bad_predict_shape"] = skip_reasons.get("bad_predict_shape", 0) + 1
+            _bump("bad_predict_shape")
             continue
         p = max(0.0, min(1.0, p))
         bucket = grouped.setdefault(league, {"probs": [], "ys": []})
@@ -708,7 +427,7 @@ async def _attempt_full_stack_inference(
         bucket["ys"].append(y)
         predicted += 1
 
-    summary = {
+    return grouped, {
         "rows_attempted": attempted,
         "rows_predicted": predicted,
         "rows_skipped": skipped,
@@ -716,12 +435,6 @@ async def _attempt_full_stack_inference(
         "error_samples": error_samples,
         "feature_source": feature_source_counts,
     }
-    return grouped, summary
-
-
-# ---------------------------------------------------------------------------
-# Scoring
-# ---------------------------------------------------------------------------
 
 
 def score_grouped(
@@ -731,32 +444,10 @@ def score_grouped(
 ) -> dict[str, Any]:
     """Compute per-league raw + calibrated metrics. Pure function — no IO.
 
-    ``apply_calibrator=False`` is the no-op-calibration mode used by
-    the full-stack scoring path: the probabilities coming in have
-    *already* been calibrated by ``app.predictor.predict()`` (which
-    internally calls ``calibrators.apply()``), so re-running them
-    through ``calibrators.apply()`` here would double-calibrate them
-    and produce nonsense ``brier_calibrated`` numbers.  In that mode
-    ``brier_v1_raw`` and ``brier_calibrated`` carry the same value
-    (the predict() output), ``brier_delta`` / ``delta_vs_v1`` is
-    always ``0.0``, and ``calibrator_applied_count`` is set to ``0``
-    so the report makes the bypass explicit.
-
-    Rollup semantics for ``brier_delta`` (= ``brier_calibrated - brier_v1_raw``):
-
-    * ``leagues_parity`` — ``|delta| <= _BRIER_TOLERANCE`` (calibrator is
-      a wash; either no fitted artifact or the artifact happens to
-      reproduce V1's baseline).
-    * ``leagues_improved`` — ``delta < -_BRIER_TOLERANCE`` (calibrator
-      meaningfully reduces Brier vs V1's raw stack output — the
-      desired direction).
-    * ``leagues_regressed`` — ``delta > +_BRIER_TOLERANCE`` (calibrator
-      makes the score WORSE than V1 — operator-actionable, must be
-      triaged before promoting to live).
-
-    The legacy ``leagues_within_tolerance`` /
-    ``leagues_outside_tolerance`` keys are retained as aliases so any
-    external dashboard already reading the report keeps working.
+    ``apply_calibrator=False`` is for the full-stack path: probabilities
+    were already calibrated by ``app.predictor.predict()``, so re-running
+    them through ``calibrators.apply()`` would double-calibrate. In that
+    mode raw == calibrated and ``brier_delta == 0``.
     """
     per_league: dict[str, Any] = {}
     leagues_parity: list[str] = []
@@ -767,10 +458,6 @@ def score_grouped(
         ys = grouped[league]["ys"]
         n = len(probs)
         if apply_calibrator:
-            # Apply current calibrator.  When no fitted artifact exists for
-            # this league, calibrators.apply() is a documented no-op and
-            # returns the raw probability — `applied` flips False so the
-            # report can call out the bypass.
             calibrated_pairs = [calibrators.apply(p, league) for p in probs]
             cal_probs = [cp for cp, _info in calibrated_pairs]
             applied_count = sum(1 for _cp, info in calibrated_pairs if info.get("applied"))
@@ -779,10 +466,6 @@ def score_grouped(
                 None,
             )
         else:
-            # Full-stack scoring path: probabilities have already been
-            # calibrated by app.predictor.predict() upstream. Re-applying
-            # would double-calibrate — instead pass them through as-is
-            # so brier_v1_raw == brier_calibrated and brier_delta == 0.
             cal_probs = list(probs)
             applied_count = 0
             cal_type = None
@@ -816,11 +499,7 @@ def score_grouped(
             "brier_v1_raw": brier_raw,
             "brier_calibrated": brier_cal,
             "brier_delta": delta,
-            # Spec-named alias of brier_delta — task #734 acceptance
-            # criteria asks for `delta_vs_v1`. Same value, two names so
-            # both the historical reports and the spec-conforming
-            # consumers read the right key.
-            "delta_vs_v1": delta,
+            "delta_vs_v1": delta,  # spec-named alias of brier_delta
             "log_loss_v1_raw": log_loss_raw,
             "log_loss_calibrated": log_loss_cal,
             "auc_v1_raw": auc_raw,
@@ -847,11 +526,6 @@ def score_grouped(
     }
 
 
-# ---------------------------------------------------------------------------
-# Top-level
-# ---------------------------------------------------------------------------
-
-
 def _parse_leagues(arg: str | None) -> set[str] | None:
     if not arg:
         return None
@@ -863,20 +537,9 @@ def _build_parity_gate_status(
     scored: dict[str, Any],
     full_stack_summary: dict[str, Any] | None,
 ) -> dict[str, Any]:
-    """Top-level hard-gate manifest: per-gate STATUS + blocked_by.
-
-    Required so reviewers reading the JSON in isolation can see at a
-    glance which acceptance criteria are PASS / EVALUABLE_DEGRADED /
-    BLOCKED, without having to walk the triage notes.  The original
-    task's '±2% parity vs V1 calibrated' gate cannot be evaluated
-    against the V1 archive (V1 stored pre-calibrator stack output,
-    not its final calibrated probability) — this manifest formalizes
-    that as a scoped task change rather than re-litigating it in
-    every review.
-    """
+    """Top-level hard-gate manifest: 3 named gates + an ``overall`` verdict."""
     fs = full_stack_summary or {}
     fs_attempted = int(fs.get("rows_attempted", 0))
-    fs_predicted = int(fs.get("rows_predicted", 0))
     fs_skip = dict(fs.get("skip_reasons", {}))
     fs_missing = int(fs_skip.get("feature_vector_unavailable", 0))
     surrogate_enabled = bool(fs.get("surrogate_features_enabled", False))
@@ -888,20 +551,13 @@ def _build_parity_gate_status(
     gates: dict[str, Any] = {
         "full_stack_replay_via_archived_features": {
             "status": "BLOCKED",
-            "blocked_by": "#731 (V1 feature snapshot dumps required — "
-                          "V1 archive does not store the upstream LGB+XGB "
-                          "feature vector at trade time)",
+            "blocked_by": "#731 (V1 feature snapshot dumps required)",
             "evidence": {
                 "rows_attempted": fs_attempted,
                 "rows_predicted_via_archived_features": archived_used,
                 "rows_skipped_missing_features": fs_missing,
             },
-            "note": (
-                "True end-to-end replay requires the original 32-slot "
-                "feature vector that fed V1's predictor. The archive "
-                "preserves predicted_prob (post-stack, pre-calibrator) "
-                "and analysis_json fields, but not the input vector."
-            ),
+            "note": "V1 archive does not snapshot the upstream LGB+XGB feature vector.",
         },
         "full_stack_replay_via_surrogate_features": {
             "status": (
@@ -917,41 +573,28 @@ def _build_parity_gate_status(
             },
             "caveat": (
                 "DEGRADED baseline: ~10 of 32 feature slots populated from "
-                "V1 archive; rest fall to per-spec defaults (sharp_money, "
-                "tz_arb, ev_source, tipster, game_context). Per-league "
-                "surrogate Brier vs V1 raw predicted_prob shows live "
-                "calibrators dominating V1's *raw* baseline — NOT V1's "
-                "final calibrated Brier."
+                "V1; rest fall to per-spec defaults. Compares against V1's "
+                "*raw* predicted_prob, not its final calibrated probability."
             ),
         },
         "parity_within_2pct_vs_v1_calibrated": {
             "status": "UNEVALUABLE",
             "blocked_by": (
                 "#731 (V1 feature snapshot dumps) AND historical V1 "
-                "calibrated-probability dump (V1 archive only stores the "
-                "pre-calibrator stack output)"
+                "calibrated-probability dump (archive stores pre-calibrator output)"
             ),
-            "note": (
-                "brier(predicted_prob, actual_outcome) on this archive is "
-                "V1's *raw* baseline, NOT V1's final calibrated Brier. "
-                "Without V1's calibrators (and without the original "
-                "feature vector to re-run them on), the spec's '±2% "
-                "parity vs V1' gate cannot be evaluated against this "
-                "archive. Tracked as scoped task change — see #731."
-            ),
+            "note": "See replit.md V1 backtest section for the full audit narrative.",
         },
     }
     blocked_count = sum(
-        1 for g in gates.values()
-        if g["status"] in {"BLOCKED", "UNEVALUABLE"}
+        1 for g in gates.values() if g["status"] in {"BLOCKED", "UNEVALUABLE"}
     )
     pass_count = sum(1 for g in gates.values() if g["status"] == "PASS")
     degraded_count = sum(
         1 for g in gates.values() if g["status"] == "EVALUABLE_DEGRADED"
     )
     not_run_count = sum(1 for g in gates.values() if g["status"] == "NOT_RUN")
-    # NOT_RUN folds into "blocked" semantics for the top-level verdict:
-    # the gate was not evaluated this run, so it cannot count as PASS.
+    # NOT_RUN folds into "blocked" semantics for the verdict.
     if pass_count == len(gates):
         overall = "PASS"
     elif degraded_count > 0 and pass_count == 0:
@@ -977,14 +620,7 @@ def _build_triage(
     scored: dict[str, Any],
     full_stack_summary: dict[str, Any] | None,
 ) -> dict[str, Any]:
-    """Restate the three root-cause buckets in machine-readable form.
-
-    The buckets mirror what the task spec asks the report to triage:
-    feature-builder mismatch, calibrator misalignment, artifact drift.
-    The narrative for each bucket lives in the module docstring; this
-    block carries the per-run evidence so a reviewer reading the JSON
-    in isolation can verify the conclusions.
-    """
+    """Per-run evidence for the three triage buckets (machine-readable)."""
     summary = scored.get("summary", {})
     fs = full_stack_summary or {}
     fs_predicted = int(fs.get("rows_predicted", 0))
@@ -1001,19 +637,13 @@ def _build_triage(
     if surrogate_enabled and surrogate_used > 0:
         note = (
             f"--surrogate-features active: {surrogate_used} archive rows "
-            "mapped into a degraded build_vector input dict (~10 of 32 "
-            "feature slots populated; rest fall to spec defaults). The "
-            "full LGB+XGB+calibrator chain ran end-to-end on the surrogate "
-            "vector — this is NOT V1 parity, just a stand-in baseline "
-            "until #731 dumps the real V1 feature snapshots."
+            "mapped through the degraded build_vector path. NOT V1 parity."
         )
     else:
         note = (
-            "V1 archive does not snapshot the upstream LGB+XGB feature "
-            "vector, so the requested full-stack replay yields zero "
-            "usable rows. Pass --surrogate-features for the degraded "
-            "stand-in path, or wait on #731 for real V1 feature dumps. "
-            "Calibrator-only audit below is the constrained fallback."
+            "V1 archive lacks the upstream feature vector; full-stack replay "
+            "yields zero usable rows. Pass --surrogate-features for the "
+            "degraded stand-in, or wait on #731 for real V1 feature dumps."
         )
     return {
         "feature_builder_mismatch": {
@@ -1035,13 +665,9 @@ def _build_triage(
                 "leagues_parity": summary.get("leagues_parity", []),
             },
             "note": (
-                "V1's archived `predicted_prob` is the pre-calibrator "
-                "stack output. brier(predicted_prob, actual_outcome) is "
-                "V1's *raw* baseline, NOT V1's final calibrated Brier — "
-                "so the spec's '±2% parity vs V1' gate cannot be "
-                "evaluated against this archive. Large negative "
-                "`delta_vs_v1` on the refit leagues is the expected "
-                "shape (current calibrators dominating the raw stack)."
+                "V1's archived predicted_prob is pre-calibrator stack output, "
+                "so brier(predicted_prob, actual_outcome) is V1's raw baseline "
+                "— not its final calibrated Brier."
             ),
         },
         "artifact_drift": {
@@ -1051,8 +677,7 @@ def _build_triage(
             },
             "note": (
                 "Per-league calibrated Brier worse than V1 raw beyond "
-                "tolerance — would indicate the on-disk calibrator "
-                "diverged from what was fit. Empty list = no drift."
+                "tolerance — would indicate on-disk calibrator drift."
             ),
         },
     }
@@ -1070,23 +695,12 @@ async def run(
     surrogate_features: bool = False,
     feature_builder: Any | None = None,
 ) -> dict[str, Any]:
-    """Programmatic entry point. Used by the pytest fixture.
-
-    DB mode walks ``v1_archive.trade_analyses`` in keyset-paginated
-    batches of ``batch_size`` rows so peak memory stays bounded
-    (the per-league grouped dict is the only thing that grows).
-
-    When ``full_stack=True`` the harness also walks every row
-    (per batch in DB mode) through ``app.predictor.predict()`` (the
-    LGB+XGB stack via models_loader) and reports the per-row
-    attempt/skip counts.  Pass ``predict_fn`` to inject a stub for
-    tests that don't want to load real models.
-    """
+    """Programmatic entry point. DB mode walks v1_archive in keyset batches."""
     started_at = datetime.now(timezone.utc).isoformat()
     if load_calibrators:
         try:
             await calibrators.load_all()
-        except Exception as e:  # pragma: no cover — defensive
+        except Exception as e:  # pragma: no cover
             print(f"[backtest] calibrator load failed (continuing with no-op): {e}")
 
     grouped: dict[str, dict[str, list]] = {}
@@ -1108,8 +722,6 @@ async def run(
     batch_count = 0
 
     async def _process_batch(batch_rows: list[dict[str, Any]]) -> None:
-        """Merge a batch into the calibrator-only grouped dict and,
-        when full_stack is on, also into the predictor-output dict."""
         nonlocal batch_count
         batch_count += 1
         _normalize_into(grouped, batch_rows, leagues_filter=leagues_filter)
@@ -1121,12 +733,10 @@ async def run(
                 surrogate_features=surrogate_features,
                 feature_builder=feature_builder,
             )
-            # Merge per-batch grouped into the running fs_grouped.
             for lg, bucket in fs_g.items():
                 target = fs_grouped.setdefault(lg, {"probs": [], "ys": []})
                 target["probs"].extend(bucket["probs"])
                 target["ys"].extend(bucket["ys"])
-            # Merge per-batch summary counters.
             full_stack_summary["rows_attempted"] += fs_s["rows_attempted"]
             full_stack_summary["rows_predicted"] += fs_s["rows_predicted"]
             full_stack_summary["rows_skipped"] += fs_s["rows_skipped"]
@@ -1138,7 +748,6 @@ async def run(
                 full_stack_summary["feature_source"][k] = (
                     full_stack_summary["feature_source"].get(k, 0) + v
                 )
-            # Cap retained error samples so the summary doesn't grow.
             for sample in fs_s["error_samples"]:
                 if len(full_stack_summary["error_samples"]) < 5:
                     full_stack_summary["error_samples"].append(sample)
@@ -1153,9 +762,6 @@ async def run(
     else:
         source = "in-memory"
         row_input_count = len(rows)
-        # Stream the in-memory list in same-size chunks so the full-stack
-        # path executes against fixture rows the same way it does
-        # against DB rows (good test coverage of the streaming code path).
         bs = max(1, int(batch_size))
         for start in range(0, len(rows), bs):
             await _process_batch(rows[start:start + bs])
@@ -1163,9 +769,7 @@ async def run(
     scored = score_grouped(grouped)
     full_stack_scored: dict[str, Any] | None = None
     if full_stack:
-        # apply_calibrator=False — predict() already calibrated internally;
-        # re-applying here would double-calibrate. See score_grouped's
-        # docstring for the full explanation.
+        # apply_calibrator=False — predict() already calibrated upstream.
         full_stack_scored = score_grouped(fs_grouped, apply_calibrator=False)
 
     triage = _build_triage(scored, full_stack_summary)
@@ -1181,9 +785,6 @@ async def run(
         "leagues_filter": sorted(leagues_filter) if leagues_filter else None,
         "limit": limit,
         "calibrator_freshness": calibrators.get_state().freshness() if load_calibrators else None,
-        # Top-level hard-gate manifest (per-gate STATUS + blocked_by) so
-        # reviewers can see PASS/EVALUABLE_DEGRADED/BLOCKED at a glance
-        # without walking the triage notes.
         "parity_gate_status": parity_gate_status,
         "full_stack_attempt": full_stack_summary,
         "triage": triage,
@@ -1205,29 +806,14 @@ async def _amain(argv: list[str] | None = None) -> int:
     parser.add_argument("--inline-rows", type=str, default=None,
                         help="JSON list of rows (overrides DB + fixture).")
     parser.add_argument("--no-load-calibrators", action="store_true",
-                        help="Skip the DB calibrator load (calibrator.apply() "
-                             "becomes a no-op and brier_calibrated == brier_v1_raw).")
+                        help="Skip the DB calibrator load (apply() becomes no-op).")
     parser.add_argument("--full-stack", action="store_true",
-                        help="Also attempt the requested LGB+XGB stack replay "
-                             "via app.predictor.predict() and report attempt/skip "
-                             "counts. On the V1 archive without --surrogate-features "
-                             "this yields zero usable rows (features not snapshotted "
-                             "— see parity_gate_status block); pair with "
-                             "--surrogate-features for the degraded stand-in path.")
+                        help="Also run app.predictor.predict() per row.")
     parser.add_argument("--surrogate-features", action="store_true",
-                        help="Opt-in DEGRADED-baseline path: when --full-stack is "
-                             "on and a row has no archived feature vector, build "
-                             "the live 32-slot vector via app.features.build_vector "
-                             "from the V1 analysis_json + row fields, falling back "
-                             "to per-spec defaults for unmapped slots (sharp_money, "
-                             "tz_arb, ev_source, etc.). Lets the LGB+XGB chain "
-                             "produce non-zero row counts so the report shows the "
-                             "live predictor's calibrated Brier on archive rows. "
-                             "NOT V1 parity — see scripts/backtest_v1_archive.py "
-                             "module docstring + replit.md V1 backtest section.")
+                        help="With --full-stack: build surrogate features when "
+                             "row lacks an archived vector. DEGRADED baseline.")
     parser.add_argument("--batch-size", type=int, default=_DEFAULT_BATCH_SIZE,
-                        help=f"Rows pulled per DB batch (keyset paginated on id). "
-                             f"Default {_DEFAULT_BATCH_SIZE}.")
+                        help=f"Rows per DB batch (default {_DEFAULT_BATCH_SIZE}).")
     parser.add_argument("--json-out", type=Path, default=None,
                         help="Write the JSON report to this path.")
     args = parser.parse_args(argv)
@@ -1240,21 +826,14 @@ async def _amain(argv: list[str] | None = None) -> int:
     else:
         rows = None
 
-    # Bootstrap the LGB+XGB ensemble so app.predictor.predict() doesn't
-    # raise PredictorUnavailable on the first surrogate row.  Skipped
-    # unless --full-stack is requested (calibrator-only path doesn't
-    # need models).  Failures are non-fatal so the script still emits
-    # a report describing the bootstrap error rather than crashing.
     if args.full_stack:
         try:
             from app import models_loader  # noqa: PLC0415
-
             await models_loader.ensure_artifacts()
             print("[backtest] models_loader.ensure_artifacts() OK")
         except Exception as e:
             print(f"[backtest] models_loader.ensure_artifacts() FAILED: "
                   f"{type(e).__name__}: {e}")
-            print("[backtest]   full-stack rows will skip with PredictorUnavailable.")
 
     report = await run(
         rows=rows,

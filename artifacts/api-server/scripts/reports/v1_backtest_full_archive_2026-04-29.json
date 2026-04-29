@@ -1,6 +1,6 @@
 {
-  "started_at": "2026-04-29T20:34:19.877019+00:00",
-  "completed_at": "2026-04-29T20:38:14.865481+00:00",
+  "started_at": "2026-04-29T21:00:39.094107+00:00",
+  "completed_at": "2026-04-29T21:04:44.033521+00:00",
   "source": "db",
   "row_input_count": 667092,
   "row_kept_count": 603128,
@@ -41,7 +41,7 @@
         "loaded": true,
         "type": "isotonic",
         "fit_at": 1777481414.721987,
-        "age_seconds": 13680.1,
+        "age_seconds": 15269.3,
         "stale": false,
         "sample_count": 3158
       },
@@ -49,7 +49,7 @@
         "loaded": true,
         "type": "isotonic",
         "fit_at": 1777481416.306042,
-        "age_seconds": 13678.6,
+        "age_seconds": 15267.7,
         "stale": false,
         "sample_count": 300
       },
@@ -57,7 +57,7 @@
         "loaded": true,
         "type": "isotonic",
         "fit_at": 1777481416.366513,
-        "age_seconds": 13678.5,
+        "age_seconds": 15267.7,
         "stale": false,
         "sample_count": 163
       },
@@ -65,7 +65,7 @@
         "loaded": true,
         "type": "isotonic",
         "fit_at": 1777481416.408817,
-        "age_seconds": 13678.5,
+        "age_seconds": 15267.6,
         "stale": false,
         "sample_count": 1356
       },
@@ -73,7 +73,7 @@
         "loaded": true,
         "type": "platt",
         "fit_at": 1777471105.808493,
-        "age_seconds": 23989.1,
+        "age_seconds": 25578.2,
         "stale": false,
         "sample_count": 2168
       },
@@ -81,7 +81,7 @@
         "loaded": true,
         "type": "platt",
         "fit_at": 1777471105.065261,
-        "age_seconds": 23989.8,
+        "age_seconds": 25579.0,
         "stale": false,
         "sample_count": 4560
       },
@@ -89,7 +89,7 @@
         "loaded": true,
         "type": "platt",
         "fit_at": 1777471105.14409,
-        "age_seconds": 23989.7,
+        "age_seconds": 25578.9,
         "stale": false,
         "sample_count": 4560
       },
@@ -97,7 +97,7 @@
         "loaded": true,
         "type": "platt",
         "fit_at": 1777471105.194317,
-        "age_seconds": 23989.7,
+        "age_seconds": 25578.8,
         "stale": false,
         "sample_count": 4560
       },
@@ -105,7 +105,7 @@
         "loaded": true,
         "type": "platt",
         "fit_at": 1777471105.245317,
-        "age_seconds": 23989.6,
+        "age_seconds": 25578.8,
         "stale": false,
         "sample_count": 3672
       },
@@ -113,7 +113,7 @@
         "loaded": true,
         "type": "platt",
         "fit_at": 1777471105.293656,
-        "age_seconds": 23989.6,
+        "age_seconds": 25578.7,
         "stale": false,
         "sample_count": 4116
       },
@@ -121,7 +121,7 @@
         "loaded": true,
         "type": "platt",
         "fit_at": 1777471105.343607,
-        "age_seconds": 23989.5,
+        "age_seconds": 25578.7,
         "stale": false,
         "sample_count": 4704
       },
@@ -129,7 +129,7 @@
         "loaded": true,
         "type": "isotonic",
         "fit_at": 1777469365.36844,
-        "age_seconds": 25729.5,
+        "age_seconds": 27318.7,
         "stale": false,
         "sample_count": 0
       },
@@ -137,7 +137,7 @@
         "loaded": true,
         "type": "isotonic",
         "fit_at": 1777469365.450857,
-        "age_seconds": 25729.4,
+        "age_seconds": 27318.6,
         "stale": false,
         "sample_count": 0
       },
@@ -145,7 +145,7 @@
         "loaded": true,
         "type": "platt",
         "fit_at": 1777471105.572939,
-        "age_seconds": 23989.3,
+        "age_seconds": 25578.5,
         "stale": false,
         "sample_count": 21060
       },
@@ -153,7 +153,7 @@
         "loaded": true,
         "type": "platt",
         "fit_at": 1777471105.752305,
-        "age_seconds": 23989.1,
+        "age_seconds": 25578.3,
         "stale": false,
         "sample_count": 19382
       },
@@ -161,7 +161,7 @@
         "loaded": true,
         "type": "isotonic",
         "fit_at": 1777469365.702279,
-        "age_seconds": 25729.2,
+        "age_seconds": 27318.3,
         "stale": false,
         "sample_count": 0
       },
@@ -169,7 +169,7 @@
         "loaded": true,
         "type": "isotonic",
         "fit_at": 1777481416.450356,
-        "age_seconds": 13678.4,
+        "age_seconds": 15267.6,
         "stale": false,
         "sample_count": 52
       },
@@ -177,7 +177,7 @@
         "loaded": true,
         "type": "isotonic",
         "fit_at": 1777469365.869148,
-        "age_seconds": 25729.0,
+        "age_seconds": 27318.2,
         "stale": false,
         "sample_count": 0
       },
@@ -185,7 +185,7 @@
         "loaded": true,
         "type": "isotonic",
         "fit_at": 1777469365.952067,
-        "age_seconds": 25728.9,
+        "age_seconds": 27318.1,
         "stale": false,
         "sample_count": 0
       },
@@ -193,7 +193,7 @@
         "loaded": true,
         "type": "isotonic",
         "fit_at": 1777469366.036278,
-        "age_seconds": 25728.8,
+        "age_seconds": 27318.0,
         "stale": false,
         "sample_count": 0
       },
@@ -201,7 +201,7 @@
         "loaded": true,
         "type": "isotonic",
         "fit_at": 1777469366.120064,
-        "age_seconds": 25728.7,
+        "age_seconds": 27317.9,
         "stale": false,
         "sample_count": 0
       },
@@ -209,7 +209,7 @@
         "loaded": true,
         "type": "isotonic",
         "fit_at": 1777469366.202642,
-        "age_seconds": 25728.7,
+        "age_seconds": 27317.8,
         "stale": false,
         "sample_count": 0
       }
@@ -229,13 +229,13 @@
     "gates": {
       "full_stack_replay_via_archived_features": {
         "status": "BLOCKED",
-        "blocked_by": "#731 (V1 feature snapshot dumps required \u2014 V1 archive does not store the upstream LGB+XGB feature vector at trade time)",
+        "blocked_by": "#731 (V1 feature snapshot dumps required)",
         "evidence": {
           "rows_attempted": 603128,
           "rows_predicted_via_archived_features": 0,
           "rows_skipped_missing_features": 63964
         },
-        "note": "True end-to-end replay requires the original 32-slot feature vector that fed V1's predictor. The archive preserves predicted_prob (post-stack, pre-calibrator) and analysis_json fields, but not the input vector."
+        "note": "V1 archive does not snapshot the upstream LGB+XGB feature vector."
       },
       "full_stack_replay_via_surrogate_features": {
         "status": "EVALUABLE_DEGRADED",
@@ -256,12 +256,12 @@
           ],
           "leagues_regressed": []
         },
-        "caveat": "DEGRADED baseline: ~10 of 32 feature slots populated from V1 archive; rest fall to per-spec defaults (sharp_money, tz_arb, ev_source, tipster, game_context). Per-league surrogate Brier vs V1 raw predicted_prob shows live calibrators dominating V1's *raw* baseline \u2014 NOT V1's final calibrated Brier."
+        "caveat": "DEGRADED baseline: ~10 of 32 feature slots populated from V1; rest fall to per-spec defaults. Compares against V1's *raw* predicted_prob, not its final calibrated probability."
       },
       "parity_within_2pct_vs_v1_calibrated": {
         "status": "UNEVALUABLE",
-        "blocked_by": "#731 (V1 feature snapshot dumps) AND historical V1 calibrated-probability dump (V1 archive only stores the pre-calibrator stack output)",
-        "note": "brier(predicted_prob, actual_outcome) on this archive is V1's *raw* baseline, NOT V1's final calibrated Brier. Without V1's calibrators (and without the original feature vector to re-run them on), the spec's '\u00b12% parity vs V1' gate cannot be evaluated against this archive. Tracked as scoped task change \u2014 see #731."
+        "blocked_by": "#731 (V1 feature snapshot dumps) AND historical V1 calibrated-probability dump (archive stores pre-calibrator output)",
+        "note": "See replit.md V1 backtest section for the full audit narrative."
       }
     }
   },
@@ -290,7 +290,7 @@
         "surrogate_features_enabled": true,
         "rows_predicted_via_surrogate": 603128
       },
-      "note": "--surrogate-features active: 603128 archive rows mapped into a degraded build_vector input dict (~10 of 32 feature slots populated; rest fall to spec defaults). The full LGB+XGB+calibrator chain ran end-to-end on the surrogate vector \u2014 this is NOT V1 parity, just a stand-in baseline until #731 dumps the real V1 feature snapshots."
+      "note": "--surrogate-features active: 603128 archive rows mapped through the degraded build_vector path. NOT V1 parity."
     },
     "calibrator_misalignment": {
       "active": true,
@@ -308,14 +308,14 @@
           "UNKNOWN"
         ]
       },
-      "note": "V1's archived `predicted_prob` is the pre-calibrator stack output. brier(predicted_prob, actual_outcome) is V1's *raw* baseline, NOT V1's final calibrated Brier \u2014 so the spec's '\u00b12% parity vs V1' gate cannot be evaluated against this archive. Large negative `delta_vs_v1` on the refit leagues is the expected shape (current calibrators dominating the raw stack)."
+      "note": "V1's archived predicted_prob is pre-calibrator stack output, so brier(predicted_prob, actual_outcome) is V1's raw baseline \u2014 not its final calibrated Brier."
     },
     "artifact_drift": {
       "active": false,
       "evidence": {
         "leagues_regressed": []
       },
-      "note": "Per-league calibrated Brier worse than V1 raw beyond tolerance \u2014 would indicate the on-disk calibrator diverged from what was fit. Empty list = no drift."
+      "note": "Per-league calibrated Brier worse than V1 raw beyond tolerance \u2014 would indicate on-disk calibrator drift."
     }
   },
   "per_league": {
