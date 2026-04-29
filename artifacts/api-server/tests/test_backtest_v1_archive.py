@@ -1039,3 +1039,86 @@ def test_build_triage_note_reflects_surrogate_mode_when_active() -> None:
     triage_off = bt._build_triage(scored, fs_off)
     assert "zero" in triage_off["feature_builder_mismatch"]["note"].lower()
     assert triage_off["feature_builder_mismatch"]["active"] is True
+
+
+def test_build_parity_gate_status_emits_blocked_and_evaluable_buckets() -> None:
+    """The top-level parity_gate_status block is the formal hard-gate
+    artifact that surfaces what's BLOCKED vs EVALUABLE_DEGRADED vs PASS
+    without making reviewers walk the triage notes.  This pins the
+    structure (gate names, statuses, blocked_by references) so a future
+    rename or status-shuffle trips a clear test failure."""
+    scored = {"summary": {"leagues_improved": ["NBA"], "leagues_parity": [],
+                          "leagues_regressed": ["MLB"]}}
+    fs = {"rows_attempted": 1000, "rows_predicted": 1000,
+          "skip_reasons": {"feature_vector_unavailable": 0},
+          "feature_source": {"surrogate": 1000, "archived": 0},
+          "surrogate_features_enabled": True}
+    pg = bt._build_parity_gate_status(scored, fs)
+
+    # Three named gates always emit, regardless of run shape.
+    assert set(pg["gates"].keys()) == {
+        "full_stack_replay_via_archived_features",
+        "full_stack_replay_via_surrogate_features",
+        "parity_within_2pct_vs_v1_calibrated",
+    }
+    # Archive-features gate is permanently BLOCKED on this archive
+    # (V1 didn't snapshot the upstream feature vector) — pinned with
+    # a #731 reference so reviewers can trace the blocker.
+    archived = pg["gates"]["full_stack_replay_via_archived_features"]
+    assert archived["status"] == "BLOCKED"
+    assert "#731" in archived["blocked_by"]
+    # Surrogate gate flips to EVALUABLE_DEGRADED when rows actually scored.
+    surrogate = pg["gates"]["full_stack_replay_via_surrogate_features"]
+    assert surrogate["status"] == "EVALUABLE_DEGRADED"
+    assert "DEGRADED" in surrogate["caveat"]
+    assert surrogate["evidence"]["rows_predicted_via_surrogate"] == 1000
+    # Parity gate is UNEVALUABLE on this archive (V1 stored
+    # pre-calibrator output) — also pinned with #731.
+    parity = pg["gates"]["parity_within_2pct_vs_v1_calibrated"]
+    assert parity["status"] == "UNEVALUABLE"
+    assert "#731" in parity["blocked_by"]
+    # Summary counts roll up correctly.
+    assert pg["summary"]["total_gates"] == 3
+    assert pg["summary"]["blocked_or_unevaluable"] == 2
+    assert pg["summary"]["evaluable_degraded"] == 1
+    assert pg["summary"]["pass"] == 0
+    # Top-level verdict: with surrogate scoring some rows but two gates
+    # still BLOCKED/UNEVALUABLE, the manifest must announce DEGRADED_PARTIAL
+    # so the rejection trail can cite it directly instead of re-deriving it.
+    assert pg["overall"] == "DEGRADED_PARTIAL_PENDING_BACKFILL"
+    assert pg["overall_blocked_by"] is not None
+    assert "#731" in pg["overall_blocked_by"]
+
+
+def test_build_parity_gate_status_marks_surrogate_not_run_when_disabled() -> None:
+    """Without --surrogate-features the surrogate gate must report
+    NOT_RUN, not EVALUABLE_DEGRADED — otherwise the manifest would
+    falsely advertise surrogate coverage on calibrator-only runs."""
+    scored = {"summary": {"leagues_improved": [], "leagues_parity": [],
+                          "leagues_regressed": []}}
+    fs = {"rows_attempted": 1000, "rows_predicted": 0,
+          "skip_reasons": {"feature_vector_unavailable": 1000}}
+    pg = bt._build_parity_gate_status(scored, fs)
+    assert pg["gates"][
+        "full_stack_replay_via_surrogate_features"
+    ]["status"] == "NOT_RUN"
+    assert pg["gates"][
+        "full_stack_replay_via_archived_features"
+    ]["status"] == "BLOCKED"
+
+
+def test_run_emits_top_level_parity_gate_status() -> None:
+    """Smoke test: the report assembled by run() must include the new
+    top-level `parity_gate_status` block (not just the buried triage
+    notes), so reviewers reading the JSON in isolation see it first."""
+    rows = [{"league": "NBA", "predicted_prob": 0.6,
+             "market_implied_prob": 0.5, "edge_at_entry": 0.1,
+             "actual_outcome": True, "ts": "2026-01-01T00:00:00+00:00",
+             "analysis_json": {"side": "yes"}}]
+    report = asyncio.run(
+        bt.run(rows=rows, limit=None, leagues_filter=None,
+               load_calibrators=False, full_stack=False)
+    )
+    assert "parity_gate_status" in report
+    assert "gates" in report["parity_gate_status"]
+    assert "summary" in report["parity_gate_status"]

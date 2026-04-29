@@ -467,40 +467,68 @@ The full-stack `summary` block grows two new keys:
   counts so reviewers can verify exactly how many rows landed via
   the degraded baseline vs the (currently empty) archived path.
 
-Validation run on 4000 archive rows filtered to NBA/NCAAB/NHL/MLB
+Validation run on 8000 archive rows filtered to NBA/NCAAB/NHL/MLB
 (see `scripts/reports/v1_backtest_surrogate_2026-04-29.json`):
-- `rows_predicted = 4000 / 4000 attempted` (was 0 before v4)
-- `feature_source.surrogate = 4000`
+- `parity_gate_status.overall = DEGRADED_PARTIAL_PENDING_BACKFILL`
+- `rows_predicted = 757 / 757` kept rows (full 8000 walked, 9.5%
+  carry settled `actual_outcome` — the rest are open positions)
+- `feature_source.surrogate = 757` (archived = 0, blocked on #731)
 - `triage.feature_builder_mismatch.active = False` (was True)
-- Per-league surrogate Brier vs V1's calibrated Brier:
-  - NBA   (n=1982): 0.0744 vs 0.2471 → -0.1727 IMPROVED
-  - NCAAB (n=1545): 0.1581 vs 0.2912 → -0.1332 IMPROVED
-  - NHL   (n=442):  0.1046 vs 0.1476 → -0.0430 IMPROVED
-  - MLB   (n=31):   0.0344 vs 0.0199 → +0.0146 small-sample regress
+- Per-league surrogate Brier vs V1's *raw* `predicted_prob` baseline:
+  - NBA   (n=367): 0.3651 → 0.2688 cal,  delta -0.0964 IMPROVED
+  - NCAAB (n=298): 0.4084 → 0.2696 cal,  delta -0.1388 IMPROVED
+  - NHL   (n=51):  0.3235 → 0.1744 cal,  delta -0.1491 IMPROVED
+  - MLB   (n=41):  0.2098 → 0.0201 cal,  delta -0.1897 IMPROVED
 
 Caveat: surrogate Brier is reduced-feature so the absolute numbers
 should NOT be cited as the live ensemble's quality bar — they show
-the chain runs, not that it matches V1. The V1-vs-live parity
-verdict still requires Phase 2 dump reconstruction (#731).
+the chain runs, not that it matches V1. The V1-vs-live calibrated
+parity verdict still requires Phase 2 dump reconstruction (#731).
 
-Re-run any time with:
+The committed calibrator-only baseline
+(`scripts/reports/v1_backtest_2026-04-29.json`, 4000-row sample)
+records `parity_gate_status.overall = BLOCKED_PENDING_BACKFILL`
+and `rows_predicted = 0` — i.e. without surrogate features the
+production path produces zero usable predictions on this archive,
+which is the precise blocker the surrogate path works around.
+
+**Top-level hard-gate manifest** (`parity_gate_status` block, emitted
+by every report) formalizes the three gates so reviewers do not have
+to re-derive them from triage notes:
+- `full_stack_replay_via_archived_features`: BLOCKED on #731 (V1
+  archive does not snapshot the upstream LGB+XGB feature vector).
+- `full_stack_replay_via_surrogate_features`: EVALUABLE_DEGRADED
+  when `--surrogate-features` is on, NOT_RUN otherwise.
+- `parity_within_2pct_vs_v1_calibrated`: UNEVALUABLE — V1 stored
+  pre-calibrator stack output, not its final calibrated probability,
+  so the spec's ±2% gate cannot be evaluated against this archive.
+
+Re-run any time with (drop `--limit` for the full ~28k-row archive,
+~6 min runtime; use `--limit N` for faster sampling):
 
     cd artifacts/api-server && \
       /home/runner/workspace/.pythonlibs/bin/python3 \
         -m scripts.backtest_v1_archive \
         --full-stack --surrogate-features \
-        --leagues NBA,NCAAB,NHL,MLB --limit 4000 \
+        --leagues NBA,NCAAB,NHL,MLB --limit 8000 \
         --json-out scripts/reports/v1_backtest_surrogate_<date>.json
 
-Regression coverage in `tests/test_backtest_v1_archive.py`:
-`_archive_to_candidate` mapping table (covers happy-path + sparse +
-reject-on-missing-minimums) plus surrogate dispatch through
-`_attempt_full_stack_inference` and `run()` with feature_source
-counts asserted on the report.
+Regression coverage in `tests/test_backtest_v1_archive.py` (45 tests):
+`_archive_to_candidate` mapping table (happy-path, sparse, reject-on-
+missing-minimums, side aliases canonicalized via `_NO_SIDES`/
+`_YES_SIDES`), surrogate dispatch through `_attempt_full_stack_inference`
+and `run()` with `feature_source` counts asserted on the report, and
+three tests pinning the `parity_gate_status` block (per-gate statuses,
+NOT_RUN handling when surrogate is disabled, and the top-level
+`overall` verdict including `BLOCKED_PENDING_BACKFILL` /
+`DEGRADED_PARTIAL_PENDING_BACKFILL` rollups).
 
 Phase 2 dumps (`weather_observations`, `line_snapshots`,
 `llm_predictions`) plus broadening V1 side coverage to sport-specific
-bet labels are tracked under follow-up task #731.
+bet labels are tracked under follow-up task #731.  Additional follow-
+ups proposed: #737 (per-league feature-coverage floor enforcement),
+#738 (e2e `_amain` test on a temp DB), #739 (operator dashboard
+surfacing per-league deltas + `parity_gate_status.overall`).
 
 **Tooling notes for Phase 2** (whoever extends this to other dumps):
 

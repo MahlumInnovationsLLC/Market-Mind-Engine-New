@@ -859,6 +859,120 @@ def _parse_leagues(arg: str | None) -> set[str] | None:
     return out or None
 
 
+def _build_parity_gate_status(
+    scored: dict[str, Any],
+    full_stack_summary: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Top-level hard-gate manifest: per-gate STATUS + blocked_by.
+
+    Required so reviewers reading the JSON in isolation can see at a
+    glance which acceptance criteria are PASS / EVALUABLE_DEGRADED /
+    BLOCKED, without having to walk the triage notes.  The original
+    task's '±2% parity vs V1 calibrated' gate cannot be evaluated
+    against the V1 archive (V1 stored pre-calibrator stack output,
+    not its final calibrated probability) — this manifest formalizes
+    that as a scoped task change rather than re-litigating it in
+    every review.
+    """
+    fs = full_stack_summary or {}
+    fs_attempted = int(fs.get("rows_attempted", 0))
+    fs_predicted = int(fs.get("rows_predicted", 0))
+    fs_skip = dict(fs.get("skip_reasons", {}))
+    fs_missing = int(fs_skip.get("feature_vector_unavailable", 0))
+    surrogate_enabled = bool(fs.get("surrogate_features_enabled", False))
+    feature_source = fs.get("feature_source") or {}
+    surrogate_used = int(feature_source.get("surrogate", 0))
+    archived_used = int(feature_source.get("archived", 0))
+    summary = scored.get("summary", {})
+
+    gates: dict[str, Any] = {
+        "full_stack_replay_via_archived_features": {
+            "status": "BLOCKED",
+            "blocked_by": "#731 (V1 feature snapshot dumps required — "
+                          "V1 archive does not store the upstream LGB+XGB "
+                          "feature vector at trade time)",
+            "evidence": {
+                "rows_attempted": fs_attempted,
+                "rows_predicted_via_archived_features": archived_used,
+                "rows_skipped_missing_features": fs_missing,
+            },
+            "note": (
+                "True end-to-end replay requires the original 32-slot "
+                "feature vector that fed V1's predictor. The archive "
+                "preserves predicted_prob (post-stack, pre-calibrator) "
+                "and analysis_json fields, but not the input vector."
+            ),
+        },
+        "full_stack_replay_via_surrogate_features": {
+            "status": (
+                "EVALUABLE_DEGRADED" if surrogate_enabled and surrogate_used > 0
+                else "NOT_RUN"
+            ),
+            "evidence": {
+                "surrogate_features_enabled": surrogate_enabled,
+                "rows_predicted_via_surrogate": surrogate_used,
+                "leagues_improved": summary.get("leagues_improved", []),
+                "leagues_parity": summary.get("leagues_parity", []),
+                "leagues_regressed": summary.get("leagues_regressed", []),
+            },
+            "caveat": (
+                "DEGRADED baseline: ~10 of 32 feature slots populated from "
+                "V1 archive; rest fall to per-spec defaults (sharp_money, "
+                "tz_arb, ev_source, tipster, game_context). Per-league "
+                "surrogate Brier vs V1 raw predicted_prob shows live "
+                "calibrators dominating V1's *raw* baseline — NOT V1's "
+                "final calibrated Brier."
+            ),
+        },
+        "parity_within_2pct_vs_v1_calibrated": {
+            "status": "UNEVALUABLE",
+            "blocked_by": (
+                "#731 (V1 feature snapshot dumps) AND historical V1 "
+                "calibrated-probability dump (V1 archive only stores the "
+                "pre-calibrator stack output)"
+            ),
+            "note": (
+                "brier(predicted_prob, actual_outcome) on this archive is "
+                "V1's *raw* baseline, NOT V1's final calibrated Brier. "
+                "Without V1's calibrators (and without the original "
+                "feature vector to re-run them on), the spec's '±2% "
+                "parity vs V1' gate cannot be evaluated against this "
+                "archive. Tracked as scoped task change — see #731."
+            ),
+        },
+    }
+    blocked_count = sum(
+        1 for g in gates.values()
+        if g["status"] in {"BLOCKED", "UNEVALUABLE"}
+    )
+    pass_count = sum(1 for g in gates.values() if g["status"] == "PASS")
+    degraded_count = sum(
+        1 for g in gates.values() if g["status"] == "EVALUABLE_DEGRADED"
+    )
+    not_run_count = sum(1 for g in gates.values() if g["status"] == "NOT_RUN")
+    # NOT_RUN folds into "blocked" semantics for the top-level verdict:
+    # the gate was not evaluated this run, so it cannot count as PASS.
+    if pass_count == len(gates):
+        overall = "PASS"
+    elif degraded_count > 0 and pass_count == 0:
+        overall = "DEGRADED_PARTIAL_PENDING_BACKFILL"
+    elif blocked_count + not_run_count == len(gates):
+        overall = "BLOCKED_PENDING_BACKFILL"
+    else:
+        overall = "MIXED"
+    return {
+        "overall": overall,
+        "overall_blocked_by": "#731 (V1 feature snapshot dumps)" if blocked_count > 0 else None,
+        "summary": {
+            "total_gates": len(gates),
+            "blocked_or_unevaluable": blocked_count,
+            "evaluable_degraded": degraded_count,
+            "pass": pass_count,
+        },
+        "gates": gates,
+    }
+
+
 def _build_triage(
     scored: dict[str, Any],
     full_stack_summary: dict[str, Any] | None,
@@ -1055,6 +1169,7 @@ async def run(
         full_stack_scored = score_grouped(fs_grouped, apply_calibrator=False)
 
     triage = _build_triage(scored, full_stack_summary)
+    parity_gate_status = _build_parity_gate_status(scored, full_stack_summary)
     report: dict[str, Any] = {
         "started_at": started_at,
         "completed_at": datetime.now(timezone.utc).isoformat(),
@@ -1066,6 +1181,10 @@ async def run(
         "leagues_filter": sorted(leagues_filter) if leagues_filter else None,
         "limit": limit,
         "calibrator_freshness": calibrators.get_state().freshness() if load_calibrators else None,
+        # Top-level hard-gate manifest (per-gate STATUS + blocked_by) so
+        # reviewers can see PASS/EVALUABLE_DEGRADED/BLOCKED at a glance
+        # without walking the triage notes.
+        "parity_gate_status": parity_gate_status,
         "full_stack_attempt": full_stack_summary,
         "triage": triage,
         **scored,
@@ -1091,8 +1210,10 @@ async def _amain(argv: list[str] | None = None) -> int:
     parser.add_argument("--full-stack", action="store_true",
                         help="Also attempt the requested LGB+XGB stack replay "
                              "via app.predictor.predict() and report attempt/skip "
-                             "counts. Yields zero usable rows on the V1 archive "
-                             "(features not snapshotted) — see triage block.")
+                             "counts. On the V1 archive without --surrogate-features "
+                             "this yields zero usable rows (features not snapshotted "
+                             "— see parity_gate_status block); pair with "
+                             "--surrogate-features for the degraded stand-in path.")
     parser.add_argument("--surrogate-features", action="store_true",
                         help="Opt-in DEGRADED-baseline path: when --full-stack is "
                              "on and a row has no archived feature vector, build "
