@@ -240,7 +240,7 @@ last run (2026-04-29):
   land in `app/models_loader.py` (filename mapping, manifest parsing,
   version selection). Do not modify the bucket from this script.**
 
-### V1 historical-data import — UNBLOCKED via bucket pg_dumps
+### V1 historical-data import — Phase 1 IMPORTED (trade_analyses, 667k rows)
 
 The second half of the same task — porting V1 historical data into
 Supabase so calibrators can cross `MIN_REFIT_SAMPLES=10` per league and
@@ -251,18 +251,57 @@ which returns HTTP 404 for every plausible spelling. The 2026-04-29
 bucket walk discovered the V1 data is **already in the same Supabase
 storage bucket** under `replit-port/archives/pg_dumps/` — eighteen
 gzipped `pg_dump` files plus split-archive `.manifest.json` companions,
-totalling roughly 2.8 GB compressed. The multi-part-cat scheme is the
-same idea as `exports/models_part_aa..ac` (sha256 + chunk count in a
-sibling `*.manifest.json`), but **the part-suffix format is different**:
-`exports/` uses GNU `split` two-letter suffixes (`aa/ab/ac`), while the
-V1 dumps use numeric `partNNN`. `app/storage.py::download_split_artifact`
-matches only the alphabetic pattern (see `expected_suffix(i)` at
-line 131), so the V1 importer must either (a) add a numeric-suffix
-reassembler alongside it, or (b) cat the parts directly with
-`download_to_path` per part + local `cat *.partNNN > out.gz`. No
-external GitHub access is needed; no new secret is needed.
+totalling roughly 2.8 GB compressed.
 
-See the next section ("Bucket inventory") for the classified list of
+**Phase 1 is now landed.** Migration `0037_v1_archive_trade_analyses`
+creates a new `v1_archive` schema with `v1_archive.trade_analyses`
+holding the full V1 settled-trade history. `scripts/import_v1_history.py`
+downloads the dump, rewrites the COPY-header schema name + strips the
+psql-18-only `\restrict` metacommand, then loads via
+`psql --single-transaction`. Re-runs are idempotent (TRUNCATE +
+reload).  Verifier `scripts/verify_v1_archive.py` confirms 667,092 rows
+landed (within 0.0003% of expected 667,094 — well under the 5%
+fail-fast threshold) with five SUPPORTED_LEAGUES eligible for
+calibrator refit once the calibrator query is extended to read from
+`v1_archive`:
+
+| League | Rows in 90-day window | Above MIN_REFIT_SAMPLES=10? |
+|---|---|---|
+| NBA   | 13,882 | yes |
+| NCAAB | 11,773 | yes |
+| NHL   | 2,941  | yes |
+| MLB   | 133    | yes |
+| PGA   | 52     | yes |
+| NFL   | 4      | no  |
+| MLS   | 1      | no  |
+
+The remaining wire-up (extending `app/calibrators.py::_fetch_training_data`
+to `UNION ALL` from `v1_archive.trade_analyses`, with careful
+side-semantics handling because V1's `actual_outcome` is side-aligned
+while MME's `pm.actual_outcome` is YES-aligned) plus Phase 2 dumps
+(`weather_observations`, `line_snapshots`, `llm_predictions`) is
+tracked under follow-up task #731.
+
+**Tooling notes for Phase 2** (whoever extends this to other dumps):
+
+- `trade_analyses` was a single-file dump (no part-cat needed). The
+  remaining multi-part dumps (e.g. `line_snapshots` is 2-part) use
+  numeric `partNNN` suffixes — `app/storage.py::download_split_artifact`
+  only matches GNU-split alphabetic `aa/ab/ac` (see `expected_suffix(i)`
+  at line 131), so a partNNN reassembler must be added alongside or
+  the parts catted directly via `download_to_path` per part.
+- These are PLAIN-format `pg_dump` outputs (gzipped SQL, data-only),
+  not custom format — `pg_restore` does NOT apply. Use `psql` or
+  parse the `COPY ... FROM stdin;` blocks. Two psql >=18 metacommands
+  (`\restrict` / `\unrestrict`) appear at the head of every dump and
+  must be stripped before feeding to psql 17.x; see
+  `scripts/import_v1_history.py::_rewrite_for_v1_archive`.
+- `id` columns in V1 dumps mix integer-strings and UUIDs (e.g. both
+  `121` and `df3d594b-c47e-731b-c8b0-60fcc6213c57` appear in
+  `trade_analyses.id`). Use `text` for the archive PK and drop the
+  trailing `setval('..._id_seq', ..., true)` line during rewrite.
+
+See the "Bucket inventory" section below for the classified list of
 every file in the bucket. Of the 18 V1 dump tables, only three are
 already referenced by MME app code:
 
@@ -293,35 +332,11 @@ The other 15 tables (`crypto_*`, `uw_*`, `trade_analyses`,
 `autoresearch_experiments`, `mid_phase_trade_decomposition`,
 `research_journal`, `feature_drift_alerts`) are V1-only — MME does NOT
 reference them in any migration or app file. The most important of
-these is **`trade_analyses.sql.gz`** (29 MB) — by row-count and content
-shape this is the closest match to the audit's "1,249 settled trades"
-smoke-test target, and is the V1 source the calibrator refit loop
-needs to cross `MIN_REFIT_SAMPLES=10` and replace `market_prior` rows.
-Phase ordering for `scripts/import_v1_history.py` should therefore be:
-
-1. **`trade_analyses`** (calibrator-unblock target). First step:
-   gunzip → grep the `CREATE TABLE trade_analyses` block to confirm the
-   schema actually contains the columns calibrators need (settled
-   outcome, model probability at decision time, league/sport, market
-   type, settled_at). Confirm row count is in the audit-reported order
-   of magnitude (~1,249). Map onto a new MME table — either
-   `trade_history` (the audit-named target) or `v1_archive.trade_analyses`
-   if V1's column shape doesn't cleanly project onto MME's intended
-   `trade_history` schema.
-2. **`weather_observations`** (already-referenced direct fit).
-3. **`line_snapshots` + `llm_predictions`** (after schema diff-check).
-4. *(optional Phase 4)* crypto_* and uw_* tables under new schema
-   `v1_archive` so they don't pollute MME's namespace.
-
-The DDL for each new table comes from the dump itself. **Important
-tooling note:** these are PLAIN-format `pg_dump` outputs (gzipped SQL),
-not custom or directory format, so `pg_restore` does NOT apply — use
-`zgrep -A 9999 'CREATE TABLE <name>' <dump>.sql.gz` (or stream-parse in
-Python) to lift the `CREATE TABLE` + index statements into a new
-Alembic migration `00NN_v1_history_tables.py`, then run an ETL that
-either pipes the gunzipped dump through `psql` directly, or parses the
-`COPY ... FROM stdin;` blocks and re-emits them via
-`asyncpg.copy_records_to_table` against the new tables.
+these is **`trade_analyses.sql.gz`** (29 MB, **DONE — Phase 1 imported
+above**). Remaining V1-only dumps (`crypto_*`, `uw_*`,
+`autoresearch_experiments`, `mid_phase_trade_decomposition`,
+`research_journal`, `feature_drift_alerts`) land under `v1_archive.*`
+in Phase 4 if and when those domains come online.
 
 ## Bucket inventory — `axiom-predict-artifacts/`
 
