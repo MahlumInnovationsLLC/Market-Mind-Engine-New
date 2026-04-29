@@ -56,24 +56,37 @@ const basePath = import.meta.env.BASE_URL.replace(/\/$/, "");
  */
 export function buildWsUrl(path: string, token: string | null): string {
   const cleanPath = path.startsWith("/") ? path : `/${path}`;
-  const apiBase = (import.meta.env.VITE_API_URL ?? "").toString().replace(/\/$/, "");
+  const apiBase = (import.meta.env.VITE_API_URL ?? "").toString().trim().replace(/\/+$/, "");
+
+  // Same-origin fallback — used when `VITE_API_URL` is empty, malformed,
+  // or carries a protocol other than http/https. Mirrors the
+  // `resolveApiUrl` allowlist so a typo'd env var never silently routes
+  // a WebSocket (which inherits the same auth boundary as REST) to an
+  // unintended origin.
+  const sameOrigin = (): string => {
+    const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
+    return `${proto}//${window.location.host}${basePath}${cleanPath}`;
+  };
+
   let url: string;
   if (apiBase) {
     try {
       const parsed = new URL(apiBase);
-      const wsProto = parsed.protocol === "https:" ? "wss:" : "ws:";
-      const apiPathPrefix = parsed.pathname.replace(/\/$/, "");
-      url = `${wsProto}//${parsed.host}${apiPathPrefix}${cleanPath}`;
+      if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+        // Mirrors `resolveApiUrl` — only http/https are valid backend
+        // origins for the WebSocket upgrade. Anything else (file:,
+        // javascript:, ftp:, …) falls back to same-origin.
+        url = sameOrigin();
+      } else {
+        const wsProto = parsed.protocol === "https:" ? "wss:" : "ws:";
+        const apiPathPrefix = parsed.pathname.replace(/\/+$/, "");
+        url = `${wsProto}//${parsed.host}${apiPathPrefix}${cleanPath}`;
+      }
     } catch {
-      // Malformed `VITE_API_URL` — never silently swap to a different
-      // host. Fall back to the same-origin path so a typo'd env var
-      // can't redirect every WebSocket to wherever the parser landed.
-      const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
-      url = `${proto}//${window.location.host}${basePath}${cleanPath}`;
+      url = sameOrigin();
     }
   } else {
-    const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
-    url = `${proto}//${window.location.host}${basePath}${cleanPath}`;
+    url = sameOrigin();
   }
   return token ? `${url}?token=${encodeURIComponent(token)}` : url;
 }

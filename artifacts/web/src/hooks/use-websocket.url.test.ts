@@ -52,4 +52,16 @@ describe("buildWsUrl host knob (VITE_API_URL)", () => {
     expect(url).toContain(window.location.host);
     expect(url.endsWith("/ws")).toBe(true);
   });
+
+  it("falls back to same-origin on an unsupported protocol", () => {
+    // Mirrors `resolveApiUrl` — only http/https are valid backend
+    // origins. ftp:, file:, javascript: must NEVER produce a real
+    // WebSocket URL because the WS upgrade inherits the same auth
+    // boundary as the REST surface.
+    vi.stubEnv("VITE_API_URL", "ftp://example.com");
+    const url = buildWsUrl("/ws", null);
+    expect(url).toContain(window.location.host);
+    expect(url.startsWith("ws://") || url.startsWith("wss://")).toBe(true);
+    expect(url.endsWith("/ws")).toBe(true);
+  });
 });
