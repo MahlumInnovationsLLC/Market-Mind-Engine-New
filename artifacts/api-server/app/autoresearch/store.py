@@ -123,9 +123,28 @@ def list_promoted_names_sync(dsn: str | None = None) -> list[str]:
     import os
     import psycopg  # type: ignore
 
-    dsn = dsn or os.environ.get("DATABASE_URL") or os.environ.get("AXIOM_DATABASE_URL")
     if not dsn:
-        log.warning("list_promoted_names_sync: no DATABASE_URL set")
+        dsn = os.environ.get("AXIOM_DATABASE_URL")
+    if not dsn:
+        try:
+            from ..config import get_settings
+
+            dsn = get_settings().supabase_db_dsn or None
+        except Exception:
+            dsn = None
+    if not dsn:
+        dsn = os.environ.get("DATABASE_URL")
+        if dsn:
+            log.warning(
+                "list_promoted_names_sync: falling back to $DATABASE_URL "
+                "(neither AXIOM_DATABASE_URL nor settings.supabase_db_dsn was "
+                "available) — on Replit this points at the empty Helium dev DB"
+            )
+    if not dsn:
+        log.warning(
+            "list_promoted_names_sync: no DSN available "
+            "(set AXIOM_DATABASE_URL or SUPABASE_DB_PASSWORD/SUPABASE_PROJECT_REF)"
+        )
         return []
     try:
         with psycopg.connect(dsn) as conn:  # type: ignore[attr-defined]

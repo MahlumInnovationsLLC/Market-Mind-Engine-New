@@ -209,8 +209,9 @@ def main(argv: list[str]) -> int:
         "--dsn",
         default=None,
         help=(
-            "Override DATABASE_URL (otherwise reads $DATABASE_URL or "
-            "$AXIOM_DATABASE_URL)."
+            "Override the Postgres DSN. Resolution order: --dsn, "
+            "$AXIOM_DATABASE_URL, settings.supabase_db_dsn (built from "
+            "$SUPABASE_DB_PASSWORD + $SUPABASE_PROJECT_REF), $DATABASE_URL."
         ),
     )
     ap.add_argument(
