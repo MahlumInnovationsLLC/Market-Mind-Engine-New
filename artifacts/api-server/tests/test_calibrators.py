@@ -238,6 +238,112 @@ def test_refit_all_skips_below_min_samples(fake_db):
     assert summary["skipped"] == len(calibrators.SUPPORTED_LEAGUES)
 
 
+def test_fetch_training_data_falls_back_when_v1_archive_absent(monkeypatch):
+    """`v1_archive.trade_analyses` may not exist on fresh dev DBs that
+    haven't run migration 0037.  In that case the V1 CTE must be
+    omitted from the SQL ENTIRELY (not just predicate-gated) — Postgres
+    parses FROM-clause relations before WHERE evaluates, so referencing
+    a missing table raises ``UndefinedTable`` and would silently drop
+    the LIVE rows too if not handled.  Asserts: preflight gates the
+    V1 CTE OUT and live rows still flow.
+    """
+    monkeypatch.setenv("AXIOM_USE_V1_ARCHIVE_FOR_CALIBRATION", "1")
+
+    captured_sql: list[str] = []
+    live_row = {"league": "NBA", "p_side": 0.6, "y_side": 1}
+
+    async def fake_fetchval(query: str, *args: Any):
+        # Simulate `to_regclass(...) IS NOT NULL` returning False —
+        # i.e. the v1_archive table does NOT exist in this DB.
+        if "to_regclass" in query and "v1_archive" in query:
+            return False
+        return None
+
+    async def fake_fetch(query: str, *args: Any):
+        captured_sql.append(query)
+        # Return live rows regardless — proves they flow even when V1
+        # is gated out.
+        return [dict(live_row)]
+
+    monkeypatch.setattr(_db, "fetchval", fake_fetchval)
+    monkeypatch.setattr(_db, "fetch", fake_fetch)
+
+    grouped = asyncio.run(calibrators._fetch_training_data())
+
+    # Live rows still made it through (the bug we're guarding against
+    # would have returned {} here because UndefinedTable hit the broad
+    # except).
+    assert "NBA" in grouped
+    assert grouped["NBA"]["probs"] == [0.6]
+    assert grouped["NBA"]["ys"] == [1]
+
+    # The composed SQL must NOT reference the missing table at all —
+    # a WHERE-clause guard is insufficient because parsing happens
+    # before predicate evaluation.
+    assert len(captured_sql) == 1
+    assert "v1_archive" not in captured_sql[0]
+    assert "v1_settled" not in captured_sql[0]
+    # And it must still contain the live CTE.
+    assert "live_settled" in captured_sql[0]
+
+
+def test_fetch_training_data_includes_v1_when_present(monkeypatch):
+    """When the preflight reports the V1 archive table exists, the V1
+    CTE is composed into the SQL so the UNION'd rows flow into refit.
+    """
+    monkeypatch.setenv("AXIOM_USE_V1_ARCHIVE_FOR_CALIBRATION", "1")
+
+    captured_sql: list[str] = []
+
+    async def fake_fetchval(query: str, *args: Any):
+        if "to_regclass" in query and "v1_archive" in query:
+            return True
+        return None
+
+    async def fake_fetch(query: str, *args: Any):
+        captured_sql.append(query)
+        return []  # rows themselves don't matter for this assertion
+
+    monkeypatch.setattr(_db, "fetchval", fake_fetchval)
+    monkeypatch.setattr(_db, "fetch", fake_fetch)
+
+    asyncio.run(calibrators._fetch_training_data())
+
+    assert len(captured_sql) == 1
+    sql = captured_sql[0]
+    assert "v1_archive.trade_analyses" in sql
+    assert "v1_settled" in sql
+    assert "UNION ALL" in sql
+    assert "live_settled" in sql
+
+
+def test_fetch_training_data_v1_disabled_via_env(monkeypatch):
+    """The kill-switch env var skips the preflight AND the V1 CTE."""
+    monkeypatch.setenv("AXIOM_USE_V1_ARCHIVE_FOR_CALIBRATION", "0")
+
+    captured_sql: list[str] = []
+    fetchval_calls: list[str] = []
+
+    async def fake_fetchval(query: str, *args: Any):
+        fetchval_calls.append(query)
+        return None
+
+    async def fake_fetch(query: str, *args: Any):
+        captured_sql.append(query)
+        return []
+
+    monkeypatch.setattr(_db, "fetchval", fake_fetchval)
+    monkeypatch.setattr(_db, "fetch", fake_fetch)
+
+    asyncio.run(calibrators._fetch_training_data())
+
+    # Preflight skipped entirely — no fetchval call against to_regclass.
+    assert not any("to_regclass" in q for q in fetchval_calls)
+    # No V1 reference in the composed SQL.
+    assert "v1_archive" not in captured_sql[0]
+    assert "v1_settled" not in captured_sql[0]
+
+
 # ---------------------------------------------------------------------------
 # predict() integration
 # ---------------------------------------------------------------------------

@@ -455,9 +455,12 @@ async def _fetch_training_data() -> dict[str, dict[str, list]]:
 
     The V1 union can be disabled at runtime via
     ``AXIOM_USE_V1_ARCHIVE_FOR_CALIBRATION=0`` for kill-switch safety.
-    The V1 subquery is wrapped in ``to_regclass()`` so missing-table
-    environments (fresh dev DBs that never ran the import) silently
-    contribute zero rows rather than failing.
+    A separate preflight ``SELECT to_regclass(...)`` runs before SQL
+    composition and gates the V1 CTE OUT entirely on environments
+    that haven't run migration 0037 — a WHERE-clause guard would NOT
+    suffice because Postgres resolves FROM-clause relations at parse
+    time, before any predicate evaluates, and a missing table would
+    raise ``UndefinedTable`` and silently drop live rows too.
     """
     import os
 
@@ -465,6 +468,24 @@ async def _fetch_training_data() -> dict[str, dict[str, list]]:
         os.getenv("AXIOM_USE_V1_ARCHIVE_FOR_CALIBRATION", "1").lower()
         not in ("0", "false", "no", "off")
     )
+
+    # PostgreSQL resolves FROM-clause relations at PARSE time, before any
+    # WHERE predicate runs.  A `to_regclass(...) IS NOT NULL` clause in
+    # WHERE does NOT protect the query from `UndefinedTable` when the
+    # archive table is absent (fresh dev DBs that never ran migration
+    # 0037).  So we MUST preflight separately and only compose the V1
+    # CTE into the SQL when the table actually exists; otherwise we'd
+    # raise into the broad except below and silently drop live rows
+    # too.
+    if use_v1:
+        try:
+            v1_present = await db.fetchval(
+                "SELECT to_regclass('v1_archive.trade_analyses') IS NOT NULL"
+            )
+        except Exception as e:
+            log.warning("[calibrators] v1_archive preflight failed: %s", e)
+            v1_present = False
+        use_v1 = bool(v1_present)
 
     live_cte = f"""
         live_settled AS (
