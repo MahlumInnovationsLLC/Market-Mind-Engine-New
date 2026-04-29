@@ -227,7 +227,11 @@ def test_per_vertical_kelly_override_beats_spec_default():
 
 
 def test_twelve_gate_invariant_unchanged():
-    assert len(GATES) == 14
+    # 14 → 17 in task #730 (sharpe_ratio + ruin_monte_carlo +
+    # segment_throttler audit gates).  The point of this assertion is
+    # still that *tech_ai* sub-checks fold into existing gates rather
+    # than adding new entries.
+    assert len(GATES) == 17
 
 
 # ---------------------------------------------------------------------------

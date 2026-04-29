@@ -277,9 +277,11 @@ def test_gate_per_vertical_cap_unknown_league_skips_sub_checks():
 
 
 def test_gate_count_invariant_preserved():
-    """Spec requires exactly 12 gates — adding NFL sub-checks must not
-    change that."""
-    assert len(GATES) == 14
+    """Spec requires NFL sub-checks fold into existing gates rather
+    than adding new entries.  Cross-vertical risk plumbing is the only
+    thing allowed to grow this number (14 → 17 in task #730:
+    sharpe_ratio + ruin_monte_carlo + segment_throttler audit gates)."""
+    assert len(GATES) == 17
 
 
 # ---------------------------------------------------------------------------

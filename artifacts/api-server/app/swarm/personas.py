@@ -36,6 +36,10 @@ _DEFAULT_TEMPERATURE = 0.4
 _FALLBACK_BY_PROVIDER: dict[str, tuple[str, str]] = {
     "openai":    ("anthropic", "claude-sonnet-4-5-20250929"),
     "anthropic": ("openai",    "gpt-4o-mini"),
+    # Local Ollama personas fall back to the cheapest hosted model so a
+    # downed local box doesn't silence the swarm — we take the cost hit
+    # rather than miss a vote.
+    "ollama":    ("openai",    "gpt-4o-mini"),
 }
 
 

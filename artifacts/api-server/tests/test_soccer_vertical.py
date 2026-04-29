@@ -344,9 +344,12 @@ def test_gate_per_league_cap_enforces_1pct_for_ucl():
 
 
 def test_gate_count_invariant_preserved():
-    """Spec requires exactly 12 gates — adding the daily-trade
-    sub-check must stay bundled inside per_vertical_cap."""
-    assert len(GATES) == 14
+    """Spec requires the soccer daily-trade sub-check stay bundled
+    inside per_vertical_cap rather than adding a new gate.  Cross-
+    vertical risk plumbing is the only thing allowed to grow this
+    number (14 → 17 in task #730: sharpe_ratio + ruin_monte_carlo +
+    segment_throttler audit gates)."""
+    assert len(GATES) == 17
 
 
 def test_league_configs_table_covers_every_supported_league():

@@ -89,6 +89,16 @@ class Settings:
     # have to remember which variant the SDK wants.  Optional — only the
     # gatekeeper model selector reads it today.
     google_api_key: str | None
+    # Ollama local/remote LLM server.  ``ollama_base_url`` defaults to the
+    # canonical ``http://localhost:11434`` so a local install Just Works;
+    # operators can point at a tunneled/remote box by setting OLLAMA_BASE_URL.
+    # ``ollama_api_key`` is only required for tunneled deployments that
+    # gate the HTTP API behind a bearer token (vanilla Ollama is anonymous).
+    # ``ollama_request_timeout_s`` caps a single /api/chat call so a stalled
+    # local model can't wedge a swarm cycle indefinitely.
+    ollama_base_url: str
+    ollama_api_key: str | None
+    ollama_request_timeout_s: float
 
     # Trading
     kalshi_api_key_id: str | None
@@ -318,6 +328,13 @@ def get_settings() -> Settings:
             os.environ.get("GEMINI_API_KEY")
             or os.environ.get("GOOGLE_API_KEY")
             or os.environ.get("GOOGLE_GENAI_API_KEY")
+        ),
+        ollama_base_url=(
+            (os.environ.get("OLLAMA_BASE_URL") or "http://localhost:11434").strip()
+        ),
+        ollama_api_key=os.environ.get("OLLAMA_API_KEY") or None,
+        ollama_request_timeout_s=float(
+            os.environ.get("OLLAMA_REQUEST_TIMEOUT_S") or "120"
         ),
         kalshi_api_key_id=os.environ.get("KALSHI_API_KEY_ID"),
         kalshi_private_key=os.environ.get("KALSHI_API_PRIVATE_KEY"),

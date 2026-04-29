@@ -430,7 +430,11 @@ def test_gates_registry_includes_daily_loss():
     names = [name for (name, _fn) in _gates.GATES]
     assert names[0] == "kill_switch"
     assert names[1] == "daily_loss"
-    assert len(_gates.GATES) == 14
+    # 14 → 17 in task #730 (sharpe_ratio + ruin_monte_carlo +
+    # segment_throttler audit gates).  daily_loss must still be #2 so
+    # an EOD halt aborts the cycle before we burn DB round-trips on
+    # the per-vertical / per-market reads.
+    assert len(_gates.GATES) == 17
 
 
 def test_snapshot_green_day_reports_zero_loss(monkeypatch):

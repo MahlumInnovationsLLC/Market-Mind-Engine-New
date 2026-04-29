@@ -564,6 +564,330 @@ async def gate_agreement(ctx: RiskContext) -> GateResult:
     )
 
 
+async def gate_sharpe_ratio(ctx: RiskContext) -> GateResult:
+    """Round-2 audit gate: realised trailing-Sharpe floor.
+
+    Walks the most recent N closed trades scoped to the candidate's
+    ``(vertical, league)`` (league join via ``swarm_debates``) and
+    rejects when the simple ``mean(returns) / pstdev(returns)`` ratio
+    has decayed below ``risk.sharpe_min_ratio`` (default 0.0).
+
+    Returns from each historical trade are computed as
+    ``pnl / max(notional, 1.0)`` so a single oversized loss can't
+    dominate; ``notional = quantity * price`` (snapshot at fill).
+
+    Operator knobs (read via ``_resolve_per_vertical_override`` so the
+    existing per-vertical override pipeline applies):
+      * ``sharpe_min_ratio``     — floor to clear (-3.0 .. 5.0).
+      * ``sharpe_window_trades`` — trailing window size (5 .. 500).
+      * ``sharpe_min_samples``   — minimum sample count before the gate
+        can veto; below this it returns PASS so cold-start verticals
+        aren't blocked by their own newness.
+
+    Insufficient history, zero variance, or DB failure all PASS — this
+    gate exists to catch *decayed* trades, not to block fresh books.
+    """
+    window = int(_resolve_per_vertical_override(
+        ctx, "sharpe_window_trades",
+        ctx.operator_overrides.get("sharpe_window_trades", 30),
+    ))
+    min_samples = int(_resolve_per_vertical_override(
+        ctx, "sharpe_min_samples",
+        ctx.operator_overrides.get("sharpe_min_samples", 10),
+    ))
+    threshold = float(_resolve_per_vertical_override(
+        ctx, "sharpe_min_ratio",
+        ctx.operator_overrides.get("sharpe_min_ratio", 0.0),
+    ))
+    if window < 5:
+        window = 5
+    if min_samples < 1:
+        min_samples = 1
+    vertical = (ctx.vertical or "").strip().lower()
+    league = (ctx.league or "").strip().upper()
+    try:
+        rows = await db.fetch(
+            """
+            SELECT
+                t.pnl::float                                      AS pnl,
+                GREATEST(
+                    coalesce((t.quantity * t.price)::float, 0.0),
+                    1.0
+                )                                                  AS notional
+              FROM trades t
+              LEFT JOIN swarm_debates d ON d.id = t.debate_id
+             WHERE t.pnl IS NOT NULL
+               AND t.settled_at IS NOT NULL
+               AND ($1 = '' OR lower(coalesce(t.vertical, '')) = $1)
+               AND ($2 = '' OR upper(coalesce(d.league, '')) = $2)
+             ORDER BY t.settled_at DESC
+             LIMIT $3
+            """,
+            vertical, league, int(window),
+        )
+    except Exception as e:
+        log.debug("sharpe_ratio query failed: %s", e)
+        return GateResult(
+            "sharpe_ratio", True, "query degraded",
+            {"error": str(e), "threshold": threshold},
+        )
+    base = {
+        "vertical": vertical or None,
+        "league": league or None,
+        "window": int(window),
+        "min_samples": int(min_samples),
+        "threshold": threshold,
+    }
+    if len(rows) < min_samples:
+        return GateResult(
+            "sharpe_ratio", True, "insufficient history",
+            {**base, "samples": len(rows)},
+        )
+    returns = [
+        float(r["pnl"]) / float(r["notional"])
+        for r in rows if r["notional"]
+    ]
+    if len(returns) < min_samples:
+        return GateResult(
+            "sharpe_ratio", True, "insufficient priced history",
+            {**base, "samples": len(returns)},
+        )
+    import statistics
+    mean = statistics.fmean(returns)
+    stdev = statistics.pstdev(returns)
+    if stdev <= 0:
+        return GateResult(
+            "sharpe_ratio", True, "zero variance",
+            {
+                **base,
+                "samples": len(returns),
+                "mean_return": mean,
+                "stdev_return": stdev,
+            },
+        )
+    sharpe = mean / stdev
+    details = {
+        **base,
+        "samples": len(returns),
+        "mean_return": mean,
+        "stdev_return": stdev,
+        "sharpe": sharpe,
+    }
+    if sharpe < threshold:
+        return GateResult(
+            "sharpe_ratio", False,
+            f"trailing Sharpe {sharpe:.3f} < floor {threshold:.3f}",
+            details,
+        )
+    return GateResult("sharpe_ratio", True, "", details)
+
+
+async def gate_ruin_monte_carlo(ctx: RiskContext) -> GateResult:
+    """Round-2 audit gate: bounded-path probability-of-ruin estimator.
+
+    Bootstraps the trailing-N realised return distribution and runs
+    ``risk.ruin_paths`` Monte-Carlo paths of ``risk.ruin_horizon_trades``
+    trades each, sized to the same intended-notional fraction this
+    candidate would carry.  A path "ruins" the moment the simulated
+    bankroll dips below the operator's bankroll floor.  Vetos when
+    ``P(ruin) > risk.ruin_max_probability`` (default 0.05).
+
+    Operator knobs (per-vertical override pipeline applies):
+      * ``ruin_max_probability`` — fail above this (0.0 .. 1.0).
+      * ``ruin_paths``           — MC paths (200 .. 50_000).
+      * ``ruin_horizon_trades``  — trades simulated per path (10 .. 500).
+      * ``ruin_min_samples``     — minimum return samples before the gate
+        can veto; below this it PASSes (cold-start protection).
+      * ``bankroll_floor_usd``   — re-uses the same floor that
+        ``gate_bankroll_floor`` enforces, so the two gates agree on
+        what "ruined" means.
+
+    Cold-start, missing bankroll snapshot, or DB failure all PASS.
+    """
+    threshold = float(_resolve_per_vertical_override(
+        ctx, "ruin_max_probability",
+        ctx.operator_overrides.get("ruin_max_probability", 0.05),
+    ))
+    paths = int(_resolve_per_vertical_override(
+        ctx, "ruin_paths",
+        ctx.operator_overrides.get("ruin_paths", 10_000),
+    ))
+    horizon = int(_resolve_per_vertical_override(
+        ctx, "ruin_horizon_trades",
+        ctx.operator_overrides.get("ruin_horizon_trades", 100),
+    ))
+    min_samples = int(_resolve_per_vertical_override(
+        ctx, "ruin_min_samples",
+        ctx.operator_overrides.get("ruin_min_samples", 20),
+    ))
+    floor = float(ctx.operator_overrides.get("bankroll_floor_usd", 100.0))
+    # Defensive bounds so an operator typo can't blow up the loop.
+    paths = max(200, min(paths, 50_000))
+    horizon = max(10, min(horizon, 500))
+    min_samples = max(1, min_samples)
+
+    bankroll = ctx.bankroll_usd or 0.0
+    base = {
+        "threshold": threshold,
+        "paths": paths,
+        "horizon": horizon,
+        "min_samples": min_samples,
+        "floor_usd": floor,
+        "bankroll_usd": bankroll,
+        "intended_notional_usd": ctx.intended_notional_usd,
+    }
+    if bankroll <= 0:
+        return GateResult(
+            "ruin_monte_carlo", True, "no bankroll snapshot", base
+        )
+    vertical = (ctx.vertical or "").strip().lower()
+    league = (ctx.league or "").strip().upper()
+    try:
+        rows = await db.fetch(
+            """
+            SELECT
+                t.pnl::float                                      AS pnl,
+                GREATEST(
+                    coalesce((t.quantity * t.price)::float, 0.0),
+                    1.0
+                )                                                  AS notional
+              FROM trades t
+              LEFT JOIN swarm_debates d ON d.id = t.debate_id
+             WHERE t.pnl IS NOT NULL
+               AND t.settled_at IS NOT NULL
+               AND ($1 = '' OR lower(coalesce(t.vertical, '')) = $1)
+               AND ($2 = '' OR upper(coalesce(d.league, '')) = $2)
+             ORDER BY t.settled_at DESC
+             LIMIT 500
+            """,
+            vertical, league,
+        )
+    except Exception as e:
+        log.debug("ruin_monte_carlo query failed: %s", e)
+        return GateResult(
+            "ruin_monte_carlo", True, "query degraded",
+            {**base, "error": str(e)},
+        )
+    returns = [
+        float(r["pnl"]) / float(r["notional"])
+        for r in rows if r["notional"]
+    ]
+    if len(returns) < min_samples:
+        return GateResult(
+            "ruin_monte_carlo", True, "insufficient history",
+            {**base, "samples": len(returns)},
+        )
+    # Each MC step compounds the candidate's intended notional by a
+    # bootstrap-sampled return — a $X notional bet pays $X * r per step
+    # on the realised distribution.  Using the candidate notional (not
+    # the historical notional) keeps the simulation aligned with the
+    # *actual* trade we're about to place.
+    import random
+    rng = random.Random(0xA1C7)  # deterministic seed → repeatable details
+    notional = max(float(ctx.intended_notional_usd), 1.0)
+    target = floor
+    ruined = 0
+    n_returns = len(returns)
+    for _ in range(paths):
+        balance = bankroll
+        for _ in range(horizon):
+            r = returns[rng.randrange(n_returns)]
+            balance += notional * r
+            if balance < target:
+                ruined += 1
+                break
+    p_ruin = ruined / float(paths)
+    details = {
+        **base,
+        "samples": len(returns),
+        "p_ruin": p_ruin,
+        "ruined_paths": ruined,
+    }
+    if p_ruin > threshold:
+        return GateResult(
+            "ruin_monte_carlo", False,
+            f"P(ruin) {p_ruin:.4f} > cap {threshold:.4f}",
+            details,
+        )
+    return GateResult("ruin_monte_carlo", True, "", details)
+
+
+async def gate_segment_throttler(ctx: RiskContext) -> GateResult:
+    """Round-2 audit gate: per-segment recent-loss throttle.
+
+    A *segment* is the ``(league, market_type)`` tuple — moneyline,
+    spread, total, etc.  When a single segment racks up
+    ``risk.segment_max_losses`` (default 3) settled losing trades inside
+    ``risk.segment_window_hours`` (default 24) the gate vetoes new
+    candidates from that segment so a localised model regression doesn't
+    bleed the bankroll while we wait for the per-vertical kill switch
+    to be tripped manually.
+
+    Both knobs respect the per-vertical override pipeline.  When the
+    candidate has no ``league`` *or* no ``market_type`` (off-sports
+    verticals, exotic books) the gate PASSes — segments are only
+    well-defined inside the sports/market-type lattice.
+    """
+    league = (ctx.league or "").strip().upper()
+    market_type = (ctx.market_type or "").strip().lower()
+    max_losses = int(_resolve_per_vertical_override(
+        ctx, "segment_max_losses",
+        ctx.operator_overrides.get("segment_max_losses", 3),
+    ))
+    window_hours = float(_resolve_per_vertical_override(
+        ctx, "segment_window_hours",
+        ctx.operator_overrides.get("segment_window_hours", 24.0),
+    ))
+    if max_losses <= 0:
+        return GateResult(
+            "segment_throttler", True, "disabled",
+            {"max_losses": max_losses},
+        )
+    base = {
+        "league": league or None,
+        "market_type": market_type or None,
+        "max_losses": max_losses,
+        "window_hours": window_hours,
+    }
+    if not league or not market_type:
+        return GateResult(
+            "segment_throttler", True, "no segment on candidate", base
+        )
+    try:
+        n = await db.fetchval(
+            """
+            SELECT count(*)::int
+              FROM trades t
+              JOIN swarm_debates d ON d.id = t.debate_id
+             WHERE t.pnl IS NOT NULL
+               AND t.pnl < 0
+               AND t.settled_at IS NOT NULL
+               AND t.settled_at > now() - ($3 || ' hours')::interval
+               AND upper(coalesce(d.league, '')) = $1
+               AND lower(coalesce(d.market_type, '')) = $2
+            """,
+            league, market_type, str(window_hours),
+        )
+    except Exception as e:
+        log.debug("segment_throttler query failed: %s", e)
+        return GateResult(
+            "segment_throttler", True, "query degraded",
+            {**base, "error": str(e)},
+        )
+    losses = int(n or 0)
+    details = {**base, "losses_in_window": losses}
+    if losses >= max_losses:
+        return GateResult(
+            "segment_throttler", False,
+            (
+                f"{league}/{market_type}: {losses} losses in last "
+                f"{window_hours:g}h >= cap {max_losses}"
+            ),
+            details,
+        )
+    return GateResult("segment_throttler", True, "", details)
+
+
 async def gate_kelly_fraction(ctx: RiskContext) -> GateResult:
     """Quarter-Kelly position size cap.  Computes the optimal Kelly
     fraction for the candidate and rejects if intended_quantity exceeds
@@ -1052,6 +1376,15 @@ GATES: tuple[tuple[str, GateFn], ...] = (
     ("min_edge", gate_min_edge),
     ("drift", gate_drift),
     ("agreement", gate_agreement),
+    # Round-2 audit gates (task #730) — model-side decay + portfolio
+    # ruin + per-segment loss throttle.  Sit between the swarm/agreement
+    # gates and the sizing gates so a decayed book is rejected BEFORE
+    # we burn DB round-trips on the bankroll snapshot + position
+    # aggregates that gate_kelly_fraction / gate_global_exposure_cap
+    # need.
+    ("sharpe_ratio", gate_sharpe_ratio),
+    ("ruin_monte_carlo", gate_ruin_monte_carlo),
+    ("segment_throttler", gate_segment_throttler),
     ("kelly_fraction", gate_kelly_fraction),
     ("bankroll_floor", gate_bankroll_floor),
     ("global_exposure_cap", gate_global_exposure_cap),
@@ -1059,8 +1392,10 @@ GATES: tuple[tuple[str, GateFn], ...] = (
     ("max_concurrent_positions", gate_max_concurrent_positions),
     ("duplicate_trade", gate_duplicate_trade),
 )
-assert len(GATES) == 14, (
-    "14 gates: 12 original + daily_loss (task #268) + vertical_halted (task #271)"
+assert len(GATES) == 17, (
+    "17 gates: 12 original + daily_loss (task #268) + vertical_halted "
+    "(task #271) + sharpe_ratio + ruin_monte_carlo + segment_throttler "
+    "(task #730)"
 )
 
 

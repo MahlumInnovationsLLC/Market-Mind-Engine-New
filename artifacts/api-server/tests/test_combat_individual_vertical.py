@@ -835,9 +835,12 @@ def test_normalize_handles_empty_payloads_gracefully():
 
 
 def test_gates_tuple_still_twelve():
-    """Lock the 12-gate invariant — combat-individual sub-checks must
-    fold into existing gates rather than adding new entries."""
-    assert len(GATES) == 14
+    """Lock the gate-count invariant — combat-individual sub-checks must
+    fold into existing gates rather than adding new entries.  The count
+    grows only when a *new* gate is added (daily_loss → 13,
+    vertical_halted → 14, sharpe_ratio + ruin_monte_carlo +
+    segment_throttler → 17 in task #730)."""
+    assert len(GATES) == 17
 
 
 # ---------------------------------------------------------------------------

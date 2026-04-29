@@ -280,16 +280,131 @@ async def _stream_google(
     return "".join(chunks), in_tok, out_tok
 
 
+class OllamaProviderError(Exception):
+    """Normalised Ollama transport / HTTP error.
+
+    Carries an optional ``status_code`` so ``_is_retryable_provider_error``
+    routes 429 / 5xx the same way OpenAI / Anthropic SDK errors are routed
+    (i.e. triggers the cross-provider fallback chain).
+    """
+
+    def __init__(self, message: str, *, status_code: int | None = None) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+
+
+async def _stream_ollama(
+    persona_id: str, model_id: str, system: str, user: str, temperature: float
+) -> tuple[str, int, int]:
+    """Streaming dispatch for a local (or tunneled remote) Ollama server.
+
+    POSTs ``/api/chat`` with ``stream=true`` and consumes the NDJSON
+    response (one JSON object per line).  Each chunk has a ``message.content``
+    delta; the terminal chunk carries ``done=true`` plus
+    ``prompt_eval_count`` / ``eval_count`` for the (synthetic, $0) cost
+    ledger.  Mirrors the OpenAI / Anthropic / Google helpers so the
+    ``persona_delta`` event stream stays uniform across providers.
+    """
+    import httpx
+
+    settings = get_settings()
+    base = (settings.ollama_base_url or "http://localhost:11434").rstrip("/")
+    url = f"{base}/api/chat"
+    headers: dict[str, str] = {"Content-Type": "application/json"}
+    if settings.ollama_api_key:
+        headers["Authorization"] = f"Bearer {settings.ollama_api_key}"
+    payload: dict[str, Any] = {
+        "model": model_id,
+        "messages": [
+            {"role": "system", "content": system},
+            {"role": "user", "content": user},
+        ],
+        "stream": True,
+        "options": {
+            "temperature": float(temperature),
+            "num_predict": 600,
+        },
+    }
+    chunks: list[str] = []
+    in_tok = out_tok = 0
+    timeout = httpx.Timeout(
+        float(settings.ollama_request_timeout_s or 120.0), connect=10.0
+    )
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            async with client.stream(
+                "POST", url, json=payload, headers=headers
+            ) as resp:
+                if resp.status_code >= 400:
+                    body = (await resp.aread()).decode("utf-8", errors="replace")
+                    raise OllamaProviderError(
+                        f"ollama HTTP {resp.status_code}: {body[:500]}",
+                        status_code=resp.status_code,
+                    )
+                async for line in resp.aiter_lines():
+                    if not line or not line.strip():
+                        continue
+                    try:
+                        obj = json.loads(line)
+                    except Exception:
+                        continue
+                    if isinstance(obj, dict) and "error" in obj:
+                        raise OllamaProviderError(
+                            f"ollama error: {obj.get('error')!r}"
+                        )
+                    msg = (obj or {}).get("message") or {}
+                    delta = msg.get("content") or ""
+                    if delta:
+                        chunks.append(delta)
+                        await _publish(
+                            {
+                                "type": "persona_delta",
+                                "persona": persona_id,
+                                "text": delta,
+                            }
+                        )
+                    if obj.get("done"):
+                        in_tok = int(obj.get("prompt_eval_count") or 0)
+                        out_tok = int(obj.get("eval_count") or 0)
+    except httpx.HTTPError as e:
+        # Normalise transport-level failures so the fallback path picks
+        # them up via the duck-typed exception-name check.
+        raise OllamaProviderError(f"ollama transport error: {e}") from e
+    return "".join(chunks), in_tok, out_tok
+
+
 def _is_retryable_provider_error(exc: BaseException) -> bool:
     """True for rate-limit (HTTP 429) or 5xx upstream failures.
 
     Uses duck-typing on the SDK exception classes so we don't pay an
     import cost when both libraries aren't installed in tests, and so a
     future SDK refactor doesn't silently disable the fallback.
+
+    For Ollama specifically we are deliberately *narrow*: a missing /
+    misconfigured model, bad auth, or malformed request returns a 4xx and
+    must surface to the operator instead of silently burning hosted-LLM
+    credit via the cross-provider fallback.  Only transport failures
+    (daemon down, timeout — modeled as ``status_code is None``) and
+    429 / 5xx are routed to fallback.
     """
     name = type(exc).__name__
-    if name in ("RateLimitError", "APITimeoutError", "APIConnectionError"):
+    if name in (
+        # OpenAI / Anthropic SDK exception classes — these are constructed
+        # by the SDKs themselves only when the upstream is genuinely
+        # unavailable, so the class name alone is a reliable signal.
+        "RateLimitError", "APITimeoutError", "APIConnectionError",
+    ):
         return True
+    if name == "OllamaProviderError":
+        status = getattr(exc, "status_code", None)
+        # Transport-level failure (daemon down, connect/read timeout) —
+        # _stream_ollama wraps httpx.HTTPError without a status_code.
+        if status is None:
+            return True
+        if isinstance(status, int) and (status == 429 or 500 <= status < 600):
+            return True
+        # 4xx config / auth / model-not-found: surface, do NOT fallback.
+        return False
     status = getattr(exc, "status_code", None)
     if isinstance(status, int) and (status == 429 or 500 <= status < 600):
         return True
@@ -312,6 +427,8 @@ async def _invoke_provider(
         return await _stream_anthropic(persona_id, model_id, system, user, temperature)
     if provider == "google":
         return await _stream_google(persona_id, model_id, system, user, temperature)
+    if provider == "ollama":
+        return await _stream_ollama(persona_id, model_id, system, user, temperature)
     raise RuntimeError(f"unknown provider {provider!r}")
 
 
@@ -409,7 +526,14 @@ async def _call_persona(
         "raw_text": text,
         "input_tokens": in_tok,
         "output_tokens": out_tok,
-        "cost": estimate_cost(used_model, in_tok, out_tok),
+        # Local Ollama personas run on operator hardware so the cost ledger
+        # records $0 — keeps the cost-vs-edge dashboards honest about which
+        # spend is hosted-LLM vs. on-prem inference.
+        "cost": (
+            0.0
+            if used_provider == "ollama"
+            else estimate_cost(used_model, in_tok, out_tok)
+        ),
         "latency_ms": latency_ms,
         "error": error,
         "primary_provider": persona.provider,

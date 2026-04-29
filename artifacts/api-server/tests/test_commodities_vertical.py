@@ -210,7 +210,12 @@ def test_baseline_stack_directionality_above_vs_below():
 
 
 def test_twelve_gate_invariant_unchanged():
-    assert len(GATES) == 14
+    # Bumped 14 → 17 in task #730 (sharpe_ratio + ruin_monte_carlo +
+    # segment_throttler audit gates).  The point of this assertion is
+    # still that *commodities* sub-checks fold into existing gates
+    # rather than adding new entries — only cross-vertical risk plumbing
+    # is allowed to grow this number.
+    assert len(GATES) == 17
 
 
 def _commodities_ctx(**overrides) -> RiskContext:

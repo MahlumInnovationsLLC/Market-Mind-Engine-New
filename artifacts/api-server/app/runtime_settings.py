@@ -769,6 +769,24 @@ RISK_KNOB_SPECS: tuple["_KnobSpec", ...] = (
     _KnobSpec("max_concurrent_positions", "Max concurrent positions",
               "Hard ceiling on simultaneously open positions",
               1.0, 200.0, 1.0, "int", "count"),
+    # ---- Round-2 audit gates (task #730) -------------------------------
+    # Exposed on the same Live-risk-knobs panel so the operator can tune
+    # the new gates without a redeploy.  Bounds were picked so a slider
+    # can't push values into a regime the gate's safe-default branch
+    # doesn't already handle (cold start, query degraded, etc).
+    _KnobSpec("sharpe_min_ratio", "Min trailing Sharpe",
+              "Veto when realised Sharpe over the trailing window decays "
+              "below this floor",
+              -3.0, 5.0, 0.05, "float", "fraction"),
+    _KnobSpec("ruin_max_probability", "Max P(ruin)",
+              "Veto when bootstrap Monte-Carlo P(ruin over horizon) "
+              "exceeds this cap",
+              0.0, 1.0, 0.01, "float", "fraction"),
+    _KnobSpec("segment_max_losses", "Segment loss throttle",
+              "Veto when settled losses for the candidate's "
+              "(league, market_type) segment in the trailing window "
+              "reach this count",
+              1.0, 50.0, 1.0, "int", "count"),
 )
 
 RISK_KNOB_KEYS: frozenset[str] = frozenset(s.key for s in RISK_KNOB_SPECS)
