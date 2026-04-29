@@ -467,30 +467,52 @@ The full-stack `summary` block grows two new keys:
   counts so reviewers can verify exactly how many rows landed via
   the degraded baseline vs the (currently empty) archived path.
 
-Validation run on 8000 archive rows filtered to NBA/NCAAB/NHL/MLB
-(see `scripts/reports/v1_backtest_surrogate_2026-04-29.json`):
+Canonical audit-gate artifact — full-archive run, no `--limit`,
+no league filter
+(`scripts/reports/v1_backtest_full_archive_2026-04-29.json`):
+- `row_input_count = 667092`, `row_kept_count = 603128` (the rest
+  are open positions with no settled `actual_outcome`)
 - `parity_gate_status.overall = DEGRADED_PARTIAL_PENDING_BACKFILL`
-- `rows_predicted = 757 / 757` kept rows (full 8000 walked, 9.5%
-  carry settled `actual_outcome` — the rest are open positions)
-- `feature_source.surrogate = 757` (archived = 0, blocked on #731)
+- `full_stack_attempt.rows_predicted = 603128 / 603128`
+- `feature_source.surrogate = 603128` (archived = 0, blocked on #731)
 - `triage.feature_builder_mismatch.active = False` (was True)
-- Per-league surrogate Brier vs V1's *raw* `predicted_prob` baseline:
-  - NBA   (n=367): 0.3651 → 0.2688 cal,  delta -0.0964 IMPROVED
-  - NCAAB (n=298): 0.4084 → 0.2696 cal,  delta -0.1388 IMPROVED
-  - NHL   (n=51):  0.3235 → 0.1744 cal,  delta -0.1491 IMPROVED
-  - MLB   (n=41):  0.2098 → 0.0201 cal,  delta -0.1897 IMPROVED
+- Per-league surrogate Brier vs V1's *raw* `predicted_prob` baseline
+  (all 5 calibrator-refit leagues IMPROVED):
+
+  ```
+  league         n  brier_raw  brier_cal      delta    verdict
+  ------------------------------------------------------------
+  MLB          133     0.2644     0.0817    -0.1827   improved
+  MLS            1     0.0000     0.0121    +0.0120     parity
+  NBA         3093     0.6015     0.1038    -0.4977   improved
+  NCAAB       1355     0.5383     0.1691    -0.3692   improved
+  NFL            4     0.7318     0.6114    -0.1204   improved
+  NHL          272     0.4450     0.1150    -0.3300   improved
+  PGA           52     0.0760     0.0680    -0.0080     parity
+  UNKNOWN   598218     0.2626     0.2626    +0.0000     parity
+  ```
+
+NFL coverage is small (n=4) but non-zero, so the original spec's
+five-league requirement is exercised end-to-end (NBA, NFL, NCAAB,
+NHL, MLB all present and IMPROVED).  UNKNOWN is the catch-all for
+rows whose `analysis_json` did not carry an explicit `league` —
+mostly futures and prop markets the V1 calibrators were not refit
+for, so parity is the expected outcome.
 
 Caveat: surrogate Brier is reduced-feature so the absolute numbers
 should NOT be cited as the live ensemble's quality bar — they show
 the chain runs, not that it matches V1. The V1-vs-live calibrated
 parity verdict still requires Phase 2 dump reconstruction (#731).
 
-The committed calibrator-only baseline
-(`scripts/reports/v1_backtest_2026-04-29.json`, 4000-row sample)
-records `parity_gate_status.overall = BLOCKED_PENDING_BACKFILL`
-and `rows_predicted = 0` — i.e. without surrogate features the
-production path produces zero usable predictions on this archive,
-which is the precise blocker the surrogate path works around.
+Two smaller sample reports are kept alongside as sanity-check
+artifacts (NOT audit-gate evidence — names made explicit):
+- `v1_backtest_sample_calibrator_only_2026-04-29.json` (4k row
+  sample, no surrogate, `parity_gate_status.overall =
+  BLOCKED_PENDING_BACKFILL`, `rows_predicted = 0`) — proves the
+  precise blocker the surrogate path works around.
+- `v1_backtest_sample_surrogate_8k_2026-04-29.json` (8k row sample,
+  with surrogate, NBA/NCAAB/NHL/MLB only) — used during development
+  to bisect bugs without paying the full-archive 6-min runtime.
 
 **Top-level hard-gate manifest** (`parity_gate_status` block, emitted
 by every report) formalizes the three gates so reviewers do not have
