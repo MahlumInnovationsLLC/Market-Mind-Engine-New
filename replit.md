@@ -202,6 +202,71 @@ Surfaced while diagnosing why the live-games chatbot reported "no data" for toni
   2. `model_health_alerts.metric_name` was `varchar(50)` but `app/kalshi/reconciler.py` (lines ~201, ~322) writes the FULL Kalshi market ticker as the metric_name, e.g. `KXMVESPORTSMULTIGAMEEXTENDED-S20263320C8C2EF4-E4BE8428C73` (58 chars). Every cycle hit "value too long for type character varying(50)" and silently dropped the alert — operators were blind to position drift on long-named markets. Migration `0029_widen_alert_and_sport_columns.py` widens `metric_name` to `varchar(255)`. The same migration also widens `line_snapshots.sport` from `varchar(20)` → `varchar(50)`: soccer keys like `soccer_germany_bundesliga` (25 chars) were causing the `executemany` in `_persist_odds_payload` to roll back ENTIRE cross-sport sweeps, which is why `line_snapshots` had 0 rows total before the fix. Post-migration: 8696 rows in last 3 min across 10 sports. Also added `ON CONFLICT (game_id, book, market_type, "timestamp") DO NOTHING` to `_persist_odds_payload` so racing pollers don't drop entire batches when the unique index collides.
 - ~~**Known followup:** `line_snapshots` has no `outcome` column, so multiple outcomes per (game, book, market, ts) would otherwise collide on the unique index.~~ **CLOSED 2026-04-28 (later that same day).** Migration `0030_line_snapshots_outcome.py` adds `outcome varchar(255)` and replaces `idx_line_snapshots_uq` with one over `(game_id, book, market_type, outcome, "timestamp")`. `_persist_odds_payload` now writes `outcome.name` from each Odds API outcome (truncated defensively to 255 chars) and the `ON CONFLICT` tuple includes outcome. Pre-migration rows have `outcome IS NULL` and never collide because Postgres treats NULL as distinct in unique indexes. Live verification 90s after restart: 19,827 new rows with outcome populated; same (game, book, market, ts) tuple now correctly keeps 3 h2h sides (Bayern Munich / Draw / PSG) and Over/Under for totals where before only one survived. Readers (`app.margin_regressor` `DISTINCT ON (game_id)` queries) are unaffected because the spread/total `line_value` is symmetric across home/away or Over/Under sides — picking either row arbitrarily yields the same value. The positive-EV scanner reads from the in-memory cache (raw API JSON) not from the DB, so it was already consuming both sides correctly; the DB schema fix unblocks any future DB-backed analytics that needs both sides.
 
+## Model artifacts (v155) — verification + V1 import status
+
+### v155 artifact wiring — verified end-to-end
+
+The v155 model bundle published to `axiom-predict-artifacts/exports/`
+(7 objects: `models_manifest.json` + `models_part_a{a,b,c}` + `source_part_a{a,b,c}`)
+is reachable through `app/models_loader.py` exactly the way the FastAPI
+`lifespan` reaches for it. Re-verify any time with:
+
+    /home/runner/workspace/.pythonlibs/bin/python3 \
+        artifacts/api-server/scripts/verify_v155_artifacts.py
+
+The script lists the bucket, runs `models_loader.ensure_artifacts(force=True)`
+end-to-end (multi-part reassembly → safe extract → manifest fetch →
+ed25519 signature → sha256 verify of all 237 declared predictors → smoke
+load every `CANONICAL_PREDICTORS` entry), and exits `0` on PASS. As of the
+last run (2026-04-29):
+
+- **Manifest version `2026.04.02-rebuild`**, predictor count = 237/237
+  matched on sha256.
+- **Signature status = `skipped`** because `AXIOM_MANIFEST_PUBLIC_KEY`
+  isn't set yet. A leaked storage key could substitute the manifest in
+  this state. Set the public key (printed by
+  `scripts/build_models_manifest.py --gen-key`) to enforce, then re-run.
+- **Canonical smoke-load: 4/6 OK, 2/6 SOFT (accepted)**. The two SOFT
+  entries are `models/saved/temperature_gru.pkl` and
+  `models/saved/precip_gru.pkl` — v155 does not ship trained weather
+  GRUs, and `app/weather/predictor.py::_resolve_gru_weights` /
+  `app/weather/precip_predictor.py` already wrap `load_predictor` in
+  try/except and fall back to `gru.baseline_weights()` with a logged
+  `[temperature] gru weight load failed: …` warning. The trading loop
+  continues to score weather markets with the baseline curve. The
+  verifier whitelists these via `FAIL_SOFT_PREDICTORS`; any OTHER
+  canonical predictor going missing is a hard fail.
+- **Per the task constraint, fixes for any future verifier failure
+  land in `app/models_loader.py` (filename mapping, manifest parsing,
+  version selection). Do not modify the bucket from this script.**
+
+### V1 historical-data import — BLOCKED on V1 source access
+
+The second half of the same task — porting V1's ~60,503 settled games
+and ~1,249 settled trades into Supabase under new `sports_games` /
+`trade_history` tables (so calibrators can cross `MIN_REFIT_SAMPLES=10`
+per league and replace the `market_prior` rows seeded by
+`scripts/seed_market_prior_calibrators.py`) — is currently blocked.
+The audit referenced `https://github.com/MahlumInnovationsLLC/Axiom-Predict-V1.git`
+as a public source, but the GitHub API returns HTTP 404 for that exact
+repo slug, every plausible alternate spelling, and every plausible
+alternate org. There is no `GITHUB_TOKEN` secret configured, no GitHub
+connection set up, and no V1 SQL/CSV dump in `attached_assets/`.
+
+To unblock, one of the following is needed:
+1. Make the V1 repo public under its real slug, OR
+2. Provide a Personal Access Token (`GITHUB_TOKEN`) with `repo:read`
+   scope, OR
+3. Drop a V1 SQL dump (`.sql` / `.sql.gz` / `pg_dump -Fc`) or
+   per-table CSV exports into `attached_assets/`.
+
+Until V1 is reachable, the migration `0037_v1_history_tables.py` and
+the ETL script `scripts/import_v1_history.py` are intentionally
+deferred — writing speculative table DDL against a schema we cannot
+verify would just have to be rewritten once V1's real column shapes
+land. The audit-reported V1 row counts (60,503 games / 1,249 trades)
+remain the smoke-test target.
+
 ## Operations Runbook — quick links
 
 For incident response and the live cutover, see [`docs/runbook.md`](docs/runbook.md). Direct links to the on-call sections:
