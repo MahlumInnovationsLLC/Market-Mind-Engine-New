@@ -243,6 +243,18 @@ bets without grepping JSON metadata.  Allowed values:
 `rh_import`, `unknown` (the last two are reserved for legacy imports and
 appear only in the `all` filter — never under `manual` or `system`).
 
+**Operator directive (2026-04-30): NO unknowns.** Per follow-up
+guidance from the operator, every trade row must carry a meaningful
+provenance tag.  Migration 0040 (a) re-tags any existing
+`placed_by='unknown'` rows as `'orchestrator'` (sub-$400 by
+construction — 0039 already promoted >$400 unknowns to `'manual_ui'`),
+and (b) drops the column DEFAULT so future inserts must pass an
+explicit value rather than silently landing at `'unknown'`.  The
+`'unknown'` enum value remains in the CHECK list for genuinely
+unclassifiable future imports but is no longer the silent fallback.
+The Kalshi fills-sync importer applies the same $400 bimodal heuristic
+per-row (see `_tag_placed_by` in `scripts/backfill_kalshi_fills.py`).
+
 - **Schema** (`migrations/versions/0039_trades_placed_by.py`): adds the
   column with a `NOT NULL DEFAULT 'unknown'` + CHECK constraint, plus
   `idx_trades_placed_by_executed_at` for the filtered-feed query plan.
@@ -260,23 +272,22 @@ appear only in the `all` filter — never under `manual` or `system`).
 - **Insert sites**: live audit found exactly one production-code path
   that runs `INSERT INTO trades` —
   `app/orchestrator/paper.py::record_paper_trade`, called by the
-  cycle / autotrader / swarm orchestrator paths.  That row now stamps
+  cycle / autotrader / swarm orchestrator paths.  That row stamps
   `placed_by='orchestrator'`.  The Kalshi fills-sync importer
   (`scripts/backfill_kalshi_fills.py`) is a SAFETY-NET that observes
-  fills already executed on Kalshi; it stamps `'unknown'` because the
-  original provenance is not knowable at backfill time, and its
-  `ON CONFLICT DO NOTHING` lets a native row keep its real
-  `placed_by` value.  *Architectural caveat*: `/api/kalshi/paper-order`
-  (the manual UI button) writes to `order_lifecycle` / `order_fills`
-  only — no `trades` row is materialised until the backfill script
-  runs.  As a result, paper-order trades placed via the UI surface as
-  `'unknown'` (visible only under the `all` filter) until that gap is
-  closed in a follow-up.  Migration 0039's `>$400 → manual_ui`
-  heuristic correctly tags historical manual trades; new manual
-  paper-orders need either (a) a runtime tag carried through the
-  lifecycle into the eventual backfill row, or (b) a direct
-  `record_paper_trade` call from the endpoint with
-  `placed_by='manual_ui'`. Out of scope for this PR.
+  fills already executed on Kalshi; it now stamps each row using the
+  shared `_tag_placed_by(qty, price)` helper — `manual_ui` if the
+  notional exceeds $400, otherwise `orchestrator` (per the operator's
+  bimodal heuristic).  Defensive fallback for missing or non-numeric
+  qty/price is `orchestrator`, never `unknown`.  `ON CONFLICT DO
+  NOTHING` still lets a native row keep its real `placed_by` value
+  when the live path beat the backfill to it.  Note: `/api/kalshi/
+  paper-order` writes to `order_lifecycle` / `order_fills` only — the
+  `trades` row is materialised by the next backfill run, which will
+  tag the row correctly via the $400 heuristic (so a >$400 manual
+  paper-order surfaces as `manual_ui`, a sub-$400 one as
+  `orchestrator`).  This matches the operator's stated rule that
+  anything below $400 is system-side.
 - **API filter** (`app/dashboard.py` + `app/main.py` routes): shared
   `_placed_by_predicate(filter)` / `_placed_by_and_clause` /
   `_placed_by_where_clause` helpers translate the

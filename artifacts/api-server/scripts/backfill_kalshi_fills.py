@@ -150,6 +150,36 @@ def _qty_dollars(fill: dict[str, Any]) -> tuple[Decimal | None, Decimal | None]:
     return qty, price
 
 
+def _tag_placed_by(qty: Any, price: Any) -> str:
+    """Per-row provenance tag for backfilled Kalshi fills.
+
+    Implements the operator's $400 bimodal heuristic (see migration
+    0039 + 2026-04-30 directive in replit.md): notional > $400 ->
+    ``'manual_ui'`` (the operator never has the autotrader place bets
+    that large; live probe of 5,725 trades found 135 over $400 and
+    ZERO of them carrying orchestrator metadata), otherwise
+    ``'orchestrator'``.
+
+    Defensive fallback: when qty or price is missing or non-numeric,
+    return ``'orchestrator'`` rather than ``'unknown'``.  Per the
+    operator's "NO unknowns" directive, the only acceptable fallback
+    is system-side — it is strictly safer to mis-attribute a small
+    edge-case row to the orchestrator than to leave it unlabeled and
+    hide it from both Manual and System dashboard buckets.
+    """
+    if qty is None or price is None:
+        return "orchestrator"
+    try:
+        # Decimal math (not float) so the $400 boundary is exact —
+        # consolidated buckets pass Decimals already, and the crypto
+        # path passes floats that may not round-trip cleanly through
+        # float multiplication near the threshold.
+        notional = Decimal(str(price)) * Decimal(str(qty))
+    except (TypeError, ValueError, ArithmeticError):
+        return "orchestrator"
+    return "manual_ui" if notional > Decimal("400") else "orchestrator"
+
+
 def _fee_dollars(fill: dict[str, Any]) -> Decimal:
     """Kalshi `fee_cost` is reported as a decimal-dollar string ('0.070000').
 
@@ -402,17 +432,25 @@ async def backfill(
 
     # Insert crypto first (per-fill, dedup by real trade_id), then consolidated.
     #
-    # ``placed_by`` is set to ``'unknown'`` here on purpose: this script
-    # is a SAFETY-NET importer that observes fills already executed on
-    # Kalshi.  We can't tell at backfill time whether the order was
-    # originally placed by the orchestrator (which would have inserted
-    # the row natively with ``placed_by='orchestrator'``) or by the
-    # user via the UI (``'manual_ui'``).  The ``ON CONFLICT DO NOTHING``
-    # below means any row already inserted by the live path keeps its
-    # real provenance — only genuinely-orphaned rows land at
-    # ``'unknown'``.  Migration 0039 added the column.
+    # ``placed_by`` is derived per-row from the operator's $400
+    # bimodal heuristic (see migration 0039 docstring + 2026-04-30
+    # operator directive in replit.md): ``price * quantity > 400`` ->
+    # ``'manual_ui'``, otherwise ``'orchestrator'``.  This script is a
+    # SAFETY-NET importer that observes fills already executed on
+    # Kalshi, so we can't see the original initiator at backfill time
+    # — but the bimodal heuristic is reliable (live probe: 135 / 5,725
+    # trades over $400, ZERO of them carrying orchestrator metadata).
+    # The ``ON CONFLICT DO NOTHING`` below means any row already
+    # inserted by the live path keeps its real provenance; only
+    # genuinely-orphaned rows fall through to the heuristic — and
+    # crucially, none of them land at ``'unknown'`` anymore (per
+    # migration 0040 cleanup + operator's "NO unknowns" directive).
+    #
+    # Index 6 = quantity, index 7 = price in the row tuples (mirrors
+    # the column order on the INSERT below).  ``_tag_placed_by`` is a
+    # module-level helper so it can be unit-tested in isolation.
     if crypto_rows:
-        crypto_rows_tagged = [(*r, "unknown") for r in crypto_rows]
+        crypto_rows_tagged = [(*r, _tag_placed_by(r[6], r[7])) for r in crypto_rows]
         await db.executemany(
             """
             INSERT INTO trades (
@@ -430,7 +468,7 @@ async def backfill(
         )
         stats["crypto_rows"] = len(crypto_rows)
     if consolidated_rows:
-        consolidated_rows_tagged = [(*r, "unknown") for r in consolidated_rows]
+        consolidated_rows_tagged = [(*r, _tag_placed_by(r[6], r[7])) for r in consolidated_rows]
         await db.executemany(
             """
             INSERT INTO trades (
