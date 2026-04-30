@@ -290,7 +290,12 @@ def _patch_paper_for_place_order(
 
 
 def _metadata_arg_from_capture(capture: _InsertCapture) -> dict[str, Any]:
-    raw = capture.captured["args"][-1]
+    # Migration 0039 added the ``placed_by`` column and
+    # `app/orchestrator/paper.py` now binds it as the FINAL parameter
+    # after ``metadata``, so the metadata jsonb is at index ``-2``
+    # (was ``-1`` before the trade-provenance work).  See replit.md →
+    # "Trade provenance tagging" for the full insert column ordering.
+    raw = capture.captured["args"][-2]
     if raw is None:
         return {}
     return json.loads(raw) if isinstance(raw, str) else dict(raw)

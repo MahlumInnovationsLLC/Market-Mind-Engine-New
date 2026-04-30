@@ -66,6 +66,8 @@ paths:
       operationId: getDashboardOverview
       tags: [dashboard]
       summary: Top-level counts and lifetime KPIs from the production database
+      parameters:
+        - $ref: "#/components/parameters/PlacedByParam"
       responses:
         "200":
           description: Overview
@@ -82,6 +84,7 @@ paths:
         - in: query
           name: limit
           schema: { type: integer, minimum: 1, maximum: 200, default: 25 }
+        - $ref: "#/components/parameters/PlacedByParam"
       responses:
         "200":
           description: Recent trades
@@ -182,6 +185,7 @@ paths:
         - in: query
           name: days
           schema: { type: integer, minimum: 1, maximum: 365, default: 30 }
+        - $ref: "#/components/parameters/PlacedByParam"
       responses:
         "200":
           description: Vertical performance bundle
@@ -722,6 +726,7 @@ paths:
           name: days
           required: false
           schema: { type: integer, default: 7, minimum: 1, maximum: 365 }
+        - $ref: "#/components/parameters/PlacedByParam"
       responses:
         "200":
           description: Vertical overview
@@ -877,6 +882,28 @@ paths:
               schema: { $ref: "#/components/schemas/ModelsInventory" }
 
 components:
+  parameters:
+    PlacedByParam:
+      # Trade-provenance filter (Manual / System / Both) — see
+      # migration 0039_trades_placed_by + the
+      # ``_placed_by_predicate`` SQL helper in app/dashboard.py.
+      # ``manual`` → only operator UI trades (placed_by='manual_ui').
+      # ``system`` → only orchestrator/autotrader/swarm trades.
+      # ``all``    → unfiltered (default; includes rh_import +
+      #              unknown buckets that the toggle deliberately
+      #              hides from the manual/system halves).
+      in: query
+      name: placed_by
+      required: false
+      schema:
+        type: string
+        enum: [manual, system, all]
+        default: all
+      description: >-
+        Provenance bucket to scope trade-derived metrics by.  The
+        web + mobile UIs surface this as a 3-segment toggle on
+        every P&L analytics surface.
+
   schemas:
     HealthStatus:
       type: object
@@ -996,6 +1023,12 @@ components:
         realized_pnl: { type: number, nullable: true }
         win_rate: { type: number, nullable: true }
         open_positions: { type: integer, nullable: true }
+        placed_by:
+          type: string
+          enum: [manual, system, all]
+          description: >-
+            Echo of the active provenance filter so the UI can
+            reconstruct the toggle state without re-parsing the URL.
       required: [counts]
 
     Trade:
@@ -1016,6 +1049,15 @@ components:
         exchange: { type: string, nullable: true }
         executed_at: { type: string, nullable: true }
         market_title: { type: string, nullable: true }
+        placed_by:
+          type: string
+          nullable: true
+          description: >-
+            Trade-provenance bucket from migration 0039
+            (one of manual_ui / orchestrator / autotrader / swarm /
+            operator_recovery / rh_import / unknown).  Per-row tag
+            so the UI can show the source even on the unfiltered
+            view.
       required: [id]
 
     MarketTitle:
@@ -1046,6 +1088,10 @@ components:
           description: >-
             Delay window applied when `delayed` is true. 0 when the
             response is undelayed.
+        placed_by:
+          type: string
+          enum: [manual, system, all]
+          description: Echo of the active provenance filter.
       required: [items]
 
     CalibrationBucket:
@@ -1128,6 +1174,10 @@ components:
         verticals:
           type: array
           items: { $ref: "#/components/schemas/VerticalPerformanceEntry" }
+        placed_by:
+          type: string
+          enum: [manual, system, all]
+          description: Echo of the active provenance filter.
       required: [days, verticals]
 
     VerticalLastCycle:
@@ -1235,6 +1285,10 @@ components:
             currently sat out.
           additionalProperties:
             $ref: "#/components/schemas/VerticalHaltMeta"
+        placed_by:
+          type: string
+          enum: [manual, system, all]
+          description: Echo of the active provenance filter.
       required: [days, verticals, visibility, halts]
 
     AdminSetVerticalVisibilityRequest:

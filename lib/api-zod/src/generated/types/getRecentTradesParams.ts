@@ -5,6 +5,7 @@
  * Axiom-Predict API — backend for the prediction-market trading platform.
  * OpenAPI spec version: 0.1.0
  */
+import type { PlacedByParamParameter } from "./placedByParamParameter";
 
 export type GetRecentTradesParams = {
   /**
@@ -12,4 +13,8 @@ export type GetRecentTradesParams = {
    * @maximum 200
    */
   limit?: number;
+  /**
+   * Provenance bucket to scope trade-derived metrics by.  The web + mobile UIs surface this as a 3-segment toggle on every P&L analytics surface.
+   */
+  placed_by?: PlacedByParamParameter;
 };

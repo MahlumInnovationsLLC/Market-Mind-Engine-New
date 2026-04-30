@@ -6,8 +6,11 @@
  * OpenAPI spec version: 0.1.0
  */
 import type { VerticalPerformanceEntry } from "./verticalPerformanceEntry";
+import type { VerticalPerformancePlacedBy } from "./verticalPerformancePlacedBy";
 
 export interface VerticalPerformance {
   days: number;
   verticals: VerticalPerformanceEntry[];
+  /** Echo of the active provenance filter. */
+  placed_by?: VerticalPerformancePlacedBy;
 }

@@ -234,6 +234,89 @@ The four mandatory pre-cutover gates run via a single thin bash wrapper at `scri
 
 The frontend gained one env knob: `VITE_API_URL` (documented in `artifacts/web/.env.example`). Default empty preserves today's same-origin Replit behaviour byte-for-byte; setting it to `https://api.yourdomain.com` repoints every `apiFetch` (via `lib/api.ts::resolveApiUrl`) and every WebSocket connection (via `hooks/use-websocket.ts::buildWsUrl`, with auto http→ws / https→wss upgrade) at the configured backend without rebuilding the bundle. Coverage in `lib/api.test.ts` and `hooks/use-websocket.url.test.ts` exercises both branches (relative default + explicit absolute base, including a malformed-URL fallback that refuses to silently swap origins).
 
+## Trade provenance tagging (Apr 30, 2026) — `placed_by` column + Manual / System / Both filter
+
+Adds a `placed_by` provenance column to the `trades` table so every P&L
+analytics surface can split user-initiated bets from autotrader / swarm
+bets without grepping JSON metadata.  Allowed values:
+`manual_ui`, `orchestrator`, `autotrader`, `swarm`, `operator_recovery`,
+`rh_import`, `unknown` (the last two are reserved for legacy imports and
+appear only in the `all` filter — never under `manual` or `system`).
+
+- **Schema** (`migrations/versions/0039_trades_placed_by.py`): adds the
+  column with a `NOT NULL DEFAULT 'unknown'` + CHECK constraint, plus
+  `idx_trades_placed_by_executed_at` for the filtered-feed query plan.
+  Inline data migration retro-classifies every existing row in priority
+  order — first match wins:
+  1. `notional (price * quantity) > 400 USD → manual_ui`
+     (operator-confirmed heuristic — live probe found 135 / 5,725 rows
+     above $400 and zero of them carry a `swarm_action` key).
+  2. Any of `pipeline_stages` / `swarm_action` / `swarm_data` /
+     `trade_signal` / `recommended_action` in metadata → `orchestrator`.
+  3. `metadata->>'source' = 'robinhood_import' → rh_import`
+     (266 rows, provenance unknown but distinct from native trades).
+  4. Everything else → `unknown`.
+  Skips cleanly when the `trades` table is absent (mirrors 0024).
+- **Insert sites**: live audit found exactly one production-code path
+  that runs `INSERT INTO trades` —
+  `app/orchestrator/paper.py::record_paper_trade`, called by the
+  cycle / autotrader / swarm orchestrator paths.  That row now stamps
+  `placed_by='orchestrator'`.  The Kalshi fills-sync importer
+  (`scripts/backfill_kalshi_fills.py`) is a SAFETY-NET that observes
+  fills already executed on Kalshi; it stamps `'unknown'` because the
+  original provenance is not knowable at backfill time, and its
+  `ON CONFLICT DO NOTHING` lets a native row keep its real
+  `placed_by` value.  *Architectural caveat*: `/api/kalshi/paper-order`
+  (the manual UI button) writes to `order_lifecycle` / `order_fills`
+  only — no `trades` row is materialised until the backfill script
+  runs.  As a result, paper-order trades placed via the UI surface as
+  `'unknown'` (visible only under the `all` filter) until that gap is
+  closed in a follow-up.  Migration 0039's `>$400 → manual_ui`
+  heuristic correctly tags historical manual trades; new manual
+  paper-orders need either (a) a runtime tag carried through the
+  lifecycle into the eventual backfill row, or (b) a direct
+  `record_paper_trade` call from the endpoint with
+  `placed_by='manual_ui'`. Out of scope for this PR.
+- **API filter** (`app/dashboard.py` + `app/main.py` routes): shared
+  `_placed_by_predicate(filter)` / `_placed_by_and_clause` /
+  `_placed_by_where_clause` helpers translate the
+  `Literal['manual','system','all']` query param into the SQL
+  fragment.  `'manual'` → `placed_by = 'manual_ui'`; `'system'` →
+  `placed_by IN ('orchestrator','autotrader','swarm','operator_recovery')`
+  (operator-recovery rows are system-side reconciliations of
+  orchestrator-initiated trades, so they group with the autotrader /
+  swarm bucket — see the inline comment on
+  `_PLACED_BY_SYSTEM_VALUES`); `'all'` → no filter.  `rh_import` and
+  `unknown` are intentionally excluded from both buckets and only
+  surface under `all`.  Threaded through `/api/dashboard/{overview,
+  recent-trades,vertical-performance,verticals}`. Backend coverage
+  adds 4-value (manual / system / all / default) parametrised tests
+  per route plus the system-bucket pinning test; api-server suite
+  green at 4,507 passing.
+- **Web UI** (`artifacts/web/src/components/dashboard/`): new
+  `<PlacedByProvider>` (URL-synced via wouter) + `<PlacedByToggle>`
+  3-segment control mounted above the dashboard's period strip.  Six
+  consumers wired to thread the value into params:
+  `kpi-summary-bar`, `trade-stats-panel`, `telemetry/recent-trades`,
+  `telemetry/vertical-performance`, `dashboard/vertical-cards`,
+  `dashboard/highlights-panel`.  The standalone `/verticals` page
+  (`pages/verticals.tsx`) wraps itself in its own `<PlacedByProvider>`
+  and renders the same toggle since it is mounted outside the
+  dashboard's provider tree.  Outside any provider (e.g. the /trading
+  page's recent-trades card) `usePlacedBy()` falls back to
+  `{placedBy:'all', setPlacedBy:no-op}` so legacy mounts keep working.
+  Coverage: `placed-by-toggle.test.tsx` (5 tests).
+- **Mobile UI** (`artifacts/mobile/`): `lib/placed-by-filter.ts`
+  module-level pub/sub mirrors the existing `vertical-filter.ts`
+  pattern so the choice persists across tab navigation without a
+  React-Context re-mount.  `components/PlacedByToggle.tsx` renders the
+  same MANUAL / SYSTEM / BOTH segments and is mounted on the
+  Dashboard, Positions, and Verticals tabs; each tab threads
+  `placed_by` into both the `apiFetch` URL and the React-Query key so
+  switching segments invalidates cleanly.  Coverage:
+  `components/__tests__/PlacedByToggle.test.tsx` (3 tests, including a
+  twin-mount lock-step assertion).  Mobile suite green at 193 passing.
+
 ## Model artifacts (v155) — verification + V1 import status
 
 ### v155 artifact wiring — verified end-to-end

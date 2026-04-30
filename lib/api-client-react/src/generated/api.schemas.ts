@@ -104,6 +104,18 @@ export interface DashboardCounts {
   positions?: number | null;
 }
 
+/**
+ * Echo of the active provenance filter so the UI can reconstruct the toggle state without re-parsing the URL.
+ */
+export type DashboardOverviewPlacedBy =
+  (typeof DashboardOverviewPlacedBy)[keyof typeof DashboardOverviewPlacedBy];
+
+export const DashboardOverviewPlacedBy = {
+  manual: "manual",
+  system: "system",
+  all: "all",
+} as const;
+
 export interface DashboardOverview {
   counts: DashboardCounts;
   latest_cycle_at?: string | null;
@@ -111,6 +123,8 @@ export interface DashboardOverview {
   realized_pnl?: number | null;
   win_rate?: number | null;
   open_positions?: number | null;
+  /** Echo of the active provenance filter so the UI can reconstruct the toggle state without re-parsing the URL. */
+  placed_by?: DashboardOverviewPlacedBy;
 }
 
 export interface Trade {
@@ -129,12 +143,26 @@ export interface Trade {
   exchange?: string | null;
   executed_at?: string | null;
   market_title?: string | null;
+  /** Trade-provenance bucket from migration 0039 (one of manual_ui / orchestrator / autotrader / swarm / operator_recovery / rh_import / unknown).  Per-row tag so the UI can show the source even on the unfiltered view. */
+  placed_by?: string | null;
 }
 
 export interface MarketTitle {
   ticker: string;
   title?: string | null;
 }
+
+/**
+ * Echo of the active provenance filter.
+ */
+export type TradeListPlacedBy =
+  (typeof TradeListPlacedBy)[keyof typeof TradeListPlacedBy];
+
+export const TradeListPlacedBy = {
+  manual: "manual",
+  system: "system",
+  all: "all",
+} as const;
 
 export interface TradeList {
   items: Trade[];
@@ -144,6 +172,8 @@ export interface TradeList {
   delayed?: boolean;
   /** Delay window applied when `delayed` is true. 0 when the response is undelayed. */
   delay_minutes?: number;
+  /** Echo of the active provenance filter. */
+  placed_by?: TradeListPlacedBy;
 }
 
 export interface CalibrationBucket {
@@ -199,9 +229,23 @@ export interface VerticalPerformanceEntry {
   daily: VerticalDailyPoint[];
 }
 
+/**
+ * Echo of the active provenance filter.
+ */
+export type VerticalPerformancePlacedBy =
+  (typeof VerticalPerformancePlacedBy)[keyof typeof VerticalPerformancePlacedBy];
+
+export const VerticalPerformancePlacedBy = {
+  manual: "manual",
+  system: "system",
+  all: "all",
+} as const;
+
 export interface VerticalPerformance {
   days: number;
   verticals: VerticalPerformanceEntry[];
+  /** Echo of the active provenance filter. */
+  placed_by?: VerticalPerformancePlacedBy;
 }
 
 export interface VerticalLastCycle {
@@ -276,6 +320,18 @@ currently sat out.
  */
 export type VerticalsOverviewHalts = { [key: string]: VerticalHaltMeta };
 
+/**
+ * Echo of the active provenance filter.
+ */
+export type VerticalsOverviewPlacedBy =
+  (typeof VerticalsOverviewPlacedBy)[keyof typeof VerticalsOverviewPlacedBy];
+
+export const VerticalsOverviewPlacedBy = {
+  manual: "manual",
+  system: "system",
+  all: "all",
+} as const;
+
 export interface VerticalsOverview {
   days: number;
   verticals: VerticalsOverviewEntry[];
@@ -285,6 +341,8 @@ the dashboard so non-admins can see which verticals are
 currently sat out.
  */
   halts: VerticalsOverviewHalts;
+  /** Echo of the active provenance filter. */
+  placed_by?: VerticalsOverviewPlacedBy;
 }
 
 export interface AdminSetVerticalVisibilityRequest {
@@ -1480,12 +1538,32 @@ export interface AdminAccessRequestResult {
   denied?: boolean;
 }
 
+export type PlacedByParamParameter =
+  (typeof PlacedByParamParameter)[keyof typeof PlacedByParamParameter];
+
+export const PlacedByParamParameter = {
+  manual: "manual",
+  system: "system",
+  all: "all",
+} as const;
+
+export type GetDashboardOverviewParams = {
+  /**
+   * Provenance bucket to scope trade-derived metrics by.  The web + mobile UIs surface this as a 3-segment toggle on every P&L analytics surface.
+   */
+  placed_by?: PlacedByParamParameter;
+};
+
 export type GetRecentTradesParams = {
   /**
    * @minimum 1
    * @maximum 200
    */
   limit?: number;
+  /**
+   * Provenance bucket to scope trade-derived metrics by.  The web + mobile UIs surface this as a 3-segment toggle on every P&L analytics surface.
+   */
+  placed_by?: PlacedByParamParameter;
 };
 
 export type GetSwarmPersonasTodayParams = {
@@ -1516,6 +1594,10 @@ export type GetVerticalPerformanceParams = {
    * @maximum 365
    */
   days?: number;
+  /**
+   * Provenance bucket to scope trade-derived metrics by.  The web + mobile UIs surface this as a 3-segment toggle on every P&L analytics surface.
+   */
+  placed_by?: PlacedByParamParameter;
 };
 
 export type GetRecentCyclesParams = {
@@ -1612,4 +1694,8 @@ export type GetVerticalsOverviewParams = {
    * @maximum 365
    */
   days?: number;
+  /**
+   * Provenance bucket to scope trade-derived metrics by.  The web + mobile UIs surface this as a 3-segment toggle on every P&L analytics surface.
+   */
+  placed_by?: PlacedByParamParameter;
 };

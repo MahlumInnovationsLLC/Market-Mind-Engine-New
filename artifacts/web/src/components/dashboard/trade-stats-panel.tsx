@@ -7,6 +7,7 @@ import { GlassCard } from "@/components/ui/glass-card";
 import { SectionHeader } from "@/components/ui/section-header";
 import { useVerticalFilter } from "@/hooks/use-selected-verticals";
 import { usePeriod } from "./period-context";
+import { usePlacedBy } from "./placed-by-context";
 
 function fmtUsd(n: number | null | undefined, digits = 0): string {
   if (n === null || n === undefined || Number.isNaN(n)) return "—";
@@ -33,9 +34,13 @@ function pnlClass(n: number | null | undefined): string {
  * window the period strip selects.
  */
 export default function TradeStatsPanel() {
-  const params = { limit: 200 };
   const { period, days } = usePeriod();
   const { matches } = useVerticalFilter();
+  // Trade-provenance filter (T004).  We delegate filtering to the API
+  // — server-side WHERE keeps the 200-row recent slice meaningful even
+  // when only a small minority of fills match the chosen segment.
+  const { placedBy } = usePlacedBy();
+  const params = { limit: 200, placed_by: placedBy };
   const { data, isLoading } = useGetRecentTrades(params, {
     query: {
       queryKey: getGetRecentTradesQueryKey(params),

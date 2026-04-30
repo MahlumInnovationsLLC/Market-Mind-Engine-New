@@ -17,8 +17,10 @@ import type { VerticalsOverview } from "@workspace/api-client-react";
 import { Card, SectionHeader, StatTile } from "@/components/Card";
 import DelayedSignalsBanner from "@/components/DelayedSignalsBanner";
 import PerLeagueCalibration from "@/components/PerLeagueCalibration";
+import { PlacedByToggle } from "@/components/PlacedByToggle";
 import { useColors } from "@/hooks/useColors";
 import { apiFetch } from "@/lib/api";
+import { usePlacedBy } from "@/lib/placed-by-filter";
 import { useSelectedVerticals } from "@/lib/vertical-filter";
 
 type Counts = {
@@ -91,10 +93,15 @@ export default function DashboardScreen() {
   const insets = useSafeAreaInsets();
   const router = useRouter();
   const [period, setPeriod] = useState<Period>(7);
+  // Trade-provenance filter (T005).  Module-level pub/sub state so the
+  // selection survives navigation between the dashboard / positions /
+  // verticals tabs.  Threaded into every trade-derived query below.
+  const { placedBy } = usePlacedBy();
 
   const overview = useQuery({
-    queryKey: ["dashboard", "overview"],
-    queryFn: () => apiFetch<Overview>("/api/dashboard/overview"),
+    queryKey: ["dashboard", "overview", placedBy],
+    queryFn: () =>
+      apiFetch<Overview>(`/api/dashboard/overview?placed_by=${placedBy}`),
     refetchInterval: 30_000,
   });
 
@@ -110,9 +117,11 @@ export default function DashboardScreen() {
     refetchOnWindowFocus: true,
   });
   const verticals = useQuery({
-    queryKey: ["dashboard", "verticals", period],
+    queryKey: ["dashboard", "verticals", period, placedBy],
     queryFn: () =>
-      apiFetch<VerticalsOverview>(`/api/dashboard/verticals?days=${period}`),
+      apiFetch<VerticalsOverview>(
+        `/api/dashboard/verticals?days=${period}&placed_by=${placedBy}`,
+      ),
     refetchInterval: 60_000,
   });
   const { selected, matches, clear, filterActive, hiddenActive } =
@@ -285,6 +294,8 @@ export default function DashboardScreen() {
             );
           })}
       </View>
+
+      <PlacedByToggle testID="overview-placed-by-toggle" />
 
       {filterActive ? (
         <Card>

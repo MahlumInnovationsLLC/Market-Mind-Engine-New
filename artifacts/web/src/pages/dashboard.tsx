@@ -17,6 +17,8 @@ import OperatorControls from "@/components/dashboard/operator-controls";
 import OverFilledOrdersBadge from "@/components/dashboard/over-filled-orders-badge";
 import PerLeagueCalibration from "@/components/dashboard/per-league-calibration";
 import { PeriodProvider, PeriodStrip } from "@/components/dashboard/period-context";
+import { PlacedByProvider } from "@/components/dashboard/placed-by-context";
+import { PlacedByToggle } from "@/components/dashboard/placed-by-toggle";
 import PipelineTracker from "@/components/dashboard/pipeline-tracker";
 import TelegramConcierge from "@/components/dashboard/telegram-concierge";
 import TournamentLeaderboardsPanel from "@/components/dashboard/tournament-leaderboards-panel";
@@ -49,6 +51,7 @@ export default function Dashboard() {
 
   return (
     <PeriodProvider>
+     <PlacedByProvider>
       <div className="space-y-5 font-mono">
         <header className="flex flex-col gap-3 lg:flex-row lg:items-end lg:justify-between">
           <div className="min-w-0">
@@ -65,6 +68,7 @@ export default function Dashboard() {
           <div className="flex flex-wrap items-center gap-3">
             <ActiveModelBadge />
             <OverFilledOrdersBadge />
+            <PlacedByToggle />
             <PeriodStrip />
           </div>
         </header>
@@ -201,6 +205,7 @@ export default function Dashboard() {
 
         <OperatorControls isAdmin={isAdmin} />
       </div>
+     </PlacedByProvider>
     </PeriodProvider>
   );
 }

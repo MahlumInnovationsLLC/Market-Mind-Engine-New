@@ -15,6 +15,7 @@ import os
 import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
+from typing import Literal
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
@@ -5150,6 +5151,7 @@ async def features_drift(
 
 @app.get("/api/dashboard/overview")
 async def dashboard_overview(
+    placed_by: Literal["manual", "system", "all"] = "all",
     user: AuthedUser = Depends(require_approved_user),
 ) -> dict[str, object]:
     """Aggregate counts and headline stats for the dashboard landing tab.
@@ -5159,8 +5161,16 @@ async def dashboard_overview(
     emit the same ``tier`` / ``delayed`` / ``delay_minutes`` shape that
     the list endpoints return so the mobile and web dashboards can
     render the free-tier upsell banner on the very first screen.
+
+    ``placed_by`` filters the trade-derived headline numbers
+    (``trades`` count, ``latest_trade_at``, ``realized_pnl``,
+    ``win_rate``) by trade provenance:
+
+      * ``manual`` — only operator-placed UI trades (``placed_by='manual_ui'``)
+      * ``system`` — only orchestrator/autotrader/swarm trades
+      * ``all`` — unfiltered (default; includes ``rh_import`` + ``unknown``)
     """
-    overview = await dashboard.get_overview()
+    overview = await dashboard.get_overview(placed_by=placed_by)
     sub = await billing.get_user_subscription(user)
     delayed = (
         billing._TIER_RANK[sub.tier] < billing._TIER_RANK[billing.TIER_PRO]
@@ -5170,12 +5180,14 @@ async def dashboard_overview(
     overview["delay_minutes"] = (
         free_tier.FREE_TIER_DELAY_MINUTES if delayed else 0
     )
+    overview["placed_by"] = placed_by
     return overview
 
 
 @app.get("/api/dashboard/recent-trades")
 async def dashboard_recent_trades(
     limit: int = 25,
+    placed_by: Literal["manual", "system", "all"] = "all",
     user: AuthedUser = Depends(require_approved_user),
 ) -> dict[str, object]:
     """Recent fills feed.
@@ -5183,9 +5195,13 @@ async def dashboard_recent_trades(
     Free callers see the same shape, but only rows whose ``executed_at``
     is at least 15 minutes old — the live edge is reserved for paid
     tiers.  Pro+ (and founders) get the unfiltered feed.
+
+    ``placed_by`` follows the same convention as
+    ``/api/dashboard/overview`` — ``manual`` / ``system`` / ``all``
+    (default ``all``).
     """
     limit = max(1, min(200, int(limit)))
-    items = await dashboard.get_recent_trades(limit)
+    items = await dashboard.get_recent_trades(limit, placed_by=placed_by)
     sub = await billing.get_user_subscription(user)
     delayed = False
     if billing._TIER_RANK[sub.tier] < billing._TIER_RANK[billing.TIER_PRO]:
@@ -5196,6 +5212,7 @@ async def dashboard_recent_trades(
         "tier": sub.tier,
         "delayed": delayed,
         "delay_minutes": free_tier.FREE_TIER_DELAY_MINUTES if delayed else 0,
+        "placed_by": placed_by,
     }
 
 
@@ -5432,10 +5449,21 @@ async def dashboard_calibration_per_league(
 
 @app.get("/api/dashboard/vertical-performance")
 async def dashboard_vertical_performance(
-    days: int = 30, _: object = Depends(require_approved_user)
+    days: int = 30,
+    placed_by: Literal["manual", "system", "all"] = "all",
+    _: object = Depends(require_approved_user),
 ) -> dict[str, object]:
+    """Per-vertical rolling P&L / Brier / calibration / sparklines.
+
+    ``placed_by`` filters every trade-derived metric (count, P&L,
+    win-rate, calibration buckets, daily series) to manual / system /
+    both.  ``brier`` and open-exposure stay unfiltered because they
+    describe model + book artifacts, not bet provenance.
+    """
     days = max(1, min(365, int(days)))
-    return await dashboard.get_vertical_performance(days)
+    out = await dashboard.get_vertical_performance(days, placed_by=placed_by)
+    out["placed_by"] = placed_by
+    return out
 
 
 @app.get("/api/dashboard/crypto-accuracy")
@@ -5463,15 +5491,24 @@ async def dashboard_crypto_accuracy(
 
 @app.get("/api/dashboard/verticals")
 async def dashboard_verticals_overview(
-    days: int = 7, _: object = Depends(require_approved_user)
+    days: int = 7,
+    placed_by: Literal["manual", "system", "all"] = "all",
+    _: object = Depends(require_approved_user),
 ) -> dict[str, object]:
     """Per-vertical overview card backing the new ``/verticals`` page +
     mobile tab. Returns one entry per registered vertical with rolling
     P&L, trade counts, win-rate, latest 24h Brier, annualized Sharpe,
     open positions, predicted vs realized edge, and the latest cycle
     status — plus the operator-set hidden / pinned visibility lists.
+
+    ``placed_by`` filters trade-derived fields (``trades`` / ``pnl`` /
+    ``win_rate`` / ``edge_predicted_bps`` / ``sharpe`` /
+    ``edge_realized_bps``) by provenance.  ``brier``, ``open_positions``
+    and ``last_cycle`` stay unfiltered.
     """
-    return await dashboard.get_verticals_overview(days)
+    out = await dashboard.get_verticals_overview(days, placed_by=placed_by)
+    out["placed_by"] = placed_by
+    return out
 
 
 @app.get("/api/dashboard/vertical-visibility")

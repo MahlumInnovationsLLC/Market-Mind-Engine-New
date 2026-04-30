@@ -1,5 +1,6 @@
 import { useMemo, useState } from "react";
 import { useVerticalFilter } from "@/hooks/use-selected-verticals";
+import { usePlacedBy } from "@/components/dashboard/placed-by-context";
 import {
   Bar,
   BarChart,
@@ -420,8 +421,12 @@ function PitChart({
 export default function VerticalPerformance() {
   const [range, setRange] = useState<RangeKey>("30");
   const days = RANGE_DAYS[range];
-  const params = { days };
   const { matches } = useVerticalFilter();
+  // Trade-provenance filter (T004).  Per-vertical sparklines and the
+  // calibration / PIT charts are all derived from the same trades, so
+  // they all need to honour the toggle.
+  const { placedBy } = usePlacedBy();
+  const params = { days, placed_by: placedBy };
   const { data, isLoading } = useGetVerticalPerformance(params, {
     query: {
       queryKey: getGetVerticalPerformanceQueryKey(params),

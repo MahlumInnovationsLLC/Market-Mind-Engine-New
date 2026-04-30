@@ -46,6 +46,7 @@ import type {
   EmergencyStopRequest,
   EmergencyStopResult,
   FullHealth,
+  GetDashboardOverviewParams,
   GetRecentBankrollEventsParams,
   GetRecentCyclesParams,
   GetRecentDebatesParams,
@@ -328,41 +329,63 @@ export function useHealthFull<
 /**
  * @summary Top-level counts and lifetime KPIs from the production database
  */
-export const getGetDashboardOverviewUrl = () => {
-  return `/api/dashboard/overview`;
+export const getGetDashboardOverviewUrl = (
+  params?: GetDashboardOverviewParams,
+) => {
+  const normalizedParams = new URLSearchParams();
+
+  Object.entries(params || {}).forEach(([key, value]) => {
+    if (value !== undefined) {
+      normalizedParams.append(key, value === null ? "null" : value.toString());
+    }
+  });
+
+  const stringifiedParams = normalizedParams.toString();
+
+  return stringifiedParams.length > 0
+    ? `/api/dashboard/overview?${stringifiedParams}`
+    : `/api/dashboard/overview`;
 };
 
 export const getDashboardOverview = async (
+  params?: GetDashboardOverviewParams,
   options?: RequestInit,
 ): Promise<DashboardOverview> => {
-  return customFetch<DashboardOverview>(getGetDashboardOverviewUrl(), {
+  return customFetch<DashboardOverview>(getGetDashboardOverviewUrl(params), {
     ...options,
     method: "GET",
   });
 };
 
-export const getGetDashboardOverviewQueryKey = () => {
-  return [`/api/dashboard/overview`] as const;
+export const getGetDashboardOverviewQueryKey = (
+  params?: GetDashboardOverviewParams,
+) => {
+  return [`/api/dashboard/overview`, ...(params ? [params] : [])] as const;
 };
 
 export const getGetDashboardOverviewQueryOptions = <
   TData = Awaited<ReturnType<typeof getDashboardOverview>>,
   TError = ErrorType<unknown>,
->(options?: {
-  query?: UseQueryOptions<
-    Awaited<ReturnType<typeof getDashboardOverview>>,
-    TError,
-    TData
-  >;
-  request?: SecondParameter<typeof customFetch>;
-}) => {
+>(
+  params?: GetDashboardOverviewParams,
+  options?: {
+    query?: UseQueryOptions<
+      Awaited<ReturnType<typeof getDashboardOverview>>,
+      TError,
+      TData
+    >;
+    request?: SecondParameter<typeof customFetch>;
+  },
+) => {
   const { query: queryOptions, request: requestOptions } = options ?? {};
 
-  const queryKey = queryOptions?.queryKey ?? getGetDashboardOverviewQueryKey();
+  const queryKey =
+    queryOptions?.queryKey ?? getGetDashboardOverviewQueryKey(params);
 
   const queryFn: QueryFunction<
     Awaited<ReturnType<typeof getDashboardOverview>>
-  > = ({ signal }) => getDashboardOverview({ signal, ...requestOptions });
+  > = ({ signal }) =>
+    getDashboardOverview(params, { signal, ...requestOptions });
 
   return { queryKey, queryFn, ...queryOptions } as UseQueryOptions<
     Awaited<ReturnType<typeof getDashboardOverview>>,
@@ -383,15 +406,18 @@ export type GetDashboardOverviewQueryError = ErrorType<unknown>;
 export function useGetDashboardOverview<
   TData = Awaited<ReturnType<typeof getDashboardOverview>>,
   TError = ErrorType<unknown>,
->(options?: {
-  query?: UseQueryOptions<
-    Awaited<ReturnType<typeof getDashboardOverview>>,
-    TError,
-    TData
-  >;
-  request?: SecondParameter<typeof customFetch>;
-}): UseQueryResult<TData, TError> & { queryKey: QueryKey } {
-  const queryOptions = getGetDashboardOverviewQueryOptions(options);
+>(
+  params?: GetDashboardOverviewParams,
+  options?: {
+    query?: UseQueryOptions<
+      Awaited<ReturnType<typeof getDashboardOverview>>,
+      TError,
+      TData
+    >;
+    request?: SecondParameter<typeof customFetch>;
+  },
+): UseQueryResult<TData, TError> & { queryKey: QueryKey } {
+  const queryOptions = getGetDashboardOverviewQueryOptions(params, options);
 
   const query = useQuery(queryOptions) as UseQueryResult<TData, TError> & {
     queryKey: QueryKey;

@@ -7,6 +7,7 @@ import {
 } from "@workspace/api-client-react";
 import { GlassCard } from "@/components/ui/glass-card";
 import { SectionHeader } from "@/components/ui/section-header";
+import { usePlacedBy } from "./placed-by-context";
 
 function fmtCurrency(n: number | null | undefined): string {
   if (n === null || n === undefined || Number.isNaN(n)) return "—";
@@ -32,7 +33,11 @@ function fmtTime(s: string | null | undefined): string {
 }
 
 export default function HighlightsPanel() {
-  const tradeParams = { limit: 100 };
+  // Trade-provenance filter (T004).  "Best win" / "biggest miss" are
+  // pure P&L so they belong in the toggle's blast radius; the debate
+  // feed below is upstream of any fill and stays unfiltered.
+  const { placedBy } = usePlacedBy();
+  const tradeParams = { limit: 100, placed_by: placedBy };
   const debateParams = { limit: 25 };
   const tradesQ = useGetRecentTrades(tradeParams, {
     query: {

@@ -6,6 +6,7 @@
  * OpenAPI spec version: 0.1.0
  */
 import type { Trade } from "./trade";
+import type { TradeListPlacedBy } from "./tradeListPlacedBy";
 
 export interface TradeList {
   items: Trade[];
@@ -15,4 +16,6 @@ export interface TradeList {
   delayed?: boolean;
   /** Delay window applied when `delayed` is true. 0 when the response is undelayed. */
   delay_minutes?: number;
+  /** Echo of the active provenance filter. */
+  placed_by?: TradeListPlacedBy;
 }

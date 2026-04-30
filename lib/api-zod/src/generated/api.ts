@@ -116,6 +116,17 @@ export const HealthFullResponse = zod.object({
 /**
  * @summary Top-level counts and lifetime KPIs from the production database
  */
+export const getDashboardOverviewQueryPlacedByDefault = `all`;
+
+export const GetDashboardOverviewQueryParams = zod.object({
+  placed_by: zod
+    .enum(["manual", "system", "all"])
+    .default(getDashboardOverviewQueryPlacedByDefault)
+    .describe(
+      "Provenance bucket to scope trade-derived metrics by.  The web + mobile UIs surface this as a 3-segment toggle on every P&L analytics surface.",
+    ),
+});
+
 export const GetDashboardOverviewResponse = zod.object({
   counts: zod.object({
     trading_cycles: zod.number().nullish(),
@@ -130,6 +141,12 @@ export const GetDashboardOverviewResponse = zod.object({
   realized_pnl: zod.number().nullish(),
   win_rate: zod.number().nullish(),
   open_positions: zod.number().nullish(),
+  placed_by: zod
+    .enum(["manual", "system", "all"])
+    .optional()
+    .describe(
+      "Echo of the active provenance filter so the UI can reconstruct the toggle state without re-parsing the URL.",
+    ),
 });
 
 /**
@@ -138,12 +155,20 @@ export const GetDashboardOverviewResponse = zod.object({
 export const getRecentTradesQueryLimitDefault = 25;
 export const getRecentTradesQueryLimitMax = 200;
 
+export const getRecentTradesQueryPlacedByDefault = `all`;
+
 export const GetRecentTradesQueryParams = zod.object({
   limit: zod.coerce
     .number()
     .min(1)
     .max(getRecentTradesQueryLimitMax)
     .default(getRecentTradesQueryLimitDefault),
+  placed_by: zod
+    .enum(["manual", "system", "all"])
+    .default(getRecentTradesQueryPlacedByDefault)
+    .describe(
+      "Provenance bucket to scope trade-derived metrics by.  The web + mobile UIs surface this as a 3-segment toggle on every P&L analytics surface.",
+    ),
 });
 
 export const GetRecentTradesResponse = zod.object({
@@ -164,6 +189,12 @@ export const GetRecentTradesResponse = zod.object({
       exchange: zod.string().nullish(),
       executed_at: zod.string().nullish(),
       market_title: zod.string().nullish(),
+      placed_by: zod
+        .string()
+        .nullish()
+        .describe(
+          "Trade-provenance bucket from migration 0039 (one of manual_ui \/ orchestrator \/ autotrader \/ swarm \/ operator_recovery \/ rh_import \/ unknown).  Per-row tag so the UI can show the source even on the unfiltered view.",
+        ),
     }),
   ),
   tier: zod
@@ -184,6 +215,10 @@ export const GetRecentTradesResponse = zod.object({
     .describe(
       "Delay window applied when `delayed` is true. 0 when the response is undelayed.",
     ),
+  placed_by: zod
+    .enum(["manual", "system", "all"])
+    .optional()
+    .describe("Echo of the active provenance filter."),
 });
 
 /**
@@ -479,12 +514,20 @@ export const SearchAllResponse = zod.object({
 export const getVerticalPerformanceQueryDaysDefault = 30;
 export const getVerticalPerformanceQueryDaysMax = 365;
 
+export const getVerticalPerformanceQueryPlacedByDefault = `all`;
+
 export const GetVerticalPerformanceQueryParams = zod.object({
   days: zod.coerce
     .number()
     .min(1)
     .max(getVerticalPerformanceQueryDaysMax)
     .default(getVerticalPerformanceQueryDaysDefault),
+  placed_by: zod
+    .enum(["manual", "system", "all"])
+    .default(getVerticalPerformanceQueryPlacedByDefault)
+    .describe(
+      "Provenance bucket to scope trade-derived metrics by.  The web + mobile UIs surface this as a 3-segment toggle on every P&L analytics surface.",
+    ),
 });
 
 export const GetVerticalPerformanceResponse = zod.object({
@@ -565,6 +608,10 @@ export const GetVerticalPerformanceResponse = zod.object({
         ),
     }),
   ),
+  placed_by: zod
+    .enum(["manual", "system", "all"])
+    .optional()
+    .describe("Echo of the active provenance filter."),
 });
 
 /**
@@ -1638,12 +1685,20 @@ export const AdminAutoResearchDecideResponse = zod.object({
 export const getVerticalsOverviewQueryDaysDefault = 7;
 export const getVerticalsOverviewQueryDaysMax = 365;
 
+export const getVerticalsOverviewQueryPlacedByDefault = `all`;
+
 export const GetVerticalsOverviewQueryParams = zod.object({
   days: zod.coerce
     .number()
     .min(1)
     .max(getVerticalsOverviewQueryDaysMax)
     .default(getVerticalsOverviewQueryDaysDefault),
+  placed_by: zod
+    .enum(["manual", "system", "all"])
+    .default(getVerticalsOverviewQueryPlacedByDefault)
+    .describe(
+      "Provenance bucket to scope trade-derived metrics by.  The web + mobile UIs surface this as a 3-segment toggle on every P&L analytics surface.",
+    ),
 });
 
 export const GetVerticalsOverviewResponse = zod.object({
@@ -1755,6 +1810,10 @@ export const GetVerticalsOverviewResponse = zod.object({
     .describe(
       "Map of halted vertical name to halt metadata. Read-only on\nthe dashboard so non-admins can see which verticals are\ncurrently sat out.\n",
     ),
+  placed_by: zod
+    .enum(["manual", "system", "all"])
+    .optional()
+    .describe("Echo of the active provenance filter."),
 });
 
 /**

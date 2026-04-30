@@ -242,9 +242,15 @@ def _patch_paper_for_place_order(
 
 
 def _metadata_arg_from_capture(capture: _InsertCapture) -> dict[str, Any]:
-    """The orchestrator binds the metadata jsonb as the *last* arg.
-    Decode it back into a dict for assertion."""
-    raw = capture.captured["args"][-1]
+    """Decode the metadata jsonb bound by the orchestrator INSERT.
+
+    Migration 0039 added the ``placed_by`` column and
+    `app/orchestrator/paper.py` now binds it as the FINAL parameter
+    after ``metadata``, so the metadata jsonb is at index ``-2``
+    (was ``-1`` before the trade-provenance work).  See replit.md →
+    "Trade provenance tagging" for the full insert column ordering.
+    """
+    raw = capture.captured["args"][-2]
     if raw is None:
         return {}
     return json.loads(raw) if isinstance(raw, str) else dict(raw)

@@ -8,6 +8,7 @@ import {
   usePipelineSubscription,
 } from "@/components/realtime/websocket-provider";
 import { useVerticalFilter } from "@/hooks/use-selected-verticals";
+import { usePlacedBy } from "@/components/dashboard/placed-by-context";
 import DelayedSignalsBanner from "@/components/delayed-signals-banner";
 import {
   KNOWN_VENUES,
@@ -48,7 +49,11 @@ function VenueBadge({ exchange }: { exchange: string | null | undefined }) {
 }
 
 export default function RecentTrades() {
-  const params = { limit: 25 };
+  // Trade-provenance filter (T004).  Lives in URL via PlacedByProvider
+  // so reload + share preserves the operator's chosen segment; the
+  // server-side WHERE keeps the LIMIT 25 slice meaningful.
+  const { placedBy } = usePlacedBy();
+  const params = { limit: 25, placed_by: placedBy };
   const queryClient = useQueryClient();
   const [, setLocation] = useLocation();
   const { data, isLoading } = useGetRecentTrades(params, {
@@ -66,7 +71,7 @@ export default function RecentTrades() {
         queryClient.invalidateQueries({ queryKey: getGetRecentTradesQueryKey(params) });
       }
     },
-    [queryClient],
+    [queryClient, params],
   );
   const onSettlementEvent = useCallback(
     (ev: Record<string, unknown>) => {
@@ -75,7 +80,7 @@ export default function RecentTrades() {
         queryClient.invalidateQueries({ queryKey: getGetRecentTradesQueryKey(params) });
       }
     },
-    [queryClient],
+    [queryClient, params],
   );
   usePipelineSubscription(onPipelineEvent);
   const pipeline = usePipelineSocket();

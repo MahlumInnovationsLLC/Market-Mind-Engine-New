@@ -66,7 +66,7 @@ const VERTICALS = { verticals: [] };
 
 function setApi(sub: SubInfo): void {
   mockApiFetch.mockImplementation(async (path: string) => {
-    if (path === "/api/dashboard/overview") return OVERVIEW;
+    if (path.startsWith("/api/dashboard/overview")) return OVERVIEW;
     if (path === "/api/me/subscription") return sub;
     if (path.startsWith("/api/dashboard/verticals")) return VERTICALS;
     throw new Error(`Unexpected apiFetch call: ${path}`);

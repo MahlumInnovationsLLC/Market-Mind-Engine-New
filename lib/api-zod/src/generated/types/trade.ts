@@ -22,4 +22,6 @@ export interface Trade {
   exchange?: string | null;
   executed_at?: string | null;
   market_title?: string | null;
+  /** Trade-provenance bucket from migration 0039 (one of manual_ui / orchestrator / autotrader / swarm / operator_recovery / rh_import / unknown).  Per-row tag so the UI can show the source even on the unfiltered view. */
+  placed_by?: string | null;
 }

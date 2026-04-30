@@ -7,6 +7,7 @@
  */
 import type { VerticalsOverviewEntry } from "./verticalsOverviewEntry";
 import type { VerticalsOverviewHalts } from "./verticalsOverviewHalts";
+import type { VerticalsOverviewPlacedBy } from "./verticalsOverviewPlacedBy";
 import type { VerticalVisibility } from "./verticalVisibility";
 
 export interface VerticalsOverview {
@@ -18,4 +19,6 @@ the dashboard so non-admins can see which verticals are
 currently sat out.
  */
   halts: VerticalsOverviewHalts;
+  /** Echo of the active provenance filter. */
+  placed_by?: VerticalsOverviewPlacedBy;
 }

@@ -6,6 +6,7 @@
  * OpenAPI spec version: 0.1.0
  */
 import type { DashboardCounts } from "./dashboardCounts";
+import type { DashboardOverviewPlacedBy } from "./dashboardOverviewPlacedBy";
 
 export interface DashboardOverview {
   counts: DashboardCounts;
@@ -14,4 +15,6 @@ export interface DashboardOverview {
   realized_pnl?: number | null;
   win_rate?: number | null;
   open_positions?: number | null;
+  /** Echo of the active provenance filter so the UI can reconstruct the toggle state without re-parsing the URL. */
+  placed_by?: DashboardOverviewPlacedBy;
 }

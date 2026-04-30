@@ -10,6 +10,7 @@ import {
 import { resolveApiUrl } from "@/lib/api";
 import { GlassCard } from "@/components/ui/glass-card";
 import { usePeriod } from "./period-context";
+import { usePlacedBy } from "./placed-by-context";
 
 /**
  * 6-tile KPI strip from §6.1 of FRONTEND_UI_REPORT:
@@ -107,21 +108,28 @@ function KpiTile({
 
 export default function KpiSummaryBar() {
   const { period, days } = usePeriod();
+  // Trade-provenance filter (T004).  Plumbed through every trade-derived
+  // tile (P&L today, ROI, volume, win-rate, Sharpe).  The equity-curve
+  // and open-positions tiles intentionally stay unscoped — equity-curve
+  // is the public marketing surface, and open_positions describes the
+  // book regardless of who placed each leg.
+  const { placedBy } = usePlacedBy();
 
-  const overviewQ = useGetDashboardOverview({
+  const overviewParams = { placed_by: placedBy };
+  const overviewQ = useGetDashboardOverview(overviewParams, {
     query: {
-      queryKey: getGetDashboardOverviewQueryKey(),
+      queryKey: getGetDashboardOverviewQueryKey(overviewParams),
       refetchInterval: 60_000,
     },
   });
-  const verticalsParams = { days };
+  const verticalsParams = { days, placed_by: placedBy };
   const verticalsQ = useGetVerticalsOverview(verticalsParams, {
     query: {
       queryKey: getGetVerticalsOverviewQueryKey(verticalsParams),
       refetchInterval: 60_000,
     },
   });
-  const tradesParams = { limit: 200 };
+  const tradesParams = { limit: 200, placed_by: placedBy };
   const tradesQ = useGetRecentTrades(tradesParams, {
     query: {
       queryKey: getGetRecentTradesQueryKey(tradesParams),

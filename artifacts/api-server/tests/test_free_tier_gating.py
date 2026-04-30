@@ -214,7 +214,14 @@ def _seed_trades(monkeypatch, now: datetime) -> list[dict[str, Any]]:
         {"id": 3, "market_id": "m-old",    "executed_at": _iso(now - timedelta(hours=1))},
     ]
 
-    async def _fake(limit: int = 25) -> list[dict[str, Any]]:
+    async def _fake(
+        limit: int = 25, placed_by: str | None = None
+    ) -> list[dict[str, Any]]:
+        # ``placed_by`` was added by migration 0039 + the trade-provenance
+        # filter (Manual / System / Both toggle).  This stub ignores the
+        # value because these free-tier tests assert the 15-minute delay
+        # behaviour, not the placed_by filter — the dedicated
+        # `test_dashboard_placed_by.py` covers that filter.
         return [dict(r) for r in rows]
 
     monkeypatch.setattr(dashboard, "get_recent_trades", _fake)
@@ -473,7 +480,11 @@ def test_trade_detail_filters_sub_15_minute_series_for_free_callers(
 
 
 def _stub_overview(monkeypatch) -> None:
-    async def _fake_overview() -> dict[str, Any]:
+    # ``placed_by`` was added by migration 0039 + the trade-provenance
+    # filter (Manual / System / Both toggle).  This stub accepts and
+    # ignores it because these free-tier tests assert the delayed-banner
+    # behaviour, not the placed_by filter.
+    async def _fake_overview(placed_by: str | None = None) -> dict[str, Any]:
         return {
             "counts": {"trades": 0},
             "latest_cycle_at": None,

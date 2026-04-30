@@ -367,13 +367,13 @@ async def place_order(
                 quantity, price, fees, pnl,
                 trading_mode, exchange, executed_at,
                 model_prob, model_edge, kelly_fraction,
-                metadata
+                metadata, placed_by
             ) VALUES (
                 $1, $2, $3, $4, $5, $6,
                 $7, $8, 0, NULL,
                 $9, $10, now(),
                 $11, $12, $13,
-                COALESCE($14::jsonb, '{}'::jsonb)
+                COALESCE($14::jsonb, '{}'::jsonb), $15
             )
             RETURNING id
             """,
@@ -391,6 +391,12 @@ async def place_order(
             edge,
             kelly,
             metadata_json,
+            # The orchestrator path inserts trades on behalf of the
+            # autotrader / cycle / swarm.  Tag every row with
+            # ``placed_by='orchestrator'`` so the analytics filter
+            # can split system trades from manual UI trades.  Migration
+            # 0039 added the column.
+            "orchestrator",
         )
     except Exception as e:
         log.error("trade insert failed: %s", e)

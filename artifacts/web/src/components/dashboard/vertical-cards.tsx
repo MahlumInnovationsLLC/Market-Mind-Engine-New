@@ -15,6 +15,7 @@ import { GlassCard } from "@/components/ui/glass-card";
 import { SectionHeader } from "@/components/ui/section-header";
 import { useVerticalFilter } from "@/hooks/use-selected-verticals";
 import { usePeriod } from "./period-context";
+import { usePlacedBy } from "./placed-by-context";
 
 type PersonaOverrideSummary = {
   disabledByVertical: Record<string, string[]>;
@@ -234,7 +235,11 @@ function VerticalCard({
 
 export default function VerticalCards() {
   const { period, days } = usePeriod();
-  const params = { days };
+  // Trade-provenance filter (T004).  Vertical cards aggregate the same
+  // trades the KPI strip and per-vertical performance panel use, so
+  // every tile must honour the toggle to stay numerically consistent.
+  const { placedBy } = usePlacedBy();
+  const params = { days, placed_by: placedBy };
   const { data, isLoading } = useGetVerticalsOverview(params, {
     query: {
       queryKey: getGetVerticalsOverviewQueryKey(params),

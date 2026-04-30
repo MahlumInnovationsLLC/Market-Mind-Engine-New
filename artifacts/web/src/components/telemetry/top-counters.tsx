@@ -20,7 +20,12 @@ function formatNumber(num: number | null | undefined, isCurrency: boolean = fals
 
 export default function TopCounters() {
   const queryClient = useQueryClient();
-  const { data: overview, isLoading } = useGetDashboardOverview({
+  // T004: `useGetDashboardOverview` gained an optional `placed_by`
+  // query param, which shifted its signature from `(opts)` to
+  // `(params?, opts)`.  This panel is provenance-agnostic (raw counters
+  // for the realtime telemetry pane), so we pass an empty params object
+  // and keep the unfiltered behaviour.
+  const { data: overview, isLoading } = useGetDashboardOverview(undefined, {
     query: { refetchInterval: 60_000, queryKey: getGetDashboardOverviewQueryKey() },
   });
   const { selected, matches, filterActive, hiddenActive } = useVerticalFilter();

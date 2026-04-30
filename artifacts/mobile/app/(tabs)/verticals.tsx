@@ -19,8 +19,10 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 
 import { useRouter } from "expo-router";
 
+import { PlacedByToggle } from "@/components/PlacedByToggle";
 import { useColors } from "@/hooks/useColors";
 import { apiFetch } from "@/lib/api";
+import { usePlacedBy } from "@/lib/placed-by-filter";
 import {
   setSelectedVerticals,
   useSelectedVerticals,
@@ -64,15 +66,20 @@ export default function VerticalsScreen() {
   const colors = useColors();
   const insets = useSafeAreaInsets();
   const { selected, toggle, clear, matches } = useSelectedVerticals();
+  // Trade-provenance filter (T005). Module-level pub/sub state shared
+  // with the dashboard / positions tabs.
+  const { placedBy } = usePlacedBy();
   const router = useRouter();
   const drillTo = (vertical: string) => {
     setSelectedVerticals([vertical]);
     router.push("/(tabs)");
   };
   const query = useQuery({
-    queryKey: ["dashboard", "verticals", 7],
+    queryKey: ["dashboard", "verticals", 7, placedBy],
     queryFn: () =>
-      apiFetch<VerticalsOverview>("/api/dashboard/verticals?days=7"),
+      apiFetch<VerticalsOverview>(
+        `/api/dashboard/verticals?days=7&placed_by=${placedBy}`,
+      ),
     refetchInterval: 60_000,
   });
   const access = useQuery({
@@ -269,6 +276,9 @@ export default function VerticalsScreen() {
         <Text style={styles.headerText}>
           {items.length} verticals · 7-day window
         </Text>
+        <View style={{ marginTop: 8 }}>
+          <PlacedByToggle testID="verticals-placed-by-toggle" />
+        </View>
         <ScrollView
           horizontal
           showsHorizontalScrollIndicator={false}

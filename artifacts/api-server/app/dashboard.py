@@ -8,7 +8,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from typing import Any
+from typing import Any, Literal
 
 from datetime import datetime, timedelta, timezone
 
@@ -20,6 +20,88 @@ from .polymarket import client as polymarket_client
 
 
 log = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Trade-provenance filter (migration 0039 added the `placed_by` column).
+#
+# The dashboard exposes a 3-segment Manual / System / Both toggle so the
+# operator can split P&L between trades they placed by hand in the UI
+# (`manual_ui`) and trades the orchestrator/swarm/autotrader placed on
+# their behalf (`orchestrator`/`autotrader`/`swarm`).
+#
+# The closed enum is validated at the FastAPI layer with
+# ``Literal['manual','system','all']`` so `_placed_by_predicate` can
+# safely bake its values as SQL literals — but the helper still raises
+# on anything outside the known set so the trust boundary is explicit
+# even when called from tests or future internal callers.
+#
+# `rh_import` and `unknown` are intentionally NOT included in either
+# bucket — they only show on the unfiltered ('all') view.
+# ---------------------------------------------------------------------------
+
+PlacedByFilter = Literal["manual", "system", "all"]
+
+# `operator_recovery` is included in the system bucket because the
+# operator-claimed reconciliation flow is a system-side recovery path:
+# the trade was originally placed by the orchestrator/autotrader/swarm
+# and the operator merely re-tagged it after a partial-fill or webhook
+# gap.  It is not a hand-placed UI bet — `manual_ui` is reserved for
+# the latter.  See the migration 0039 docstring for the full taxonomy.
+_PLACED_BY_SYSTEM_VALUES: tuple[str, ...] = (
+    "orchestrator",
+    "autotrader",
+    "swarm",
+    "operator_recovery",
+)
+
+
+def _placed_by_predicate(filter_value: str | None, alias: str = "") -> str:
+    """SQL boolean expression for the `placed_by` filter.
+
+    Returns either an empty string (no filter — caller appends nothing)
+    or a bare predicate like ``"placed_by = 'manual_ui'"`` /
+    ``"t.placed_by IN ('orchestrator','autotrader','swarm')"``.  The
+    caller is responsible for stitching it onto the surrounding query
+    with ``AND`` or ``WHERE``; see :func:`_placed_by_and_clause` for the
+    ``" AND <pred>"`` convenience form used by every existing
+    `WHERE`-bearing query in this module.
+
+    `alias` lets the caller scope the column to a table alias when the
+    surrounding query joins multiple tables (e.g. ``alias='t'`` ->
+    ``"t.placed_by = ..."``).
+    """
+    col = f"{alias}.placed_by" if alias else "placed_by"
+    if filter_value in (None, "", "all"):
+        return ""
+    if filter_value == "manual":
+        return f"{col} = 'manual_ui'"
+    if filter_value == "system":
+        in_list = ",".join(f"'{v}'" for v in _PLACED_BY_SYSTEM_VALUES)
+        return f"{col} IN ({in_list})"
+    raise ValueError(f"unknown placed_by filter: {filter_value!r}")
+
+
+def _placed_by_and_clause(filter_value: str | None, alias: str = "") -> str:
+    """Return ``" AND <predicate>"`` (with leading space) or ``""``.
+
+    Convenience wrapper for the common case where the surrounding query
+    already has a ``WHERE`` clause and just needs another ANDed
+    predicate. The leading space keeps the splice safe regardless of
+    whether the call site closes the prior line with whitespace.
+    """
+    pred = _placed_by_predicate(filter_value, alias=alias)
+    return f" AND {pred}" if pred else ""
+
+
+def _placed_by_where_clause(filter_value: str | None, alias: str = "") -> str:
+    """Return ``" WHERE <predicate>"`` (with leading space) or ``""``.
+
+    Use when the surrounding query has no other WHERE clause (the bare
+    ``count(*)`` / ``sum(pnl)`` aggregates in :func:`get_overview`).
+    """
+    pred = _placed_by_predicate(filter_value, alias=alias)
+    return f" WHERE {pred}" if pred else ""
 
 
 async def _safe_count(table: str) -> int | None:
@@ -46,10 +128,19 @@ def _registered_verticals_snapshot() -> list[dict[str, Any]]:
     return [s.to_dict() for s in _vertical_registry.all_specs()]
 
 
-async def get_overview() -> dict[str, Any]:
+async def get_overview(placed_by: str | None = None) -> dict[str, Any]:
+    # Trade-provenance filter applies only to the trade-derived headline
+    # numbers (trades count, latest_trade_at, realized_pnl, win_rate).
+    # The non-trade counts (cycles, debates, predictions, positions) are
+    # left unfiltered because they describe orchestrator/system activity
+    # regardless of who placed the resulting bets.
+    pb_where = _placed_by_where_clause(placed_by)        # " WHERE ..." or ""
+    pb_and = _placed_by_and_clause(placed_by)            # " AND ..." or ""
+
+    trades_count = await _safe_fetchval(f"SELECT count(*) FROM trades{pb_where}")
     counts = {
         "trading_cycles": await _safe_count("trading_cycles"),
-        "trades": await _safe_count("trades"),
+        "trades": int(trades_count) if trades_count is not None else None,
         "swarm_debates": await _safe_count("swarm_debates"),
         "ml_training_logs": await _safe_count("ml_training_logs"),
         "predictions": await _safe_count("predictions"),
@@ -59,12 +150,14 @@ async def get_overview() -> dict[str, Any]:
         "SELECT to_char(max(started_at), 'YYYY-MM-DD\"T\"HH24:MI:SSZ') FROM trading_cycles"
     )
     latest_trade_at = await _safe_fetchval(
-        "SELECT to_char(max(executed_at), 'YYYY-MM-DD\"T\"HH24:MI:SSZ') FROM trades"
+        f"SELECT to_char(max(executed_at), 'YYYY-MM-DD\"T\"HH24:MI:SSZ') FROM trades{pb_where}"
     )
-    realized_pnl = await _safe_fetchval("SELECT coalesce(sum(pnl),0)::float FROM trades")
+    realized_pnl = await _safe_fetchval(
+        f"SELECT coalesce(sum(pnl),0)::float FROM trades{pb_where}"
+    )
     win_rate = await _safe_fetchval(
         "SELECT (sum((pnl > 0)::int)::float / nullif(count(*) filter (where pnl is not null), 0)) "
-        "FROM trades WHERE pnl IS NOT NULL"
+        f"FROM trades WHERE pnl IS NOT NULL{pb_and}"
     )
     open_positions = await _safe_fetchval(
         "SELECT count(*) FROM positions WHERE coalesce(status,'open') = 'open'"
@@ -82,10 +175,13 @@ async def get_overview() -> dict[str, Any]:
     }
 
 
-async def get_recent_trades(limit: int = 25) -> list[dict[str, Any]]:
+async def get_recent_trades(
+    limit: int = 25, placed_by: str | None = None
+) -> list[dict[str, Any]]:
+    pb_where = _placed_by_where_clause(placed_by)        # " WHERE ..." or ""
     try:
         rows = await db.fetch(
-            """
+            f"""
             SELECT
               id,
               trade_id,
@@ -101,8 +197,9 @@ async def get_recent_trades(limit: int = 25) -> list[dict[str, Any]]:
               trading_mode,
               exchange,
               market_title,
+              placed_by,
               to_char(executed_at, 'YYYY-MM-DD"T"HH24:MI:SSZ') AS executed_at
-            FROM trades
+            FROM trades{pb_where}
             ORDER BY executed_at DESC NULLS LAST
             LIMIT $1
             """,
@@ -1833,7 +1930,9 @@ async def get_trade_detail(trade_ref: str) -> dict[str, Any] | None:
     return out
 
 
-async def get_vertical_performance(days: int = 30) -> dict[str, Any]:
+async def get_vertical_performance(
+    days: int = 30, placed_by: str | None = None
+) -> dict[str, Any]:
     """Per-vertical (sports/weather/crypto) performance for the operator strip.
 
     Returns one entry per known vertical with rolling-window P&L, win rate,
@@ -1851,6 +1950,14 @@ async def get_vertical_performance(days: int = 30) -> dict[str, Any]:
     single failure doesn't blank the whole strip.
     """
     days = max(1, min(int(days), 365))
+    # Trade-provenance filter: scope every per-vertical aggregate below
+    # to manual / system / both. The non-trade probes in this function
+    # (calibration_snapshots Brier, positions exposure, swarm_debates
+    # counts) are intentionally NOT scoped — they describe model /
+    # research artifacts that exist regardless of who placed the bet.
+    pb_t = _placed_by_and_clause(placed_by, alias="t")   # " AND t.placed_by = ..."
+    pb_bare = _placed_by_and_clause(placed_by)           # " AND placed_by = ..."
+
     # Driven by `app.verticals` — verticals with
     # `include_in_dashboard_strip=True` show up here.  Existing order
     # (sports → weather → crypto) is preserved by the registry's
@@ -1917,7 +2024,7 @@ async def get_vertical_performance(days: int = 30) -> dict[str, Any]:
         # sparkline.
         try:
             agg = await db.fetchrow(
-                """
+                f"""
                 SELECT count(*)::int                                    AS n,
                        coalesce(sum(pnl), 0)::float                     AS pnl,
                        sum((pnl > 0)::int)::int                         AS wins,
@@ -1928,6 +2035,7 @@ async def get_vertical_performance(days: int = 30) -> dict[str, Any]:
                   FROM trades
                  WHERE vertical = $1
                    AND executed_at >= ((now() at time zone 'utc')::date - ($2::int - 1))
+                   {pb_bare}
                 """,
                 vertical, days,
             )
@@ -1978,11 +2086,12 @@ async def get_vertical_performance(days: int = 30) -> dict[str, Any]:
         # Today's realized P&L (UTC calendar day) for this vertical.
         try:
             n = await db.fetchval(
-                """
+                f"""
                 SELECT coalesce(sum(pnl), 0)::float
                   FROM trades
                  WHERE vertical = $1
                    AND executed_at >= (now() AT TIME ZONE 'UTC')::date
+                   {pb_bare}
                 """,
                 vertical,
             )
@@ -2009,7 +2118,7 @@ async def get_vertical_performance(days: int = 30) -> dict[str, Any]:
         # over the same rolling window, computed from settled trades.
         try:
             rows = await db.fetch(
-                """
+                f"""
                 WITH settled AS (
                   SELECT t.model_prob::float                AS p_yes,
                          lower(coalesce(t.side, ''))        AS side_lc,
@@ -2021,6 +2130,7 @@ async def get_vertical_performance(days: int = 30) -> dict[str, Any]:
                      AND t.executed_at >= ((now() at time zone 'utc')::date - ($2::int - 1))
                      AND t.model_prob IS NOT NULL
                      AND pm.actual_outcome IS NOT NULL
+                     {pb_t}
                 ), aligned AS (
                   SELECT CASE WHEN side_lc IN ('no','n','sell')
                               THEN 1.0 - p_yes ELSE p_yes END AS p_side,
@@ -2104,7 +2214,7 @@ async def get_vertical_performance(days: int = 30) -> dict[str, Any]:
         daily: list[dict[str, Any]] = []
         try:
             drows = await db.fetch(
-                """
+                f"""
                 WITH bounds AS (
                   SELECT ((now() at time zone 'utc')::date - ($2::int - 1)) AS start_d,
                          (now() at time zone 'utc')::date                   AS end_d
@@ -2119,6 +2229,7 @@ async def get_vertical_performance(days: int = 30) -> dict[str, Any]:
                     FROM trades t, bounds b
                    WHERE t.vertical = $1
                      AND t.executed_at >= b.start_d
+                     {pb_t}
                 ),
                 daily_pnl AS (
                   SELECT d, sum(pnl)::float AS daily_pnl, count(*)::int AS trades
@@ -2140,6 +2251,7 @@ async def get_vertical_performance(days: int = 30) -> dict[str, Any]:
                      AND t.executed_at >= b.start_d
                      AND t.model_prob IS NOT NULL
                      AND pm.actual_outcome IS NOT NULL
+                     {pb_t}
                 ),
                 daily_brier AS (
                   SELECT d,
@@ -2498,7 +2610,9 @@ async def get_recent_swarm_debates(limit: int = 10) -> list[dict[str, Any]]:
         return []
 
 
-async def get_verticals_overview(days: int = 7) -> dict[str, Any]:
+async def get_verticals_overview(
+    days: int = 7, placed_by: str | None = None
+) -> dict[str, Any]:
     """Aggregate per-vertical performance card backing
     ``/api/dashboard/verticals`` and the dedicated overview tab.
 
@@ -2531,6 +2645,16 @@ async def get_verticals_overview(days: int = 7) -> dict[str, Any]:
     as ``None`` and the rest of the row populates normally.
     """
     days = max(1, min(int(days), 365))
+    # Trade-provenance scoping (migration 0039 + the dashboard 3-segment
+    # toggle).  Only the trade-derived fields below are scoped:
+    # ``trades`` / ``pnl`` / ``win_rate`` / ``edge_predicted_bps`` /
+    # ``sharpe`` / ``edge_realized_bps``.  ``brier`` (from
+    # ``calibration_snapshots``) and ``open_positions`` describe model
+    # / book artifacts that exist regardless of who placed each bet, so
+    # they stay unfiltered.
+    pb_t = _placed_by_and_clause(placed_by, alias="t")   # " AND t.placed_by = ..."
+    pb_bare = _placed_by_and_clause(placed_by)           # " AND placed_by = ..."
+
     from . import verticals as _vertical_registry
     from . import runtime_settings as _runtime_settings
 
@@ -2577,7 +2701,7 @@ async def get_verticals_overview(days: int = 7) -> dict[str, Any]:
         # Trade aggregates (wins / pnl / win_rate / count).
         try:
             agg = await db.fetchrow(
-                """
+                f"""
                 SELECT count(*)::int                                    AS n,
                        coalesce(sum(pnl), 0)::float                     AS pnl,
                        sum((pnl > 0)::int)::int                         AS wins,
@@ -2589,6 +2713,7 @@ async def get_verticals_overview(days: int = 7) -> dict[str, Any]:
                   FROM trades
                  WHERE vertical = $1
                    AND executed_at >= now() - ($2::int || ' days')::interval
+                   {pb_bare}
                 """,
                 vertical, days,
             )
@@ -2626,13 +2751,14 @@ async def get_verticals_overview(days: int = 7) -> dict[str, Any]:
         # Sharpe over daily realized P&L (annualized, 252 trading days).
         try:
             daily_rows = await db.fetch(
-                """
+                f"""
                 SELECT date_trunc('day', executed_at)::date AS d,
                        coalesce(sum(pnl), 0)::float          AS daily_pnl
                   FROM trades
                  WHERE vertical = $1
                    AND executed_at >= now() - ($2::int || ' days')::interval
                    AND pnl IS NOT NULL
+                   {pb_bare}
                  GROUP BY d
                 """,
                 vertical, days,
@@ -2666,7 +2792,7 @@ async def get_verticals_overview(days: int = 7) -> dict[str, Any]:
         # Realized edge (bps) from settled postmortems.
         try:
             row = await db.fetchrow(
-                """
+                f"""
                 SELECT
                   avg(
                     CASE
@@ -2682,6 +2808,7 @@ async def get_verticals_overview(days: int = 7) -> dict[str, Any]:
                    AND t.executed_at >= now() - ($2::int || ' days')::interval
                    AND pm.actual_outcome IS NOT NULL
                    AND t.price IS NOT NULL
+                   {pb_t}
                 """,
                 vertical, days,
             )

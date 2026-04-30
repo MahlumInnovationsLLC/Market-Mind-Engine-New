@@ -9,6 +9,11 @@ import {
 import { GlassCard } from "@/components/ui/glass-card";
 import { SectionHeader } from "@/components/ui/section-header";
 import VerticalAdminControls from "@/components/intelligence/vertical-admin-controls";
+import {
+  PlacedByProvider,
+  usePlacedBy,
+} from "@/components/dashboard/placed-by-context";
+import { PlacedByToggle } from "@/components/dashboard/placed-by-toggle";
 
 function fmtCurrency(n: number | null | undefined): string {
   if (n === null || n === undefined) return "—";
@@ -160,14 +165,18 @@ function VerticalCard({ entry, onDrillIn, isAdmin }: VerticalCardProps) {
   );
 }
 
-export default function VerticalsPage() {
+function VerticalsPageInner() {
   const [, setLocation] = useLocation();
   const { data: access } = useGetMyAccess({
     query: { queryKey: getGetMyAccessQueryKey(), staleTime: 30_000 },
   });
   const isAdmin = !!access?.is_admin;
+  // Trade-provenance filter (T005). The /verticals route mounts its own
+  // <PlacedByProvider> below so the toggle / URL sync still work even
+  // though this page sits outside the dashboard's provider tree.
+  const { placedBy } = usePlacedBy();
 
-  const params = { days: 7 };
+  const params = { days: 7, placed_by: placedBy };
   const { data, isLoading, error } = useGetVerticalsOverview(params, {
     query: {
       queryKey: getGetVerticalsOverviewQueryKey(params),
@@ -196,6 +205,8 @@ export default function VerticalsPage() {
           {visible.length} registered · click a card to scope the dashboard.
         </p>
       </header>
+
+      <PlacedByToggle testID="verticals-placed-by-toggle" />
 
       <GlassCard tone="solid" padding="md" data-testid="card-verticals-grid">
         <SectionHeader
@@ -237,5 +248,16 @@ export default function VerticalsPage() {
         )}
       </GlassCard>
     </div>
+  );
+}
+
+export default function VerticalsPage() {
+  // Wraps the page in a <PlacedByProvider> so the toggle's URL-sync and
+  // shared filter context work even though /verticals is mounted
+  // outside the dashboard's provider tree.
+  return (
+    <PlacedByProvider>
+      <VerticalsPageInner />
+    </PlacedByProvider>
   );
 }

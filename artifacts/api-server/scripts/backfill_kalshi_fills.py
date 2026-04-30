@@ -401,38 +401,50 @@ async def backfill(
         log.info("dropped %s prior consolidated rows in window before re-insert", stats["consolidated_dropped_pre"])
 
     # Insert crypto first (per-fill, dedup by real trade_id), then consolidated.
+    #
+    # ``placed_by`` is set to ``'unknown'`` here on purpose: this script
+    # is a SAFETY-NET importer that observes fills already executed on
+    # Kalshi.  We can't tell at backfill time whether the order was
+    # originally placed by the orchestrator (which would have inserted
+    # the row natively with ``placed_by='orchestrator'``) or by the
+    # user via the UI (``'manual_ui'``).  The ``ON CONFLICT DO NOTHING``
+    # below means any row already inserted by the live path keeps its
+    # real provenance — only genuinely-orphaned rows land at
+    # ``'unknown'``.  Migration 0039 added the column.
     if crypto_rows:
+        crypto_rows_tagged = [(*r, "unknown") for r in crypto_rows]
         await db.executemany(
             """
             INSERT INTO trades (
                 trade_id, market_id, market_title, vertical, side, action,
                 quantity, price, fees, pnl,
-                trading_mode, exchange, executed_at, metadata
+                trading_mode, exchange, executed_at, metadata, placed_by
             ) VALUES (
                 $1, $2, $3, $4, $5, $6,
                 $7, $8, $9, $10,
-                $11, $12, $13, $14::jsonb
+                $11, $12, $13, $14::jsonb, $15
             )
             ON CONFLICT DO NOTHING
             """,
-            crypto_rows,
+            crypto_rows_tagged,
         )
         stats["crypto_rows"] = len(crypto_rows)
     if consolidated_rows:
+        consolidated_rows_tagged = [(*r, "unknown") for r in consolidated_rows]
         await db.executemany(
             """
             INSERT INTO trades (
                 trade_id, market_id, market_title, vertical, side, action,
                 quantity, price, fees, pnl,
-                trading_mode, exchange, executed_at, metadata
+                trading_mode, exchange, executed_at, metadata, placed_by
             ) VALUES (
                 $1, $2, $3, $4, $5, $6,
                 $7, $8, $9, $10,
-                $11, $12, $13, $14::jsonb
+                $11, $12, $13, $14::jsonb, $15
             )
             ON CONFLICT DO NOTHING
             """,
-            consolidated_rows,
+            consolidated_rows_tagged,
         )
         stats["consolidated_rows"] = len(consolidated_rows)
     stats["inserted"] = stats["crypto_rows"] + stats["consolidated_rows"]

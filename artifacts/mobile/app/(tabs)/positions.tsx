@@ -13,8 +13,10 @@ import {
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
 import DelayedSignalsBanner from "@/components/DelayedSignalsBanner";
+import { PlacedByToggle } from "@/components/PlacedByToggle";
 import { useColors } from "@/hooks/useColors";
 import { apiFetch } from "@/lib/api";
+import { usePlacedBy } from "@/lib/placed-by-filter";
 
 type Trade = {
   id: number;
@@ -77,10 +79,16 @@ export default function PositionsScreen() {
   const colors = useColors();
   const insets = useSafeAreaInsets();
   const [filter, setFilter] = useState<Filter>("all");
+  // Trade-provenance filter (T005). Shared module-level state so the
+  // selection persists across tab switches.
+  const { placedBy } = usePlacedBy();
 
   const { data, isLoading, isError, error, refetch, isFetching } = useQuery({
-    queryKey: ["dashboard", "recent-trades"],
-    queryFn: () => apiFetch<TradeList>("/api/dashboard/recent-trades?limit=50"),
+    queryKey: ["dashboard", "recent-trades", placedBy],
+    queryFn: () =>
+      apiFetch<TradeList>(
+        `/api/dashboard/recent-trades?limit=50&placed_by=${placedBy}`,
+      ),
     refetchInterval: 30_000,
   });
 
@@ -142,6 +150,7 @@ export default function PositionsScreen() {
               testID="banner-positions-delayed"
             />
           ) : null}
+          <PlacedByToggle testID="positions-placed-by-toggle" />
           <ScrollView
             horizontal
             showsHorizontalScrollIndicator={false}
