@@ -19,9 +19,44 @@ import {
   describe,
   expect,
   it,
+  vi,
 } from "vitest";
 
-import { useSelectedVerticals } from "./use-selected-verticals";
+// `useVerticalFilter` is the composite hook that pulls in
+// `useGetMyAccess` / `useGetVerticalVisibility` / `useGetVerticalsOverview`
+// from the generated client.  Mock them here with a mutable state bag so
+// each `effectiveVerticals` test can dial in admin/hidden/registry
+// independently without spinning up React Query or a real network.
+const { compositeState } = vi.hoisted(() => ({
+  compositeState: {
+    isAdmin: false,
+    hidden: [] as string[],
+    registry: [] as string[],
+  },
+}));
+
+vi.mock("@workspace/api-client-react", () => ({
+  getGetMyAccessQueryKey: () => ["my-access"],
+  getGetVerticalVisibilityQueryKey: () => ["vertical-visibility"],
+  getGetVerticalsOverviewQueryKey: () => ["verticals-overview"],
+  useGetMyAccess: () => ({ data: { is_admin: compositeState.isAdmin } }),
+  useGetVerticalVisibility: () => ({
+    data: { hidden: compositeState.hidden, pinned: [] },
+  }),
+  useGetVerticalsOverview: () => ({
+    data: {
+      verticals: compositeState.registry.map((v) => ({
+        vertical: v,
+        trades: 0,
+      })),
+    },
+  }),
+}));
+
+import {
+  useSelectedVerticals,
+  useVerticalFilter,
+} from "./use-selected-verticals";
 
 // jsdom defaults the document origin to `http://localhost:3000` and
 // rejects `replaceState` to a different origin. Stick to a relative
@@ -31,6 +66,9 @@ const HOME = "/dashboard";
 
 beforeEach(() => {
   window.history.replaceState(null, "", HOME);
+  compositeState.isAdmin = false;
+  compositeState.hidden = [];
+  compositeState.registry = [];
 });
 
 afterEach(() => {
@@ -186,5 +224,85 @@ describe("useSelectedVerticals - cross-tab sync", () => {
     });
     expect(a.result.current.selected).toEqual(["sports"]);
     expect(b.result.current.selected).toEqual(["sports"]);
+  });
+});
+
+describe("useVerticalFilter - effectiveVerticals (server-side filter list)", () => {
+  it("returns [] (no narrowing) for an admin with no chip selection", () => {
+    compositeState.isAdmin = true;
+    compositeState.hidden = ["weather"];
+    compositeState.registry = ["sports", "crypto", "weather"];
+    const { result } = renderHook(() => useVerticalFilter());
+    expect(result.current.effectiveVerticals).toEqual([]);
+    expect(result.current.filterActive).toBe(false);
+    expect(result.current.hiddenActive).toBe(false);
+  });
+
+  it("returns [] (no narrowing) for a non-admin with no chip selection AND no hidden", () => {
+    compositeState.isAdmin = false;
+    compositeState.hidden = [];
+    compositeState.registry = ["sports", "crypto"];
+    const { result } = renderHook(() => useVerticalFilter());
+    expect(result.current.effectiveVerticals).toEqual([]);
+    expect(result.current.filterActive).toBe(false);
+  });
+
+  it("narrows to the visible registry minus hidden for a non-admin with no chip selection", () => {
+    // The fix the architect flagged: previously the headline equity
+    // curve omitted the `vertical=` param in this case, so the server
+    // returned the all-vertical sum that *included* hidden P&L —
+    // visibly drifting from the per-vertical breakdown table that
+    // already excluded hidden rows client-side.
+    compositeState.isAdmin = false;
+    compositeState.hidden = ["weather"];
+    compositeState.registry = ["sports", "crypto", "weather"];
+    const { result } = renderHook(() => useVerticalFilter());
+    expect(result.current.effectiveVerticals.sort()).toEqual([
+      "crypto",
+      "sports",
+    ]);
+    expect(result.current.hiddenActive).toBe(true);
+    expect(result.current.filterActive).toBe(true);
+  });
+
+  it("honours an explicit chip selection (admin path)", () => {
+    compositeState.isAdmin = true;
+    compositeState.hidden = ["weather"];
+    compositeState.registry = ["sports", "crypto", "weather"];
+    window.history.replaceState(null, "", `${HOME}?selectedVerticals=sports`);
+    const { result } = renderHook(() => useVerticalFilter());
+    expect(result.current.effectiveVerticals).toEqual(["sports"]);
+    expect(result.current.filterActive).toBe(true);
+  });
+
+  it("strips a hidden vertical from an explicit selection for non-admins (defends against stale URLs)", () => {
+    // A non-admin can't normally pick a hidden chip from the picker,
+    // but a stale URL or a copy-pasted link could carry one in.  We
+    // refuse to send it server-side so a hidden vertical never re-
+    // appears in the headline curve via the back door.
+    compositeState.isAdmin = false;
+    compositeState.hidden = ["weather"];
+    compositeState.registry = ["sports", "crypto", "weather"];
+    window.history.replaceState(
+      null,
+      "",
+      `${HOME}?selectedVerticals=sports,weather`,
+    );
+    const { result } = renderHook(() => useVerticalFilter());
+    expect(result.current.effectiveVerticals).toEqual(["sports"]);
+  });
+
+  it("falls back to [] (no narrowing) when hiddenActive but registry hasn't loaded yet", () => {
+    // Documented one-render-frame fallback: the alternative would be
+    // to gate the equity query on the registry load, which trades a
+    // guaranteed-correct first paint for a UX latency cost.  We accept
+    // the brief flash because `VerticalPicker` mounts on the same
+    // surface and React Query dedupes the in-flight overview request.
+    compositeState.isAdmin = false;
+    compositeState.hidden = ["weather"];
+    compositeState.registry = []; // overview hasn't landed yet
+    const { result } = renderHook(() => useVerticalFilter());
+    expect(result.current.effectiveVerticals).toEqual([]);
+    expect(result.current.hiddenActive).toBe(true);
   });
 });

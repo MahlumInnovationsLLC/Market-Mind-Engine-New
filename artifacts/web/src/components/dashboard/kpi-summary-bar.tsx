@@ -9,6 +9,7 @@ import {
 } from "@workspace/api-client-react";
 import { resolveApiUrl } from "@/lib/api";
 import { GlassCard } from "@/components/ui/glass-card";
+import { useVerticalFilter } from "@/hooks/use-selected-verticals";
 import { usePeriod } from "./period-context";
 import { usePlacedBy } from "./placed-by-context";
 
@@ -117,6 +118,23 @@ export default function KpiSummaryBar() {
   // Open-positions stays unscoped — it describes the live book
   // (currently-held contracts) which is provenance-agnostic.
   const { placedBy } = usePlacedBy();
+  // Mirror the operator's vertical-strip selection so every equity-
+  // derived tile (P&L Today, ROI, Volume, Sharpe) narrows in lock-step
+  // with the equity charts and the per-vertical panels lower on the
+  // page.  We use `effectiveVerticals` (not the bare `selected`) so
+  // admin-managed hidden verticals are also suppressed server-side for
+  // non-admins when no explicit chip selection is active — matching
+  // how `matches()` already filters the per-vertical breakdown.
+  // Win-rate and Open-positions tiles intentionally stay unscoped:
+  // their endpoints return a global all-time / live-book scalar without
+  // a per-vertical breakdown, so narrowing them here would require a
+  // separate API change and is out of scope for this wiring.
+  const {
+    effectiveVerticals,
+    matches: matchesVertical,
+    filterActive: verticalFilterActive,
+  } = useVerticalFilter();
+  const verticalsCsv = effectiveVerticals.slice().sort().join(",");
 
   const overviewParams = { placed_by: placedBy };
   const overviewQ = useGetDashboardOverview(overviewParams, {
@@ -140,17 +158,23 @@ export default function KpiSummaryBar() {
     },
   });
   const equityQ = useQuery<EquityCurve>({
-    // `placedBy` is part of the key so the cache splits per-segment
-    // and toggling Manual/System/Both forces a refetch instead of
-    // returning the previous segment's series.
-    queryKey: ["public-equity-curve", days, placedBy],
+    // `placedBy` AND the verticals CSV are part of the key so the
+    // cache splits per-segment and per-vertical-selection, forcing a
+    // refetch when the operator toggles the Manual/System/Both
+    // toggle or clicks a vertical chip.
+    queryKey: ["public-equity-curve", days, placedBy, verticalsCsv],
     queryFn: async () => {
       // Goes through `resolveApiUrl` so the Mac-Studio cutover knob
       // (`VITE_API_URL`) reroutes the public equity curve to the
       // configured backend just like every other API call.
+      const params = new URLSearchParams({
+        days: String(days),
+        placed_by: placedBy,
+      });
+      if (verticalsCsv) params.set("vertical", verticalsCsv);
       const r = await fetch(
         resolveApiUrl(
-          `${import.meta.env.BASE_URL}api/public/equity-curve?days=${days}&placed_by=${placedBy}`,
+          `${import.meta.env.BASE_URL}api/public/equity-curve?${params.toString()}`,
         ),
       );
       if (!r.ok) throw new Error(`equity-curve ${r.status}`);
@@ -192,7 +216,11 @@ export default function KpiSummaryBar() {
   const roi = baseline > 0 ? periodPnl / baseline : null;
 
   // Total Volume — Σ |qty|·price across recent fills clipped to the
-  // selected window.
+  // selected window.  When a vertical filter is active we additionally
+  // drop any fill whose `vertical` is not in the operator's selection,
+  // so the tile narrows in lock-step with the equity chart.  The
+  // recent-trades endpoint already returns `vertical` per row, so this
+  // is a pure client-side filter — no extra API surface needed.
   const cutoffMs = Date.now() - days * 86_400_000;
   let volume = 0;
   let volumeFills = 0;
@@ -201,18 +229,25 @@ export default function KpiSummaryBar() {
       const ms = new Date(t.executed_at).getTime();
       if (!Number.isNaN(ms) && ms < cutoffMs) continue;
     }
+    if (verticalFilterActive && !matchesVertical(t.vertical ?? null)) continue;
     volume += Math.abs(Number(t.quantity ?? 0)) * Number(t.price ?? 0);
     volumeFills += 1;
   }
 
   // Sharpe — trade-weighted across verticals, matching the period.
-  const sharpeNumer = verticals.reduce(
+  // The same vertical filter applies: when the operator narrows to one
+  // or more verticals we weight only those rows so the trade-weighted
+  // Sharpe reflects the same slice as the rest of the headline strip.
+  const sharpeRows = verticalFilterActive
+    ? verticals.filter((v) => matchesVertical(v.vertical))
+    : verticals;
+  const sharpeNumer = sharpeRows.reduce(
     (s, v) =>
       s +
       (v.sharpe !== null && v.sharpe !== undefined ? v.sharpe * v.trades : 0),
     0,
   );
-  const sharpeDenom = verticals.reduce(
+  const sharpeDenom = sharpeRows.reduce(
     (s, v) =>
       s + (v.sharpe !== null && v.sharpe !== undefined ? v.trades : 0),
     0,

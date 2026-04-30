@@ -1041,21 +1041,42 @@ async def billing_pricing() -> dict[str, object]:
 async def public_equity_curve(
     days: int = 30,
     placed_by: Literal["manual", "system", "all"] = "all",
+    vertical: str | None = None,
 ) -> dict[str, object]:
     """Public — daily cumulative realized PnL.
 
-    Marketing landing page calls this without ``placed_by`` (defaults
-    to ``"all"`` → no filter, identical to the pre-T004 behaviour).
-    The authed dashboard's KPI tiles (P&L Today, ROI) and the
-    Cumulative / Daily P&L charts pass the operator's selection so
-    those surfaces honour the Manual / System / Both toggle in
-    lock-step with every other dashboard widget.
+    Marketing landing page calls this without ``placed_by`` or
+    ``vertical`` (defaults: ``"all"`` / no filter, identical to the
+    pre-T004 behaviour).  The authed dashboard's KPI tiles (P&L Today,
+    ROI) and the Cumulative / Daily P&L charts pass the operator's
+    selection so those surfaces honour the Manual / System / Both
+    toggle in lock-step with every other dashboard widget; ``vertical``
+    is a comma-separated list of canonical vertical names (e.g.
+    ``"sports,crypto"``) used by the same surfaces to narrow the curve
+    to the chips selected in the `VerticalPicker` strip.
+
+    Unknown vertical names are rejected with HTTP 400 — silently
+    returning the unfiltered curve on a typo would be a P&L-display
+    foot-gun, since the operator could miss that their filter wasn't
+    applied.
     """
     clamped_days = max(1, min(int(days), 365))
-    points = await dashboard.get_public_equity_curve(
-        clamped_days, placed_by=placed_by
-    )
-    return {"days": clamped_days, "points": points, "placed_by": placed_by}
+    try:
+        points = await dashboard.get_public_equity_curve(
+            clamped_days, placed_by=placed_by, verticals=vertical
+        )
+    except ValueError as exc:
+        # `_vertical_predicate` raises on an unknown vertical name; turn
+        # that into a 400 so the UI surfaces a real error rather than a
+        # silently-unfiltered curve.
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    verticals_echo = dashboard._normalize_verticals(vertical)
+    return {
+        "days": clamped_days,
+        "points": points,
+        "placed_by": placed_by,
+        "verticals": verticals_echo,
+    }
 
 
 @app.get("/api/public/stats")

@@ -26,9 +26,18 @@ vi.mock("@workspace/api-client-react", () => ({
   getGetDashboardOverviewQueryKey: () => ["dashboard-overview"],
   getGetRecentTradesQueryKey: () => ["recent-trades"],
   getGetVerticalsOverviewQueryKey: () => ["verticals-overview"],
+  // `useVerticalFilter` (consumed by KpiSummaryBar via the placed_by /
+  // vertical wiring) reads access + visibility + the same
+  // verticals-overview query that powers the per-vertical breakdown.
+  // We share the `state.verticals` source so the registry list visible
+  // to the hook is whatever the test populates for the breakdown.
+  getGetMyAccessQueryKey: () => ["my-access"],
+  getGetVerticalVisibilityQueryKey: () => ["vertical-visibility"],
   useGetDashboardOverview: () => state.overview,
   useGetRecentTrades: () => state.trades,
   useGetVerticalsOverview: () => state.verticals,
+  useGetMyAccess: () => ({ data: { is_admin: false } }),
+  useGetVerticalVisibility: () => ({ data: { hidden: [], pinned: [] } }),
 }));
 
 vi.mock("@tanstack/react-query", () => ({

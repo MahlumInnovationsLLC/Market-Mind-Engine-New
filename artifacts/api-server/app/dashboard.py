@@ -104,6 +104,101 @@ def _placed_by_where_clause(filter_value: str | None, alias: str = "") -> str:
     return f" WHERE {pred}" if pred else ""
 
 
+# ---------------------------------------------------------------------------
+# Vertical filter — sibling of the placed_by helpers.
+#
+# The operator console exposes a multi-select strip (`VerticalPicker`) that
+# narrows panels to one or more verticals.  Until this change the equity-
+# curve endpoint and the equity-derived KPI tiles ignored that selection
+# and always returned the global all-verticals series, which made the
+# headline chart drift visibly out of sync with the per-vertical panels
+# below it (operator on SPORTS would see a SPORTS-only breakdown table
+# but a global SYSTEM equity curve, creating a perceived discrepancy
+# between the two).
+#
+# Values are validated against the canonical registry (`verticals.has`)
+# before they're baked into the SQL fragment.  Unknown entries raise
+# rather than silently dropping out of the IN-list — the route layer
+# converts the ValueError into HTTP 400 so a typo in the query string
+# fails loudly instead of returning the unfiltered curve by accident.
+# ---------------------------------------------------------------------------
+
+
+def _normalize_verticals(values: object) -> list[str]:
+    """Parse a verticals filter argument into a deduplicated, lower-cased list.
+
+    Accepts ``None`` / ``""`` / ``"all"`` (any of which means *no
+    filter*), a comma-separated string from the query layer, or an
+    already-split iterable from internal callers.  Entries are
+    lower-cased and deduplicated while preserving their first-seen
+    order so the resulting SQL fragment is deterministic for caching.
+    """
+    if values is None:
+        return []
+    if isinstance(values, str):
+        raw = values.split(",")
+    else:
+        try:
+            raw = list(values)  # type: ignore[arg-type]
+        except TypeError:
+            return []
+    out: list[str] = []
+    seen: set[str] = set()
+    for v in raw:
+        if not isinstance(v, str):
+            continue
+        s = v.strip().lower()
+        if not s or s == "all":
+            continue
+        if s in seen:
+            continue
+        seen.add(s)
+        out.append(s)
+    return out
+
+
+def _vertical_predicate(values: object, alias: str = "") -> str:
+    """SQL boolean expression for the optional vertical-narrowing filter.
+
+    Returns ``""`` when the caller passed nothing (or only the sentinel
+    ``"all"``) — splice nothing onto the surrounding query, identical
+    to the pre-vertical-filter plan.
+
+    Otherwise returns a bare predicate like
+    ``"vertical IN ('sports','crypto')"`` (or scoped via ``alias``).
+    Each name is validated against the canonical registry before it
+    is baked into the SQL literal so a typo in the query string
+    can't slip past — :class:`ValueError` is converted to HTTP 400
+    by the route layer.
+    """
+    parsed = _normalize_verticals(values)
+    if not parsed:
+        return ""
+    # Local import to avoid a top-of-module cycle (the verticals package
+    # imports from .db at startup which in turn pulls dashboard helpers
+    # in the test harness).
+    from . import verticals as _vertical_registry
+
+    for name in parsed:
+        if not _vertical_registry.has(name):
+            raise ValueError(f"unknown vertical: {name!r}")
+    col = f"{alias}.vertical" if alias else "vertical"
+    in_list = ",".join(f"'{v}'" for v in parsed)
+    return f"{col} IN ({in_list})"
+
+
+def _vertical_and_clause(values: object, alias: str = "") -> str:
+    """Return ``" AND <predicate>"`` (with leading space) or ``""``."""
+    pred = _vertical_predicate(values, alias=alias)
+    return f" AND {pred}" if pred else ""
+
+
+def _vertical_where_clause(values: object, alias: str = "") -> str:
+    """Return ``" WHERE <predicate>"`` (with leading space) or ``""``."""
+    pred = _vertical_predicate(values, alias=alias)
+    return f" WHERE {pred}" if pred else ""
+
+
 async def _safe_count(table: str) -> int | None:
     try:
         return int(await db.fetchval(f"SELECT count(*) FROM {table}"))
@@ -562,15 +657,18 @@ async def get_slippage_guard_top_offenders(
 async def get_public_equity_curve(
     days: int = 30,
     placed_by: str | None = None,
+    verticals: object = None,
 ) -> list[dict[str, Any]]:
     """Daily cumulative realized PnL across all trades, in chronological order.
 
     Public — used by the marketing landing page (which never sets
-    ``placed_by``, so the unfiltered "all-trades" curve is preserved
-    exactly as before for anonymous visitors).  The authed dashboard
-    threads ``placed_by`` so its KPI tiles (P&L Today, ROI) and the
-    Cumulative / Daily P&L charts honour the Manual / System / Both
-    toggle the operator selected.
+    ``placed_by`` or ``verticals``, so the unfiltered "all-trades"
+    curve is preserved exactly as before for anonymous visitors).  The
+    authed dashboard threads ``placed_by`` so its KPI tiles (P&L Today,
+    ROI) and the Cumulative / Daily P&L charts honour the Manual /
+    System / Both toggle the operator selected, and ``verticals`` so
+    those same surfaces narrow when the operator clicks one or more
+    chips in the `VerticalPicker` strip.
 
     Bounded so a hostile caller can't trigger a multi-year scan; the
     dashboard never asks for more than ~90 days of history.
@@ -582,11 +680,15 @@ async def get_public_equity_curve(
     failure.
     """
     days = max(1, min(int(days), 365))
-    # Reuse the shared helper so the manual/system/all bucket
-    # definitions stay in lock-step with every other route.  When
-    # `placed_by` is None or "all" the helper returns "" → no extra
-    # WHERE fragment, identical to the pre-T004 query plan.
-    pb_and = _placed_by_and_clause(placed_by)  # " AND placed_by = ..." or ""
+    # Reuse the shared helpers so the manual/system/all and per-vertical
+    # bucket definitions stay in lock-step with every other route.  When
+    # `placed_by` is None or "all" / `verticals` is None or empty, the
+    # helper returns "" → no extra WHERE fragment, identical to the
+    # pre-T004 query plan.  Vertical names are validated against the
+    # canonical registry before being baked into the SQL — bad input
+    # raises and the route layer turns it into HTTP 400.
+    pb_and = _placed_by_and_clause(placed_by)   # " AND placed_by = ..." or ""
+    vert_and = _vertical_and_clause(verticals)  # " AND vertical IN (...)" or ""
     try:
         rows = await db.fetch(
             f"""
@@ -604,7 +706,7 @@ async def get_public_equity_curve(
                 date_trunc('day', executed_at)::date AS d,
                 coalesce(pnl, 0)::float              AS pnl
               FROM trades, bounds b
-              WHERE executed_at >= b.start_d{pb_and}
+              WHERE executed_at >= b.start_d{pb_and}{vert_and}
             ),
             daily AS (
               SELECT

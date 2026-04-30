@@ -983,3 +983,94 @@ fields as `{[k:string]:unknown}|null`, so the component owns its own
 narrowing helpers (`narrowAnalystVerdicts`, `narrowModeratorSynthesis`)
 rather than expanding the OpenAPI spec. The mobile equivalent already
 existed at `artifacts/mobile/app/research/[id].tsx`.
+
+## Vertical filter on equity-derived tiles (Apr 30, 2026)
+
+Symptom that triggered this: an operator on SPORTS / SYSTEM / YTD saw
+the "Cumulative P&L" chart hit ~$-7k while their direct query of
+sports-only system trades was -$4k.  Audit confirmed no manual leakage
+into the SYSTEM bucket — the gap was a UX gap.  `EquityCharts` and
+`KpiSummaryBar` only threaded `placed_by` and `days` into the public
+equity-curve fetch, ignoring the operator's chip selection in
+`VerticalPicker`.  So clicking SPORTS narrowed every panel below the
+fold but the headline equity chart and tiles stayed all-verticals,
+making them visibly drift from the per-vertical breakdown table.
+
+This change wires the operator's vertical-strip selection into the
+equity-curve endpoint and the equity-derived tiles end-to-end:
+
+* **Backend** — `dashboard.py` gained a sibling family of helpers next
+  to `_placed_by_predicate`:
+  - `_normalize_verticals(values)` — accepts None / "" / "all" / a CSV
+    string / an iterable, returns a deduplicated lower-cased list,
+    drops the "all" sentinel, preserves first-seen order.
+  - `_vertical_predicate(values, alias="")` — validates each name
+    against the canonical registry (`verticals.has(...)`) and bakes a
+    `vertical IN ('sports','crypto')` literal.  Unknown names raise
+    `ValueError`, which the route layer translates to HTTP 400.
+  - `_vertical_and_clause / _vertical_where_clause` — convenience
+    wrappers mirroring the placed_by family.
+
+  `get_public_equity_curve` now accepts `verticals=None` and splices
+  the predicate onto its `WHERE`.  The route in `main.py` accepts
+  `vertical: str | None = None` (CSV), forwards it, catches
+  `ValueError`, and echoes the normalized list back as `verticals`.
+
+* **Web** — `EquityCharts` and `KpiSummaryBar` read `useVerticalFilter()`
+  (the composite hook that already accounts for admin-managed hidden
+  verticals) and append `&vertical=<csv>` when the selection is
+  non-empty.  The CSV is part of the React-Query key so toggling chips
+  invalidates the cache cleanly instead of returning a stale series.
+  `KpiSummaryBar` additionally narrows the Volume tile (client-side
+  filter on `recent-trades` rows by `t.vertical`) and the Sharpe tile
+  (filter the per-vertical breakdown rows before computing the
+  trade-weighted average) so all four equity-derived tiles move in
+  lock-step with the chart.
+
+* **Intentionally untouched** — Win-rate and Open-positions tiles stay
+  global.  The former is "all-time settled" by API contract, the latter
+  describes the live book; both endpoints return scalars without a
+  per-vertical breakdown, so narrowing them would require a separate
+  API change.  Out of scope for this fix.
+
+* **Tests** — `test_dashboard_placed_by.py` gained
+  `TestNormalizeVerticals`, `TestVerticalPredicate`,
+  `TestVerticalAndWhereClauses`, plus three route tests covering CSV
+  forwarding, the normalized echo, and the HTTP-400 path on an unknown
+  vertical name.  1010 dashboard-related tests pass.
+
+Trust-boundary note: silently dropping unknown verticals would let a
+typo'd query string return the unfiltered curve while the operator
+believed they were narrowed — a real P&L-display foot-gun.  Hence the
+loud HTTP 400 instead of a defensive default.
+
+### Follow-up: hidden-vertical leakage in headline equity (Apr 30, 2026)
+
+Architect review of the above caught a medium caveat: when a non-admin
+operator has admin-hidden verticals AND no explicit chip selection,
+`useVerticalFilter().selected` is `[]` so the equity-curve fetch sent
+no `vertical=` param.  The server then summed all verticals server-side
+including the hidden ones — visibly drifting from the per-vertical
+breakdown table that already excluded hidden rows client-side via
+`matches()`.  Same UX bug as the original task, just a different
+trigger.
+
+Fix: extended `useVerticalFilter` to expose
+`effectiveVerticals: string[]`.  The hook now also reads
+`useGetVerticalsOverview({days: 7})` (already cached by `VerticalPicker`
+on every dashboard surface, so React Query dedupes) and computes the
+effective server-side filter list:
+
+* explicit selection (admin) → `selected` as-is
+* explicit selection (non-admin) → `selected` minus hidden (defends
+  against a stale URL carrying a hidden chip name back in)
+* no selection + hidden active (non-admin) → registry minus hidden
+* anything else → `[]` (no narrowing)
+
+`EquityCharts` and `KpiSummaryBar` now serialize `effectiveVerticals`
+(not `selected`) into the `vertical=` CSV; `KpiSummaryBar` also reads
+`filterActive` directly from the hook instead of re-deriving it from
+selection length.  6 new unit tests in
+`use-selected-verticals.test.tsx` cover all branches including the
+documented one-render-frame fallback when `hiddenActive` but the
+registry overview hasn't loaded yet.

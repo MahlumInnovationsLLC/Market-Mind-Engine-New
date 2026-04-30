@@ -13,8 +13,10 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 
 import {
   getGetMyAccessQueryKey,
+  getGetVerticalsOverviewQueryKey,
   getGetVerticalVisibilityQueryKey,
   useGetMyAccess,
+  useGetVerticalsOverview,
   useGetVerticalVisibility,
 } from "@workspace/api-client-react";
 
@@ -120,6 +122,16 @@ export function useVerticalFilter(): {
   /** True when the effective filter is narrowing (explicit selection OR
    * hidden-active for non-admins). */
   filterActive: boolean;
+  /** Lower-cased vertical slugs to send to a server-side filter (e.g. the
+   * `?vertical=` CSV on `/api/public/equity-curve`).  Empty array means
+   * "no narrowing — return everything".  Combines explicit chip selection
+   * with admin-managed hidden-vertical suppression for non-admins so the
+   * headline equity curve never silently leaks hidden P&L into a non-admin
+   * operator's view.  Note: when `hiddenActive` is true but the registry
+   * overview hasn't loaded yet this returns `[]` (one render frame at
+   * worst, since `VerticalPicker` mounts on the same surface and React
+   * Query dedupes the in-flight request). */
+  effectiveVerticals: string[];
 } {
   const base = useSelectedVerticals();
   const access = useGetMyAccess({
@@ -131,11 +143,27 @@ export function useVerticalFilter(): {
       staleTime: 60_000,
     },
   });
+  const overview = useGetVerticalsOverview(
+    { days: 7 },
+    {
+      query: {
+        queryKey: getGetVerticalsOverviewQueryKey({ days: 7 }),
+        staleTime: 60_000,
+      },
+    },
+  );
 
   const isAdmin = !!access.data?.is_admin;
   const hidden = useMemo(
     () => new Set((visibility.data?.hidden ?? []).map((v) => v.toLowerCase())),
     [visibility.data?.hidden],
+  );
+  const knownVerticals = useMemo(
+    () =>
+      (overview.data?.verticals ?? [])
+        .map((e) => (e.vertical ?? "").toLowerCase())
+        .filter(Boolean),
+    [overview.data?.verticals],
   );
 
   const matches = useCallback(
@@ -152,10 +180,29 @@ export function useVerticalFilter(): {
   const hiddenActive = !isAdmin && hidden.size > 0;
   const filterActive = base.selected.length > 0 || hiddenActive;
 
+  const effectiveVerticals = useMemo(() => {
+    if (base.selected.length > 0) {
+      // Explicit selection wins; defensively strip hidden so a non-admin
+      // can't keep a hidden chip checked via a stale URL.
+      if (!isAdmin && hidden.size > 0) {
+        return base.selected.filter((v) => !hidden.has(v));
+      }
+      return base.selected;
+    }
+    if (hiddenActive && knownVerticals.length > 0) {
+      // No explicit selection, but admin hid some verticals from this
+      // non-admin — narrow server-side to the visible set so the headline
+      // curve matches what the operator can actually see in the breakdown.
+      return knownVerticals.filter((v) => !hidden.has(v));
+    }
+    return [];
+  }, [base.selected, isAdmin, hidden, hiddenActive, knownVerticals]);
+
   return {
     matches,
     selected: base.selected,
     hiddenActive,
     filterActive,
+    effectiveVerticals,
   };
 }

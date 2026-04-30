@@ -393,10 +393,17 @@ def test_verticals_overview_forwards_placed_by(
 
 def _stub_public_equity_curve(monkeypatch, captured: list[Any]) -> None:
     async def _fake(
-        days: int = 30, placed_by: str | None = None
+        days: int = 30,
+        placed_by: str | None = None,
+        verticals: object = None,
     ) -> list[dict[str, Any]]:
         captured.append(
-            {"fn": "public_equity_curve", "days": days, "placed_by": placed_by}
+            {
+                "fn": "public_equity_curve",
+                "days": days,
+                "placed_by": placed_by,
+                "verticals": verticals,
+            }
         )
         return []
 
@@ -431,6 +438,9 @@ def test_public_equity_curve_forwards_placed_by(
     body = resp.json()
     # Echoed back so the client can verify the active filter.
     assert body.get("placed_by") == expected_kwarg
+    # Marketing-landing default: no vertical filter, empty echo.
+    assert captured_calls[0]["verticals"] is None
+    assert body.get("verticals") == []
 
 
 def test_public_equity_curve_rejects_unknown_placed_by_with_422(monkeypatch):
@@ -444,3 +454,160 @@ def test_public_equity_curve_rejects_unknown_placed_by_with_422(monkeypatch):
     assert resp.status_code == 422
     # Should not have reached the dashboard layer.
     assert captured == []
+
+
+# ---------------------------------------------------------------------------
+# Vertical filter — sibling helpers + route plumbing.
+#
+# `_vertical_predicate` validates against the canonical registry and bakes
+# the matched names into the SQL literal.  The route turns ValueError into
+# HTTP 400 so a typo in the query string fails loudly instead of silently
+# returning the unfiltered curve.
+# ---------------------------------------------------------------------------
+
+
+class TestNormalizeVerticals:
+    @pytest.mark.parametrize("empty", [None, "", "   ", "all"])
+    def test_empty_inputs_return_empty_list(self, empty):
+        assert dashboard._normalize_verticals(empty) == []
+
+    def test_csv_string_split_lowered_deduped(self):
+        # Order preserved by first occurrence; 'All' sentinel skipped;
+        # trailing/leading whitespace tolerated; case-insensitive dedup.
+        assert dashboard._normalize_verticals("Sports, crypto ,SPORTS,all") == [
+            "sports",
+            "crypto",
+        ]
+
+    def test_iterable_input(self):
+        assert dashboard._normalize_verticals(["sports", "crypto"]) == [
+            "sports",
+            "crypto",
+        ]
+
+    def test_non_string_entries_dropped(self):
+        # Defensive — internal callers may pass mixed iterables; we
+        # silently drop non-strings rather than raising so a malformed
+        # entry doesn't blow up an otherwise-valid request.
+        assert dashboard._normalize_verticals([None, "sports", 42, "crypto"]) == [
+            "sports",
+            "crypto",
+        ]
+
+
+class TestVerticalPredicate:
+    def test_empty_inputs_emit_no_predicate(self):
+        for empty in (None, "", "all", []):
+            assert dashboard._vertical_predicate(empty) == ""
+            assert dashboard._vertical_predicate(empty, alias="t") == ""
+
+    def test_single_known_vertical_emits_in_clause(self):
+        # IN-list (not =) so the predicate shape stays uniform whether
+        # one or many verticals are selected — simplifies the splice site.
+        assert (
+            dashboard._vertical_predicate("sports") == "vertical IN ('sports')"
+        )
+
+    def test_multiple_known_verticals_preserve_first_seen_order(self):
+        assert dashboard._vertical_predicate("sports,crypto") == (
+            "vertical IN ('sports','crypto')"
+        )
+
+    def test_alias_scopes_column(self):
+        assert dashboard._vertical_predicate("sports", alias="t") == (
+            "t.vertical IN ('sports')"
+        )
+
+    def test_unknown_vertical_raises_valueerror(self):
+        # Bad input must fail loudly so the route layer can return 400 —
+        # silently dropping unknown names would mask a typo and return
+        # the unfiltered curve, which is a P&L-display foot-gun.
+        with pytest.raises(ValueError, match="unknown vertical"):
+            dashboard._vertical_predicate("horseracing")
+        with pytest.raises(ValueError, match="unknown vertical"):
+            dashboard._vertical_predicate("sports,horseracing")
+
+
+class TestVerticalAndWhereClauses:
+    def test_and_clause_empty(self):
+        assert dashboard._vertical_and_clause(None) == ""
+        assert dashboard._vertical_and_clause("all") == ""
+
+    def test_and_clause_with_filter(self):
+        assert dashboard._vertical_and_clause("sports") == (
+            " AND vertical IN ('sports')"
+        )
+
+    def test_where_clause_empty(self):
+        assert dashboard._vertical_where_clause(None) == ""
+
+    def test_where_clause_with_filter(self):
+        assert dashboard._vertical_where_clause("crypto") == (
+            " WHERE vertical IN ('crypto')"
+        )
+
+
+@pytest.mark.parametrize(
+    "qs,expected_arg,expected_echo",
+    [
+        # No vertical param → marketing-landing default, no filter.
+        ("?days=30", None, []),
+        # Single vertical.
+        ("?days=30&vertical=sports", "sports", ["sports"]),
+        # Multiple verticals (CSV) — order is normalized to first-seen.
+        ("?days=30&vertical=sports,crypto", "sports,crypto", ["sports", "crypto"]),
+        # Mixed-case + whitespace + 'all' sentinel are all normalized.
+        ("?days=30&vertical=SPORTS,%20crypto%20,all", "SPORTS, crypto ,all", ["sports", "crypto"]),
+    ],
+)
+def test_public_equity_curve_forwards_vertical(
+    monkeypatch, captured_calls, qs, expected_arg, expected_echo
+):
+    """The route accepts ``?vertical=<csv>`` and forwards it verbatim,
+    while the response echoes the *normalized* list so the UI can
+    verify what actually filtered without re-parsing the query string.
+    """
+    _stub_public_equity_curve(monkeypatch, captured_calls)
+    client = TestClient(app)
+
+    resp = client.get(f"/api/public/equity-curve{qs}")
+
+    assert resp.status_code == 200, resp.text
+    assert captured_calls[0]["verticals"] == expected_arg
+    body = resp.json()
+    assert body.get("verticals") == expected_echo
+
+
+def test_public_equity_curve_rejects_unknown_vertical_with_400(monkeypatch):
+    """Unknown vertical → HTTP 400 with a clear error.
+
+    Critical for operator trust: silently returning the unfiltered
+    curve on a typo would let a SPORTS-intending operator stare at
+    all-verticals data thinking they were narrowed.  We make the
+    failure loud.
+
+    We stub `get_public_equity_curve` with a coroutine that re-runs the
+    real predicate so the route's ``except ValueError`` branch fires
+    without needing a live DB connection.  This guards against any
+    future refactor that moves the validation off the route.
+    """
+
+    async def _fake(
+        days: int = 30,
+        placed_by: str | None = None,
+        verticals: object = None,
+    ) -> list[dict[str, Any]]:
+        # Re-runs the real registry-backed validation — raises on any
+        # name not in `verticals.has(...)` so the route's HTTP 400
+        # branch is exercised end-to-end.
+        dashboard._vertical_predicate(verticals)
+        return []
+
+    monkeypatch.setattr(dashboard, "get_public_equity_curve", _fake)
+    client = TestClient(app)
+
+    resp = client.get("/api/public/equity-curve?days=30&vertical=horseracing")
+
+    assert resp.status_code == 400
+    body = resp.json()
+    assert "unknown vertical" in body.get("detail", "")

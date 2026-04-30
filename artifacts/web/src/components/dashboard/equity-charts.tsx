@@ -16,6 +16,7 @@ import {
 } from "recharts";
 import { GlassCard } from "@/components/ui/glass-card";
 import { SectionHeader } from "@/components/ui/section-header";
+import { useVerticalFilter } from "@/hooks/use-selected-verticals";
 import { usePeriod } from "./period-context";
 import { usePlacedBy } from "./placed-by-context";
 
@@ -56,15 +57,31 @@ export default function EquityCharts() {
   // instead of returning a stale cached series.  `all` produces no
   // server-side filter, identical to the marketing-landing behaviour.
   const { placedBy } = usePlacedBy();
+  // Mirror the operator's vertical-strip selection so the equity chart
+  // narrows whenever they click SPORTS / CRYPTO / etc.  An empty
+  // selection means "show all", same as omitting the param entirely —
+  // identical to the marketing landing-page behaviour.  We use
+  // `effectiveVerticals` (not the bare `selected`) so admin-managed
+  // hidden verticals are also suppressed server-side for non-admins
+  // when no explicit chip selection is active — otherwise the headline
+  // curve would silently leak hidden-vertical P&L into a non-admin's
+  // view while every panel below the fold correctly excluded it.
+  const { effectiveVerticals } = useVerticalFilter();
+  const verticalsCsv = effectiveVerticals.slice().sort().join(",");
   const { data, isLoading, isError } = useQuery<EquityCurve>({
-    queryKey: ["public-equity-curve", days, placedBy],
+    queryKey: ["public-equity-curve", days, placedBy, verticalsCsv],
     queryFn: async () => {
       // Goes through `resolveApiUrl` so the Mac-Studio cutover knob
       // (`VITE_API_URL`) reroutes the public equity curve to the
       // configured backend just like every other API call.
+      const params = new URLSearchParams({
+        days: String(days),
+        placed_by: placedBy,
+      });
+      if (verticalsCsv) params.set("vertical", verticalsCsv);
       const r = await fetch(
         resolveApiUrl(
-          `${import.meta.env.BASE_URL}api/public/equity-curve?days=${days}&placed_by=${placedBy}`,
+          `${import.meta.env.BASE_URL}api/public/equity-curve?${params.toString()}`,
         ),
       );
       if (!r.ok) throw new Error(`equity-curve ${r.status}`);
