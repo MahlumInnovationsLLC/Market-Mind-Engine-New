@@ -1074,3 +1074,37 @@ selection length.  6 new unit tests in
 `use-selected-verticals.test.tsx` cover all branches including the
 documented one-render-frame fallback when `hiddenActive` but the
 registry overview hasn't loaded yet.
+
+### Forensic: "Feb 19" SYSTEM −$4,251 was actually Feb 20 (Apr 30, 2026)
+
+Operator suspected manual-trade leakage into the SYSTEM-filtered equity
+curve after seeing a tooltip read `Feb 19  daily_pnl: −$4,251` while
+SYSTEM was selected — a far worse number than the per-day system
+trades they could account for.  Direct `asyncpg` audit against
+`trades` (column is `pnl`, not `realized_pnl`):
+
+* `2026-02-19` SYSTEM (`placed_by IN ('orchestrator','autotrader',
+  'swarm','operator_recovery')`): **15 trades, −$24.84** total.
+* `2026-02-19` `manual_ui`: 2 trades, −$392.65.
+* `2026-02-20` SYSTEM: **25 trades, −$4,251.50** total — dominated by
+  a single 04:26 UTC orchestrator order on
+  `KXNBAGAME-26FEB19BOSGSW-BOS` (4,394 NO contracts at $0.040,
+  realized −$4,218.24 when Boston covered).  All 25 trades carry
+  `placed_by='orchestrator'`; **no manual leakage**.
+
+The `−$4,251` was real and genuinely system-placed — but on Feb 20,
+not Feb 19.  Root cause of the date mislabel: `fmtShortDate` in
+`equity-charts.tsx` was parsing the bare `YYYY-MM-DD` bucket key as
+UTC midnight (`new Date(\`${s}T00:00:00Z\`)`) and then formatting
+with `toLocaleDateString(undefined, …)`, which shifted the rendered
+day backward by one in any timezone west of UTC (Pacific renders
+`2026-02-20T00:00:00Z` as Feb 19 local).  The chart's `dataKey="date"`
+and the API payload were both correct; only the tick + tooltip label
+drifted.
+
+Fix: parse `YYYY-MM-DD` by splitting and constructing a *local*
+`new Date(y, m-1, d)`.  Locked with `equity-charts.test.tsx` (5
+tests) covering empty input, malformed input, non-numeric components,
+and the Feb-20 + Jan-1 round-trip — the assertion derives the
+expected label the same way a healthy implementation must, so the
+test is locale-independent.

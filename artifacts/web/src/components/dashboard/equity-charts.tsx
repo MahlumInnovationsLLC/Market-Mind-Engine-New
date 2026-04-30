@@ -37,11 +37,27 @@ function fmtCurrency(n: number | null | undefined, digits = 0): string {
   }).format(n);
 }
 
-function fmtShortDate(s: string): string {
+export function fmtShortDate(s: string): string {
   if (!s) return "—";
-  const d = new Date(`${s}T00:00:00Z`);
-  if (Number.isNaN(d.getTime())) return s;
-  return d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
+  // Parse the YYYY-MM-DD bucket key as a *local* calendar date.  The
+  // backend (`get_public_equity_curve`) groups trades by
+  // `date_trunc('day', executed_at)::date` in UTC and emits each
+  // bucket as a bare `YYYY-MM-DD` string with no timezone.  Parsing
+  // it via `new Date("YYYY-MM-DDT00:00:00Z")` then formatting with
+  // `toLocaleDateString` made any user west of UTC see the *previous*
+  // day (e.g. a 2026-02-20 bucket rendered as "Feb 19" in Pacific
+  // time), which made it look like a real-day trade had been
+  // back-dated.  Splitting the components and constructing a local
+  // Date keeps the rendered label aligned with the backend bucket.
+  const parts = s.split("-");
+  if (parts.length !== 3) return s;
+  const [y, m, d] = parts.map((p) => Number.parseInt(p, 10));
+  if (!Number.isFinite(y) || !Number.isFinite(m) || !Number.isFinite(d)) {
+    return s;
+  }
+  const dt = new Date(y, m - 1, d);
+  if (Number.isNaN(dt.getTime())) return s;
+  return dt.toLocaleDateString(undefined, { month: "short", day: "numeric" });
 }
 
 const CYAN = "hsl(var(--primary))";
