@@ -1108,3 +1108,96 @@ tests) covering empty input, malformed input, non-numeric components,
 and the Feb-20 + Jan-1 round-trip — the assertion derives the
 expected label the same way a healthy implementation must, so the
 test is locale-independent.
+
+## Tail-risk policy gates (Apr 30, 2026 — task #743)
+
+The Feb-20 forensic audit above (the date-mislabel work) surfaced a
+much bigger structural finding once the SYSTEM filter was working
+correctly: **0.28% of YTD 2026 SYSTEM trades drove 163% of the cumu-
+lative loss.**  Direct `asyncpg` audit (`pnl` column,
+`placed_by IN ('orchestrator','autotrader','swarm','operator_recovery')`,
+n=5,347, net **−$5,878**) found two tail patterns that account for
+the entire loss:
+
+* **Deep-OTM bets** (`min(price, 1−price) < $0.10`): 65 trades,
+  18.5% win rate, **−$5,607**.  Worst single trade — Feb-20 NBA
+  Boston/GSW NO at qty=4,394, YES_price=$0.04 (NO entry $0.96, max
+  loss = 4,394 × $0.96 ≈ $4,218) — alone exceeded the entire YTD net
+  loss.
+* **Jumbo bets** (qty ≥ 1,000): 15 trades, 33% win rate, **−$5,985**
+  (−$399 EV/trade), price-independent.
+
+Without those 15 worst trades the bot is **+$3,726 YTD**.  The
+trailing-30-day sample (after avg qty fell 63.9 → 10.3 and jumbo
+trades fell 14 → 1) flipped the bot to **+$2,113 at the same 19.5%
+win rate**, so the policy direction is proven.  The good edge
+($0.60–$0.90 favorites: +$6,326 across 1,500+ trades, +$11–$17
+EV/trade) is left untouched — these gates are defensive caps on the
+tail, not a strategy change.
+
+Two new no-DB risk gates land in `app/risk/gates.py`, slotted between
+`gate_agreement` (model-side) and the round-2 audit gates (DB-touching
+`sharpe_ratio` / `ruin_monte_carlo` / `segment_throttler`) so a deep-OTM
+or jumbo candidate is rejected BEFORE we burn DB round-trips on the
+audit / sizing reads:
+
+1. **`gate_tail_price_size_cap`** — fires when one leg of the market
+   is trading in the tail (`min(YES_price, 1−YES_price) < tail_price_threshold`,
+   default `$0.10`).  Catches both directions: deep-underdog YES bets
+   (small per-contract entry, but jumbo qty inflates exposure) and
+   deep-favorite NO bets (large per-contract entry — the Feb-20 case).
+   When triggered, two side-aware caps are checked:
+   * `intended_notional_usd` (= qty × YES_price) ≤ `max_tail_notional_usd`
+     (default `$400`).
+   * `max_loss_usd` (= qty × entry_price, where entry_price is YES_price
+     for YES, `1 − YES_price` for NO) ≤ `max_tail_loss_usd` (default
+     `$400`).
+   Default caps are sized so the worst-case Feb-20-style loss would
+   have been rejected.  Setting any cap to `0` (per-vertical or global)
+   disables that sub-check; a `None` `current_price` short-circuits to
+   PASS so a missing tick never nukes a cycle.
+2. **`gate_jumbo_quantity_cap`** — hard ceiling on `intended_quantity`
+   (default `750`, comfortably below the audit's 1,000-contract jumbo
+   boundary).  Belt-and-suspenders against Kelly + per-vertical override
+   drift pushing size into the catastrophic zone.  Set to `0` to
+   disable.
+
+Both gates use the existing `_resolve_per_vertical_override` helper
+(reads `risk.<knob>.<vertical>` then `risk.<knob>` from
+`ctx.operator_overrides`), so an operator can run sports stricter than
+crypto — the audit shows crypto deep-OTM is roughly flat
+(−$0.18 EV/trade across 3,426 trades) and can use a looser cap
+without hurting the system bottom line.
+
+* **Operator UI surface** — `app/runtime_settings.py::RISK_KNOB_SPECS`
+  gains four entries (`tail_price_threshold`, `max_tail_loss_usd`,
+  `max_tail_notional_usd`, `jumbo_quantity_cap`) so the existing
+  Live-risk-knobs admin panel + per-vertical gatekeeper-tuning UI
+  accept the new keys without a new screen.  Bounds were picked so a
+  fat-fingered slider can't widen the gate past the regime its
+  defaults were sized for: threshold ∈ [0, 0.49], loss/notional caps
+  ∈ [$0, $10,000], jumbo cap ∈ [0, 100,000] contracts.  Setting any
+  cap to 0 disables that sub-check, which is the documented
+  emergency-loosen path.
+* **Registry invariant** — `assert len(GATES) == 19` in
+  `app/risk/gates.py`.  Order is: kill-switch / daily-loss /
+  vertical-halted / market-cooldown / swarm-approval / model-side
+  (min_edge / drift / agreement) → **tail-risk** (`tail_price_size_cap`,
+  `jumbo_quantity_cap`) → audit (`sharpe_ratio` / `ruin_monte_carlo` /
+  `segment_throttler`) → sizing (`kelly_fraction` / `bankroll_floor`
+  / `global_exposure_cap` / `per_vertical_cap` /
+  `max_concurrent_positions` / `duplicate_trade`).  Five vertical-spec
+  invariant tests + the round-2 ordering test were updated from
+  `len == 17` → `len == 19` with comments documenting the bump source
+  (task #743).
+* **Coverage** — 22 new tests in `tests/test_gates_tail_risk_policy.py`
+  cover both gates' pass / veto / disabled (whole-gate and per-sub-cap) /
+  per-vertical-override (loosen + tighten) / side-aware-max-loss /
+  missing-price branches, plus a Feb-20 NBA replay that reconstructs
+  the exact failing `RiskContext` and asserts
+  (a) the tail gate rejects with `entry_price=$0.96` and
+  `max_loss_usd ≈ $4,218`, (b) the jumbo gate rejects with
+  `qty=4,394 > 750`, and (c) the full `run_all_gates` pipeline
+  short-circuits at the tail gate without ever invoking any DB-backed
+  gate downstream.  Final api-server suite: 2,458 passed / 3 skipped /
+  0 failed.

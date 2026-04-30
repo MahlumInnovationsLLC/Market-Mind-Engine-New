@@ -564,6 +564,176 @@ async def gate_agreement(ctx: RiskContext) -> GateResult:
     )
 
 
+# ---------------------------------------------------------------------------
+# Tail-risk policy gates (task #743 — May 2026 forensic audit).
+#
+# YTD 2026 SYSTEM trade audit (placed_by IN orchestrator/autotrader/swarm/
+# operator_recovery, n=5,347, net −$5,878) found two tail patterns that
+# accounted for the entire loss:
+#
+#   * Deep-OTM bets (min(price, 1−price) < $0.10): 65 trades, 18.5% win
+#     rate, **−$5,607**.  Worst single trade — Feb-20 NBA Boston/GSW NO
+#     at qty=4,394, YES_price=$0.04 (so NO entry = $0.96, side-aware
+#     max-loss = 4,394 × $0.96 ≈ $4,218) — alone exceeded the entire
+#     YTD net loss.
+#   * Jumbo bets (qty >= 1,000): 15 trades, 33% win rate, **−$5,985**.
+#
+# Without those 15 worst trades the bot is **+$3,726 YTD**.  The 30-day
+# trailing sample (after avg qty fell 63.9 → 10.3 and jumbo trades fell
+# 14 → 1) flipped the bot to **+$2,113 at the same 19.5% win rate**, so
+# the policy direction is proven.  The good edge ($0.60–$0.90 favorites:
+# +$6,326 across 1,500+ trades) is left untouched — these gates are
+# defensive caps on the tail, not a strategy change.
+# ---------------------------------------------------------------------------
+
+
+async def gate_tail_price_size_cap(ctx: RiskContext) -> GateResult:
+    """Cap exposure on tail-priced markets (task #743).
+
+    A market is "tail-priced" when one side is trading near zero, i.e.
+    ``min(YES_price, 1 - YES_price) < tail_price_threshold`` (default
+    $0.10).  This catches both directions of the failure mode the
+    forensic audit found:
+
+      * Deep-underdog YES bets (small per-contract entry, fragile —
+        jumbo qty inflates exposure dramatically).
+      * Deep-favorite NO bets (large per-contract entry — the Feb-20
+        NBA case: YES@$0.04 → NO@$0.96, qty=4,394, max-loss $4,218).
+
+    When the gate fires, two side-aware caps are checked:
+
+      * ``intended_notional_usd``  (= qty × YES_price; the bot's
+        existing notional accounting) must be ≤ ``max_tail_notional_usd``
+        (default $400).
+      * ``max_loss_usd``  (= qty × entry_price, where entry_price =
+        YES_price for YES, (1 − YES_price) for NO) must be ≤
+        ``max_tail_loss_usd`` (default $400).  This is what you actually
+        lose if the contract expires worthless.
+
+    Both caps support per-vertical override (e.g. crypto deep-OTM is
+    flat in the audit and can use a looser cap; sports is the bleeder).
+    Any cap set to ``0`` disables that sub-check, and a ``None``
+    ``current_price`` short-circuits to PASS so a missing tick never
+    nukes a cycle.
+
+    Knobs (resolved via ``_resolve_per_vertical_override``):
+      * ``tail_price_threshold``    — default 0.10
+      * ``max_tail_notional_usd``   — default 400.0
+      * ``max_tail_loss_usd``       — default 400.0
+    """
+    if ctx.current_price is None:
+        return GateResult(
+            "tail_price_size_cap", True, "no current_price", {}
+        )
+    threshold = _resolve_per_vertical_override(
+        ctx, "tail_price_threshold", 0.10
+    )
+    if threshold <= 0:
+        return GateResult(
+            "tail_price_size_cap",
+            True,
+            "disabled",
+            {"threshold": threshold},
+        )
+    price = float(ctx.current_price)
+    # Side-aware "skew" measure: how close the cheaper leg is to zero.
+    # min(price, 1-price) is the displayed price of the cheaper side,
+    # so when it's below the threshold we know SOME leg of the market
+    # is trading deep in the tail — independent of which side the bot
+    # is taking.
+    tail_skew = min(price, 1.0 - price)
+    if tail_skew >= threshold:
+        return GateResult(
+            "tail_price_size_cap",
+            True,
+            "",
+            {
+                "threshold": threshold,
+                "tail_skew": tail_skew,
+                "current_price": price,
+            },
+        )
+    side = (ctx.side or "").upper()
+    entry_price = price if side == "YES" else (1.0 - price)
+    qty = max(int(ctx.intended_quantity), 0)
+    max_loss_usd = qty * entry_price
+    notional_usd = float(ctx.intended_notional_usd)
+    max_loss_cap = _resolve_per_vertical_override(
+        ctx, "max_tail_loss_usd", 400.0
+    )
+    max_notional_cap = _resolve_per_vertical_override(
+        ctx, "max_tail_notional_usd", 400.0
+    )
+    details = {
+        "threshold": threshold,
+        "tail_skew": tail_skew,
+        "current_price": price,
+        "entry_price": entry_price,
+        "side": side,
+        "intended_quantity": qty,
+        "intended_notional_usd": notional_usd,
+        "max_loss_usd": max_loss_usd,
+        "max_loss_cap_usd": max_loss_cap,
+        "max_notional_cap_usd": max_notional_cap,
+    }
+    if max_loss_cap > 0 and max_loss_usd > max_loss_cap:
+        return GateResult(
+            "tail_price_size_cap",
+            False,
+            (
+                f"tail-priced market ({side} entry ${entry_price:.3f}); "
+                f"max-loss ${max_loss_usd:.2f} > cap ${max_loss_cap:.2f}"
+            ),
+            details,
+        )
+    if max_notional_cap > 0 and notional_usd > max_notional_cap:
+        return GateResult(
+            "tail_price_size_cap",
+            False,
+            (
+                f"tail-priced market ({side} entry ${entry_price:.3f}); "
+                f"notional ${notional_usd:.2f} > cap ${max_notional_cap:.2f}"
+            ),
+            details,
+        )
+    return GateResult("tail_price_size_cap", True, "", details)
+
+
+async def gate_jumbo_quantity_cap(ctx: RiskContext) -> GateResult:
+    """Reject any candidate whose contract count is in the jumbo zone
+    (task #743).
+
+    Belt-and-suspenders against Kelly + override drift pushing size
+    into the catastrophic zone.  The forensic audit found 15 trades
+    with ``qty >= 1,000`` totalled **−$5,985** (33% win rate, −$399
+    EV/trade) — independent of price, large qty kept blowing up.  The
+    default cap of 750 sits comfortably below the audit's jumbo
+    boundary so an operator running a deliberate "big swing" still has
+    to opt in via the per-vertical override.
+
+    Set ``jumbo_quantity_cap`` to 0 (per-vertical or global) to
+    disable the gate entirely — useful for paper-only environments.
+
+    Knobs:
+      * ``jumbo_quantity_cap`` — default 750 contracts.
+    """
+    cap = int(_resolve_per_vertical_override(ctx, "jumbo_quantity_cap", 750.0))
+    qty = int(ctx.intended_quantity)
+    details = {"intended_quantity": qty, "cap": cap}
+    if cap <= 0:
+        return GateResult(
+            "jumbo_quantity_cap", True, "disabled", details
+        )
+    if qty > cap:
+        return GateResult(
+            "jumbo_quantity_cap",
+            False,
+            f"intended quantity {qty} > jumbo cap {cap}",
+            details,
+        )
+    return GateResult("jumbo_quantity_cap", True, "", details)
+
+
 async def gate_sharpe_ratio(ctx: RiskContext) -> GateResult:
     """Round-2 audit gate: realised trailing-Sharpe floor.
 
@@ -1376,6 +1546,16 @@ GATES: tuple[tuple[str, GateFn], ...] = (
     ("min_edge", gate_min_edge),
     ("drift", gate_drift),
     ("agreement", gate_agreement),
+    # Tail-risk policy gates (task #743 — May 2026 forensic audit).
+    # Cheap, no-DB caps that reject deep-OTM and jumbo-sized
+    # candidates BEFORE the round-2 audit gates spend DB round-trips on
+    # trailing-Sharpe / Monte-Carlo ruin / segment-throttler queries.
+    # Defaults are sized so the forensic audit's worst-case Feb-20 NBA
+    # trade (qty=4,394, NO entry=$0.96, max-loss $4,218) would have
+    # been rejected; see each gate's docstring for the full audit
+    # provenance.
+    ("tail_price_size_cap", gate_tail_price_size_cap),
+    ("jumbo_quantity_cap", gate_jumbo_quantity_cap),
     # Round-2 audit gates (task #730) — model-side decay + portfolio
     # ruin + per-segment loss throttle.  Sit between the swarm/agreement
     # gates and the sizing gates so a decayed book is rejected BEFORE
@@ -1392,10 +1572,10 @@ GATES: tuple[tuple[str, GateFn], ...] = (
     ("max_concurrent_positions", gate_max_concurrent_positions),
     ("duplicate_trade", gate_duplicate_trade),
 )
-assert len(GATES) == 17, (
-    "17 gates: 12 original + daily_loss (task #268) + vertical_halted "
+assert len(GATES) == 19, (
+    "19 gates: 12 original + daily_loss (task #268) + vertical_halted "
     "(task #271) + sharpe_ratio + ruin_monte_carlo + segment_throttler "
-    "(task #730)"
+    "(task #730) + tail_price_size_cap + jumbo_quantity_cap (task #743)"
 )
 
 

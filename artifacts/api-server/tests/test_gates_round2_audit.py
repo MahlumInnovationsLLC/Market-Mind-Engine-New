@@ -399,4 +399,6 @@ def test_round2_gates_registered_between_agreement_and_kelly():
             f"{new} must sit between agreement ({i_agreement}) and "
             f"kelly_fraction ({i_kelly}); got {idx}"
         )
-    assert len(_gates.GATES) == 17
+    # 17 from the round-2 audit + 2 added by task #743 (tail-risk policy
+    # gates `tail_price_size_cap` + `jumbo_quantity_cap`).
+    assert len(_gates.GATES) == 19

@@ -787,6 +787,34 @@ RISK_KNOB_SPECS: tuple["_KnobSpec", ...] = (
               "(league, market_type) segment in the trailing window "
               "reach this count",
               1.0, 50.0, 1.0, "int", "count"),
+    # ---- Tail-risk policy gates (task #743) -----------------------------
+    # Surfaced on the same Live-risk-knobs panel so the operator can
+    # respond to a tail-driven drawdown without a redeploy.  Bounds:
+    # the threshold can't go above 0.49 (no real "tail" past the
+    # mid), the cap floors at 0 (which the gate treats as "disabled")
+    # and ceilings at $10k / 100k contracts so a fat-fingered slider
+    # can't widen the gate past the regime its defaults were sized
+    # for.  See `app/risk/gates.py::gate_tail_price_size_cap` and
+    # `gate_jumbo_quantity_cap` for the full audit provenance.
+    _KnobSpec("tail_price_threshold", "Tail-price threshold",
+              "Trip the tail-price size cap when "
+              "min(YES_price, 1 - YES_price) is below this. "
+              "Set to 0 to disable the gate.",
+              0.0, 0.49, 0.01, "float", "fraction"),
+    _KnobSpec("max_tail_loss_usd", "Max tail max-loss",
+              "Cap on side-aware max-loss exposure "
+              "(qty × entry_price) for tail-priced markets. "
+              "Set to 0 to disable the sub-check.",
+              0.0, 10_000.0, 25.0, "float", "usd"),
+    _KnobSpec("max_tail_notional_usd", "Max tail notional",
+              "Cap on intended notional (qty × YES_price) for "
+              "tail-priced markets. Set to 0 to disable the "
+              "sub-check.",
+              0.0, 10_000.0, 25.0, "float", "usd"),
+    _KnobSpec("jumbo_quantity_cap", "Jumbo quantity cap",
+              "Hard ceiling on contract count per candidate. "
+              "Set to 0 to disable the gate.",
+              0.0, 100_000.0, 25.0, "int", "count"),
 )
 
 RISK_KNOB_KEYS: frozenset[str] = frozenset(s.key for s in RISK_KNOB_SPECS)

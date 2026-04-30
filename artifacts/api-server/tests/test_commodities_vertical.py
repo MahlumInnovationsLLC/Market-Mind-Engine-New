@@ -215,7 +215,7 @@ def test_twelve_gate_invariant_unchanged():
     # still that *commodities* sub-checks fold into existing gates
     # rather than adding new entries — only cross-vertical risk plumbing
     # is allowed to grow this number.
-    assert len(GATES) == 17
+    assert len(GATES) == 19
 
 
 def _commodities_ctx(**overrides) -> RiskContext:
