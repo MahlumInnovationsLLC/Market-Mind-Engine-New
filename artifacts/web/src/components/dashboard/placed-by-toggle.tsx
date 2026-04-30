@@ -7,8 +7,10 @@ import { usePlacedBy, type PlacedByFilter } from "./placed-by-context";
  * single horizontal control bar.  Backed by `<PlacedByProvider>` —
  * see :file:`placed-by-context.tsx` for URL plumbing.
  *
- * `Both` is the documented default and maps to ``placed_by=all`` on
- * the wire (the API treats `all` as no-filter, surfacing every row
+ * `System` is the documented default (operator preference 2026-04-30:
+ * the landing dashboard should reflect the autotrader's performance,
+ * not manual side-bets).  `Both` maps to ``placed_by=all`` on the
+ * wire (the API treats `all` as no-filter, surfacing every row
  * including ``rh_import`` and ``unknown`` provenance buckets).
  */
 const SEGMENTS: { key: PlacedByFilter; label: string; testId: string }[] = [

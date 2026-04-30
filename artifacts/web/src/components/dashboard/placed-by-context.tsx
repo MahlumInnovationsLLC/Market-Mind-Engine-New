@@ -28,13 +28,24 @@ import { useLocation, useSearch } from "wouter";
  *   - On mount we hydrate from the URL; on change we replace history
  *     (no push) so the back button doesn't fill with toggle clicks.
  *
- * `all` is the documented default; we omit the param from the URL when
- * the value equals the default to keep shared links clean.
+ * `system` is the documented default for any page wrapped in
+ * `<PlacedByProvider>` (operator preference 2026-04-30: the landing
+ * dashboard should reflect the autotrader's performance, not the
+ * operator's manual side-bets — Manual / Both are explicit opt-ins).
+ * We omit the param from the URL when the value equals this default
+ * to keep shared links clean.
+ *
+ * Components rendered OUTSIDE a provider (the legacy fallback in
+ * `usePlacedBy` below) still resolve to ``"all"`` — those mounts
+ * (e.g. the /trading page's recent-trades card) have never been
+ * filterable and must not start filtering silently when their host
+ * page hasn't opted into the toggle.
  */
 
 export type PlacedByFilter = "manual" | "system" | "all";
 
-const DEFAULT_FILTER: PlacedByFilter = "all";
+const DEFAULT_FILTER: PlacedByFilter = "system";
+const UNWRAPPED_FALLBACK: PlacedByFilter = "all";
 const URL_PARAM = "placed_by";
 
 function parsePlacedBy(raw: string | null | undefined): PlacedByFilter {
@@ -117,7 +128,7 @@ export function usePlacedBy(): Ctx {
   const ctx = useContext(PlacedByContext);
   if (!ctx) {
     return {
-      placedBy: DEFAULT_FILTER,
+      placedBy: UNWRAPPED_FALLBACK,
       setPlacedBy: () => undefined,
     };
   }

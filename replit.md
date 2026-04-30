@@ -313,10 +313,14 @@ per-row (see `_tag_placed_by` in `scripts/backfill_kalshi_fills.py`).
   `dashboard/highlights-panel`.  The standalone `/verticals` page
   (`pages/verticals.tsx`) wraps itself in its own `<PlacedByProvider>`
   and renders the same toggle since it is mounted outside the
-  dashboard's provider tree.  Outside any provider (e.g. the /trading
-  page's recent-trades card) `usePlacedBy()` falls back to
-  `{placedBy:'all', setPlacedBy:no-op}` so legacy mounts keep working.
-  Coverage: `placed-by-toggle.test.tsx` (5 tests).
+  dashboard's provider tree.  **In-provider default is `system`**
+  (operator preference 2026-04-30: landing surfaces should reflect
+  autotrader performance — manual / both are explicit opt-ins).
+  Outside any provider (e.g. the /trading page's recent-trades card)
+  `usePlacedBy()` falls back to `{placedBy:'all', setPlacedBy:no-op}`
+  so legacy mounts keep their previous unfiltered behaviour and don't
+  start filtering silently.  Coverage:
+  `placed-by-toggle.test.tsx` (5 tests, defaults asserted).
 - **Mobile UI** (`artifacts/mobile/`): `lib/placed-by-filter.ts`
   module-level pub/sub mirrors the existing `vertical-filter.ts`
   pattern so the choice persists across tab navigation without a
@@ -324,9 +328,19 @@ per-row (see `_tag_placed_by` in `scripts/backfill_kalshi_fills.py`).
   same MANUAL / SYSTEM / BOTH segments and is mounted on the
   Dashboard, Positions, and Verticals tabs; each tab threads
   `placed_by` into both the `apiFetch` URL and the React-Query key so
-  switching segments invalidates cleanly.  Coverage:
+  switching segments invalidates cleanly.  **Default segment is
+  `system`** to match the web landing-page behaviour.  Coverage:
   `components/__tests__/PlacedByToggle.test.tsx` (3 tests, including a
   twin-mount lock-step assertion).  Mobile suite green at 193 passing.
+- **Auth UX guardrail** (`artifacts/web/src/ClerkApp.tsx`,
+  `AuthedShellRoute`): unauthenticated users hitting any protected
+  route under the catch-all (e.g. `/app`, `/verticals`, `/trading`)
+  are redirected to `/sign-in` rather than the public NotFound page.
+  Previously a signed-out visitor opening the preview at `/app` saw a
+  bare 404 with the dev-only "Did you forget to add the page to the
+  router?" hint, which read as a regression.  The Clerk SignIn page's
+  `fallbackRedirectUrl` already points back to `/app`, so the round-
+  trip is seamless.
 
 ## Model artifacts (v155) — verification + V1 import status
 

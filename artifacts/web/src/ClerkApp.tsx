@@ -316,16 +316,20 @@ function AuthedShell() {
 
 function AuthedShellRoute() {
   // Catch-all for any path not matched by the public-route Switch above.
-  // Signed-in users get the shell (which has its own inner NotFound for
-  // unknown sub-paths); signed-out users get the public NotFound page so
-  // unknown URLs don't silently bounce to `/`.
+  // Signed-in users get the shell (which has its own inner Switch — and
+  // its own inner NotFound for genuinely unknown sub-paths).  Signed-out
+  // users hitting a protected route (e.g. /app, /verticals, /trading)
+  // get bounced to /sign-in rather than a confusing public 404 — the
+  // intent is clearly "I want the app", not "I typed a wrong URL".
+  // Clerk's fallbackRedirectUrl on the SignIn page sends them back to
+  // /app once they're signed in.
   return (
     <>
       <Show when="signed-in">
         <AuthedShell />
       </Show>
       <Show when="signed-out">
-        <NotFound />
+        <Redirect to={`${basePath}/sign-in`} />
       </Show>
     </>
   );

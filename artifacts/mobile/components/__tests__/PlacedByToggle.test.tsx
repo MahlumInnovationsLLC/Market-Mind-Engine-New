@@ -3,7 +3,9 @@
  * mobile counterpart of the web `placed-by-toggle.test.tsx`).
  *
  * Verifies:
- *   - Default segment is "BOTH" (the web/API contract).
+ *   - Default segment is "SYSTEM" (operator preference 2026-04-30:
+ *     landing surfaces should reflect autotrader performance, not
+ *     manual side-bets — see `DEFAULT_FILTER` in placed-by-filter.ts).
  *   - Tapping a segment publishes the new value through the
  *     module-level pub/sub backing the `usePlacedBy` hook so other
  *     mounted consumers (e.g. another tab's toggle) move in lock-step.
@@ -38,14 +40,15 @@ beforeEach(() => {
 });
 
 describe("PlacedByToggle", () => {
-  it("renders the three provenance segments with BOTH selected by default", () => {
+  it("renders the three provenance segments with SYSTEM selected by default", () => {
     render(<PlacedByToggle />);
     expect(screen.getByTestId("placed-by-manual")).toBeTruthy();
-    expect(screen.getByTestId("placed-by-system")).toBeTruthy();
-    const both = screen.getByTestId("placed-by-all");
-    // The "all" segment is selected by default — the API contract
-    // treats `all` as no WHERE clause.
-    expect(both.props.accessibilityState).toEqual(
+    expect(screen.getByTestId("placed-by-all")).toBeTruthy();
+    const system = screen.getByTestId("placed-by-system");
+    // The "system" segment is selected by default — operator preference
+    // 2026-04-30 is to surface autotrader-only P&L on landing.  See
+    // DEFAULT_FILTER in placed-by-filter.ts.
+    expect(system.props.accessibilityState).toEqual(
       expect.objectContaining({ selected: true }),
     );
   });
@@ -59,8 +62,9 @@ describe("PlacedByToggle", () => {
     expect(manual.props.accessibilityState).toEqual(
       expect.objectContaining({ selected: true }),
     );
-    const both = screen.getByTestId("placed-by-all");
-    expect(both.props.accessibilityState).toEqual(
+    // The previously-default "system" segment should now be deselected.
+    const system = screen.getByTestId("placed-by-system");
+    expect(system.props.accessibilityState).toEqual(
       expect.objectContaining({ selected: false }),
     );
   });

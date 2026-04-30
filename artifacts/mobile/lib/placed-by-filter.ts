@@ -13,14 +13,17 @@ import { useEffect, useState } from "react";
  *   - Multiple consumers (Dashboard, Positions, Verticals tabs) stay
  *     in lock-step on a single source of truth.
  *
- * `all` is the documented default and means "no server-side filter" —
- * the API treats it as no WHERE clause, surfacing every row including
- * the ``rh_import`` and ``unknown`` provenance buckets.
+ * `system` is the documented default (operator preference 2026-04-30:
+ * the landing dashboard should reflect the autotrader's performance,
+ * not manual side-bets — Manual / Both are explicit opt-ins).  `all`
+ * means "no server-side filter" — the API treats it as no WHERE
+ * clause, surfacing every row including the ``rh_import`` and
+ * ``unknown`` provenance buckets.
  */
 
 export type PlacedByFilter = "manual" | "system" | "all";
 
-const DEFAULT_FILTER: PlacedByFilter = "all";
+const DEFAULT_FILTER: PlacedByFilter = "system";
 
 let _placedBy: PlacedByFilter = DEFAULT_FILTER;
 const _listeners = new Set<(v: PlacedByFilter) => void>();
