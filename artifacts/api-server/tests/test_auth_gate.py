@@ -305,6 +305,7 @@ OTHER_PUBLIC_ROUTES: tuple[str, ...] = (
     "/api/billing/webhook",
     "/api/billing/revenuecat-webhook",
     "/api/public/equity-curve",
+    "/api/public/tail-risk-exposure",
     "/api/public/stats",
     "/api/public/recent-signals",
     "/api/public/leads",

@@ -18,6 +18,7 @@ import { Card, SectionHeader, StatTile } from "@/components/Card";
 import DelayedSignalsBanner from "@/components/DelayedSignalsBanner";
 import PerLeagueCalibration from "@/components/PerLeagueCalibration";
 import { PlacedByToggle } from "@/components/PlacedByToggle";
+import TailRiskExposure from "@/components/TailRiskExposure";
 import { useColors } from "@/hooks/useColors";
 import { apiFetch } from "@/lib/api";
 import { usePlacedBy } from "@/lib/placed-by-filter";
@@ -334,6 +335,8 @@ export default function DashboardScreen() {
           testID="card-recent-trades"
         />
       </View>
+
+      <TailRiskExposure />
 
       <SectionHeader>SWARM</SectionHeader>
       <View style={styles.row}>

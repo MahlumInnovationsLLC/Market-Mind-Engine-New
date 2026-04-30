@@ -20,6 +20,7 @@ import { PeriodProvider, PeriodStrip } from "@/components/dashboard/period-conte
 import { PlacedByProvider } from "@/components/dashboard/placed-by-context";
 import { PlacedByToggle } from "@/components/dashboard/placed-by-toggle";
 import PipelineTracker from "@/components/dashboard/pipeline-tracker";
+import TailRiskExposurePanel from "@/components/dashboard/tail-risk-exposure-panel";
 import TelegramConcierge from "@/components/dashboard/telegram-concierge";
 import TournamentLeaderboardsPanel from "@/components/dashboard/tournament-leaderboards-panel";
 import TournamentTimelinePanel from "@/components/dashboard/tournament-timeline-panel";
@@ -74,6 +75,8 @@ export default function Dashboard() {
         </header>
 
         <KpiSummaryBar />
+
+        <TailRiskExposurePanel />
 
         <VerticalPicker isAdmin={isAdmin} />
 

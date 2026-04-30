@@ -741,6 +741,265 @@ async def get_public_equity_curve(
         return []
 
 
+# ---------------------------------------------------------------------------
+# Tail-risk exposure (task #744).
+#
+# Forensic audit of YTD 2026 SYSTEM trades found that 0.28% of trades
+# (15 of 5,347) drove −$9,604 of cumulative losses on a −$5,878 net
+# book — i.e. without those 15 trades the bot is +$3,726 YTD.  Two
+# patterns explained virtually all of it: deep-OTM tail bets at
+# `t.price < $0.10` (one Feb-20 NBA NO at $0.04 / qty 4,394 lost
+# −$4,218 by itself) and jumbo bets at `t.quantity ≥ 1,000`.
+#
+# This aggregator surfaces a live read-only matrix of:
+#   - **Open exposure** per price-bucket (count, side-aware cost basis,
+#     worst-case max-loss = qty × max(price, 1−price)) sourced from the
+#     `positions` table where `status='open'`.
+#   - **Realized P&L** per price-bucket over a rolling window (default
+#     30 days) sourced from `trades` joined on the same bucket
+#     boundaries — count, wins (pnl > 0), and total realized PnL — so
+#     the operator can compare what each bucket is risking *now* vs
+#     what it has cost over the period.
+#
+# Buckets match the audit's price-bucket taxonomy.  The SQL owns the
+# bucket boundaries — the UI must NOT re-slice client-side, otherwise
+# the tile and any future surface (mobile, alerts) would drift.
+# ---------------------------------------------------------------------------
+
+# Half-open intervals [lo, hi).  The last bucket uses `hi=1.01` so a
+# rare `price = 1.00` settlement-certain row still lands in `$0.90+`.
+_TAIL_RISK_BUCKETS: tuple[tuple[float, float, str], ...] = (
+    (0.00, 0.10, "<$0.10"),
+    (0.10, 0.25, "$0.10–$0.25"),
+    (0.25, 0.40, "$0.25–$0.40"),
+    (0.40, 0.60, "$0.40–$0.60"),
+    (0.60, 0.75, "$0.60–$0.75"),
+    (0.75, 0.90, "$0.75–$0.90"),
+    (0.90, 1.01, "$0.90+"),
+)
+
+# "Tail" = bucket indices whose `lo < 0.20` — i.e. the two leftmost
+# buckets (`<$0.10` and `$0.10–$0.25`).  Used to compute the headline
+# concentration metric (% of open max-loss exposure sitting in tail
+# buckets).  Spec from the task: red ≥ 30%, amber 15–30%, green < 15%.
+_TAIL_BUCKET_INDICES: tuple[int, ...] = tuple(
+    i for i, (lo, _hi, _label) in enumerate(_TAIL_RISK_BUCKETS) if lo < 0.20
+)
+_TAIL_TONE_RED_THRESHOLD = 0.30
+_TAIL_TONE_AMBER_THRESHOLD = 0.15
+
+
+def _zero_tail_totals() -> dict[str, Any]:
+    return {
+        "open_count": 0,
+        "open_cost_usd": 0.0,
+        "open_max_loss_usd": 0.0,
+        "realized_count": 0,
+        "realized_wins": 0,
+        "realized_pnl_usd": 0.0,
+    }
+
+
+def _classify_tail_tone(pct: float | None) -> str:
+    if pct is None:
+        return "empty"
+    if pct >= _TAIL_TONE_RED_THRESHOLD:
+        return "red"
+    if pct >= _TAIL_TONE_AMBER_THRESHOLD:
+        return "amber"
+    return "green"
+
+
+async def get_tail_risk_exposure(
+    days: int = 30,
+    placed_by: str | None = None,
+    verticals: object = None,
+) -> dict[str, Any]:
+    """Bucketed open-exposure + realized-PnL matrix for the dashboard tile.
+
+    Returns one record per bucket (always all 7, even when empty) plus
+    grand totals and a tail-concentration headline.  Each bucket carries
+    a per-vertical breakdown so the operator can see which vertical the
+    current risk is parked in without losing the rollup view.
+
+    The SQL owns the bucket boundaries (CASE-mapped via a VALUES table)
+    so the UI doesn't re-bucket client-side and drift from future
+    surfaces.  Reuses :func:`_placed_by_and_clause` /
+    :func:`_vertical_and_clause` so the manual/system/all and
+    per-vertical taxonomy stays in lock-step with every other route.
+
+    Open positions come from the ``positions`` table where
+    ``status='open'``; that's the same source the operator's open-book
+    surfaces use.  Realized PnL comes from ``trades`` filtered to the
+    rolling window.
+
+    On any DB failure (e.g. ``positions`` missing on a fresh DB) we
+    return a fully-empty matrix rather than 500ing — the tile is a
+    read-only analytics surface and an empty render is preferable to a
+    broken dashboard.  ``ValueError`` from an unknown vertical is the
+    exception: we let it propagate so the route layer can turn it into
+    HTTP 400 (silently dropping a typo would be a P&L-display foot-gun
+    — the operator would think their filter was applied when it wasn't).
+    """
+    days = max(1, min(int(days), 365))
+    # Validate verticals up-front so the route layer can turn a bad name
+    # into HTTP 400 before we ever touch the DB.  Same trust-boundary
+    # stance as `get_public_equity_curve`.
+    pb_t = _placed_by_and_clause(placed_by, alias="t")
+    vert_t = _vertical_and_clause(verticals, alias="t")
+    pb_p = _placed_by_and_clause(placed_by, alias="p")
+    vert_p = _vertical_and_clause(verticals, alias="p")
+
+    # Bake the buckets into a VALUES table so the bucketing taxonomy
+    # lives in this SQL fragment alone — no client-side re-slicing.
+    buckets_values = ",\n              ".join(
+        f"({i}, {lo!r}::float8, {hi!r}::float8)"
+        for i, (lo, hi, _label) in enumerate(_TAIL_RISK_BUCKETS)
+    )
+
+    sql = f"""
+        WITH bucket_defs AS (
+            SELECT * FROM (VALUES
+              {buckets_values}
+            ) AS b(bucket_idx, lo, hi)
+        ),
+        open_pos AS (
+          SELECT
+            coalesce(p.vertical, '__unknown__')              AS vertical,
+            p.quantity::float8                               AS qty,
+            p.avg_price::float8                              AS price,
+            lower(coalesce(p.side, ''))                      AS side_lc
+          FROM positions p
+          WHERE coalesce(p.status, '') = 'open'
+            AND p.quantity IS NOT NULL AND p.quantity > 0
+            AND p.avg_price IS NOT NULL
+            AND p.avg_price >= 0 AND p.avg_price <= 1
+            {pb_p}{vert_p}
+        ),
+        open_bucketed AS (
+          SELECT
+            b.bucket_idx                                                  AS bucket_idx,
+            o.vertical                                                    AS vertical,
+            count(*)::int                                                 AS open_count,
+            sum(
+              o.qty *
+              CASE WHEN o.side_lc IN ('no','n','sell')
+                THEN (1.0 - o.price)
+                ELSE o.price
+              END
+            )::float8                                                     AS open_cost_usd,
+            sum(o.qty * GREATEST(o.price, 1.0 - o.price))::float8         AS open_max_loss_usd
+          FROM open_pos o
+          JOIN bucket_defs b ON o.price >= b.lo AND o.price < b.hi
+          GROUP BY b.bucket_idx, o.vertical
+        ),
+        realized_t AS (
+          SELECT
+            coalesce(t.vertical, '__unknown__')              AS vertical,
+            t.price::float8                                  AS price,
+            coalesce(t.pnl, 0)::float8                       AS pnl
+          FROM trades t
+          WHERE t.executed_at >= ((now() at time zone 'utc')::date - ($1::int - 1))
+            AND t.price IS NOT NULL
+            AND t.price >= 0 AND t.price <= 1
+            {pb_t}{vert_t}
+        ),
+        realized_bucketed AS (
+          SELECT
+            b.bucket_idx                                                  AS bucket_idx,
+            r.vertical                                                    AS vertical,
+            count(*)::int                                                 AS realized_count,
+            sum(CASE WHEN r.pnl > 0 THEN 1 ELSE 0 END)::int               AS realized_wins,
+            sum(r.pnl)::float8                                            AS realized_pnl_usd
+          FROM realized_t r
+          JOIN bucket_defs b ON r.price >= b.lo AND r.price < b.hi
+          GROUP BY b.bucket_idx, r.vertical
+        )
+        SELECT
+          coalesce(o.bucket_idx, r.bucket_idx)             AS bucket_idx,
+          coalesce(o.vertical, r.vertical)                 AS vertical,
+          coalesce(o.open_count, 0)::int                   AS open_count,
+          coalesce(o.open_cost_usd, 0)::float8             AS open_cost_usd,
+          coalesce(o.open_max_loss_usd, 0)::float8         AS open_max_loss_usd,
+          coalesce(r.realized_count, 0)::int               AS realized_count,
+          coalesce(r.realized_wins, 0)::int                AS realized_wins,
+          coalesce(r.realized_pnl_usd, 0)::float8          AS realized_pnl_usd
+        FROM open_bucketed o
+        FULL OUTER JOIN realized_bucketed r
+          ON o.bucket_idx = r.bucket_idx AND o.vertical = r.vertical
+        ORDER BY 1, 2
+    """
+    try:
+        rows = await db.fetch(sql, days)
+    except Exception as e:
+        log.warning("tail_risk_exposure failed: %s", e)
+        rows = []
+
+    # Re-shape into the bucket × vertical matrix the UI consumes.
+    bucket_rows: list[list[dict[str, Any]]] = [[] for _ in _TAIL_RISK_BUCKETS]
+    for r in rows:
+        idx = int(r["bucket_idx"])
+        if 0 <= idx < len(_TAIL_RISK_BUCKETS):
+            bucket_rows[idx].append(
+                {
+                    "vertical": r["vertical"],
+                    "open_count": int(r["open_count"] or 0),
+                    "open_cost_usd": float(r["open_cost_usd"] or 0.0),
+                    "open_max_loss_usd": float(r["open_max_loss_usd"] or 0.0),
+                    "realized_count": int(r["realized_count"] or 0),
+                    "realized_wins": int(r["realized_wins"] or 0),
+                    "realized_pnl_usd": float(r["realized_pnl_usd"] or 0.0),
+                }
+            )
+
+    grand = _zero_tail_totals()
+    buckets_out: list[dict[str, Any]] = []
+    for i, (lo, hi, label) in enumerate(_TAIL_RISK_BUCKETS):
+        rows_i = bucket_rows[i]
+        bucket_total = _zero_tail_totals()
+        for cell in rows_i:
+            for k in bucket_total:
+                bucket_total[k] += cell[k]
+        for k in grand:
+            grand[k] += bucket_total[k]
+        buckets_out.append(
+            {
+                "label": label,
+                "lo": lo,
+                # Don't expose the 1.01 sentinel — clamp the display upper
+                # bound for the last bucket back to 1.00 so the UI doesn't
+                # show "$0.90 to $1.01" which is nonsensical.
+                "hi": hi if hi <= 1.0 else 1.0,
+                "rows": rows_i,
+                "totals": bucket_total,
+            }
+        )
+
+    tail_max_loss = sum(
+        buckets_out[i]["totals"]["open_max_loss_usd"]
+        for i in _TAIL_BUCKET_INDICES
+    )
+    total_max_loss = grand["open_max_loss_usd"]
+    if total_max_loss <= 0:
+        pct: float | None = None
+        tone = "empty"
+    else:
+        pct = tail_max_loss / total_max_loss
+        tone = _classify_tail_tone(pct)
+
+    return {
+        "days": days,
+        "buckets": buckets_out,
+        "totals": grand,
+        "tail_concentration": {
+            "tail_max_loss_usd": tail_max_loss,
+            "total_max_loss_usd": total_max_loss,
+            "pct": pct,
+            "tone": tone,
+        },
+    }
+
+
 async def get_public_stats() -> dict[str, Any]:
     """High-level numbers safe to expose to anonymous visitors.
 

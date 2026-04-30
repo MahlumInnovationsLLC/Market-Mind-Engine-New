@@ -40,6 +40,10 @@ jest.mock("@/lib/vertical-filter", () => ({
     filterActive: false,
     hiddenActive: false,
   }),
+  // The tail-risk-exposure tile (task #744) calls this — stub it out
+  // here so the dashboard render keeps the quota CTA branches as the
+  // sole subject of these tests.
+  useEffectiveVerticals: () => [],
 }));
 
 import DashboardScreen from "../index";
@@ -64,11 +68,31 @@ const OVERVIEW = {
 
 const VERTICALS = { verticals: [] };
 
+const TAIL_RISK_EMPTY = {
+  days: 30,
+  buckets: [],
+  totals: {
+    open_count: 0,
+    open_cost_usd: 0,
+    open_max_loss_usd: 0,
+    realized_count: 0,
+    realized_wins: 0,
+    realized_pnl_usd: 0,
+  },
+  tail_concentration: {
+    tail_max_loss_usd: 0,
+    total_max_loss_usd: 0,
+    pct: null,
+    tone: "empty",
+  },
+};
+
 function setApi(sub: SubInfo): void {
   mockApiFetch.mockImplementation(async (path: string) => {
     if (path.startsWith("/api/dashboard/overview")) return OVERVIEW;
     if (path === "/api/me/subscription") return sub;
     if (path.startsWith("/api/dashboard/verticals")) return VERTICALS;
+    if (path.startsWith("/api/public/tail-risk-exposure")) return TAIL_RISK_EMPTY;
     throw new Error(`Unexpected apiFetch call: ${path}`);
   });
 }
