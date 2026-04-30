@@ -50,6 +50,7 @@ type BucketRow = {
   realized_count: number;
   realized_wins: number;
   realized_pnl_usd: number;
+  ev_per_trade: number | null;
 };
 
 type Totals = {
@@ -59,12 +60,14 @@ type Totals = {
   realized_count: number;
   realized_wins: number;
   realized_pnl_usd: number;
+  ev_per_trade: number | null;
 };
 
 type Bucket = {
   label: string;
   lo: number;
   hi: number;
+  is_tail: boolean;
   rows: BucketRow[];
   totals: Totals;
 };
@@ -78,7 +81,9 @@ type TailRiskResponse = {
     total_max_loss_usd: number;
     pct: number | null;
     tone: ToneType;
+    threshold_price: number;
   };
+  source?: string;
 };
 
 function zeroTotals(): Totals {
@@ -89,29 +94,35 @@ function zeroTotals(): Totals {
     realized_count: 0,
     realized_wins: 0,
     realized_pnl_usd: 0,
+    ev_per_trade: null,
   };
 }
 
 function emptyResponse(): TailRiskResponse {
+  const lows = [0, 0.1, 0.25, 0.4, 0.6, 0.75, 0.9];
+  const highs = [0.1, 0.25, 0.4, 0.6, 0.75, 0.9, 1.0];
+  // Server reports `is_tail=true` only when the WHOLE bucket sits
+  // below the $0.20 threshold — only the `<$0.10` bucket qualifies.
   return {
     days: 30,
-    buckets: [
-      ...["<$0.10", "$0.10–$0.25", "$0.25–$0.40", "$0.40–$0.60",
-          "$0.60–$0.75", "$0.75–$0.90", "$0.90+"].map((label, i) => ({
-        label,
-        lo: i === 0 ? 0 : [0, 0.1, 0.25, 0.4, 0.6, 0.75, 0.9][i],
-        hi: [0.1, 0.25, 0.4, 0.6, 0.75, 0.9, 1.0][i],
-        rows: [] as BucketRow[],
-        totals: zeroTotals(),
-      })),
-    ],
+    buckets: ["<$0.10", "$0.10–$0.25", "$0.25–$0.40", "$0.40–$0.60",
+              "$0.60–$0.75", "$0.75–$0.90", "$0.90+"].map((label, i) => ({
+      label,
+      lo: lows[i],
+      hi: highs[i],
+      is_tail: highs[i] <= 0.2,
+      rows: [] as BucketRow[],
+      totals: zeroTotals(),
+    })),
     totals: zeroTotals(),
     tail_concentration: {
       tail_max_loss_usd: 0,
       total_max_loss_usd: 0,
       pct: null,
       tone: "empty" as ToneType,
+      threshold_price: 0.2,
     },
+    source: "positions",
   };
 }
 
@@ -163,6 +174,7 @@ describe("TailRiskExposure (mobile)", () => {
         realized_count: 1,
         realized_wins: 0,
         realized_pnl_usd: -4218,
+        ev_per_trade: -4218,
       },
     ];
     r.buckets[0].totals = {
@@ -172,6 +184,7 @@ describe("TailRiskExposure (mobile)", () => {
       realized_count: 1,
       realized_wins: 0,
       realized_pnl_usd: -4218,
+      ev_per_trade: -4218,
     };
     r.totals = { ...r.buckets[0].totals };
     r.tail_concentration = {
@@ -179,6 +192,7 @@ describe("TailRiskExposure (mobile)", () => {
       total_max_loss_usd: 4218.24,
       pct: 1.0,
       tone: "red",
+      threshold_price: 0.2,
     };
     mockApiFetch.mockResolvedValueOnce(r);
 
@@ -191,6 +205,12 @@ describe("TailRiskExposure (mobile)", () => {
     expect(screen.getByTestId("tail-risk-bucket-<$0.10")).toBeTruthy();
     // Other buckets with no activity are filtered out of the mobile view.
     expect(screen.queryByTestId("tail-risk-bucket-$0.40–$0.60")).toBeNull();
+    // Headline copy uses the server-published threshold ($0.20), NOT
+    // the prior hardcoded "$0.25" — architect rejection landed here.
+    const detail = screen.getByTestId("tail-risk-headline-detail");
+    expect(detail.props.children.join("")).toContain("<$0.20");
+    // EV/trade for the Feb-20 bucket is surfaced inline.
+    expect(screen.getByTestId("tail-risk-bucket-<$0.10-ev")).toBeTruthy();
   });
 
   it("classifies amber and green tones from the server response", async () => {
@@ -200,6 +220,7 @@ describe("TailRiskExposure (mobile)", () => {
       total_max_loss_usd: 1000,
       pct: 0.2,
       tone: "amber",
+      threshold_price: 0.2,
     };
     r1.totals.open_max_loss_usd = 1000;
     r1.totals.open_count = 1;
@@ -216,6 +237,7 @@ describe("TailRiskExposure (mobile)", () => {
       total_max_loss_usd: 1000,
       pct: 0.05,
       tone: "green",
+      threshold_price: 0.2,
     };
     r2.totals.open_max_loss_usd = 1000;
     r2.totals.open_count = 1;
@@ -224,6 +246,47 @@ describe("TailRiskExposure (mobile)", () => {
     expect(
       await screen.findByTestId("tail-risk-headline-tone-green"),
     ).toBeTruthy();
+  });
+
+  it("renders the per-vertical breakdown when a bucket has multiple verticals", async () => {
+    // Asserts the matrix view: when a single bucket carries more than
+    // one vertical, mobile renders the per-cell sub-rows so the
+    // operator sees which slice owns the exposure (parity with the
+    // web table's nested per-vertical rows).
+    const r = emptyResponse();
+    r.buckets[0].rows = [
+      {
+        vertical: "sports", open_count: 2,
+        open_cost_usd: 800, open_max_loss_usd: 800,
+        realized_count: 5, realized_wins: 1, realized_pnl_usd: -1500,
+        ev_per_trade: -300,
+      },
+      {
+        vertical: "crypto", open_count: 1,
+        open_cost_usd: 50, open_max_loss_usd: 50,
+        realized_count: 0, realized_wins: 0, realized_pnl_usd: 0,
+        ev_per_trade: null,
+      },
+    ];
+    r.buckets[0].totals = {
+      open_count: 3, open_cost_usd: 850, open_max_loss_usd: 850,
+      realized_count: 5, realized_wins: 1, realized_pnl_usd: -1500,
+      ev_per_trade: -300,
+    };
+    r.totals = { ...r.buckets[0].totals };
+    r.tail_concentration = {
+      tail_max_loss_usd: 850, total_max_loss_usd: 850,
+      pct: 1.0, tone: "red", threshold_price: 0.2,
+    };
+    mockApiFetch.mockResolvedValueOnce(r);
+
+    renderTile();
+
+    // Both per-vertical sub-rows render under the bucket.
+    expect(
+      await screen.findByTestId("tail-risk-cell-<$0.10-sports"),
+    ).toBeTruthy();
+    expect(screen.getByTestId("tail-risk-cell-<$0.10-crypto")).toBeTruthy();
   });
 
   it("surfaces a clear error message when the request fails", async () => {

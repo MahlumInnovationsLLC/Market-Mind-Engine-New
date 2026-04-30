@@ -57,31 +57,32 @@ function emptyBody() {
     days: 30,
     buckets: [
       {
-        label: "<$0.10", lo: 0.0, hi: 0.1, rows: [],
+        label: "<$0.10", lo: 0.0, hi: 0.1, is_tail: true, rows: [],
         totals: zeroTotals(),
       },
       {
-        label: "$0.10–$0.25", lo: 0.1, hi: 0.25, rows: [],
+        // Straddles the $0.20 threshold — server reports is_tail=false.
+        label: "$0.10–$0.25", lo: 0.1, hi: 0.25, is_tail: false, rows: [],
         totals: zeroTotals(),
       },
       {
-        label: "$0.25–$0.40", lo: 0.25, hi: 0.4, rows: [],
+        label: "$0.25–$0.40", lo: 0.25, hi: 0.4, is_tail: false, rows: [],
         totals: zeroTotals(),
       },
       {
-        label: "$0.40–$0.60", lo: 0.4, hi: 0.6, rows: [],
+        label: "$0.40–$0.60", lo: 0.4, hi: 0.6, is_tail: false, rows: [],
         totals: zeroTotals(),
       },
       {
-        label: "$0.60–$0.75", lo: 0.6, hi: 0.75, rows: [],
+        label: "$0.60–$0.75", lo: 0.6, hi: 0.75, is_tail: false, rows: [],
         totals: zeroTotals(),
       },
       {
-        label: "$0.75–$0.90", lo: 0.75, hi: 0.9, rows: [],
+        label: "$0.75–$0.90", lo: 0.75, hi: 0.9, is_tail: false, rows: [],
         totals: zeroTotals(),
       },
       {
-        label: "$0.90+", lo: 0.9, hi: 1.0, rows: [],
+        label: "$0.90+", lo: 0.9, hi: 1.0, is_tail: false, rows: [],
         totals: zeroTotals(),
       },
     ],
@@ -91,7 +92,9 @@ function emptyBody() {
       total_max_loss_usd: 0,
       pct: null,
       tone: "empty",
+      threshold_price: 0.2,
     },
+    source: "positions",
     placed_by: "all",
     verticals: [],
   };
@@ -105,6 +108,7 @@ function zeroTotals() {
     realized_count: 0,
     realized_wins: 0,
     realized_pnl_usd: 0,
+    ev_per_trade: null,
   };
 }
 
@@ -154,42 +158,48 @@ describe("TailRiskExposurePanel", () => {
   it("renders the bucket table + Feb-20 regression shape and headline tone=red", async () => {
     const body = emptyBody();
     body.buckets[0] = {
-      label: "<$0.10", lo: 0.0, hi: 0.1,
+      label: "<$0.10", lo: 0.0, hi: 0.1, is_tail: true,
       rows: [
         {
           vertical: "sports",
           open_count: 1, open_cost_usd: 4218.24, open_max_loss_usd: 4218.24,
           realized_count: 1, realized_wins: 0, realized_pnl_usd: -4218,
+          ev_per_trade: -4218,
         },
       ],
       totals: {
         open_count: 1, open_cost_usd: 4218.24, open_max_loss_usd: 4218.24,
         realized_count: 1, realized_wins: 0, realized_pnl_usd: -4218,
+        ev_per_trade: -4218,
       },
     };
     body.buckets[3] = {
-      label: "$0.40–$0.60", lo: 0.4, hi: 0.6,
+      label: "$0.40–$0.60", lo: 0.4, hi: 0.6, is_tail: false,
       rows: [
         {
           vertical: "sports",
           open_count: 1, open_cost_usd: 5.5, open_max_loss_usd: 5.5,
           realized_count: 2, realized_wins: 1, realized_pnl_usd: 47,
+          ev_per_trade: 23.5,
         },
       ],
       totals: {
         open_count: 1, open_cost_usd: 5.5, open_max_loss_usd: 5.5,
         realized_count: 2, realized_wins: 1, realized_pnl_usd: 47,
+        ev_per_trade: 23.5,
       },
     };
     body.totals = {
       open_count: 2, open_cost_usd: 4223.74, open_max_loss_usd: 4223.74,
       realized_count: 3, realized_wins: 1, realized_pnl_usd: -4171,
+      ev_per_trade: -1390.33,
     };
     body.tail_concentration = {
       tail_max_loss_usd: 4218.24,
       total_max_loss_usd: 4223.74,
       pct: 4218.24 / 4223.74,
       tone: "red",
+      threshold_price: 0.2,
     };
     state.fetchResponses = [{ ok: true, body }];
 
@@ -215,6 +225,27 @@ describe("TailRiskExposurePanel", () => {
     // the Feb-20 sized number.
     const sports = screen.getByTestId("tail-risk-vertical-sports");
     expect(sports.textContent).toContain("$4,218");
+
+    // Headline copy uses the server-published threshold rather than a
+    // hardcoded "$0.25" — the architect rejection landed on this.
+    const detail = screen.getByTestId("tail-risk-headline-detail");
+    expect(detail.textContent).toContain("<$0.20");
+
+    // Per-bucket EV/trade column rendered with sign + 2dp.
+    const b0Ev = screen.getByTestId("tail-risk-bucket-0-ev");
+    expect(b0Ev.textContent).toMatch(/-\$4,218\.00/);
+    const b3Ev = screen.getByTestId("tail-risk-bucket-3-ev");
+    expect(b3Ev.textContent).toMatch(/\+\$23\.50/);
+    const totalsEv = screen.getByTestId("tail-risk-totals-ev");
+    expect(totalsEv.textContent).toMatch(/-\$1,390\.33/);
+
+    // Full bucket × vertical matrix: the per-vertical cell is rendered
+    // beneath the bucket row, not just collapsed into the strip below.
+    const cell0 = screen.getByTestId("tail-risk-cell-0-sports");
+    expect(cell0.textContent).toContain("sports");
+    expect(cell0.textContent).toContain("$4,218");
+    const cell3 = screen.getByTestId("tail-risk-cell-3-sports");
+    expect(cell3.textContent).toContain("sports");
   });
 
   it("surfaces an error message when the request fails", async () => {

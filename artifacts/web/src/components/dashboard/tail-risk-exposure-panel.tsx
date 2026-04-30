@@ -1,3 +1,4 @@
+import { Fragment } from "react";
 import { useQuery } from "@tanstack/react-query";
 
 import { resolveApiUrl } from "@/lib/api";
@@ -22,10 +23,18 @@ import { usePlacedBy } from "./placed-by-context";
  * as KpiSummaryBar / EquityCharts so the tile narrows in lock-step
  * when the operator toggles Manual/System/Both or picks a vertical.
  *
- * Bucket boundaries are owned by the server — the response includes
- * `lo`/`hi`/`label` per bucket; this component does NOT re-bucket so
- * any future taxonomy change (or per-vertical override) flows through
- * without a client redeploy.
+ * Bucket boundaries AND the row-level tail definition are owned by the
+ * server.  The response includes:
+ *   - `lo`/`hi`/`label`/`is_tail` per bucket — `is_tail=true` only when
+ *     the whole bucket sits below `tail_concentration.threshold_price`
+ *     (currently $0.20).  The `$0.10–$0.25` bucket straddles that
+ *     line, so its UI badge stays off and its share of the tail
+ *     headline comes from the dedicated row-level aggregate the server
+ *     computes against `price < threshold` (NOT from summing the whole
+ *     bucket — that would over-count $0.20–$0.25 trades).
+ *   - `totals.ev_per_trade` per bucket and grand total — surfaced by
+ *     the server so every consumer (web, mobile, alerts) shares one
+ *     definition.
  */
 
 type BucketRow = {
@@ -36,33 +45,40 @@ type BucketRow = {
   realized_count: number;
   realized_wins: number;
   realized_pnl_usd: number;
+  ev_per_trade: number | null;
+};
+
+type BucketTotals = {
+  open_count: number;
+  open_cost_usd: number;
+  open_max_loss_usd: number;
+  realized_count: number;
+  realized_wins: number;
+  realized_pnl_usd: number;
+  ev_per_trade: number | null;
 };
 
 type Bucket = {
   label: string;
   lo: number;
   hi: number;
+  is_tail: boolean;
   rows: BucketRow[];
-  totals: {
-    open_count: number;
-    open_cost_usd: number;
-    open_max_loss_usd: number;
-    realized_count: number;
-    realized_wins: number;
-    realized_pnl_usd: number;
-  };
+  totals: BucketTotals;
 };
 
 type TailRiskExposure = {
   days: number;
   buckets: Bucket[];
-  totals: Bucket["totals"];
+  totals: BucketTotals;
   tail_concentration: {
     tail_max_loss_usd: number;
     total_max_loss_usd: number;
     pct: number | null;
     tone: "red" | "amber" | "green" | "empty";
+    threshold_price: number;
   };
+  source?: string;
   placed_by: string;
   verticals: string[];
 };
@@ -81,10 +97,33 @@ function fmtPct(n: number | null, digits = 1): string {
   return `${(n * 100).toFixed(digits)}%`;
 }
 
+function fmtEv(n: number | null): string {
+  if (n === null || Number.isNaN(n)) return "—";
+  // EV/trade is a small dollar number per trade — show 2 dp so a $0.50
+  // edge doesn't round to "$1" and a −$0.30 drag doesn't round to "$0".
+  return new Intl.NumberFormat("en-US", {
+    style: "currency",
+    currency: "USD",
+    maximumFractionDigits: 2,
+    minimumFractionDigits: 2,
+    signDisplay: "exceptZero",
+  }).format(n);
+}
+
+function fmtPriceThreshold(p: number): string {
+  // Render `0.20` as `$0.20`, `0.2` as `$0.20`, `0.05` as `$0.05`.
+  return `$${p.toFixed(2)}`;
+}
+
 function pnlClass(n: number): string {
   if (n < 0) return "text-loss";
   if (n > 0) return "text-win";
   return "text-foreground";
+}
+
+function evClass(n: number | null): string {
+  if (n === null) return "text-muted-foreground";
+  return pnlClass(n);
 }
 
 const TONE_HEADLINE_CLASS: Record<TailRiskExposure["tail_concentration"]["tone"], string> = {
@@ -103,6 +142,11 @@ const TONE_LABEL: Record<TailRiskExposure["tail_concentration"]["tone"], string>
   green: "CONTAINED",
   empty: "NO EXPOSURE",
 };
+
+// Default threshold rendered in the headline copy when the server hasn't
+// returned one yet (e.g. mid-loading first paint) — must match the
+// server-side `_TAIL_PRICE_THRESHOLD` constant in `app/dashboard.py`.
+const DEFAULT_TAIL_THRESHOLD = 0.2;
 
 export default function TailRiskExposurePanel() {
   // Match the threading pattern KpiSummaryBar / EquityCharts already
@@ -135,6 +179,9 @@ export default function TailRiskExposurePanel() {
   const data = q.data;
   const buckets = data?.buckets ?? [];
   const concentration = data?.tail_concentration;
+  const thresholdLabel = fmtPriceThreshold(
+    concentration?.threshold_price ?? DEFAULT_TAIL_THRESHOLD,
+  );
 
   return (
     <GlassCard
@@ -168,10 +215,13 @@ export default function TailRiskExposurePanel() {
 
       {data && concentration && (
         <>
-          {/* Headline — concentration of OPEN max-loss exposure in the
-              two leftmost (sub-$0.25) buckets.  Tone classification is
-              owned server-side so every surface (web, mobile, alerts)
-              agrees on what "elevated" means. */}
+          {/* Headline — concentration of OPEN max-loss exposure that
+              sits in trades priced below the server-published
+              threshold.  Tone classification is owned server-side so
+              every surface (web, mobile, alerts) agrees on what
+              "elevated" means, and the threshold itself is read from
+              the response so a future tightening (e.g. $0.20 → $0.15)
+              flows through without a client redeploy. */}
           <div
             className="mb-4 flex flex-wrap items-baseline gap-x-3 gap-y-1"
             data-testid="tail-risk-headline"
@@ -192,14 +242,20 @@ export default function TailRiskExposurePanel() {
             >
               {TONE_LABEL[concentration.tone]}
             </span>
-            <span className="text-[10px] text-muted-foreground/80">
+            <span
+              className="text-[10px] text-muted-foreground/80"
+              data-testid="tail-risk-headline-detail"
+            >
               {fmtUsd(concentration.tail_max_loss_usd)} of {fmtUsd(concentration.total_max_loss_usd)} open max-loss
-              sits in price &lt;$0.25 buckets
+              sits in trades priced &lt;{thresholdLabel}
             </span>
           </div>
 
           {/* Bucket table.  No client-side bucketing — server owns the
-              taxonomy and we just render what came back. */}
+              taxonomy and we just render what came back.  Each bucket
+              row is followed by its per-vertical breakdown rows so the
+              full bucket × vertical matrix is visible without a
+              drill-down click. */}
           <div className="overflow-x-auto">
             <table
               className="w-full text-xs"
@@ -213,56 +269,119 @@ export default function TailRiskExposurePanel() {
                   <th className="text-right font-normal py-1 pr-2">Max loss</th>
                   <th className="text-right font-normal py-1 pr-2">Realized #</th>
                   <th className="text-right font-normal py-1 pr-2">Win rate</th>
+                  <th className="text-right font-normal py-1 pr-2">EV/trade</th>
                   <th className="text-right font-normal py-1">Realized P&L (30d)</th>
                 </tr>
               </thead>
               <tbody>
                 {buckets.map((b, idx) => {
-                  const isTail = b.lo < 0.20;
+                  // Server-owned tail flag: `is_tail=true` ONLY when
+                  // the whole bucket sits below the threshold.  The
+                  // straddling `$0.10–$0.25` bucket is intentionally
+                  // false so it doesn't get flagged as tail in the UI
+                  // even though some of its rows feed the headline.
+                  const isTail = b.is_tail;
                   const totals = b.totals;
                   const winRate =
                     totals.realized_count > 0
                       ? totals.realized_wins / totals.realized_count
                       : null;
+                  // Sort cells by max-loss desc so the worst offender
+                  // is the first nested row — operators scan top-down.
+                  const cells = b.rows
+                    .slice()
+                    .sort((a, c) => c.open_max_loss_usd - a.open_max_loss_usd);
                   return (
-                    <tr
-                      key={b.label}
-                      data-testid={`tail-risk-bucket-${idx}`}
-                      data-bucket-label={b.label}
-                      data-tail={isTail ? "true" : "false"}
-                      className={`border-t border-border/40 ${isTail ? "bg-loss/5" : ""}`}
-                    >
-                      <td className="py-1.5 pr-2 font-medium text-foreground">
-                        {b.label}
-                        {isTail && (
-                          <span className="ml-2 text-[9px] uppercase tracking-widest text-loss">
-                            tail
-                          </span>
-                        )}
-                      </td>
-                      <td className="py-1.5 pr-2 text-right tabular-nums">
-                        {totals.open_count}
-                      </td>
-                      <td className="py-1.5 pr-2 text-right tabular-nums">
-                        {fmtUsd(totals.open_cost_usd)}
-                      </td>
-                      <td
-                        className={`py-1.5 pr-2 text-right tabular-nums ${isTail && totals.open_max_loss_usd > 0 ? "text-loss font-semibold" : ""}`}
+                    <Fragment key={b.label}>
+                      <tr
+                        data-testid={`tail-risk-bucket-${idx}`}
+                        data-bucket-label={b.label}
+                        data-tail={isTail ? "true" : "false"}
+                        className={`border-t border-border/40 ${isTail ? "bg-loss/5" : ""}`}
                       >
-                        {fmtUsd(totals.open_max_loss_usd)}
-                      </td>
-                      <td className="py-1.5 pr-2 text-right tabular-nums">
-                        {totals.realized_count}
-                      </td>
-                      <td className="py-1.5 pr-2 text-right tabular-nums">
-                        {fmtPct(winRate, 0)}
-                      </td>
-                      <td
-                        className={`py-1.5 text-right tabular-nums ${pnlClass(totals.realized_pnl_usd)}`}
-                      >
-                        {fmtUsd(totals.realized_pnl_usd)}
-                      </td>
-                    </tr>
+                        <td className="py-1.5 pr-2 font-medium text-foreground">
+                          {b.label}
+                          {isTail && (
+                            <span className="ml-2 text-[9px] uppercase tracking-widest text-loss">
+                              tail
+                            </span>
+                          )}
+                        </td>
+                        <td className="py-1.5 pr-2 text-right tabular-nums">
+                          {totals.open_count}
+                        </td>
+                        <td className="py-1.5 pr-2 text-right tabular-nums">
+                          {fmtUsd(totals.open_cost_usd)}
+                        </td>
+                        <td
+                          className={`py-1.5 pr-2 text-right tabular-nums ${isTail && totals.open_max_loss_usd > 0 ? "text-loss font-semibold" : ""}`}
+                        >
+                          {fmtUsd(totals.open_max_loss_usd)}
+                        </td>
+                        <td className="py-1.5 pr-2 text-right tabular-nums">
+                          {totals.realized_count}
+                        </td>
+                        <td className="py-1.5 pr-2 text-right tabular-nums">
+                          {fmtPct(winRate, 0)}
+                        </td>
+                        <td
+                          className={`py-1.5 pr-2 text-right tabular-nums ${evClass(totals.ev_per_trade)}`}
+                          data-testid={`tail-risk-bucket-${idx}-ev`}
+                        >
+                          {fmtEv(totals.ev_per_trade)}
+                        </td>
+                        <td
+                          className={`py-1.5 text-right tabular-nums ${pnlClass(totals.realized_pnl_usd)}`}
+                        >
+                          {fmtUsd(totals.realized_pnl_usd)}
+                        </td>
+                      </tr>
+                      {/* Per-vertical cells for this bucket — full
+                          matrix view.  Indented and slightly muted so
+                          they read as a sub-row of the bucket above. */}
+                      {cells.map((cell) => {
+                        const cellWinRate =
+                          cell.realized_count > 0
+                            ? cell.realized_wins / cell.realized_count
+                            : null;
+                        return (
+                          <tr
+                            key={`${b.label}-${cell.vertical}`}
+                            className="text-muted-foreground/90"
+                            data-testid={`tail-risk-cell-${idx}-${cell.vertical}`}
+                          >
+                            <td className="py-1 pr-2 pl-4 text-[11px]">
+                              ↳ {cell.vertical}
+                            </td>
+                            <td className="py-1 pr-2 text-right tabular-nums text-[11px]">
+                              {cell.open_count}
+                            </td>
+                            <td className="py-1 pr-2 text-right tabular-nums text-[11px]">
+                              {fmtUsd(cell.open_cost_usd)}
+                            </td>
+                            <td className="py-1 pr-2 text-right tabular-nums text-[11px]">
+                              {fmtUsd(cell.open_max_loss_usd)}
+                            </td>
+                            <td className="py-1 pr-2 text-right tabular-nums text-[11px]">
+                              {cell.realized_count}
+                            </td>
+                            <td className="py-1 pr-2 text-right tabular-nums text-[11px]">
+                              {fmtPct(cellWinRate, 0)}
+                            </td>
+                            <td
+                              className={`py-1 pr-2 text-right tabular-nums text-[11px] ${evClass(cell.ev_per_trade)}`}
+                            >
+                              {fmtEv(cell.ev_per_trade)}
+                            </td>
+                            <td
+                              className={`py-1 text-right tabular-nums text-[11px] ${pnlClass(cell.realized_pnl_usd)}`}
+                            >
+                              {fmtUsd(cell.realized_pnl_usd)}
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </Fragment>
                   );
                 })}
                 {/* Grand totals — match the bucket-row layout so the eye
@@ -295,6 +414,12 @@ export default function TailRiskExposurePanel() {
                     )}
                   </td>
                   <td
+                    className={`py-1.5 pr-2 text-right tabular-nums ${evClass(data.totals.ev_per_trade)}`}
+                    data-testid="tail-risk-totals-ev"
+                  >
+                    {fmtEv(data.totals.ev_per_trade)}
+                  </td>
+                  <td
                     className={`py-1.5 text-right tabular-nums ${pnlClass(data.totals.realized_pnl_usd)}`}
                   >
                     {fmtUsd(data.totals.realized_pnl_usd)}
@@ -306,13 +431,11 @@ export default function TailRiskExposurePanel() {
 
           {/* Per-vertical breakdown for the tail buckets only — keeps
               the audit's "lost −$5,607 in sports alone" signal visible
-              without bloating the main table.  Aggregates the
-              per-(bucket × vertical) cells for the two leftmost buckets
-              into a single per-vertical strip, sorted by max-loss
-              descending so the worst offender is left-most. */}
+              as a one-line summary even though the full matrix is
+              already in the table above. */}
           {(() => {
             const tailRows = buckets
-              .filter((b) => b.lo < 0.20)
+              .filter((b) => b.is_tail)
               .flatMap((b) => b.rows);
             if (tailRows.length === 0) return null;
             const byVertical = tailRows.reduce<

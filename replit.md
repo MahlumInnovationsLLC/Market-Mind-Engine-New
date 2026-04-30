@@ -34,6 +34,7 @@ Axiom Predict is a prediction-market trading platform designed for advanced trad
 - **Accessibility:** Implements accessibility primitives and undergoes regular audits.
 - **Trade Provenance:** Incorporates a `placed_by` filter for analytics, allowing users to view trades by `manual_ui`, `orchestrator`, or `all`. This filter is applied to dashboard metrics and equity curves.
 - **Vertical Filtering:** Enables filtering of equity-derived tiles and charts by specific verticals (e.g., sports, crypto) to provide accurate P&L views.
+- **Tail-risk exposure tile:** Read-only dashboard tile (web + mobile, slotted directly under `KpiSummaryBar`) backed by `GET /api/public/tail-risk-exposure`. Surfaces a 7-bucket × per-vertical matrix of open positions and 30-day realized P&L bucketed by entry price, plus a server-classified concentration headline (RED / WATCH / CONTAINED). The tail definition (`price < $0.20`) and tone thresholds are owned server-side so every surface stays in lock-step; the tile threads the same `placedBy` + `effectiveVerticals` filters as the rest of the dashboard.
 
 **Mobile (Expo):**
 - Shares the "cyberpunk-finance" design system.

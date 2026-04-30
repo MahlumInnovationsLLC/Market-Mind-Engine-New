@@ -42,21 +42,45 @@ from app.main import app
 # ---------------------------------------------------------------------------
 
 
-def _stub_fetch(monkeypatch, rows: list[dict[str, Any]]) -> dict[str, Any]:
-    """Replace ``dashboard.db.fetch`` with a coroutine returning ``rows``.
+def _stub_fetch(
+    monkeypatch,
+    rows: list[dict[str, Any]],
+    tail_max_loss: float = 0.0,
+) -> dict[str, Any]:
+    """Replace ``dashboard.db.fetch`` and ``.fetchval`` with stubs.
 
-    Captures the SQL string and the trailing positional args so tests
-    can assert filter splicing (placed_by / vertical fragments) without
-    needing a real DB.
+    Captures the bucket-query SQL string and trailing positional args
+    so tests can assert filter splicing (placed_by / vertical fragments)
+    without needing a real DB.  ``fetchval`` is stubbed to return
+    ``tail_max_loss`` so the dedicated row-level tail aggregate
+    (introduced after the architect review) doesn't escape to a real DB
+    in unit tests; tests that exercise the headline arithmetic pass an
+    explicit value here.
     """
-    captured: dict[str, Any] = {"sql": None, "args": None}
+    # The aggregator may issue more than one fetch (positions primary +
+    # trades fallback when positions returns empty/zero open exposure).
+    # Concatenate every query string into ``cap["sql"]`` so existing
+    # filter-splicing assertions ("p.placed_by ... in sql",
+    # "t.placed_by ... in sql") still hold regardless of which path ran.
+    captured: dict[str, Any] = {
+        "sql": "",
+        "args": None,
+        "tail_sql": None,
+        "all_sqls": [],
+    }
 
     async def fake_fetch(query: str, *args: Any) -> list[dict[str, Any]]:
-        captured["sql"] = query
+        captured["all_sqls"].append(query)
+        captured["sql"] = "\n".join(captured["all_sqls"])
         captured["args"] = args
         return rows
 
+    async def fake_fetchval(query: str, *args: Any) -> float:
+        captured["tail_sql"] = query
+        return float(tail_max_loss)
+
     monkeypatch.setattr(dashboard.db, "fetch", fake_fetch)
+    monkeypatch.setattr(dashboard.db, "fetchval", fake_fetchval)
     return captured
 
 
@@ -97,7 +121,19 @@ class TestEmptyAndZeroState:
                 "realized_count": 0,
                 "realized_wins": 0,
                 "realized_pnl_usd": 0.0,
+                # Derived field: None when no realized trades land in
+                # the bucket.  Surfaced in the payload so the UI doesn't
+                # have to compute it (and risk drift between web/mobile).
+                "ev_per_trade": None,
             }
+            # Per-bucket `is_tail` flag: only the `<$0.10` bucket is
+            # entirely below the $0.20 threshold; the $0.10–$0.25 bucket
+            # straddles it so its UI badge will rely on the row-level
+            # tail headline rather than the bucket flag.
+            assert "is_tail" in b
+        assert out["buckets"][0]["is_tail"] is True
+        assert out["buckets"][1]["is_tail"] is False
+        assert out["buckets"][6]["is_tail"] is False
 
         # Grand totals zero, concentration "empty" (no exposure to
         # measure — the headline must not fall to a misleading 0% green).
@@ -184,13 +220,25 @@ class TestRollupArithmetic:
         assert b0["totals"]["open_cost_usd"] == pytest.approx(850.0)
         assert b0["totals"]["realized_count"] == 5
         assert b0["totals"]["realized_pnl_usd"] == pytest.approx(-1500.0)
+        # EV/trade per bucket: -1500 / 5 = -300 in bucket 0 (sports
+        # cell drove the realized count; crypto cell had 0 trades).
+        assert b0["totals"]["ev_per_trade"] == pytest.approx(-300.0)
+        # Per-cell ev_per_trade also surfaced for the matrix view.
+        sports_cell = next(r for r in b0["rows"] if r["vertical"] == "sports")
+        crypto_cell = next(r for r in b0["rows"] if r["vertical"] == "crypto")
+        assert sports_cell["ev_per_trade"] == pytest.approx(-300.0)
+        assert crypto_cell["ev_per_trade"] is None  # zero realized
 
         b5 = out["buckets"][5]
         assert b5["label"] == "$0.75–$0.90"
         assert len(b5["rows"]) == 1
+        # +175 across 12 trades → +14.58/trade — the favorite-band
+        # signal the audit highlighted as masked by the tail blow-ups.
+        assert b5["totals"]["ev_per_trade"] == pytest.approx(175.0 / 12.0)
 
         # Buckets that received no rows stay zeroed.
         assert out["buckets"][3]["totals"]["open_count"] == 0
+        assert out["buckets"][3]["totals"]["ev_per_trade"] is None
 
         # Grand total across all rows.
         assert out["totals"]["open_count"] == 7
@@ -198,6 +246,8 @@ class TestRollupArithmetic:
         assert out["totals"]["realized_count"] == 17
         assert out["totals"]["realized_wins"] == 9
         assert out["totals"]["realized_pnl_usd"] == pytest.approx(-1325.0)
+        # Grand EV/trade = -1325 / 17.
+        assert out["totals"]["ev_per_trade"] == pytest.approx(-1325.0 / 17.0)
 
     def test_unknown_bucket_idx_silently_dropped(self, monkeypatch):
         # Defensive — a future schema change shouldn't blow up the
@@ -232,12 +282,16 @@ class TestTailConcentrationHeadline:
         }
 
     def test_red_when_tail_share_at_or_above_30_pct(self, monkeypatch):
+        # Tail value comes from the dedicated row-level fetchval
+        # aggregate (price < $0.20 strictly), not from summing whole
+        # buckets — the $0.10–$0.25 bucket straddles the threshold.
         _stub_fetch(
             monkeypatch,
             [
                 self._row(0, 300.0),  # tail bucket
                 self._row(3, 700.0),  # mid bucket
             ],
+            tail_max_loss=300.0,
         )
         out = _run(dashboard.get_tail_risk_exposure(days=30))
         c = out["tail_concentration"]
@@ -245,14 +299,20 @@ class TestTailConcentrationHeadline:
         assert c["total_max_loss_usd"] == pytest.approx(1000.0)
         assert c["pct"] == pytest.approx(0.30)
         assert c["tone"] == "red"
+        # Headline copy: surfaces the threshold the UI shows so every
+        # consumer agrees on what "tail" means without hardcoding it.
+        assert c["threshold_price"] == 0.20
 
     def test_amber_in_the_15_to_30_band(self, monkeypatch):
+        # Row-level tail = 150 (the trades in the $0.10–$0.25 bucket
+        # that landed below $0.20).
         _stub_fetch(
             monkeypatch,
             [
                 self._row(1, 150.0),  # tail bucket ($0.10-$0.25)
                 self._row(4, 850.0),
             ],
+            tail_max_loss=150.0,
         )
         out = _run(dashboard.get_tail_risk_exposure(days=30))
         c = out["tail_concentration"]
@@ -266,26 +326,55 @@ class TestTailConcentrationHeadline:
                 self._row(0, 50.0),
                 self._row(5, 950.0),
             ],
+            tail_max_loss=50.0,
         )
         out = _run(dashboard.get_tail_risk_exposure(days=30))
         c = out["tail_concentration"]
         assert c["pct"] == pytest.approx(0.05)
         assert c["tone"] == "green"
 
-    def test_tail_buckets_are_first_two(self, monkeypatch):
-        # The tail set is (`<$0.10`, `$0.10–$0.25`) — exposure in
-        # bucket 2 ($0.25-$0.40) must NOT count toward the headline.
+    def test_tail_excludes_above_threshold_buckets(self, monkeypatch):
+        # Row-level tail is computed by the SQL aggregate against
+        # `price < 0.20`.  Exposure that lands in bucket 2 or higher
+        # must NOT count toward the headline.  We assert this by
+        # passing a stub fetchval value of 0 — i.e. no rows below
+        # threshold even though buckets 2 + 4 both have exposure.
         _stub_fetch(
             monkeypatch,
             [
                 self._row(2, 600.0),  # NOT tail
                 self._row(4, 400.0),
             ],
+            tail_max_loss=0.0,
         )
         out = _run(dashboard.get_tail_risk_exposure(days=30))
         assert out["tail_concentration"]["tail_max_loss_usd"] == 0.0
         assert out["tail_concentration"]["pct"] == pytest.approx(0.0)
         assert out["tail_concentration"]["tone"] == "green"
+
+    def test_tail_uses_row_level_threshold_not_bucket_boundaries(
+        self, monkeypatch
+    ):
+        # Regression: prior behavior summed the whole `$0.10–$0.25`
+        # bucket into the tail headline even though that bucket spans
+        # prices up to $0.25 — over-counting any trade priced
+        # $0.20–$0.25.  The dedicated fetchval aggregate fixes this:
+        # the bucket totals show 200 in bucket 1 (mixed prices), but
+        # only 80 of those rows are actually below $0.20.
+        _stub_fetch(
+            monkeypatch,
+            [
+                self._row(1, 200.0),  # bucket spans 0.10–0.25
+                self._row(4, 800.0),
+            ],
+            tail_max_loss=80.0,  # only the < $0.20 portion
+        )
+        out = _run(dashboard.get_tail_risk_exposure(days=30))
+        c = out["tail_concentration"]
+        # Tail = 80 / (200 + 800) = 0.08, NOT 200 / 1000 = 0.20.
+        assert c["tail_max_loss_usd"] == pytest.approx(80.0)
+        assert c["pct"] == pytest.approx(0.08)
+        assert c["tone"] == "green"
 
 
 class TestFilterSplicing:
@@ -357,7 +446,9 @@ def _stub_aggregator(monkeypatch, captured: list[dict[str, Any]]) -> None:
                 "total_max_loss_usd": 0.0,
                 "pct": None,
                 "tone": "empty",
+                "threshold_price": dashboard._TAIL_PRICE_THRESHOLD,
             },
+            "source": "positions",
         }
 
     monkeypatch.setattr(dashboard, "get_tail_risk_exposure", _fake)
@@ -718,3 +809,269 @@ def test_sql_bucketing_side_aware_maxloss_and_feb20_regression(
     # Total open count across ALL buckets == 3 (NOT 4 — the manual_ui
     # position was filtered out by placed_by='system').
     assert out["totals"]["open_count"] == 3
+
+
+def test_empty_positions_falls_back_to_trades_reconstruction(
+    pg_dsn, monkeypatch
+):
+    """When the `positions` table is present but empty (e.g. fresh
+    install, ingestion stalled, or table truncated), the aggregator
+    must fall back to reconstructing open exposure from the `trades`
+    table rather than reporting zero open exposure.
+
+    Hand-seeded fixture (positions: empty; trades only):
+      - sports / NO at YES-price=0.04, qty=4,394, pnl IS NULL — the
+        Feb-20 NBA tail shape, recorded only as a trade fill.  Expected
+        max-loss = 4394 * max(0.04, 0.96) = $4,218.24, lands in
+        `<$0.10` bucket.
+      - One realized trade at 0.55 (pnl=+50) — should still surface in
+        the realized slice via the same fallback path.
+
+    Asserts:
+      - `source == "trades_fallback"` in the payload meta.
+      - Bucket 0 reports the reconstructed open exposure.
+      - Tail headline reflects the reconstructed tail max-loss.
+    """
+    from app import db as app_db
+
+    async def go():
+        pool = await asyncpg.create_pool(pg_dsn, min_size=1, max_size=2)
+
+        async def _fetchval(q, *a):
+            async with pool.acquire() as c:
+                return await c.fetchval(q, *a)
+
+        async def _fetch(q, *a):
+            async with pool.acquire() as c:
+                return await c.fetch(q, *a)
+
+        async def _execute(q, *a):
+            async with pool.acquire() as c:
+                return await c.execute(q, *a)
+
+        monkeypatch.setattr(app_db, "fetchval", _fetchval)
+        monkeypatch.setattr(app_db, "fetch", _fetch)
+        monkeypatch.setattr(app_db, "execute", _execute)
+
+        await _execute(_SCHEMA_SQL)
+        # Module-scoped pg_dsn fixture means prior tests' rows persist.
+        # Positions table left empty on purpose for THIS test.
+        await _execute("TRUNCATE positions; TRUNCATE trades;")
+        await _execute(
+            "INSERT INTO trades (market_id, side, vertical, quantity, "
+            "price, pnl, placed_by, executed_at) VALUES "
+            "('NBA-FEB20', 'no', 'sports', 4394, 0.04, NULL, "
+            "'autotrader', now() - interval '1 day'),"
+            "('MID', 'yes', 'sports', 10, 0.55, 50, "
+            "'autotrader', now() - interval '1 day')"
+        )
+
+        out = await dashboard.get_tail_risk_exposure(
+            days=7, placed_by="system"
+        )
+        await pool.close()
+        return out
+
+    out = _run(go())
+
+    # Source flag flipped — the UI / observability hooks rely on this
+    # to surface that the headline is approximate.
+    assert out["source"] == "trades_fallback"
+
+    # Bucket 0 reconstructed from the unsettled NO trade.
+    b0 = out["buckets"][0]
+    assert b0["totals"]["open_count"] == 1
+    assert b0["totals"]["open_max_loss_usd"] == pytest.approx(4218.24, abs=0.01)
+
+    # Realized slice still flows through the fallback path.
+    b3 = out["buckets"][3]
+    assert b3["totals"]["realized_count"] == 1
+    assert b3["totals"]["realized_pnl_usd"] == pytest.approx(50.0, abs=0.01)
+
+    # Tail headline = reconstructed tail max-loss (only the < $0.20 trade).
+    c = out["tail_concentration"]
+    assert c["tail_max_loss_usd"] == pytest.approx(4218.24, abs=0.01)
+    assert c["tone"] == "red"
+
+
+def test_trades_fallback_nets_multi_fill_market_via_vwap(
+    pg_dsn, monkeypatch
+):
+    """Multiple opening fills for the same `(market_id, side)` should
+    collapse into a single netted position priced at the VWAP — not be
+    counted as N independent opens.
+
+    Hand-seeded fixture (positions: empty; trades only):
+      - Three fills for `('FAV-DROP', 'yes', 'sports')`, all pnl IS NULL:
+          fill 1: qty=100 at price=0.10
+          fill 2: qty=100 at price=0.20
+          fill 3: qty=200 at price=0.05
+        Expected net qty = 400, VWAP = (10 + 20 + 10) / 400 = $0.10.
+        After bucketing on VWAP, this lands in `$0.10–$0.25` (lo=0.10
+        inclusive).  Side=YES, so max-loss = 400 * max(0.10, 0.90) = 360.
+      - The naive (non-netted) sum would be 3 separate opens with mixed
+        prices — open_count=3, max-loss = 100*0.90 + 100*0.80 + 200*0.95
+        = 90 + 80 + 190 = 360 (coincidentally same total here, but the
+        bucket placement and per-position EV would differ).  The
+        regression we care about is `open_count == 1`, not 3.
+
+    Asserts:
+      - One netted open position (not three).
+      - VWAP-bucketed into $0.10–$0.25.
+      - Max-loss = 400 * 0.90 = 360.
+    """
+    from app import db as app_db
+
+    async def go():
+        pool = await asyncpg.create_pool(pg_dsn, min_size=1, max_size=2)
+
+        async def _fetchval(q, *a):
+            async with pool.acquire() as c:
+                return await c.fetchval(q, *a)
+
+        async def _fetch(q, *a):
+            async with pool.acquire() as c:
+                return await c.fetch(q, *a)
+
+        async def _execute(q, *a):
+            async with pool.acquire() as c:
+                return await c.execute(q, *a)
+
+        monkeypatch.setattr(app_db, "fetchval", _fetchval)
+        monkeypatch.setattr(app_db, "fetch", _fetch)
+        monkeypatch.setattr(app_db, "execute", _execute)
+
+        await _execute(_SCHEMA_SQL)
+        # Module-scoped pg_dsn fixture means prior tests' rows persist.
+        await _execute("TRUNCATE positions; TRUNCATE trades;")
+        await _execute(
+            "INSERT INTO trades (market_id, side, vertical, quantity, "
+            "price, pnl, placed_by, executed_at) VALUES "
+            "('FAV-DROP', 'yes', 'sports', 100, 0.10, NULL, "
+            "'autotrader', now() - interval '1 day'),"
+            "('FAV-DROP', 'yes', 'sports', 100, 0.20, NULL, "
+            "'autotrader', now() - interval '1 day'),"
+            "('FAV-DROP', 'yes', 'sports', 200, 0.05, NULL, "
+            "'autotrader', now() - interval '1 day')"
+        )
+
+        out = await dashboard.get_tail_risk_exposure(
+            days=7, placed_by="system"
+        )
+        await pool.close()
+        return out
+
+    out = _run(go())
+
+    assert out["source"] == "trades_fallback"
+
+    # Three fills should collapse into ONE netted position landing in
+    # the $0.10–$0.25 VWAP bucket.
+    b1 = out["buckets"][1]
+    assert b1["label"] == "$0.10–$0.25"
+    assert b1["totals"]["open_count"] == 1, (
+        "multi-fill same-market trades must net into a single position, "
+        f"got open_count={b1['totals']['open_count']}"
+    )
+    # YES side at VWAP=0.10, qty=400 → max-loss = 400 * max(0.10, 0.90) = 360.
+    assert b1["totals"]["open_max_loss_usd"] == pytest.approx(360.0, abs=0.01)
+
+    # Other buckets must be empty — the 3 fills did NOT leak into <$0.10
+    # or any other bucket because we bucket on the netted VWAP, not the
+    # individual fill prices.
+    for i, b in enumerate(out["buckets"]):
+        if i == 1:
+            continue
+        assert b["totals"]["open_count"] == 0, (
+            f"bucket {i} ({b['label']}) leaked open positions: "
+            f"{b['totals']}"
+        )
+
+
+def test_trades_fallback_tail_aggregate_partitions_by_vertical(
+    pg_dsn, monkeypatch
+):
+    """Headline tail aggregate (`sql_tail_trades`) must group by the
+    same `(vertical, market_key, side)` key as the matrix
+    (`sql_trades_only.open_netted`) — otherwise a `market_id` shared
+    across verticals would be silently merged in the headline while
+    staying separate in the bucket totals, drifting the two readings
+    apart.
+
+    Hand-seeded fixture (positions: empty; trades only):
+      Same ticker `'OVERLAP'`, same `'yes'` side, same sub-tail price
+      (0.04), but two different verticals:
+        sports : qty=1000 at 0.04  → max-loss = 1000 * 0.96 = 960
+        crypto : qty=2000 at 0.04  → max-loss = 2000 * 0.96 = 1920
+      Combined headline tail max-loss must therefore equal
+      960 + 1920 = $2,880.  (If the tail SQL forgot the `vertical`
+      partition, both rows would collapse into a single VWAP-merged
+      group and the per-vertical headline math would still happen to
+      match here only because the prices coincide — the bucket matrix,
+      however, would still keep them apart.  We assert both directly
+      so any future regression in either query trips this test.)
+    """
+    from app import db as app_db
+
+    async def go():
+        pool = await asyncpg.create_pool(pg_dsn, min_size=1, max_size=2)
+
+        async def _fetchval(q, *a):
+            async with pool.acquire() as c:
+                return await c.fetchval(q, *a)
+
+        async def _fetch(q, *a):
+            async with pool.acquire() as c:
+                return await c.fetch(q, *a)
+
+        async def _execute(q, *a):
+            async with pool.acquire() as c:
+                return await c.execute(q, *a)
+
+        monkeypatch.setattr(app_db, "fetchval", _fetchval)
+        monkeypatch.setattr(app_db, "fetch", _fetch)
+        monkeypatch.setattr(app_db, "execute", _execute)
+
+        await _execute(_SCHEMA_SQL)
+        await _execute("TRUNCATE positions; TRUNCATE trades;")
+        await _execute(
+            "INSERT INTO trades (market_id, side, vertical, quantity, "
+            "price, pnl, placed_by, executed_at) VALUES "
+            "('OVERLAP', 'yes', 'sports', 1000, 0.04, NULL, "
+            "'autotrader', now() - interval '1 day'),"
+            "('OVERLAP', 'yes', 'crypto', 2000, 0.04, NULL, "
+            "'autotrader', now() - interval '1 day')"
+        )
+
+        out = await dashboard.get_tail_risk_exposure(
+            days=7, placed_by="system"
+        )
+        await pool.close()
+        return out
+
+    out = _run(go())
+
+    assert out["source"] == "trades_fallback"
+
+    # Bucket 0 ($0.10–$0.10 actually <$0.10) — both rows land here at
+    # VWAP=0.04.  Because the matrix groups by (vertical, market_key,
+    # side), each vertical contributes its own netted position row.
+    b0 = out["buckets"][0]
+    assert b0["label"] == "<$0.10"
+    assert b0["totals"]["open_count"] == 2, (
+        "two verticals sharing a market_id must NOT collapse into one "
+        f"netted position; got open_count={b0['totals']['open_count']}"
+    )
+    # Per-vertical breakdown lives under `rows`.
+    verticals = sorted(r["vertical"] for r in b0["rows"])
+    assert verticals == ["crypto", "sports"]
+    # Combined max-loss = 1000*0.96 + 2000*0.96 = 2880.
+    assert b0["totals"]["open_max_loss_usd"] == pytest.approx(2880.0, abs=0.01)
+
+    # Headline tail max-loss must equal the matrix sum — i.e. the tail
+    # aggregate also partitioned by vertical.  Drift here would mean
+    # `sql_tail_trades` silently merged the two verticals.
+    c = out["tail_concentration"]
+    assert c["tail_max_loss_usd"] == pytest.approx(
+        b0["totals"]["open_max_loss_usd"], abs=0.01
+    )

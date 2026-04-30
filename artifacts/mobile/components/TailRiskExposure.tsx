@@ -36,33 +36,40 @@ type BucketRow = {
   realized_count: number;
   realized_wins: number;
   realized_pnl_usd: number;
+  ev_per_trade: number | null;
+};
+
+type BucketTotals = {
+  open_count: number;
+  open_cost_usd: number;
+  open_max_loss_usd: number;
+  realized_count: number;
+  realized_wins: number;
+  realized_pnl_usd: number;
+  ev_per_trade: number | null;
 };
 
 type Bucket = {
   label: string;
   lo: number;
   hi: number;
+  is_tail: boolean;
   rows: BucketRow[];
-  totals: {
-    open_count: number;
-    open_cost_usd: number;
-    open_max_loss_usd: number;
-    realized_count: number;
-    realized_wins: number;
-    realized_pnl_usd: number;
-  };
+  totals: BucketTotals;
 };
 
 type TailRiskExposure = {
   days: number;
   buckets: Bucket[];
-  totals: Bucket["totals"];
+  totals: BucketTotals;
   tail_concentration: {
     tail_max_loss_usd: number;
     total_max_loss_usd: number;
     pct: number | null;
     tone: "red" | "amber" | "green" | "empty";
+    threshold_price: number;
   };
+  source?: string;
 };
 
 function fmtUsd(n: number): string {
@@ -76,6 +83,27 @@ function fmtPct(n: number | null, digits = 1): string {
   if (n === null || Number.isNaN(n)) return "—";
   return `${(n * 100).toFixed(digits)}%`;
 }
+
+function fmtEv(n: number | null): string {
+  // EV/trade is a small dollar number per trade — show 2 dp + an
+  // explicit sign so a $0.50 edge doesn't round to "$1" and a −$0.30
+  // drag doesn't round to "$0".
+  if (n === null || Number.isNaN(n)) return "—";
+  const sign = n > 0 ? "+" : n < 0 ? "-" : "";
+  return `${sign}$${Math.abs(n).toLocaleString(undefined, {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  })}`;
+}
+
+function fmtPriceThreshold(p: number): string {
+  return `$${p.toFixed(2)}`;
+}
+
+// Default threshold for the headline copy when the server hasn't
+// returned one yet (mid-loading) — must match `_TAIL_PRICE_THRESHOLD`
+// in `artifacts/api-server/app/dashboard.py`.
+const DEFAULT_TAIL_THRESHOLD = 0.2;
 
 const TONE_LABEL: Record<TailRiskExposure["tail_concentration"]["tone"], string> = {
   red: "ELEVATED",
@@ -185,9 +213,14 @@ export default function TailRiskExposure() {
               </View>
               <Text
                 style={[styles.subtle, { color: colors.mutedForeground }]}
+                testID="tail-risk-headline-detail"
               >
                 {fmtUsd(concentration.tail_max_loss_usd)} of{" "}
-                {fmtUsd(concentration.total_max_loss_usd)} open max-loss in price &lt;$0.25
+                {fmtUsd(concentration.total_max_loss_usd)} open max-loss
+                in trades priced &lt;
+                {fmtPriceThreshold(
+                  concentration.threshold_price ?? DEFAULT_TAIL_THRESHOLD,
+                )}
               </Text>
             </View>
 
@@ -199,11 +232,21 @@ export default function TailRiskExposure() {
                   b.totals.open_count > 0 || b.totals.realized_count > 0,
               )
               .map((b, idx) => {
-                const isTail = b.lo < 0.20;
+                // Server-owned tail flag: only true when the WHOLE
+                // bucket sits below the threshold (the $0.10–$0.25
+                // bucket straddles $0.20 so it stays unflagged even
+                // though some of its rows feed the headline).
+                const isTail = b.is_tail;
                 const winRate =
                   b.totals.realized_count > 0
                     ? b.totals.realized_wins / b.totals.realized_count
                     : null;
+                // Per-vertical cells, sorted by max-loss desc — gives
+                // mobile the same matrix view as web inside each
+                // visible bucket without bloating the tile.
+                const cells = b.rows
+                  .slice()
+                  .sort((a, c) => c.open_max_loss_usd - a.open_max_loss_usd);
                 return (
                   <View
                     key={b.label}
@@ -257,8 +300,67 @@ export default function TailRiskExposure() {
                         {winRate !== null
                           ? ` · ${fmtPct(winRate, 0)} win`
                           : ""}
+                        {b.totals.ev_per_trade !== null
+                          ? (
+                              <Text
+                                testID={`tail-risk-bucket-${b.label}-ev`}
+                                style={{ color: pnlColor(b.totals.ev_per_trade) }}
+                              >
+                                {" · "}
+                                {fmtEv(b.totals.ev_per_trade)}/trade
+                              </Text>
+                            )
+                          : null}
                       </Text>
                     </View>
+                    {/* Per-vertical breakdown for buckets that
+                        actually have multiple verticals — keeps the
+                        tile compact when there's only one slice but
+                        surfaces the matrix when there are several. */}
+                    {cells.length > 1
+                      ? cells.map((cell) => (
+                          <View
+                            key={`${b.label}-${cell.vertical}`}
+                            style={styles.cellRow}
+                            testID={`tail-risk-cell-${b.label}-${cell.vertical}`}
+                          >
+                            <Text
+                              style={[
+                                styles.cellLabel,
+                                { color: colors.mutedForeground },
+                              ]}
+                            >
+                              ↳ {cell.vertical}
+                            </Text>
+                            <Text
+                              style={[
+                                styles.cellMeta,
+                                { color: colors.mutedForeground },
+                              ]}
+                            >
+                              {cell.open_count}× ·{" "}
+                              {fmtUsd(cell.open_max_loss_usd)} ·{" "}
+                              <Text
+                                style={{ color: pnlColor(cell.realized_pnl_usd) }}
+                              >
+                                {fmtUsd(cell.realized_pnl_usd)}
+                              </Text>
+                              {cell.ev_per_trade !== null
+                                ? (
+                                    <Text
+                                      style={{
+                                        color: pnlColor(cell.ev_per_trade),
+                                      }}
+                                    >
+                                      {" · "}
+                                      {fmtEv(cell.ev_per_trade)}/t
+                                    </Text>
+                                  )
+                                : null}
+                            </Text>
+                          </View>
+                        ))
+                      : null}
                   </View>
                 );
               })}
@@ -339,5 +441,23 @@ const styles = StyleSheet.create({
   },
   bucketMetaRow: {
     marginTop: 2,
+  },
+  cellRow: {
+    marginTop: 4,
+    paddingLeft: 12,
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "baseline",
+    gap: 8,
+  },
+  cellLabel: {
+    fontSize: 11,
+    fontFamily: "Inter_500Medium",
+  },
+  cellMeta: {
+    fontSize: 11,
+    fontFamily: "Inter_400Regular",
+    flexShrink: 1,
+    textAlign: "right",
   },
 });
