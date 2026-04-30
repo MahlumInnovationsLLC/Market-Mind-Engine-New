@@ -332,6 +332,27 @@ per-row (see `_tag_placed_by` in `scripts/backfill_kalshi_fills.py`).
   `system`** to match the web landing-page behaviour.  Coverage:
   `components/__tests__/PlacedByToggle.test.tsx` (3 tests, including a
   twin-mount lock-step assertion).  Mobile suite green at 193 passing.
+- **Equity-curve threading follow-up** (2026-04-30): the operator
+  reported that toggling Manual / System / Both still left ROI, P&L
+  Today, the Cumulative P&L chart and the Daily P&L chart unchanged.
+  Root cause: those four widgets are derived from
+  `/api/public/equity-curve`, which had no `placed_by` param and ran
+  unfiltered.  Audit of the dashboard tree confirmed the rest of the
+  unwired widgets (`ActivePositions`, `BankrollPanel`, `Leagues
+  ExposurePanel`, `Tournament*`, `PipelineTracker`, swarm telemetry,
+  `HealthSnapshot`) are book-level / model-level surfaces (live
+  exposure or model health) that correctly stay provenance-agnostic.
+  Fix: `dashboard.get_public_equity_curve` and the
+  `/api/public/equity-curve` route now accept the same
+  `Literal['manual','system','all']='all'` param, applied via
+  `_placed_by_and_clause` inside the `window_trades` CTE WHERE clause.
+  `EquityCharts` and `KpiSummaryBar`'s equity-curve query both thread
+  `placedBy` from `usePlacedBy()` into the queryKey + URL so cache
+  segments per filter and toggling forces a refetch.  The default of
+  `'all'` keeps the anonymous marketing landing page behaviour
+  unchanged.  Coverage: 5 new api-server tests
+  (`test_public_equity_curve_forwards_placed_by` parametrised across
+  default / manual / system / all + a 422 trust-boundary check).
 - **Auth UX guardrail** (`artifacts/web/src/ClerkApp.tsx`,
   `AuthedShellRoute`): unauthenticated users hitting any protected
   route under the catch-all (e.g. `/app`, `/verticals`, `/trading`)

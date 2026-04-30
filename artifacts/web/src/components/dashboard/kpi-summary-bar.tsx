@@ -108,11 +108,14 @@ function KpiTile({
 
 export default function KpiSummaryBar() {
   const { period, days } = usePeriod();
-  // Trade-provenance filter (T004).  Plumbed through every trade-derived
-  // tile (P&L today, ROI, volume, win-rate, Sharpe).  The equity-curve
-  // and open-positions tiles intentionally stay unscoped — equity-curve
-  // is the public marketing surface, and open_positions describes the
-  // book regardless of who placed each leg.
+  // Trade-provenance filter (T004).  Plumbed through every trade-
+  // derived tile (P&L today, ROI, volume, win-rate, Sharpe) AND the
+  // equity-curve query the P&L-today / ROI tiles derive from — the
+  // equity-curve API now accepts an optional `placed_by` param that
+  // defaults to "all" on the marketing landing surface, so threading
+  // it from the authed dashboard doesn't break the anonymous one.
+  // Open-positions stays unscoped — it describes the live book
+  // (currently-held contracts) which is provenance-agnostic.
   const { placedBy } = usePlacedBy();
 
   const overviewParams = { placed_by: placedBy };
@@ -137,13 +140,18 @@ export default function KpiSummaryBar() {
     },
   });
   const equityQ = useQuery<EquityCurve>({
-    queryKey: ["public-equity-curve", days],
+    // `placedBy` is part of the key so the cache splits per-segment
+    // and toggling Manual/System/Both forces a refetch instead of
+    // returning the previous segment's series.
+    queryKey: ["public-equity-curve", days, placedBy],
     queryFn: async () => {
       // Goes through `resolveApiUrl` so the Mac-Studio cutover knob
       // (`VITE_API_URL`) reroutes the public equity curve to the
       // configured backend just like every other API call.
       const r = await fetch(
-        resolveApiUrl(`${import.meta.env.BASE_URL}api/public/equity-curve?days=${days}`),
+        resolveApiUrl(
+          `${import.meta.env.BASE_URL}api/public/equity-curve?days=${days}&placed_by=${placedBy}`,
+        ),
       );
       if (!r.ok) throw new Error(`equity-curve ${r.status}`);
       return r.json();

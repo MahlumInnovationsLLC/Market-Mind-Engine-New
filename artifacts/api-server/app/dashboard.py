@@ -559,12 +559,21 @@ async def get_slippage_guard_top_offenders(
         return []
 
 
-async def get_public_equity_curve(days: int = 30) -> list[dict[str, Any]]:
+async def get_public_equity_curve(
+    days: int = 30,
+    placed_by: str | None = None,
+) -> list[dict[str, Any]]:
     """Daily cumulative realized PnL across all trades, in chronological order.
 
-    Public — used by the marketing landing page.  Bounded so a hostile
-    caller can't trigger a multi-year scan; the dashboard never asks for
-    more than ~90 days of history.
+    Public — used by the marketing landing page (which never sets
+    ``placed_by``, so the unfiltered "all-trades" curve is preserved
+    exactly as before for anonymous visitors).  The authed dashboard
+    threads ``placed_by`` so its KPI tiles (P&L Today, ROI) and the
+    Cumulative / Daily P&L charts honour the Manual / System / Both
+    toggle the operator selected.
+
+    Bounded so a hostile caller can't trigger a multi-year scan; the
+    dashboard never asks for more than ~90 days of history.
 
     Returns a list of `{date, daily_pnl, cumulative_pnl, trades}` rows,
     one per calendar day in the window (chronological).  Days with no
@@ -573,9 +582,14 @@ async def get_public_equity_curve(days: int = 30) -> list[dict[str, Any]]:
     failure.
     """
     days = max(1, min(int(days), 365))
+    # Reuse the shared helper so the manual/system/all bucket
+    # definitions stay in lock-step with every other route.  When
+    # `placed_by` is None or "all" the helper returns "" → no extra
+    # WHERE fragment, identical to the pre-T004 query plan.
+    pb_and = _placed_by_and_clause(placed_by)  # " AND placed_by = ..." or ""
     try:
         rows = await db.fetch(
-            """
+            f"""
             WITH bounds AS (
               SELECT
                 ((now() at time zone 'utc')::date - ($1::int - 1)) AS start_d,
@@ -590,7 +604,7 @@ async def get_public_equity_curve(days: int = 30) -> list[dict[str, Any]]:
                 date_trunc('day', executed_at)::date AS d,
                 coalesce(pnl, 0)::float              AS pnl
               FROM trades, bounds b
-              WHERE executed_at >= b.start_d
+              WHERE executed_at >= b.start_d{pb_and}
             ),
             daily AS (
               SELECT

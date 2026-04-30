@@ -17,6 +17,7 @@ import {
 import { GlassCard } from "@/components/ui/glass-card";
 import { SectionHeader } from "@/components/ui/section-header";
 import { usePeriod } from "./period-context";
+import { usePlacedBy } from "./placed-by-context";
 
 type EquityPoint = {
   date: string;
@@ -48,14 +49,23 @@ const LOSS = "hsl(var(--loss, 0 72% 55%))";
 
 export default function EquityCharts() {
   const { period, days } = usePeriod();
+  // Thread the operator's Manual / System / Both selection through
+  // the equity-curve fetch so the Cumulative + Daily P&L charts move
+  // in lock-step with the rest of the dashboard.  `placedBy` is part
+  // of the React-Query key so flipping the toggle invalidates cleanly
+  // instead of returning a stale cached series.  `all` produces no
+  // server-side filter, identical to the marketing-landing behaviour.
+  const { placedBy } = usePlacedBy();
   const { data, isLoading, isError } = useQuery<EquityCurve>({
-    queryKey: ["public-equity-curve", days],
+    queryKey: ["public-equity-curve", days, placedBy],
     queryFn: async () => {
       // Goes through `resolveApiUrl` so the Mac-Studio cutover knob
       // (`VITE_API_URL`) reroutes the public equity curve to the
       // configured backend just like every other API call.
       const r = await fetch(
-        resolveApiUrl(`${import.meta.env.BASE_URL}api/public/equity-curve?days=${days}`),
+        resolveApiUrl(
+          `${import.meta.env.BASE_URL}api/public/equity-curve?days=${days}&placed_by=${placedBy}`,
+        ),
       );
       if (!r.ok) throw new Error(`equity-curve ${r.status}`);
       return r.json();

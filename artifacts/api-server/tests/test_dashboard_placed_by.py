@@ -375,3 +375,72 @@ def test_verticals_overview_forwards_placed_by(
     assert captured_calls[0]["placed_by"] == expected_kwarg
     body = resp.json()
     assert body.get("placed_by") == expected_kwarg
+
+
+# ---- /api/public/equity-curve --------------------------------------------
+#
+# This endpoint backs both the marketing landing page (anonymous, must
+# stay unfiltered → sends no `placed_by`, defaults to "all") and the
+# authed dashboard's KPI tiles (`P&L Today`, `ROI`) plus the Cumulative /
+# Daily P&L charts (which thread the operator's Manual / System / Both
+# selection).  Two contracts to lock down:
+#   1. Default `placed_by` is "all" so the existing marketing surface
+#      keeps its pre-T004 behaviour exactly.
+#   2. The value reaches `dashboard.get_public_equity_curve` and is
+#      echoed back in the response so the UI can reconstruct the
+#      active filter without re-parsing the URL.
+
+
+def _stub_public_equity_curve(monkeypatch, captured: list[Any]) -> None:
+    async def _fake(
+        days: int = 30, placed_by: str | None = None
+    ) -> list[dict[str, Any]]:
+        captured.append(
+            {"fn": "public_equity_curve", "days": days, "placed_by": placed_by}
+        )
+        return []
+
+    monkeypatch.setattr(dashboard, "get_public_equity_curve", _fake)
+
+
+@pytest.mark.parametrize(
+    "qs,expected_kwarg",
+    [
+        ("?days=30", "all"),                        # marketing-landing default
+        ("?days=30&placed_by=manual", "manual"),
+        ("?days=30&placed_by=system", "system"),
+        ("?days=30&placed_by=all", "all"),
+    ],
+)
+def test_public_equity_curve_forwards_placed_by(
+    monkeypatch, captured_calls, qs, expected_kwarg
+):
+    """The route accepts the optional `placed_by` and forwards it.
+
+    No auth fixture — `/api/public/*` is anonymous by contract.
+    """
+    _stub_public_equity_curve(monkeypatch, captured_calls)
+    client = TestClient(app)
+
+    resp = client.get(f"/api/public/equity-curve{qs}")
+
+    assert resp.status_code == 200, resp.text
+    assert len(captured_calls) == 1
+    assert captured_calls[0]["placed_by"] == expected_kwarg
+    assert captured_calls[0]["days"] == 30
+    body = resp.json()
+    # Echoed back so the client can verify the active filter.
+    assert body.get("placed_by") == expected_kwarg
+
+
+def test_public_equity_curve_rejects_unknown_placed_by_with_422(monkeypatch):
+    """Same 422 trust-boundary contract as the dashboard routes."""
+    captured: list[Any] = []
+    _stub_public_equity_curve(monkeypatch, captured)
+    client = TestClient(app)
+
+    resp = client.get("/api/public/equity-curve?days=30&placed_by=evil")
+
+    assert resp.status_code == 422
+    # Should not have reached the dashboard layer.
+    assert captured == []
