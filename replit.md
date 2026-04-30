@@ -456,6 +456,45 @@ The report's `summary` block exposes `leagues_parity`,
 should fire on `leagues_regressed` not on `leagues_outside_tolerance`,
 since "outside" is currently dominated by *improvements*.
 
+**Live execution result (2026-04-30):** the commit backfill against
+Supabase resolved **40,130 of 638,306** unresolved rows (a 6.3%
+recovery; 100% of *recoverable* rows). The cascade fired with
+`market_id:v1_sport_schema = 40,088` (rule 5) and
+`market_id:kalshi_prefix = 42` (rule 4); rules 1–3 had zero hits
+because V1's writer dropped the original Kalshi ticker / sport label
+from `analysis_json` before persisting (analysis_json on unresolved
+rows holds only post-trade analytics: pnl/edge/Brier-derived metrics).
+Rule 5 (added 2026-04-30 from the live data probe) parses V1's
+synthetic `SPORT-<LEAGUE>-<SUB>-<HASH>` market_id placeholder; the
+discovered league distribution was NBA=14,405 / NCAAB=13,768 /
+NHL=10,785 / MLB=1,130. The remaining 598,176 unresolved rows are
+overwhelmingly the V1 `CRYPTO-<COIN>-<TIMEFRAME>` placeholder
+(595,290 BTC, 167 weather, ~3k FIBA/misc) — none of those leagues are
+in `SUPPORTED_LEAGUES`, so leaving them at `UNRESOLVED` is the
+*correct* outcome (the conservative-philosophy comment in
+`league_inference.py` documents why mis-bucketing them would pollute
+real per-league Brier scores).
+
+Backtest delta (`scripts/reports/v1_backtest_full_archive_2026-04-29.json` →
+`reports/v1_backtest_full_archive_2026-04-30.json`):
+
+* `row_kept_count` 603,128 → 4,952 — the old report's 603k was
+  poisoned by a 598,218-row synthetic UNKNOWN bucket (brier_calibrated
+  0.2626) included as a "league". The new report correctly excludes
+  unresolved rows from per-league scoring.
+* `summary.league_count` 8 → 12 — five new real leagues now have a
+  scored bucket (COMMODITIES, ENTERTAINMENT, EVENTS_ECON, SERIEA,
+  UCL); they were previously hidden inside the UNKNOWN aggregate.
+* New top-level fields `league_unresolved_count: 598,176` and
+  `league_unresolved_breakdown: {null: 0, literal_unknown: 598,176}`
+  expose the honest residual without polluting `per_league`.
+* No regression on existing per-league Briers: NBA/NCAAB/NHL/MLB/
+  NFL/MLS/PGA all unchanged (the 40k newly-resolved rows fail the
+  backtest's surrogate-feature filter and aren't re-scored — they're
+  simply now correctly *attributed* in their per-league bucket and
+  available to future calibrator refits, e.g. via
+  `scripts/refit_v153_calibrators.py`).
+
 **Internals — DB batching + no double-calibration on full-stack path.**
 `run()` walks the V1 archive in keyset-paginated batches (default
 `--batch-size 50000`, ordered by the `id` PRIMARY KEY) so memory

@@ -12,32 +12,31 @@ contributed nothing to the calibrated-Brier metric.
 This module implements a deterministic, data-driven inference cascade
 that runs ENTIRELY off the imported row's existing columns — no
 network calls, no extra DB lookups beyond the row itself.  Order of
-precedence is highest-confidence-first; the first rule to fire wins:
+precedence matches the Task #740 contract; the first rule to fire wins:
 
-1. **Kalshi series prefix on ``market_id``** — Kalshi event tickers are
-   ``<SERIES>-<EVENT>-<OUTCOME>``; the series segment is canonical and
-   maps 1:1 to a league.  The prefix table covers all 22 leagues the
-   per-league calibrator stack supports plus the few extra Kalshi
-   series shapes V1 emitted (``KX*GAME``, ``KX*MATCH``, ``KXATPMATCH``,
-   ``KXBTC``/``KXETH``, ``KXGOLD``/``KXOIL``, ``KXAI*``, ``KXPRES*``,
-   ``KXFED*`` etc).  This rule hits the bulk of the UNKNOWN bucket
-   because the V1 writer recorded ``market_id`` even when ``league``
-   defaulted to ``'unknown'``.
-2. **``analysis_json.league``** — V1 occasionally stashed the league
-   directly in the per-trade analysis blob even when the column was
-   blank.  Trusted only when the value normalises to one of the
-   supported leagues.
-3. **``analysis_json.kalshi_market_ticker`` / ``analysis_json.market_id``
-   / ``analysis_json.market_ticker``** — same Kalshi-prefix rule
-   applied to whatever ticker the analysis blob carries when the
-   top-level ``market_id`` column is also missing.
-4. **``vertical`` fallback** — if the row's ``vertical`` is one of the
-   single-league verticals (``commodities`` -> ``COMMODITIES``,
+1. **``analysis_json.kalshi_ticker`` (or ``kalshi_market_ticker`` /
+   ``market_ticker`` / ``ticker`` / ``market_id`` / ``marketId``)
+   prefix lookup** against the canonical 22-league Kalshi series
+   prefix table.  V1's writer often recorded the Kalshi ticker
+   inside the per-trade analysis blob even when the top-level
+   ``league`` column was ``'unknown'``.  Highest confidence because
+   the series segment is canonical and maps 1:1 to a league.
+2. **``vertical`` 1:1 fallback** — if the row's ``vertical`` is one of
+   the single-league verticals (``commodities`` -> ``COMMODITIES``,
    ``tech_ai`` -> ``TECH_AI``, ``elections`` -> ``ELECTIONS``,
    ``events_econ`` -> ``EVENTS_ECON``, ``entertainment`` ->
    ``ENTERTAINMENT``).  ``sports`` and ``soccer`` are intentionally
    NOT included here because they fan out to many leagues — leaving
    them at ``UNRESOLVED`` is more honest than mis-bucketing them.
+3. **``analysis_json.sport`` / ``analysis_json.league``** — V1
+   occasionally stashed the league directly in the per-trade analysis
+   blob even when the column was blank.  Trusted only when the value
+   normalises to one of the supported leagues (so a ``sport`` value of
+   the literal string ``"basketball"`` will NOT mis-fire — it has no
+   canonical SUPPORTED_LEAGUE that name maps to).
+4. **``market_id`` regex/prefix fallback** — last-resort Kalshi-prefix
+   match against the top-level ``market_id`` column for rows that have
+   no analysis_json blob at all.
 
 When NO rule fires the function returns ``None`` and the caller leaves
 the row's ``league`` untouched.  The backtest harness must then treat
@@ -191,13 +190,18 @@ _VERTICAL_RULES: dict[str, str] = {
     "entertainment": "ENTERTAINMENT",
 }
 
-# Common analysis_json key aliases for the league field.
+# Common analysis_json key aliases for an explicit league or sport
+# string field.  ``sport`` is included per the Task #740 contract;
+# ``_normalize_league_value`` is conservative — it only fires for
+# values that map to a SUPPORTED_LEAGUE, so a sport value like
+# ``"basketball"`` will NOT mis-bucket as NBA.
 _ANALYSIS_LEAGUE_KEYS: tuple[str, ...] = (
     "league", "League", "LEAGUE", "league_name", "leagueName",
+    "sport", "Sport", "SPORT",
 )
 # Common analysis_json key aliases for a Kalshi market ticker.
 _ANALYSIS_TICKER_KEYS: tuple[str, ...] = (
-    "kalshi_market_ticker", "kalshi_ticker", "market_ticker",
+    "kalshi_ticker", "kalshi_market_ticker", "market_ticker",
     "ticker", "market_id", "marketId",
 )
 
@@ -205,6 +209,34 @@ _ANALYSIS_TICKER_KEYS: tuple[str, ...] = (
 # Strip leading non-letter characters so a leading ``"``/``'`` from a
 # malformed JSON-string-of-a-string can't block the prefix match.
 _LEADING_NONALPHA = re.compile(r"^[^A-Za-z]+")
+
+
+# ---------------------------------------------------------------------------
+# V1-writer ``SPORT-<LEAGUE>-<SUB>-<HASH>`` market-id schema.
+#
+# Discovered while running the live backfill probe (2026-04-30) against
+# Supabase: V1 wrote ~40,088 unresolved sports rows whose top-level
+# ``market_id`` is the synthetic placeholder ``SPORT-<LEAGUE>-<SUB>-
+# <md5hash>`` (e.g. ``SPORT-NCAAB-NCAAB-873982815bce991e0e334990ca56e228``)
+# rather than a real Kalshi ticker.  The second hyphen-segment is the
+# canonical league key.  This rule is V1-schema-specific, so it carries
+# its own audit key (``market_id:v1_sport_schema``) and is separate from
+# the Kalshi-prefix rule (rule 4).
+# ---------------------------------------------------------------------------
+_V1_SPORT_SCHEMA_RE = re.compile(r"^SPORT-([A-Z0-9_]+)-")
+
+
+def _league_from_v1_sport_schema(market_id: Any) -> tuple[str, str] | None:
+    """Parse ``SPORT-<LEAGUE>-...`` V1 placeholder market ids."""
+    if not isinstance(market_id, str):
+        return None
+    m = _V1_SPORT_SCHEMA_RE.match(market_id.strip().upper())
+    if m is None:
+        return None
+    candidate = _normalize_league_value(m.group(1))
+    if candidate is None:
+        return None
+    return candidate, "market_id:v1_sport_schema"
 
 
 def _normalize_league_value(raw: Any) -> str | None:
@@ -254,25 +286,35 @@ def _league_from_kalshi_ticker(ticker: Any) -> str | None:
     return None
 
 
-def _league_from_analysis_json(blob: Any) -> tuple[str, str] | None:
-    """Inspect the per-trade analysis_json blob for a usable league hint.
+def _league_from_analysis_ticker(blob: Any) -> tuple[str, str] | None:
+    """Run the Kalshi-prefix lookup against any ticker-shaped key in the blob.
 
-    Returns ``(league, rule_key)`` on hit, ``None`` otherwise.
+    Used by cascade rule (1) — highest precedence.
     """
     if not isinstance(blob, Mapping):
         return None
-    # 1. Direct league field.
-    for key in _ANALYSIS_LEAGUE_KEYS:
-        if key in blob:
-            mapped = _normalize_league_value(blob.get(key))
-            if mapped is not None:
-                return mapped, f"analysis_json.{key}"
-    # 2. Kalshi ticker stashed in the analysis blob.
     for key in _ANALYSIS_TICKER_KEYS:
         if key in blob:
             mapped = _league_from_kalshi_ticker(blob.get(key))
             if mapped is not None:
                 return mapped, f"analysis_json.{key}:kalshi_prefix"
+    return None
+
+
+def _league_from_analysis_field(blob: Any) -> tuple[str, str] | None:
+    """Inspect explicit ``league`` / ``sport`` fields on the analysis blob.
+
+    Used by cascade rule (3).  Conservative: only fires for values
+    that ``_normalize_league_value`` recognises as a SUPPORTED_LEAGUE,
+    so a generic sport name like ``"basketball"`` will NOT mis-fire.
+    """
+    if not isinstance(blob, Mapping):
+        return None
+    for key in _ANALYSIS_LEAGUE_KEYS:
+        if key in blob:
+            mapped = _normalize_league_value(blob.get(key))
+            if mapped is not None:
+                return mapped, f"analysis_json.{key}"
     return None
 
 
@@ -314,19 +356,40 @@ def infer_league(
     The caller is responsible for ALSO appending the original league
     value (``orig=<v1_value>``) to the audit string before persisting,
     so a rollback is possible without re-querying the dump.
+
+    Cascade order (matches Task #740 contract):
+      (1) ``analysis_json.kalshi_ticker`` (and aliases) Kalshi prefix
+      (2) ``vertical`` 1:1 fallback for single-league verticals
+      (3) ``analysis_json.sport`` / ``analysis_json.league`` direct field
+      (4) ``market_id`` top-level Kalshi prefix fallback
     """
-    # Rule 1: Kalshi series prefix on the top-level ``market_id`` column.
-    mapped = _league_from_kalshi_ticker(market_id)
-    if mapped is not None:
-        return mapped, f"kalshi_prefix:market_id"
-    # Rules 2 + 3: Inspect the analysis_json blob.
-    aj = _league_from_analysis_json(analysis_json)
-    if aj is not None:
-        return aj
-    # Rule 4: Single-league vertical fallback.
+    # Rule 1 — analysis_json ticker prefix (highest precedence: explicit
+    # ticker reference is the strongest signal).
+    aj_ticker = _league_from_analysis_ticker(analysis_json)
+    if aj_ticker is not None:
+        return aj_ticker
+    # Rule 2 — vertical 1:1 mapping (only single-league verticals; runs
+    # before the analysis_json field check because a single-league
+    # vertical is deterministic — even if analysis_json carries a
+    # garbled league string, the vertical is the source of truth).
     vf = _league_from_vertical(vertical)
     if vf is not None:
         return vf
+    # Rule 3 — analysis_json explicit league/sport field.
+    aj_field = _league_from_analysis_field(analysis_json)
+    if aj_field is not None:
+        return aj_field
+    # Rule 4 — top-level market_id Kalshi prefix fallback (last resort
+    # for rows whose analysis_json is missing entirely).
+    mapped = _league_from_kalshi_ticker(market_id)
+    if mapped is not None:
+        return mapped, "market_id:kalshi_prefix"
+    # Rule 5 — V1-writer's ``SPORT-<LEAGUE>-<SUB>-<HASH>`` synthetic
+    # placeholder schema.  Discovered live (2026-04-30); recovers
+    # ~40k sports rows whose original Kalshi ticker was dropped by V1.
+    v1_sport = _league_from_v1_sport_schema(market_id)
+    if v1_sport is not None:
+        return v1_sport
     return None
 
 

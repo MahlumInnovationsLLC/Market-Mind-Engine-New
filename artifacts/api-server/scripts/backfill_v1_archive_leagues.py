@@ -160,6 +160,33 @@ async def _run_backfill(
             f"unresolved_before={unresolved_before}"
         )
 
+        # Idempotence guard (Task #740 contract): if the archive is
+        # already fully resolved, refuse to do any further work.  This
+        # makes a re-run of the script a clean no-op signal — the
+        # operator can spot a misfire (e.g. wrong DSN pointing at an
+        # already-backfilled DB) instead of silently iterating zero
+        # rows and reporting "DONE".  Returning early here also means
+        # the dry-run rollback path is never entered, so the summary
+        # is honest about ``rows_updated=0``.
+        if not unresolved_before:
+            _log(
+                "REFUSING: pre-state has zero unresolved rows; nothing "
+                "to backfill (idempotent guard)."
+            )
+            return {
+                "dry_run": dry_run,
+                "total_rows": total_rows,
+                "unresolved_before": 0,
+                "unresolved_after": 0,
+                "rows_seen": 0,
+                "rows_updated": 0,
+                "rows_left_unresolved": 0,
+                "per_rule": {},
+                "per_league": {},
+                "samples": [],
+                "refused_no_unresolved": True,
+            }
+
         per_rule_counter: Counter[str] = Counter()
         per_league_counter: Counter[str] = Counter()
         rows_seen = 0
@@ -365,6 +392,12 @@ async def _amain() -> int:
         limit=args.limit,
     )
     _print_summary(summary)
+    # Idempotence guard: signal a non-zero exit code when the script
+    # refused to run (zero unresolved pre-state) so an automation
+    # harness / cron wrapper can distinguish "did meaningful work"
+    # from "was already a no-op".
+    if summary.get("refused_no_unresolved"):
+        return 2
     return 0
 
 

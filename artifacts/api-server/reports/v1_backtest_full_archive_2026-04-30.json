@@ -1,0 +1,532 @@
+{
+  "started_at": "2026-04-30T14:31:54.918773+00:00",
+  "completed_at": "2026-04-30T14:32:04.207992+00:00",
+  "source": "db",
+  "row_input_count": 667092,
+  "row_kept_count": 4952,
+  "batch_count": 14,
+  "batch_size": 50000,
+  "league_unresolved_count": 598176,
+  "league_unresolved_breakdown": {
+    "null": 0,
+    "literal_unknown": 598176
+  },
+  "leagues_filter": null,
+  "limit": null,
+  "calibrator_freshness": {
+    "supported": [
+      "NBA",
+      "NHL",
+      "MLB",
+      "NCAAB",
+      "NFL",
+      "EPL",
+      "LALIGA",
+      "SERIEA",
+      "BUNDES",
+      "LIGUE1",
+      "MLS",
+      "UCL",
+      "UFC",
+      "ATP",
+      "WTA",
+      "F1",
+      "PGA",
+      "COMMODITIES",
+      "TECH_AI",
+      "ELECTIONS",
+      "EVENTS_ECON",
+      "ENTERTAINMENT"
+    ],
+    "loaded_count": 22,
+    "missing_count": 0,
+    "stale_count": 0,
+    "per_league": {
+      "NBA": {
+        "loaded": true,
+        "type": "isotonic",
+        "fit_at": 1777557846.751325,
+        "age_seconds": 1677.5,
+        "stale": false,
+        "sample_count": 3158
+      },
+      "NHL": {
+        "loaded": true,
+        "type": "isotonic",
+        "fit_at": 1777557846.818376,
+        "age_seconds": 1677.4,
+        "stale": false,
+        "sample_count": 300
+      },
+      "MLB": {
+        "loaded": true,
+        "type": "isotonic",
+        "fit_at": 1777557846.860253,
+        "age_seconds": 1677.3,
+        "stale": false,
+        "sample_count": 163
+      },
+      "NCAAB": {
+        "loaded": true,
+        "type": "isotonic",
+        "fit_at": 1777557846.948082,
+        "age_seconds": 1677.3,
+        "stale": false,
+        "sample_count": 1356
+      },
+      "NFL": {
+        "loaded": true,
+        "type": "platt",
+        "fit_at": 1777471105.808493,
+        "age_seconds": 88418.4,
+        "stale": false,
+        "sample_count": 2168
+      },
+      "EPL": {
+        "loaded": true,
+        "type": "platt",
+        "fit_at": 1777471105.065261,
+        "age_seconds": 88419.1,
+        "stale": false,
+        "sample_count": 4560
+      },
+      "LALIGA": {
+        "loaded": true,
+        "type": "platt",
+        "fit_at": 1777471105.14409,
+        "age_seconds": 88419.1,
+        "stale": false,
+        "sample_count": 4560
+      },
+      "SERIEA": {
+        "loaded": true,
+        "type": "platt",
+        "fit_at": 1777471105.194317,
+        "age_seconds": 88419.0,
+        "stale": false,
+        "sample_count": 4560
+      },
+      "BUNDES": {
+        "loaded": true,
+        "type": "platt",
+        "fit_at": 1777471105.245317,
+        "age_seconds": 88419.0,
+        "stale": false,
+        "sample_count": 3672
+      },
+      "LIGUE1": {
+        "loaded": true,
+        "type": "platt",
+        "fit_at": 1777471105.293656,
+        "age_seconds": 88418.9,
+        "stale": false,
+        "sample_count": 4116
+      },
+      "MLS": {
+        "loaded": true,
+        "type": "platt",
+        "fit_at": 1777471105.343607,
+        "age_seconds": 88418.9,
+        "stale": false,
+        "sample_count": 4704
+      },
+      "UCL": {
+        "loaded": true,
+        "type": "isotonic",
+        "fit_at": 1777469365.36844,
+        "age_seconds": 90158.8,
+        "stale": false,
+        "sample_count": 0
+      },
+      "UFC": {
+        "loaded": true,
+        "type": "isotonic",
+        "fit_at": 1777469365.450857,
+        "age_seconds": 90158.8,
+        "stale": false,
+        "sample_count": 0
+      },
+      "ATP": {
+        "loaded": true,
+        "type": "platt",
+        "fit_at": 1777471105.572939,
+        "age_seconds": 88418.6,
+        "stale": false,
+        "sample_count": 21060
+      },
+      "WTA": {
+        "loaded": true,
+        "type": "platt",
+        "fit_at": 1777471105.752305,
+        "age_seconds": 88418.5,
+        "stale": false,
+        "sample_count": 19382
+      },
+      "F1": {
+        "loaded": true,
+        "type": "isotonic",
+        "fit_at": 1777469365.702279,
+        "age_seconds": 90158.5,
+        "stale": false,
+        "sample_count": 0
+      },
+      "PGA": {
+        "loaded": true,
+        "type": "isotonic",
+        "fit_at": 1777557846.99164,
+        "age_seconds": 1677.2,
+        "stale": false,
+        "sample_count": 52
+      },
+      "COMMODITIES": {
+        "loaded": true,
+        "type": "isotonic",
+        "fit_at": 1777469365.869148,
+        "age_seconds": 90158.3,
+        "stale": false,
+        "sample_count": 0
+      },
+      "TECH_AI": {
+        "loaded": true,
+        "type": "isotonic",
+        "fit_at": 1777469365.952067,
+        "age_seconds": 90158.3,
+        "stale": false,
+        "sample_count": 0
+      },
+      "ELECTIONS": {
+        "loaded": true,
+        "type": "isotonic",
+        "fit_at": 1777469366.036278,
+        "age_seconds": 90158.2,
+        "stale": false,
+        "sample_count": 0
+      },
+      "EVENTS_ECON": {
+        "loaded": true,
+        "type": "isotonic",
+        "fit_at": 1777469366.120064,
+        "age_seconds": 90158.1,
+        "stale": false,
+        "sample_count": 0
+      },
+      "ENTERTAINMENT": {
+        "loaded": true,
+        "type": "isotonic",
+        "fit_at": 1777469366.202642,
+        "age_seconds": 90158.0,
+        "stale": false,
+        "sample_count": 0
+      }
+    },
+    "last_refit_at": null,
+    "last_refit_summary": {}
+  },
+  "parity_gate_status": {
+    "overall": "BLOCKED_PENDING_BACKFILL",
+    "overall_blocked_by": "#731 (V1 feature snapshot dumps)",
+    "summary": {
+      "total_gates": 3,
+      "blocked_or_unevaluable": 3,
+      "evaluable_degraded": 0,
+      "evaluable_degraded_pass": 0,
+      "evaluable_degraded_fail": 0,
+      "pass": 0,
+      "fail": 0
+    },
+    "gates": {
+      "full_stack_replay_via_archived_features": {
+        "status": "BLOCKED",
+        "verdict": null,
+        "blocked_by": "#731 (V1 feature snapshot dumps required)",
+        "evidence": {
+          "rows_attempted": 0,
+          "rows_predicted_via_archived_features": 0,
+          "rows_skipped_missing_features": 0
+        },
+        "note": "V1 archive does not snapshot the upstream LGB+XGB feature vector."
+      },
+      "full_stack_replay_via_surrogate_features": {
+        "status": "NOT_RUN",
+        "evidence": {
+          "surrogate_features_enabled": false,
+          "rows_predicted_via_surrogate": 0,
+          "leagues_improved": [],
+          "leagues_parity": [],
+          "leagues_regressed": []
+        },
+        "caveat": "DEGRADED baseline: ~10 of 32 feature slots populated from V1; rest fall to per-spec defaults. Compares against V1's *raw* predicted_prob, not its final calibrated probability."
+      },
+      "parity_within_2pct_vs_v1_calibrated": {
+        "status": "UNEVALUABLE",
+        "blocked_by": "full_stack predict() produced zero paired rows",
+        "note": "Run with --full-stack to populate this gate."
+      }
+    }
+  },
+  "full_stack_attempt": null,
+  "triage": {
+    "feature_builder_mismatch": {
+      "active": false,
+      "evidence": {
+        "full_stack_attempted": false,
+        "rows_attempted": 0,
+        "rows_predicted_via_models_loader": 0,
+        "rows_skipped_missing_features": 0,
+        "surrogate_features_enabled": false,
+        "rows_predicted_via_surrogate": 0
+      },
+      "note": "V1 archive lacks the upstream feature vector; full-stack replay yields zero usable rows. Pass --surrogate-features for the degraded stand-in, or wait on #731 for real V1 feature dumps."
+    },
+    "calibrator_misalignment": {
+      "active": true,
+      "evidence": {
+        "leagues_improved": [
+          "MLB",
+          "NBA",
+          "NCAAB",
+          "NFL",
+          "NHL"
+        ],
+        "leagues_parity": [
+          "COMMODITIES",
+          "ENTERTAINMENT",
+          "EVENTS_ECON",
+          "MLS",
+          "PGA",
+          "SERIEA",
+          "UCL"
+        ]
+      },
+      "note": "V1's archived predicted_prob is pre-calibrator stack output, so brier(predicted_prob, actual_outcome) is V1's raw baseline \u2014 not its final calibrated Brier."
+    },
+    "artifact_drift": {
+      "active": false,
+      "evidence": {
+        "leagues_regressed": []
+      },
+      "note": "Per-league calibrated Brier worse than V1 raw beyond tolerance \u2014 would indicate on-disk calibrator drift."
+    }
+  },
+  "audit_path": "calibrator_only_via_v1_predicted_prob",
+  "per_league": {
+    "COMMODITIES": {
+      "sample_count": 10,
+      "calibrator_applied_count": 10,
+      "calibrator_type": "isotonic",
+      "brier_v1_raw": 0.583647804,
+      "brier_calibrated": 0.583647804,
+      "brier_delta": 0.0,
+      "delta_vs_v1": 0.0,
+      "log_loss_v1_raw": 1.4449634354836172,
+      "log_loss_calibrated": 1.4449634354836172,
+      "auc_v1_raw": null,
+      "auc_calibrated": null,
+      "within_brier_tolerance": true,
+      "verdict": "parity"
+    },
+    "ENTERTAINMENT": {
+      "sample_count": 6,
+      "calibrator_applied_count": 6,
+      "calibrator_type": "isotonic",
+      "brier_v1_raw": 0.011458500000000002,
+      "brier_calibrated": 0.011458500000000002,
+      "brier_delta": 0.0,
+      "delta_vs_v1": 0.0,
+      "log_loss_v1_raw": 0.11103848856389971,
+      "log_loss_calibrated": 0.11103848856389971,
+      "auc_v1_raw": null,
+      "auc_calibrated": null,
+      "within_brier_tolerance": true,
+      "verdict": "parity"
+    },
+    "EVENTS_ECON": {
+      "sample_count": 19,
+      "calibrator_applied_count": 19,
+      "calibrator_type": "isotonic",
+      "brier_v1_raw": 0.08436743736842105,
+      "brier_calibrated": 0.08436743736842105,
+      "brier_delta": 0.0,
+      "delta_vs_v1": 0.0,
+      "log_loss_v1_raw": 0.31324414960402774,
+      "log_loss_calibrated": 0.31324414960402774,
+      "auc_v1_raw": null,
+      "auc_calibrated": null,
+      "within_brier_tolerance": true,
+      "verdict": "parity"
+    },
+    "MLB": {
+      "sample_count": 133,
+      "calibrator_applied_count": 133,
+      "calibrator_type": "isotonic",
+      "brier_v1_raw": 0.2643976997744361,
+      "brier_calibrated": 0.08169624882532543,
+      "brier_delta": -0.18270145094911067,
+      "delta_vs_v1": -0.18270145094911067,
+      "log_loss_v1_raw": 0.8650459001473062,
+      "log_loss_calibrated": 0.30992179612877285,
+      "auc_v1_raw": 0.1687779433681073,
+      "auc_calibrated": 0.36475409836065575,
+      "within_brier_tolerance": false,
+      "verdict": "improved"
+    },
+    "MLS": {
+      "sample_count": 1,
+      "calibrator_applied_count": 1,
+      "calibrator_type": "platt",
+      "brier_v1_raw": 1.156e-05,
+      "brier_calibrated": 0.012057786703985164,
+      "brier_delta": 0.012046226703985164,
+      "delta_vs_v1": 0.012046226703985164,
+      "log_loss_v1_raw": 0.003405793134832821,
+      "log_loss_calibrated": 0.11631805721602896,
+      "auc_v1_raw": null,
+      "auc_calibrated": null,
+      "within_brier_tolerance": true,
+      "verdict": "parity"
+    },
+    "NBA": {
+      "sample_count": 3093,
+      "calibrator_applied_count": 3093,
+      "calibrator_type": "isotonic",
+      "brier_v1_raw": 0.6014733892240535,
+      "brier_calibrated": 0.10376254395026946,
+      "brier_delta": -0.497710845273784,
+      "delta_vs_v1": -0.497710845273784,
+      "log_loss_v1_raw": 14.325398165850237,
+      "log_loss_calibrated": 0.3588621975577177,
+      "auc_v1_raw": 0.38191613482249703,
+      "auc_calibrated": 0.5646300358994815,
+      "within_brier_tolerance": false,
+      "verdict": "improved"
+    },
+    "NCAAB": {
+      "sample_count": 1355,
+      "calibrator_applied_count": 1355,
+      "calibrator_type": "isotonic",
+      "brier_v1_raw": 0.5382558996531366,
+      "brier_calibrated": 0.16905913213312312,
+      "brier_delta": -0.36919676752001346,
+      "delta_vs_v1": -0.36919676752001346,
+      "log_loss_v1_raw": 11.252268394531537,
+      "log_loss_calibrated": 0.5211520587638263,
+      "auc_v1_raw": 0.33921828889547545,
+      "auc_calibrated": 0.49975837317491206,
+      "within_brier_tolerance": false,
+      "verdict": "improved"
+    },
+    "NFL": {
+      "sample_count": 4,
+      "calibrator_applied_count": 4,
+      "calibrator_type": "platt",
+      "brier_v1_raw": 0.7318422499999999,
+      "brier_calibrated": 0.6114197410900514,
+      "brier_delta": -0.12042250890994854,
+      "delta_vs_v1": -0.12042250890994854,
+      "log_loss_v1_raw": 14.639719899549002,
+      "log_loss_calibrated": 1.762883116909122,
+      "auc_v1_raw": 0.6666666666666666,
+      "auc_calibrated": 0.6666666666666666,
+      "within_brier_tolerance": false,
+      "verdict": "improved"
+    },
+    "NHL": {
+      "sample_count": 272,
+      "calibrator_applied_count": 272,
+      "calibrator_type": "isotonic",
+      "brier_v1_raw": 0.44499831227941167,
+      "brier_calibrated": 0.11496760804453592,
+      "brier_delta": -0.33003070423487574,
+      "delta_vs_v1": -0.33003070423487574,
+      "log_loss_v1_raw": 8.313718477056813,
+      "log_loss_calibrated": 0.3913780989693456,
+      "auc_v1_raw": 0.2969632768361582,
+      "auc_calibrated": 0.5025894538606404,
+      "within_brier_tolerance": false,
+      "verdict": "improved"
+    },
+    "PGA": {
+      "sample_count": 52,
+      "calibrator_applied_count": 52,
+      "calibrator_type": "isotonic",
+      "brier_v1_raw": 0.07602725173076924,
+      "brier_calibrated": 0.06800699300699296,
+      "brier_delta": -0.008020258723776277,
+      "delta_vs_v1": -0.008020258723776277,
+      "log_loss_v1_raw": 0.4287798071844088,
+      "log_loss_calibrated": 0.25300273418215585,
+      "auc_v1_raw": 0.5052083333333334,
+      "auc_calibrated": 0.6614583333333334,
+      "within_brier_tolerance": true,
+      "verdict": "parity"
+    },
+    "SERIEA": {
+      "sample_count": 2,
+      "calibrator_applied_count": 2,
+      "calibrator_type": "platt",
+      "brier_v1_raw": 1.9624999999999898e-05,
+      "brier_calibrated": 0.0075964581985979145,
+      "brier_delta": 0.007576833198597915,
+      "delta_vs_v1": 0.007576833198597915,
+      "log_loss_v1_raw": 0.003559852528540494,
+      "log_loss_calibrated": 0.09118625218364051,
+      "auc_v1_raw": null,
+      "auc_calibrated": null,
+      "within_brier_tolerance": true,
+      "verdict": "parity"
+    },
+    "UCL": {
+      "sample_count": 5,
+      "calibrator_applied_count": 5,
+      "calibrator_type": "isotonic",
+      "brier_v1_raw": 2.579800000000021e-05,
+      "brier_calibrated": 2.579800000000021e-05,
+      "brier_delta": 0.0,
+      "delta_vs_v1": 0.0,
+      "log_loss_v1_raw": 0.0050729433523258325,
+      "log_loss_calibrated": 0.0050729433523258325,
+      "auc_v1_raw": null,
+      "auc_calibrated": null,
+      "within_brier_tolerance": true,
+      "verdict": "parity"
+    }
+  },
+  "summary": {
+    "league_count": 12,
+    "row_count": 4952,
+    "brier_tolerance": 0.02,
+    "leagues_parity": [
+      "COMMODITIES",
+      "ENTERTAINMENT",
+      "EVENTS_ECON",
+      "MLS",
+      "PGA",
+      "SERIEA",
+      "UCL"
+    ],
+    "leagues_improved": [
+      "MLB",
+      "NBA",
+      "NCAAB",
+      "NFL",
+      "NHL"
+    ],
+    "leagues_regressed": [],
+    "leagues_within_tolerance": [
+      "COMMODITIES",
+      "ENTERTAINMENT",
+      "EVENTS_ECON",
+      "MLS",
+      "PGA",
+      "SERIEA",
+      "UCL"
+    ],
+    "leagues_outside_tolerance": [
+      "MLB",
+      "NBA",
+      "NCAAB",
+      "NFL",
+      "NHL"
+    ]
+  }
+}
