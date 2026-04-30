@@ -914,12 +914,16 @@ async def get_tail_risk_exposure(
           GROUP BY b.bucket_idx, o.vertical
         ),
         realized_t AS (
+          -- Realized = settled trades only (pnl IS NOT NULL).  Without
+          -- this filter, open trades with NULL pnl would inflate
+          -- realized_count and dilute win-rate / EV / pnl metrics.
           SELECT
             coalesce(t.vertical, '__unknown__')              AS vertical,
             t.price::float8                                  AS price,
-            coalesce(t.pnl, 0)::float8                       AS pnl
+            t.pnl::float8                                    AS pnl
           FROM trades t
           WHERE t.executed_at >= ((now() at time zone 'utc')::date - ($1::int - 1))
+            AND t.pnl IS NOT NULL
             AND t.price IS NOT NULL
             AND t.price >= 0 AND t.price <= 1
             {pb_t}{vert_t}
@@ -1113,6 +1117,15 @@ async def get_tail_risk_exposure(
         rows = []
         positions_failed = True
 
+    # Three failure modes warrant the trades-only fallback: (a) the
+    # positions query throws (table missing/broken); (b) positions
+    # returns no rows at all; (c) positions returns rows but every
+    # `open_count` is zero (table present, no live opens recorded —
+    # common when ingestion is stale).  Realized slice is identical
+    # between the two paths (same `trades` table, same filters
+    # including `pnl IS NOT NULL`), so swapping wholesale is safe and
+    # never blanks the realized panel even when fallback finds zero
+    # open exposure.
     positions_open_count = sum(int(r["open_count"] or 0) for r in rows)
     if positions_failed or positions_open_count == 0:
         try:
@@ -1121,15 +1134,26 @@ async def get_tail_risk_exposure(
             log.warning("tail_risk_exposure trades fallback failed: %s", e2)
             fallback_rows = []
         fallback_open = sum(int(r["open_count"] or 0) for r in fallback_rows)
-        if fallback_open > 0:
+        if positions_failed:
+            # No positions data at all — fallback is our only source.
+            # Use whatever it returned (may be open + realized, or
+            # realized-only if no `pnl IS NULL` trades exist).  Mark
+            # `source = empty` only when literally nothing came back.
+            if fallback_rows:
+                rows = fallback_rows
+                source = "trades_fallback"
+            else:
+                rows = []
+                source = "empty"
+        elif fallback_open > 0:
+            # Positions had only realized rows (no opens) but fallback
+            # reconstructed real open exposure — prefer it so the
+            # bucket matrix and headline reflect live trading.
             rows = fallback_rows
             source = "trades_fallback"
-        elif positions_failed:
-            # Nothing recoverable from either path.  Keep `rows` empty
-            # and mark the payload so the UI can render an empty state
-            # rather than implying we have a confirmed zero reading.
-            rows = []
-            source = "empty"
+        # else: positions had realized rows and fallback adds no open
+        # exposure either — keep the positions rows; `source` stays
+        # "positions" so the realized slice still surfaces.
 
     try:
         if source == "positions":

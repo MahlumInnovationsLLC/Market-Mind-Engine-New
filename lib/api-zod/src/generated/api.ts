@@ -645,6 +645,127 @@ export const GetRecentCyclesResponse = zod.object({
 });
 
 /**
+ * Returns a bucket × vertical matrix of open positions and realized P&L over the trailing window so the dashboard tile can show where today's tail-risk lives without any client-side bucketing.  Bucket boundaries and the `is_tail` flag are owned by the server.
+ * @summary Bucketed open-exposure + realized-PnL matrix for the tail-risk tile
+ */
+export const getPublicTailRiskExposureQueryDaysDefault = 30;
+export const getPublicTailRiskExposureQueryDaysMax = 365;
+
+export const getPublicTailRiskExposureQueryPlacedByDefault = `all`;
+
+export const GetPublicTailRiskExposureQueryParams = zod.object({
+  days: zod.coerce
+    .number()
+    .min(1)
+    .max(getPublicTailRiskExposureQueryDaysMax)
+    .default(getPublicTailRiskExposureQueryDaysDefault)
+    .describe(
+      "Trailing window length in days (clamped to [1, 365]). Driven by the dashboard's PeriodStrip selector.",
+    ),
+  placed_by: zod
+    .enum(["manual", "system", "all"])
+    .default(getPublicTailRiskExposureQueryPlacedByDefault)
+    .describe(
+      "Provenance bucket to scope trade-derived metrics by.  The web + mobile UIs surface this as a 3-segment toggle on every P&L analytics surface.",
+    ),
+  vertical: zod.coerce
+    .string()
+    .optional()
+    .describe(
+      "Comma-separated list of vertical names (e.g. `sports,crypto`).  Unknown names raise HTTP 400 — silently returning the unfiltered matrix on a typo would be a P&L-display foot-gun on a tile whose entire purpose is to highlight risk concentration.",
+    ),
+});
+
+export const GetPublicTailRiskExposureResponse = zod.object({
+  days: zod
+    .number()
+    .describe("Window length the server actually used (post-clamp)."),
+  buckets: zod.array(
+    zod.object({
+      label: zod
+        .string()
+        .describe("Human-readable bucket label, e.g. `<$0.10`"),
+      lo: zod.number().describe("Bucket lower bound (inclusive)."),
+      hi: zod.number().describe("Bucket upper bound (exclusive)."),
+      is_tail: zod
+        .boolean()
+        .describe(
+          "True iff the entire bucket sits below `tail_concentration.threshold_price` so the UI can paint the bucket as part of the tail.  Buckets that straddle the threshold (e.g. `$0.10–$0.25`) report `is_tail=false`; the tail headline uses the dedicated row-level aggregate the server computes against `price < threshold` to avoid over-counting the part of the bucket above the threshold.",
+        ),
+      rows: zod.array(
+        zod.object({
+          vertical: zod.string(),
+          open_count: zod.number(),
+          open_cost_usd: zod.number(),
+          open_max_loss_usd: zod.number(),
+          realized_count: zod.number(),
+          realized_wins: zod.number(),
+          realized_pnl_usd: zod.number(),
+          ev_per_trade: zod
+            .number()
+            .nullable()
+            .describe(
+              "Realized P&L per realized trade for this slice; null when `realized_count == 0` so the UI can render an em-dash instead of `$0.00`.",
+            ),
+        }),
+      ),
+      totals: zod.object({
+        open_count: zod.number(),
+        open_cost_usd: zod.number(),
+        open_max_loss_usd: zod.number(),
+        realized_count: zod.number(),
+        realized_wins: zod.number(),
+        realized_pnl_usd: zod.number(),
+        ev_per_trade: zod.number().nullable(),
+      }),
+    }),
+  ),
+  totals: zod.object({
+    open_count: zod.number(),
+    open_cost_usd: zod.number(),
+    open_max_loss_usd: zod.number(),
+    realized_count: zod.number(),
+    realized_wins: zod.number(),
+    realized_pnl_usd: zod.number(),
+    ev_per_trade: zod.number().nullable(),
+  }),
+  tail_concentration: zod.object({
+    tail_max_loss_usd: zod.number(),
+    total_max_loss_usd: zod.number(),
+    pct: zod
+      .number()
+      .nullable()
+      .describe(
+        "Tail share of total open max-loss exposure.  Null when there is no open exposure at all so the UI can render an em-dash instead of `0%`.",
+      ),
+    tone: zod
+      .enum(["red", "amber", "green", "empty"])
+      .describe(
+        "Server-computed headline tone — red ≥ 30%, amber 15–30%, green < 15%, empty when no open exposure.  Owned by the server so web + mobile + future surfaces stay aligned.",
+      ),
+    threshold_price: zod
+      .number()
+      .describe(
+        'Price below which a trade is considered \"tail\" (currently $0.20).  Echoed so the UI doesn\'t have to hard-code a magic number.',
+      ),
+  }),
+  source: zod
+    .enum(["positions", "trades_fallback", "empty"])
+    .optional()
+    .describe(
+      "Provenance of the open-exposure slice.  `positions` when the live `positions` table was readable and had any open row; `trades_fallback` when the positions read failed or returned no opens and the server reconstructed open exposure from `trades` via VWAP netting; `empty` when neither path produced data.",
+    ),
+  placed_by: zod
+    .enum(["manual", "system", "all"])
+    .describe(
+      "Echo of the `placed_by` query parameter for client-side cache assertions.",
+    ),
+  verticals: zod
+    .array(zod.string())
+    .describe("Server-canonicalised list of verticals applied to the query."),
+});
+
+/**
  * @summary GTC orders Kalshi over-filled in the current UTC day
  */
 export const GetOverFilledOrdersTodayResponse = zod.object({

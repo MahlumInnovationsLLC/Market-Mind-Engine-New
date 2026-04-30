@@ -34,7 +34,7 @@ Axiom Predict is a prediction-market trading platform designed for advanced trad
 - **Accessibility:** Implements accessibility primitives and undergoes regular audits.
 - **Trade Provenance:** Incorporates a `placed_by` filter for analytics, allowing users to view trades by `manual_ui`, `orchestrator`, or `all`. This filter is applied to dashboard metrics and equity curves.
 - **Vertical Filtering:** Enables filtering of equity-derived tiles and charts by specific verticals (e.g., sports, crypto) to provide accurate P&L views.
-- **Tail-risk exposure tile:** Read-only dashboard tile (web + mobile, slotted directly under `KpiSummaryBar`) backed by `GET /api/public/tail-risk-exposure`. Surfaces a 7-bucket × per-vertical matrix of open positions and 30-day realized P&L bucketed by entry price, plus a server-classified concentration headline (RED / WATCH / CONTAINED). The tail definition (`price < $0.20`) and tone thresholds are owned server-side so every surface stays in lock-step; the tile threads the same `placedBy` + `effectiveVerticals` filters as the rest of the dashboard.
+- **Tail-risk exposure tile (May 2026):** Read-only dashboard tile (web + mobile, slotted directly under `KpiSummaryBar`) backed by `GET /api/public/tail-risk-exposure`. See the dedicated subsection at the end of this file for bucket taxonomy and audit context.
 
 **Mobile (Expo):**
 - Shares the "cyberpunk-finance" design system.
@@ -71,3 +71,72 @@ Axiom Predict is a prediction-market trading platform designed for advanced trad
 - **HTTP Client:** httpx.
 - **Testing:** Playwright (e2e), Vitest (web unit), Jest with `jest-expo` (mobile unit/component).
 - **Accessibility Auditing:** axe-core.
+## Tail-risk exposure tile (May 2026)
+
+**Why it exists.** Forensic audit of YTD 2026 SYSTEM trades found that
+0.28% of trades (15 of 5,347) drove −$9,604 of cumulative losses on a
+−$5,878 net book — i.e. without those 15 trades the bot is +$3,726 YTD.
+Two patterns cause virtually all of it:
+
+- **Deep-OTM tail bets** (entry price < $0.10) lost −$5,607 in the
+  sports vertical alone, and one Feb-20 NBA bet (qty=4,394 NO at
+  $0.04 → −$4,218) was bigger than the entire YTD loss.
+- **Jumbo bets** (qty ≥ 1,000) were 15 trades for −$5,985 net.
+
+The good buckets — $0.60–$0.90 favorites at +$11–$17 EV/trade for
++$6,326 cumulative — were masked by these blow-ups. The tile makes
+the live concentration of those bets visible right under the KPI
+strip so the operator sees today's tail-risk exposure before the next
+blow-up.
+
+**Bucket taxonomy (server-owned).** Boundaries are SQL `CASE`
+expressions in `dashboard.py` — DO NOT re-derive them client-side, the
+server owns the taxonomy so every surface (web tile, mobile tile,
+future alerts) stays aligned:
+
+| Bucket          | `lo` (≥) | `hi` (<) | Default `is_tail` |
+| --------------- | -------- | -------- | ----------------- |
+| `<$0.10`        | 0.00     | 0.10     | true              |
+| `$0.10–$0.25`   | 0.10     | 0.25     | false (straddles) |
+| `$0.25–$0.40`   | 0.25     | 0.40     | false             |
+| `$0.40–$0.60`   | 0.40     | 0.60     | false             |
+| `$0.60–$0.75`   | 0.60     | 0.75     | false             |
+| `$0.75–$0.90`   | 0.75     | 0.90     | false             |
+| `$0.90+`        | 0.90     | 1.00     | false             |
+
+The tail definition (`_TAIL_PRICE_THRESHOLD = 0.20`) is its own
+constant and the `is_tail` flag is true only when the whole bucket
+sits below it.  The `$0.10–$0.25` bucket straddles the threshold, so
+the tile uses a **dedicated row-level aggregate**
+(`sql_tail_positions` / `sql_tail_trades`) for the headline number
+instead of summing the straddling bucket — that would over-count any
+trade priced $0.20–$0.25.
+
+**Data path.** The aggregator runs `sql_with_positions` first; if
+that throws OR returns rows but every `open_count == 0`, it
+reconstructs open exposure from the `trades` table via
+`sql_trades_only` (VWAP-netted by `(vertical, market_key, side_lc)`
+with `HAVING sum(qty) > 0`).  The realized slice in BOTH paths
+filters `pnl IS NOT NULL` so open trades never inflate realized
+counts.  The response carries `source ∈ { "positions",
+"trades_fallback", "empty" }` so the client can label provenance and
+the realized slice always surfaces — even when both paths find zero
+open exposure but the positions path returned realized rows, those
+rows are kept (the dispatch never blanks the tile).
+
+**Frontend wiring.** Web (`tail-risk-exposure-panel.tsx`) reads
+`days` from `usePeriod()` and threads `placedBy`,
+`effectiveVerticals`, and `days` into the React-Query key so the
+PeriodStrip + provenance + vertical chip toggles all refetch in
+lock-step with `KpiSummaryBar` / `EquityCharts`.  Mobile
+(`TailRiskExposure.tsx`) accepts `days` / `period` props that the
+dashboard screen wires from its local `period` state.  Default = 30
+days for both (preserves historical behaviour and keeps the test
+harness compatible).
+
+**Typed client.** The endpoint is published in
+`lib/api-spec/openapi.yaml` as `getPublicTailRiskExposure` and the
+Orval codegen produces typed React-Query hooks in
+`lib/api-client-react/src/generated/` and Zod schemas in
+`lib/api-zod/src/generated/`.  Future surfaces should consume those
+types instead of re-defining the response shape locally.

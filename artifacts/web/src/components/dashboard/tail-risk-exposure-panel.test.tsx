@@ -6,6 +6,8 @@ const { state } = vi.hoisted(() => ({
   state: {
     placedBy: "all" as "all" | "manual" | "system",
     verticals: [] as string[],
+    period: "30d" as "1d" | "7d" | "30d" | "ytd",
+    days: 30 as number,
     fetchResponses: [] as Array<{ ok: boolean; status?: number; body?: unknown }>,
     lastUrl: "" as string,
   },
@@ -17,6 +19,19 @@ vi.mock("@/lib/api", () => ({
 
 vi.mock("@/components/dashboard/placed-by-context", () => ({
   usePlacedBy: () => ({ placedBy: state.placedBy, setPlacedBy: vi.fn() }),
+}));
+
+// Mock the period context so the panel can be rendered standalone
+// without a `<PeriodProvider>` parent (which the existing tests don't
+// set up).  Keep the default at 30/30d so the historical `days=30`
+// assertions still hold; individual tests can mutate `state.period`
+// to verify period-selector wiring.
+vi.mock("@/components/dashboard/period-context", () => ({
+  usePeriod: () => ({
+    period: state.period,
+    days: state.days,
+    setPeriod: vi.fn(),
+  }),
 }));
 
 vi.mock("@/hooks/use-selected-verticals", () => ({
@@ -34,6 +49,8 @@ import TailRiskExposurePanel from "./tail-risk-exposure-panel";
 beforeEach(() => {
   state.placedBy = "all";
   state.verticals = [];
+  state.period = "30d";
+  state.days = 30;
   state.fetchResponses = [];
   state.lastUrl = "";
   global.fetch = vi.fn(async (url: string) => {
@@ -142,6 +159,21 @@ describe("TailRiskExposurePanel", () => {
     expect(state.lastUrl).toMatch(/placed_by=system/);
     // Verticals are sorted before joining so the cache key is stable.
     expect(state.lastUrl).toMatch(/vertical=crypto%2Csports/);
+  });
+
+  it("respects the period selector — `days` flows through from usePeriod()", async () => {
+    // Simulate the operator clicking the `7D` button on the dashboard
+    // PeriodStrip.  The tile must thread that through to the request
+    // (and into its cache key) instead of always asking for 30 days.
+    state.period = "7d";
+    state.days = 7;
+    state.fetchResponses = [{ ok: true, body: emptyBody() }];
+    renderPanel();
+    await waitFor(() => expect(state.lastUrl).toMatch(/tail-risk-exposure/));
+    expect(state.lastUrl).toMatch(/days=7(?!\d)/);
+    // The eyebrow shows the period label so operators know which
+    // window the tile is keyed to.
+    expect(screen.getByText(/RISK · 7D/)).toBeTruthy();
   });
 
   it("renders the empty headline as 'NO EXPOSURE' when no open book", async () => {

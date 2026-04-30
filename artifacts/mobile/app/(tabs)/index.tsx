@@ -336,7 +336,7 @@ export default function DashboardScreen() {
         />
       </View>
 
-      <TailRiskExposure />
+      <TailRiskExposure days={period} period={period} />
 
       <SectionHeader>SWARM</SectionHeader>
       <View style={styles.row}>

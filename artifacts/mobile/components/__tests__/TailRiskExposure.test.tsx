@@ -126,13 +126,13 @@ function emptyResponse(): TailRiskResponse {
   };
 }
 
-function renderTile(): ReturnType<typeof render> {
+function renderTile(props?: { days?: number; period?: number }): ReturnType<typeof render> {
   const qc = new QueryClient({
     defaultOptions: { queries: { retry: false, gcTime: 0 } },
   });
   return render(
     <QueryClientProvider client={qc}>
-      <TailRiskExposure />
+      <TailRiskExposure {...(props ?? {})} />
     </QueryClientProvider>,
   );
 }
@@ -152,6 +152,19 @@ describe("TailRiskExposure (mobile)", () => {
     expect(url).toMatch(/placed_by=system/);
     // Verticals sorted alphabetically before joining → stable cache key.
     expect(url).toMatch(/vertical=crypto%2Csports/);
+  });
+
+  it("respects the dashboard period selector via the `days`/`period` props", async () => {
+    // Simulate the dashboard screen passing through the operator's
+    // `7D` selection (Period = 7).  The tile must request that window
+    // instead of always asking for 30, and the section header eyebrow
+    // must mirror the label.
+    mockApiFetch.mockResolvedValueOnce(emptyResponse());
+    renderTile({ days: 7, period: 7 });
+    await waitFor(() => expect(mockApiFetch).toHaveBeenCalled());
+    const url = mockApiFetch.mock.calls[0][0] as string;
+    expect(url).toMatch(/days=7(?!\d)/);
+    expect(screen.getByText(/RISK · 7D :: TAIL EXPOSURE/)).toBeTruthy();
   });
 
   it("renders 'NO EXPOSURE' when the server reports no open book", async () => {

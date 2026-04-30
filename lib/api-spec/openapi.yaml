@@ -209,6 +209,53 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/TradingCycleList" }
 
+  # Public, unauthenticated read-model used by the operator
+  # dashboard's tail-risk exposure tile (web + mobile).  Same
+  # query-param shape as ``/api/public/equity-curve`` so the tile
+  # threads the operator's Manual / System / Both selection
+  # (`placed_by`) and the VerticalPicker chip selection (`vertical`
+  # CSV) into the read-model in lock-step with every other panel.
+  # Kept under tag `dashboard` so the generated client groups it
+  # alongside the other dashboard surfaces.
+  /public/tail-risk-exposure:
+    get:
+      operationId: getPublicTailRiskExposure
+      tags: [dashboard]
+      summary: Bucketed open-exposure + realized-PnL matrix for the tail-risk tile
+      description: >-
+        Returns a bucket × vertical matrix of open positions and
+        realized P&L over the trailing window so the dashboard tile
+        can show where today's tail-risk lives without any
+        client-side bucketing.  Bucket boundaries and the
+        `is_tail` flag are owned by the server.
+      parameters:
+        - in: query
+          name: days
+          required: false
+          schema: { type: integer, minimum: 1, maximum: 365, default: 30 }
+          description: >-
+            Trailing window length in days (clamped to [1, 365]).
+            Driven by the dashboard's PeriodStrip selector.
+        - $ref: "#/components/parameters/PlacedByParam"
+        - in: query
+          name: vertical
+          required: false
+          schema: { type: string }
+          description: >-
+            Comma-separated list of vertical names (e.g.
+            `sports,crypto`).  Unknown names raise HTTP 400 — silently
+            returning the unfiltered matrix on a typo would be a
+            P&L-display foot-gun on a tile whose entire purpose is to
+            highlight risk concentration.
+      responses:
+        "200":
+          description: Bucketed tail-risk exposure payload
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TailRiskExposure" }
+        "400":
+          description: vertical contained an unknown name
+
   /dashboard/over-filled-orders-today:
     get:
       operationId: getOverFilledOrdersToday
@@ -2718,3 +2765,143 @@ components:
         is_admin: { type: boolean }
         denied: { type: boolean }
       required: [clerk_user_id, approved, is_admin]
+
+    # ---- Tail-risk exposure tile (task #744) -----------------------
+    # Per-vertical aggregate inside one price bucket.  Same shape as
+    # the bucket totals row so the client can use one renderer.
+    TailRiskBucketRow:
+      type: object
+      properties:
+        vertical: { type: string }
+        open_count: { type: integer }
+        open_cost_usd: { type: number }
+        open_max_loss_usd: { type: number }
+        realized_count: { type: integer }
+        realized_wins: { type: integer }
+        realized_pnl_usd: { type: number }
+        ev_per_trade:
+          type: number
+          nullable: true
+          description: >-
+            Realized P&L per realized trade for this slice; null when
+            `realized_count == 0` so the UI can render an em-dash
+            instead of `$0.00`.
+      required:
+        - vertical
+        - open_count
+        - open_cost_usd
+        - open_max_loss_usd
+        - realized_count
+        - realized_wins
+        - realized_pnl_usd
+        - ev_per_trade
+
+    # Aggregate totals across all verticals inside one bucket and at
+    # the grand-total level.
+    TailRiskBucketTotals:
+      type: object
+      properties:
+        open_count: { type: integer }
+        open_cost_usd: { type: number }
+        open_max_loss_usd: { type: number }
+        realized_count: { type: integer }
+        realized_wins: { type: integer }
+        realized_pnl_usd: { type: number }
+        ev_per_trade: { type: number, nullable: true }
+      required:
+        - open_count
+        - open_cost_usd
+        - open_max_loss_usd
+        - realized_count
+        - realized_wins
+        - realized_pnl_usd
+        - ev_per_trade
+
+    TailRiskBucket:
+      type: object
+      properties:
+        label: { type: string, description: "Human-readable bucket label, e.g. `<$0.10`" }
+        lo: { type: number, description: "Bucket lower bound (inclusive)." }
+        hi: { type: number, description: "Bucket upper bound (exclusive)." }
+        is_tail:
+          type: boolean
+          description: >-
+            True iff the entire bucket sits below
+            `tail_concentration.threshold_price` so the UI can paint the
+            bucket as part of the tail.  Buckets that straddle the
+            threshold (e.g. `$0.10–$0.25`) report `is_tail=false`; the
+            tail headline uses the dedicated row-level aggregate the
+            server computes against `price < threshold` to avoid
+            over-counting the part of the bucket above the threshold.
+        rows:
+          type: array
+          items: { $ref: "#/components/schemas/TailRiskBucketRow" }
+        totals: { $ref: "#/components/schemas/TailRiskBucketTotals" }
+      required: [label, lo, hi, is_tail, rows, totals]
+
+    TailRiskConcentration:
+      type: object
+      properties:
+        tail_max_loss_usd: { type: number }
+        total_max_loss_usd: { type: number }
+        pct:
+          type: number
+          nullable: true
+          description: >-
+            Tail share of total open max-loss exposure.  Null when
+            there is no open exposure at all so the UI can render an
+            em-dash instead of `0%`.
+        tone:
+          type: string
+          enum: [red, amber, green, empty]
+          description: >-
+            Server-computed headline tone — red ≥ 30%, amber 15–30%,
+            green < 15%, empty when no open exposure.  Owned by the
+            server so web + mobile + future surfaces stay aligned.
+        threshold_price:
+          type: number
+          description: >-
+            Price below which a trade is considered "tail" (currently
+            $0.20).  Echoed so the UI doesn't have to hard-code a
+            magic number.
+      required:
+        - tail_max_loss_usd
+        - total_max_loss_usd
+        - pct
+        - tone
+        - threshold_price
+
+    TailRiskExposure:
+      type: object
+      properties:
+        days: { type: integer, description: "Window length the server actually used (post-clamp)." }
+        buckets:
+          type: array
+          items: { $ref: "#/components/schemas/TailRiskBucket" }
+        totals: { $ref: "#/components/schemas/TailRiskBucketTotals" }
+        tail_concentration: { $ref: "#/components/schemas/TailRiskConcentration" }
+        source:
+          type: string
+          enum: [positions, trades_fallback, empty]
+          description: >-
+            Provenance of the open-exposure slice.  `positions` when
+            the live `positions` table was readable and had any open
+            row; `trades_fallback` when the positions read failed or
+            returned no opens and the server reconstructed open
+            exposure from `trades` via VWAP netting; `empty` when
+            neither path produced data.
+        placed_by:
+          type: string
+          enum: [manual, system, all]
+          description: Echo of the `placed_by` query parameter for client-side cache assertions.
+        verticals:
+          type: array
+          items: { type: string }
+          description: Server-canonicalised list of verticals applied to the query.
+      required:
+        - days
+        - buckets
+        - totals
+        - tail_concentration
+        - placed_by
+        - verticals

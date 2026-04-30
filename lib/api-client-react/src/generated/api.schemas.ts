@@ -1538,6 +1538,103 @@ export interface AdminAccessRequestResult {
   denied?: boolean;
 }
 
+export interface TailRiskBucketRow {
+  vertical: string;
+  open_count: number;
+  open_cost_usd: number;
+  open_max_loss_usd: number;
+  realized_count: number;
+  realized_wins: number;
+  realized_pnl_usd: number;
+  /** Realized P&L per realized trade for this slice; null when `realized_count == 0` so the UI can render an em-dash instead of `$0.00`. */
+  ev_per_trade: number | null;
+}
+
+export interface TailRiskBucketTotals {
+  open_count: number;
+  open_cost_usd: number;
+  open_max_loss_usd: number;
+  realized_count: number;
+  realized_wins: number;
+  realized_pnl_usd: number;
+  ev_per_trade: number | null;
+}
+
+export interface TailRiskBucket {
+  /** Human-readable bucket label, e.g. `<$0.10` */
+  label: string;
+  /** Bucket lower bound (inclusive). */
+  lo: number;
+  /** Bucket upper bound (exclusive). */
+  hi: number;
+  /** True iff the entire bucket sits below `tail_concentration.threshold_price` so the UI can paint the bucket as part of the tail.  Buckets that straddle the threshold (e.g. `$0.10–$0.25`) report `is_tail=false`; the tail headline uses the dedicated row-level aggregate the server computes against `price < threshold` to avoid over-counting the part of the bucket above the threshold. */
+  is_tail: boolean;
+  rows: TailRiskBucketRow[];
+  totals: TailRiskBucketTotals;
+}
+
+/**
+ * Server-computed headline tone — red ≥ 30%, amber 15–30%, green < 15%, empty when no open exposure.  Owned by the server so web + mobile + future surfaces stay aligned.
+ */
+export type TailRiskConcentrationTone =
+  (typeof TailRiskConcentrationTone)[keyof typeof TailRiskConcentrationTone];
+
+export const TailRiskConcentrationTone = {
+  red: "red",
+  amber: "amber",
+  green: "green",
+  empty: "empty",
+} as const;
+
+export interface TailRiskConcentration {
+  tail_max_loss_usd: number;
+  total_max_loss_usd: number;
+  /** Tail share of total open max-loss exposure.  Null when there is no open exposure at all so the UI can render an em-dash instead of `0%`. */
+  pct: number | null;
+  /** Server-computed headline tone — red ≥ 30%, amber 15–30%, green < 15%, empty when no open exposure.  Owned by the server so web + mobile + future surfaces stay aligned. */
+  tone: TailRiskConcentrationTone;
+  /** Price below which a trade is considered "tail" (currently $0.20).  Echoed so the UI doesn't have to hard-code a magic number. */
+  threshold_price: number;
+}
+
+/**
+ * Provenance of the open-exposure slice.  `positions` when the live `positions` table was readable and had any open row; `trades_fallback` when the positions read failed or returned no opens and the server reconstructed open exposure from `trades` via VWAP netting; `empty` when neither path produced data.
+ */
+export type TailRiskExposureSource =
+  (typeof TailRiskExposureSource)[keyof typeof TailRiskExposureSource];
+
+export const TailRiskExposureSource = {
+  positions: "positions",
+  trades_fallback: "trades_fallback",
+  empty: "empty",
+} as const;
+
+/**
+ * Echo of the `placed_by` query parameter for client-side cache assertions.
+ */
+export type TailRiskExposurePlacedBy =
+  (typeof TailRiskExposurePlacedBy)[keyof typeof TailRiskExposurePlacedBy];
+
+export const TailRiskExposurePlacedBy = {
+  manual: "manual",
+  system: "system",
+  all: "all",
+} as const;
+
+export interface TailRiskExposure {
+  /** Window length the server actually used (post-clamp). */
+  days: number;
+  buckets: TailRiskBucket[];
+  totals: TailRiskBucketTotals;
+  tail_concentration: TailRiskConcentration;
+  /** Provenance of the open-exposure slice.  `positions` when the live `positions` table was readable and had any open row; `trades_fallback` when the positions read failed or returned no opens and the server reconstructed open exposure from `trades` via VWAP netting; `empty` when neither path produced data. */
+  source?: TailRiskExposureSource;
+  /** Echo of the `placed_by` query parameter for client-side cache assertions. */
+  placed_by: TailRiskExposurePlacedBy;
+  /** Server-canonicalised list of verticals applied to the query. */
+  verticals: string[];
+}
+
 export type PlacedByParamParameter =
   (typeof PlacedByParamParameter)[keyof typeof PlacedByParamParameter];
 
@@ -1606,6 +1703,23 @@ export type GetRecentCyclesParams = {
    * @maximum 100
    */
   limit?: number;
+};
+
+export type GetPublicTailRiskExposureParams = {
+  /**
+   * Trailing window length in days (clamped to [1, 365]). Driven by the dashboard's PeriodStrip selector.
+   * @minimum 1
+   * @maximum 365
+   */
+  days?: number;
+  /**
+   * Provenance bucket to scope trade-derived metrics by.  The web + mobile UIs surface this as a 3-segment toggle on every P&L analytics surface.
+   */
+  placed_by?: PlacedByParamParameter;
+  /**
+   * Comma-separated list of vertical names (e.g. `sports,crypto`).  Unknown names raise HTTP 400 — silently returning the unfiltered matrix on a typo would be a P&L-display foot-gun on a tile whose entire purpose is to highlight risk concentration.
+   */
+  vertical?: string;
 };
 
 export type GetSlippageGuardRejectsParams = {

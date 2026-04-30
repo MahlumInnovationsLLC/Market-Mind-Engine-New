@@ -112,7 +112,34 @@ const TONE_LABEL: Record<TailRiskExposure["tail_concentration"]["tone"], string>
   empty: "NO EXPOSURE",
 };
 
-export default function TailRiskExposure() {
+type TailRiskExposureProps = {
+  /**
+   * Window length in days to bucket — wired from the dashboard's
+   * period selector (1 / 7 / 30 / 365) so the tile narrows in
+   * lock-step with KPI cards and the verticals strip.  Defaults to
+   * 30 to preserve historical behaviour and keep the test harness
+   * compatible with `<TailRiskExposure />` with no props.
+   */
+  days?: number;
+  /**
+   * Optional pretty label (e.g. `1`, `7`, `30`, `365`) shown in the
+   * section header eyebrow.  Falls back to `${days}D` so callers that
+   * only pass `days` still get a sensible label.
+   */
+  period?: number;
+};
+
+const PERIOD_LABEL: Record<number, string> = {
+  1: "1D",
+  7: "7D",
+  30: "30D",
+  365: "YTD",
+};
+
+export default function TailRiskExposure({
+  days = 30,
+  period,
+}: TailRiskExposureProps = {}) {
   const colors = useColors();
   const { placedBy } = usePlacedBy();
   // Same source as the web `TailRiskExposurePanel` — combine the
@@ -123,12 +150,13 @@ export default function TailRiskExposure() {
   // click order.
   const effective = useEffectiveVerticals();
   const verticalsCsv = effective.slice().sort().join(",");
+  const periodLabel = PERIOD_LABEL[period ?? days] ?? `${days}D`;
 
   const q = useQuery<TailRiskExposure>({
-    queryKey: ["public-tail-risk-exposure", placedBy, verticalsCsv],
+    queryKey: ["public-tail-risk-exposure", placedBy, verticalsCsv, days],
     queryFn: () => {
       const params = new URLSearchParams({
-        days: "30",
+        days: String(days),
         placed_by: placedBy,
       });
       if (verticalsCsv) params.set("vertical", verticalsCsv);
@@ -168,7 +196,7 @@ export default function TailRiskExposure() {
 
   return (
     <>
-      <SectionHeader>RISK :: TAIL EXPOSURE</SectionHeader>
+      <SectionHeader>{`RISK · ${periodLabel} :: TAIL EXPOSURE`}</SectionHeader>
       <Card testID="card-tail-risk-exposure">
         {q.isLoading ? (
           <Text

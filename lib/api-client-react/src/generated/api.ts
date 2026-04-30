@@ -47,6 +47,7 @@ import type {
   EmergencyStopResult,
   FullHealth,
   GetDashboardOverviewParams,
+  GetPublicTailRiskExposureParams,
   GetRecentBankrollEventsParams,
   GetRecentCyclesParams,
   GetRecentDebatesParams,
@@ -84,6 +85,7 @@ import type {
   SwarmDebateResult,
   SwarmPersonaList,
   SwarmPersonaTodayList,
+  TailRiskExposure,
   TradeDetail,
   TradeList,
   TradingCycleList,
@@ -1075,6 +1077,116 @@ export function useGetRecentCycles<
   },
 ): UseQueryResult<TData, TError> & { queryKey: QueryKey } {
   const queryOptions = getGetRecentCyclesQueryOptions(params, options);
+
+  const query = useQuery(queryOptions) as UseQueryResult<TData, TError> & {
+    queryKey: QueryKey;
+  };
+
+  return { ...query, queryKey: queryOptions.queryKey };
+}
+
+/**
+ * Returns a bucket × vertical matrix of open positions and realized P&L over the trailing window so the dashboard tile can show where today's tail-risk lives without any client-side bucketing.  Bucket boundaries and the `is_tail` flag are owned by the server.
+ * @summary Bucketed open-exposure + realized-PnL matrix for the tail-risk tile
+ */
+export const getGetPublicTailRiskExposureUrl = (
+  params?: GetPublicTailRiskExposureParams,
+) => {
+  const normalizedParams = new URLSearchParams();
+
+  Object.entries(params || {}).forEach(([key, value]) => {
+    if (value !== undefined) {
+      normalizedParams.append(key, value === null ? "null" : value.toString());
+    }
+  });
+
+  const stringifiedParams = normalizedParams.toString();
+
+  return stringifiedParams.length > 0
+    ? `/api/public/tail-risk-exposure?${stringifiedParams}`
+    : `/api/public/tail-risk-exposure`;
+};
+
+export const getPublicTailRiskExposure = async (
+  params?: GetPublicTailRiskExposureParams,
+  options?: RequestInit,
+): Promise<TailRiskExposure> => {
+  return customFetch<TailRiskExposure>(
+    getGetPublicTailRiskExposureUrl(params),
+    {
+      ...options,
+      method: "GET",
+    },
+  );
+};
+
+export const getGetPublicTailRiskExposureQueryKey = (
+  params?: GetPublicTailRiskExposureParams,
+) => {
+  return [
+    `/api/public/tail-risk-exposure`,
+    ...(params ? [params] : []),
+  ] as const;
+};
+
+export const getGetPublicTailRiskExposureQueryOptions = <
+  TData = Awaited<ReturnType<typeof getPublicTailRiskExposure>>,
+  TError = ErrorType<void>,
+>(
+  params?: GetPublicTailRiskExposureParams,
+  options?: {
+    query?: UseQueryOptions<
+      Awaited<ReturnType<typeof getPublicTailRiskExposure>>,
+      TError,
+      TData
+    >;
+    request?: SecondParameter<typeof customFetch>;
+  },
+) => {
+  const { query: queryOptions, request: requestOptions } = options ?? {};
+
+  const queryKey =
+    queryOptions?.queryKey ?? getGetPublicTailRiskExposureQueryKey(params);
+
+  const queryFn: QueryFunction<
+    Awaited<ReturnType<typeof getPublicTailRiskExposure>>
+  > = ({ signal }) =>
+    getPublicTailRiskExposure(params, { signal, ...requestOptions });
+
+  return { queryKey, queryFn, ...queryOptions } as UseQueryOptions<
+    Awaited<ReturnType<typeof getPublicTailRiskExposure>>,
+    TError,
+    TData
+  > & { queryKey: QueryKey };
+};
+
+export type GetPublicTailRiskExposureQueryResult = NonNullable<
+  Awaited<ReturnType<typeof getPublicTailRiskExposure>>
+>;
+export type GetPublicTailRiskExposureQueryError = ErrorType<void>;
+
+/**
+ * @summary Bucketed open-exposure + realized-PnL matrix for the tail-risk tile
+ */
+
+export function useGetPublicTailRiskExposure<
+  TData = Awaited<ReturnType<typeof getPublicTailRiskExposure>>,
+  TError = ErrorType<void>,
+>(
+  params?: GetPublicTailRiskExposureParams,
+  options?: {
+    query?: UseQueryOptions<
+      Awaited<ReturnType<typeof getPublicTailRiskExposure>>,
+      TError,
+      TData
+    >;
+    request?: SecondParameter<typeof customFetch>;
+  },
+): UseQueryResult<TData, TError> & { queryKey: QueryKey } {
+  const queryOptions = getGetPublicTailRiskExposureQueryOptions(
+    params,
+    options,
+  );
 
   const query = useQuery(queryOptions) as UseQueryResult<TData, TError> & {
     queryKey: QueryKey;

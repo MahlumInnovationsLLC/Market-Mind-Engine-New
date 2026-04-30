@@ -5,6 +5,7 @@ import { resolveApiUrl } from "@/lib/api";
 import { GlassCard } from "@/components/ui/glass-card";
 import { SectionHeader } from "@/components/ui/section-header";
 import { useVerticalFilter } from "@/hooks/use-selected-verticals";
+import { usePeriod } from "./period-context";
 import { usePlacedBy } from "./placed-by-context";
 
 /**
@@ -154,13 +155,18 @@ export default function TailRiskExposurePanel() {
   // refetch instead of replaying stale data.
   const { placedBy } = usePlacedBy();
   const { effectiveVerticals } = useVerticalFilter();
+  // Honour the dashboard's PeriodStrip (1d / 7d / 30d / YTD) just like
+  // KpiSummaryBar and EquityCharts.  `days` is part of the cache key so
+  // toggling 7d → 30d refetches immediately rather than serving stale.
+  const { period, days } = usePeriod();
+  const periodLabel = period.toUpperCase();
   const verticalsCsv = effectiveVerticals.slice().sort().join(",");
 
   const q = useQuery<TailRiskExposure>({
-    queryKey: ["public-tail-risk-exposure", placedBy, verticalsCsv],
+    queryKey: ["public-tail-risk-exposure", placedBy, verticalsCsv, days],
     queryFn: async () => {
       const params = new URLSearchParams({
-        days: "30",
+        days: String(days),
         placed_by: placedBy,
       });
       if (verticalsCsv) params.set("vertical", verticalsCsv);
@@ -190,9 +196,9 @@ export default function TailRiskExposurePanel() {
       data-testid="card-tail-risk-exposure"
     >
       <SectionHeader
-        eyebrow="RISK"
+        eyebrow={`RISK · ${periodLabel}`}
         title="Tail-risk exposure"
-        subtitle="Open positions and 30-day realized P&L bucketed by entry price. Forensic audit: 0.28% of YTD trades drove −$9.6K of losses — this tile keeps that risk visible."
+        subtitle="Open positions and realized P&L bucketed by entry price across the selected window. Forensic audit: 0.28% of YTD trades drove −$9.6K of losses — this tile keeps that risk visible."
       />
 
       {q.isLoading && (
