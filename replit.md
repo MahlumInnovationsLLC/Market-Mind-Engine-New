@@ -960,3 +960,26 @@ For incident response and the live cutover, see [`docs/runbook.md`](docs/runbook
 - **HTTP Client:** httpx (for outbound REST calls).
 - **Testing:** Playwright (e2e tests), Vitest (web unit tests with V8 coverage), Jest with `jest-expo` preset (mobile unit + component tests with Istanbul coverage; component tests use React Native Testing Library and run via the `mobile-tests` workflow). Frontend coverage trends are posted as a sticky PR comment by the `frontend-coverage-comment` workflow, which compares against baselines stored on the `js-coverage-data` branch.
 - **Accessibility Auditing:** axe-core.
+
+## Swarm-debate transcript expand-on-click (Apr 30, 2026)
+
+The dashboard's recent-debates panel
+(`artifacts/web/src/components/telemetry/swarm-debates.tsx`) now lets a
+Pro+ caller click any non-redacted row to reveal the full debate
+transcript: the moderator synthesis (text + model + REC), the
+gatekeeper card (tri-state APPROVED / VETOED / UNKNOWN — `null` is
+deliberately rendered as UNKNOWN, never as a veto), and one card per
+analyst persona (provider/model, lean+probability, confidence, weight,
+latency, reasoning verbatim — or the error string if the persona
+crashed). Single-accordion behaviour: opening a new row collapses the
+previous one. Redacted rows still show only the Pro upsell with no
+toggle (there's nothing to reveal — `dashboard.redact_swarm_debate_
+transcripts` strips `analyst_verdicts` and `moderator_synthesis`
+server-side for sub-Pro callers).
+
+The data was already returned by `/api/dashboard/recent-debates` —
+this is purely a UI affordance. The generated client types these jsonb
+fields as `{[k:string]:unknown}|null`, so the component owns its own
+narrowing helpers (`narrowAnalystVerdicts`, `narrowModeratorSynthesis`)
+rather than expanding the OpenAPI spec. The mobile equivalent already
+existed at `artifacts/mobile/app/research/[id].tsx`.

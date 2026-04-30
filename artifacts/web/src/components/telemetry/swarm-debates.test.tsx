@@ -300,3 +300,233 @@ describe("SwarmDebates redacted upsell", () => {
     expect(screen.queryAllByTestId(/^link-upgrade-/)).toHaveLength(0);
   });
 });
+
+describe("SwarmDebates click-to-expand transcript", () => {
+  const QUANT_REASONING =
+    "Model edge of +320bps with the line crossing the LV close — keep size modest until volume confirms.";
+  const NARRATIVE_REASONING =
+    "Public is heavy on the favourite but the underlying news flow is mixed; lean YES with low conviction.";
+  const MODERATOR_SYNTHESIS_TEXT =
+    "Quant carries a clear edge while narrative concurs with low conviction; consensus YES at 0.61, band 0.55–0.66.";
+
+  beforeEach(() => {
+    apiState.debatesResult = {
+      data: {
+        items: [
+          makeDebate({
+            id: 900,
+            redacted: false,
+            matchup: "NYK vs BOS",
+            recommended_action: "BUY YES",
+            consensus_probability: 0.61,
+            confidence_band_low: 0.55,
+            confidence_band_high: 0.66,
+            agreement_rate: 0.83,
+            analyst_verdicts: [
+              {
+                persona: "quant",
+                provider: "openai",
+                model: "gpt-5",
+                fallback_used: false,
+                probability: 0.63,
+                confidence: 0.7,
+                lean: "YES",
+                weight: 0.6,
+                reasoning: QUANT_REASONING,
+                latency_ms: 1840,
+              },
+              {
+                persona: "narrative",
+                provider: "anthropic",
+                model: "claude-4",
+                fallback_used: false,
+                probability: 0.59,
+                confidence: 0.45,
+                lean: "YES",
+                weight: 0.4,
+                reasoning: NARRATIVE_REASONING,
+                latency_ms: 2110,
+              },
+            ],
+            moderator_synthesis: {
+              model: "gpt-5",
+              recommended_action: "BUY YES",
+              synthesis: MODERATOR_SYNTHESIS_TEXT,
+              gatekeeper: {
+                model: "gpt-5",
+                approved: true,
+                recommended_action: "BUY YES",
+                veto_reason: null,
+              },
+            },
+          }),
+          makeDebate({
+            id: 901,
+            redacted: false,
+            matchup: "GS vs LAL",
+            recommended_action: "PASS",
+            analyst_verdicts: [
+              {
+                persona: "quant",
+                provider: "openai",
+                model: "gpt-5",
+                fallback_used: false,
+                probability: 0.51,
+                lean: "PASS",
+                reasoning: "Edge collapses against the post-news line.",
+              },
+            ],
+            moderator_synthesis: {
+              model: "gpt-5",
+              recommended_action: "PASS",
+              synthesis: "Marginal edge — recommend pass.",
+              gatekeeper: null,
+            },
+          }),
+          makeDebate({
+            id: 902,
+            redacted: true,
+            matchup: "Locked vs Locked",
+          }),
+        ],
+      },
+      isLoading: false,
+    };
+  });
+
+  it("does not render the transcript by default", () => {
+    render(<SwarmDebates />);
+    expect(screen.queryByTestId("debate-transcript-900")).toBeNull();
+    expect(screen.queryByTestId("debate-moderator-900")).toBeNull();
+    expect(screen.queryByText(QUANT_REASONING)).toBeNull();
+  });
+
+  it("expands a row on click and reveals the moderator synthesis + per-persona reasoning", () => {
+    render(<SwarmDebates />);
+
+    const toggle = screen.getByTestId("debate-toggle-900");
+    expect(toggle.getAttribute("aria-expanded")).toBe("false");
+    fireEvent.click(toggle);
+    expect(toggle.getAttribute("aria-expanded")).toBe("true");
+
+    // Transcript region appears, with both the moderator narrative and
+    // each persona's reasoning rendered verbatim — that's the whole
+    // point of the feature: show "why the swarm came to their
+    // agreement".
+    const transcript = screen.getByTestId("debate-transcript-900");
+    expect(transcript).toBeTruthy();
+    const moderator = within(transcript).getByTestId("debate-moderator-900");
+    expect(moderator.textContent).toContain(MODERATOR_SYNTHESIS_TEXT);
+    expect(within(transcript).getByText(QUANT_REASONING)).toBeTruthy();
+    expect(within(transcript).getByText(NARRATIVE_REASONING)).toBeTruthy();
+
+    // Both persona blocks are present and tagged by persona name so
+    // future consumers (analytics, screen-readers) can target them.
+    expect(
+      within(transcript).getByTestId("debate-persona-900-quant"),
+    ).toBeTruthy();
+    expect(
+      within(transcript).getByTestId("debate-persona-900-narrative"),
+    ).toBeTruthy();
+
+    // Gatekeeper card surfaces approve/veto with model + final action.
+    const gk = within(transcript).getByTestId("debate-gatekeeper-900");
+    expect(gk.textContent).toMatch(/APPROVED/);
+  });
+
+  it("collapses the transcript when the same row is clicked twice", () => {
+    render(<SwarmDebates />);
+
+    const toggle = screen.getByTestId("debate-toggle-900");
+    fireEvent.click(toggle);
+    expect(screen.getByTestId("debate-transcript-900")).toBeTruthy();
+
+    fireEvent.click(toggle);
+    expect(toggle.getAttribute("aria-expanded")).toBe("false");
+    expect(screen.queryByTestId("debate-transcript-900")).toBeNull();
+  });
+
+  it("only one row stays expanded at a time (single-accordion)", () => {
+    render(<SwarmDebates />);
+
+    fireEvent.click(screen.getByTestId("debate-toggle-900"));
+    expect(screen.getByTestId("debate-transcript-900")).toBeTruthy();
+
+    fireEvent.click(screen.getByTestId("debate-toggle-901"));
+    expect(screen.getByTestId("debate-transcript-901")).toBeTruthy();
+    // Opening row 901 collapses row 900 — keeps the panel scannable
+    // when several debates are in flight at once.
+    expect(screen.queryByTestId("debate-transcript-900")).toBeNull();
+  });
+
+  it("redacted rows do not render the toggle button (transcript is server-stripped)", () => {
+    render(<SwarmDebates />);
+    // The Pro upsell stays visible, but there is no toggle to expand —
+    // there's nothing in the payload to reveal.
+    expect(screen.queryByTestId("debate-toggle-902")).toBeNull();
+    expect(screen.getByTestId("upsell-redacted-902")).toBeTruthy();
+  });
+
+  it("shows VETOED + reason when the gatekeeper rejects", () => {
+    apiState.debatesResult = {
+      data: {
+        items: [
+          makeDebate({
+            id: 910,
+            redacted: false,
+            recommended_action: "PASS",
+            analyst_verdicts: [],
+            moderator_synthesis: {
+              model: "gpt-5",
+              recommended_action: "PASS",
+              synthesis: "Quant flagged a model edge but bankroll is over cap.",
+              gatekeeper: {
+                model: "gpt-5",
+                approved: false,
+                recommended_action: "PASS",
+                veto_reason: "Bankroll guardrail tripped: exposure > 12%.",
+              },
+            },
+          }),
+        ],
+      },
+      isLoading: false,
+    };
+    render(<SwarmDebates />);
+    fireEvent.click(screen.getByTestId("debate-toggle-910"));
+    const gk = screen.getByTestId("debate-gatekeeper-910");
+    expect(gk.textContent).toMatch(/VETOED/);
+    expect(gk.textContent).toMatch(/Bankroll guardrail tripped/);
+  });
+
+  it("renders gatekeeper as UNKNOWN (not VETOED) when approved is missing", () => {
+    // Tri-state defensive rendering: a payload with `gatekeeper: {}` (no
+    // `approved` field) must NOT be painted as a veto — that would
+    // mislead the operator.
+    apiState.debatesResult = {
+      data: {
+        items: [
+          makeDebate({
+            id: 911,
+            redacted: false,
+            recommended_action: "BUY YES",
+            analyst_verdicts: [],
+            moderator_synthesis: {
+              model: "gpt-5",
+              recommended_action: "BUY YES",
+              synthesis: "Quant + narrative aligned.",
+              gatekeeper: { model: "gpt-5" },
+            },
+          }),
+        ],
+      },
+      isLoading: false,
+    };
+    render(<SwarmDebates />);
+    fireEvent.click(screen.getByTestId("debate-toggle-911"));
+    const gk = screen.getByTestId("debate-gatekeeper-911");
+    expect(gk.textContent).toMatch(/UNKNOWN/);
+    expect(gk.textContent).not.toMatch(/VETOED/);
+    expect(gk.textContent).not.toMatch(/APPROVED/);
+  });
+});
