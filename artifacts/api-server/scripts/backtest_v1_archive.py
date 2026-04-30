@@ -129,16 +129,50 @@ def _normalize_rows(
     return grouped
 
 
+# Sentinel league values V1 wrote when its own per-trade heuristic
+# failed.  Treated identically to NULL so the calibrator-fit harness
+# does NOT silently bucket ~99% of imported rows into a synthetic
+# ``UNKNOWN`` league the per-league calibrator stack can never serve.
+# See task #740 + ``app/v1_archive/league_inference.py``.
+_LEAGUE_UNRESOLVED_LITERALS: frozenset[str] = frozenset(
+    {"", "UNKNOWN", "NONE", "NULL"}
+)
+
+
 def _normalize_into(
     grouped: dict[str, dict[str, list]],
     rows: list[dict[str, Any]],
     leagues_filter: set[str] | None,
+    *,
+    unresolved_counter: dict[str, int] | None = None,
 ) -> int:
-    """Merge ``rows`` into ``grouped`` in place. Returns rows appended."""
+    """Merge ``rows`` into ``grouped`` in place. Returns rows appended.
+
+    Rows whose ``league`` is the V1 ``unknown``/NULL sentinel are
+    SKIPPED — they're counted into the report's
+    ``league_unresolved_count`` instead of bucketed into a synthetic
+    ``UNKNOWN`` league the calibrator stack can never serve.
+
+    ``unresolved_counter``, when provided, is bumped under the keys
+    ``"null"`` (Python ``None``/empty) and ``"literal_unknown"`` (the
+    V1 ``'unknown'``/``'NONE'``/``'NULL'`` sentinel strings) so the
+    report can distinguish the two failure modes for task #740 audit.
+    """
     appended = 0
     for r in rows:
-        league = (r.get("league") or "").strip().upper()
-        if not league or (leagues_filter and league not in leagues_filter):
+        raw_league = r.get("league")
+        league = (raw_league or "").strip().upper()
+        if not league:
+            if unresolved_counter is not None:
+                unresolved_counter["null"] = unresolved_counter.get("null", 0) + 1
+            continue
+        if league in _LEAGUE_UNRESOLVED_LITERALS:
+            if unresolved_counter is not None:
+                unresolved_counter["literal_unknown"] = (
+                    unresolved_counter.get("literal_unknown", 0) + 1
+                )
+            continue
+        if leagues_filter and league not in leagues_filter:
             continue
         prob_raw = r.get("predicted_prob")
         outcome_raw = r.get("actual_outcome")
@@ -358,7 +392,10 @@ async def _attempt_full_stack_inference(
 
     for r in rows:
         league = (r.get("league") or "").strip().upper()
-        if not league:
+        if not league or league in _LEAGUE_UNRESOLVED_LITERALS:
+            # Treat the V1 ``unknown``/NULL sentinel identically to a
+            # missing league so the full-stack pass doesn't try to
+            # apply a calibrator that can never match (task #740).
             skipped += 1
             _bump("missing_league")
             continue
@@ -968,11 +1005,18 @@ async def run(
     )
     row_input_count = 0
     batch_count = 0
+    # Task #740: distinguish NULL vs literal "unknown" sentinel rows
+    # so the report shows whether the V1 archive backfill needs to
+    # run before the calibrator-fit step trusts these results.
+    unresolved_counter: dict[str, int] = {"null": 0, "literal_unknown": 0}
 
     async def _process_batch(batch_rows: list[dict[str, Any]]) -> None:
         nonlocal batch_count
         batch_count += 1
-        _normalize_into(grouped, batch_rows, leagues_filter=leagues_filter)
+        _normalize_into(
+            grouped, batch_rows, leagues_filter=leagues_filter,
+            unresolved_counter=unresolved_counter,
+        )
         if full_stack and full_stack_summary is not None:
             fs_g, fs_s = await _attempt_full_stack_inference(
                 batch_rows,
@@ -1035,6 +1079,17 @@ async def run(
         "row_kept_count": scored["summary"]["row_count"],
         "batch_count": batch_count,
         "batch_size": batch_size,
+        # Task #740: rows whose ``league`` is NULL or the V1 sentinel
+        # ``'unknown'`` are NOT bucketed any longer; they're surfaced
+        # here so the operator can see whether
+        # ``scripts/backfill_v1_archive_leagues.py`` still needs to
+        # run.  Sum of the two equals ``row_input_count - row_kept_count``
+        # minus rows skipped for other reasons (missing prob/outcome,
+        # bad side, etc.).
+        "league_unresolved_count": (
+            unresolved_counter["null"] + unresolved_counter["literal_unknown"]
+        ),
+        "league_unresolved_breakdown": dict(unresolved_counter),
         "leagues_filter": sorted(leagues_filter) if leagues_filter else None,
         "limit": limit,
         "calibrator_freshness": calibrators.get_state().freshness() if load_calibrators else None,

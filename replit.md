@@ -416,7 +416,34 @@ task #731). The raw AUC < 0.5 on the sports leagues is consistent
 with V1 having shipped without per-league post-hoc calibration; the
 isotonic step pulls AUC back toward / above 0.5 on every league it
 touches. UNKNOWN (98% of rows, no fitted calibrator) is unchanged by
-design. Re-run any time with:
+design.
+
+**Task #740 — UNKNOWN-league backfill (Apr 30, 2026):** the 598,218-row
+UNKNOWN bucket above was V1's literal `'unknown'` / NULL sentinel,
+NOT a real league with no calibrator. Migration `0038` adds an audit
+column `v1_archive.trade_analyses.league_inferred_from`;
+`scripts/backfill_v1_archive_leagues.py` walks unresolved rows and
+re-derives `league` via a deterministic cascade (Kalshi series prefix
+on `market_id` → `analysis_json.league` / ticker → single-league
+`vertical` fallback) implemented in `app/v1_archive/league_inference.py`.
+The script is idempotent (only touches rows still unresolved at SELECT
+time), atomic (single-transaction; `--dry-run` rolls back), and writes
+the firing rule + original V1 value into the audit column so the
+decision is reversible without re-querying the dump. The backtest
+harness `scripts/backtest_v1_archive.py` is also hardened to treat
+literal `'UNKNOWN'`/`'NONE'`/`'NULL'` identically to NULL — so re-
+running before the backfill simply surfaces the count under the new
+report field `league_unresolved_count` (with a `null` vs
+`literal_unknown` breakdown) instead of polluting the calibrator
+metrics with a synthetic UNKNOWN bucket. Operator runbook:
+
+    cd artifacts/api-server && \
+      /home/runner/workspace/.pythonlibs/bin/python3 \
+        -m scripts.backfill_v1_archive_leagues --dry-run     # preview
+    /home/runner/workspace/.pythonlibs/bin/python3 \
+      -m scripts.backfill_v1_archive_leagues                # commit
+
+Re-run any time with:
 
     cd artifacts/api-server && \
       /home/runner/workspace/.pythonlibs/bin/python3 \

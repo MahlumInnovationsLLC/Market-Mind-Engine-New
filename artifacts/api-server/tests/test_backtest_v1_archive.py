@@ -836,3 +836,73 @@ def test_archived_features_gate_passes_once_backfill_activates():
     assert pg["overall"] != "FAIL"
     assert pg["summary"]["fail"] == 0
     assert pg["summary"]["pass"] == 2  # archived + parity gates pass
+
+
+# --- Task #740: literal-UNKNOWN handling ------------------------------------
+
+
+def test_normalize_skips_literal_unknown_league():
+    """Rows whose ``league`` is the V1 ``unknown``/NULL sentinel must
+    NOT be bucketed into a synthetic ``UNKNOWN`` league the calibrator
+    stack can never serve (task #740).
+    """
+    grouped: dict[str, dict[str, list]] = {}
+    counter: dict[str, int] = {}
+    rows = [
+        {"league": "NBA", "predicted_prob": 0.6, "actual_outcome": 1, "side": "yes"},
+        {"league": "unknown", "predicted_prob": 0.5, "actual_outcome": 1, "side": "yes"},
+        {"league": "UNKNOWN", "predicted_prob": 0.4, "actual_outcome": 0, "side": "yes"},
+        {"league": None, "predicted_prob": 0.7, "actual_outcome": 1, "side": "yes"},
+        {"league": "", "predicted_prob": 0.3, "actual_outcome": 0, "side": "yes"},
+        {"league": "NONE", "predicted_prob": 0.5, "actual_outcome": 1, "side": "yes"},
+        {"league": "MLB", "predicted_prob": 0.55, "actual_outcome": 0, "side": "yes"},
+    ]
+    appended = bt._normalize_into(
+        grouped, rows, leagues_filter=None, unresolved_counter=counter,
+    )
+    # Only NBA + MLB rows make it into grouped; UNKNOWN bucket must NOT exist.
+    assert appended == 2
+    assert set(grouped.keys()) == {"NBA", "MLB"}
+    assert "UNKNOWN" not in grouped
+    # Counter splits NULL/empty (3 rows: None, "", "" via raw_league
+    # falsiness — wait: "" and None hit "null"; "unknown"/"UNKNOWN"/"NONE"
+    # hit "literal_unknown")
+    assert counter["null"] == 2  # None + ""
+    assert counter["literal_unknown"] == 3  # unknown + UNKNOWN + NONE
+
+
+def test_normalize_unresolved_counter_optional():
+    """No ``unresolved_counter`` arg -> still works (back-compat)."""
+    grouped: dict[str, dict[str, list]] = {}
+    rows = [{"league": "unknown", "predicted_prob": 0.5,
+             "actual_outcome": 1, "side": "yes"}]
+    # Must not raise.
+    bt._normalize_into(grouped, rows, leagues_filter=None)
+    assert grouped == {}
+
+
+def test_full_stack_inference_skips_literal_unknown():
+    """``_attempt_full_stack_inference`` must also reject the V1
+    sentinel so the per-league predict() call doesn't fire on rows the
+    calibrator can never serve."""
+    rows = [
+        {"league": "unknown", "predicted_prob": 0.5,
+         "actual_outcome": 1, "side": "yes"},
+        {"league": "UNKNOWN", "predicted_prob": 0.5,
+         "actual_outcome": 0, "side": "yes"},
+    ]
+
+    async def fake_predict(features, league):  # pragma: no cover - shouldn't fire
+        raise AssertionError(f"predict() must not be called for league={league!r}")
+
+    grouped, summary = asyncio.run(
+        bt._attempt_full_stack_inference(
+            rows, leagues_filter=None, predict_fn=fake_predict,
+            surrogate_features=False,
+        )
+    )
+    assert grouped == {}
+    assert summary["rows_attempted"] == 0
+    assert summary["rows_predicted"] == 0
+    assert summary["rows_skipped"] == 2
+    assert summary["skip_reasons"].get("missing_league") == 2
