@@ -23,6 +23,7 @@ the change, and the rollback path if you need to undo it.
 14. [Stale-cancel anomaly triage](#14-stale-cancel-anomaly-triage)
 15. [Per-vertical gatekeeper-knob tuning](#15-per-vertical-gatekeeper-knob-tuning)
 16. [Tail-risk gate knobs (auto-armed)](#16-tail-risk-gate-knobs-auto-armed)
+17. [Honest paper-fill baseline (orderbook-walk simulator)](#17-honest-paper-fill-baseline-orderbook-walk-simulator)
 
 ---
 
@@ -1793,3 +1794,133 @@ The next API server restart will re-arm them with the audit
 defaults via the lifespan hook. To prevent re-arming, also remove
 the call to `ensure_tail_risk_defaults_armed()` from
 `app/main.py::lifespan`.
+
+---
+
+## 17. Honest paper-fill baseline (orderbook-walk simulator)
+
+**TL;DR**: as of Task #751 the paper-trading branch in
+`app/kalshi/lifecycle.py` no longer fills every order at the requested
+limit price for 100 % of requested quantity. It now walks the live
+orderbook cache and returns a realistic `(filled_qty, vwap_price,
+residual)`, which means **paper Brier scores will permanently drop
+1–2 %**. That is the intended honest baseline, NOT a regression.
+
+### Why the change
+
+The legacy paper short-circuit (single line at the top of
+`_submit_after_dedupe`) gave every paper order:
+
+* the *best* feasible price (the limit, never any slippage);
+* the *full* requested size (no partial fills, no liquidity gates).
+
+Live execution on Kalshi does neither. Result: paper Brier was inflated
+by ~5–15 % vs reality, the `online_learning_buffer` trained calibrators
+on optimistic numbers, and live performance under-shot every dashboard
+benchmark on cutover. Round 11 audit, bug #5.
+
+### What the simulator does
+
+`app/kalshi/paper_fill_sim.py::simulate_paper_fill` is a pure function
+that:
+
+1. Picks the half-book the taker would actually cross (binary
+   transform: BUY YES walks the no-book at `100 − no_bid_price`).
+2. Walks levels best→worst, respecting the limit price as a per-level
+   ceiling/floor.
+3. Returns the volume-weighted average price across walked levels and
+   the residual (unfilled) quantity.
+
+The lifecycle helper `_simulate_paper_fill_and_record` then:
+
+* writes a row to `order_fills` with `source='paper_sim'` (or
+  `paper_sim_no_book_fallback` — see below) so dashboards can split
+  honest paper fills from operator/legacy rows;
+* persists a `filled` lifecycle event with the simulator outcome
+  under `metadata.paper_sim` (status, levels walked, residual, etc.);
+* records `state='rejected'` with `reason='paper_no_liquidity' |
+  'paper_limit_unfillable' | 'paper_slippage_exceeded'` when the book
+  has no usable depth.
+
+### Cold-cache fallback
+
+The orderbook cache is populated by the WS subscriber. On cold start
+(or after a Kalshi-side outage) it may have no book for the requested
+ticker. The simulator returns `status='no_book'` in that case and the
+lifecycle layer falls back to the legacy limit-price fill, but tags the
+audit row with `source='paper_sim_no_book_fallback'` so the divergence
+is queryable. This mirrors the slippage-guard's existing degraded-allow
+philosophy and keeps backtests / unit tests that don't run a WS feed
+working unchanged.
+
+To audit how often you're in fallback mode:
+
+```sql
+-- Last 24h: ratio of honest vs cold-cache paper fills.
+SELECT source, COUNT(*) AS rows
+  FROM order_fills
+ WHERE source IN ('paper_sim', 'paper_sim_no_book_fallback')
+   AND received_at > now() - interval '24 hours'
+ GROUP BY source
+ ORDER BY rows DESC;
+```
+
+A healthy production system should sit ≥ 95 % `paper_sim`. Sustained
+dominance of the fallback variant means the WS orderbook cache is
+under-fed for the tickers the orchestrator is trading — investigate
+WS subscriptions before trusting any paper-Brier number from that
+window.
+
+### Expected Brier shift on rollout
+
+The Round-11 audit estimated paper Brier was inflated by 5–15 % vs
+live; operators should expect a **paper-Brier increase of roughly 1–2
+percentage points per vertical** (higher Brier = worse calibration)
+once the simulator is fed by a healthy WS orderbook cache. That puts
+the new paper number squarely on top of where the live calibrator
+typically settles after a few hundred fills, which is the whole point
+of the change.
+
+To confirm the rollout landed in that band on your environment, run a
+side-by-side 24 h replay (per-vertical):
+
+```sql
+-- Honest paper-Brier window (last 24h). Compare against the same
+-- query on a `received_at` window from BEFORE the simulator landed
+-- to see the real per-vertical shift.
+SELECT pv.vertical,
+       AVG((pv.predicted_prob - sm.outcome) ^ 2) AS brier
+  FROM paper_vertical_predictions pv
+  JOIN settled_markets             sm USING (market_id)
+ WHERE pv.created_at > now() - interval '24 hours'
+ GROUP BY pv.vertical
+ ORDER BY pv.vertical;
+```
+
+Record the per-vertical numbers in the next operator changelog entry.
+**A jump larger than ~2 points per vertical is suspicious** — likely
+the `online_learning_buffer` was being fed a heavy bias from one
+ticker family pre-rollout, which is worth a separate investigation
+rather than being absorbed into the new baseline.
+
+### Reverting
+
+The simulator has no kill switch (it's the new baseline). If you
+genuinely need to revert — e.g. for a regression test against pre-#751
+numbers — patch
+`app/kalshi/lifecycle.py::_simulate_paper_fill_and_record` to return
+the legacy short-circuit:
+
+```python
+fill_price = int(req.limit_price_cents or 50)
+record.state = "filled"
+record.filled_count = req.count
+record.avg_fill_price_cents = fill_price
+await _record(req, paper=True, state="filled", price=fill_price,
+              extra={"simulated": True})
+await _emit({"event": "filled", "order": record.to_dict()})
+return record
+```
+
+Don't ship that to production — it re-contaminates the calibrator
+training set within a few hours.

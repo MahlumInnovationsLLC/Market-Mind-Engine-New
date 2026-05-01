@@ -41,6 +41,7 @@ from ..exchange_kill_switch import (
 from .bus import bus
 from . import client as kalshi_client
 from . import orderbook as kalshi_orderbook
+from . import paper_fill_sim
 
 log = logging.getLogger(__name__)
 
@@ -871,17 +872,7 @@ async def _submit_after_dedupe(
     await _emit({"event": "submitted", "order": record.to_dict()})
 
     if paper:
-        # Short-circuit BEFORE the wire. Treat the order as immediately
-        # filled at the limit price (or 50¢ for market orders) so downstream
-        # P&L / settlement logic has something to chew on.
-        fill_price = int(req.limit_price_cents or 50)
-        record.state = "filled"
-        record.filled_count = req.count
-        record.avg_fill_price_cents = fill_price
-        await _record(req, paper=True, state="filled", price=fill_price,
-                      extra={"simulated": True})
-        await _emit({"event": "filled", "order": record.to_dict()})
-        return record
+        return await _simulate_paper_fill_and_record(req, record)
 
     # ---- live path ------------------------------------------------------
     try:
@@ -920,6 +911,132 @@ async def _submit_after_dedupe(
     await _record(req, paper=False, state="resting", price=req.limit_price_cents or 0,
                   extra={"exchange_order_id": record.exchange_order_id, "ack": order_obj})
     await _emit({"event": "resting", "order": record.to_dict()})
+    return record
+
+
+# --- paper-mode honest fill ----------------------------------------------
+#
+# The legacy paper branch filled every order at the requested limit for
+# 100 % of requested quantity (or 50¢ for market orders). That gave paper
+# Brier scores a 5–15 % free lift over what live execution actually
+# achieves, which contaminated `online_learning_buffer` and produced
+# calibrators that learned an over-optimistic world. The simulator in
+# ``app.kalshi.paper_fill_sim`` walks the live half-book and returns an
+# honest ``(filled_qty, vwap, residual)`` tuple; the helper below
+# sequences the audit rows / bus events around it.
+#
+# Audit trail:
+#   * Filled rows write to ``order_fills`` with ``source='paper_sim'``
+#     (or ``source='paper_sim_no_book_fallback'`` when the orderbook
+#     cache is cold for that ticker — see degraded-allow note below).
+#   * The lifecycle row metadata carries the simulator outcome under
+#     ``paper_sim`` so an operator inspecting ``order_lifecycle`` can
+#     tell exactly why a fill was rejected, partially filled, or
+#     fell back to the legacy shortcut.
+#
+# Degraded-allow on cold cache:
+#   The orderbook cache is populated by the WS subscriber; on a cold
+#   start (or after a Kalshi-side outage) the cache may have no book
+#   for the requested ticker. Refusing every paper trade in that
+#   window would mask far worse problems (paper P&L going silent) and
+#   break thousands of unit tests / backtests that don't run a WS feed.
+#   We therefore mirror the slippage guard's ``degraded-allow`` policy:
+#   when the cache returns ``None`` we fall back to the legacy
+#   limit-price fill, but tag the audit row so the divergence is
+#   visible. ``status='no_liquidity'`` (the cache HAS data but the
+#   side is empty) is treated as a real reject.
+async def _simulate_paper_fill_and_record(
+    req: OrderRequest, record: OrderRecord,
+) -> OrderRecord:
+    """Run the paper-fill simulator against the live orderbook cache and
+    write the corresponding lifecycle / fills rows.
+
+    Always returns the (mutated) ``OrderRecord``. Does NOT raise on
+    no-liquidity / slippage rejects — the lifecycle convention is that
+    a paper rejection is recorded as ``state='rejected'`` and the
+    OrderRecord is returned to the caller (orchestrator decides
+    whether to retry on the next pipeline tick).
+    """
+    book = await kalshi_orderbook.orderbook_cache.snapshot(req.market_ticker)
+    sim = paper_fill_sim.simulate_paper_fill(
+        book,
+        action=req.action,
+        side=req.side,
+        count=int(req.count),
+        limit_price_cents=req.limit_price_cents,
+    )
+
+    sim_meta: dict[str, Any] = {
+        "paper_sim": {
+            "status": sim.status,
+            "filled_qty": sim.filled_qty,
+            "vwap_price_cents": sim.vwap_price_cents,
+            "residual_qty": sim.residual_qty,
+            "levels_walked": sim.levels_walked,
+            "book_present": book is not None,
+        },
+        # Preserve legacy flag so historical metadata consumers
+        # (dashboards, log-grep playbooks) keep matching paper rows.
+        "simulated": True,
+    }
+
+    # ---- Cold-cache fallback: degraded-allow at the limit price. -----
+    if sim.status == "no_book":
+        fill_price = int(req.limit_price_cents or 50)
+        record.state = "filled"
+        record.filled_count = int(req.count)
+        record.avg_fill_price_cents = fill_price
+        await _record_fill_idempotent(
+            order_id=record.order_id,
+            fill_id=f"paper:{record.order_id}",
+            count=int(req.count),
+            price_cents=fill_price,
+            source="paper_sim_no_book_fallback",
+        )
+        await _record(
+            req, paper=True, state="filled", price=fill_price,
+            extra=sim_meta,
+        )
+        await _emit({"event": "filled", "order": record.to_dict()})
+        return record
+
+    # ---- Real reject paths: empty side / limit unfillable / slippage. ---
+    if sim.filled_qty <= 0:
+        reason = {
+            "no_liquidity":     "paper_no_liquidity",
+            "limit_unfillable": "paper_limit_unfillable",
+            "slippage_exceeded": "paper_slippage_exceeded",
+        }.get(sim.status, "paper_no_fill")
+        record.state = "rejected"
+        await _record(
+            req, paper=True, state="rejected",
+            price=int(req.limit_price_cents or 0),
+            extra={**sim_meta, "reason": reason},
+        )
+        await _emit({
+            "event": "rejected",
+            "order": record.to_dict(),
+            "reason": reason,
+        })
+        return record
+
+    # ---- Full or partial fill at the simulated VWAP. ----------------
+    fill_price = int(sim.vwap_price_cents or 0)
+    record.state = "filled"
+    record.filled_count = int(sim.filled_qty)
+    record.avg_fill_price_cents = fill_price
+    await _record_fill_idempotent(
+        order_id=record.order_id,
+        fill_id=f"paper:{record.order_id}",
+        count=int(sim.filled_qty),
+        price_cents=fill_price,
+        source="paper_sim",
+    )
+    await _record(
+        req, paper=True, state="filled", price=fill_price,
+        extra=sim_meta,
+    )
+    await _emit({"event": "filled", "order": record.to_dict()})
     return record
 
 

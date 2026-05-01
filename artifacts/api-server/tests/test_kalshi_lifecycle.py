@@ -15,6 +15,7 @@ from typing import Any
 import pytest
 
 from app.kalshi import lifecycle
+from app.kalshi import orderbook as kalshi_orderbook
 from app.kalshi.bus import bus
 
 
@@ -56,6 +57,15 @@ def _reset_lifecycle(monkeypatch):
     bus._lock = asyncio.Lock()
     bus._subs.clear()
 
+    # Reset the in-process orderbook cache so paper-fill tests don't leak
+    # books across each other. The lifecycle paper branch consults this
+    # cache via ``orderbook_cache.snapshot`` — leaving stale books from a
+    # previous test would silently flip the new code path between the
+    # cold-cache fallback and the honest-walk simulator.
+    kalshi_orderbook.orderbook_cache._books = {}
+    kalshi_orderbook.orderbook_cache._updated_at = {}
+    kalshi_orderbook.orderbook_cache._lock = asyncio.Lock()
+
     # Capture every persisted lifecycle row instead of hitting Postgres.
     written: list[dict[str, Any]] = []
 
@@ -67,10 +77,14 @@ def _reset_lifecycle(monkeypatch):
 
     # The new partial-fill rollup helpers also touch Postgres — stub them.
     # Tests that need to exercise dedupe replays override `seen_fills`.
+    # ``recorded_fills`` captures the full kwargs (including ``source``) so
+    # paper-fill provenance assertions can introspect what was persisted.
     seen_fills: set[tuple[str, str]] = set()
+    recorded_fills: list[dict[str, Any]] = []
     positions: list[dict[str, Any]] = []
 
     async def _fake_record_fill(**kwargs):
+        recorded_fills.append(kwargs)
         key = (kwargs["order_id"], kwargs["fill_id"])
         if key in seen_fills:
             return False
@@ -83,8 +97,9 @@ def _reset_lifecycle(monkeypatch):
     monkeypatch.setattr(lifecycle, "_record_fill_idempotent", _fake_record_fill)
     monkeypatch.setattr(lifecycle, "_upsert_position_rollup", _fake_upsert_position)
     # Expose side-channel state on the module so tests can introspect.
-    lifecycle._test_seen_fills = seen_fills      # type: ignore[attr-defined]
-    lifecycle._test_positions = positions        # type: ignore[attr-defined]
+    lifecycle._test_seen_fills = seen_fills           # type: ignore[attr-defined]
+    lifecycle._test_recorded_fills = recorded_fills   # type: ignore[attr-defined]
+    lifecycle._test_positions = positions             # type: ignore[attr-defined]
 
     # Best-effort: silence the alerts module so notifications don't blow up
     # without Stripe / SMTP envs.
@@ -123,6 +138,12 @@ async def _collect_during(coro):
 # ---------------------------------------------------------------------------
 
 def test_paper_order_short_circuits_to_filled(monkeypatch, _reset_lifecycle):
+    """Cold orderbook cache (no book for the ticker) → simulator returns
+    ``no_book`` → lifecycle falls back to the legacy limit-price fill,
+    tagged ``source='paper_sim_no_book_fallback'`` for audit. This is
+    the degraded-allow path; existing pre-#751 paper assertions should
+    still hold so backtests / unit tests without a WS feed don't break.
+    """
     written = _reset_lifecycle
     monkeypatch.setattr(lifecycle, "get_settings", lambda: _make_settings("paper"))
 
@@ -147,6 +168,162 @@ def test_paper_order_short_circuits_to_filled(monkeypatch, _reset_lifecycle):
     # Both bus events fired in order.
     bus_events = [m["event"] for m in events if m.get("type") == "order_lifecycle"]
     assert bus_events == ["submitted", "filled"]
+    # Provenance: order_fills row tagged as cold-cache fallback so the
+    # 24h audit query in runbook §17 can split it from honest paper_sim.
+    fills = lifecycle._test_recorded_fills  # type: ignore[attr-defined]
+    assert len(fills) == 1
+    assert fills[0]["source"] == "paper_sim_no_book_fallback"
+    assert fills[0]["count"] == 3 and fills[0]["price_cents"] == 42
+
+
+# ---------------------------------------------------------------------------
+# Honest paper-fill path (Task #751): orderbook cache populated → simulator
+# walks the half-book and returns realistic fill numbers, NOT the legacy
+# 100%-at-limit shortcut.
+# ---------------------------------------------------------------------------
+
+def _seed_book(ticker: str, *, yes=None, no=None) -> None:
+    """Populate the in-process orderbook cache directly. Bypasses the WS
+    consumer because tests don't run a real Kalshi feed."""
+    kalshi_orderbook.orderbook_cache._books[ticker] = {
+        "yes": dict(yes or {}),
+        "no":  dict(no  or {}),
+    }
+    import time as _t
+    kalshi_orderbook.orderbook_cache._updated_at[ticker] = _t.time()
+
+
+def test_paper_fill_uses_orderbook_walk_when_cache_is_warm(
+    monkeypatch, _reset_lifecycle,
+):
+    """Warm cache → simulator walks the no-book and the persisted fill
+    reflects the *VWAP*, not the limit price. ``order_fills.source``
+    is ``'paper_sim'``, and the lifecycle metadata exposes the walked
+    levels so operators can audit the simulation."""
+    written = _reset_lifecycle
+    monkeypatch.setattr(lifecycle, "get_settings", lambda: _make_settings("paper"))
+
+    # BUY YES walks the no-book: best bid 45 (size 4) → taker pays 55¢;
+    # next bid 40 (size 100) → taker pays 60¢. Buying 6 contracts:
+    #   4 @ 55 + 2 @ 60 = 220 + 120 = 340; VWAP = (340 + 3) // 6 = 57.
+    _seed_book("X-WARM", no={45: 4, 40: 100})
+
+    req = lifecycle.OrderRequest(
+        market_ticker="X-WARM", side="yes", action="buy", count=6,
+        limit_price_cents=70, client_order_id="paper-warm-1",
+    )
+    record, _ = _run(_collect_during(lifecycle.submit_order(req)))
+
+    assert record.state == "filled"
+    assert record.filled_count == 6
+    # VWAP, NOT the limit price (legacy code would have returned 70).
+    assert record.avg_fill_price_cents == 57
+
+    fills = lifecycle._test_recorded_fills  # type: ignore[attr-defined]
+    assert len(fills) == 1
+    assert fills[0]["source"] == "paper_sim"
+    assert fills[0]["price_cents"] == 57
+
+    filled_row = next(w for w in written if w["event_type"] == "filled")
+    sim_meta = filled_row["metadata"]["paper_sim"]
+    assert sim_meta["status"] == "filled"
+    assert sim_meta["filled_qty"] == 6
+    assert sim_meta["vwap_price_cents"] == 57
+    assert sim_meta["residual_qty"] == 0
+    assert sim_meta["levels_walked"] == [(55, 4), (60, 2)]
+    assert sim_meta["book_present"] is True
+
+
+def test_paper_partial_fill_records_residual_and_emits_filled(
+    monkeypatch, _reset_lifecycle,
+):
+    """Limited depth at the simulator's limit → partial fill. The
+    lifecycle still emits ``filled`` (not ``rejected``) because *some*
+    quantity crossed; the residual lands in the metadata for the
+    orchestrator's retry-next-tick logic."""
+    _reset_lifecycle  # pin fixture
+    monkeypatch.setattr(lifecycle, "get_settings", lambda: _make_settings("paper"))
+
+    # no-bids: 40 (size 3) → taker 60¢; 30 (size 100) → taker 70¢.
+    # Limit 65¢ → only the first level qualifies, fills 3 of 10.
+    _seed_book("X-PART", no={40: 3, 30: 100})
+
+    req = lifecycle.OrderRequest(
+        market_ticker="X-PART", side="yes", action="buy", count=10,
+        limit_price_cents=65, client_order_id="paper-part-1",
+    )
+    record, events = _run(_collect_during(lifecycle.submit_order(req)))
+
+    assert record.state == "filled"
+    assert record.filled_count == 3
+    assert record.avg_fill_price_cents == 60
+
+    fills = lifecycle._test_recorded_fills  # type: ignore[attr-defined]
+    assert len(fills) == 1
+    assert fills[0]["source"] == "paper_sim"
+    assert fills[0]["count"] == 3
+
+    bus_events = [m["event"] for m in events if m.get("type") == "order_lifecycle"]
+    assert bus_events == ["submitted", "filled"]
+
+
+def test_paper_no_liquidity_rejects_with_audit_reason(
+    monkeypatch, _reset_lifecycle,
+):
+    """Book exists but the side a BUY YES needs (the no-book) is empty
+    → simulator returns ``no_liquidity`` → lifecycle records a real
+    rejection, NOT the cold-cache fallback. No fill row is written."""
+    written = _reset_lifecycle
+    monkeypatch.setattr(lifecycle, "get_settings", lambda: _make_settings("paper"))
+
+    # yes-book has depth, no-book is empty → BUY YES has no liquidity.
+    _seed_book("X-NOLIQ", yes={70: 100}, no={})
+
+    req = lifecycle.OrderRequest(
+        market_ticker="X-NOLIQ", side="yes", action="buy", count=5,
+        limit_price_cents=80, client_order_id="paper-noliq-1",
+    )
+    record, events = _run(_collect_during(lifecycle.submit_order(req)))
+
+    assert record.state == "rejected"
+    assert record.filled_count == 0
+    assert record.avg_fill_price_cents is None
+
+    fills = lifecycle._test_recorded_fills  # type: ignore[attr-defined]
+    assert fills == [], "no order_fills row should be written on a paper reject"
+
+    states = [w["event_type"] for w in written]
+    assert states == ["submitted", "rejected"]
+    rejected_row = next(w for w in written if w["event_type"] == "rejected")
+    assert rejected_row["metadata"]["reason"] == "paper_no_liquidity"
+    assert rejected_row["metadata"]["paper_sim"]["status"] == "no_liquidity"
+
+    bus_events = [m for m in events if m.get("type") == "order_lifecycle"]
+    rejected_event = next(m for m in bus_events if m["event"] == "rejected")
+    assert rejected_event["reason"] == "paper_no_liquidity"
+
+
+def test_paper_limit_unfillable_rejects_when_book_too_expensive(
+    monkeypatch, _reset_lifecycle,
+):
+    """Every bid in the cross-book violates the limit → reject with
+    reason ``paper_limit_unfillable`` (distinct from ``no_liquidity``
+    for triage)."""
+    monkeypatch.setattr(lifecycle, "get_settings", lambda: _make_settings("paper"))
+
+    # No-bids 30 (taker 70¢), 25 (taker 75¢). Limit 60¢ rejects both.
+    _seed_book("X-LIMIT", no={30: 100, 25: 50})
+
+    req = lifecycle.OrderRequest(
+        market_ticker="X-LIMIT", side="yes", action="buy", count=5,
+        limit_price_cents=60, client_order_id="paper-limit-1",
+    )
+    record, _ = _run(_collect_during(lifecycle.submit_order(req)))
+
+    assert record.state == "rejected"
+    assert record.filled_count == 0
+    fills = lifecycle._test_recorded_fills  # type: ignore[attr-defined]
+    assert fills == []
 
 
 def test_force_paper_overrides_live_mode(monkeypatch, _reset_lifecycle):
