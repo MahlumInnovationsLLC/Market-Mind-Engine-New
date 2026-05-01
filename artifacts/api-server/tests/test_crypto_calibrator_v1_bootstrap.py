@@ -63,7 +63,7 @@ def test_apply_returns_calibrated_probability_for_crypto() -> None:
     """
     calibrators.invalidate()
     state = calibrators.get_state()
-    state.calibrators["CRYPTO"] = calibrators._Calibrator(
+    state.calibrators["CRYPTO"] = {calibrators.ROLE_CHAMPION: calibrators._Calibrator(
         league="CRYPTO",
         type="isotonic",
         # Aggressive miscalibration: model says 0.7 but actual rate is
@@ -71,7 +71,7 @@ def test_apply_returns_calibrated_probability_for_crypto() -> None:
         state={"x": [0.0, 0.7, 1.0], "y": [0.0, 0.3, 1.0]},
         fit_at=time.time(),
         sample_count=5000,
-    )
+    )}
     out, info = calibrators.apply(0.7, "crypto")  # case-insensitive
     assert info["applied"] is True
     assert info["type"] == "isotonic"
@@ -308,7 +308,7 @@ def test_bootstrap_script_persists_crypto_snapshot(
     calibrators.invalidate()
     state = asyncio.run(calibrators.load_all())
     assert "CRYPTO" in state.calibrators
-    assert state.calibrators["CRYPTO"].type == "isotonic"
+    assert state.champion("CRYPTO").type == "isotonic"
 
 
 def test_bootstrap_script_dry_run_does_not_persist(

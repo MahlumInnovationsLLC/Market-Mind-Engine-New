@@ -4046,6 +4046,113 @@ async def get_per_league_calibration() -> dict[str, Any]:
     }
 
 
+async def get_calibrator_ab(history_limit: int = 5) -> dict[str, Any]:
+    """Champion-challenger A/B history for the dashboard tile (task #755).
+
+    For each league returns:
+
+      * ``champion``   — the latest ``role='champion'`` snapshot
+        (sample_count, fit_at, in/oos Brier).
+      * ``challenger`` — the latest ``role='challenger'`` snapshot
+        (or ``None`` if cold-start).
+      * ``snapshots``  — the last ``history_limit`` snapshots across
+        ALL roles (champion + challenger + retired_champion) ordered
+        most-recent first; renders the small audit timeline next to
+        each league row.
+
+    The promotion-job audit trail is reconstructible client-side from
+    role transitions in ``snapshots`` so the tile can flag a recent
+    swap without a separate endpoint.
+    """
+    from . import calibrators as _calibrators
+
+    try:
+        rows = await db.fetch(
+            """
+            SELECT id,
+                   sub_category,
+                   COALESCE(role, 'champion')                AS role,
+                   sample_count,
+                   brier_in_sample::float                    AS brier_in_sample,
+                   brier_out_of_sample::float                AS brier_out_of_sample,
+                   to_char(created_at, 'YYYY-MM-DD"T"HH24:MI:SSZ')
+                                                              AS fit_at,
+                   created_at
+              FROM calibration_snapshots
+             WHERE vertical = 'sports'
+               AND sub_category LIKE 'per_league:%'
+               AND calibrator_state IS NOT NULL
+               AND COALESCE(drift_status->>'status', '') <> 'rolled_back'
+             ORDER BY sub_category, created_at DESC
+            """
+        )
+    except Exception as e:
+        log.warning("calibrator_ab query failed: %s", e)
+        return {
+            "items": [], "supported": list(_calibrators.SUPPORTED_LEAGUES),
+            "error": str(e)[:240],
+        }
+
+    history: dict[str, list[dict[str, Any]]] = {}
+    for r in rows:
+        sub = str(r["sub_category"] or "")
+        if not sub.startswith("per_league:"):
+            continue
+        league = sub.split(":", 1)[1].strip().upper()
+        if league not in _calibrators.SUPPORTED_LEAGUES:
+            continue
+        history.setdefault(league, []).append({
+            "id": int(r["id"]),
+            "role": str(r["role"] or "champion").lower(),
+            "sample_count": int(r["sample_count"] or 0),
+            "brier_in_sample": (
+                float(r["brier_in_sample"])
+                if r["brier_in_sample"] is not None else None
+            ),
+            "brier_out_of_sample": (
+                float(r["brier_out_of_sample"])
+                if r["brier_out_of_sample"] is not None else None
+            ),
+            "fit_at": r["fit_at"],
+        })
+
+    items: list[dict[str, Any]] = []
+    for lg in _calibrators.SUPPORTED_LEAGUES:
+        rows_for_lg = history.get(lg, [])
+        champion = next(
+            (s for s in rows_for_lg if s["role"] == "champion"), None
+        )
+        challenger = next(
+            (s for s in rows_for_lg if s["role"] == "challenger"), None
+        )
+        last_promotion_at: str | None = None
+        # Promotion = a 'champion' row whose immediate predecessor (the
+        # next-older snapshot in time) is 'retired_champion'.  Because
+        # rows_for_lg is newest-first, the predecessor sits at index+1.
+        # We pick the most recent such transition.
+        for i, s in enumerate(rows_for_lg):
+            if s["role"] != "champion":
+                continue
+            j = i + 1
+            if j < len(rows_for_lg) and rows_for_lg[j]["role"] == "retired_champion":
+                last_promotion_at = s["fit_at"]
+                break
+        items.append({
+            "league": lg,
+            "champion": champion,
+            "challenger": challenger,
+            "snapshots": rows_for_lg[: max(1, int(history_limit))],
+            "last_promotion_at": last_promotion_at,
+        })
+
+    return {
+        "items": items,
+        "supported": list(_calibrators.SUPPORTED_LEAGUES),
+        "champion_count": sum(1 for it in items if it["champion"] is not None),
+        "challenger_count": sum(1 for it in items if it["challenger"] is not None),
+    }
+
+
 async def get_recent_bankroll_events(
     limit: int = 200,
     *,

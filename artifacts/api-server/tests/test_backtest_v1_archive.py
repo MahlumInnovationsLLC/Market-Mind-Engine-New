@@ -152,11 +152,11 @@ def test_score_grouped_noop_calibrator_yields_zero_delta():
 
 
 def test_score_grouped_calibrator_changes_delta():
-    calibrators._state.calibrators["NBA"] = calibrators._Calibrator(
+    calibrators._state.calibrators["NBA"] = {calibrators.ROLE_CHAMPION: calibrators._Calibrator(
         league="NBA", type="isotonic",
         state={"x": [0.0, 1.0], "y": [0.4, 0.6]},
         fit_at=time.time(), sample_count=999,
-    )
+    )}
     rows = json.loads(FIXTURE.read_text())
     scored = bt.score_grouped(bt._normalize_rows(rows))
     nba = scored["per_league"]["NBA"]
@@ -182,21 +182,21 @@ def test_verdict_boundary_classification():
     # Solve q so calibrated Brier on parity league = raw + tol exactly.
     q = (1 - math.sqrt(1 - 4 * 0.23)) / 2
     assert ((q - 0) ** 2 + (q - 1) ** 2) / 2 == pytest.approx(0.25 + tol, abs=1e-9)
-    calibrators._state.calibrators[L_PARITY] = calibrators._Calibrator(
+    calibrators._state.calibrators[L_PARITY] = {calibrators.ROLE_CHAMPION: calibrators._Calibrator(
         league=L_PARITY, type="isotonic",
         state={"x": [0.0, 1.0], "y": [q, q]},
         fit_at=time.time(), sample_count=999,
-    )
-    calibrators._state.calibrators[L_IMPROVE] = calibrators._Calibrator(
+    )}
+    calibrators._state.calibrators[L_IMPROVE] = {calibrators.ROLE_CHAMPION: calibrators._Calibrator(
         league=L_IMPROVE, type="isotonic",
         state={"x": [0.0, 1.0], "y": [1.0, 0.0]},
         fit_at=time.time(), sample_count=999,
-    )
-    calibrators._state.calibrators[L_REGRESS] = calibrators._Calibrator(
+    )}
+    calibrators._state.calibrators[L_REGRESS] = {calibrators.ROLE_CHAMPION: calibrators._Calibrator(
         league=L_REGRESS, type="isotonic",
         state={"x": [0.0, 1.0], "y": [0.5, 0.5]},
         fit_at=time.time(), sample_count=999,
-    )
+    )}
     scored = bt.score_grouped(grouped)
     assert scored["per_league"][L_PARITY]["verdict"] == "parity"
     assert scored["per_league"][L_IMPROVE]["verdict"] == "improved"

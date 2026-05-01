@@ -37,6 +37,7 @@ import type {
   AutoResearchFeatureList,
   AutoResearchRunResult,
   BankrollRecent,
+  CalibratorAb,
   CheckoutSessionRequest,
   CheckoutSessionResult,
   CryptoBacktestRetentionStatus,
@@ -46,6 +47,7 @@ import type {
   EmergencyStopRequest,
   EmergencyStopResult,
   FullHealth,
+  GetCalibratorAbParams,
   GetDashboardOverviewParams,
   GetPublicTailRiskExposureParams,
   GetRecentBankrollEventsParams,
@@ -877,6 +879,103 @@ export function useSearchAll<
   },
 ): UseQueryResult<TData, TError> & { queryKey: QueryKey } {
   const queryOptions = getSearchAllQueryOptions(params, options);
+
+  const query = useQuery(queryOptions) as UseQueryResult<TData, TError> & {
+    queryKey: QueryKey;
+  };
+
+  return { ...query, queryKey: queryOptions.queryKey };
+}
+
+/**
+ * @summary Champion-challenger A/B calibrator history per league
+ */
+export const getGetCalibratorAbUrl = (params?: GetCalibratorAbParams) => {
+  const normalizedParams = new URLSearchParams();
+
+  Object.entries(params || {}).forEach(([key, value]) => {
+    if (value !== undefined) {
+      normalizedParams.append(key, value === null ? "null" : value.toString());
+    }
+  });
+
+  const stringifiedParams = normalizedParams.toString();
+
+  return stringifiedParams.length > 0
+    ? `/api/dashboard/calibration/ab?${stringifiedParams}`
+    : `/api/dashboard/calibration/ab`;
+};
+
+export const getCalibratorAb = async (
+  params?: GetCalibratorAbParams,
+  options?: RequestInit,
+): Promise<CalibratorAb> => {
+  return customFetch<CalibratorAb>(getGetCalibratorAbUrl(params), {
+    ...options,
+    method: "GET",
+  });
+};
+
+export const getGetCalibratorAbQueryKey = (params?: GetCalibratorAbParams) => {
+  return [
+    `/api/dashboard/calibration/ab`,
+    ...(params ? [params] : []),
+  ] as const;
+};
+
+export const getGetCalibratorAbQueryOptions = <
+  TData = Awaited<ReturnType<typeof getCalibratorAb>>,
+  TError = ErrorType<unknown>,
+>(
+  params?: GetCalibratorAbParams,
+  options?: {
+    query?: UseQueryOptions<
+      Awaited<ReturnType<typeof getCalibratorAb>>,
+      TError,
+      TData
+    >;
+    request?: SecondParameter<typeof customFetch>;
+  },
+) => {
+  const { query: queryOptions, request: requestOptions } = options ?? {};
+
+  const queryKey = queryOptions?.queryKey ?? getGetCalibratorAbQueryKey(params);
+
+  const queryFn: QueryFunction<Awaited<ReturnType<typeof getCalibratorAb>>> = ({
+    signal,
+  }) => getCalibratorAb(params, { signal, ...requestOptions });
+
+  return { queryKey, queryFn, ...queryOptions } as UseQueryOptions<
+    Awaited<ReturnType<typeof getCalibratorAb>>,
+    TError,
+    TData
+  > & { queryKey: QueryKey };
+};
+
+export type GetCalibratorAbQueryResult = NonNullable<
+  Awaited<ReturnType<typeof getCalibratorAb>>
+>;
+export type GetCalibratorAbQueryError = ErrorType<unknown>;
+
+/**
+ * @summary Champion-challenger A/B calibrator history per league
+ */
+
+export function useGetCalibratorAb<
+  TData = Awaited<ReturnType<typeof getCalibratorAb>>,
+  TError = ErrorType<unknown>,
+>(
+  params?: GetCalibratorAbParams,
+  options?: {
+    query?: UseQueryOptions<
+      Awaited<ReturnType<typeof getCalibratorAb>>,
+      TError,
+      TData
+    >;
+    request?: SecondParameter<typeof customFetch>;
+  },
+): UseQueryResult<TData, TError> & { queryKey: QueryKey } {
+  const queryOptions = getGetCalibratorAbQueryOptions(params, options);
 
   const query = useQuery(queryOptions) as UseQueryResult<TData, TError> & {
     queryKey: QueryKey;

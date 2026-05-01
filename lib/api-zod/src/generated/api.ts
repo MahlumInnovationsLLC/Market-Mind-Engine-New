@@ -509,6 +509,66 @@ export const SearchAllResponse = zod.object({
 });
 
 /**
+ * @summary Champion-challenger A/B calibrator history per league
+ */
+export const getCalibratorAbQueryHistoryLimitDefault = 5;
+export const getCalibratorAbQueryHistoryLimitMax = 50;
+
+export const GetCalibratorAbQueryParams = zod.object({
+  history_limit: zod.coerce
+    .number()
+    .min(1)
+    .max(getCalibratorAbQueryHistoryLimitMax)
+    .default(getCalibratorAbQueryHistoryLimitDefault)
+    .describe(
+      "How many recent snapshots (across all roles) to return per league.",
+    ),
+});
+
+export const GetCalibratorAbResponse = zod.object({
+  items: zod.array(
+    zod.object({
+      league: zod.string(),
+      champion: zod
+        .object({
+          id: zod.number(),
+          role: zod.enum(["champion", "challenger", "retired_champion"]),
+          sample_count: zod.number(),
+          brier_in_sample: zod.number().nullish(),
+          brier_out_of_sample: zod.number().nullish(),
+          fit_at: zod.string().nullable(),
+        })
+        .nullish(),
+      challenger: zod
+        .object({
+          id: zod.number(),
+          role: zod.enum(["champion", "challenger", "retired_champion"]),
+          sample_count: zod.number(),
+          brier_in_sample: zod.number().nullish(),
+          brier_out_of_sample: zod.number().nullish(),
+          fit_at: zod.string().nullable(),
+        })
+        .nullish(),
+      snapshots: zod.array(
+        zod.object({
+          id: zod.number(),
+          role: zod.enum(["champion", "challenger", "retired_champion"]),
+          sample_count: zod.number(),
+          brier_in_sample: zod.number().nullish(),
+          brier_out_of_sample: zod.number().nullish(),
+          fit_at: zod.string().nullable(),
+        }),
+      ),
+      last_promotion_at: zod.string().nullish(),
+    }),
+  ),
+  supported: zod.array(zod.string()),
+  champion_count: zod.number().optional(),
+  challenger_count: zod.number().optional(),
+  error: zod.string().nullish(),
+});
+
+/**
  * @summary Per-vertical P&L, win rate, Brier, calibration, and PIT histogram
  */
 export const getVerticalPerformanceQueryDaysDefault = 30;

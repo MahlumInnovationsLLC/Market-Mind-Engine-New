@@ -116,17 +116,20 @@ arithmetic, not architecture.**
 
 ### Phase 5 — Champion-challenger A/B (2 days) **[do here]**
 
-- **T-16 · `ALTER TABLE calibration_snapshots ADD COLUMN role text DEFAULT 'champion'`**
+- **T-16 · `ALTER TABLE calibration_snapshots ADD COLUMN role text DEFAULT 'champion'`** ✅
   - Migration + backfill all existing rows to `champion`. Seed first challenger from a held-out training slice.
   - Acceptance: migration up/down works; existing predictions unaffected.
+  - Done: migration `0044_calibration_snapshots_role_ab.py` adds `role text NOT NULL DEFAULT 'champion'` + `brier_in_sample`/`brier_out_of_sample` float8 columns + `(sub_category, role, created_at DESC)` index. Existing rows backfill via the column DEFAULT; loader reads `COALESCE(role, 'champion')` for backcompat.
 
-- **T-17 · Predictor returns `(p_champion, p_challenger)` and only champion drives trades**
+- **T-17 · Predictor returns `(p_champion, p_challenger)` and only champion drives trades** ✅
   - Update `app/predictions.py` to evaluate both, log both, but only feed champion downstream.
   - Acceptance: dashboard tile shows both probabilities side-by-side per league.
+  - Done: `calibrators.apply_both()` returns `(p_champion, info{p_champion,p_challenger,challenger_applied})`; sports `app/predictor.py` and `app/crypto/predictor.py` both call `apply_both` and stitch both numbers into `raw.calibration` while downstream `probability` stays the champion. Dashboard tile `artifacts/web/src/components/dashboard/calibrator-ab.tsx` (mounted in `pages/dashboard.tsx`) reads `/api/dashboard/calibration/ab` and shows champion-vs-challenger Brier side-by-side per league with the role-history strip.
 
-- **T-18 · Auto-promotion — challenger wins OOS Brier 2 snapshots in a row → swap roles**
+- **T-18 · Auto-promotion — challenger wins OOS Brier 2 snapshots in a row → swap roles** ✅
   - Add temporal OOS holdout in `calibrators.py`; persist `brier_in_sample` + `brier_out_of_sample`.
   - Acceptance: synthetic challenger that's better wins promotion; one that's worse never promotes.
+  - Done: `_temporal_split` (10% / min 5 trailing rows by `ts`) drives in-sample/OOS Brier on both champion (re-evaluated) and freshly-fit challenger. `_maybe_promote_challenger` reads the last 8 active snapshots, requires 2 consecutive challenger OOS strictly < champion OOS by `PROMOTION_MIN_DELTA=1e-9`, and atomically swaps via a CTE (prior champion → `retired_champion`, latest challenger → `champion`). 16 dedicated tests in `tests/test_calibrator_ab.py` cover apply/apply_both/load_all partitioning, cold-start vs warm-path refit, promotion (better/worse/tie/short-history), and the dashboard shape.
 
 ### Phase 6 — Mac Studio cutover (1 day) **[Mac Studio]**
 

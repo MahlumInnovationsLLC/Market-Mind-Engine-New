@@ -369,6 +369,40 @@ export interface SwarmPersonaList {
   items: SwarmPersona[];
 }
 
+export type CalibratorAbSnapshotRole =
+  (typeof CalibratorAbSnapshotRole)[keyof typeof CalibratorAbSnapshotRole];
+
+export const CalibratorAbSnapshotRole = {
+  champion: "champion",
+  challenger: "challenger",
+  retired_champion: "retired_champion",
+} as const;
+
+export interface CalibratorAbSnapshot {
+  id: number;
+  role: CalibratorAbSnapshotRole;
+  sample_count: number;
+  brier_in_sample?: number | null;
+  brier_out_of_sample?: number | null;
+  fit_at: string | null;
+}
+
+export interface CalibratorAbItem {
+  league: string;
+  champion?: CalibratorAbSnapshot | null;
+  challenger?: CalibratorAbSnapshot | null;
+  snapshots: CalibratorAbSnapshot[];
+  last_promotion_at?: string | null;
+}
+
+export interface CalibratorAb {
+  items: CalibratorAbItem[];
+  supported: string[];
+  champion_count?: number;
+  challenger_count?: number;
+  error?: string | null;
+}
+
 export interface SwarmPersonaToday {
   persona_id: string;
   debates: number;
@@ -1694,6 +1728,15 @@ export type SearchAllParams = {
    * @maximum 50
    */
   limit?: number;
+};
+
+export type GetCalibratorAbParams = {
+  /**
+   * How many recent snapshots (across all roles) to return per league.
+   * @minimum 1
+   * @maximum 50
+   */
+  history_limit?: number;
 };
 
 export type GetVerticalPerformanceParams = {

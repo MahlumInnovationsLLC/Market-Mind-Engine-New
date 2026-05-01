@@ -189,8 +189,13 @@ async def predict_crypto_binary(
 
     # Per-league calibration on top of the ensemble — same contract the
     # generic predictor uses so the operator-tuned crypto calibrator
-    # (when one is loaded) applies automatically.
-    cal_prob, cal_info = calibrators.apply(probability, league)
+    # (when one is loaded) applies automatically.  Champion-challenger
+    # A/B (task #755): apply_both runs both calibrators in parallel;
+    # the trade decision continues to feed off the champion only —
+    # `cal_prob` IS the champion's probability — and the challenger
+    # number rides along in `cal_info` purely for the dashboard tile
+    # and the auto-promotion job's audit trail.
+    cal_prob, cal_info = calibrators.apply_both(probability, league)
     if cal_info.get("applied"):
         blend_info["uncalibrated_probability"] = float(probability)
         probability = cal_prob

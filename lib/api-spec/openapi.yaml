@@ -176,6 +176,23 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/SearchResults" }
 
+  /dashboard/calibration/ab:
+    get:
+      operationId: getCalibratorAb
+      tags: [dashboard]
+      summary: Champion-challenger A/B calibrator history per league
+      parameters:
+        - in: query
+          name: history_limit
+          schema: { type: integer, minimum: 1, maximum: 50, default: 5 }
+          description: How many recent snapshots (across all roles) to return per league.
+      responses:
+        "200":
+          description: Per-league champion + challenger snapshot history
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CalibratorAb" }
+
   /dashboard/vertical-performance:
     get:
       operationId: getVerticalPerformance
@@ -1373,6 +1390,43 @@ components:
           type: array
           items: { $ref: "#/components/schemas/SwarmPersona" }
       required: [items]
+
+    CalibratorAbSnapshot:
+      type: object
+      properties:
+        id: { type: integer }
+        role: { type: string, enum: [champion, challenger, retired_champion] }
+        sample_count: { type: integer }
+        brier_in_sample: { type: number, nullable: true }
+        brier_out_of_sample: { type: number, nullable: true }
+        fit_at: { type: string, nullable: true }
+      required: [id, role, sample_count, fit_at]
+
+    CalibratorAbItem:
+      type: object
+      properties:
+        league: { type: string }
+        champion: { allOf: [{ $ref: "#/components/schemas/CalibratorAbSnapshot" }], nullable: true }
+        challenger: { allOf: [{ $ref: "#/components/schemas/CalibratorAbSnapshot" }], nullable: true }
+        snapshots:
+          type: array
+          items: { $ref: "#/components/schemas/CalibratorAbSnapshot" }
+        last_promotion_at: { type: string, nullable: true }
+      required: [league, snapshots]
+
+    CalibratorAb:
+      type: object
+      properties:
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/CalibratorAbItem" }
+        supported:
+          type: array
+          items: { type: string }
+        champion_count: { type: integer }
+        challenger_count: { type: integer }
+        error: { type: string, nullable: true }
+      required: [items, supported]
 
     SwarmPersonaToday:
       type: object

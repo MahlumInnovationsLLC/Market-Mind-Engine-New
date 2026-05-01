@@ -5591,6 +5591,21 @@ async def dashboard_calibration_per_league(
     return await dashboard.get_per_league_calibration()
 
 
+@app.get("/api/dashboard/calibration/ab")
+async def dashboard_calibration_ab(
+    history_limit: int = 5,
+    _: object = Depends(require_approved_user),
+) -> dict[str, object]:
+    """Champion-challenger A/B calibrator history (task #755).
+
+    Per-league: latest champion + challenger snapshots with in-sample
+    and out-of-sample Brier, plus the last ``history_limit`` snapshots
+    across all roles for the audit timeline.  Drives the operator A/B
+    tile that flags a recent auto-promotion swap.
+    """
+    return await dashboard.get_calibrator_ab(history_limit=int(history_limit))
+
+
 @app.get("/api/dashboard/vertical-performance")
 async def dashboard_vertical_performance(
     days: int = 30,

@@ -166,6 +166,8 @@ PROTECTED_ROUTES: tuple[str, ...] = (
     "/api/research/directives",
     # Task #155 — per-league calibration panel on the operator dashboard.
     "/api/dashboard/calibration/per-league",
+    # Task #755 — champion-challenger calibrator A/B history tile.
+    "/api/dashboard/calibration/ab",
     # Task #208 — NFL per-league + Sunday-window exposure panel.
     "/api/dashboard/nfl-exposure",
     # Task #437 — multi-league exposure panel (NFL panel generalised).

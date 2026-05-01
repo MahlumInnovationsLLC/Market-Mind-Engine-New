@@ -15,6 +15,7 @@ import MacroReleaseSurprises from "@/components/dashboard/macro-release-surprise
 import LeaguesExposurePanel from "@/components/dashboard/leagues-exposure-panel";
 import OperatorControls from "@/components/dashboard/operator-controls";
 import OverFilledOrdersBadge from "@/components/dashboard/over-filled-orders-badge";
+import CalibratorAb from "@/components/dashboard/calibrator-ab";
 import PerLeagueCalibration from "@/components/dashboard/per-league-calibration";
 import { PeriodProvider, PeriodStrip } from "@/components/dashboard/period-context";
 import { PlacedByProvider } from "@/components/dashboard/placed-by-context";
@@ -116,6 +117,8 @@ export default function Dashboard() {
         <TournamentTimelinePanel />
 
         <PerLeagueCalibration />
+
+        <CalibratorAb />
 
         <MacroReleaseSurprises />
 

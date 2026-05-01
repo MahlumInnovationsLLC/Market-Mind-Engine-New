@@ -32,22 +32,49 @@ class _FakeDb:
 
     async def fetch(self, query: str, *args: Any) -> list[dict[str, Any]]:
         q = " ".join(query.split())
-        if "FROM calibration_snapshots" in q and "DISTINCT ON (sub_category)" in q:
-            # Return latest per sub_category for sports/per_league:*
-            by_sub: dict[str, dict[str, Any]] = {}
+        # Auto-promotion check (task #755) — return the recent
+        # champion+challenger snapshot history for the requested
+        # sub_category in created_at DESC order.
+        if (
+            "FROM calibration_snapshots" in q
+            and "ORDER BY created_at DESC" in q
+            and "brier_out_of_sample IS NOT NULL" in q
+        ):
+            sub = args[0] if args else None
+            history = sorted(
+                (r for r in self.snapshots if r["sub_category"] == sub),
+                key=lambda x: x["created_at"], reverse=True,
+            )
+            return [
+                {
+                    "id": r["id"],
+                    "role": r.get("role", "champion"),
+                    "brier_out_of_sample": r.get("brier_out_of_sample"),
+                    "created_at": r["created_at"],
+                }
+                for r in history if r.get("brier_out_of_sample") is not None
+            ][:8]
+        if "FROM calibration_snapshots" in q and "DISTINCT ON" in q:
+            # Return latest per (sub_category, role) for sports/per_league:*
+            by_key: dict[tuple[str, str], dict[str, Any]] = {}
             for r in self.snapshots:
                 sub = r["sub_category"]
                 if not sub.startswith("per_league:"):
                     continue
                 if r["calibrator_state"] in (None, "{}"):
                     continue
-                cur = by_sub.get(sub)
+                role = r.get("role", "champion")
+                if role not in ("champion", "challenger"):
+                    continue
+                key = (sub, role)
+                cur = by_key.get(key)
                 if cur is None or r["created_at"] > cur["created_at"]:
-                    by_sub[sub] = r
+                    by_key[key] = r
             out = []
-            for r in sorted(by_sub.values(), key=lambda x: x["sub_category"]):
+            for r in sorted(by_key.values(), key=lambda x: (x["sub_category"], x.get("role", "champion"))):
                 out.append({
                     "sub_category": r["sub_category"],
+                    "role": r.get("role", "champion"),
                     "calibrator_state": r["calibrator_state"],
                     "sample_count": r["sample_count"],
                     "fit_at": float(r["created_at"]),
@@ -65,12 +92,19 @@ class _FakeDb:
             sub_cat = args[0]
             n = int(args[4])
             state_json = args[5]
+            # Task #755 added 3 new positional args at $10/$11/$12.
+            role = args[9] if len(args) > 9 else "champion"
+            brier_in = args[10] if len(args) > 10 else None
+            brier_oos = args[11] if len(args) > 11 else None
             self.snapshots.append({
                 "id": new_id,
                 "sub_category": sub_cat,
                 "calibrator_state": state_json,
                 "sample_count": n,
                 "created_at": time.time(),
+                "role": role,
+                "brier_in_sample": brier_in,
+                "brier_out_of_sample": brier_oos,
             })
             return new_id
         return None
@@ -121,11 +155,11 @@ def test_apply_bypasses_when_not_loaded():
 def test_apply_isotonic_interpolates_between_knots():
     calibrators.invalidate()
     state = calibrators.get_state()
-    state.calibrators["NBA"] = calibrators._Calibrator(
+    state.calibrators["NBA"] = {calibrators.ROLE_CHAMPION: calibrators._Calibrator(
         league="NBA", type="isotonic",
         state={"x": [0.0, 0.5, 1.0], "y": [0.1, 0.4, 0.9]},
         fit_at=time.time(), sample_count=100,
-    )
+    )}
     out, info = calibrators.apply(0.5, "NBA")
     assert info["applied"] is True
     assert info["type"] == "isotonic"
@@ -137,11 +171,11 @@ def test_apply_isotonic_interpolates_between_knots():
 def test_apply_platt_returns_sigmoid():
     calibrators.invalidate()
     state = calibrators.get_state()
-    state.calibrators["NHL"] = calibrators._Calibrator(
+    state.calibrators["NHL"] = {calibrators.ROLE_CHAMPION: calibrators._Calibrator(
         league="NHL", type="platt",
         state={"a": 2.0, "b": -1.0},  # sigmoid(2p - 1)
         fit_at=time.time(), sample_count=20,
-    )
+    )}
     out, info = calibrators.apply(0.5, "nhl")  # case-insensitive
     assert info["applied"] is True
     assert info["type"] == "platt"
@@ -173,8 +207,8 @@ def test_load_all_picks_most_recent_per_league(fake_db):
     ])
     state = asyncio.run(calibrators.load_all())
     assert "NBA" in state.calibrators
-    assert state.calibrators["NBA"].type == "platt"  # the newer one wins
-    assert state.calibrators["MLB"].type == "isotonic"
+    assert state.champion("NBA").type == "platt"  # the newer one wins
+    assert state.champion("MLB").type == "isotonic"
     fresh = state.freshness()
     assert fresh["loaded_count"] == 2
     # Two leagues fitted (NBA, MLB); the rest of SUPPORTED_LEAGUES are missing.
@@ -378,11 +412,11 @@ def test_predict_applies_per_league_calibrator(monkeypatch):
     _seed_predictor()
     state = calibrators.get_state()
     # Compress probabilities towards 0.5 so we can see the shift.
-    state.calibrators["NBA"] = calibrators._Calibrator(
+    state.calibrators["NBA"] = {calibrators.ROLE_CHAMPION: calibrators._Calibrator(
         league="NBA", type="isotonic",
         state={"x": [0.0, 0.7, 1.0], "y": [0.1, 0.55, 0.9]},
         fit_at=time.time(), sample_count=100,
-    )
+    )}
     out = asyncio.run(predictor.predict([1.0, 2.0], league="NBA"))
     assert out.probability == pytest.approx(0.55, abs=1e-6)
     assert out.raw["calibration"]["applied"] is True
