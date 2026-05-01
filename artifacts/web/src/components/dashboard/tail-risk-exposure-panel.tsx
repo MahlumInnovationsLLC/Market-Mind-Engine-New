@@ -8,10 +8,7 @@ import { useVerticalFilter } from "@/hooks/use-selected-verticals";
 import { usePeriod } from "./period-context";
 import { usePlacedBy } from "./placed-by-context";
 
-// Tail-risk exposure tile — read-only matrix from
-// /api/public/tail-risk-exposure. Buckets, the row-level tail definition
-// (price < tail_concentration.threshold_price), and ev_per_trade are
-// owned by the server. See replit.md ("Tail-risk exposure tile").
+// See replit.md "Tail-risk exposure tile".
 
 type BucketRow = {
   vertical: string;
@@ -75,8 +72,6 @@ function fmtPct(n: number | null, digits = 1): string {
 
 function fmtEv(n: number | null): string {
   if (n === null || Number.isNaN(n)) return "—";
-  // EV/trade is a small dollar number per trade — show 2 dp so a $0.50
-  // edge doesn't round to "$1" and a −$0.30 drag doesn't round to "$0".
   return new Intl.NumberFormat("en-US", {
     style: "currency",
     currency: "USD",
@@ -87,7 +82,6 @@ function fmtEv(n: number | null): string {
 }
 
 function fmtPriceThreshold(p: number): string {
-  // Render `0.20` as `$0.20`, `0.2` as `$0.20`, `0.05` as `$0.05`.
   return `$${p.toFixed(2)}`;
 }
 
@@ -116,7 +110,6 @@ const TONE_LABEL: Record<TailRiskExposure["tail_concentration"]["tone"], string>
   empty: "NO EXPOSURE",
 };
 
-// First-paint fallback; mirrors `_TAIL_PRICE_THRESHOLD` in dashboard.py.
 const DEFAULT_TAIL_THRESHOLD = 0.2;
 
 export default function TailRiskExposurePanel() {
@@ -162,7 +155,7 @@ export default function TailRiskExposurePanel() {
       <SectionHeader
         eyebrow={`RISK · ${periodLabel}`}
         title="Tail-risk exposure"
-        subtitle="Open positions and realized P&L bucketed by entry price across the selected window. Forensic audit: 0.28% of YTD trades drove −$9.6K of losses — this tile keeps that risk visible."
+        subtitle="Open positions and realized P&L bucketed by entry price across the selected window."
       />
 
       {q.isLoading && (
@@ -185,7 +178,6 @@ export default function TailRiskExposurePanel() {
 
       {data && concentration && (
         <>
-          {/* Headline: tone + threshold are server-owned. */}
           <div
             className="mb-4 flex flex-wrap items-baseline gap-x-3 gap-y-1"
             data-testid="tail-risk-headline"
@@ -215,8 +207,6 @@ export default function TailRiskExposurePanel() {
             </span>
           </div>
 
-          {/* Bucket table — server-owned taxonomy; rows include
-              per-vertical breakdown for the full bucket × vertical matrix. */}
           <div className="overflow-x-auto">
             <table
               className="w-full text-xs"
@@ -242,8 +232,6 @@ export default function TailRiskExposurePanel() {
                     totals.realized_count > 0
                       ? totals.realized_wins / totals.realized_count
                       : null;
-                  // Sort cells by max-loss desc so the worst offender
-                  // is the first nested row — operators scan top-down.
                   const cells = b.rows
                     .slice()
                     .sort((a, c) => c.open_max_loss_usd - a.open_max_loss_usd);
@@ -292,7 +280,6 @@ export default function TailRiskExposurePanel() {
                           {fmtUsd(totals.realized_pnl_usd)}
                         </td>
                       </tr>
-                      {/* Per-vertical sub-rows for this bucket. */}
                       {cells.map((cell) => {
                         const cellWinRate =
                           cell.realized_count > 0
@@ -338,7 +325,6 @@ export default function TailRiskExposurePanel() {
                     </Fragment>
                   );
                 })}
-                {/* Grand totals row. */}
                 <tr
                   className="border-t-2 border-border bg-muted/10 font-semibold"
                   data-testid="tail-risk-totals-row"
@@ -382,7 +368,6 @@ export default function TailRiskExposurePanel() {
             </table>
           </div>
 
-          {/* One-line per-vertical summary for tail buckets. */}
           {(() => {
             const tailRows = buckets
               .filter((b) => b.is_tail)

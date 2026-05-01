@@ -126,7 +126,6 @@ function zeroTotals() {
 }
 
 function renderPanel() {
-  // New client per render so cache isolation between tests is total.
   const qc = new QueryClient({
     defaultOptions: { queries: { retry: false, gcTime: 0 } },
   });
@@ -139,7 +138,6 @@ function renderPanel() {
 
 describe("TailRiskExposurePanel", () => {
   it("shows the loading copy before data arrives", async () => {
-    // Resolve never — keep the query in flight.
     global.fetch = vi.fn(() => new Promise(() => {})) as unknown as typeof fetch;
     renderPanel();
     expect(await screen.findByTestId("tail-risk-loading")).toBeTruthy();
@@ -153,7 +151,6 @@ describe("TailRiskExposurePanel", () => {
     await waitFor(() => expect(state.lastUrl).toMatch(/tail-risk-exposure/));
     expect(state.lastUrl).toMatch(/days=30/);
     expect(state.lastUrl).toMatch(/placed_by=system/);
-    // Verticals are sorted before joining so the cache key is stable.
     expect(state.lastUrl).toMatch(/vertical=crypto%2Csports/);
   });
 
@@ -164,8 +161,6 @@ describe("TailRiskExposurePanel", () => {
     renderPanel();
     await waitFor(() => expect(state.lastUrl).toMatch(/tail-risk-exposure/));
     expect(state.lastUrl).toMatch(/days=7(?!\d)/);
-    // The eyebrow shows the period label so operators know which
-    // window the tile is keyed to.
     expect(screen.getByText(/RISK · 7D/)).toBeTruthy();
   });
 
@@ -175,7 +170,6 @@ describe("TailRiskExposurePanel", () => {
     const tone = await screen.findByTestId("tail-risk-headline-tone");
     expect(tone.textContent).toBe("NO EXPOSURE");
     const value = screen.getByTestId("tail-risk-headline-value");
-    // No exposure → pct=null renders as the em-dash placeholder.
     expect(value.textContent).toBe("—");
     expect(value.getAttribute("data-tone")).toBe("empty");
   });
@@ -234,29 +228,21 @@ describe("TailRiskExposurePanel", () => {
     expect(tone.textContent).toBe("ELEVATED");
     const value = screen.getByTestId("tail-risk-headline-value");
     expect(value.getAttribute("data-tone")).toBe("red");
-    // 99.87% rounded to 1 dp.
     expect(value.textContent).toMatch(/99\.[89]%/);
 
-    // First bucket row has the tail flag and a non-zero max-loss.
     const b0 = screen.getByTestId("tail-risk-bucket-0");
     expect(b0.getAttribute("data-tail")).toBe("true");
     expect(b0.textContent).toContain("$4,218");
 
-    // Mid bucket has tail=false.
     const b3 = screen.getByTestId("tail-risk-bucket-3");
     expect(b3.getAttribute("data-tail")).toBe("false");
 
-    // Vertical breakdown only includes the tail buckets — sports gets
-    // the Feb-20 sized number.
     const sports = screen.getByTestId("tail-risk-vertical-sports");
     expect(sports.textContent).toContain("$4,218");
 
-    // Headline copy uses the server-published threshold rather than a
-    // hardcoded "$0.25" — the architect rejection landed on this.
     const detail = screen.getByTestId("tail-risk-headline-detail");
     expect(detail.textContent).toContain("<$0.20");
 
-    // Per-bucket EV/trade column rendered with sign + 2dp.
     const b0Ev = screen.getByTestId("tail-risk-bucket-0-ev");
     expect(b0Ev.textContent).toMatch(/-\$4,218\.00/);
     const b3Ev = screen.getByTestId("tail-risk-bucket-3-ev");
@@ -264,8 +250,6 @@ describe("TailRiskExposurePanel", () => {
     const totalsEv = screen.getByTestId("tail-risk-totals-ev");
     expect(totalsEv.textContent).toMatch(/-\$1,390\.33/);
 
-    // Full bucket × vertical matrix: the per-vertical cell is rendered
-    // beneath the bucket row, not just collapsed into the strip below.
     const cell0 = screen.getByTestId("tail-risk-cell-0-sports");
     expect(cell0.textContent).toContain("sports");
     expect(cell0.textContent).toContain("$4,218");

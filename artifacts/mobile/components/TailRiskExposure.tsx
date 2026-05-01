@@ -9,10 +9,7 @@ import { useEffectiveVerticals } from "@/lib/vertical-filter";
 
 import { Card, SectionHeader } from "./Card";
 
-// Mobile tail-risk exposure tile — mirrors the web tile against the
-// same /api/public/tail-risk-exposure. Buckets and tone thresholds are
-// server-owned; placedBy + useEffectiveVerticals keep the slice in sync
-// with web. See replit.md ("Tail-risk exposure tile").
+// See replit.md "Tail-risk exposure tile".
 
 type BucketRow = {
   vertical: string;
@@ -71,7 +68,6 @@ function fmtPct(n: number | null, digits = 1): string {
 }
 
 function fmtEv(n: number | null): string {
-  // 2 dp + explicit sign so small EV per trade doesn't round to $0.
   if (n === null || Number.isNaN(n)) return "—";
   const sign = n > 0 ? "+" : n < 0 ? "-" : "";
   return `${sign}$${Math.abs(n).toLocaleString(undefined, {
@@ -84,7 +80,6 @@ function fmtPriceThreshold(p: number): string {
   return `$${p.toFixed(2)}`;
 }
 
-// First-paint fallback; mirrors `_TAIL_PRICE_THRESHOLD` in dashboard.py.
 const DEFAULT_TAIL_THRESHOLD = 0.2;
 
 const TONE_LABEL: Record<TailRiskExposure["tail_concentration"]["tone"], string> = {
@@ -95,9 +90,7 @@ const TONE_LABEL: Record<TailRiskExposure["tail_concentration"]["tone"], string>
 };
 
 type TailRiskExposureProps = {
-  /** Window length in days (defaults to 30). */
   days?: number;
-  /** Pretty period (1/7/30/365) used for the section eyebrow. */
   period?: number;
 };
 
@@ -137,8 +130,6 @@ export default function TailRiskExposure({
   const data = q.data;
   const concentration = data?.tail_concentration;
 
-  // Tone → palette mapping picks tokens that already exist in the
-  // mobile theme so the tile keys off the same colours as P&L cards.
   const toneColor = (() => {
     if (!concentration) return colors.mutedForeground;
     switch (concentration.tone) {
@@ -180,7 +171,6 @@ export default function TailRiskExposure({
           </Text>
         ) : data && concentration ? (
           <>
-            {/* Headline: server-classified tone. */}
             <View style={styles.headlineRow} testID="tail-risk-headline">
               <Text
                 style={[styles.eyebrow, { color: colors.mutedForeground }]}
@@ -214,7 +204,6 @@ export default function TailRiskExposure({
               </Text>
             </View>
 
-            {/* Bucket rollup — skip empty buckets to keep the tile compact. */}
             {data.buckets
               .filter(
                 (b) =>
@@ -226,7 +215,6 @@ export default function TailRiskExposure({
                   b.totals.realized_count > 0
                     ? b.totals.realized_wins / b.totals.realized_count
                     : null;
-                // Per-vertical cells, sorted by max-loss desc.
                 const cells = b.rows
                   .slice()
                   .sort((a, c) => c.open_max_loss_usd - a.open_max_loss_usd);
@@ -296,7 +284,6 @@ export default function TailRiskExposure({
                           : null}
                       </Text>
                     </View>
-                    {/* Per-vertical sub-rows (matrix parity with web). */}
                     {cells.map((cell) => (
                       <View
                         key={`${b.label}-${cell.vertical}`}
@@ -341,7 +328,6 @@ export default function TailRiskExposure({
                 );
               })}
 
-            {/* Grand-total row (parity with the web tile's tfoot). */}
             {(data.totals.open_count > 0 || data.totals.realized_count > 0) ? (
               <View
                 style={[
@@ -393,7 +379,6 @@ export default function TailRiskExposure({
               </View>
             ) : null}
 
-            {/* Empty-state copy when there's no activity at all. */}
             {data.totals.open_count === 0 &&
             data.totals.realized_count === 0 ? (
               <Text

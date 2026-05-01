@@ -1,13 +1,3 @@
-/**
- * Component tests for the mobile tail-risk exposure tile (task #744).
- *
- * Locks down the rendering branches that mirror the web tile: the
- * server-classified tone (RED / WATCH / CONTAINED / NO EXPOSURE), the
- * Feb-20 NBA bucket regression, and the empty / loading / error
- * states.  Also asserts the URL is built with the operator's filters
- * (placedBy + sorted vertical CSV) so a regression in the cache-key
- * shape would turn this red instead of slipping into production.
- */
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { render, screen, waitFor } from "@testing-library/react-native";
 import React from "react";
@@ -32,9 +22,6 @@ jest.mock("@/lib/vertical-filter", () => ({
     filterActive: true,
     hiddenActive: false,
   }),
-  // Mirrors the production behavior — non-admin selection with no
-  // hidden-vertical suppression so the URL contract test asserts
-  // exactly the operator's chip selection makes it onto the wire.
   useEffectiveVerticals: () => ["sports", "crypto"],
 }));
 
@@ -101,8 +88,6 @@ function zeroTotals(): Totals {
 function emptyResponse(): TailRiskResponse {
   const lows = [0, 0.1, 0.25, 0.4, 0.6, 0.75, 0.9];
   const highs = [0.1, 0.25, 0.4, 0.6, 0.75, 0.9, 1.0];
-  // Server reports `is_tail=true` only when the WHOLE bucket sits
-  // below the $0.20 threshold — only the `<$0.10` bucket qualifies.
   return {
     days: 30,
     buckets: ["<$0.10", "$0.10–$0.25", "$0.25–$0.40", "$0.40–$0.60",
@@ -150,7 +135,6 @@ describe("TailRiskExposure (mobile)", () => {
     expect(url).toMatch(/^\/api\/public\/tail-risk-exposure\?/);
     expect(url).toMatch(/days=30/);
     expect(url).toMatch(/placed_by=system/);
-    // Verticals sorted alphabetically before joining → stable cache key.
     expect(url).toMatch(/vertical=crypto%2Csports/);
   });
 
@@ -170,8 +154,6 @@ describe("TailRiskExposure (mobile)", () => {
       await screen.findByTestId("tail-risk-headline-tone-empty"),
     ).toBeTruthy();
     expect(screen.getByTestId("tail-risk-empty")).toBeTruthy();
-    // No grand-total row when nothing was open or realized — keeps
-    // the empty-state visually clean.
     expect(screen.queryByTestId("tail-risk-totals-row")).toBeNull();
   });
 
@@ -247,15 +229,10 @@ describe("TailRiskExposure (mobile)", () => {
     expect(
       await screen.findByTestId("tail-risk-headline-tone-red"),
     ).toBeTruthy();
-    // Bucket testID encodes the label for stable selection.
     expect(screen.getByTestId("tail-risk-bucket-<$0.10")).toBeTruthy();
-    // Other buckets with no activity are filtered out of the mobile view.
     expect(screen.queryByTestId("tail-risk-bucket-$0.40–$0.60")).toBeNull();
-    // Headline copy uses the server-published threshold ($0.20), NOT
-    // the prior hardcoded "$0.25" — architect rejection landed here.
     const detail = screen.getByTestId("tail-risk-headline-detail");
     expect(detail.props.children.join("")).toContain("<$0.20");
-    // EV/trade for the Feb-20 bucket is surfaced inline.
     expect(screen.getByTestId("tail-risk-bucket-<$0.10-ev")).toBeTruthy();
   });
 
@@ -324,7 +301,6 @@ describe("TailRiskExposure (mobile)", () => {
 
     renderTile();
 
-    // Both per-vertical sub-rows render under the bucket.
     expect(
       await screen.findByTestId("tail-risk-cell-<$0.10-sports"),
     ).toBeTruthy();

@@ -1085,11 +1085,7 @@ async def public_tail_risk_exposure(
     placed_by: Literal["manual", "system", "all"] = "all",
     vertical: str | None = None,
 ) -> dict[str, object]:
-    """Public — tail-risk exposure matrix for the dashboard tile.
-
-    Same query-param shape as ``/api/public/equity-curve``; unknown
-    vertical names raise HTTP 400.
-    """
+    """Public tail-risk exposure matrix; unknown vertical → HTTP 400."""
     clamped_days = max(1, min(int(days), 365))
     try:
         result = await dashboard.get_tail_risk_exposure(

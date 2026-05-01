@@ -741,12 +741,8 @@ async def get_public_equity_curve(
         return []
 
 
-# Tail-risk exposure aggregator. Open exposure (positions) + realized
-# PnL (trades) bucketed by entry price; SQL owns the bucket boundaries
-# so web/mobile/alerts share one definition. See replit.md.
+# Tail-risk exposure aggregator — see replit.md.
 
-# Half-open intervals [lo, hi).  The last bucket uses `hi=1.01` so a
-# rare `price = 1.00` settlement-certain row still lands in `$0.90+`.
 _TAIL_RISK_BUCKETS: tuple[tuple[float, float, str], ...] = (
     (0.00, 0.10, "<$0.10"),
     (0.10, 0.25, "$0.10–$0.25"),
@@ -757,7 +753,6 @@ _TAIL_RISK_BUCKETS: tuple[tuple[float, float, str], ...] = (
     (0.90, 1.01, "$0.90+"),
 )
 
-# Tail = entry price strictly below this threshold (row-level filter).
 _TAIL_PRICE_THRESHOLD = 0.20
 _TAIL_TONE_RED_THRESHOLD = 0.30
 _TAIL_TONE_AMBER_THRESHOLD = 0.15
@@ -771,7 +766,6 @@ def _zero_tail_totals() -> dict[str, Any]:
         "realized_count": 0,
         "realized_wins": 0,
         "realized_pnl_usd": 0.0,
-        # ev_per_trade = realized_pnl_usd / realized_count (None if 0).
         "ev_per_trade": None,
     }
 
@@ -800,13 +794,7 @@ async def get_tail_risk_exposure(
     placed_by: str | None = None,
     verticals: object = None,
 ) -> dict[str, Any]:
-    """Bucketed open-exposure + realized-PnL matrix for the dashboard tile.
-
-    Returns all buckets (even empty), a per-vertical breakdown per
-    bucket, grand totals, and a tail-concentration headline. Raises
-    ``ValueError`` on an unknown vertical so the route layer can turn it
-    into HTTP 400.
-    """
+    """Tail-risk exposure matrix; raises ValueError on unknown vertical."""
     days = max(1, min(int(days), 365))
     pb_t = _placed_by_and_clause(placed_by, alias="t")
     vert_t = _vertical_and_clause(verticals, alias="t")
@@ -818,7 +806,6 @@ async def get_tail_risk_exposure(
         for i, (lo, hi, _label) in enumerate(_TAIL_RISK_BUCKETS)
     )
 
-    # Primary path: opens from `positions`, realized from `trades`.
     sql_with_positions = f"""
         WITH bucket_defs AS (
             SELECT * FROM (VALUES
@@ -856,7 +843,6 @@ async def get_tail_risk_exposure(
           GROUP BY b.bucket_idx, o.vertical
         ),
         realized_t AS (
-          -- Settled trades only (pnl IS NOT NULL).
           SELECT
             coalesce(t.vertical, '__unknown__')              AS vertical,
             t.price::float8                                  AS price,
@@ -894,7 +880,6 @@ async def get_tail_risk_exposure(
         ORDER BY 1, 2
     """
 
-    # Fallback: reconstruct opens from unsettled trades (VWAP-netted).
     sql_trades_only = f"""
         WITH bucket_defs AS (
             SELECT * FROM (VALUES
@@ -973,8 +958,6 @@ async def get_tail_risk_exposure(
         ORDER BY 1, 2
     """
 
-    # Row-level tail max-loss (price < threshold). Avoids over-counting
-    # the bucket that straddles the threshold.
     sql_tail_positions = f"""
         SELECT coalesce(sum(p.quantity::float8 * GREATEST(p.avg_price::float8, 1.0 - p.avg_price::float8)), 0)::float8
         FROM positions p
@@ -984,8 +967,6 @@ async def get_tail_risk_exposure(
           AND p.avg_price >= 0 AND p.avg_price < {_TAIL_PRICE_THRESHOLD!r}::float8
           {pb_p}{vert_p}
     """
-    # Same tail aggregate for the trades fallback path; netting/grouping
-    # must mirror `sql_trades_only.open_netted` exactly.
     sql_tail_trades = f"""
         WITH netted AS (
           SELECT
@@ -1012,7 +993,6 @@ async def get_tail_risk_exposure(
         WHERE n.vwap_price < {_TAIL_PRICE_THRESHOLD!r}::float8
     """
 
-    # Prefer positions; fall back to trades-only on failure or zero opens.
     source = "positions"
     tail_max_loss_exact: float | None = None
     positions_failed = False
@@ -1035,7 +1015,6 @@ async def get_tail_risk_exposure(
             fallback_rows = []
         fallback_open = sum(int(r["open_count"] or 0) for r in fallback_rows)
         if positions_failed:
-            # Positions threw — fallback is our only source.
             if fallback_rows:
                 rows = fallback_rows
                 source = "trades_fallback"
@@ -1043,10 +1022,8 @@ async def get_tail_risk_exposure(
                 rows = []
                 source = "empty"
         elif fallback_open > 0:
-            # Positions had no opens; prefer the fallback's reconstruction.
             rows = fallback_rows
             source = "trades_fallback"
-        # else: keep the positions rows so realized still surfaces.
 
     try:
         if source == "positions":
@@ -1059,7 +1036,6 @@ async def get_tail_risk_exposure(
         )
         tail_max_loss_exact = None
 
-    # Re-shape rows into the bucket × vertical matrix the UI consumes.
     _SUMMABLE_KEYS = (
         "open_count",
         "open_cost_usd",
@@ -1102,9 +1078,7 @@ async def get_tail_risk_exposure(
             {
                 "label": label,
                 "lo": lo,
-                # Clamp the 1.01 sentinel for display.
                 "hi": hi if hi <= 1.0 else 1.0,
-                # Bucket tail badge: entire range below threshold.
                 "is_tail": hi <= _TAIL_PRICE_THRESHOLD,
                 "rows": rows_i,
                 "totals": bucket_total,
@@ -1112,8 +1086,6 @@ async def get_tail_risk_exposure(
         )
     _finalize_totals(grand)
 
-    # Headline tail max-loss: prefer the row-level aggregate; on
-    # failure, sum bucket totals (under-counts but never over-counts).
     if tail_max_loss_exact is not None:
         tail_max_loss = tail_max_loss_exact
     else:
@@ -1140,7 +1112,6 @@ async def get_tail_risk_exposure(
             "total_max_loss_usd": total_max_loss,
             "pct": pct,
             "tone": tone,
-            # Headline copy: the threshold the UI should show.
             "threshold_price": _TAIL_PRICE_THRESHOLD,
         },
         "source": source,
