@@ -154,6 +154,13 @@ def test_emergency_stop_endpoint_runs_full_pipeline(stub_admin, patched_estop) -
 
 
 class _FakeBankrollDB:
+    """In-memory stand-in for the ``bankroll_events`` table.
+
+    Mirrors the post-#752 schema: every row carries a ``trading_mode``
+    column ('paper' or 'live') and the SELECT/INSERT helpers pass it
+    explicitly so the paper and live ledgers stay isolated.
+    """
+
     def __init__(self) -> None:
         self.rows: list[dict[str, Any]] = []
         self._next_id = 1
@@ -161,10 +168,17 @@ class _FakeBankrollDB:
     async def fetchval(self, query: str, *args: Any):
         q = " ".join(query.split())
         if q.startswith("SELECT balance_cents FROM bankroll_events"):
-            kalshi_rows = [r for r in self.rows if r["exchange"] == "kalshi"]
-            if not kalshi_rows:
+            # Post-#752 the helper always passes (exchange, trading_mode).
+            exchange = args[0] if len(args) >= 1 else "kalshi"
+            trading_mode = args[1] if len(args) >= 2 else "live"
+            scoped = [
+                r for r in self.rows
+                if r["exchange"] == exchange
+                and r.get("trading_mode", "live") == trading_mode
+            ]
+            if not scoped:
                 return None
-            return kalshi_rows[-1]["balance_cents"]
+            return scoped[-1]["balance_cents"]
         return None
 
     async def fetchrow(self, query: str, *args: Any):
@@ -177,6 +191,10 @@ class _FakeBankrollDB:
                 "reason": args[1],
                 "delta_cents": args[2],
                 "balance_cents": args[3],
+                # Trading mode is the 6th positional arg post-#752.
+                # Default to 'live' for compat with any callers that
+                # haven't been migrated yet.
+                "trading_mode": args[5] if len(args) >= 6 else "live",
             }
             self._next_id += 1
             self.rows.append(row)

@@ -105,6 +105,78 @@ def _placed_by_where_clause(filter_value: str | None, alias: str = "") -> str:
 
 
 # ---------------------------------------------------------------------------
+# Trading-mode filter (Round-11 audit Bug #6/7).
+#
+# Every dashboard read against ``trades``, ``positions``, or
+# ``bankroll_events`` MUST scope by the operator's currently-effective
+# trading mode (``paper`` vs ``live``).  Before this filter existed the
+# headline equity curve and KPI tiles silently averaged the two modes
+# together — paper P&L bled into live equity, live drawdowns showed up
+# in paper backtests, and a paper drawdown could halt live trading via
+# the daily-loss circuit breaker.
+#
+# All three tables now carry a ``trading_mode`` column constrained to
+# ``('paper','live')`` — ``trades`` was already populated by the
+# orchestrator (paper.py / kalshi.lifecycle) at every INSERT site, and
+# migration 0041 added the column to ``positions`` and ``bankroll_events``
+# (existing rows were backfilled to ``'live'`` to match their factual
+# provenance — the only historical writers were live-only paths).
+#
+# Helper API mirrors ``_placed_by_*`` exactly so call-sites stay
+# symmetric.  ``filter_value=None`` (the default) skips filtering for
+# legacy / cross-mode aggregates such as ``get_public_stats`` (a
+# pre-launch landing-page metric) and unit tests that already mock the
+# DB at a coarser grain.  Routes always resolve and thread the active
+# mode via :func:`risk.trading_mode.resolve_trading_mode`.
+# ---------------------------------------------------------------------------
+
+TradingModeFilter = Literal["paper", "live"]
+
+
+def _trading_mode_predicate(filter_value: str | None, alias: str = "") -> str:
+    """SQL boolean expression for the ``trading_mode`` filter.
+
+    Returns either an empty string (no filter) or a bare predicate like
+    ``"trading_mode = 'paper'"`` / ``"t.trading_mode = 'live'"``.
+
+    Raises ``ValueError`` on any value outside ``('paper','live',None,'',"all")``
+    so a typo in a route handler surfaces as HTTP 400 instead of silently
+    returning the unfiltered cross-mode aggregate (which is exactly the
+    leakage Round-11 Bug #6 was about).
+    """
+    col = f"{alias}.trading_mode" if alias else "trading_mode"
+    if filter_value in (None, "", "all"):
+        return ""
+    if filter_value in ("paper", "live"):
+        return f"{col} = '{filter_value}'"
+    raise ValueError(f"unknown trading_mode filter: {filter_value!r}")
+
+
+def _trading_mode_and_clause(filter_value: str | None, alias: str = "") -> str:
+    """Return ``" AND <predicate>"`` (with leading space) or ``""``."""
+    pred = _trading_mode_predicate(filter_value, alias=alias)
+    return f" AND {pred}" if pred else ""
+
+
+def _trading_mode_where_clause(filter_value: str | None, alias: str = "") -> str:
+    """Return ``" WHERE <predicate>"`` (with leading space) or ``""``."""
+    pred = _trading_mode_predicate(filter_value, alias=alias)
+    return f" WHERE {pred}" if pred else ""
+
+
+def _combine_where_and(*predicates: str) -> str:
+    """Build a ``" WHERE a AND b AND ..."`` clause from non-empty predicate
+    snippets.  Empty inputs are skipped.  Returns ``""`` when nothing is
+    left to filter — used by the bankroll/positions queries that mix two
+    optional dimensions (placed_by + trading_mode).
+    """
+    keep = [p for p in predicates if p]
+    if not keep:
+        return ""
+    return " WHERE " + " AND ".join(keep)
+
+
+# ---------------------------------------------------------------------------
 # Vertical filter — sibling of the placed_by helpers.
 #
 # The operator console exposes a multi-select strip (`VerticalPicker`) that
@@ -223,39 +295,65 @@ def _registered_verticals_snapshot() -> list[dict[str, Any]]:
     return [s.to_dict() for s in _vertical_registry.all_specs()]
 
 
-async def get_overview(placed_by: str | None = None) -> dict[str, Any]:
+async def get_overview(
+    placed_by: str | None = None,
+    *,
+    trading_mode: str | None = None,
+) -> dict[str, Any]:
     # Trade-provenance filter applies only to the trade-derived headline
     # numbers (trades count, latest_trade_at, realized_pnl, win_rate).
     # The non-trade counts (cycles, debates, predictions, positions) are
     # left unfiltered because they describe orchestrator/system activity
     # regardless of who placed the resulting bets.
-    pb_where = _placed_by_where_clause(placed_by)        # " WHERE ..." or ""
-    pb_and = _placed_by_and_clause(placed_by)            # " AND ..." or ""
+    pb_pred = _placed_by_predicate(placed_by)
+    tm_pred = _trading_mode_predicate(trading_mode)
+    # Stitch the two optional predicates together for the trade aggregates;
+    # ``positions`` carries its own ``trading_mode`` since migration 0041
+    # but not ``placed_by`` (positions are exchange-side state, not
+    # operator-attributed orders), so it only takes the mode predicate.
+    trades_where = _combine_where_and(pb_pred, tm_pred)
+    trades_and = (
+        " AND " + " AND ".join(p for p in (pb_pred, tm_pred) if p)
+        if (pb_pred or tm_pred)
+        else ""
+    )
+    pos_where = _trading_mode_where_clause(trading_mode)
 
-    trades_count = await _safe_fetchval(f"SELECT count(*) FROM trades{pb_where}")
+    trades_count = await _safe_fetchval(f"SELECT count(*) FROM trades{trades_where}")
     counts = {
         "trading_cycles": await _safe_count("trading_cycles"),
         "trades": int(trades_count) if trades_count is not None else None,
         "swarm_debates": await _safe_count("swarm_debates"),
         "ml_training_logs": await _safe_count("ml_training_logs"),
         "predictions": await _safe_count("predictions"),
-        "positions": await _safe_count("positions"),
+        # ``positions`` count is mode-scoped post-0041; an unfiltered
+        # value would mix a paper-mode operator's view with the live
+        # open exposure card.
+        "positions": (
+            await _safe_fetchval(f"SELECT count(*) FROM positions{pos_where}")
+        ),
     }
+    if counts["positions"] is not None:
+        try:
+            counts["positions"] = int(counts["positions"])
+        except (TypeError, ValueError):
+            counts["positions"] = None
     latest_cycle_at = await _safe_fetchval(
         "SELECT to_char(max(started_at), 'YYYY-MM-DD\"T\"HH24:MI:SSZ') FROM trading_cycles"
     )
     latest_trade_at = await _safe_fetchval(
-        f"SELECT to_char(max(executed_at), 'YYYY-MM-DD\"T\"HH24:MI:SSZ') FROM trades{pb_where}"
+        f"SELECT to_char(max(executed_at), 'YYYY-MM-DD\"T\"HH24:MI:SSZ') FROM trades{trades_where}"
     )
     realized_pnl = await _safe_fetchval(
-        f"SELECT coalesce(sum(pnl),0)::float FROM trades{pb_where}"
+        f"SELECT coalesce(sum(pnl),0)::float FROM trades{trades_where}"
     )
     win_rate = await _safe_fetchval(
         "SELECT (sum((pnl > 0)::int)::float / nullif(count(*) filter (where pnl is not null), 0)) "
-        f"FROM trades WHERE pnl IS NOT NULL{pb_and}"
+        f"FROM trades WHERE pnl IS NOT NULL{trades_and}"
     )
     open_positions = await _safe_fetchval(
-        "SELECT count(*) FROM positions WHERE coalesce(status,'open') = 'open'"
+        "SELECT count(*) FROM positions"
+        + _combine_where_and("coalesce(status,'open') = 'open'", tm_pred)
     )
     from .config import get_settings as _get_settings
     return {
@@ -271,9 +369,14 @@ async def get_overview(placed_by: str | None = None) -> dict[str, Any]:
 
 
 async def get_recent_trades(
-    limit: int = 25, placed_by: str | None = None
+    limit: int = 25,
+    placed_by: str | None = None,
+    *,
+    trading_mode: str | None = None,
 ) -> list[dict[str, Any]]:
-    pb_where = _placed_by_where_clause(placed_by)        # " WHERE ..." or ""
+    pb_pred = _placed_by_predicate(placed_by)
+    tm_pred = _trading_mode_predicate(trading_mode)
+    where = _combine_where_and(pb_pred, tm_pred)
     try:
         rows = await db.fetch(
             f"""
@@ -294,7 +397,7 @@ async def get_recent_trades(
               market_title,
               placed_by,
               to_char(executed_at, 'YYYY-MM-DD"T"HH24:MI:SSZ') AS executed_at
-            FROM trades{pb_where}
+            FROM trades{where}
             ORDER BY executed_at DESC NULLS LAST
             LIMIT $1
             """,
@@ -793,6 +896,8 @@ async def get_tail_risk_exposure(
     days: int = 30,
     placed_by: str | None = None,
     verticals: object = None,
+    *,
+    trading_mode: str | None = None,
 ) -> dict[str, Any]:
     """Tail-risk exposure matrix; raises ValueError on unknown vertical."""
     days = max(1, min(int(days), 365))
@@ -800,6 +905,13 @@ async def get_tail_risk_exposure(
     vert_t = _vertical_and_clause(verticals, alias="t")
     pb_p = _placed_by_and_clause(placed_by, alias="p")
     vert_p = _vertical_and_clause(verticals, alias="p")
+    # Tail-risk exposure must NOT mix paper into the live exposure picture
+    # (or vice versa) — open paper positions don't actually consume the
+    # operator's bankroll, and live drawdowns shouldn't bias paper backtest
+    # readings.  Both the open-position CTE (positions table, alias ``p``)
+    # and the realized-trade CTE (trades table, alias ``t``) are scoped.
+    tm_t = _trading_mode_and_clause(trading_mode, alias="t")
+    tm_p = _trading_mode_and_clause(trading_mode, alias="p")
 
     buckets_values = ",\n              ".join(
         f"({i}, {lo!r}::float8, {hi!r}::float8)"
@@ -823,7 +935,7 @@ async def get_tail_risk_exposure(
             AND p.quantity IS NOT NULL AND p.quantity > 0
             AND p.avg_price IS NOT NULL
             AND p.avg_price >= 0 AND p.avg_price <= 1
-            {pb_p}{vert_p}
+            {pb_p}{vert_p}{tm_p}
         ),
         open_bucketed AS (
           SELECT
@@ -852,7 +964,7 @@ async def get_tail_risk_exposure(
             AND t.pnl IS NOT NULL
             AND t.price IS NOT NULL
             AND t.price >= 0 AND t.price <= 1
-            {pb_t}{vert_t}
+            {pb_t}{vert_t}{tm_t}
         ),
         realized_bucketed AS (
           SELECT
@@ -899,7 +1011,7 @@ async def get_tail_risk_exposure(
             AND t.quantity IS NOT NULL AND t.quantity > 0
             AND t.price IS NOT NULL
             AND t.price >= 0 AND t.price <= 1
-            {pb_t}{vert_t}
+            {pb_t}{vert_t}{tm_t}
           GROUP BY 1, 2, 3
           HAVING sum(t.quantity::float8) > 0
         ),
@@ -930,7 +1042,7 @@ async def get_tail_risk_exposure(
             AND t.pnl IS NOT NULL
             AND t.price IS NOT NULL
             AND t.price >= 0 AND t.price <= 1
-            {pb_t}{vert_t}
+            {pb_t}{vert_t}{tm_t}
         ),
         realized_bucketed AS (
           SELECT
@@ -965,7 +1077,7 @@ async def get_tail_risk_exposure(
           AND p.quantity IS NOT NULL AND p.quantity > 0
           AND p.avg_price IS NOT NULL
           AND p.avg_price >= 0 AND p.avg_price < {_TAIL_PRICE_THRESHOLD!r}::float8
-          {pb_p}{vert_p}
+          {pb_p}{vert_p}{tm_p}
     """
     sql_tail_trades = f"""
         WITH netted AS (
@@ -981,7 +1093,7 @@ async def get_tail_risk_exposure(
             AND t.quantity IS NOT NULL AND t.quantity > 0
             AND t.price IS NOT NULL
             AND t.price >= 0 AND t.price <= 1
-            {pb_t}{vert_t}
+            {pb_t}{vert_t}{tm_t}
           GROUP BY 1, 2, 3
           HAVING sum(t.quantity::float8) > 0
         )
@@ -1124,15 +1236,26 @@ async def get_public_stats() -> dict[str, Any]:
     Used by the marketing hero — total realized PnL, win rate, trade
     count, and the most recent trade timestamp.  Every individual stat
     is wrapped so a single failure doesn't blank the whole hero.
+
+    Pinned to ``trading_mode='live'``: paper P&L is operator-internal
+    backtesting that we explicitly do NOT advertise, and pre-launch a
+    bug that allowed paper bumps to leak into the marketing hero would
+    misrepresent real performance to anonymous visitors (Round-11 Bug
+    #6 surface).
     """
-    realized_pnl = await _safe_fetchval("SELECT coalesce(sum(pnl), 0)::float FROM trades")
-    total_trades = await _safe_count("trades")
+    realized_pnl = await _safe_fetchval(
+        "SELECT coalesce(sum(pnl), 0)::float FROM trades WHERE trading_mode = 'live'"
+    )
+    total_trades = await _safe_fetchval(
+        "SELECT count(*) FROM trades WHERE trading_mode = 'live'"
+    )
     win_rate = await _safe_fetchval(
         "SELECT (sum((pnl > 0)::int)::float / nullif(count(*) filter (where pnl is not null), 0)) "
-        "FROM trades WHERE pnl IS NOT NULL"
+        "FROM trades WHERE pnl IS NOT NULL AND trading_mode = 'live'"
     )
     last_trade_at = await _safe_fetchval(
-        "SELECT to_char(max(executed_at), 'YYYY-MM-DD\"T\"HH24:MI:SSZ') FROM trades"
+        "SELECT to_char(max(executed_at), 'YYYY-MM-DD\"T\"HH24:MI:SSZ') "
+        "FROM trades WHERE trading_mode = 'live'"
     )
     cycles = await _safe_count("trading_cycles")
     debates = await _safe_count("swarm_debates")
@@ -1175,6 +1298,9 @@ async def get_recent_settled_signals(limit: int = 4) -> list[dict[str, Any]]:
              WHERE t.settled_at IS NOT NULL
                AND t.model_prob IS NOT NULL
                AND pm.actual_outcome IS NOT NULL
+               -- Public landing widget: live-only, never paper
+               -- (same rationale as get_public_stats above).
+               AND t.trading_mode = 'live'
              ORDER BY t.settled_at DESC NULLS LAST
              LIMIT $1
             """,
@@ -2251,12 +2377,22 @@ async def _fetch_polymarket_market_price_history(
     return _polymarket_history_to_points(history)
 
 
-async def get_trade_detail(trade_ref: str) -> dict[str, Any] | None:
+async def get_trade_detail(
+    trade_ref: str,
+    trading_mode: str | None = None,
+) -> dict[str, Any] | None:
     """Return a single trade row + market-vs-model time series.
 
     `trade_ref` accepts either the integer ``trades.id`` (preferred —
     that's what the recent-trades table renders) or the UUID-ish
     ``trades.trade_id``.  Returns ``None`` if no row matches.
+
+    ``trading_mode`` (Task #752 step 1) scopes the lookup to one of
+    ``"paper"`` / ``"live"`` so a paper-mode dashboard can never
+    deep-link into a live trade detail (or vice versa).  When
+    ``None`` the lookup is unrestricted — the route layer is
+    responsible for resolving the caller's effective mode and
+    passing it explicitly.
 
     The time series merges three sources so the market-vs-model overlay
     reflects exchange tick history rather than only the moments where
@@ -2278,47 +2414,92 @@ async def get_trade_detail(trade_ref: str) -> dict[str, Any] | None:
     if not ref:
         return None
 
+    mode = trading_mode if trading_mode in ("paper", "live") else None
     try:
         if ref.isdigit():
-            row = await db.fetchrow(
-                """
-                SELECT id, trade_id, market_id, market_title, vertical, league,
-                       side, action,
-                       quantity::float    AS quantity,
-                       price::float       AS price,
-                       fees::float        AS fees,
-                       pnl::float         AS pnl,
-                       model_prob::float  AS model_prob,
-                       model_edge::float  AS model_edge,
-                       kelly_fraction::float AS kelly_fraction,
-                       trading_mode, exchange,
-                       to_char(executed_at, 'YYYY-MM-DD"T"HH24:MI:SSZ') AS executed_at
-                  FROM trades
-                 WHERE id = $1
-                 LIMIT 1
-                """,
-                int(ref),
-            )
+            if mode is None:
+                row = await db.fetchrow(
+                    """
+                    SELECT id, trade_id, market_id, market_title, vertical, league,
+                           side, action,
+                           quantity::float    AS quantity,
+                           price::float       AS price,
+                           fees::float        AS fees,
+                           pnl::float         AS pnl,
+                           model_prob::float  AS model_prob,
+                           model_edge::float  AS model_edge,
+                           kelly_fraction::float AS kelly_fraction,
+                           trading_mode, exchange,
+                           to_char(executed_at, 'YYYY-MM-DD"T"HH24:MI:SSZ') AS executed_at
+                      FROM trades
+                     WHERE id = $1
+                     LIMIT 1
+                    """,
+                    int(ref),
+                )
+            else:
+                row = await db.fetchrow(
+                    """
+                    SELECT id, trade_id, market_id, market_title, vertical, league,
+                           side, action,
+                           quantity::float    AS quantity,
+                           price::float       AS price,
+                           fees::float        AS fees,
+                           pnl::float         AS pnl,
+                           model_prob::float  AS model_prob,
+                           model_edge::float  AS model_edge,
+                           kelly_fraction::float AS kelly_fraction,
+                           trading_mode, exchange,
+                           to_char(executed_at, 'YYYY-MM-DD"T"HH24:MI:SSZ') AS executed_at
+                      FROM trades
+                     WHERE id = $1 AND trading_mode = $2
+                     LIMIT 1
+                    """,
+                    int(ref),
+                    mode,
+                )
         else:
-            row = await db.fetchrow(
-                """
-                SELECT id, trade_id, market_id, market_title, vertical, league,
-                       side, action,
-                       quantity::float    AS quantity,
-                       price::float       AS price,
-                       fees::float        AS fees,
-                       pnl::float         AS pnl,
-                       model_prob::float  AS model_prob,
-                       model_edge::float  AS model_edge,
-                       kelly_fraction::float AS kelly_fraction,
-                       trading_mode, exchange,
-                       to_char(executed_at, 'YYYY-MM-DD"T"HH24:MI:SSZ') AS executed_at
-                  FROM trades
-                 WHERE trade_id = $1
-                 LIMIT 1
-                """,
-                ref,
-            )
+            if mode is None:
+                row = await db.fetchrow(
+                    """
+                    SELECT id, trade_id, market_id, market_title, vertical, league,
+                           side, action,
+                           quantity::float    AS quantity,
+                           price::float       AS price,
+                           fees::float        AS fees,
+                           pnl::float         AS pnl,
+                           model_prob::float  AS model_prob,
+                           model_edge::float  AS model_edge,
+                           kelly_fraction::float AS kelly_fraction,
+                           trading_mode, exchange,
+                           to_char(executed_at, 'YYYY-MM-DD"T"HH24:MI:SSZ') AS executed_at
+                      FROM trades
+                     WHERE trade_id = $1
+                     LIMIT 1
+                    """,
+                    ref,
+                )
+            else:
+                row = await db.fetchrow(
+                    """
+                    SELECT id, trade_id, market_id, market_title, vertical, league,
+                           side, action,
+                           quantity::float    AS quantity,
+                           price::float       AS price,
+                           fees::float        AS fees,
+                           pnl::float         AS pnl,
+                           model_prob::float  AS model_prob,
+                           model_edge::float  AS model_edge,
+                           kelly_fraction::float AS kelly_fraction,
+                           trading_mode, exchange,
+                           to_char(executed_at, 'YYYY-MM-DD"T"HH24:MI:SSZ') AS executed_at
+                      FROM trades
+                     WHERE trade_id = $1 AND trading_mode = $2
+                     LIMIT 1
+                    """,
+                    ref,
+                    mode,
+                )
     except Exception as e:
         log.warning("get_trade_detail lookup failed: %s", e)
         return None
@@ -2424,7 +2605,10 @@ async def get_trade_detail(trade_ref: str) -> dict[str, Any] | None:
 
 
 async def get_vertical_performance(
-    days: int = 30, placed_by: str | None = None
+    days: int = 30,
+    placed_by: str | None = None,
+    *,
+    trading_mode: str | None = None,
 ) -> dict[str, Any]:
     """Per-vertical (sports/weather/crypto) performance for the operator strip.
 
@@ -2450,6 +2634,11 @@ async def get_vertical_performance(
     # research artifacts that exist regardless of who placed the bet.
     pb_t = _placed_by_and_clause(placed_by, alias="t")   # " AND t.placed_by = ..."
     pb_bare = _placed_by_and_clause(placed_by)           # " AND placed_by = ..."
+    # Per-vertical strip is mode-scoped: a paper-mode operator should
+    # see paper P&L per vertical, a live-mode operator sees only live.
+    # ``positions`` exposure (open_exposure_usd) is also scoped post-0041.
+    tm_t = _trading_mode_and_clause(trading_mode, alias="t")
+    tm_bare = _trading_mode_and_clause(trading_mode)
 
     # Driven by `app.verticals` — verticals with
     # `include_in_dashboard_strip=True` show up here.  Existing order
@@ -2528,7 +2717,7 @@ async def get_vertical_performance(
                   FROM trades
                  WHERE vertical = $1
                    AND executed_at >= ((now() at time zone 'utc')::date - ($2::int - 1))
-                   {pb_bare}
+                   {pb_bare}{tm_bare}
                 """,
                 vertical, days,
             )
@@ -2564,11 +2753,12 @@ async def get_vertical_performance(
         # open positions tagged with this vertical (task #450).
         try:
             n = await db.fetchval(
-                """
+                f"""
                 SELECT coalesce(sum(notional), 0)::float
                   FROM positions
                  WHERE vertical = $1
                    AND coalesce(status, 'open') = 'open'
+                   {tm_bare}
                 """,
                 vertical,
             )
@@ -2584,7 +2774,7 @@ async def get_vertical_performance(
                   FROM trades
                  WHERE vertical = $1
                    AND executed_at >= (now() AT TIME ZONE 'UTC')::date
-                   {pb_bare}
+                   {pb_bare}{tm_bare}
                 """,
                 vertical,
             )
@@ -2623,7 +2813,7 @@ async def get_vertical_performance(
                      AND t.executed_at >= ((now() at time zone 'utc')::date - ($2::int - 1))
                      AND t.model_prob IS NOT NULL
                      AND pm.actual_outcome IS NOT NULL
-                     {pb_t}
+                     {pb_t}{tm_t}
                 ), aligned AS (
                   SELECT CASE WHEN side_lc IN ('no','n','sell')
                               THEN 1.0 - p_yes ELSE p_yes END AS p_side,
@@ -2722,7 +2912,7 @@ async def get_vertical_performance(
                     FROM trades t, bounds b
                    WHERE t.vertical = $1
                      AND t.executed_at >= b.start_d
-                     {pb_t}
+                     {pb_t}{tm_t}
                 ),
                 daily_pnl AS (
                   SELECT d, sum(pnl)::float AS daily_pnl, count(*)::int AS trades
@@ -2744,7 +2934,7 @@ async def get_vertical_performance(
                      AND t.executed_at >= b.start_d
                      AND t.model_prob IS NOT NULL
                      AND pm.actual_outcome IS NOT NULL
-                     {pb_t}
+                     {pb_t}{tm_t}
                 ),
                 daily_brier AS (
                   SELECT d,
@@ -3104,7 +3294,10 @@ async def get_recent_swarm_debates(limit: int = 10) -> list[dict[str, Any]]:
 
 
 async def get_verticals_overview(
-    days: int = 7, placed_by: str | None = None
+    days: int = 7,
+    placed_by: str | None = None,
+    *,
+    trading_mode: str | None = None,
 ) -> dict[str, Any]:
     """Aggregate per-vertical performance card backing
     ``/api/dashboard/verticals`` and the dedicated overview tab.
@@ -3147,6 +3340,11 @@ async def get_verticals_overview(
     # they stay unfiltered.
     pb_t = _placed_by_and_clause(placed_by, alias="t")   # " AND t.placed_by = ..."
     pb_bare = _placed_by_and_clause(placed_by)           # " AND placed_by = ..."
+    # Same paper/live scoping as get_vertical_performance: trade-derived
+    # fields (trades/pnl/win_rate/edge/sharpe) and ``open_positions`` are
+    # filtered by ``trading_mode``; brier (calibration_snapshots) is not.
+    tm_t = _trading_mode_and_clause(trading_mode, alias="t")
+    tm_bare = _trading_mode_and_clause(trading_mode)
 
     from . import verticals as _vertical_registry
     from . import runtime_settings as _runtime_settings
@@ -3206,7 +3404,7 @@ async def get_verticals_overview(
                   FROM trades
                  WHERE vertical = $1
                    AND executed_at >= now() - ($2::int || ' days')::interval
-                   {pb_bare}
+                   {pb_bare}{tm_bare}
                 """,
                 vertical, days,
             )
@@ -3251,7 +3449,7 @@ async def get_verticals_overview(
                  WHERE vertical = $1
                    AND executed_at >= now() - ($2::int || ' days')::interval
                    AND pnl IS NOT NULL
-                   {pb_bare}
+                   {pb_bare}{tm_bare}
                  GROUP BY d
                 """,
                 vertical, days,
@@ -3271,10 +3469,11 @@ async def get_verticals_overview(
         # Open positions tagged with this vertical.
         try:
             n = await db.fetchval(
-                """
+                f"""
                 SELECT count(*)::int FROM positions
                  WHERE vertical = $1
                    AND coalesce(status,'open') = 'open'
+                   {tm_bare}
                 """,
                 vertical,
             )
@@ -3301,7 +3500,7 @@ async def get_verticals_overview(
                    AND t.executed_at >= now() - ($2::int || ' days')::interval
                    AND pm.actual_outcome IS NOT NULL
                    AND t.price IS NOT NULL
-                   {pb_t}
+                   {pb_t}{tm_t}
                 """,
                 vertical, days,
             )
@@ -3357,7 +3556,9 @@ async def get_verticals_overview(
     }
 
 
-async def get_over_filled_orders_today() -> dict[str, Any]:
+async def get_over_filled_orders_today(
+    *, trading_mode: str | None = None
+) -> dict[str, Any]:
     """GTC orders that Kalshi over-filled in the current UTC day.
 
     Task #103 caps the rolled-up ``positions.quantity`` at the order's
@@ -3377,9 +3578,10 @@ async def get_over_filled_orders_today() -> dict[str, Any]:
     instead of erroring.
     """
     today_utc = datetime.now(tz=timezone.utc).date().isoformat()
+    tm_p = _trading_mode_and_clause(trading_mode, alias="p")
     try:
         rows = await db.fetch(
-            """
+            f"""
             SELECT p.order_id,
                    p.market_id,
                    p.side,
@@ -3393,6 +3595,7 @@ async def get_over_filled_orders_today() -> dict[str, Any]:
               JOIN order_fills f ON f.order_id = p.order_id
              WHERE p.over_filled = TRUE
                AND p.order_id IS NOT NULL
+               {tm_p}
              GROUP BY p.order_id, p.market_id, p.side, p.vertical, p.filled_count
             HAVING max(f.received_at) >= date_trunc('day', now() AT TIME ZONE 'UTC')
              ORDER BY max(f.received_at) DESC
@@ -3847,6 +4050,7 @@ async def get_recent_bankroll_events(
     limit: int = 200,
     *,
     exchange: str = "kalshi",
+    trading_mode: str | None = None,
 ) -> dict[str, Any]:
     """Recent ``bankroll_events`` rows + live balance bundle.
 
@@ -3866,9 +4070,15 @@ async def get_recent_bankroll_events(
     so the dashboard degrades cleanly.
     """
     limit = max(1, min(int(limit), 500))
+    # Equity-curve / cash bundle is mode-scoped: paper bankroll grows
+    # from the AXIOM_PAPER_BANKROLL_USD seed (and synthetic paper
+    # settlement deltas if added later); live bankroll grows from the
+    # Kalshi exchange sync.  Mixing them makes the equity sparkline
+    # nonsense (Round-11 Bug #6).
+    tm_and = _trading_mode_and_clause(trading_mode)
     try:
         rows = await db.fetch(
-            """
+            f"""
             SELECT id,
                    to_char(occurred_at, 'YYYY-MM-DD"T"HH24:MI:SSZ') AS occurred_at,
                    exchange,
@@ -3877,6 +4087,7 @@ async def get_recent_bankroll_events(
                    balance_cents
               FROM bankroll_events
              WHERE exchange = $1
+               {tm_and}
              ORDER BY id DESC
              LIMIT $2
             """,
@@ -3899,7 +4110,7 @@ async def get_recent_bankroll_events(
     open_value_cents: int | None = 0
     try:
         opv = await db.fetchval(
-            """
+            f"""
             SELECT COALESCE(SUM(quantity * current_price)::bigint, 0)
               FROM positions
              WHERE COALESCE(status, 'open') = 'open'
@@ -3907,6 +4118,7 @@ async def get_recent_bankroll_events(
                AND quantity IS NOT NULL
                AND (exchange = $1
                     OR ($1 = 'kalshi' AND exchange IS NULL))
+               {tm_and}
             """,
             exchange,
         )
@@ -4112,7 +4324,7 @@ async def get_sportradar_leaderboards_retention_status() -> dict[str, Any]:
     }
 
 
-async def get_nfl_exposure() -> dict[str, Any]:
+async def get_nfl_exposure(trading_mode: str = "live") -> dict[str, Any]:
     """NFL per-league + per-game + Sunday-window exposure with cap headroom.
 
     Sources its numbers from the orchestrator's
@@ -4143,7 +4355,7 @@ async def get_nfl_exposure() -> dict[str, Any]:
     league = "NFL"
     cfg = get_league_config(league)
     try:
-        bankroll = await _latest_bankroll()
+        bankroll = await _latest_bankroll(trading_mode=trading_mode)
     except Exception as e:
         log.warning("nfl exposure bankroll read failed: %s", e)
         bankroll = None
@@ -4156,7 +4368,7 @@ async def get_nfl_exposure() -> dict[str, Any]:
             per_matchup,
             per_sunday,
             _per_event,
-        ) = await _open_position_aggregates()
+        ) = await _open_position_aggregates(trading_mode=trading_mode)
     except Exception as e:
         log.warning("nfl exposure aggregate read failed: %s", e)
         per_league, per_matchup, per_sunday = {}, {}, {}
@@ -4324,7 +4536,7 @@ def _summarize_recent_warnings(history: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-async def get_leagues_exposure() -> dict[str, Any]:
+async def get_leagues_exposure(trading_mode: str = "live") -> dict[str, Any]:
     """Per-league exposure with cap headroom for every league with an
     open position.
 
@@ -4360,7 +4572,7 @@ async def get_leagues_exposure() -> dict[str, Any]:
     from .sports.leagues import LEAGUE_CONFIGS, get_league_config
 
     try:
-        bankroll = await _latest_bankroll()
+        bankroll = await _latest_bankroll(trading_mode=trading_mode)
     except Exception as e:
         log.warning("leagues exposure bankroll read failed: %s", e)
         bankroll = None
@@ -4373,7 +4585,7 @@ async def get_leagues_exposure() -> dict[str, Any]:
             per_matchup,
             per_sunday,
             per_event,
-        ) = await _open_position_aggregates()
+        ) = await _open_position_aggregates(trading_mode=trading_mode)
     except Exception as e:
         log.warning("leagues exposure aggregate read failed: %s", e)
         per_league, per_matchup, per_sunday, per_event = {}, {}, {}, {}

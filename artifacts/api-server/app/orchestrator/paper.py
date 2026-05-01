@@ -273,6 +273,23 @@ async def place_order(
     action = "buy"
     side_norm = "yes" if ctx.side.upper() == "YES" else "no"
     quantity = max(1, int(ctx.intended_quantity))
+    # Canary mode (Task #752 step 5): the first N live trades after a
+    # paper→live cutover are forced to qty=1 so we observe real exchange
+    # behavior end-to-end before risking full size.  Paper trades are
+    # never canaried — they're already not real money.  The metadata
+    # flag travels with the row so the settlement pipeline can decrement
+    # the counter only when a *canary* trade settles (decrement on
+    # placement would over-spend the counter on pre-fill cancels).
+    canary_active = False
+    if not paper:
+        from ..risk import canary as _canary
+        forced_qty, canary_active = await _canary.force_quantity_for_live(quantity)
+        if canary_active:
+            log.info(
+                "canary cap applied: market=%s intended=%s forced=%s",
+                ctx.market_id, quantity, forced_qty,
+            )
+            quantity = forced_qty
     # Prefer the venue-specific quote when present so a Polymarket-routed
     # order isn't priced off a Kalshi mid (and vice-versa). Falls back to
     # ctx.current_price (historically the Kalshi mid) when the candidate
@@ -306,6 +323,12 @@ async def place_order(
     # (NBA/NFL/etc.) do not get spurious leg tags from titles that happen
     # to mention "draw" / a team name.
     metadata: dict[str, Any] = {}
+    if canary_active:
+        # Settlement pipeline reads this and calls
+        # ``risk.canary.decrement_on_settle`` exactly once per settled
+        # canary trade so the counter reflects observed end-to-end
+        # outcomes, not just placements.
+        metadata["canary"] = True
     try:
         cfg = get_league_config(ctx.league)
         if cfg is not None and cfg.three_way_market:

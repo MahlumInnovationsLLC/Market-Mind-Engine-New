@@ -46,7 +46,7 @@ def _wire_aggregates(monkeypatch, *, bankroll=10_000.0):
     per_matchup = {"NFL:BUF@MIA": 300.0, "NFL:KC@DEN": 100.0}
     per_sunday = {"NFL": 250.0}
 
-    async def _fake_aggregates():
+    async def _fake_aggregates(*, trading_mode="live"):
         return (
             5,
             450.0,
@@ -57,7 +57,7 @@ def _wire_aggregates(monkeypatch, *, bankroll=10_000.0):
             {},
         )
 
-    async def _fake_bankroll():
+    async def _fake_bankroll(*, trading_mode="live"):
         return bankroll
 
     monkeypatch.setattr(cycle_mod, "_open_position_aggregates", _fake_aggregates)

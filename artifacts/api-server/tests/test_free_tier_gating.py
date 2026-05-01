@@ -215,13 +215,17 @@ def _seed_trades(monkeypatch, now: datetime) -> list[dict[str, Any]]:
     ]
 
     async def _fake(
-        limit: int = 25, placed_by: str | None = None
+        limit: int = 25,
+        placed_by: str | None = None,
+        trading_mode: str | None = None,
     ) -> list[dict[str, Any]]:
         # ``placed_by`` was added by migration 0039 + the trade-provenance
-        # filter (Manual / System / Both toggle).  This stub ignores the
-        # value because these free-tier tests assert the 15-minute delay
-        # behaviour, not the placed_by filter — the dedicated
-        # `test_dashboard_placed_by.py` covers that filter.
+        # filter (Manual / System / Both toggle).  ``trading_mode`` was
+        # added by Task #752 step 1 (paper/live dashboard scoping).
+        # This stub ignores both values because these free-tier tests
+        # assert the 15-minute delay behaviour, not the filters — the
+        # dedicated `test_dashboard_placed_by.py` and
+        # `test_dashboard_trading_mode.py` cover those.
         return [dict(r) for r in rows]
 
     monkeypatch.setattr(dashboard, "get_recent_trades", _fake)
@@ -286,7 +290,14 @@ def _seed_trade_detail(
     15-minute delay never drops the row in tests that aren't asserting
     on the delay itself.
     """
-    async def _fake(trade_ref: str) -> dict[str, Any]:
+    async def _fake(
+        trade_ref: str,
+        trading_mode: str | None = None,
+    ) -> dict[str, Any]:
+        # ``trading_mode`` was added by Task #752 step 1 (paper/live
+        # dashboard scoping).  Free-tier tests are mode-agnostic — they
+        # exercise the 15-minute delay + market-view quota — so we
+        # accept and ignore the kwarg here.
         return {
             "trade": {
                 "id": int(trade_ref) if trade_ref.isdigit() else 1,
@@ -481,10 +492,14 @@ def test_trade_detail_filters_sub_15_minute_series_for_free_callers(
 
 def _stub_overview(monkeypatch) -> None:
     # ``placed_by`` was added by migration 0039 + the trade-provenance
-    # filter (Manual / System / Both toggle).  This stub accepts and
-    # ignores it because these free-tier tests assert the delayed-banner
-    # behaviour, not the placed_by filter.
-    async def _fake_overview(placed_by: str | None = None) -> dict[str, Any]:
+    # filter (Manual / System / Both toggle).  ``trading_mode`` was
+    # added by Task #752 step 1 (paper/live dashboard scoping).  This
+    # stub accepts and ignores both because these free-tier tests
+    # assert the delayed-banner behaviour, not the filters.
+    async def _fake_overview(
+        placed_by: str | None = None,
+        trading_mode: str | None = None,
+    ) -> dict[str, Any]:
         return {
             "counts": {"trades": 0},
             "latest_cycle_at": None,

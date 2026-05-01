@@ -190,6 +190,172 @@ def test_series_anchor_added_when_no_debate_rows(monkeypatch: pytest.MonkeyPatch
     ]
 
 
+# ---------------------------------------------------------------------------
+# Task #752 step 1 — trading_mode scoping
+# ---------------------------------------------------------------------------
+
+
+class _ModeAwareFakeDB:
+    """Stricter stub that bound-checks the trading_mode parameter so we
+    can prove the WHERE clause carries it through to the bind list."""
+
+    def __init__(
+        self,
+        *,
+        trade_row: dict[str, Any] | None,
+        expect_mode: str | None,
+        ref_kind: str = "id",  # "id" or "trade_id"
+        ref_value: Any = None,
+    ) -> None:
+        self.trade_row = trade_row
+        self.expect_mode = expect_mode
+        self.ref_kind = ref_kind
+        self.ref_value = ref_value
+        self.calls: list[tuple[str, tuple[Any, ...]]] = []
+
+    async def fetchrow(self, query: str, *args: Any) -> Any:
+        self.calls.append((query, args))
+        if "FROM trades" not in query:
+            return None
+        if self.expect_mode is None:
+            # When no mode is requested the route uses the legacy
+            # 1-arg lookup: WHERE id = $1 / WHERE trade_id = $1.
+            # ``trading_mode`` itself appears in the SELECT list, so
+            # we check the WHERE-clause shape instead.
+            assert "trading_mode = $2" not in query
+            assert len(args) == 1
+        else:
+            assert "AND trading_mode = $2" in query
+            assert len(args) == 2
+            assert args[1] == self.expect_mode
+        if args[0] == self.ref_value:
+            return self.trade_row
+        return None
+
+    async def fetch(self, query: str, *args: Any) -> list[dict[str, Any]]:
+        self.calls.append((query, args))
+        return []
+
+    async def fetchval(self, query: str, *args: Any) -> Any:  # pragma: no cover
+        return None
+
+
+def _trade(**overrides: Any) -> dict[str, Any]:
+    base = {
+        "id": 99, "trade_id": "uuid-99", "market_id": "KXNFL-99",
+        "market_title": "Title", "vertical": "sports", "league": "NFL",
+        "side": "yes", "action": "buy",
+        "quantity": 1.0, "price": 0.5, "fees": 0.0, "pnl": 0.0,
+        "model_prob": 0.6, "model_edge": 0.05, "kelly_fraction": 0.02,
+        "trading_mode": "live", "exchange": "kalshi",
+        "executed_at": "2026-04-22T12:00:00Z",
+    }
+    base.update(overrides)
+    return base
+
+
+def test_trade_detail_with_trading_mode_live_binds_filter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake = _ModeAwareFakeDB(
+        trade_row=_trade(id=42, trading_mode="live"),
+        expect_mode="live",
+        ref_kind="id", ref_value=42,
+    )
+    monkeypatch.setattr(dashboard, "db", fake)
+    _stub_titles(monkeypatch)
+    out = _run(dashboard.get_trade_detail("42", trading_mode="live"))
+    assert out is not None
+    assert out["trade"]["id"] == 42
+
+
+def test_trade_detail_with_trading_mode_paper_binds_filter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake = _ModeAwareFakeDB(
+        trade_row=_trade(id=7, trading_mode="paper"),
+        expect_mode="paper",
+        ref_kind="id", ref_value=7,
+    )
+    monkeypatch.setattr(dashboard, "db", fake)
+    _stub_titles(monkeypatch)
+    out = _run(dashboard.get_trade_detail("7", trading_mode="paper"))
+    assert out is not None
+    assert out["trade"]["trading_mode"] == "paper"
+
+
+def test_trade_detail_uuid_branch_with_trading_mode_binds_filter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake = _ModeAwareFakeDB(
+        trade_row=_trade(trade_id="abc-uuid", trading_mode="live"),
+        expect_mode="live",
+        ref_kind="trade_id", ref_value="abc-uuid",
+    )
+    monkeypatch.setattr(dashboard, "db", fake)
+    _stub_titles(monkeypatch)
+    out = _run(dashboard.get_trade_detail("abc-uuid", trading_mode="live"))
+    assert out is not None
+
+
+def test_trade_detail_cross_mode_lookup_returns_none(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The Round-11 leak: deep-linking from a paper-mode dashboard into
+    a live trade ID must NOT return that trade.
+
+    The stub returns the row only when the WHERE bound id matches —
+    but with mode mismatch the route would have to send `live` to find
+    it and `paper` to confirm the filter is wired.  Easiest proof:
+    request id=42 with trading_mode=paper and have the stub check
+    that when mode=paper is bound but the trade is live, no row comes
+    back."""
+    class _StrictFake:
+        calls: list[tuple[Any, ...]] = []
+        async def fetchrow(self, query, *args):
+            self.calls.append(args)
+            assert "trading_mode = $2" in query
+            # Only return a row if mode matches — paper ≠ live.
+            if args[1] == "live":
+                return _trade(id=42, trading_mode="live")
+            return None
+        async def fetch(self, query, *args):
+            return []
+        async def fetchval(self, query, *args):
+            return None
+
+    fake = _StrictFake()
+    monkeypatch.setattr(dashboard, "db", fake)
+    _stub_titles(monkeypatch)
+
+    # Paper-mode caller asks for id=42 (which is live) → should be None.
+    out_paper = _run(dashboard.get_trade_detail("42", trading_mode="paper"))
+    assert out_paper is None
+
+    # Same id with live mode → row comes back.
+    out_live = _run(dashboard.get_trade_detail("42", trading_mode="live"))
+    assert out_live is not None
+
+
+def test_trade_detail_invalid_trading_mode_falls_back_to_no_filter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Defence in depth: an invalid trading_mode at the helper level
+    (e.g. caller passes a typo) is treated as 'no filter' so the row
+    is still found.  The HTTP layer's _resolve_dashboard_trading_mode
+    is the real validation point — this test just locks in the
+    helper's permissive contract."""
+    fake = _ModeAwareFakeDB(
+        trade_row=_trade(id=1),
+        expect_mode=None,  # helper falls back to no-filter
+        ref_kind="id", ref_value=1,
+    )
+    monkeypatch.setattr(dashboard, "db", fake)
+    _stub_titles(monkeypatch)
+    out = _run(dashboard.get_trade_detail("1", trading_mode="bogus"))
+    assert out is not None
+
+
 def test_anchor_skipped_if_executed_at_already_in_series(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

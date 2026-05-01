@@ -30,7 +30,7 @@ def test_get_nfl_exposure_roundtrips_open_position_aggregates(monkeypatch):
     }
     per_sunday = {"NFL": 250.0}
 
-    async def _fake_aggregates():
+    async def _fake_aggregates(*, trading_mode="live"):
         return (
             5,                # open_n
             450.0,            # open_notional
@@ -41,7 +41,7 @@ def test_get_nfl_exposure_roundtrips_open_position_aggregates(monkeypatch):
             {},               # per_event
         )
 
-    async def _fake_bankroll():
+    async def _fake_bankroll(*, trading_mode="live"):
         return bankroll
 
     monkeypatch.setattr(cycle_mod, "_open_position_aggregates", _fake_aggregates)
@@ -107,13 +107,13 @@ def test_get_nfl_exposure_handles_no_bankroll(monkeypatch):
     from app import dashboard
     from app.orchestrator import cycle as cycle_mod
 
-    async def _fake_aggregates():
+    async def _fake_aggregates(*, trading_mode="live"):
         return (
             1, 50.0, {"sports": 50.0},
             {"NFL": 50.0}, {"NFL:BUF@MIA": 50.0}, {}, {},
         )
 
-    async def _fake_bankroll():
+    async def _fake_bankroll(*, trading_mode="live"):
         return None
 
     monkeypatch.setattr(cycle_mod, "_open_position_aggregates", _fake_aggregates)

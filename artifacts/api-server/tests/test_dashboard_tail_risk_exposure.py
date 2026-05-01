@@ -328,12 +328,15 @@ def _stub_aggregator(monkeypatch, captured: list[dict[str, Any]]) -> None:
         days: int = 30,
         placed_by: str | None = None,
         verticals: object = None,
+        *,
+        trading_mode: str | None = None,
     ) -> dict[str, Any]:
         captured.append(
             {
                 "days": days,
                 "placed_by": placed_by,
                 "verticals": verticals,
+                "trading_mode": trading_mode,
             }
         )
         return {
@@ -420,6 +423,8 @@ def test_route_rejects_unknown_vertical_with_400(client, monkeypatch):
         days: int = 30,
         placed_by: str | None = None,
         verticals: object = None,
+        *,
+        trading_mode: str | None = None,
     ) -> dict[str, Any]:
         dashboard._vertical_predicate(verticals)
         return {

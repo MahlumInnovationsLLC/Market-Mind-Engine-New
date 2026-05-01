@@ -55,12 +55,23 @@ def state() -> dict[str, Any]:
     }
 
 
-async def _latest_event_balance_cents() -> int | None:
+async def _latest_event_balance_cents(
+    exchange: str = "kalshi", trading_mode: str = "live"
+) -> int | None:
+    """Return the last recorded ``balance_cents`` for ``(exchange,
+    trading_mode)``.  Round-11 Bug #6 — pre-#752 the lookup ignored
+    ``trading_mode``, so the paper seed event would silently anchor the
+    Kalshi live sync's first delta computation against the paper
+    bankroll, manifesting as a huge spurious delta on the very next
+    tick.
+    """
     try:
         v = await db.fetchval(
             "SELECT balance_cents FROM bankroll_events "
-            "WHERE exchange = 'kalshi' "
-            "ORDER BY id DESC LIMIT 1"
+            "WHERE exchange = $1 AND trading_mode = $2 "
+            "ORDER BY id DESC LIMIT 1",
+            exchange,
+            trading_mode,
         )
         return int(v) if v is not None else None
     except Exception as e:
@@ -74,12 +85,21 @@ async def record_balance(
     reason: str = "exchange_sync",
     details: dict[str, Any] | None = None,
     exchange: str = "kalshi",
+    trading_mode: str = "live",
 ) -> dict[str, Any] | None:
-    """Insert a bankroll_events row if `balance_cents` differs from the
-    last recorded balance for this exchange. Returns the inserted row dict
-    or None if no write was needed (or the write failed).
+    """Insert a bankroll_events row if ``balance_cents`` differs from the
+    last recorded balance for ``(exchange, trading_mode)``.  Returns the
+    inserted row dict or None if no write was needed (or the write
+    failed).
+
+    The ``trading_mode`` argument keeps the paper and live ledgers
+    isolated end-to-end (Round-11 Bug #6 / Task #752 step 3).  The
+    Kalshi sync loop always writes ``"live"`` (its only source of truth
+    is the live exchange API); the paper-bankroll seeder writes
+    ``"paper"`` once on first boot from
+    :func:`ensure_paper_bankroll_seeded`.
     """
-    prev = await _latest_event_balance_cents()
+    prev = await _latest_event_balance_cents(exchange, trading_mode)
     delta = balance_cents - (prev or 0)
     # On the very first observation we must seed the row even though we
     # have no "delta" to compare against — equity curve and floor gate
@@ -91,22 +111,88 @@ async def record_balance(
         row = await db.fetchrow(
             """
             INSERT INTO bankroll_events
-              (exchange, reason, delta_cents, balance_cents, details)
-            VALUES ($1, $2, $3, $4, $5::jsonb)
+              (exchange, reason, delta_cents, balance_cents, details, trading_mode)
+            VALUES ($1, $2, $3, $4, $5::jsonb, $6)
             RETURNING id, occurred_at, exchange, reason,
-                      delta_cents, balance_cents
+                      delta_cents, balance_cents, trading_mode
             """,
             exchange,
             reason,
             int(delta),
             int(balance_cents),
             json.dumps(details or {}),
+            trading_mode,
         )
         return dict(row) if row else None
     except Exception as e:
-        log.warning("bankroll_events insert failed (%s, %s¢): %s",
-                    reason, balance_cents, e)
+        log.warning("bankroll_events insert failed (%s, %s, %s¢): %s",
+                    reason, trading_mode, balance_cents, e)
         return None
+
+
+# ---------------------------------------------------------------------------
+# Paper-mode bankroll seed (Task #752 step 3 — Round-11 Bug #6).
+# ---------------------------------------------------------------------------
+
+
+def _paper_bankroll_seed_cents() -> int:
+    """Resolve the paper-mode starting bankroll from
+    ``AXIOM_PAPER_BANKROLL_USD`` (default $1,000).
+
+    Used once on first boot to anchor the paper ledger so the daily-loss
+    pct breaker and the dashboard equity curve have a denominator on
+    day-1 — without this seed, the paper breaker would have no
+    start-of-day bankroll, and the dashboard equity tile would show an
+    empty state until the first paper trade settled.
+    """
+    raw = os.environ.get("AXIOM_PAPER_BANKROLL_USD")
+    default_usd = 1000.0
+    if raw is None or not raw.strip():
+        usd = default_usd
+    else:
+        try:
+            usd = float(raw)
+        except ValueError:
+            log.warning(
+                "AXIOM_PAPER_BANKROLL_USD is not a number: %r — defaulting to $%.2f",
+                raw, default_usd,
+            )
+            usd = default_usd
+    if usd <= 0:
+        usd = default_usd
+    return int(round(usd * 100.0))
+
+
+async def ensure_paper_bankroll_seeded(
+    *, exchange: str = "kalshi"
+) -> dict[str, Any] | None:
+    """Idempotently seed the paper bankroll ledger.
+
+    Inserts a single ``reason='paper_seed'`` row at
+    ``AXIOM_PAPER_BANKROLL_USD`` cents iff the paper ledger for the
+    given exchange is empty.  Subsequent boots are no-ops because
+    :func:`_latest_event_balance_cents` already returns a value.
+
+    Called from the API startup hook (alongside :func:`start`) and from
+    the orchestrator pre-flight (so a brand-new deploy in paper mode
+    can run a cycle immediately without operator action).
+    """
+    existing = await _latest_event_balance_cents(
+        exchange=exchange, trading_mode="paper"
+    )
+    if existing is not None:
+        return None
+    seed_cents = _paper_bankroll_seed_cents()
+    log.info(
+        "seeding paper bankroll for %s: $%.2f", exchange, seed_cents / 100.0
+    )
+    return await record_balance(
+        seed_cents,
+        reason="paper_seed",
+        details={"source": "AXIOM_PAPER_BANKROLL_USD"},
+        exchange=exchange,
+        trading_mode="paper",
+    )
 
 
 async def _tick_once() -> None:
@@ -116,7 +202,12 @@ async def _tick_once() -> None:
             bal = await c.get_balance()
         bal_cents = int(bal.balance_cents)
         _last_balance_cents = bal_cents
-        await record_balance(bal_cents, reason="exchange_sync")
+        # The Kalshi sync loop is the live exchange's source of truth
+        # — explicit ``trading_mode="live"`` so the paper ledger can
+        # never be polluted by an exchange-sync row.
+        await record_balance(
+            bal_cents, reason="exchange_sync", trading_mode="live"
+        )
         _last_error = None
     except Exception as e:
         _last_error = f"{type(e).__name__}: {e}"
@@ -140,6 +231,14 @@ async def start() -> None:
     global _task, _started_at
     if _task and not _task.done():
         return
+    # Always idempotently seed the paper ledger first — even when the
+    # live sync loop is disabled, the paper breaker / paper dashboard
+    # need a starting bankroll anchor.  A failed seed is logged and
+    # swallowed inside :func:`ensure_paper_bankroll_seeded`.
+    try:
+        await ensure_paper_bankroll_seeded()
+    except Exception as e:  # noqa: BLE001 — best-effort
+        log.warning("paper bankroll seed failed at startup: %s", e)
     if (os.environ.get("BANKROLL_SYNC_ENABLED", "1") or "").strip() == "0":
         log.info("bankroll sync disabled by env")
         return

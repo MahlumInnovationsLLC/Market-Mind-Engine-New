@@ -46,6 +46,11 @@ class DailyLossSnapshot:
     # the UI doesn't lie when a non-UTC zone is in effect.
     date_local: str
     timezone: str
+    # The trading mode this snapshot was scoped to (Round-11 Bug #6).
+    # Stored on the snapshot so cached reads can return early when the
+    # mode changes (paper↔live) and the dashboard / breaker can both
+    # see exactly which ledger was aggregated.
+    trading_mode: str
     realized_pnl_usd: float
     unrealized_pnl_usd: float
     net_pnl_usd: float
@@ -141,28 +146,38 @@ def _read_threshold_pct(overrides: dict[str, Any] | None) -> float | None:
 
 
 async def _fetch_snapshot_inputs(
-    today: date, tz_name: str = DEFAULT_TZ
+    today: date,
+    tz_name: str = DEFAULT_TZ,
+    trading_mode: str = "live",
 ) -> tuple[float, float, float | None]:
     """Aggregate the three snapshot inputs in a single round-trip.
 
     Returns ``(realized_pnl_today_usd, unrealized_pnl_open_usd,
     start_of_day_bankroll_usd_or_None)``.
 
-    The CTEs preserve the exact semantics of the older per-query helpers:
+    The CTEs preserve the exact semantics of the older per-query helpers,
+    with one critical addition (Round-11 Bug #6 / Task #752 step 2): every
+    aggregate is scoped to ``trading_mode = $3``.  Pre-#752 the breaker
+    summed paper + live trades together, which had two failure modes:
+
+    * a paper "win" silently masked a real live loss → the kill switch
+      didn't trip when it should have;
+    * a paper "loss" tripped the live kill switch and halted real money
+      trading on the basis of simulated P&L.
+
+    Both directions are tested in ``tests/test_daily_loss_trading_mode.py``.
+
+    Per-CTE detail:
 
     * ``realized`` sums settled trades whose ``settled_at`` falls on
-      ``$1`` when projected into ``$2`` (the configured trading-day TZ).
-      The trades table stores realized P&L per trade in the ``pnl``
-      column (there is no ``realized_pnl`` column on trades — that
-      column lives on ``positions``).  Earlier revisions of this file
-      referenced ``trades.realized_pnl`` and silently degraded the
-      gate every cycle with "column does not exist", leaving the
-      daily-loss kill switch as a no-op in production.
+      ``$1`` when projected into ``$2``.  P&L lives in the ``pnl``
+      column; ``positions`` carries ``realized_pnl`` separately.
     * ``unrealized`` sums open positions' ``unrealized_pnl``.
     * Start-of-day bankroll is the latest ``bankroll_events.balance_cents``
       strictly before ``$1`` in the same TZ, falling back to the earliest
       row ever recorded so the pct threshold still has a denominator on
-      day-1 deploys when no prior-day rows exist.
+      day-1 deploys (e.g. paper mode with only the
+      ``AXIOM_PAPER_BANKROLL_USD`` seed event).
 
     A failure returns the same safe defaults the per-query paths used so
     the gate keeps passing rather than blocking trades on a transient DB
@@ -176,22 +191,26 @@ async def _fetch_snapshot_inputs(
                   FROM trades
                  WHERE settled_at IS NOT NULL
                    AND ((settled_at at time zone $2)::date) = $1
+                   AND trading_mode = $3
             ),
             unrealized AS (
                 SELECT coalesce(sum(unrealized_pnl), 0)::float AS v
                   FROM positions
                  WHERE coalesce(status, 'open') = 'open'
+                   AND trading_mode = $3
             ),
             sod_primary AS (
                 SELECT balance_cents
                   FROM bankroll_events
                  WHERE ((occurred_at at time zone $2)::date) < $1
+                   AND trading_mode = $3
                  ORDER BY id DESC
                  LIMIT 1
             ),
             sod_fallback AS (
                 SELECT balance_cents
                   FROM bankroll_events
+                 WHERE trading_mode = $3
                  ORDER BY id ASC
                  LIMIT 1
             )
@@ -205,6 +224,7 @@ async def _fetch_snapshot_inputs(
             """,
             today,
             tz_name,
+            trading_mode,
         )
     except Exception as e:
         log.warning("daily_loss snapshot aggregate query failed: %s", e)
@@ -221,6 +241,39 @@ async def _fetch_snapshot_inputs(
     return realized, unrealized, bankroll
 
 
+async def _resolve_breaker_trading_mode(
+    overrides: dict[str, Any] | None,
+) -> str:
+    """Pick the trading mode the breaker should aggregate over.
+
+    Operator override (``risk.trading_mode``) wins; ``halt`` is mapped
+    to whichever mode was last active before the halt — but since the
+    breaker still needs to attribute today's P&L correctly while the
+    system is halted, we fall back to ``"live"`` (the safer default —
+    a halt almost always follows a live drawdown).
+
+    A snapshot ``overrides`` argument may also pin ``"trading_mode"``
+    explicitly, which the test harness uses to drive both directions
+    deterministically without touching the DB.
+    """
+    if overrides and overrides.get("trading_mode"):
+        v = str(overrides["trading_mode"]).strip().lower()
+        if v in ("paper", "live"):
+            return v
+    try:
+        from .trading_mode import resolve_trading_mode
+        mode = (await resolve_trading_mode()).lower()
+    except Exception as e:  # noqa: BLE001 — best-effort, fall back to live
+        log.debug("daily_loss trading_mode resolve failed: %s", e)
+        return "live"
+    if mode in ("paper", "live"):
+        return mode
+    # ``halt`` (and anything else) → default to live.  The breaker
+    # still needs a target ledger, and a halted system is one a live
+    # drawdown almost certainly produced.
+    return "live"
+
+
 async def compute_snapshot(
     overrides: dict[str, Any] | None = None,
     *,
@@ -230,10 +283,14 @@ async def compute_snapshot(
 
     "Today" is the current date in the configured trading-day timezone
     (default UTC). A TZ or override change invalidates the cache on the
-    next call because the cache-key comparison checks ``(date_local, tz)``.
+    next call because the cache-key comparison checks
+    ``(date_local, tz, trading_mode)`` — the trading_mode component is
+    new in #752 so a paper↔live flip can never serve a stale snapshot
+    from the other ledger.
     """
     global _cache
     tz_name, tz = _resolve_tz(overrides)
+    trading_mode = await _resolve_breaker_trading_mode(overrides)
     now_m = time.monotonic()
     today_str = _today_in_tz(tz).isoformat()
     if use_cache and _cache is not None:
@@ -242,6 +299,7 @@ async def compute_snapshot(
             now_m < expires
             and snap.date_local == today_str
             and snap.timezone == tz_name
+            and snap.trading_mode == trading_mode
         ):
             return snap
     async with _cache_lock:
@@ -252,11 +310,12 @@ async def compute_snapshot(
                 time.monotonic() < expires
                 and snap.date_local == _today_in_tz(tz).isoformat()
                 and snap.timezone == tz_name
+                and snap.trading_mode == trading_mode
             ):
                 return snap
         today = _today_in_tz(tz)
         realized, unrealized, bankroll = await _fetch_snapshot_inputs(
-            today, tz_name
+            today, tz_name, trading_mode
         )
         net = float(realized) + float(unrealized)
         loss = -net if net < 0 else 0.0
@@ -283,6 +342,7 @@ async def compute_snapshot(
         snap = DailyLossSnapshot(
             date_local=today.isoformat(),
             timezone=tz_name,
+            trading_mode=trading_mode,
             realized_pnl_usd=realized,
             unrealized_pnl_usd=unrealized,
             net_pnl_usd=net,

@@ -116,18 +116,24 @@ def _stub_db(monkeypatch, trade_rows: list[dict[str, Any]]) -> dict[str, Any]:
             return trade_rows
         return []
 
-    async def _fake_fetchrow(*_a: Any, **_kw: Any) -> dict[str, Any] | None:
+    async def _fake_fetchrow(query: str, *args: Any) -> dict[str, Any] | None:
+        # Task #752 step 5 (architect follow-up): the trade UPDATE was
+        # converted to ``UPDATE ... RETURNING id`` so settle can detect
+        # whether it actually transitioned the row (and therefore
+        # whether to drain a canary slot).  Record the UPDATE here for
+        # the test's `trade_updates` assertions and return a row to
+        # signal "first settle wins" — there is no double-settle in
+        # these tests.
+        if "UPDATE trades" in query and "RETURNING id" in query:
+            captured["trade_updates"].append({"id": args[0], "pnl": args[1]})
+            return {"id": args[0]}
         return None
 
     async def _fake_fetchval(*_a: Any, **_kw: Any) -> Any:
         return None
 
     async def _fake_execute(query: str, *args: Any) -> str:
-        # Record the per-trade UPDATE so the test can assert which
-        # outcome each trade was settled against.
-        if "UPDATE trades" in query:
-            captured["trade_updates"].append({"id": args[0], "pnl": args[1]})
-        elif "INSERT INTO trade_postmortems" in query:
+        if "INSERT INTO trade_postmortems" in query:
             # actual_outcome is the 8th positional arg per the INSERT
             # column order; details json is the 14th.
             captured["postmortems"].append({

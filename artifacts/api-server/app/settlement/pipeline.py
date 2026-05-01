@@ -271,19 +271,43 @@ async def _settle_one_trade(
     tid = trade["id"]
     pnl = _trade_pnl(trade.get("side"), trade.get("quantity"), trade.get("price"),
                      outcome_yes)
+    # `RETURNING id` lets us tell whether this UPDATE actually
+    # transitioned the trade from unsettled → settled.  A duplicate
+    # settlement (replay, retry, race between the live websocket and
+    # the polling fallback) hits the `settled_at IS NULL` predicate as
+    # a no-op and returns no row; we use that signal below to skip the
+    # canary decrement so a single canary trade can't drain more than
+    # one slot from the counter.
     try:
-        await db.execute(
+        first_settle_row = await db.fetchrow(
             """
             UPDATE trades
                SET pnl = $2,
                    settled_at = now()
              WHERE id = $1
                AND settled_at IS NULL
+             RETURNING id
             """,
             tid, pnl,
         )
     except Exception as e:
         return {"trade_id": tid, "ok": False, "error": f"trade update: {e}"}
+
+    is_first_settle = first_settle_row is not None
+
+    # Canary counter accounting (Task #752 step 5).  Decrement is
+    # idempotent-on-noop and swallows DB errors internally — a flaky
+    # ``system_settings`` write must not block the settlement of an
+    # otherwise-clean trade.  Only canary-tagged live trades trigger
+    # the decrement; everything else is a fast metadata-shape check.
+    # We *also* gate on the first-settle flag so a duplicate settle of
+    # the same canary trade can't drain two slots.
+    if is_first_settle:
+        try:
+            from ..risk import canary as _canary
+            await _canary.decrement_on_settle(trade)
+        except Exception as e:  # pragma: no cover — defensive
+            log.warning("canary decrement on settle failed for %s: %s", tid, e)
 
     # Post-mortem (idempotent on trade_id — relies on the
     # `trade_postmortems_trade_id_key` unique constraint so concurrent

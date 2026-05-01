@@ -1097,12 +1097,23 @@ async def public_tail_risk_exposure(
     days: int = 30,
     placed_by: Literal["manual", "system", "all"] = "all",
     vertical: str | None = None,
+    trading_mode: Literal["paper", "live"] = "live",
 ) -> dict[str, object]:
-    """Public tail-risk exposure matrix; unknown vertical → HTTP 400."""
+    """Public tail-risk exposure matrix; unknown vertical → HTTP 400.
+
+    ``trading_mode`` defaults to ``'live'`` since the marketing-side
+    consumers of this endpoint never want to see paper exposure (paper
+    positions don't actually consume bankroll).  The operator dashboard
+    threads its mode-toggle value through to flip between paper and
+    live without leaking cross-mode aggregates (Round-11 Bug #6).
+    """
     clamped_days = max(1, min(int(days), 365))
     try:
         result = await dashboard.get_tail_risk_exposure(
-            clamped_days, placed_by=placed_by, verticals=vertical
+            clamped_days,
+            placed_by=placed_by,
+            verticals=vertical,
+            trading_mode=trading_mode,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -1111,6 +1122,7 @@ async def public_tail_risk_exposure(
         **result,
         "placed_by": placed_by,
         "verticals": verticals_echo,
+        "trading_mode": trading_mode,
     }
 
 
@@ -5218,9 +5230,42 @@ async def features_drift(
 # ---------------------------------------------------------------------------
 
 
+async def _resolve_dashboard_trading_mode(
+    explicit: str | None,
+) -> str:
+    """Resolve the ``trading_mode`` to scope a dashboard read by.
+
+    Operator override beats env beats default — every mode-aware
+    dashboard endpoint accepts an optional ``?trading_mode=paper|live``
+    so the operator's mode toggle in the UI can override what's stored
+    in ``system_settings.risk.trading_mode`` (useful when comparing
+    paper backtests against live execution side-by-side).
+
+    Validates the input and falls back to the resolved current mode
+    when omitted; ``'all'`` is intentionally NOT supported on read
+    endpoints (Round-11 Bug #6 was exactly this kind of cross-mode
+    aggregation).  An unknown value raises ``HTTPException(400)`` so
+    a typo in the frontend surfaces immediately rather than silently
+    returning unfiltered numbers.
+    """
+    from .risk.trading_mode import resolve_trading_mode
+
+    if explicit is not None and explicit != "":
+        v = explicit.strip().lower()
+        if v not in ("paper", "live"):
+            raise HTTPException(
+                status_code=400,
+                detail=f"trading_mode must be 'paper' or 'live' (got {explicit!r})",
+            )
+        return v
+    resolved = (await resolve_trading_mode() or "paper").lower()
+    return resolved if resolved in ("paper", "live") else "paper"
+
+
 @app.get("/api/dashboard/overview")
 async def dashboard_overview(
     placed_by: Literal["manual", "system", "all"] = "all",
+    trading_mode: str | None = None,
     user: AuthedUser = Depends(require_approved_user),
 ) -> dict[str, object]:
     """Aggregate counts and headline stats for the dashboard landing tab.
@@ -5239,7 +5284,8 @@ async def dashboard_overview(
       * ``system`` — only orchestrator/autotrader/swarm trades
       * ``all`` — unfiltered (default; includes ``rh_import`` + ``unknown``)
     """
-    overview = await dashboard.get_overview(placed_by=placed_by)
+    mode = await _resolve_dashboard_trading_mode(trading_mode)
+    overview = await dashboard.get_overview(placed_by=placed_by, trading_mode=mode)
     sub = await billing.get_user_subscription(user)
     delayed = (
         billing._TIER_RANK[sub.tier] < billing._TIER_RANK[billing.TIER_PRO]
@@ -5250,6 +5296,7 @@ async def dashboard_overview(
         free_tier.FREE_TIER_DELAY_MINUTES if delayed else 0
     )
     overview["placed_by"] = placed_by
+    overview["trading_mode"] = mode
     return overview
 
 
@@ -5257,6 +5304,7 @@ async def dashboard_overview(
 async def dashboard_recent_trades(
     limit: int = 25,
     placed_by: Literal["manual", "system", "all"] = "all",
+    trading_mode: str | None = None,
     user: AuthedUser = Depends(require_approved_user),
 ) -> dict[str, object]:
     """Recent fills feed.
@@ -5270,7 +5318,10 @@ async def dashboard_recent_trades(
     (default ``all``).
     """
     limit = max(1, min(200, int(limit)))
-    items = await dashboard.get_recent_trades(limit, placed_by=placed_by)
+    mode = await _resolve_dashboard_trading_mode(trading_mode)
+    items = await dashboard.get_recent_trades(
+        limit, placed_by=placed_by, trading_mode=mode,
+    )
     sub = await billing.get_user_subscription(user)
     delayed = False
     if billing._TIER_RANK[sub.tier] < billing._TIER_RANK[billing.TIER_PRO]:
@@ -5282,6 +5333,7 @@ async def dashboard_recent_trades(
         "delayed": delayed,
         "delay_minutes": free_tier.FREE_TIER_DELAY_MINUTES if delayed else 0,
         "placed_by": placed_by,
+        "trading_mode": mode,
     }
 
 
@@ -5405,6 +5457,7 @@ async def dashboard_runtime_settings(
 @app.get("/api/dashboard/trades/{trade_ref}")
 async def dashboard_trade_detail(
     trade_ref: str,
+    trading_mode: str | None = None,
     user: AuthedUser = Depends(require_approved_user),
 ) -> dict[str, object]:
     """Single-trade detail + market-vs-model time series.
@@ -5412,12 +5465,20 @@ async def dashboard_trade_detail(
     `trade_ref` accepts either the integer `trades.id` or the UUID-ish
     `trades.trade_id` so the operator can deep-link from either column.
 
+    The ``trading_mode`` query param (Task #752 step 1) scopes the
+    lookup to ``"paper"`` or ``"live"``.  When omitted it resolves to
+    the dashboard's default mode (paper) just like the other
+    ``/api/dashboard/*`` endpoints — a paper-mode dashboard that
+    deep-links into ``id=42`` will get a 404 if id=42 is a live trade,
+    closing the cross-mode read leak the Round-11 audit caught.
+
     Free callers count one "market evaluation" per distinct market_id
     per UTC day.  The 6th distinct market in a day returns HTTP 402
     with an ``upgrade_required`` payload (see :mod:`app.free_tier`).
     Re-opening a market the user already viewed today is free.
     """
-    detail = await dashboard.get_trade_detail(trade_ref)
+    mode = await _resolve_dashboard_trading_mode(trading_mode)
+    detail = await dashboard.get_trade_detail(trade_ref, trading_mode=mode)
     if detail is None:
         raise HTTPException(status_code=404, detail="trade not found")
 
@@ -5476,6 +5537,7 @@ async def dashboard_search(
 
 @app.get("/api/dashboard/nfl-exposure")
 async def dashboard_nfl_exposure(
+    trading_mode: str | None = None,
     _: object = Depends(require_approved_user),
 ) -> dict[str, object]:
     """NFL per-league + per-game + Sunday-window exposure with cap headroom.
@@ -5484,12 +5546,19 @@ async def dashboard_nfl_exposure(
     cycle uses, so the operator dashboard can see how close the next
     bet is to tripping the per-league (5%), per-game (1.5%), or Sunday
     window (3%) sub-caps before it submits.
+
+    The optional ``trading_mode`` query param scopes the snapshot to
+    paper or live exclusively (Task #752).  When omitted, the
+    runtime-mode resolver is used so the panel matches the operator's
+    current trading context.
     """
-    return await dashboard.get_nfl_exposure()
+    mode = await _resolve_dashboard_trading_mode(trading_mode)
+    return await dashboard.get_nfl_exposure(trading_mode=mode)
 
 
 @app.get("/api/dashboard/leagues-exposure")
 async def dashboard_leagues_exposure(
+    trading_mode: str | None = None,
     _: object = Depends(require_approved_user),
 ) -> dict[str, object]:
     """Per-league + per-game (+ per-event / Sunday-window) exposure
@@ -5500,8 +5569,14 @@ async def dashboard_leagues_exposure(
     Sourced from the same `_open_position_aggregates` snapshot the
     trading cycle uses, so the operator dashboard can see how close
     every league is to tripping its caps before the next placement.
+
+    The optional ``trading_mode`` query param scopes the snapshot to
+    paper or live exclusively (Task #752).  When omitted, the
+    runtime-mode resolver is used so the panel matches the operator's
+    current trading context.
     """
-    return await dashboard.get_leagues_exposure()
+    mode = await _resolve_dashboard_trading_mode(trading_mode)
+    return await dashboard.get_leagues_exposure(trading_mode=mode)
 
 
 @app.get("/api/dashboard/calibration/per-league")
@@ -5520,6 +5595,7 @@ async def dashboard_calibration_per_league(
 async def dashboard_vertical_performance(
     days: int = 30,
     placed_by: Literal["manual", "system", "all"] = "all",
+    trading_mode: str | None = None,
     _: object = Depends(require_approved_user),
 ) -> dict[str, object]:
     """Per-vertical rolling P&L / Brier / calibration / sparklines.
@@ -5528,10 +5604,18 @@ async def dashboard_vertical_performance(
     win-rate, calibration buckets, daily series) to manual / system /
     both.  ``brier`` and open-exposure stay unfiltered because they
     describe model + book artifacts, not bet provenance.
+
+    ``trading_mode`` (``paper``/``live``) scopes every trade-derived
+    aggregate to the operator's currently-effective mode (Round-11 Bug
+    #6 fix).  Defaults to the active system mode when omitted.
     """
     days = max(1, min(365, int(days)))
-    out = await dashboard.get_vertical_performance(days, placed_by=placed_by)
+    mode = await _resolve_dashboard_trading_mode(trading_mode)
+    out = await dashboard.get_vertical_performance(
+        days, placed_by=placed_by, trading_mode=mode,
+    )
     out["placed_by"] = placed_by
+    out["trading_mode"] = mode
     return out
 
 
@@ -5562,6 +5646,7 @@ async def dashboard_crypto_accuracy(
 async def dashboard_verticals_overview(
     days: int = 7,
     placed_by: Literal["manual", "system", "all"] = "all",
+    trading_mode: str | None = None,
     _: object = Depends(require_approved_user),
 ) -> dict[str, object]:
     """Per-vertical overview card backing the new ``/verticals`` page +
@@ -5572,11 +5657,17 @@ async def dashboard_verticals_overview(
 
     ``placed_by`` filters trade-derived fields (``trades`` / ``pnl`` /
     ``win_rate`` / ``edge_predicted_bps`` / ``sharpe`` /
-    ``edge_realized_bps``) by provenance.  ``brier``, ``open_positions``
-    and ``last_cycle`` stay unfiltered.
+    ``edge_realized_bps``) by provenance.  ``brier`` and ``last_cycle``
+    stay unfiltered.  ``trading_mode`` (``paper``/``live``) scopes
+    every trade-derived metric AND ``open_positions`` (since migration
+    0041) to the operator's currently-effective mode.
     """
-    out = await dashboard.get_verticals_overview(days, placed_by=placed_by)
+    mode = await _resolve_dashboard_trading_mode(trading_mode)
+    out = await dashboard.get_verticals_overview(
+        days, placed_by=placed_by, trading_mode=mode,
+    )
     out["placed_by"] = placed_by
+    out["trading_mode"] = mode
     return out
 
 
@@ -6586,6 +6677,7 @@ async def dashboard_uw_signals(
 
 @app.get("/api/dashboard/over-filled-orders-today")
 async def dashboard_over_filled_orders_today(
+    trading_mode: str | None = None,
     _: object = Depends(require_approved_user),
 ) -> dict[str, object]:
     """GTC orders Kalshi over-filled in the current UTC day.
@@ -6594,8 +6686,17 @@ async def dashboard_over_filled_orders_today(
     :mod:`app.kalshi.lifecycle`) joined with the immutable
     ``order_fills`` ledger so the operator console can flag
     reconciliation discrepancies at a glance.
+
+    Mode-scoped via ``trading_mode`` (defaults to active system mode).
+    Live-only by construction historically — paper trades never insert
+    into ``positions`` — but the explicit filter prevents future paper
+    rows (if a paper-positions writer is added) from contaminating the
+    live over-fill triage feed.
     """
-    return await dashboard.get_over_filled_orders_today()
+    mode = await _resolve_dashboard_trading_mode(trading_mode)
+    out = await dashboard.get_over_filled_orders_today(trading_mode=mode)
+    out["trading_mode"] = mode
+    return out
 
 
 @app.get("/api/dashboard/tournament-leaderboards")
@@ -6706,6 +6807,7 @@ async def dashboard_sportradar_leaderboards_retention(
 @app.get("/api/dashboard/bankroll/recent")
 async def dashboard_bankroll_recent(
     limit: int = 200,
+    trading_mode: str | None = None,
     _: object = Depends(require_approved_user),
 ) -> dict[str, object]:
     """Recent ``bankroll_events`` rows + the current live balance + the
@@ -6716,12 +6818,21 @@ async def dashboard_bankroll_recent(
     surfaces that feed so the operator dashboard can render a live
     balance tile, a 24h delta sparkline, and a fresh / stale indicator
     for the underlying sync loop.
+
+    Mode-scoped via ``trading_mode``: paper-mode operators see the
+    ``AXIOM_PAPER_BANKROLL_USD``-seeded paper ledger; live-mode
+    operators see the Kalshi-synced live ledger.  Round-11 Bug #6
+    fix — previously this mixed paper bumps into the live equity
+    sparkline.
     """
     from . import bankroll_sync as _bankroll_sync
 
-    feed = await dashboard.get_recent_bankroll_events(limit=int(limit))
+    mode = await _resolve_dashboard_trading_mode(trading_mode)
+    feed = await dashboard.get_recent_bankroll_events(
+        limit=int(limit), trading_mode=mode,
+    )
     sync_state = _bankroll_sync.state()
-    return {**feed, "sync": sync_state}
+    return {**feed, "sync": sync_state, "trading_mode": mode}
 
 
 @app.get("/api/dashboard/recent-debates")
@@ -7194,8 +7305,36 @@ async def orchestrator_live_execute_toggle(
 
     Persists into ``system_settings.risk.trading_mode`` which the
     kill-switch gate already honours (operator override beats env).
+
+    Going **live** requires passing the 9-point pre-flight checklist
+    (Task #752, Round-11 audit Bug #7); a single failed check returns
+    HTTP 409 with ``{failed_check, hint}`` and writes nothing.  Going
+    back to **paper** is unconditional — you can always rollback safely.
     """
     new_mode = "live" if body.enabled else "paper"
+
+    # Pre-flight only gates live cutover.  Paper-flips and identity
+    # toggles ("we're already paper, set us to paper") skip the check.
+    if new_mode == "live":
+        from .orchestrator.preflight import run_preflight
+        result = await run_preflight()
+        if not result.passed:
+            failed = result.first_failure
+            assert failed is not None  # not result.passed implies a failure
+            log.warning(
+                "live-execute pre-flight blocked: %s by user=%s tier=%s",
+                failed.id, sub.user_id, sub.tier,
+            )
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "preflight_failed",
+                    "failed_check": failed.id,
+                    "hint": failed.hint,
+                    "checks": [c.to_dict() for c in result.checks],
+                },
+            )
+
     try:
         await db.execute(
             """
@@ -7210,6 +7349,19 @@ async def orchestrator_live_execute_toggle(
     except Exception as e:
         log.exception("live-execute toggle failed")
         raise HTTPException(status_code=502, detail=f"toggle write failed: {e}")
+
+    # Seed the canary counter on a paper→live cutover so the first N
+    # live trades are forced to qty=1 (Task #752 step 5).  Idempotent:
+    # if a counter row already exists it is left untouched, so flipping
+    # live→paper→live mid-canary doesn't reset the cap.  Operators that
+    # explicitly want a fresh canary call ``risk.canary.reset`` directly.
+    if new_mode == "live":
+        try:
+            from .risk import canary as _canary
+            await _canary.ensure_initialized()
+        except Exception as e:  # pragma: no cover — defensive
+            log.warning("canary init on live cutover failed: %s", e)
+
     log.info(
         "live-execute toggled to %s by %s (tier=%s)",
         new_mode,

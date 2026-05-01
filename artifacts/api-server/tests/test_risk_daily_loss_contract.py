@@ -45,6 +45,7 @@ def client(monkeypatch):
         return _dl.DailyLossSnapshot(
             date_local="2026-04-24",
             timezone="UTC",
+            trading_mode="live",
             realized_pnl_usd=-120.5,
             unrealized_pnl_usd=-25.0,
             net_pnl_usd=-145.5,
@@ -150,6 +151,7 @@ def test_daily_loss_endpoint_used_pct_math(client, monkeypatch):
         return _dl.DailyLossSnapshot(
             date_local="2026-04-24",
             timezone="UTC",
+            trading_mode="live",
             realized_pnl_usd=-100.0,
             unrealized_pnl_usd=0.0,
             net_pnl_usd=-100.0,

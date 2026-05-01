@@ -71,16 +71,29 @@ class _Patcher:
         self.halt_calls: list[str] = []
         self.alerts: list[dict] = []
 
-    async def _fake_fetch_inputs(self, today, tz_name="UTC"):
+    async def _fake_fetch_inputs(
+        self, today, tz_name="UTC", trading_mode="live"
+    ):
         # Mirrors the old per-helper bookkeeping so the existing TZ
         # assertions (last_tz_realized / last_tz_bankroll) still work
-        # with the collapsed single-query aggregate.
+        # with the collapsed single-query aggregate.  ``trading_mode``
+        # is the new #752 scope kwarg — captured so the new test file
+        # ``test_daily_loss_trading_mode.py`` can assert the right
+        # ledger was queried.
         self.fetch_inputs_calls += 1
         self.last_tz_realized = tz_name
         self.last_date_realized = today
         self.last_tz_bankroll = tz_name
         self.last_date_bankroll = today
+        self.last_fetch_trading_mode = trading_mode
         return float(self.realized), float(self.unrealized), self.bankroll
+
+    async def _fake_resolve_breaker_mode(self, overrides):
+        # Pin the breaker scope to a known mode for the existing fixtures
+        # (which all assume the live ledger).  The new mode-scoping
+        # tests call ``_dl._resolve_breaker_trading_mode`` directly and
+        # don't go through this patcher.
+        return "live"
 
     async def _fake_current_mode(self):
         return self.trading_mode
@@ -113,6 +126,9 @@ class _Patcher:
             patch.object(_dl, "_today_utc", lambda: self.today),
             patch.object(_dl, "_today_in_tz", lambda tz: self.today),
             patch.object(_dl, "_fetch_snapshot_inputs", self._fake_fetch_inputs),
+            patch.object(
+                _dl, "_resolve_breaker_trading_mode", self._fake_resolve_breaker_mode
+            ),
             patch.object(_dl, "_current_trading_mode", self._fake_current_mode),
             patch.object(_dl, "_persist_halt", self._fake_persist),
             patch(
@@ -476,9 +492,19 @@ def test_snapshot_uses_single_db_round_trip(monkeypatch):
          patch.object(_db, "fetchval", _spy_fetchval):
         snap = asyncio.run(_dl.compute_snapshot(None))
 
-    # Exactly one DB round-trip per snapshot — no per-input fetches.
-    assert len(db_calls) == 1
-    assert db_calls[0][0] == "fetchrow"
+    # Exactly one ``fetchrow`` round-trip per snapshot for the heavy
+    # aggregate — no per-input fetches.  The breaker also issues a
+    # cheap ``fetchval`` to resolve the operator's trading_mode (added
+    # in #752); pin both so a regression that fans the aggregate back
+    # out to N calls still trips this test.
+    fetchrows = [c for c in db_calls if c[0] == "fetchrow"]
+    fetchvals = [c for c in db_calls if c[0] == "fetchval"]
+    assert len(fetchrows) == 1, db_calls
+    assert len(fetchvals) <= 1, db_calls
+    # The aggregate's parameter list now ends with the trading_mode
+    # scope (Round-11 Bug #6); pin the kwarg position so a future
+    # rename doesn't silently leak across modes.
+    assert fetchrows[0][1][-1] in ("paper", "live")
     assert snap.realized_pnl_usd == -100.0
     assert snap.unrealized_pnl_usd == -25.0
     assert snap.start_of_day_bankroll_usd == 2500.0

@@ -38,7 +38,7 @@ def test_get_leagues_exposure_covers_multiple_leagues(monkeypatch):
     per_sunday = {"NFL": 250.0}
     per_event = {"UFC:UFC300": 80.0}
 
-    async def _fake_aggregates():
+    async def _fake_aggregates(*, trading_mode="live"):
         return (
             8,
             1080.0,
@@ -49,7 +49,7 @@ def test_get_leagues_exposure_covers_multiple_leagues(monkeypatch):
             per_event,
         )
 
-    async def _fake_bankroll():
+    async def _fake_bankroll(*, trading_mode="live"):
         return bankroll
 
     monkeypatch.setattr(cycle_mod, "_open_position_aggregates", _fake_aggregates)
@@ -118,13 +118,13 @@ def test_get_leagues_exposure_filters_zero_exposure_leagues(monkeypatch):
     from app import dashboard
     from app.orchestrator import cycle as cycle_mod
 
-    async def _fake_aggregates():
+    async def _fake_aggregates(*, trading_mode="live"):
         return (
             1, 50.0, {"sports": 50.0},
             {"NFL": 50.0}, {"NFL:BUF@MIA": 50.0}, {}, {},
         )
 
-    async def _fake_bankroll():
+    async def _fake_bankroll(*, trading_mode="live"):
         return 10_000.0
 
     monkeypatch.setattr(cycle_mod, "_open_position_aggregates", _fake_aggregates)
@@ -141,13 +141,13 @@ def test_get_leagues_exposure_handles_no_bankroll(monkeypatch):
     from app import dashboard
     from app.orchestrator import cycle as cycle_mod
 
-    async def _fake_aggregates():
+    async def _fake_aggregates(*, trading_mode="live"):
         return (
             1, 50.0, {"sports": 50.0},
             {"NFL": 50.0}, {"NFL:BUF@MIA": 50.0}, {}, {},
         )
 
-    async def _fake_bankroll():
+    async def _fake_bankroll(*, trading_mode="live"):
         return None
 
     monkeypatch.setattr(cycle_mod, "_open_position_aggregates", _fake_aggregates)
@@ -169,7 +169,7 @@ def test_get_leagues_exposure_surfaces_unconfigured_league(monkeypatch):
     from app import dashboard
     from app.orchestrator import cycle as cycle_mod
 
-    async def _fake_aggregates():
+    async def _fake_aggregates(*, trading_mode="live"):
         return (
             1, 25.0, {"sports": 25.0},
             {"WNBA": 25.0},        # no LEAGUE_CONFIGS entry
@@ -178,7 +178,7 @@ def test_get_leagues_exposure_surfaces_unconfigured_league(monkeypatch):
             {},
         )
 
-    async def _fake_bankroll():
+    async def _fake_bankroll(*, trading_mode="live"):
         return 5_000.0
 
     monkeypatch.setattr(cycle_mod, "_open_position_aggregates", _fake_aggregates)

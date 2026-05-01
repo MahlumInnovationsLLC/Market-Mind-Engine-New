@@ -1924,3 +1924,211 @@ return record
 
 Don't ship that to production — it re-contaminates the calibrator
 training set within a few hours.
+
+## 18. Trading-mode honesty: paper/live scoping, canary, pre-flight (Task #752)
+
+The platform runs paper and live trading side-by-side on a shared
+`trades` / `bankroll_events` / `positions` schema, distinguished by a
+`trading_mode` column. Round-11 audit (May 2026) found four leakage
+bugs where paper activity contaminated live signals (and vice-versa).
+This section documents the post-#752 contract and the operator-facing
+knobs the fixes added.
+
+### 18.1 Dashboard scoping
+
+Every read endpoint under `/api/dashboard/*` (overview, recent trades,
+vertical perf, verticals overview, tail risk exposure, placed-by,
+bankroll/recent, and `trades/{trade_ref}` deep-link) accepts an
+optional `trading_mode` query parameter (`paper` | `live`) and pushes
+the filter into the SQL `WHERE` clause via
+`dashboard._combine_where_and`. **The two ledgers are never mixed in
+a single query.**
+
+Resolution rules (`_resolve_dashboard_trading_mode` in `app/main.py`):
+
+* `trading_mode=paper` → paper-only
+* `trading_mode=live`  → live-only
+* omitted              → defaults to the current
+  `runtime_settings.trading_mode`; when that is `halt` we read the
+  **paper** ledger so a halted dashboard can never accidentally show
+  live numbers
+* anything else (typo, `all`) → HTTP 400 — the legacy `all` value is
+  explicitly rejected so the dashboard cannot mix the two ledgers
+
+The trade-detail route (`GET /api/dashboard/trades/{trade_ref}`)
+applies the same resolver, so deep-linking from a paper-mode list
+into a live trade ID returns 404 instead of cross-mode read.
+
+The exposure routes (`GET /api/dashboard/nfl-exposure` and
+`GET /api/dashboard/leagues-exposure`) accept the same
+`trading_mode=paper|live` parameter and forward it through
+`dashboard.get_*_exposure` into `_open_position_aggregates` /
+`_latest_bankroll`. When omitted they fall through the same
+`_resolve_dashboard_trading_mode` chain, so the cap-headroom panels
+reflect whichever ledger the operator is actively trading. **The
+underlying cycle helpers default to `live` for legacy caller safety
+— always pass `trading_mode=` explicitly from new dashboard or
+risk-gate code paths so paper mode does not silently read the live
+ledger.**
+
+To verify a route's filter is in effect on a degraded dashboard:
+
+```bash
+curl -s "$API/api/dashboard/overview?trading_mode=live" | jq '.kpis.bankroll_usd'
+curl -s "$API/api/dashboard/overview?trading_mode=paper" | jq '.kpis.bankroll_usd'
+```
+
+The two numbers MUST differ when both modes have activity. If they
+don't, check the route's call site for a missing `trading_mode=` kwarg
+on the `dashboard.*` query helper.
+
+### 18.2 Daily-loss circuit breaker scoping
+
+`risk.daily_loss._fetch_snapshot_inputs` filters its 4 CTEs on
+`trading_mode = $3`, where the breaker resolves the mode via
+`_resolve_breaker_trading_mode(overrides)`. The resolver maps:
+
+* `live`   → `live` (the common path)
+* `paper`  → `paper`
+* `halt`   → `live` (safer default — a halted system reads the live
+  ledger so re-enabling doesn't sneak through with a paper-only
+  loss budget)
+* anything else (typo, missing key) → `live`
+
+The snapshot cache key is `(date_local, tz, trading_mode)` so the
+two modes don't share cached numbers. **Symptom of regression**: a
+paper losing day "trips" the live breaker, or a live losing day is
+masked because the operator was reviewing paper.
+
+### 18.3 Bankroll ledger split + paper seed
+
+`bankroll_events.trading_mode` (migration `0041`) is `NOT NULL` with
+a CHECK constraint on `('paper','live')`. `bankroll_sync` calls
+`_latest_event_balance_cents(exchange, trading_mode)` on every
+read; the live polling loop hardcodes `trading_mode='live'` and the
+new `ensure_paper_bankroll_seeded()` helper writes one
+`reason='paper_seed'` row at startup per process.
+
+* `AXIOM_PAPER_BANKROLL_USD` (default `1000`): the seed amount in
+  USD. Set it before first boot if you want paper to start at a
+  different bankroll.
+* The seed is **idempotent** — once a paper row exists, subsequent
+  boots no-op. To reset, delete the row manually:
+  ```sql
+  DELETE FROM bankroll_events WHERE trading_mode = 'paper';
+  ```
+  Then restart the API to re-seed at the current `AXIOM_PAPER_BANKROLL_USD`.
+
+The pre-#752 bug: the latest-row lookup ignored `trading_mode`, so a
+paper seed of $1000 made the very first live observation of $250 look
+like a -$750 delta on the **live** ledger. Verify the fix is in place
+with:
+
+```sql
+SELECT trading_mode, count(*), max(occurred_at) FROM bankroll_events
+GROUP BY trading_mode;
+```
+
+Both ledgers should grow independently. Cross-mode contamination
+shows up as a single `paper_seed` row interleaved with live deltas.
+
+### 18.4 9-point pre-flight on `POST /api/orchestrator/live-execute`
+
+Flipping `enabled=true` (paper → live) now runs `app/orchestrator/preflight.run_preflight()`
+which evaluates 9 independent predicates **in this order**:
+
+1. `trading_mode_target` — marker, always passes (we wouldn't be here otherwise)
+2. `kill_switch` — process-wide kill switch is not tripped
+3. `bankroll_sanity` — live bankroll ≥ `AXIOM_PREFLIGHT_BANKROLL_FLOOR_USD` (default $100)
+4. `pipeline_health` — last `trading_cycles.started_at` ≤ `AXIOM_PREFLIGHT_CYCLE_MAX_MINUTES` (default 15) min ago
+5. `calibrator_freshness` — newest `calibration_snapshots` row with `drift_status='retrained'` ≤ `AXIOM_PREFLIGHT_CALIBRATOR_MAX_HOURS` (default 24) old
+6. `drift_status` — no calibrator with `drift_status='rolled_back'` in the last 6h
+7. `daily_loss_headroom` — used % of cap < `AXIOM_PREFLIGHT_DAILY_LOSS_MAX_USED_PCT` (default 90)
+8. `swarm_provider` — no primary LLM provider's 30-min fallback rate ≥ `AXIOM_PREFLIGHT_SWARM_FALLBACK_MAX_RATE` (default 0.30)
+9. `market_cooldowns` — count of currently-active `watchdog_market_cooldowns` ≤ `AXIOM_PREFLIGHT_MARKET_COOLDOWN_MAX_ACTIVE` (default 25)
+
+A single failure returns HTTP 409 with body:
+
+```json
+{
+  "detail": {
+    "code": "preflight_failed",
+    "failed_check": "kill_switch",
+    "hint": "Kill switch is TRIPPED — clear it via `POST /api/admin/kill-switch/reset` first.",
+    "checks": [ ...all 9, with .passed/.hint/.details... ]
+  }
+}
+```
+
+**No DB write happens on a failed pre-flight.** The flip back to
+paper (`enabled=false`) is **unconditional** — pre-flight does not
+gate going home. That asymmetry is deliberate: you can always
+rollback safely.
+
+#### Failure triage
+
+* `kill_switch`: `POST /api/admin/kill-switch/reset` (operator-only)
+* `bankroll_sanity`: top up the Kalshi account, wait for the next
+  `bankroll_sync` tick, retry
+* `pipeline_health`: check `axiom.orchestrator.cycle` workflow logs;
+  the scheduler is wedged
+* `calibrator_freshness`: `POST /api/orchestrator/retrain` for any
+  vertical, then retry
+* `drift_status`: investigate the rolled-back calibrator (see §6);
+  do **not** override
+* `daily_loss_headroom`: wait until tomorrow's reset (TZ-aware via
+  `risk.timezone`)
+* `swarm_provider`: investigate primary provider outage
+  (Anthropic/OpenAI status page)
+* `market_cooldowns`: query `watchdog_market_cooldowns` for the
+  ticker family driving the count; usually a Kalshi sectional outage
+
+To temporarily relax a check during a known-degraded window without
+a code change, override the env var on the API artifact and
+restart. **Do not leave overrides in place.** Track the override in
+the operator changelog with a clear "revert by" date.
+
+### 18.5 Canary mode (first 5 live trades after cutover)
+
+On a paper → live flip the route calls `risk.canary.ensure_initialized()`
+which writes `system_settings.risk.canary_remaining = AXIOM_CANARY_TRADES`
+(default `5`). While `remaining > 0`, every live trade in `place_order`
+is forced to `quantity = 1` regardless of what the Kelly sizer wanted,
+and stamped with `metadata.canary = true`.
+
+The settlement pipeline calls `risk.canary.decrement_on_settle(trade)`
+on every settled trade; the helper short-circuits unless
+`metadata.canary == true`. Decrement is on **settlement**, not
+placement — a trade rejected by the venue (slippage, dedupe, kill
+switch) never gets a metadata stamp and so doesn't consume a canary
+slot. The operator gets the full N-trade safety budget against actual
+end-to-end exchange round-trips.
+
+#### Operator knobs
+
+* `AXIOM_CANARY_TRADES`: number of trades to canary (default 5,
+  `0` disables canary, negative falls back to default)
+* Reset mid-canary by calling `risk.canary.reset(count)` from a
+  Python REPL on the API container, or by directly writing to
+  `system_settings`:
+  ```sql
+  UPDATE system_settings SET value = '5'
+   WHERE key = 'risk.canary_remaining';
+  ```
+* Verify canary state:
+  ```bash
+  curl -s "$API/api/orchestrator/live-execute" | jq .
+  ```
+  (the GET response surfaces effective_mode + db_mode; query
+  `system_settings.risk.canary_remaining` directly for the counter)
+
+#### Symptom of regression
+
+* Full-size live trades land within seconds of cutover → check that
+  `place_order` invokes `force_quantity_for_live` on the `not paper`
+  branch, and that the trades carry `metadata.canary = true`
+* Counter never decrements → check the settlement pipeline's
+  `_settle_one_trade` is calling `decrement_on_settle`
+* Counter goes negative → impossible by construction (the UPDATE
+  uses `greatest(0, ...)`); if you see a negative value, someone
+  manually wrote it

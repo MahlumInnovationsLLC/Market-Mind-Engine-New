@@ -321,26 +321,74 @@ def test_debate_by_id_404s_within_free_tier_delay_window(
 
 @pytest.fixture
 def patch_live_execute_db(monkeypatch):
-    """In-memory fake of the two queries the live-execute endpoints run."""
-    state: dict[str, Any] = {"value": None, "executes": []}
+    """In-memory fake of the two queries the live-execute endpoints run.
+
+    Also stubs :func:`app.orchestrator.preflight.run_preflight` to return
+    a passing result so the tier-gating assertions don't get masked by
+    a (legitimately) failing pre-flight on a stub DB.  Tests that want
+    to exercise the pre-flight path live in ``test_live_execute_preflight.py``.
+    """
+    # ``executes`` records *only* the trading-mode flips so the existing
+    # assertions stay tight; the canary seed writes (Task #752 step 5)
+    # are tracked separately in ``canary_executes``.
+    state: dict[str, Any] = {
+        "value": None, "executes": [], "canary": {"remaining": None},
+        "canary_executes": [],
+    }
 
     async def _fake_fetchval(query: str, *args: Any) -> Any:
+        # Trading-mode override.
         if "system_settings" in query and "risk.trading_mode" in query:
             return state["value"]
-        raise AssertionError(f"unexpected fetchval: {query!r}")
+        # Canary counter lookup (Task #752 step 5).  Live cutover calls
+        # ``ensure_initialized`` which does ``SELECT value FROM
+        # system_settings WHERE key = $1`` with key='risk.canary_remaining'.
+        if (
+            "system_settings" in query
+            and "WHERE key" in query
+            and args
+            and args[0] == "risk.canary_remaining"
+        ):
+            return state["canary"]["remaining"]
+        raise AssertionError(f"unexpected fetchval: {query!r} args={args!r}")
 
     async def _fake_execute(query: str, *args: Any) -> str:
-        if query.lstrip().upper().startswith("INSERT INTO SYSTEM_SETTINGS"):
+        upper = query.lstrip().upper()
+        if not upper.startswith("INSERT INTO SYSTEM_SETTINGS"):
+            raise AssertionError(f"unexpected execute: {query!r}")
+        # First positional arg is either the literal trading_mode value
+        # (legacy single-arg insert) or the key (two-arg insert used by
+        # the canary helpers).  Discriminate so legacy assertions only
+        # see paper/live values.
+        if args and args[0] in ("paper", "live", "halt"):
             state["value"] = args[0]
             state["executes"].append(args[0])
-            return "OK"
-        raise AssertionError(f"unexpected execute: {query!r}")
+        else:
+            # Canary seed / init-at write.
+            state["canary_executes"].append(args)
+            if args and args[0] == "risk.canary_remaining" and len(args) >= 2:
+                state["canary"]["remaining"] = args[1]
+        return "OK"
 
     from app import db as db_module
     from app import main as main_module
+    from app.orchestrator import preflight as _preflight
+
+    async def _passing_preflight() -> _preflight.PreflightResult:
+        return _preflight.PreflightResult(
+            passed=True,
+            checks=[
+                _preflight.PreflightCheck(
+                    id="trading_mode_target",
+                    label="Target mode = live",
+                    passed=True,
+                ),
+            ],
+        )
 
     monkeypatch.setattr(db_module, "fetchval", _fake_fetchval)
     monkeypatch.setattr(db_module, "execute", _fake_execute)
+    monkeypatch.setattr(_preflight, "run_preflight", _passing_preflight)
     # main.py uses ``db.fetchval`` / ``db.execute`` via module-level
     # ``from . import db``; the same patch above covers that import.
     assert main_module.db is db_module

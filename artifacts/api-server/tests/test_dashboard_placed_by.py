@@ -195,8 +195,15 @@ def captured_calls():
 
 
 def _stub_overview(monkeypatch, captured: list[Any]) -> None:
-    async def _fake(placed_by: str | None = None) -> dict[str, Any]:
-        captured.append({"fn": "overview", "placed_by": placed_by})
+    # The route now also threads ``trading_mode``; the stub captures
+    # both so the assertion harness can keep validating placed_by
+    # without each test caring about the new param.
+    async def _fake(
+        placed_by: str | None = None, *, trading_mode: str | None = None
+    ) -> dict[str, Any]:
+        captured.append(
+            {"fn": "overview", "placed_by": placed_by, "trading_mode": trading_mode}
+        )
         return {
             "counts": {"trades": 0},
             "latest_cycle_at": None,
@@ -235,7 +242,12 @@ def test_overview_forwards_placed_by_and_echoes_in_response(
     resp = client.get(f"/api/dashboard/overview{qs}")
 
     assert resp.status_code == 200, resp.text
-    assert captured_calls == [{"fn": "overview", "placed_by": expected_kwarg}]
+    # Strip the trading_mode key (added in #752) so the placed_by
+    # contract assertion stays focused on what this test exercises.
+    assert [
+        {k: v for k, v in c.items() if k != "trading_mode"}
+        for c in captured_calls
+    ] == [{"fn": "overview", "placed_by": expected_kwarg}]
     body = resp.json()
     # Echo lets the UI reconstruct the active toggle from the response
     # without re-parsing the URL — see T004/T005.
@@ -262,10 +274,18 @@ def test_overview_rejects_unknown_placed_by_with_422(
 
 def _stub_recent_trades(monkeypatch, captured: list[Any]) -> None:
     async def _fake(
-        limit: int = 25, placed_by: str | None = None
+        limit: int = 25,
+        placed_by: str | None = None,
+        *,
+        trading_mode: str | None = None,
     ) -> list[dict[str, Any]]:
         captured.append(
-            {"fn": "recent_trades", "limit": limit, "placed_by": placed_by}
+            {
+                "fn": "recent_trades",
+                "limit": limit,
+                "placed_by": placed_by,
+                "trading_mode": trading_mode,
+            }
         )
         return []
 
@@ -307,10 +327,18 @@ def test_recent_trades_forwards_placed_by(
 
 def _stub_vertical_perf(monkeypatch, captured: list[Any]) -> None:
     async def _fake(
-        days: int = 30, placed_by: str | None = None
+        days: int = 30,
+        placed_by: str | None = None,
+        *,
+        trading_mode: str | None = None,
     ) -> dict[str, Any]:
         captured.append(
-            {"fn": "vertical_perf", "days": days, "placed_by": placed_by}
+            {
+                "fn": "vertical_perf",
+                "days": days,
+                "placed_by": placed_by,
+                "trading_mode": trading_mode,
+            }
         )
         return {"days": days, "verticals": []}
 
@@ -344,10 +372,18 @@ def test_vertical_performance_forwards_placed_by(
 
 def _stub_verticals_overview(monkeypatch, captured: list[Any]) -> None:
     async def _fake(
-        days: int = 7, placed_by: str | None = None
+        days: int = 7,
+        placed_by: str | None = None,
+        *,
+        trading_mode: str | None = None,
     ) -> dict[str, Any]:
         captured.append(
-            {"fn": "verticals_overview", "days": days, "placed_by": placed_by}
+            {
+                "fn": "verticals_overview",
+                "days": days,
+                "placed_by": placed_by,
+                "trading_mode": trading_mode,
+            }
         )
         return {"days": days, "verticals": []}
 

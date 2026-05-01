@@ -215,24 +215,40 @@ async def _cancel_stale_resting_orders(
     }
 
 
-async def _latest_bankroll() -> float | None:
-    """Most recent bankroll, in dollars.
+async def _latest_bankroll(trading_mode: str = "live") -> float | None:
+    """Most recent bankroll, in dollars, scoped to ``trading_mode``.
 
     Prefers `bankroll_events` (fed by the continuous Kalshi balance sync —
     see `app.bankroll_sync`) so the floor gate always reflects the live
     exchange balance. Falls back to legacy `bankroll_snapshots` when the
     events table is empty (e.g. during the very first boot before the
     sync loop has ticked).
+
+    The ``trading_mode`` filter (Task #752 step 1) prevents paper-mode
+    bankroll deltas from leaking into the live cycle's risk gates and
+    vice versa.  Default ``"live"`` is the safe fallback for callers
+    that haven't been threaded yet — the legacy single-ledger world
+    was effectively all-live.
     """
+    mode = trading_mode if trading_mode in ("paper", "live") else "live"
     try:
         v = await db.fetchval(
             "SELECT balance_cents FROM bankroll_events "
-            "ORDER BY id DESC LIMIT 1"
+            "WHERE trading_mode = $1 "
+            "ORDER BY id DESC LIMIT 1",
+            mode,
         )
         if v is not None:
             return float(int(v)) / 100.0
     except Exception as e:
         log.debug("bankroll_events read failed: %s", e)
+    # `bankroll_snapshots` predates the trading_mode split and is only
+    # used as a last-resort fallback on an empty events table.  It is
+    # historically a live-only ledger; for paper-mode callers we skip
+    # the fallback entirely so paper bankroll never returns the live
+    # snapshot total.
+    if mode != "live":
+        return None
     try:
         v = await db.fetchval(
             "SELECT balance::float FROM bankroll_snapshots ORDER BY date DESC LIMIT 1"
@@ -243,7 +259,9 @@ async def _latest_bankroll() -> float | None:
         return None
 
 
-async def _open_position_aggregates() -> tuple[
+async def _open_position_aggregates(
+    trading_mode: str = "live",
+) -> tuple[
     int,
     float,
     dict[str, float],
@@ -270,6 +288,7 @@ async def _open_position_aggregates() -> tuple[
     come back empty and the gates short-circuit their sub-checks, leaving
     behavior identical to the legacy aggregate.
     """
+    mode = trading_mode if trading_mode in ("paper", "live") else "live"
     try:
         rows = await db.fetch(
             """
@@ -278,8 +297,10 @@ async def _open_position_aggregates() -> tuple[
                    coalesce(sum(p.quantity * p.avg_price), 0)::float AS notional
               FROM positions p
              WHERE coalesce(p.status, 'open') = 'open'
+               AND p.trading_mode = $1
              GROUP BY p.vertical
-            """
+            """,
+            mode,
         )
     except Exception as e:
         log.debug("open position aggregate failed: %s", e)
@@ -310,9 +331,11 @@ async def _open_position_aggregates() -> tuple[
               LEFT JOIN swarm_debates d ON d.id = p.debate_id
               LEFT JOIN games g ON g.game_id = d.game_id
              WHERE coalesce(p.status, 'open') = 'open'
+               AND p.trading_mode = $1
                AND coalesce(d.league, '') <> ''
              GROUP BY d.league, d.matchup, d.game_id
-            """
+            """,
+            mode,
         )
         for r in league_rows:
             league = str(r["league"] or "").upper()
@@ -346,14 +369,21 @@ async def _open_position_aggregates() -> tuple[
     )
 
 
-async def _today_trade_counts_per_league() -> dict[str, int]:
+async def _today_trade_counts_per_league(
+    trading_mode: str = "live",
+) -> dict[str, int]:
     """Returns the per-league count of trades executed during the current
     UTC day, joined to `swarm_debates.league` so soccer's per-matchday
     cap (task #196) can throttle churn.
 
+    Scoped to ``trading_mode`` (Task #752 step 1) so the daily-trade
+    gate of a live cycle isn't tripped by paper-mode placement churn
+    and vice versa.
+
     Best-effort: empty dict on any DB failure so the daily-trade gate
     short-circuits to a no-op rather than killing the cycle.
     """
+    mode = trading_mode if trading_mode in ("paper", "live") else "live"
     try:
         rows = await db.fetch(
             """
@@ -363,9 +393,11 @@ async def _today_trade_counts_per_league() -> dict[str, int]:
               LEFT JOIN swarm_debates d ON d.id = t.debate_id
              WHERE ((t.executed_at at time zone 'UTC')::date)
                    = (now() at time zone 'UTC')::date
+               AND t.trading_mode = $1
                AND coalesce(d.league, '') <> ''
              GROUP BY upper(coalesce(d.league, ''))
-            """
+            """,
+            mode,
         )
     except Exception as e:
         log.debug("today trade counts per league failed: %s", e)
@@ -1365,7 +1397,12 @@ async def run_cycle(vertical: str = "sports") -> CycleResult:
         await _close_cycle(result, started)
         return result
 
-    bankroll = await _latest_bankroll()
+    # Task #752 step 1: thread the cycle's resolved trading_mode into
+    # every read-side risk aggregate so paper-mode bankroll deltas /
+    # open positions / today-trade churn never leak into a live cycle's
+    # gates and vice versa.  The cycle's ``effective_mode`` is one of
+    # paper|live by this point (halt was already short-circuited above).
+    bankroll = await _latest_bankroll(trading_mode=effective_mode)
     (
         open_n,
         open_notional,
@@ -1374,8 +1411,10 @@ async def run_cycle(vertical: str = "sports") -> CycleResult:
         per_matchup,
         per_sunday_window,
         per_event,
-    ) = await _open_position_aggregates()
-    trades_today_per_league = await _today_trade_counts_per_league()
+    ) = await _open_position_aggregates(trading_mode=effective_mode)
+    trades_today_per_league = await _today_trade_counts_per_league(
+        trading_mode=effective_mode
+    )
 
     # Best-effort cap-bucket warn check: page the on-call when any
     # NFL exposure bucket (per-league, per-game, Sunday-window)
