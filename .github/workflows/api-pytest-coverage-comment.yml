@@ -7,10 +7,11 @@ name: api-pytest coverage comment
 #     `python-coverage-comment-action-data` branch so future PR deltas are
 #     compared against an up-to-date main.
 
+# Disabled — upstream `api-pytest` no longer runs on push, but
+# neutralize this one too. Manual-only. Re-enable by restoring the
+# workflow_run trigger below.
 on:
-  workflow_run:
-    workflows: ["api-pytest"]
-    types: [completed]
+  workflow_dispatch:
 
 jobs:
   post-coverage-comment:

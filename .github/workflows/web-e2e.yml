@@ -1,10 +1,8 @@
 name: web-e2e
 
+# Disabled on push/PR — manual-only. Re-enable by restoring the
+# push/pull_request triggers below. Replit is the active CI today.
 on:
-  push:
-    branches: [main]
-  pull_request:
-    branches: [main]
   workflow_dispatch:
 
 concurrency:

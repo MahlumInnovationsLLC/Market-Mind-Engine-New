@@ -24,13 +24,9 @@ name: gh-pages-prune
 #   * Re-renders the gh-pages landing-page `index.html` so it no longer
 #     points at any reports that were just pruned.
 
+# Disabled on schedule/PR-close — manual-only. Re-enable by restoring
+# the schedule + pull_request triggers below.
 on:
-  schedule:
-    # Daily at 04:17 UTC. Off-peak, and odd-minute to avoid the top-of-hour
-    # GitHub Actions runner contention.
-    - cron: "17 4 * * *"
-  pull_request:
-    types: [closed]
   workflow_dispatch:
     inputs:
       pr_max_age_days:

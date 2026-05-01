@@ -18,10 +18,11 @@ name: frontend coverage comment
 # access on forks), and this followup runs at base-repo privilege so
 # it can push to the data branch and post the comment safely.
 
+# Disabled — upstream web-vitest / mobile-jest no longer run on push,
+# but neutralize this one too. Manual-only. Re-enable by restoring the
+# workflow_run trigger below.
 on:
-  workflow_run:
-    workflows: ["web-vitest", "mobile-jest"]
-    types: [completed]
+  workflow_dispatch:
 
 permissions:
   contents: write

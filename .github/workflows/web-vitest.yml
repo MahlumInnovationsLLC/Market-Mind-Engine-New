@@ -11,11 +11,9 @@ name: web-vitest
 # forks (where `pull-requests: write` is not granted to the original PR
 # run, but IS granted to the privileged `workflow_run` followup).
 
+# Disabled on push/PR — manual-only. Re-enable by restoring the
+# push/pull_request triggers below. Replit is the active CI today.
 on:
-  push:
-    branches: [main]
-  pull_request:
-    branches: [main]
   workflow_dispatch:
 
 concurrency:

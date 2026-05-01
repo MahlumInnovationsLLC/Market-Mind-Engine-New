@@ -8,11 +8,9 @@ name: api-client-react-vitest
 # wired up, so we just run `vitest run` and let GitHub surface the
 # pass/fail status.
 
+# Disabled on push/PR — manual-only. Re-enable by restoring the
+# push/pull_request triggers below. Replit is the active CI today.
 on:
-  push:
-    branches: [main]
-  pull_request:
-    branches: [main]
   workflow_dispatch:
 
 concurrency:
