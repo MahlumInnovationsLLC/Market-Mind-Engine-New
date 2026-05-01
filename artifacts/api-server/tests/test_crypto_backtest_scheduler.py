@@ -552,6 +552,10 @@ def test_loop_invokes_run_backtest_for_each_pair_each_cadence(
     per pair before stopping the loop.
     """
     monkeypatch.setenv("CRYPTO_BACKTEST_SCHEDULER_ENABLED", "1")
+    # Disable the per-sweep calibrator refit hook (#754) — this test
+    # exercises pair-iteration cadence only and the refit path makes
+    # real DB calls we don't want to mock here.
+    monkeypatch.setenv("CRYPTO_BACKTEST_REFIT_CALIBRATORS", "0")
     # Bypass the 60s floor in _interval_seconds() so the cadence loop
     # ticks immediately and the test stays fast.
     monkeypatch.setattr(_bts, "_interval_seconds", lambda: 0.01)
@@ -617,6 +621,8 @@ def test_status_reflects_recent_sweep(
     """`status()` should expose the most-recent sweep's outcome so the
     operator console can detect a stuck loop without tailing logs."""
     monkeypatch.setenv("CRYPTO_BACKTEST_SCHEDULER_ENABLED", "1")
+    # See #754 note above — disable refit hook for cadence-only tests.
+    monkeypatch.setenv("CRYPTO_BACKTEST_REFIT_CALIBRATORS", "0")
     monkeypatch.setattr(_bts, "_interval_seconds", lambda: 0.01)
     monkeypatch.setattr(
         _bts, "supported_pairs", lambda: [("BTC", "1h"), ("ETH", "15m")]
@@ -689,6 +695,8 @@ def test_loop_continues_after_a_pair_failure(
     """If `run_backtest` raises for one pair, the loop must still
     invoke the next pair (per-pair failures are non-fatal)."""
     monkeypatch.setenv("CRYPTO_BACKTEST_SCHEDULER_ENABLED", "1")
+    # See #754 note above — disable refit hook for cadence-only tests.
+    monkeypatch.setenv("CRYPTO_BACKTEST_REFIT_CALIBRATORS", "0")
     monkeypatch.setattr(_bts, "_interval_seconds", lambda: 0.01)
     monkeypatch.setattr(
         _bts, "supported_pairs", lambda: [("BTC", "1h"), ("ETH", "15m")]
