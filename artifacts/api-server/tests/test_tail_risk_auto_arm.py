@@ -24,6 +24,9 @@ from app.notifications import alerts as alerts_mod
 from app.risk import gates as gates_mod
 
 
+_MISSING = object()
+
+
 # ---------------------------------------------------------------------------
 # Shared in-memory DB stub — reads/writes the rows the auto-arm function
 # touches: `system_settings` (SELECT by key, INSERT, DELETE) and
@@ -55,12 +58,18 @@ class _MemoryDb:
         async def fetchval(self, sql: str, *args: Any) -> Any:
             if "INSERT INTO system_settings" in sql and "RETURNING key" in sql:
                 key, value = args[0], args[1]
-                # `ON CONFLICT (key) DO NOTHING RETURNING key` — return
-                # the key only when the insert actually happened.
-                if key in self.parent.system_settings:
-                    return None
-                self.parent.system_settings[key] = value
-                return key
+                # `ON CONFLICT (key) DO UPDATE ... WHERE value IS NULL
+                # OR value = '' RETURNING key` — return the key when
+                # we inserted OR when we updated a NULL/empty row;
+                # otherwise return None.
+                current = self.parent.system_settings.get(key, _MISSING)
+                if current is _MISSING:
+                    self.parent.system_settings[key] = value
+                    return key
+                if current is None or current == "":
+                    self.parent.system_settings[key] = value
+                    return key
+                return None
             return None
 
         async def execute(self, sql: str, *args: Any) -> str:
@@ -162,6 +171,39 @@ def test_auto_arm_preserves_existing_operator_override(mem_db):
     assert armed_keys == {"max_tail_loss_usd", "max_tail_notional_usd"}
     preserved_keys = {row["key"] for row in result["preserved"]}
     assert preserved_keys == {"tail_price_threshold", "jumbo_quantity_cap"}
+
+
+def test_auto_arm_promotes_null_value_row_to_default(mem_db):
+    """If `system_settings.value IS NULL` (or empty string) for one of
+    the four knobs — for example because an operator deleted the value
+    but left the row, or an aborted migration left a half-written row —
+    auto-arm MUST write the default into that row so the gate is not
+    silently disarmed in production.  Non-NULL operator overrides are
+    still preserved in the same run."""
+    # Two rows exist but with NULL/empty `value` — gate is disarmed.
+    mem_db.system_settings["risk.tail_price_threshold"] = None
+    mem_db.system_settings["risk.max_tail_loss_usd"] = ""
+    # One real operator override that must NOT be touched.
+    mem_db.system_settings["risk.jumbo_quantity_cap"] = "0"
+    # `risk.max_tail_notional_usd` is missing entirely.
+
+    result = asyncio.run(runtime_settings_mod.ensure_tail_risk_defaults_armed())
+
+    # The two NULL/empty rows + the missing one were all armed to defaults.
+    assert mem_db.system_settings["risk.tail_price_threshold"] == "0.1"
+    assert mem_db.system_settings["risk.max_tail_loss_usd"] == "400.0"
+    assert mem_db.system_settings["risk.max_tail_notional_usd"] == "400.0"
+    # The real operator override survived.
+    assert mem_db.system_settings["risk.jumbo_quantity_cap"] == "0"
+
+    armed_keys = {row["key"] for row in result["armed"]}
+    assert armed_keys == {
+        "tail_price_threshold",
+        "max_tail_loss_usd",
+        "max_tail_notional_usd",
+    }
+    preserved_keys = {row["key"] for row in result["preserved"]}
+    assert preserved_keys == {"jumbo_quantity_cap"}
 
 
 def test_auto_arm_default_values_match_in_code_gate_fallbacks():
@@ -436,6 +478,118 @@ def test_alert_dispatch_failure_does_not_break_gate(monkeypatch):
     # Veto verdict and reason still surface even when the alert blew up.
     assert res.passed is False
     assert "jumbo cap" in res.reason
+
+
+def test_tail_risk_gate_trip_dispatches_to_telegram(monkeypatch):
+    """Task #750 step 4 explicitly requires gate trips reach the
+    *existing* alert pipeline = Telegram + email.  This test stubs both
+    the email path (`_dispatch`) and the Telegram broadcast and asserts
+    BOTH are invoked on a real (non-dry-run) gate trip."""
+    email_calls: list[dict[str, Any]] = []
+    tg_calls: list[str] = []
+
+    def _capture_dispatch(subject, body, *, tag, dry_run=False, **k):
+        email_calls.append(
+            {"subject": subject, "body": body, "tag": tag, "dry_run": dry_run}
+        )
+        return {
+            "queued": True,
+            "tag": tag,
+            "subject": subject,
+            "body_preview": body,
+            "user_pref_column": "email_drift",
+            "dry_run": dry_run,
+        }
+
+    monkeypatch.setattr(alerts_mod, "_dispatch", _capture_dispatch, raising=True)
+
+    # Stub the Telegram module that `tail_risk_gate_trip` imports
+    # lazily so we can assert the broadcast was invoked without
+    # touching the real bot.
+    import sys
+    import types
+
+    fake_tg_pkg = types.ModuleType("app.telegram")
+    fake_tg_notify = types.ModuleType("app.telegram.notify")
+
+    def _fake_broadcast(msg: str) -> None:
+        tg_calls.append(msg)
+
+    fake_tg_notify.broadcast_in_background = _fake_broadcast
+    fake_tg_pkg.notify = fake_tg_notify
+    monkeypatch.setitem(sys.modules, "app.telegram", fake_tg_pkg)
+    monkeypatch.setitem(sys.modules, "app.telegram.notify", fake_tg_notify)
+
+    out = alerts_mod.tail_risk_gate_trip(
+        gate_name="jumbo_quantity_cap",
+        market_id="KXNFLPATBUF-25NOV03",
+        vertical="sports",
+        side="YES",
+        intended_quantity=2_000,
+        current_price=0.42,
+        reason="jumbo cap: qty 2000 > cap 750",
+        details={"jumbo_quantity_cap": 750},
+        dry_run=False,
+    )
+
+    # Email path was hit.
+    assert len(email_calls) == 1
+    assert email_calls[0]["tag"] == "tail-risk-gate-trip"
+    assert email_calls[0]["dry_run"] is False
+    # Telegram broadcast was hit, with subject + body in the message.
+    assert len(tg_calls) == 1
+    assert "jumbo_quantity_cap" in tg_calls[0]
+    assert "KXNFLPATBUF-25NOV03" in tg_calls[0]
+    # Caller still gets the email-side return value.
+    assert out["tag"] == "tail-risk-gate-trip"
+
+
+def test_tail_risk_gate_trip_telegram_failure_does_not_break_email(monkeypatch):
+    """Telegram broadcast failures must NOT shadow the email path or
+    raise — the email queue still has to fire."""
+    email_calls: list[dict[str, Any]] = []
+
+    def _capture_dispatch(subject, body, *, tag, dry_run=False, **k):
+        email_calls.append({"subject": subject, "tag": tag})
+        return {
+            "queued": True,
+            "tag": tag,
+            "subject": subject,
+            "body_preview": body,
+            "user_pref_column": "email_drift",
+            "dry_run": dry_run,
+        }
+
+    monkeypatch.setattr(alerts_mod, "_dispatch", _capture_dispatch, raising=True)
+
+    import sys
+    import types
+
+    fake_tg_pkg = types.ModuleType("app.telegram")
+    fake_tg_notify = types.ModuleType("app.telegram.notify")
+
+    def _exploding_broadcast(_msg: str) -> None:
+        raise RuntimeError("telegram api down")
+
+    fake_tg_notify.broadcast_in_background = _exploding_broadcast
+    fake_tg_pkg.notify = fake_tg_notify
+    monkeypatch.setitem(sys.modules, "app.telegram", fake_tg_pkg)
+    monkeypatch.setitem(sys.modules, "app.telegram.notify", fake_tg_notify)
+
+    # Must not raise.
+    out = alerts_mod.tail_risk_gate_trip(
+        gate_name="tail_price_size_cap",
+        market_id="X",
+        vertical="sports",
+        side="YES",
+        intended_quantity=10,
+        current_price=0.05,
+        reason="test",
+        dry_run=False,
+    )
+    # Email was still queued.
+    assert len(email_calls) == 1
+    assert out["tag"] == "tail-risk-gate-trip"
 
 
 def test_tail_risk_gate_trip_alert_dry_run_renders_subject_and_body():

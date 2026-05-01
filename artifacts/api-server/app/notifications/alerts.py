@@ -2121,9 +2121,21 @@ def tail_risk_gate_trip(
         + _format_lines(rows)
         + "\n"
     )
-    return _dispatch(
+    result = _dispatch(
         subject, body, tag="tail-risk-gate-trip", dry_run=dry_run
     )
+    # Task #750 step 4: surface gate trips through the existing
+    # alert pipeline — that means *both* email (via `_dispatch`
+    # above) *and* Telegram broadcast, in line with how halt-class
+    # alerts are wired in this module.  Telegram failures must not
+    # shadow the email path.
+    if not dry_run:
+        try:
+            from ..telegram import notify as _tg_notify
+            _tg_notify.broadcast_in_background(f"{subject}\n\n{body}")
+        except Exception as e:  # pragma: no cover — broadcast must not break alerting
+            log.warning("tail-risk telegram broadcast failed: %s", e)
+    return result
 
 
 # ---------------------------------------------------------------------------

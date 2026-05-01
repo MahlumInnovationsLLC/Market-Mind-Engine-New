@@ -1003,22 +1003,37 @@ async def ensure_tail_risk_defaults_armed() -> dict[str, Any]:
                 "tail-risk auto-arm read failed for %s: %s", full_key, e
             )
             continue
-        if existing is not None:
+        # A non-empty existing value is an operator override and must
+        # be preserved verbatim.  We treat both `NULL`/missing AND an
+        # empty string as "needs arming" so a half-written row from
+        # an aborted migration doesn't leave the gate disarmed.
+        existing_str = (
+            str(existing).strip() if existing is not None else ""
+        )
+        if existing_str != "":
             preserved.append({"key": key, "value": existing})
             continue
         try:
-            # `RETURNING key` distinguishes a real insert from the
-            # multi-replica race where two pods boot in parallel, both
-            # see the row missing, and both run this INSERT.  Only the
-            # winner gets a row back; the loser must report this knob
-            # as `preserved` (the value the winner wrote) so the audit
-            # log doesn't claim writes the loser didn't perform.
+            # The `WHERE system_settings.value IS NULL OR ... = ''`
+            # clause covers the "row exists with NULL value" case the
+            # task spec calls out (an operator deleted the value but
+            # left the row).  `RETURNING key` distinguishes a real
+            # write from the multi-replica race where two pods boot
+            # in parallel, both see the row missing/NULL, and both
+            # run this statement.  Only the winner gets a row back;
+            # the loser must report the knob as `preserved` (the
+            # value the winner wrote) so the audit log doesn't claim
+            # writes the loser didn't perform.
             async with db.acquire() as c:
                 inserted_key = await c.fetchval(
                     """
                     INSERT INTO system_settings (key, value, updated_at)
                     VALUES ($1, $2, now())
-                    ON CONFLICT (key) DO NOTHING
+                    ON CONFLICT (key) DO UPDATE
+                        SET value = EXCLUDED.value,
+                            updated_at = now()
+                        WHERE system_settings.value IS NULL
+                           OR system_settings.value = ''
                     RETURNING key
                     """,
                     full_key,
