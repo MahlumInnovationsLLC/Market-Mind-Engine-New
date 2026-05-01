@@ -264,7 +264,7 @@ def _classify_drift(
     """Return ``(tone, why)`` — tone in ``{"green","yellow","red"}``.
 
     Order matters: RED beats YELLOW beats GREEN.  Thresholds match the
-    runbook section 18 documentation so what the operator reads in the
+    runbook section 21 documentation so what the operator reads in the
     report is exactly what they read on the runbook page.
     """
     why: list[str] = []
@@ -323,7 +323,6 @@ async def collect_calibrator_drift_status() -> dict[str, Any]:
               FROM calibration_snapshots
              WHERE sub_category LIKE 'per_league:%'
                AND COALESCE(role, 'champion') = 'champion'
-               AND COALESCE(drift_status->>'status', '') <> 'rolled_back'
              ORDER BY sub_category, created_at DESC
             """
         )
@@ -497,6 +496,31 @@ def _fmt_pct(v: Any) -> str:
         return str(v)
 
 
+def _divergence_bar(delta: float, *, width: int = 24, hi: float = 0.10) -> str:
+    """Tiny ASCII bar for the divergence chart.  ``hi`` is full-scale."""
+    if delta is None or delta != delta or delta < 0:
+        return "·" * width
+    filled = min(width, int(round((delta / hi) * width)))
+    return "█" * filled + "·" * (width - filled)
+
+
+def _dashboard_url(path: str) -> str | None:
+    """Stand-in for the operator's screenshot — link to the live tile.
+
+    A true PNG screenshot would require a headless-browser dependency we
+    don't carry in the cron container; an authenticated link to the live
+    dashboard delivers the same operator value with one click and stays
+    correct as the tile evolves.
+    """
+    base = os.environ.get("DASHBOARD_BASE_URL") or ""
+    base = base.strip().rstrip("/")
+    if not base:
+        return None
+    if not path.startswith("/"):
+        path = "/" + path
+    return f"{base}{path}"
+
+
 def render_text(payload: dict[str, Any]) -> tuple[str, str]:
     """Render ``(subject, body)`` for the operator broadcast."""
     date_utc = payload.get("date_utc") or "(unknown)"
@@ -504,7 +528,7 @@ def render_text(payload: dict[str, Any]) -> tuple[str, str]:
 
     lines: list[str] = []
 
-    # Section 1 — divergence
+    # Section 1 — divergence (with ASCII bar chart per league)
     div = payload.get("divergence") or {}
     lines.append("== 1. Shadow-vs-live divergence (last "
                  f"{div.get('days', '?')}d, |Brier delta| per league) ==")
@@ -513,7 +537,18 @@ def render_text(payload: dict[str, Any]) -> tuple[str, str]:
     elif not div.get("items") and not div.get("samples_too_small"):
         lines.append("  no settled rows on either side yet")
     else:
-        for it in div.get("items") or []:
+        items = list(div.get("items") or [])
+        if items:
+            lines.append("  chart (full scale = 0.10 |Δbrier|):")
+            for it in items:
+                lines.append(
+                    f"    {it['league']:>8s} "
+                    f"|{_divergence_bar(it['abs_delta'])}| "
+                    f"Δ={it['abs_delta']:.4f}"
+                )
+            lines.append("")
+            lines.append("  detail:")
+        for it in items:
             lines.append(
                 f"  {it['league']:>8s}  Δ={it['abs_delta']:.4f}  "
                 f"live={it['brier_live']:.4f} (n={it['n_live']})  "
@@ -575,6 +610,9 @@ def render_text(payload: dict[str, Any]) -> tuple[str, str]:
             f"  threshold_price   = {tr.get('threshold_price') or '(n/a)'}"
         )
         lines.append(f"  source            = {tr.get('source') or '(n/a)'}")
+        dash_url = _dashboard_url("/dashboard/risk")
+        if dash_url:
+            lines.append(f"  live tile         = {dash_url}")
     lines.append("")
 
     # Section 4 — gate trips
@@ -593,7 +631,7 @@ def render_text(payload: dict[str, Any]) -> tuple[str, str]:
             )
     lines.append("")
     lines.append(
-        "Read the runbook section 18 for what each red signal means."
+        "Read the runbook section 21 for what each red signal means."
     )
     body = "\n".join(lines) + "\n"
     return subject, body
@@ -755,7 +793,7 @@ def render_html(payload: dict[str, Any]) -> str:
 
     parts.append(
         "<p style=\"color:#666;font-size:12px;margin-top:24px;\">"
-        "Read the runbook section 18 for what each red signal means.</p>"
+        "Read the runbook section 21 for what each red signal means.</p>"
     )
     parts.append("</body></html>")
     return "".join(parts)

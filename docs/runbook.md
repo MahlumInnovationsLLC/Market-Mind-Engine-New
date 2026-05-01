@@ -2476,11 +2476,19 @@ signals (Task #756 / roadmap T-21):
    `dashboard.get_tail_risk_exposure(days=30)`: `tail_max_loss_usd`,
    `total_max_loss_usd`, % of portfolio exposed to the tail bucket,
    the dashboard tile's tone, and the threshold price used to slice
-   markets into the tail bucket.
+   markets into the tail bucket. When `DASHBOARD_BASE_URL` is set, the
+   report appends a one-click link to the live tile (used in lieu of a
+   literal screenshot since the cron container has no headless
+   browser).
 4. **Risk-gate trips (last 24 h)** — count of rows in
    `risk_gate_trips` per `gate_name`. Tail-risk gate trips are written
    here unconditionally (even when the broadcast is deduped) so the
-   operator can see what *would* have alerted overnight.
+   operator can see what *would* have alerted overnight. **Scope
+   today**: only the tail-risk gate writes `risk_gate_trips` rows; the
+   notional-cap, daily-loss, canary, and vertical-halt gates still emit
+   alerts without persisting structured rows. Follow-up task #763
+   widens coverage so this panel becomes a single source of truth for
+   all gate behaviour.
 
 ### What red looks like
 
