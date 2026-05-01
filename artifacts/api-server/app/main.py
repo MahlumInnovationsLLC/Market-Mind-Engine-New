@@ -1085,20 +1085,10 @@ async def public_tail_risk_exposure(
     placed_by: Literal["manual", "system", "all"] = "all",
     vertical: str | None = None,
 ) -> dict[str, object]:
-    """Public — bucketed open-exposure + realized-PnL matrix backing the
-    operator dashboard's tail-risk tile (task #744).
+    """Public — tail-risk exposure matrix for the dashboard tile.
 
-    Same query-param shape as ``/api/public/equity-curve`` so the
-    dashboard tile threads the operator's Manual / System / Both
-    selection (`placed_by`) and the `VerticalPicker` chip selection
-    (`vertical` CSV) into the read-model in lock-step with every other
-    panel that respects those filters.
-
-    Unknown vertical names raise HTTP 400 — silently returning the
-    unfiltered matrix on a typo would be a P&L-display foot-gun on a
-    surface whose entire purpose is to highlight where today's risk
-    concentration lives, identical to the trust-boundary stance the
-    equity-curve route already takes.
+    Same query-param shape as ``/api/public/equity-curve``; unknown
+    vertical names raise HTTP 400.
     """
     clamped_days = max(1, min(int(days), 365))
     try:
@@ -1108,9 +1098,6 @@ async def public_tail_risk_exposure(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     verticals_echo = dashboard._normalize_verticals(vertical)
-    # `result` already carries `days` so the client can verify the
-    # clamped value; we add `placed_by` + `verticals` so the same UI
-    # contract as `/api/public/equity-curve` is preserved.
     return {
         **result,
         "placed_by": placed_by,

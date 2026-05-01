@@ -155,10 +155,6 @@ describe("TailRiskExposure (mobile)", () => {
   });
 
   it("respects the dashboard period selector via the `days`/`period` props", async () => {
-    // Simulate the dashboard screen passing through the operator's
-    // `7D` selection (Period = 7).  The tile must request that window
-    // instead of always asking for 30, and the section header eyebrow
-    // must mirror the label.
     mockApiFetch.mockResolvedValueOnce(emptyResponse());
     renderTile({ days: 7, period: 7 });
     await waitFor(() => expect(mockApiFetch).toHaveBeenCalled());
@@ -299,10 +295,6 @@ describe("TailRiskExposure (mobile)", () => {
   });
 
   it("renders the per-vertical breakdown when a bucket has multiple verticals", async () => {
-    // Asserts the matrix view: when a single bucket carries more than
-    // one vertical, mobile renders the per-cell sub-rows so the
-    // operator sees which slice owns the exposure (parity with the
-    // web table's nested per-vertical rows).
     const r = emptyResponse();
     r.buckets[0].rows = [
       {

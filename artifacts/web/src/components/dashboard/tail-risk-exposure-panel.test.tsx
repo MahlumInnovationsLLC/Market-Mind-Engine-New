@@ -21,11 +21,7 @@ vi.mock("@/components/dashboard/placed-by-context", () => ({
   usePlacedBy: () => ({ placedBy: state.placedBy, setPlacedBy: vi.fn() }),
 }));
 
-// Mock the period context so the panel can be rendered standalone
-// without a `<PeriodProvider>` parent (which the existing tests don't
-// set up).  Keep the default at 30/30d so the historical `days=30`
-// assertions still hold; individual tests can mutate `state.period`
-// to verify period-selector wiring.
+// Mock the period context so the panel can be rendered standalone.
 vi.mock("@/components/dashboard/period-context", () => ({
   usePeriod: () => ({
     period: state.period,
@@ -162,9 +158,6 @@ describe("TailRiskExposurePanel", () => {
   });
 
   it("respects the period selector — `days` flows through from usePeriod()", async () => {
-    // Simulate the operator clicking the `7D` button on the dashboard
-    // PeriodStrip.  The tile must thread that through to the request
-    // (and into its cache key) instead of always asking for 30 days.
     state.period = "7d";
     state.days = 7;
     state.fetchResponses = [{ ok: true, body: emptyBody() }];

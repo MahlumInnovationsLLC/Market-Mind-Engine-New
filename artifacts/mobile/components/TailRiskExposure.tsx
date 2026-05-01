@@ -71,9 +71,7 @@ function fmtPct(n: number | null, digits = 1): string {
 }
 
 function fmtEv(n: number | null): string {
-  // EV/trade is a small dollar number per trade — show 2 dp + an
-  // explicit sign so a $0.50 edge doesn't round to "$1" and a −$0.30
-  // drag doesn't round to "$0".
+  // 2 dp + explicit sign so small EV per trade doesn't round to $0.
   if (n === null || Number.isNaN(n)) return "—";
   const sign = n > 0 ? "+" : n < 0 ? "-" : "";
   return `${sign}$${Math.abs(n).toLocaleString(undefined, {
@@ -86,9 +84,7 @@ function fmtPriceThreshold(p: number): string {
   return `$${p.toFixed(2)}`;
 }
 
-// Default threshold for the headline copy when the server hasn't
-// returned one yet (mid-loading) — must match `_TAIL_PRICE_THRESHOLD`
-// in `artifacts/api-server/app/dashboard.py`.
+// First-paint fallback; mirrors `_TAIL_PRICE_THRESHOLD` in dashboard.py.
 const DEFAULT_TAIL_THRESHOLD = 0.2;
 
 const TONE_LABEL: Record<TailRiskExposure["tail_concentration"]["tone"], string> = {
@@ -99,19 +95,9 @@ const TONE_LABEL: Record<TailRiskExposure["tail_concentration"]["tone"], string>
 };
 
 type TailRiskExposureProps = {
-  /**
-   * Window length in days to bucket — wired from the dashboard's
-   * period selector (1 / 7 / 30 / 365) so the tile narrows in
-   * lock-step with KPI cards and the verticals strip.  Defaults to
-   * 30 to preserve historical behaviour and keep the test harness
-   * compatible with `<TailRiskExposure />` with no props.
-   */
+  /** Window length in days (defaults to 30). */
   days?: number;
-  /**
-   * Optional pretty label (e.g. `1`, `7`, `30`, `365`) shown in the
-   * section header eyebrow.  Falls back to `${days}D` so callers that
-   * only pass `days` still get a sensible label.
-   */
+  /** Pretty period (1/7/30/365) used for the section eyebrow. */
   period?: number;
 };
 
@@ -128,12 +114,6 @@ export default function TailRiskExposure({
 }: TailRiskExposureProps = {}) {
   const colors = useColors();
   const { placedBy } = usePlacedBy();
-  // Same source as the web `TailRiskExposurePanel` — combine the
-  // operator's chip selection with admin-managed hidden-vertical
-  // suppression so a non-admin can never see exposure from a hidden
-  // vertical (parity with `useVerticalFilter().effectiveVerticals` on
-  // web).  Sort before joining so the cache key is stable regardless of
-  // click order.
   const effective = useEffectiveVerticals();
   const verticalsCsv = effective.slice().sort().join(",");
   const periodLabel = PERIOD_LABEL[period ?? days] ?? `${days}D`;
@@ -211,9 +191,6 @@ export default function TailRiskExposure({
                 <Text
                   style={[styles.headlineValue, { color: toneColor }]}
                   testID="tail-risk-headline-value"
-                  // RNTL queries data-* via the `accessibilityLabel`
-                  // hint slot — but for headless jest we expose the
-                  // tone via testID + a visible badge instead.
                 >
                   {fmtPct(concentration.pct)}
                 </Text>
@@ -244,18 +221,12 @@ export default function TailRiskExposure({
                   b.totals.open_count > 0 || b.totals.realized_count > 0,
               )
               .map((b, idx) => {
-                // Server-owned tail flag: only true when the WHOLE
-                // bucket sits below the threshold (the $0.10–$0.25
-                // bucket straddles $0.20 so it stays unflagged even
-                // though some of its rows feed the headline).
                 const isTail = b.is_tail;
                 const winRate =
                   b.totals.realized_count > 0
                     ? b.totals.realized_wins / b.totals.realized_count
                     : null;
-                // Per-vertical cells, sorted by max-loss desc — gives
-                // mobile the same matrix view as web inside each
-                // visible bucket without bloating the tile.
+                // Per-vertical cells, sorted by max-loss desc.
                 const cells = b.rows
                   .slice()
                   .sort((a, c) => c.open_max_loss_usd - a.open_max_loss_usd);
@@ -325,51 +296,47 @@ export default function TailRiskExposure({
                           : null}
                       </Text>
                     </View>
-                    {/* Per-vertical sub-rows when a bucket spans multiple. */}
-                    {cells.length > 1
-                      ? cells.map((cell) => (
-                          <View
-                            key={`${b.label}-${cell.vertical}`}
-                            style={styles.cellRow}
-                            testID={`tail-risk-cell-${b.label}-${cell.vertical}`}
+                    {/* Per-vertical sub-rows (matrix parity with web). */}
+                    {cells.map((cell) => (
+                      <View
+                        key={`${b.label}-${cell.vertical}`}
+                        style={styles.cellRow}
+                        testID={`tail-risk-cell-${b.label}-${cell.vertical}`}
+                      >
+                        <Text
+                          style={[
+                            styles.cellLabel,
+                            { color: colors.mutedForeground },
+                          ]}
+                        >
+                          ↳ {cell.vertical}
+                        </Text>
+                        <Text
+                          style={[
+                            styles.cellMeta,
+                            { color: colors.mutedForeground },
+                          ]}
+                        >
+                          {cell.open_count}× ·{" "}
+                          {fmtUsd(cell.open_max_loss_usd)} ·{" "}
+                          <Text
+                            style={{ color: pnlColor(cell.realized_pnl_usd) }}
                           >
+                            {fmtUsd(cell.realized_pnl_usd)}
+                          </Text>
+                          {cell.ev_per_trade !== null ? (
                             <Text
-                              style={[
-                                styles.cellLabel,
-                                { color: colors.mutedForeground },
-                              ]}
+                              style={{
+                                color: pnlColor(cell.ev_per_trade),
+                              }}
                             >
-                              ↳ {cell.vertical}
+                              {" · "}
+                              {fmtEv(cell.ev_per_trade)}/t
                             </Text>
-                            <Text
-                              style={[
-                                styles.cellMeta,
-                                { color: colors.mutedForeground },
-                              ]}
-                            >
-                              {cell.open_count}× ·{" "}
-                              {fmtUsd(cell.open_max_loss_usd)} ·{" "}
-                              <Text
-                                style={{ color: pnlColor(cell.realized_pnl_usd) }}
-                              >
-                                {fmtUsd(cell.realized_pnl_usd)}
-                              </Text>
-                              {cell.ev_per_trade !== null
-                                ? (
-                                    <Text
-                                      style={{
-                                        color: pnlColor(cell.ev_per_trade),
-                                      }}
-                                    >
-                                      {" · "}
-                                      {fmtEv(cell.ev_per_trade)}/t
-                                    </Text>
-                                  )
-                                : null}
-                            </Text>
-                          </View>
-                        ))
-                      : null}
+                          ) : null}
+                        </Text>
+                      </View>
+                    ))}
                   </View>
                 );
               })}

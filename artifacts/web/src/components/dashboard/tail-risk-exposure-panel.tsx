@@ -103,9 +103,6 @@ function evClass(n: number | null): string {
 }
 
 const TONE_HEADLINE_CLASS: Record<TailRiskExposure["tail_concentration"]["tone"], string> = {
-  // Red is the audit-driven "this is what burned us last quarter"
-  // colour — match the existing `text-loss` token so the tile keys off
-  // the same palette as P&L Today, the equity chart's loss area, etc.
   red: "text-loss",
   amber: "text-warning",
   green: "text-win",
@@ -119,20 +116,12 @@ const TONE_LABEL: Record<TailRiskExposure["tail_concentration"]["tone"], string>
   empty: "NO EXPOSURE",
 };
 
-// Default threshold rendered in the headline copy when the server hasn't
-// returned one yet (e.g. mid-loading first paint) — must match the
-// server-side `_TAIL_PRICE_THRESHOLD` constant in `app/dashboard.py`.
+// First-paint fallback; mirrors `_TAIL_PRICE_THRESHOLD` in dashboard.py.
 const DEFAULT_TAIL_THRESHOLD = 0.2;
 
 export default function TailRiskExposurePanel() {
-  // Match the threading pattern KpiSummaryBar / EquityCharts already
-  // use: provenance + verticals are part of the cache key so toggles
-  // refetch instead of replaying stale data.
   const { placedBy } = usePlacedBy();
   const { effectiveVerticals } = useVerticalFilter();
-  // Honour the dashboard's PeriodStrip (1d / 7d / 30d / YTD) just like
-  // KpiSummaryBar and EquityCharts.  `days` is part of the cache key so
-  // toggling 7d → 30d refetches immediately rather than serving stale.
   const { period, days } = usePeriod();
   const periodLabel = period.toUpperCase();
   const verticalsCsv = effectiveVerticals.slice().sort().join(",");
@@ -247,11 +236,6 @@ export default function TailRiskExposurePanel() {
               </thead>
               <tbody>
                 {buckets.map((b, idx) => {
-                  // Server-owned tail flag: `is_tail=true` ONLY when
-                  // the whole bucket sits below the threshold.  The
-                  // straddling `$0.10–$0.25` bucket is intentionally
-                  // false so it doesn't get flagged as tail in the UI
-                  // even though some of its rows feed the headline.
                   const isTail = b.is_tail;
                   const totals = b.totals;
                   const winRate =
