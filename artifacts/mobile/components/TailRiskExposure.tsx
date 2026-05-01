@@ -262,7 +262,13 @@ export default function TailRiskExposure({
                       <Text
                         style={[styles.muted, { color: colors.mutedForeground }]}
                       >
-                        {`${b.totals.open_count} open · ${periodLabel} `}
+                        {`${b.totals.open_count} open · `}
+                        <Text
+                          testID={`tail-risk-bucket-${b.label}-notional`}
+                        >
+                          {fmtUsd(b.totals.open_cost_usd)} notional
+                        </Text>
+                        {` · ${periodLabel} `}
                         <Text
                           style={{ color: pnlColor(b.totals.realized_pnl_usd) }}
                         >
@@ -305,7 +311,13 @@ export default function TailRiskExposure({
                           ]}
                         >
                           {cell.open_count}× ·{" "}
-                          {fmtUsd(cell.open_max_loss_usd)} ·{" "}
+                          <Text
+                            testID={`tail-risk-cell-${b.label}-${cell.vertical}-notional`}
+                          >
+                            {fmtUsd(cell.open_cost_usd)}
+                          </Text>
+                          {" notional · "}
+                          {fmtUsd(cell.open_max_loss_usd)} max-loss ·{" "}
                           <Text
                             style={{ color: pnlColor(cell.realized_pnl_usd) }}
                           >
@@ -354,7 +366,11 @@ export default function TailRiskExposure({
                     style={[styles.muted, { color: colors.mutedForeground }]}
                     testID="tail-risk-totals-meta"
                   >
-                    {`${data.totals.open_count} open · ${periodLabel} `}
+                    {`${data.totals.open_count} open · `}
+                    <Text testID="tail-risk-totals-notional">
+                      {fmtUsd(data.totals.open_cost_usd)} notional
+                    </Text>
+                    {` · ${periodLabel} `}
                     <Text
                       style={{ color: pnlColor(data.totals.realized_pnl_usd) }}
                     >

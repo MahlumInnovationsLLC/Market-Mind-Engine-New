@@ -189,6 +189,13 @@ describe("TailRiskExposure (mobile)", () => {
       .join("");
     expect(text).toContain("2 open");
     expect(text).toContain("25%");
+    const totalsNotional = screen.getByTestId("tail-risk-totals-notional");
+    expect(
+      totalsNotional.props.children
+        .flat(Infinity)
+        .filter((c: unknown) => typeof c === "string")
+        .join(""),
+    ).toContain("$800");
   });
 
   it("renders the Feb-20 NBA regression bucket and red headline tone", async () => {
@@ -234,6 +241,15 @@ describe("TailRiskExposure (mobile)", () => {
     const detail = screen.getByTestId("tail-risk-headline-detail");
     expect(detail.props.children.join("")).toContain("<$0.20");
     expect(screen.getByTestId("tail-risk-bucket-<$0.10-ev")).toBeTruthy();
+    const bucketNotional = screen.getByTestId(
+      "tail-risk-bucket-<$0.10-notional",
+    );
+    expect(
+      bucketNotional.props.children
+        .flat(Infinity)
+        .filter((c: unknown) => typeof c === "string")
+        .join(""),
+    ).toContain("$4,218");
   });
 
   it("classifies amber and green tones from the server response", async () => {
@@ -305,6 +321,19 @@ describe("TailRiskExposure (mobile)", () => {
       await screen.findByTestId("tail-risk-cell-<$0.10-sports"),
     ).toBeTruthy();
     expect(screen.getByTestId("tail-risk-cell-<$0.10-crypto")).toBeTruthy();
+    const flatten = (c: unknown): string => {
+      if (typeof c === "string") return c;
+      if (Array.isArray(c)) return c.map(flatten).join("");
+      return "";
+    };
+    const sportsNotional = screen.getByTestId(
+      "tail-risk-cell-<$0.10-sports-notional",
+    );
+    expect(flatten(sportsNotional.props.children)).toContain("$800");
+    const cryptoNotional = screen.getByTestId(
+      "tail-risk-cell-<$0.10-crypto-notional",
+    );
+    expect(flatten(cryptoNotional.props.children)).toContain("$50");
   });
 
   it("surfaces a clear error message when the request fails", async () => {
