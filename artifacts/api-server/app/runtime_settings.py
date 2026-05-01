@@ -938,6 +938,147 @@ async def set_risk_knob_overrides(
     return after
 
 
+# ---------------------------------------------------------------------------
+# Tail-risk gate auto-arm (Task #750).
+#
+# The four tail-risk knobs below have in-code fallbacks in
+# ``app/risk/gates.py`` (``gate_tail_price_size_cap`` and
+# ``gate_jumbo_quantity_cap``), so the gates already enforce these
+# defaults whether or not a row exists in ``system_settings``.  We
+# additionally persist them on lifespan startup so:
+#
+#   * the operator dashboard surfaces the active values (instead of
+#     showing "no override" and forcing operators to know the in-code
+#     defaults);
+#   * the existing per-vertical override panel can clone, scope, or
+#     loosen each knob without anyone having to type the global value
+#     in by hand first;
+#   * the audit-log captures the moment these gates went armed in
+#     production.
+#
+# The values here MUST stay in sync with the docstring fallbacks in
+# ``gate_tail_price_size_cap`` / ``gate_jumbo_quantity_cap`` — if those
+# fallbacks change, update both sides in the same commit.
+# ---------------------------------------------------------------------------
+
+
+TAIL_RISK_DEFAULT_KNOBS: dict[str, float | int] = {
+    "tail_price_threshold":  0.10,
+    "max_tail_loss_usd":     400.0,
+    "max_tail_notional_usd": 400.0,
+    "jumbo_quantity_cap":    750,
+}
+
+
+async def ensure_tail_risk_defaults_armed() -> dict[str, Any]:
+    """Idempotently persist the four tail-risk knob defaults (Task #750).
+
+    Behaviour is unchanged either way — the gates fall back to the
+    same values via in-code defaults — but persisting them makes the
+    armed configuration visible on the operator dashboard and routable
+    through the per-vertical override panel.
+
+    Idempotent on every axis:
+
+      * If a row already exists for ``risk.<knob>``, it is left
+        untouched (even when the value differs from the audit default
+        — an explicit operator override always wins).
+      * Re-running on every lifespan startup is safe; the function
+        only writes the rows that are missing.
+
+    Returns a structured summary so the caller can log / surface the
+    auto-arm result.  Errors are caught per-knob so a single failure
+    can't block the rest from being armed.
+    """
+    armed: list[dict[str, Any]] = []
+    preserved: list[dict[str, Any]] = []
+    for key, default in TAIL_RISK_DEFAULT_KNOBS.items():
+        full_key = f"risk.{key}"
+        try:
+            existing = await db.fetchval(
+                "SELECT value FROM system_settings WHERE key = $1", full_key
+            )
+        except Exception as e:
+            log.warning(
+                "tail-risk auto-arm read failed for %s: %s", full_key, e
+            )
+            continue
+        if existing is not None:
+            preserved.append({"key": key, "value": existing})
+            continue
+        try:
+            # `RETURNING key` distinguishes a real insert from the
+            # multi-replica race where two pods boot in parallel, both
+            # see the row missing, and both run this INSERT.  Only the
+            # winner gets a row back; the loser must report this knob
+            # as `preserved` (the value the winner wrote) so the audit
+            # log doesn't claim writes the loser didn't perform.
+            async with db.acquire() as c:
+                inserted_key = await c.fetchval(
+                    """
+                    INSERT INTO system_settings (key, value, updated_at)
+                    VALUES ($1, $2, now())
+                    ON CONFLICT (key) DO NOTHING
+                    RETURNING key
+                    """,
+                    full_key,
+                    str(default),
+                )
+            if inserted_key is not None:
+                armed.append({"key": key, "value": default})
+            else:
+                # Lost the race — re-read the value the winner wrote.
+                try:
+                    actual = await db.fetchval(
+                        "SELECT value FROM system_settings WHERE key = $1",
+                        full_key,
+                    )
+                except Exception:
+                    actual = str(default)
+                preserved.append({"key": key, "value": actual})
+        except Exception as e:
+            log.warning(
+                "tail-risk auto-arm write failed for %s: %s", full_key, e
+            )
+    if armed:
+        log.info(
+            "tail-risk gate defaults armed in system_settings: %s",
+            ", ".join(f"{a['key']}={a['value']}" for a in armed),
+        )
+        try:
+            import json
+
+            async with db.acquire() as c:
+                await c.execute(
+                    """
+                    INSERT INTO admin_audit_log (
+                        actor_user_id, actor_email,
+                        target_user_id, target_email,
+                        action, before_value, after_value
+                    ) VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7::jsonb)
+                    """,
+                    "system",
+                    None,
+                    "system",
+                    None,
+                    "auto_arm_tail_risk_defaults",
+                    json.dumps([p["key"] for p in preserved]),
+                    json.dumps(armed),
+                )
+        except Exception as e:
+            log.warning(
+                "audit log insert (auto-arm tail-risk) failed: %s", e
+            )
+    else:
+        log.info(
+            "tail-risk gate defaults already armed in system_settings "
+            "(%d/%d keys present)",
+            len(preserved),
+            len(TAIL_RISK_DEFAULT_KNOBS),
+        )
+    return {"armed": armed, "preserved": preserved}
+
+
 def risk_knob_specs_payload() -> list[dict[str, Any]]:
     return [
         {

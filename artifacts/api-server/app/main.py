@@ -164,6 +164,19 @@ async def lifespan(_: FastAPI):
     except Exception as e:
         log.error("alembic migrations failed: %s", e)
         ready_gate.mark_check("migrations", ok=False, detail=f"{type(e).__name__}: {e}")
+    # Auto-arm the four tail-risk knob defaults in `system_settings`
+    # (Task #750).  The gates already fall back to the same values via
+    # in-code defaults, so behaviour is unchanged either way — this
+    # just makes the armed configuration visible on the operator
+    # dashboard and routable through the per-vertical override panel.
+    # Idempotent: existing operator overrides are NEVER overwritten.
+    try:
+        from . import runtime_settings as _rt_settings
+
+        await _rt_settings.ensure_tail_risk_defaults_armed()
+    except Exception as e:
+        log.warning("tail-risk auto-arm at startup failed: %s", e)
+
     # Hydrate the in-process promoted-feature set from
     # ``autoresearch_features``. Promoted UW candidates are opted back
     # into the live feature vector so a freshly retrained model with

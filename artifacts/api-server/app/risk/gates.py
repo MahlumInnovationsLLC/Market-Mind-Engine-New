@@ -45,6 +45,78 @@ def _reset_no_thresholds_warning_throttle() -> None:
     _last_no_thresholds_warning_at = float("-inf")
 
 
+# ---------------------------------------------------------------------------
+# Tail-risk gate trip alert helper (Task #750).
+#
+# Both `gate_tail_price_size_cap` and `gate_jumbo_quantity_cap` call
+# this on a veto so operators get an info-severity broadcast about the
+# trip.  Dedupes on `(gate_name, market_id)` so a market that keeps
+# tripping the gate every cycle doesn't spam mailboxes.
+#
+# Wrapped in a top-level try/except so an alert-system failure (DB
+# down, postmark unavailable) NEVER shadows the actual gate verdict —
+# the gate decision must always reach the orchestrator.
+# ---------------------------------------------------------------------------
+
+
+# Dedupe TTL — long enough that a market re-evaluated every cycle
+# (typically a few seconds) doesn't generate a fresh email each time,
+# short enough that a fresh trip for the same market the next trading
+# day still surfaces.
+_TAIL_RISK_TRIP_DEDUPE_TTL_SECONDS = 6 * 3600
+
+
+async def _emit_tail_risk_trip_alert(
+    *,
+    ctx: "RiskContext",
+    gate_name: str,
+    reason: str,
+    details: dict[str, Any],
+) -> None:
+    """Best-effort fire of the tail-risk trip alert. Never raises."""
+    try:
+        from ..notifications import alerts as _alerts
+
+        market_id = ctx.market_id or "(unknown)"
+        dedupe_key = f"{gate_name}:{market_id}"
+        try:
+            should_send = await _alerts.dedupe_or_skip(
+                "tail_risk_gate_trip",
+                dedupe_key,
+                ttl_seconds=_TAIL_RISK_TRIP_DEDUPE_TTL_SECONDS,
+            )
+        except Exception as e:
+            log.warning(
+                "tail_risk_gate_trip dedupe claim failed for %s: %s",
+                dedupe_key,
+                e,
+            )
+            should_send = True
+        if not should_send:
+            return
+        _alerts.tail_risk_gate_trip(
+            gate_name=gate_name,
+            market_id=market_id,
+            vertical=ctx.vertical,
+            side=ctx.side,
+            intended_quantity=int(ctx.intended_quantity)
+            if ctx.intended_quantity is not None
+            else None,
+            current_price=float(ctx.current_price)
+            if ctx.current_price is not None
+            else None,
+            reason=reason,
+            details=details,
+        )
+    except Exception as e:  # pragma: no cover — alert failures must never break a gate
+        log.warning(
+            "tail_risk_gate_trip alert dispatch failed for gate=%s market=%s: %s",
+            gate_name,
+            getattr(ctx, "market_id", None),
+            e,
+        )
+
+
 def _mode_default(ctx: "RiskContext", key: str, fallback: float) -> float:
     """Default value for a tunable gate threshold given the active
     aggression mode (read off ``operator_overrides['aggression_mode']``).
@@ -677,24 +749,32 @@ async def gate_tail_price_size_cap(ctx: RiskContext) -> GateResult:
         "max_notional_cap_usd": max_notional_cap,
     }
     if max_loss_cap > 0 and max_loss_usd > max_loss_cap:
+        reason = (
+            f"tail-priced market ({side} entry ${entry_price:.3f}); "
+            f"max-loss ${max_loss_usd:.2f} > cap ${max_loss_cap:.2f}"
+        )
+        await _emit_tail_risk_trip_alert(
+            ctx=ctx,
+            gate_name="tail_price_size_cap",
+            reason=reason,
+            details=details,
+        )
         return GateResult(
-            "tail_price_size_cap",
-            False,
-            (
-                f"tail-priced market ({side} entry ${entry_price:.3f}); "
-                f"max-loss ${max_loss_usd:.2f} > cap ${max_loss_cap:.2f}"
-            ),
-            details,
+            "tail_price_size_cap", False, reason, details,
         )
     if max_notional_cap > 0 and notional_usd > max_notional_cap:
+        reason = (
+            f"tail-priced market ({side} entry ${entry_price:.3f}); "
+            f"notional ${notional_usd:.2f} > cap ${max_notional_cap:.2f}"
+        )
+        await _emit_tail_risk_trip_alert(
+            ctx=ctx,
+            gate_name="tail_price_size_cap",
+            reason=reason,
+            details=details,
+        )
         return GateResult(
-            "tail_price_size_cap",
-            False,
-            (
-                f"tail-priced market ({side} entry ${entry_price:.3f}); "
-                f"notional ${notional_usd:.2f} > cap ${max_notional_cap:.2f}"
-            ),
-            details,
+            "tail_price_size_cap", False, reason, details,
         )
     return GateResult("tail_price_size_cap", True, "", details)
 
@@ -725,11 +805,15 @@ async def gate_jumbo_quantity_cap(ctx: RiskContext) -> GateResult:
             "jumbo_quantity_cap", True, "disabled", details
         )
     if qty > cap:
+        reason = f"intended quantity {qty} > jumbo cap {cap}"
+        await _emit_tail_risk_trip_alert(
+            ctx=ctx,
+            gate_name="jumbo_quantity_cap",
+            reason=reason,
+            details=details,
+        )
         return GateResult(
-            "jumbo_quantity_cap",
-            False,
-            f"intended quantity {qty} > jumbo cap {cap}",
-            details,
+            "jumbo_quantity_cap", False, reason, details,
         )
     return GateResult("jumbo_quantity_cap", True, "", details)
 

@@ -22,6 +22,7 @@ the change, and the rollback path if you need to undo it.
 13. [Order-submit dead-letter triage](#13-order-submit-dead-letter-triage)
 14. [Stale-cancel anomaly triage](#14-stale-cancel-anomaly-triage)
 15. [Per-vertical gatekeeper-knob tuning](#15-per-vertical-gatekeeper-knob-tuning)
+16. [Tail-risk gate knobs (auto-armed)](#16-tail-risk-gate-knobs-auto-armed)
 
 ---
 
@@ -1684,3 +1685,111 @@ DELETE FROM system_settings WHERE key LIKE 'risk.%.%';
 (Note the two-dot pattern — single-dot keys like `risk.min_edge_pp`
 are global overrides and must be preserved unless you also want to
 clear those.)
+
+---
+
+## 16. Tail-risk gate knobs (auto-armed)
+
+The forensic audit (Task #743) identified two failure modes in the
+historical trade log: deep-OTM tail bets and jumbo-quantity orders.
+Two defensive gates run on every candidate to cap exposure on those
+patterns:
+
+* `gate_tail_price_size_cap` — caps notional and side-aware max-loss
+  on markets where one side trades near zero
+  (`min(YES_price, 1 − YES_price) < tail_price_threshold`).
+* `gate_jumbo_quantity_cap` — hard ceiling on contract count per
+  candidate.
+
+Both gates are armed by **four knobs** in `system_settings`:
+
+| Knob (`risk.<key>`)        | Default  | Purpose                                                  |
+| -------------------------- | -------- | -------------------------------------------------------- |
+| `tail_price_threshold`     | `0.10`   | Trip the tail-price gate when min(price, 1−price) < this |
+| `max_tail_loss_usd`        | `400.0`  | Cap on side-aware max-loss for tail-priced markets       |
+| `max_tail_notional_usd`    | `400.0`  | Cap on intended notional for tail-priced markets         |
+| `jumbo_quantity_cap`       | `750`    | Hard ceiling on contract count per candidate             |
+
+### Auto-arm on startup
+
+The lifespan startup hook in `app/main.py` calls
+`runtime_settings.ensure_tail_risk_defaults_armed()` after the
+Alembic migrations land. This idempotently inserts the four default
+rows above into `system_settings` if they're missing.
+
+* The gates *also* fall back to the same defaults via in-code
+  values, so behaviour is unchanged whether or not the rows exist —
+  the auto-arm just makes the configuration **visible on the
+  operator dashboard** and routable through the per-vertical
+  override panel (see §15).
+* Existing operator overrides (any value, even `0` to disable) are
+  **never overwritten**. The function only writes rows that don't
+  already exist.
+* Each auto-arm batch logs an `auto_arm_tail_risk_defaults` row to
+  `admin_audit_log` so you can pinpoint when each environment first
+  armed the gates.
+
+To verify the rows are present in production:
+
+```sql
+SELECT key, value, updated_at
+  FROM system_settings
+ WHERE key IN ('risk.tail_price_threshold',
+               'risk.max_tail_loss_usd',
+               'risk.max_tail_notional_usd',
+               'risk.jumbo_quantity_cap');
+```
+
+You should see four rows with the defaults above.
+
+### Tuning per vertical
+
+Each knob supports a per-vertical override via
+`risk.<knob>.<vertical>` (e.g. `risk.jumbo_quantity_cap.crypto`).
+Resolution order, from highest to lowest precedence:
+
+1. `risk.<knob>.<vertical>` (per-vertical override)
+2. `risk.<knob>` (global override — what auto-arm writes)
+3. In-code fallback in `app/risk/gates.py`
+
+Use the **Live risk knobs** panel on `/system` to set both global
+and per-vertical overrides through the UI. Setting any knob to `0`
+disables that gate (or sub-check) entirely — useful for paper-only
+environments. The crypto vertical typically wants looser caps
+because the audit found deep-OTM crypto markets were flat (not the
+bleeder); sports is the vertical the gates are sized for.
+
+### Trip alerts
+
+When either gate vetoes a candidate, an info-severity broadcast
+fires under the `tail-risk-gate-trip` tag (mapped to `email_drift`
+opt-ins, fanned out via Postmark + per-user fanout). Dispatch is
+deduped on `(gate_name, market_id)` for ~6 hours so a market that
+keeps tripping the gate every cycle doesn't generate dozens of
+identical emails in a single day.
+
+These alerts are **not halts** — the gate has already done its job
+by rejecting the order. The notification exists so operators can:
+
+* spot a pattern (one market tripping the gate every cycle = retire
+  the market or tighten the per-vertical override);
+* confirm in production that the gates are armed and firing;
+* surface the trip in the operator dashboard's recent-alerts feed.
+
+### Rollback
+
+To revert the auto-armed defaults (and let the gates fall back to
+their in-code defaults), run:
+
+```sql
+DELETE FROM system_settings
+ WHERE key IN ('risk.tail_price_threshold',
+               'risk.max_tail_loss_usd',
+               'risk.max_tail_notional_usd',
+               'risk.jumbo_quantity_cap');
+```
+
+The next API server restart will re-arm them with the audit
+defaults via the lifespan hook. To prevent re-arming, also remove
+the call to `ensure_tail_risk_defaults_armed()` from
+`app/main.py::lifespan`.

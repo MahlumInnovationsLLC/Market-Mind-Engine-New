@@ -60,6 +60,7 @@ _TAG_TO_USER_PREF: dict[str, str] = {
     "order-dead-letter-resolved": "email_halt",
     "stale-cancel-volume-anomaly": "email_drift",
     "stale-cancel-failure-spike":  "email_halt",
+    "tail-risk-gate-trip":         "email_drift",
 }
 
 
@@ -262,6 +263,11 @@ USER_VISIBLE_ALERTS: dict[str, dict[str, Any]] = {
         "label": "Stale-cancel failure spike",
         "scope": "broadcast",
         "channels": [("email", "email_halt")],
+    },
+    "tail_risk_gate_trip": {
+        "label": "Tail-risk gate trip",
+        "scope": "broadcast",
+        "channels": [("email", "email_drift")],
     },
 }
 
@@ -2040,6 +2046,84 @@ def _fmt_value(v: float | int | None) -> str:
     if isinstance(v, int):
         return str(v)
     return f"{float(v):.4g}"
+
+
+# ---------------------------------------------------------------------------
+# Tail-risk gate trip (info severity, Task #750).
+#
+# Fired by `gate_tail_price_size_cap` and `gate_jumbo_quantity_cap`
+# when they veto a candidate.  Severity is *info* — these gates are
+# defensive caps that catch the rare audit-flagged tail trade, so a
+# trip is "the gate did its job", not a halt event.  We dedupe on
+# `(gate_name, market_id)` for ~6 hours so a market that keeps
+# tripping the gate every cycle doesn't pile up dozens of identical
+# emails in a single day.
+# ---------------------------------------------------------------------------
+
+
+def tail_risk_gate_trip(
+    *,
+    gate_name: str,
+    market_id: str,
+    vertical: str | None,
+    side: str | None,
+    intended_quantity: int | None,
+    current_price: float | None,
+    reason: str | None,
+    details: dict[str, Any] | None = None,
+    dry_run: bool = False,
+) -> dict[str, Any]:
+    """Operator alert for a tail-risk gate veto (Task #750).
+
+    Info-severity broadcast — *no* halt, *no* push, *no* SMS.  The
+    gate has already done its job by rejecting the candidate; this
+    notification is a paper trail so operators can see the gate is
+    armed in production and so they can spot a pattern (e.g. a single
+    market tripping the gate every cycle = retire the market).
+    """
+    subject = (
+        f"[axiom][TAIL-RISK] {gate_name} vetoed {market_id} "
+        f"({vertical or 'unknown'} / {side or '?'})"
+    )
+    rows: list[tuple[str, Any]] = [
+        ("gate", gate_name),
+        ("market_id", market_id),
+        ("vertical", vertical or "(unknown)"),
+        ("side", side or "(unknown)"),
+        (
+            "intended_quantity",
+            intended_quantity if intended_quantity is not None else "(n/a)",
+        ),
+        (
+            "current_price",
+            f"${float(current_price):.4f}" if current_price is not None else "(n/a)",
+        ),
+        ("reason", reason or "(unspecified)"),
+    ]
+    if details:
+        for k, v in details.items():
+            if k in {
+                "intended_quantity",
+                "current_price",
+                "side",
+                "vertical",
+            }:
+                # already surfaced above
+                continue
+            rows.append((k, v))
+    rows.append(("at", _utc_now_iso()))
+    body = (
+        "A tail-risk policy gate vetoed an order candidate. The order "
+        "was NOT placed; trading otherwise continues normally. Tune "
+        "the threshold from the operator dashboard "
+        "(/system → Live risk knobs) if the trip rate is too high or "
+        "too low for the active strategy.\n\n"
+        + _format_lines(rows)
+        + "\n"
+    )
+    return _dispatch(
+        subject, body, tag="tail-risk-gate-trip", dry_run=dry_run
+    )
 
 
 # ---------------------------------------------------------------------------
