@@ -57,18 +57,10 @@ function relativeFromUnix(seconds: number | null | undefined): string {
 const TWENTY_FOUR_HOURS_MS = 24 * 60 * 60 * 1000;
 
 /**
- * Operator panel for the live Kalshi bankroll.
- *
- * Backed by `/api/dashboard/bankroll/recent` — itself the `bankroll_events`
- * append-only feed populated by the continuous balance sync (see
- * `app.bankroll_sync`).  Renders:
- *
- *   * Current balance + last-event timestamp.
- *   * Sparkline of the last 24h of running balance, colour-coded by the
- *     event's `reason` (sync / fill / deposit / withdrawal / manual).
- *   * Per-reason 24h delta breakdown so a big move can be attributed
- *     to a fill vs an exchange-side adjustment at a glance.
- *   * `exchange_sync` freshness badge driven by `bankroll_sync.state()`.
+ * Live Kalshi bankroll tile (backed by `/api/dashboard/bankroll/recent`).
+ * Headline = cash + marked-to-market open positions; also renders a 24h
+ * sparkline, per-reason delta breakdown, and the exchange-sync freshness
+ * badge from `bankroll_sync.state()`.
  */
 export default function BankrollPanel() {
   const { data, isLoading, isError } = useGetRecentBankrollEvents(
@@ -152,7 +144,7 @@ export default function BankrollPanel() {
       <SectionHeader
         eyebrow="EXCHANGE"
         title="Live Kalshi balance"
-        subtitle="Balance sync feed — last 24h."
+        subtitle="Cash + open-position mark — last 24h sync feed."
       />
 
       {isLoading ? (
@@ -173,13 +165,38 @@ export default function BankrollPanel() {
           <div className="flex flex-wrap items-end justify-between gap-3">
             <div>
               <div className="text-[10px] uppercase tracking-widest text-muted-foreground">
-                Current balance
+                Total live balance
               </div>
               <div
                 className="text-2xl font-bold tabular-nums text-foreground"
-                data-testid="bankroll-current-balance"
+                data-testid="bankroll-total-equity"
               >
-                {fmtCurrencyCents(data?.current_balance_cents)}
+                {fmtCurrencyCents(
+                  data?.total_equity_cents ?? data?.current_balance_cents,
+                )}
+              </div>
+              <div
+                className="mt-1 flex flex-wrap gap-x-3 gap-y-0.5 text-[10px] uppercase tracking-widest text-muted-foreground"
+                data-testid="bankroll-equity-breakdown"
+              >
+                <span>
+                  Cash{" "}
+                  <span
+                    className="tabular-nums text-foreground"
+                    data-testid="bankroll-current-balance"
+                  >
+                    {fmtCurrencyCents(data?.current_balance_cents)}
+                  </span>
+                </span>
+                <span>
+                  Open positions{" "}
+                  <span
+                    className="tabular-nums text-foreground"
+                    data-testid="bankroll-open-position-value"
+                  >
+                    {fmtCurrencyCents(data?.open_position_value_cents)}
+                  </span>
+                </span>
               </div>
               <div className="text-[10px] uppercase tracking-widest text-muted-foreground">
                 Last event {fmtTime(data?.last_event_at)} ·{" "}

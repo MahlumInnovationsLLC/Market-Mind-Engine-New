@@ -3848,16 +3848,22 @@ async def get_recent_bankroll_events(
     *,
     exchange: str = "kalshi",
 ) -> dict[str, Any]:
-    """Recent rows from ``bankroll_events`` plus the current balance.
+    """Recent ``bankroll_events`` rows + live balance bundle.
 
-    The continuous Kalshi balance sync (see ``app.bankroll_sync``) writes
-    a row every time the live exchange balance moves; this helper hands
-    that feed to the operator dashboard so the equity sparkline and the
-    "live balance" tile both come from the same authoritative table.
+    Returns ``{exchange, current_balance_cents, open_position_value_cents,
+    total_equity_cents, items, last_event_at}``.
 
-    Returns ``{exchange, current_balance_cents, items, last_event_at}``;
-    on any DB failure ``items`` is ``[]`` and ``current_balance_cents``
-    is ``None`` so the dashboard renders cleanly instead of erroring.
+    * ``current_balance_cents`` — most recent ``bankroll_events.balance_cents``
+      (cash on hand).
+    * ``open_position_value_cents`` — ``sum(quantity * current_price)`` across
+      open positions for ``exchange``; ``current_price`` is in cents (0..100)
+      so the product is already in cents.  Legacy rows with NULL ``exchange``
+      are attributed to Kalshi only.
+    * ``total_equity_cents`` — cash + open value when both are known; ``None``
+      otherwise (we never claim "$0 equity" when the cash leg is unknown).
+
+    On DB failure ``items`` is ``[]`` and the cash/equity fields are ``None``
+    so the dashboard degrades cleanly.
     """
     limit = max(1, min(int(limit), 500))
     try:
@@ -3882,20 +3888,47 @@ async def get_recent_bankroll_events(
         return {
             "exchange": exchange,
             "current_balance_cents": None,
+            "open_position_value_cents": None,
+            "total_equity_cents": None,
             "last_event_at": None,
             "items": [],
         }
 
-    # Items are returned newest-first; the current balance is just the
-    # most recent row's running balance.
+    # Legacy ``positions`` rows pre-date the ``exchange`` column; attribute
+    # them to Kalshi only, never to a second exchange.
+    open_value_cents: int | None = 0
+    try:
+        opv = await db.fetchval(
+            """
+            SELECT COALESCE(SUM(quantity * current_price)::bigint, 0)
+              FROM positions
+             WHERE COALESCE(status, 'open') = 'open'
+               AND current_price IS NOT NULL
+               AND quantity IS NOT NULL
+               AND (exchange = $1
+                    OR ($1 = 'kalshi' AND exchange IS NULL))
+            """,
+            exchange,
+        )
+        open_value_cents = int(opv) if opv is not None else 0
+    except Exception as e:
+        log.warning("open_position_value computation failed: %s", e)
+        open_value_cents = None
+
     current = items[0]["balance_cents"] if items else None
     last_at = items[0]["occurred_at"] if items else None
-    # Reverse so the dashboard sparkline can iterate chronologically
-    # without re-sorting.
+    cash_cents = int(current) if current is not None else None
+    if cash_cents is None or open_value_cents is None:
+        total_equity_cents: int | None = None
+    else:
+        total_equity_cents = cash_cents + open_value_cents
+    # Sparkline iterates chronologically.
     items.reverse()
     return {
         "exchange": exchange,
-        "current_balance_cents": int(current) if current is not None else None,
+        "current_balance_cents": cash_cents,
+        "open_position_value_cents": open_value_cents,
+        "total_equity_cents": total_equity_cents,
         "last_event_at": last_at,
         "items": items,
     }

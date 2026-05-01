@@ -53,6 +53,52 @@ describe("BankrollPanel", () => {
     expect(screen.getByTestId("bankroll-current-balance")).toBeTruthy();
   });
 
+  it("renders total live balance = cash + open positions, with both broken out", () => {
+    state.data = {
+      items: [],
+      current_balance_cents: 5_079,
+      open_position_value_cents: 17_235,
+      total_equity_cents: 22_314,
+      sync: {
+        running: true,
+        last_tick_at: Math.floor(Date.now() / 1000),
+        interval_seconds: 60,
+      },
+    };
+    render(<BankrollPanel />);
+    expect(screen.getByTestId("bankroll-total-equity").textContent).toMatch(
+      /\$223\.14/,
+    );
+    expect(screen.getByTestId("bankroll-current-balance").textContent).toMatch(
+      /\$50\.79/,
+    );
+    expect(
+      screen.getByTestId("bankroll-open-position-value").textContent,
+    ).toMatch(/\$172\.35/);
+    expect(screen.getByTestId("bankroll-equity-breakdown")).toBeTruthy();
+  });
+
+  it("falls back to cash-only when total_equity_cents is null (degraded path)", () => {
+    state.data = {
+      items: [],
+      current_balance_cents: 5_079,
+      open_position_value_cents: null,
+      total_equity_cents: null,
+      sync: {
+        running: true,
+        last_tick_at: Math.floor(Date.now() / 1000),
+        interval_seconds: 60,
+      },
+    };
+    render(<BankrollPanel />);
+    expect(screen.getByTestId("bankroll-total-equity").textContent).toMatch(
+      /\$50\.79/,
+    );
+    expect(
+      screen.getByTestId("bankroll-open-position-value").textContent,
+    ).toMatch(/—/);
+  });
+
   it("renders one row per reason in the 24h breakdown when events are present", () => {
     const nowIso = new Date().toISOString();
     state.data = {

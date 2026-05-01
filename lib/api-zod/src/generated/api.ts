@@ -1046,7 +1046,22 @@ export const GetRecentBankrollEventsQueryParams = zod.object({
 
 export const GetRecentBankrollEventsResponse = zod.object({
   exchange: zod.string(),
-  current_balance_cents: zod.number().nullish(),
+  current_balance_cents: zod
+    .number()
+    .nullish()
+    .describe("Cash on hand from the most recent bankroll_events row."),
+  open_position_value_cents: zod
+    .number()
+    .nullish()
+    .describe(
+      "Marked-to-market value of currently open contracts —\nsum(quantity \* current_price) over positions where status='open',\nin cents. Null if the per-position computation failed.\n",
+    ),
+  total_equity_cents: zod
+    .number()
+    .nullish()
+    .describe(
+      'current_balance_cents + open_position_value_cents — the live\n\"what would I have if I closed everything right now\" figure.\nNull whenever the cash leg is unknown.\n',
+    ),
   last_event_at: zod.string().nullish(),
   items: zod
     .array(

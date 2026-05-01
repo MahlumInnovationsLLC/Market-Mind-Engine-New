@@ -1671,7 +1671,24 @@ components:
       type: object
       properties:
         exchange: { type: string }
-        current_balance_cents: { type: integer, nullable: true }
+        current_balance_cents:
+          type: integer
+          nullable: true
+          description: Cash on hand from the most recent bankroll_events row.
+        open_position_value_cents:
+          type: integer
+          nullable: true
+          description: |
+            Marked-to-market value of currently open contracts —
+            sum(quantity * current_price) over positions where status='open',
+            in cents. Null if the per-position computation failed.
+        total_equity_cents:
+          type: integer
+          nullable: true
+          description: |
+            current_balance_cents + open_position_value_cents — the live
+            "what would I have if I closed everything right now" figure.
+            Null whenever the cash leg is unknown.
         last_event_at: { type: string, nullable: true }
         items:
           type: array

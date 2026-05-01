@@ -10,7 +10,18 @@ import type { BankrollSyncState } from "./bankrollSyncState";
 
 export interface BankrollRecent {
   exchange: string;
+  /** Cash on hand from the most recent bankroll_events row. */
   current_balance_cents?: number | null;
+  /** Marked-to-market value of currently open contracts —
+sum(quantity * current_price) over positions where status='open',
+in cents. Null if the per-position computation failed.
+ */
+  open_position_value_cents?: number | null;
+  /** current_balance_cents + open_position_value_cents — the live
+"what would I have if I closed everything right now" figure.
+Null whenever the cash leg is unknown.
+ */
+  total_equity_cents?: number | null;
   last_event_at?: string | null;
   /** Chronological — oldest first — so callers can sparkline directly. */
   items: BankrollEvent[];
