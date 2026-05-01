@@ -422,6 +422,23 @@ LEAGUE_CONFIGS: dict[str, LeagueConfig] = {
         live_action_blackout=False,
         max_daily_trades=15,
     ),
+    # Crypto-binary (task #754).  Each KXBTC/KXETH/etc price-target
+    # contract resolves on its own clock (5m / 1h / etc cadence) so
+    # there's no "event in progress" frame to gate on.  Conservative
+    # per-coin/per-event cap and a low max-daily-trades because the
+    # crypto stack still leans heavily on the V1-bootstrap calibrator
+    # — once the 6-h scheduler refit accumulates a meaningful live
+    # population we can revisit these numbers.
+    "CRYPTO": LeagueConfig(
+        league="CRYPTO",
+        priority=11,
+        allocation_pct=0.05,
+        per_game_cap_pct=0.005,
+        per_event_cap_pct=0.02,
+        n_way_market=False,
+        live_action_blackout=False,
+        max_daily_trades=20,
+    ),
 }
 
 

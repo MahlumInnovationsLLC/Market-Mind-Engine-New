@@ -60,6 +60,16 @@ SUPPORTED_LEAGUES: frozenset[str] = frozenset({
     "EPL", "LALIGA", "SERIEA", "BUNDES", "LIGUE1", "MLS", "UCL",
     "UFC", "ATP", "WTA", "F1", "PGA",
     "COMMODITIES", "TECH_AI", "ELECTIONS", "EVENTS_ECON", "ENTERTAINMENT",
+    # Task #754: ``CRYPTO`` joined the calibrator registry.  The
+    # prefix rules below still don't map KXBTC/KXETH on purpose —
+    # the V1 archive backfill identifies crypto rows via
+    # ``vertical='crypto'`` (handled directly by
+    # ``scripts/backtest_v1_archive.py`` and the v1_settled CTE),
+    # which is more robust than a Kalshi-prefix heuristic.  Adding
+    # the literal here just keeps this module's mirror in sync with
+    # ``app.calibrators.SUPPORTED_LEAGUES`` so the drift-guard test
+    # in ``test_v1_archive_league_inference.py`` passes.
+    "CRYPTO",
 })
 
 # Sentinel league values V1 wrote when its own per-trade heuristic

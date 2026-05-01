@@ -93,6 +93,17 @@ SUPPORTED_LEAGUES: tuple[str, ...] = (
     # entertainment trades feed an isotonic / Platt curve scoped to
     # ENTERTAINMENT just like every other vertical.
     "ENTERTAINMENT",
+    # Crypto-binary (task #754).  V1 archive carries ~595k labelled
+    # crypto-binary outcomes (BTC/ETH price-target contracts written
+    # with ``vertical='crypto'`` and the V1 ``league='unknown'``
+    # sentinel).  The forward predictor (``app/crypto/predictor.py``)
+    # already calls ``apply(p, league='CRYPTO')`` so simply registering
+    # the league here is enough to unblock both the bootstrap fit on
+    # the V1 subset and the ongoing 6-h refit triggered by
+    # ``app/crypto/backtest_scheduler.py``.  Single-league bucket for
+    # v1; per-coin (BTC vs ETH vs SOL) calibration is intentionally
+    # out-of-scope until signal warrants it.
+    "CRYPTO",
 )
 
 # Below this sample count we fall back to Platt; below MIN_REFIT we
@@ -547,6 +558,19 @@ async def _fetch_training_data() -> dict[str, dict[str, list]]:
     union_parts: list[str] = ["SELECT league, p_side, y_side, source FROM live_settled"]
 
     if use_v1:
+        # Two row populations are folded into ``v1_settled``:
+        #
+        # * League-aligned trades — the original path.  Requires a
+        #   resolved ``league`` AND a known YES/NO side label so we
+        #   can flip ``predicted_prob`` to side-aligned.
+        # * Crypto-binary placeholders (task #754) — V1 wrote these
+        #   with ``vertical='crypto'`` and ``league='unknown'``
+        #   (no league inference rule covers them).  The contract is
+        #   binary YES/NO on a price target and V1's
+        #   ``predicted_prob`` is YES-aligned by construction, so
+        #   no side flip is needed and the synthetic
+        #   ``league='CRYPTO'`` matches the forward predictor's
+        #   ``apply(p, league='CRYPTO')`` call site exactly.
         extra_ctes.append(f""",
         v1_settled AS (
           SELECT upper(league)                                AS league,
@@ -570,6 +594,27 @@ async def _fetch_training_data() -> dict[str, dict[str, list]]:
              AND lower(coalesce(analysis_json->>'side', '')) IN
                  ('yes','buy','live_yes','buy yes',
                   'no','sell','live_no','buy no')
+             -- Mutual-exclusion guard with the CRYPTO branch below.
+             -- V1 crypto rows live in vertical='crypto' (typically
+             -- league='unknown', no explicit side); excluding them
+             -- here makes the two UNION ALL branches partitioned by
+             -- vertical so no row can be counted twice or split-bucket
+             -- into both its inferred league AND CRYPTO.
+             AND lower(coalesce(vertical, '')) <> 'crypto'
+          UNION ALL
+          SELECT 'CRYPTO'::text                               AS league,
+                 greatest(0.0, least(1.0,
+                          predicted_prob::float))             AS p_side,
+                 actual_outcome::int                          AS y_side,
+                 'v1'::text                                   AS source
+            FROM v1_archive.trade_analyses
+           WHERE to_regclass('v1_archive.trade_analyses') IS NOT NULL
+             AND created_at IS NOT NULL
+             AND created_at > now() - interval '{int(REFIT_WINDOW_DAYS)} days'
+             AND predicted_prob IS NOT NULL
+             AND actual_outcome IS NOT NULL
+             AND lower(coalesce(vertical, '')) = 'crypto'
+             AND actual_outcome IN (0, 1)
         )""")
         union_parts.append("SELECT league, p_side, y_side, source FROM v1_settled")
 

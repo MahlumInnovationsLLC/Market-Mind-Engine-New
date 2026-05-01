@@ -43,7 +43,7 @@ import os
 from datetime import datetime, timezone
 from typing import Any, Iterable, Sequence
 
-from .. import db
+from .. import calibrators, db
 from ..health import error_log
 from ..notifications import alerts as notif_alerts
 from . import backtest as crypto_backtest
@@ -144,6 +144,34 @@ def _alert_ttl_seconds() -> int:
     except Exception:
         return 6 * 3600
     return max(60, v)
+
+
+def _refit_calibrators_enabled() -> bool:
+    """Whether each scheduler sweep also triggers a per-league refit.
+
+    The 6-h cadence is the right surface for a fresh CRYPTO
+    calibrator (task #754) because crypto outcomes settle on a
+    minutes-to-hours timeline — once shadow + live rows accumulate
+    for the calibrator's 90-day window, a 6-h refit gives us a
+    materially fresher curve than the nightly sports refit.
+
+    The refit covers every supported league (it's a single
+    ``calibrators.refit_all()`` call), not just CRYPTO — but:
+
+    * the fit cost is dominated by leagues with the most rows;
+    * any league below ``MIN_REFIT_SAMPLES`` is skipped, so this
+      is a no-op for cold leagues;
+    * the same code path the nightly tick uses already runs here,
+      so we never end up with two calibrator-fit code paths to
+      keep in sync.
+
+    Defaults ON; flip to ``0`` if the operator wants to revert to
+    nightly-only refit.
+    """
+    raw = (
+        os.environ.get("CRYPTO_BACKTEST_REFIT_CALIBRATORS") or "1"
+    ).strip().lower()
+    return raw in ("1", "true", "yes", "on", "y")
 
 
 def supported_pairs() -> list[tuple[str, str]]:
@@ -664,6 +692,28 @@ async def check_now(
             out["errors"] += 1
         out["alerts_raised"] += int(res.get("alerts_raised") or 0)
     out["completed_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    # Trigger the per-league calibrator refit at the same cadence.
+    # The refit is best-effort: a sick fit for one league must not
+    # break the next sweep, so we capture and log the error in the
+    # summary rather than re-raising.
+    if _refit_calibrators_enabled():
+        try:
+            refit_summary = await calibrators.refit_all()
+            out["calibrator_refit"] = {
+                "ok": True,
+                "fitted": int(refit_summary.get("fitted") or 0),
+                "skipped": int(refit_summary.get("skipped") or 0),
+                "errors": int(refit_summary.get("errors") or 0),
+                "duration_seconds": refit_summary.get("duration_seconds"),
+            }
+        except Exception as e:  # pragma: no cover — defensive
+            log.warning("calibrators.refit_all failed during sweep: %s", e)
+            out["calibrator_refit"] = {
+                "ok": False,
+                "error": f"{type(e).__name__}: {e}",
+            }
+    else:
+        out["calibrator_refit"] = {"ok": True, "skipped": "disabled_via_env"}
     return out
 
 
@@ -689,6 +739,12 @@ _status: dict[str, Any] = {
     "last_sweep_alerts": 0,
     "last_error": None,
     "sweeps_completed": 0,
+    # Most recent per-league calibrator refit triggered by the
+    # 6-h sweep; surfaced so the operator dashboard can see the
+    # CRYPTO calibrator was refit on schedule even when no
+    # crypto_backtest_drift alert fired.  ``None`` until the first
+    # sweep with the refit env switch ON completes.
+    "last_calibrator_refit": None,
 }
 
 
@@ -729,6 +785,7 @@ async def _loop() -> None:
             _status["last_sweep_errors"] = int(summary.get("errors", 0))
             _status["last_sweep_alerts"] = int(summary.get("alerts_raised", 0))
             _status["sweeps_completed"] = int(_status.get("sweeps_completed", 0)) + 1
+            _status["last_calibrator_refit"] = summary.get("calibrator_refit")
             _status["last_error"] = None
             log.info(
                 "crypto_backtest_scheduler sweep done: pairs=%d errors=%d alerts=%d",

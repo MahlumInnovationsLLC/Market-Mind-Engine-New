@@ -99,17 +99,20 @@ arithmetic, not architecture.**
 
 ### Phase 4 — Crypto calibrator (2–3 days) **[do here]**
 
-- **T-13 · Add `crypto` to `SUPPORTED_LEAGUES` calibrator list**
+- **T-13 · Add `crypto` to `SUPPORTED_LEAGUES` calibrator list** ✅ (Task #754)
   - Schema work: ensure `predictions.league` accepts `crypto` and the calibrator registry knows about it.
   - Acceptance: smoke test predicts on a crypto contract end-to-end.
+  - Done: `CRYPTO` registered in `app/calibrators.py::SUPPORTED_LEAGUES`; `apply(p, league='CRYPTO')` no longer bypasses with `unsupported league` (forward predictor already calls `apply(p, league='CRYPTO')` at `app/crypto/predictor.py`).
 
-- **T-14 · Bootstrap crypto calibrator from 595k V1-archive crypto rows**
+- **T-14 · Bootstrap crypto calibrator from 595k V1-archive crypto rows** ✅ (Task #754)
   - Re-use the existing isotonic fit pattern; train on the V1 archive subset and persist as a `calibration_snapshots` row.
   - Acceptance: V1 backtest harness shows crypto Brier drops from "no-op" to a measurable improvement (target: ≥0.05 reduction on the V1 archive crypto rows).
+  - Done: `scripts/bootstrap_crypto_calibrator.py` — pulls V1 crypto rows (`vertical='crypto'`), fits isotonic (Platt fallback under `ISOTONIC_MIN_SAMPLES`), persists with `source_breakdown={'v1_archive_bootstrap': n}`. `scripts/backtest_v1_archive.py` now derives `league='CRYPTO'` from `vertical='crypto'` so the harness report surfaces a CRYPTO entry. Runbook §20 documents invocation, expected Brier delta, and verification SQL.
 
-- **T-15 · Wire `crypto/backtest_scheduler.py` (6-h cadence) to refit + score**
+- **T-15 · Wire `crypto/backtest_scheduler.py` (6-h cadence) to refit + score** ✅ (Task #754)
   - Cron the existing backtest scheduler to also write a fresh calibration snapshot every 6 h.
   - Acceptance: 24-h soak shows snapshots written on schedule and dashboard surfaces the freshness.
+  - Done: `check_now()` calls `calibrators.refit_all()` after the per-pair sweep, gated by `CRYPTO_BACKTEST_REFIT_CALIBRATORS` (default ON, kill-switchable). Sweep payload + scheduler `_status` carry a `last_calibrator_refit` block (`fitted/skipped/errors/duration_seconds`) the dashboard surfaces; failure of the refit does not abort the sweep.
 
 ### Phase 5 — Champion-challenger A/B (2 days) **[do here]**
 

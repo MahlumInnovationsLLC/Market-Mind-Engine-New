@@ -162,11 +162,22 @@ def _normalize_into(
     for r in rows:
         raw_league = r.get("league")
         league = (raw_league or "").strip().upper()
-        if not league:
+        # Task #754: V1 crypto rows landed with the V1 ``unknown`` /
+        # NULL ``league`` sentinel because no inference rule covered
+        # KXBTC/KXETH.  They DO carry ``vertical='crypto'`` though,
+        # which the calibrator treats as the ``CRYPTO`` per-league
+        # bucket.  Promote those rows to ``league='CRYPTO'`` so the
+        # harness reports a CRYPTO Brier delta instead of dropping
+        # ~595k rows into ``literal_unknown``.
+        vertical = (r.get("vertical") or "").strip().lower()
+        is_crypto_vertical = vertical == "crypto"
+        if (not league or league in _LEAGUE_UNRESOLVED_LITERALS) and is_crypto_vertical:
+            league = "CRYPTO"
+        elif not league:
             if unresolved_counter is not None:
                 unresolved_counter["null"] = unresolved_counter.get("null", 0) + 1
             continue
-        if league in _LEAGUE_UNRESOLVED_LITERALS:
+        elif league in _LEAGUE_UNRESOLVED_LITERALS:
             if unresolved_counter is not None:
                 unresolved_counter["literal_unknown"] = (
                     unresolved_counter.get("literal_unknown", 0) + 1
@@ -178,7 +189,13 @@ def _normalize_into(
         outcome_raw = r.get("actual_outcome")
         if prob_raw is None or outcome_raw is None:
             continue
-        p_side = _side_align(float(prob_raw), _resolve_side(r))
+        # Crypto V1 rows have no ``side`` (no analysis_json side either):
+        # the V1 ``predicted_prob`` is the YES-side probability already,
+        # so treat side=YES when missing rather than dropping the row.
+        side = _resolve_side(r)
+        if side is None and league == "CRYPTO":
+            side = "yes"
+        p_side = _side_align(float(prob_raw), side)
         if p_side is None:
             continue
         try:
@@ -212,16 +229,33 @@ async def _fetch_db_rows_batched(
         print("[backtest] v1_archive.trade_analyses not found; nothing to do.")
         return
 
+    # The original (sports / mixed-vertical) path requires a resolved
+    # ``league`` because side-alignment depends on it.  V1 crypto rows
+    # (task #754) were imported with the V1 ``league='unknown'``
+    # sentinel — there's no inference rule that maps them — but they
+    # carry ``vertical='crypto'`` so we can synthesise
+    # ``league='CRYPTO'`` downstream in ``_normalize_into``.  Hence
+    # the WHERE clause accepts EITHER a resolved league OR the
+    # crypto vertical.
     where_static: list[str] = [
         "predicted_prob IS NOT NULL",
         "actual_outcome IS NOT NULL",
-        "league IS NOT NULL",
+        "(league IS NOT NULL OR lower(coalesce(vertical, '')) = 'crypto')",
     ]
     if leagues_filter:
         cleaned = ",".join(
             "'" + lg.replace("'", "''").upper() + "'" for lg in leagues_filter
         )
-        where_static.append(f"upper(league) IN ({cleaned})")
+        # When CRYPTO is in the leagues filter we must keep the
+        # crypto-vertical rows even if their ``league`` column is the
+        # V1 unresolved sentinel — otherwise the filter masks them out.
+        if "CRYPTO" in {lg.upper() for lg in leagues_filter}:
+            where_static.append(
+                f"(upper(coalesce(league, '')) IN ({cleaned}) "
+                f"OR lower(coalesce(vertical, '')) = 'crypto')"
+            )
+        else:
+            where_static.append(f"upper(league) IN ({cleaned})")
 
     last_id: str | None = None
     total_yielded = 0
@@ -241,7 +275,8 @@ async def _fetch_db_rows_batched(
             where_clauses.append("id > $1")
             params.append(last_id)
         sql = (
-            "SELECT id, league, predicted_prob, actual_outcome, analysis_json "
+            "SELECT id, league, vertical, predicted_prob, actual_outcome, "
+            "analysis_json "
             "FROM v1_archive.trade_analyses "
             f"WHERE {' AND '.join(where_clauses)} "
             f"ORDER BY id ASC LIMIT {int(this_batch)}"

@@ -2278,3 +2278,172 @@ per-cycle counts on the operator console — `predictor.snapshots_written`,
   loop was built for.  Check the affected vertical's
   per-league calibrator snapshot breakdown to confirm shadow rows
   outnumber live rows by a reasonable margin (≥ 5 :1 typical).
+
+## 20. Crypto calibrator bootstrap (Task #754)
+
+The forward predictor (`app/crypto/predictor.py`) calls
+`calibrators.apply(p, league='CRYPTO')`, but until task #754 the
+`CRYPTO` bucket was unregistered → every crypto candidate bypassed
+calibration with `unsupported league`.  This section covers the
+one-shot bootstrap from V1's archive plus the steady-state 6-h
+refit.
+
+### Why we need a bootstrap
+
+V1 wrote ~595 k labelled crypto-binary outcomes
+(`vertical='crypto'`, `market_id` like `CRYPTO-BTC-5m`) into
+`v1_archive.trade_analyses`, with `league='unknown'` because no
+inference rule covered KXBTC/KXETH.  The nightly refit's
+`v1_settled` CTE is gated by
+`created_at > now() - interval '90 days'` and the archive rows are
+mostly months/years older than that — so the calibrator would
+register `CRYPTO` but never have data to fit until live shadow
+rows accumulated for the full 90-day window (months of waiting).
+
+The bootstrap script scans the *full* V1 crypto subset (no time
+window), fits an isotonic regressor, and writes a
+`per_league:CRYPTO` snapshot the loader picks up at boot.
+
+### Run the bootstrap
+
+```bash
+# Dry run (no DB write — just prints metrics):
+pnpm --filter @workspace/api-server exec \
+  python -m scripts.bootstrap_crypto_calibrator --dry-run
+
+# Live persist:
+pnpm --filter @workspace/api-server exec \
+  python -m scripts.bootstrap_crypto_calibrator
+```
+
+Expected output (live persist):
+
+```json
+{
+  "ok": true,
+  "league": "CRYPTO",
+  "sample_count": 595000,
+  "calibrator_type": "isotonic",
+  "brier_before": 0.24,
+  "brier_after": 0.18,
+  "brier_delta": -0.06,
+  "snapshot_id": 4321,
+  "dry_run": false
+}
+```
+
+`brier_delta` should land at **≥ 0.05 reduction** on the V1 crypto
+subset (the task #754 acceptance bar).  If it doesn't, the V1
+import probably under-loaded — check
+`v1_archive.trade_analyses` row counts before re-running.
+
+### Verify the snapshot landed
+
+```sql
+SELECT id, sub_category, sample_count,
+       config->>'brier_before'  AS brier_before,
+       config->>'brier_after'   AS brier_after,
+       config->'source_breakdown' AS source_breakdown,
+       created_at
+  FROM calibration_snapshots
+ WHERE sub_category = 'per_league:CRYPTO'
+ ORDER BY created_at DESC
+ LIMIT 1;
+```
+
+* `source_breakdown` should be `{"v1_archive_bootstrap": <n>}` on
+  the bootstrap row, and `{"v1": ..., "shadow": ..., "live": ...}`
+  on later refit rows.
+* The loader picks DISTINCT ON `sub_category` ORDER BY
+  `created_at DESC`, so each re-run supersedes the previous fit.
+
+### Verify `apply()` is using it
+
+```bash
+curl -s "$BASE_URL/api/admin/calibrators/freshness" | \
+  jq '.per_league.CRYPTO'
+```
+
+Should report `loaded: true, type: "isotonic", stale: false`.
+A `loaded: false` after the bootstrap means the API process never
+called `load_all()` after the insert — restart the
+`artifacts/api-server: API Server` workflow or hit
+`/api/admin/calibrators/reload`.
+
+### Steady-state 6-h refit
+
+Once the bootstrap has landed, the
+`app/crypto/backtest_scheduler.py` cadence (default 6 h) pulls a
+fresh `calibrators.refit_all()` after every per-pair sweep — same
+code path the nightly sports refit uses.  This is gated by
+`CRYPTO_BACKTEST_REFIT_CALIBRATORS` (default `1`).
+
+```bash
+# Disable scheduler-driven refit (revert to nightly-only):
+replit deploy env set CRYPTO_BACKTEST_REFIT_CALIBRATORS=0
+```
+
+The most recent refit summary surfaces on the scheduler status
+payload (`app.crypto.backtest_scheduler.status()`):
+
+```json
+{
+  "last_calibrator_refit": {
+    "ok": true, "fitted": 22, "skipped": 1, "errors": 0,
+    "duration_seconds": 4.7
+  }
+}
+```
+
+`fitted` is total leagues fitted (not just CRYPTO).  A persistent
+`errors > 0` for the CRYPTO league specifically should be cross-
+referenced with the `[calibrators] fit failed for CRYPTO` log
+line.
+
+### Re-run after a V1 archive reload
+
+If the V1 import is re-run (e.g. fresher V1 dump landed), re-run
+the bootstrap to refit on the new row population:
+
+```bash
+# Confirm the archive row count moved:
+psql "$DATABASE_URL" -c "
+  SELECT count(*) FROM v1_archive.trade_analyses
+   WHERE lower(coalesce(vertical,'')) = 'crypto';"
+
+# Re-fit:
+pnpm --filter @workspace/api-server exec \
+  python -m scripts.bootstrap_crypto_calibrator
+```
+
+The new snapshot supersedes the previous one immediately.
+
+### V1 backtest harness CRYPTO entry
+
+`scripts/backtest_v1_archive.py` derives `league='CRYPTO'` from
+`vertical='crypto'` when the V1 league column is unresolved, so
+re-running the archive backtest should now show a `CRYPTO`
+per-league entry in the report alongside the existing leagues.
+
+```bash
+pnpm --filter @workspace/api-server exec \
+  python -m scripts.backtest_v1_archive --leagues CRYPTO
+```
+
+Look for the `CRYPTO` block under `per_league` in the JSON report;
+its `brier.calibrated_delta` should match the bootstrap's
+`brier_delta` within rounding.
+
+### Symptoms of regression
+
+* Bootstrap exits 1 with `below MIN_REFIT_SAMPLES (10)` → the V1
+  archive is empty for crypto.  Confirm migration `0037` applied
+  and the V1 import landed (see §11 / `scripts/import_v1_history`).
+* Snapshot insert succeeds but `apply()` still bypasses with
+  `no fitted calibrator` → the API process didn't reload state.
+  Restart the API server workflow or call
+  `/api/admin/calibrators/reload`.
+* Scheduler `last_calibrator_refit.errors > 0` for CRYPTO → check
+  the calibrator log for the trace; most common cause is a sick
+  row in `shadow_learning_buffer` with NaN `predicted_prob` (the
+  refit clamps but the upstream writer can still produce them).
