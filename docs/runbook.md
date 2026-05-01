@@ -2157,7 +2157,13 @@ The shadow loop closes the bias by running on every settlement cycle
    `predictions` on `kalshi_market_id`, copies `outcome` /
    `settled_at` onto the shadow row, and inserts a matching
    `shadow_learning_buffer` row (idempotent on
-   `shadow_prediction_id`).
+   `shadow_prediction_id`).  `predictions.outcome` is text
+   (`'yes'` / `'no'` / `'void'`) per migration 0022; the settler
+   normalises to int for the shadow tables and **drops `void`
+   markets** entirely (no calibration signal).  Voids are reported
+   on the cycle summary as `voids_skipped` so an unusually high
+   void rate is visible in `last_cycle.shadow` without log
+   spelunking.
 3. **Drift parity** — `_calibration_and_drift_shadow(vertical)`
    computes 24 h Brier off `shadow_learning_buffer` per registered
    vertical, writes a `calibration_snapshots` row tagged

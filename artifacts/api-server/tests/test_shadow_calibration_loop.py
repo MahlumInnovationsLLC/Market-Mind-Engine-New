@@ -119,7 +119,11 @@ class _InMemoryDb:
                     "vertical": sp.get("vertical"),
                     "predicted_prob": float(sp["predicted_prob"]),
                     "uncalibrated_prob": sp.get("uncalibrated_prob"),
-                    "outcome": int(r["outcome"]),
+                    # Pass the raw outcome through unchanged so the
+                    # settler's own _normalize_outcome path is exercised.
+                    # In production this is a *text* column ('yes'/'no'/
+                    # 'void') per migration 0022.
+                    "outcome": r["outcome"],
                     "settled_at": r["settled_at"],
                 })
                 if len(out) >= limit:
@@ -361,17 +365,23 @@ def test_shadow_settler_copies_outcome_and_inserts_buffer(fake_db):
         "settled_at": None, "outcome": None,
     })
     fake_db._next_shadow_id = 2
+    # NOTE: predictions.outcome is a *text* column ('yes'/'no'/'void')
+    # per migration 0022; the settler must normalise to int for the
+    # shadow tables.  Use the realistic text label here so we exercise
+    # the normalisation path (a regression here would silently break
+    # buffer inserts in production).
     fake_db.predictions.append({
         "id": 99, "kalshi_market_id": "KX-NBA-LAL-1",
         "league": "NBA", "model_yes_prob": 0.62,
-        "settled_at": settled_at, "outcome": 1, "game_time": None,
+        "settled_at": settled_at, "outcome": "yes", "game_time": None,
     })
 
     cr = asyncio.run(shadow_settler.run_cycle())
     assert cr.candidates_scanned == 1
     assert cr.settled == 1
     assert cr.buffer_inserted == 1
-    # Outcome stamped on the shadow row
+    assert cr.voids_skipped == 0
+    # Outcome stamped on the shadow row (normalised to int)
     assert fake_db.shadow_predictions[0]["settled_at"] == settled_at
     assert fake_db.shadow_predictions[0]["outcome"] == 1
     # Buffer row populated
@@ -385,6 +395,83 @@ def test_shadow_settler_copies_outcome_and_inserts_buffer(fake_db):
     cr2 = asyncio.run(shadow_settler.run_cycle())
     assert cr2.buffer_inserted == 0
     assert len(fake_db.shadow_buffer) == 1
+
+
+def test_shadow_settler_normalizes_text_outcomes_and_skips_voids(fake_db):
+    """Coverage for the predictions.outcome text vocabulary
+    ('yes'/'no'/'void').  'no' should land as 0 in the buffer; 'void'
+    should be counted in voids_skipped and never write a row (a void
+    market carries no calibration signal)."""
+    settled_at = datetime.now(timezone.utc) - timedelta(minutes=10)
+    fake_db.shadow_predictions.extend([
+        {"id": 10, "market_id": "KX-MKT-A", "league": "NBA",
+         "vertical": "sports", "predicted_prob": 0.40,
+         "uncalibrated_prob": None, "predicted_at": settled_at,
+         "settled_at": None, "outcome": None},
+        {"id": 11, "market_id": "KX-MKT-B", "league": "NBA",
+         "vertical": "sports", "predicted_prob": 0.55,
+         "uncalibrated_prob": None, "predicted_at": settled_at,
+         "settled_at": None, "outcome": None},
+        {"id": 12, "market_id": "KX-MKT-VOID", "league": "NBA",
+         "vertical": "sports", "predicted_prob": 0.50,
+         "uncalibrated_prob": None, "predicted_at": settled_at,
+         "settled_at": None, "outcome": None},
+    ])
+    fake_db._next_shadow_id = 13
+    fake_db.predictions.extend([
+        {"id": 100, "kalshi_market_id": "KX-MKT-A", "league": "NBA",
+         "model_yes_prob": 0.40, "settled_at": settled_at,
+         "outcome": "no", "game_time": None},
+        {"id": 101, "kalshi_market_id": "KX-MKT-B", "league": "NBA",
+         "model_yes_prob": 0.55, "settled_at": settled_at,
+         "outcome": "YES", "game_time": None},  # case-insensitive
+        {"id": 102, "kalshi_market_id": "KX-MKT-VOID", "league": "NBA",
+         "model_yes_prob": 0.50, "settled_at": settled_at,
+         "outcome": "void", "game_time": None},
+    ])
+
+    cr = asyncio.run(shadow_settler.run_cycle())
+    assert cr.candidates_scanned == 3
+    assert cr.settled == 2
+    assert cr.buffer_inserted == 2
+    assert cr.voids_skipped == 1
+    # 'no' -> 0, 'YES' -> 1, void dropped entirely.
+    outcomes = sorted(
+        b["actual_outcome"] for b in fake_db.shadow_buffer
+    )
+    assert outcomes == [0, 1]
+    market_ids = {b["market_id"] for b in fake_db.shadow_buffer}
+    assert market_ids == {"KX-MKT-A", "KX-MKT-B"}
+    # The void row is left un-stamped on shadow_predictions so a future
+    # cycle re-inspects it (cheap; the void status is sticky upstream).
+    void_row = next(
+        sp for sp in fake_db.shadow_predictions if sp["id"] == 12
+    )
+    assert void_row["settled_at"] is None
+    assert void_row["outcome"] is None
+
+
+def test_shadow_settler_normalize_outcome_helper():
+    """Direct contract test for the normaliser — the unit under test
+    that closes the previous-round audit gap (predictions.outcome is
+    text but shadow tables hold int)."""
+    n = shadow_settler._normalize_outcome
+    assert n("yes") == 1
+    assert n("Yes") == 1
+    assert n(" YES ") == 1
+    assert n("no") == 0
+    assert n("NO") == 0
+    assert n(1) == 1
+    assert n(0) == 0
+    assert n(True) == 1
+    assert n(False) == 0
+    # void / cancel / unparseable / out-of-range numeric all map to None
+    assert n("void") is None
+    assert n("cancel") is None
+    assert n("") is None
+    assert n(None) is None
+    assert n(2) is None
+    assert n("maybe") is None
 
 
 # ---------------------------------------------------------------------------

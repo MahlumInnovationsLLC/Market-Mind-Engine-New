@@ -50,7 +50,39 @@ class ShadowSettleCycleResult:
     candidates_scanned: int = 0
     settled: int = 0
     buffer_inserted: int = 0
+    voids_skipped: int = 0
     errors: list[str] = field(default_factory=list)
+
+
+# `predictions.outcome` is a *text* column (migration 0022) holding
+# Kalshi's canonical resolution labels: 'yes' / 'no' / 'void'.  The
+# shadow tables store outcome as integer (1=yes, 0=no), so we
+# normalise here.  'void' is intentionally dropped from the training
+# UNION — a voided market carries no calibration signal and would
+# bias the per-league Brier score downward.  Numeric outcomes are
+# accepted too so a future settler that writes 0/1 directly remains
+# compatible.
+def _normalize_outcome(raw: Any) -> int | None:
+    """Return 1/0 for resolved outcomes, None for void / missing /
+    unparseable.  Mirrors the label vocabulary established by the
+    Kalshi reconciler in ``app/feeds/kalshi_crypto_markets.py`` and
+    documented on the ``predictions.outcome`` column."""
+    if raw is None:
+        return None
+    if isinstance(raw, bool):
+        return int(raw)
+    if isinstance(raw, (int, float)):
+        as_int = int(raw)
+        return as_int if as_int in (0, 1) else None
+    if isinstance(raw, str):
+        norm = raw.strip().lower()
+        if norm in ("yes", "y", "1", "true", "t"):
+            return 1
+        if norm in ("no", "n", "0", "false", "f"):
+            return 0
+        # 'void', 'cancel', '' — no calibration signal.
+        return None
+    return None
 
 
 async def _fetch_pending_resolutions(limit: int) -> list[dict[str, Any]]:
@@ -206,10 +238,12 @@ async def run_cycle(*, limit: int = DEFAULT_BATCH_LIMIT) -> ShadowSettleCycleRes
         settled_at = r.get("settled_at")
         if outcome is None or settled_at is None:
             continue
-        try:
-            outcome_int = int(outcome)
-        except (TypeError, ValueError):
-            cr.errors.append(f"{shadow_id}: bad outcome {outcome!r}")
+        outcome_int = _normalize_outcome(outcome)
+        if outcome_int is None:
+            # Void / cancel / unparseable — these carry no calibration
+            # signal.  Count them so an operator can sanity-check the
+            # void rate without spelunking logs, but never raise.
+            cr.voids_skipped += 1
             continue
 
         try:
@@ -248,8 +282,9 @@ async def run_cycle(*, limit: int = DEFAULT_BATCH_LIMIT) -> ShadowSettleCycleRes
     cr.duration_seconds = round(time.perf_counter() - started, 3)
     cr.completed_at = datetime.now(timezone.utc).isoformat()
     log.info(
-        "[shadow_settler] cycle done scanned=%d settled=%d buffered=%d errors=%d duration=%.2fs",
+        "[shadow_settler] cycle done scanned=%d settled=%d buffered=%d "
+        "voids=%d errors=%d duration=%.2fs",
         cr.candidates_scanned, cr.settled, cr.buffer_inserted,
-        len(cr.errors), cr.duration_seconds,
+        cr.voids_skipped, len(cr.errors), cr.duration_seconds,
     )
     return cr
