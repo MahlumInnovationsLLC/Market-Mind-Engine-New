@@ -193,6 +193,30 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/CalibratorAb" }
 
+  /dashboard/v1-backtest-gate:
+    get:
+      operationId: getV1BacktestGate
+      tags: [dashboard]
+      summary: Weekly V1 backtest gate (latest run + history)
+      description: >-
+        Returns the most recent persisted ``v1_backtest_gate_runs`` row
+        plus a short history slice so the dashboard tile can render the
+        current overall verdict (PASS / FAIL / DEGRADED_…), the
+        per-league Brier table, the list of regressed leagues, and a
+        sparkline of recent verdicts.  The tile turns red as soon as
+        ``regressed_leagues`` is non-empty.
+      parameters:
+        - in: query
+          name: history_limit
+          schema: { type: integer, minimum: 1, maximum: 50, default: 8 }
+          description: How many recent runs to return in ``history`` (latest first).
+      responses:
+        "200":
+          description: Latest V1 backtest gate run + history
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/V1BacktestGate" }
+
   /dashboard/vertical-performance:
     get:
       operationId: getVerticalPerformance
@@ -1427,6 +1451,46 @@ components:
         challenger_count: { type: integer }
         error: { type: string, nullable: true }
       required: [items, supported]
+
+    V1BacktestGateRun:
+      type: object
+      description: One persisted row of `v1_backtest_gate_runs` (latest-first).
+      properties:
+        id: { type: integer }
+        run_at: { type: string, description: ISO-8601 UTC. }
+        overall_verdict: { type: string, description: "PASS / FAIL / DEGRADED_… / ERROR / UNKNOWN" }
+        parity_gate_status:
+          type: object
+          additionalProperties: true
+          description: Verbatim `_build_parity_gate_status` manifest from the offline replay script.
+        per_league_brier:
+          type: object
+          additionalProperties: { type: number }
+          description: League → calibrator-applied Brier on this run; baseline for next week's regression diff.
+        regressed_leagues:
+          type: array
+          items: { type: string }
+          description: Leagues whose Brier got worse than the prior run by more than `_BRIER_TOLERANCE`.
+        report_path: { type: string, nullable: true, description: Path to the full JSON report on disk, if persisted. }
+        duration_seconds: { type: number, nullable: true }
+        notes: { type: string, nullable: true }
+      required: [id, run_at, overall_verdict, parity_gate_status, per_league_brier, regressed_leagues]
+
+    V1BacktestGate:
+      type: object
+      description: >-
+        Latest weekly V1-backtest gate run + history. The dashboard tile
+        renders red when `latest.regressed_leagues` is non-empty or when
+        `latest.overall_verdict` is `FAIL` / `ERROR`.
+      properties:
+        latest:
+          allOf: [{ $ref: "#/components/schemas/V1BacktestGateRun" }]
+          nullable: true
+        history:
+          type: array
+          items: { $ref: "#/components/schemas/V1BacktestGateRun" }
+        error: { type: string, nullable: true }
+      required: [history]
 
     SwarmPersonaToday:
       type: object

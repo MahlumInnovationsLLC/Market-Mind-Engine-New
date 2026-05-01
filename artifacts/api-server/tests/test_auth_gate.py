@@ -48,6 +48,8 @@ PROTECTED_ROUTES: tuple[str, ...] = (
     "/api/dashboard/llm-fallback-rates",
     "/api/dashboard/recent-cycles",
     "/api/dashboard/vertical-performance",
+    # Task #756 — weekly V1 backtest gate tile (red on per-league Brier regression).
+    "/api/dashboard/v1-backtest-gate",
     "/api/dashboard/over-filled-orders-today",
     "/api/dashboard/crypto-ohlcv-retention",
     # Task #640 — backtest history retention status panel on the operator dashboard.
@@ -226,6 +228,8 @@ PROTECTED_MUTATING_ENDPOINTS: tuple[tuple[str, str], ...] = (
     ("POST", "/api/admin/persona-toggles"),
     ("POST", "/api/admin/emergency-stop"),
     ("POST", "/api/admin/rearm-trading"),
+    # Task #756 — admin-triggered manual fire of the daily honesty report.
+    ("POST", "/api/admin/honesty-report/fire-now"),
     ("POST", "/api/polymarket/paper-order"),
     ("POST", "/api/admin/runtime-settings"),
     ("DELETE", "/api/admin/runtime-settings/revert"),

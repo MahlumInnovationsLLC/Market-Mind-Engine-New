@@ -143,15 +143,18 @@ arithmetic, not architecture.**
 
 ### Phase 8 — Ongoing observability **[do here]**
 
-- **T-21 · Daily automated "honesty report" emailed/Telegrammed to operator**
+- **[x] T-21 · Daily automated "honesty report" emailed/Telegrammed to operator** (#756)
   - Bundles: shadow-vs-live divergence chart, calibrator drift status, tail-risk tile screenshot, gate-trip log.
   - Acceptance: report lands at 09:00 local; manual smoke shows all panels populated.
+  - Done: `app/notifications/daily_honesty_report.py` builds 4 sections + dispatches via Postmark + Telegram with restart-safe dedupe; `POST /api/admin/honesty-report/fire-now` is the manual replay path; `risk_gate_trips` (migration 0045) backs the trip count panel; runbook §21 documents reds + mute path.
 
-- **T-22 · Weekly V1-backtest harness re-run with `parity_gate_status` surfaced on dashboard**
+- **[x] T-22 · Weekly V1-backtest harness re-run with `parity_gate_status` surfaced on dashboard** (#756)
   - Track until issue #731 (upstream feature snapshot import) lands and the gate flips to `PASS`.
+  - Done: `app/notifications/v1_backtest_gate.py` wraps `scripts.backtest_v1_archive.run`, persists `parity_gate_status` + per-league Brier into `v1_backtest_gate_runs` (migration 0046), and the `Weekly parity vs V1 archive` dashboard tile (`v1-backtest-gate-tile.tsx`) goes red on any per-league regression vs the prior week (`_BRIER_TOLERANCE = 0.02`). Runbook §22 documents thresholds + manual replay.
 
-- **T-23 · Monthly investor deck refresh — equity curve + per-league Brier delta chart**
+- **[x] T-23 · Monthly investor deck refresh — equity curve + per-league Brier delta chart** (#756)
   - Self-serve from the audit-report JSONs in `artifacts/api-server/reports/`. No new code, just a runbook entry + a `.pptx` template.
+  - Done: `scripts/build_investor_deck.py` reads the most recent `v1_backtest_full_archive_*.json` and renders 5 slides (cover, equity TL;DR, per-league Brier table, parity gate status, road-to-live) into `docs/investor-deck-template.pptx` (python-pptx). Re-running deterministically refreshes the deck.
 
 ---
 

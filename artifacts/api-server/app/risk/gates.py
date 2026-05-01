@@ -66,6 +66,56 @@ def _reset_no_thresholds_warning_throttle() -> None:
 _TAIL_RISK_TRIP_DEDUPE_TTL_SECONDS = 6 * 3600
 
 
+async def _persist_risk_gate_trip(
+    *,
+    ctx: "RiskContext",
+    gate_name: str,
+    reason: str,
+    details: dict[str, Any],
+) -> None:
+    """Best-effort write of one row into ``risk_gate_trips``.
+
+    Backs the daily honesty report's ``gate_trips_24h`` panel
+    (Task #756).  We persist *every* trip even when the email/Telegram
+    fan-out is deduped, because the operator's daily report needs the
+    real "this gate fired N times today" count, not the (smaller)
+    deduped notification count.
+
+    DB failures are swallowed — the gate decision and the alert
+    fan-out below must always reach their respective consumers.
+    """
+    try:
+        import json as _json
+
+        await db.execute(
+            """
+            INSERT INTO risk_gate_trips
+                (gate_name, market_id, vertical, side,
+                 intended_quantity, current_price, reason, details)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb)
+            """,
+            gate_name,
+            ctx.market_id,
+            ctx.vertical,
+            ctx.side,
+            int(ctx.intended_quantity)
+            if ctx.intended_quantity is not None
+            else None,
+            float(ctx.current_price)
+            if ctx.current_price is not None
+            else None,
+            reason,
+            _json.dumps(details or {}),
+        )
+    except Exception as e:  # pragma: no cover — log persistence is best-effort
+        log.warning(
+            "risk_gate_trips persist failed for gate=%s market=%s: %s",
+            gate_name,
+            getattr(ctx, "market_id", None),
+            e,
+        )
+
+
 async def _emit_tail_risk_trip_alert(
     *,
     ctx: "RiskContext",
@@ -74,6 +124,12 @@ async def _emit_tail_risk_trip_alert(
     details: dict[str, Any],
 ) -> None:
     """Best-effort fire of the tail-risk trip alert. Never raises."""
+    # Persist the structured row first so the daily honesty report
+    # ``gate_trips_24h`` panel has the count even when the email/
+    # Telegram dedupe below suppresses the broadcast.
+    await _persist_risk_gate_trip(
+        ctx=ctx, gate_name=gate_name, reason=reason, details=details,
+    )
     try:
         from ..notifications import alerts as _alerts
 

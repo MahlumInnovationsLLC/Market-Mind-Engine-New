@@ -24,6 +24,11 @@ the change, and the rollback path if you need to undo it.
 15. [Per-vertical gatekeeper-knob tuning](#15-per-vertical-gatekeeper-knob-tuning)
 16. [Tail-risk gate knobs (auto-armed)](#16-tail-risk-gate-knobs-auto-armed)
 17. [Honest paper-fill baseline (orderbook-walk simulator)](#17-honest-paper-fill-baseline-orderbook-walk-simulator)
+18. [Trading-mode honesty: paper/live scoping, canary, pre-flight](#18-trading-mode-honesty-paperlive-scoping-canary-pre-flight-task-752)
+19. [Shadow-prediction calibration loop](#19-shadow-prediction-calibration-loop-task-753)
+20. [Crypto calibrator bootstrap](#20-crypto-calibrator-bootstrap-task-754)
+21. [Daily honesty report (09:00 local)](#21-daily-honesty-report-0900-local)
+22. [Weekly V1 backtest gate](#22-weekly-v1-backtest-gate)
 
 ---
 
@@ -2447,3 +2452,138 @@ its `brier.calibrated_delta` should match the bootstrap's
   the calibrator log for the trace; most common cause is a sick
   row in `shadow_learning_buffer` with NaN `predicted_prob` (the
   refit clamps but the upstream writer can still produce them).
+
+
+## 21. Daily honesty report (09:00 local)
+
+Each day around **13:00 UTC** (≈ 09:00 ET) the API server fires a
+single Telegram + email digest summarising four operator-visible
+signals (Task #756 / roadmap T-21):
+
+1. **Shadow-vs-live divergence** — per-league
+   `|brier(shadow last 7d) − brier(live last 7d)|`, computed from the
+   `shadow_learning_buffer` and `online_learning_buffer` tables.
+   Leagues with fewer than `DAILY_HONESTY_REPORT_MIN_SAMPLES` (default
+   30) settled rows on either side are listed under
+   *Insufficient samples* instead of being silently dropped.
+2. **Calibrator drift status** — one row per supported per-league
+   calibrator, classified GREEN / YELLOW / RED on three axes:
+   * `drift_status->>'status'` — `rolled_back` / `fitting_failed` /
+     `drift_breach` ⇒ **RED**, `drift_warning` ⇒ **YELLOW**.
+   * Brier-after — `>0.25` ⇒ **RED**, `>0.20` ⇒ **YELLOW**.
+   * Snapshot age — `>14 d` ⇒ **RED**, `>72 h` ⇒ **YELLOW**.
+3. **Tail-risk concentration** — headline numbers from
+   `dashboard.get_tail_risk_exposure(days=30)`: `tail_max_loss_usd`,
+   `total_max_loss_usd`, % of portfolio exposed to the tail bucket,
+   the dashboard tile's tone, and the threshold price used to slice
+   markets into the tail bucket.
+4. **Risk-gate trips (last 24 h)** — count of rows in
+   `risk_gate_trips` per `gate_name`. Tail-risk gate trips are written
+   here unconditionally (even when the broadcast is deduped) so the
+   operator can see what *would* have alerted overnight.
+
+### What red looks like
+
+| Section | Red signal | Likely cause |
+| --- | --- | --- |
+| Divergence | `|Δ| > 0.05` for any league | Shadow-vs-live regime split — calibrator drift, feature-store skew, or live-only side filter (e.g. tier gating) keeping live samples on a narrower distribution. |
+| Calibrator drift | RED tone on any league | Brier blew past 0.25, drift status flipped to `rolled_back` / `fitting_failed` / `drift_breach`, or the snapshot is older than 14 days (refit job stalled). |
+| Tail risk | `tone == "red"` | One or two markets account for too large a fraction of the open `tail_max_loss`. Inspect the per-position table and consider trimming. |
+| Gate trips | `tail_risk_size_clamped` count > 0 | Sizing layer keeps trying to over-allocate into the tail bucket. Tighten `RISK_GATE_TAIL_MAX_LOSS_USD` or the per-market clamp (see §16). |
+
+### Manual fire-now
+
+Operators can replay the report on demand from the admin console (or
+via `curl`) without waiting for the cron tick. `dry_run=true` (the
+default) builds the body and returns it without dispatching, so the
+on-call can sanity-check the contents first:
+
+```bash
+curl -X POST -H "Authorization: Bearer $ADMIN_JWT" \
+     -H "Content-Type: application/json" \
+     -d '{"dry_run": true}' \
+     "$AXIOM_API_URL/api/admin/honesty-report/fire-now"
+```
+
+Set `dry_run` to `false` to actually send. The endpoint bypasses the
+once-per-day `notification_dedupe` row keyed `daily_honesty_report`
+so it can be replayed safely after a busted run.
+
+### Mute / disable
+
+Set `DAILY_HONESTY_REPORT_ENABLED=0` to disable the scheduler entirely
+(restart the API server workflow to apply). To shift the send time,
+set `DAILY_HONESTY_REPORT_HOUR_UTC` and
+`DAILY_HONESTY_REPORT_MINUTE_UTC`. The dedupe row makes the cron
+restart-safe — repeated process restarts on the same UTC date will
+not refire.
+
+---
+
+## 22. Weekly V1 backtest gate
+
+Once a week the API server replays the V1 archive through the live
+calibrators (the `scripts.backtest_v1_archive.run` programmatic entry
+point), persists a row to `v1_backtest_gate_runs`, and the dashboard
+tile **Weekly parity vs V1 archive** turns red the moment any league
+regresses (Task #756 / roadmap T-22).
+
+### How the tile is fed
+
+1. `app.notifications.v1_backtest_gate.run_weekly_v1_backtest()` calls
+   `backtest_v1_archive.run(load_calibrators=True, full_stack=False)`
+   with a row cap of `V1_BACKTEST_GATE_LIMIT` (default 10 000; set to
+   `0` for "no cap").
+2. The returned `parity_gate_status` (the verbatim manifest from
+   `_build_parity_gate_status`) is persisted as JSONB.
+3. Per-league `brier_calibrated` is collected into `per_league_brier`
+   so it becomes next week's regression baseline.
+4. `regressed_leagues` is computed by comparing the new
+   `per_league_brier` against the prior persisted row. A league counts
+   as **regressed** when
+   `brier_current − brier_prior > _BRIER_TOLERANCE` (currently 0.02).
+5. Optional: when `V1_BACKTEST_GATE_WRITE_JSON=1`, the full report is
+   also written to
+   `artifacts/api-server/reports/v1_backtest_full_archive_<ts>.json`
+   so the investor-deck script (`scripts/build_investor_deck.py`,
+   §monthly) can pick it up.
+
+### What counts as a regression
+
+A red tile means **at least one** of:
+
+* `latest.regressed_leagues` is non-empty (the strict diff above).
+* `latest.overall_verdict == "FAIL"` (any of the three parity gates
+  failed: archived-features replay, surrogate-features replay, or the
+  ±2 pp parity gate vs V1's calibrated probability).
+* `latest.overall_verdict == "ERROR"` (the replay itself crashed —
+  check `error_log("v1_backtest_gate", ...)`).
+
+Yellow is reserved for `DEGRADED_*` verdicts — i.e. the surrogate path
+ran (because the archived-features path is still blocked on #731) and
+the comparison is a *degraded* baseline, not the production parity
+metric.
+
+### Manual replay
+
+```bash
+# Same code path the cron uses — bounded to 10k rows.
+pnpm --filter @workspace/api-server exec python -c '
+import asyncio
+from app.notifications.v1_backtest_gate import run_weekly_v1_backtest
+res = asyncio.run(run_weekly_v1_backtest(limit=10000))
+print({k: v for k, v in res.items() if k != "parity_gate_status"})
+'
+
+# Or run the offline script and inspect the JSON report directly.
+pnpm --filter @workspace/api-server exec \
+  python -m scripts.backtest_v1_archive --limit 10000 \
+  --json-out artifacts/api-server/reports/v1_backtest_manual.json
+```
+
+### Disable
+
+Set `V1_BACKTEST_GATE_ENABLED=0` to keep the scheduler from firing
+(useful while paper-replaying a calibrator change in isolation). To
+slow it down without disabling, raise
+`V1_BACKTEST_GATE_INTERVAL_SECONDS` — defaults to 604 800 (one week).

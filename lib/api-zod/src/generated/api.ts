@@ -569,6 +569,95 @@ export const GetCalibratorAbResponse = zod.object({
 });
 
 /**
+ * Returns the most recent persisted ``v1_backtest_gate_runs`` row plus a short history slice so the dashboard tile can render the current overall verdict (PASS / FAIL / DEGRADED_…), the per-league Brier table, the list of regressed leagues, and a sparkline of recent verdicts.  The tile turns red as soon as ``regressed_leagues`` is non-empty.
+ * @summary Weekly V1 backtest gate (latest run + history)
+ */
+export const getV1BacktestGateQueryHistoryLimitDefault = 8;
+export const getV1BacktestGateQueryHistoryLimitMax = 50;
+
+export const GetV1BacktestGateQueryParams = zod.object({
+  history_limit: zod.coerce
+    .number()
+    .min(1)
+    .max(getV1BacktestGateQueryHistoryLimitMax)
+    .default(getV1BacktestGateQueryHistoryLimitDefault)
+    .describe("How many recent runs to return in ``history`` (latest first)."),
+});
+
+export const GetV1BacktestGateResponse = zod
+  .object({
+    latest: zod
+      .object({
+        id: zod.number(),
+        run_at: zod.string().describe("ISO-8601 UTC."),
+        overall_verdict: zod
+          .string()
+          .describe("PASS \/ FAIL \/ DEGRADED_… \/ ERROR \/ UNKNOWN"),
+        parity_gate_status: zod
+          .record(zod.string(), zod.unknown())
+          .describe(
+            "Verbatim `_build_parity_gate_status` manifest from the offline replay script.",
+          ),
+        per_league_brier: zod
+          .record(zod.string(), zod.number())
+          .describe(
+            "League → calibrator-applied Brier on this run; baseline for next week's regression diff.",
+          ),
+        regressed_leagues: zod
+          .array(zod.string())
+          .describe(
+            "Leagues whose Brier got worse than the prior run by more than `_BRIER_TOLERANCE`.",
+          ),
+        report_path: zod
+          .string()
+          .nullish()
+          .describe("Path to the full JSON report on disk"),
+        duration_seconds: zod.number().nullish(),
+        notes: zod.string().nullish(),
+      })
+      .describe("One persisted row of `v1_backtest_gate_runs` (latest-first).")
+      .nullish(),
+    history: zod.array(
+      zod
+        .object({
+          id: zod.number(),
+          run_at: zod.string().describe("ISO-8601 UTC."),
+          overall_verdict: zod
+            .string()
+            .describe("PASS \/ FAIL \/ DEGRADED_… \/ ERROR \/ UNKNOWN"),
+          parity_gate_status: zod
+            .record(zod.string(), zod.unknown())
+            .describe(
+              "Verbatim `_build_parity_gate_status` manifest from the offline replay script.",
+            ),
+          per_league_brier: zod
+            .record(zod.string(), zod.number())
+            .describe(
+              "League → calibrator-applied Brier on this run; baseline for next week's regression diff.",
+            ),
+          regressed_leagues: zod
+            .array(zod.string())
+            .describe(
+              "Leagues whose Brier got worse than the prior run by more than `_BRIER_TOLERANCE`.",
+            ),
+          report_path: zod
+            .string()
+            .nullish()
+            .describe("Path to the full JSON report on disk"),
+          duration_seconds: zod.number().nullish(),
+          notes: zod.string().nullish(),
+        })
+        .describe(
+          "One persisted row of `v1_backtest_gate_runs` (latest-first).",
+        ),
+    ),
+    error: zod.string().nullish(),
+  })
+  .describe(
+    "Latest weekly V1-backtest gate run + history. The dashboard tile renders red when `latest.regressed_leagues` is non-empty or when `latest.overall_verdict` is `FAIL` \/ `ERROR`.",
+  );
+
+/**
  * @summary Per-vertical P&L, win rate, Brier, calibration, and PIT histogram
  */
 export const getVerticalPerformanceQueryDaysDefault = 30;

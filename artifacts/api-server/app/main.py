@@ -42,6 +42,7 @@ from . import (
 from .notifications import (
     alerts as notif_alerts,
     churn as notif_churn,
+    daily_honesty_report,
     daily_summary,
     email as notif_user_email,
     persona_brier_alerts as notif_persona_brier_alerts,
@@ -50,6 +51,7 @@ from .notifications import (
     sms as notif_sms,
     soccer_settlement_drift as notif_soccer_settlement_drift,
     suppression as notif_suppression,
+    v1_backtest_gate as notif_v1_backtest_gate,
     weekly_roundup as notif_weekly_roundup,
 )
 from .auth import (
@@ -420,6 +422,14 @@ async def lifespan(_: FastAPI):
     except Exception as e:
         log.warning("daily summary scheduler start failed: %s", e)
     try:
+        await daily_honesty_report.start()
+    except Exception as e:
+        log.warning("daily honesty report scheduler start failed: %s", e)
+    try:
+        await notif_v1_backtest_gate.start()
+    except Exception as e:
+        log.warning("v1 backtest gate scheduler start failed: %s", e)
+    try:
         await notif_weekly_roundup.start()
     except Exception as e:
         log.warning("weekly roundup scheduler start failed: %s", e)
@@ -682,6 +692,14 @@ async def lifespan(_: FastAPI):
             await daily_summary.stop()
         except Exception as e:
             log.warning("daily summary stop error: %s", e)
+        try:
+            await daily_honesty_report.stop()
+        except Exception as e:
+            log.warning("daily honesty report stop error: %s", e)
+        try:
+            await notif_v1_backtest_gate.stop()
+        except Exception as e:
+            log.warning("v1 backtest gate stop error: %s", e)
         try:
             await notif_weekly_roundup.stop()
         except Exception as e:
@@ -1946,6 +1964,26 @@ async def admin_list_users(
     actor: AuthedUser = Depends(require_admin),
 ) -> dict[str, object]:
     return {"items": await admin_module.list_users()}
+
+
+class AdminHonestyReportFireRequest(BaseModel):
+    dry_run: bool = True
+
+
+@app.post("/api/admin/honesty-report/fire-now")
+async def admin_honesty_report_fire_now(
+    body: AdminHonestyReportFireRequest,
+    actor: AuthedUser = Depends(require_admin),
+) -> dict[str, object]:
+    """Manually fire the daily honesty report (Task #756 / roadmap T-21).
+
+    With ``dry_run=true`` (the default) this returns the rendered text +
+    HTML body and the four-section payload without dispatching, so the
+    operator can sanity-check the contents from the admin console.
+    With ``dry_run=false`` it queues a Postmark send + Telegram broadcast
+    immediately — bypassing the once-per-day dedupe so it can be replayed
+    on demand."""
+    return await daily_honesty_report.fire_now(dry_run=body.dry_run)
 
 
 @app.get("/api/admin/watchdog")
@@ -5577,6 +5615,20 @@ async def dashboard_leagues_exposure(
     """
     mode = await _resolve_dashboard_trading_mode(trading_mode)
     return await dashboard.get_leagues_exposure(trading_mode=mode)
+
+
+@app.get("/api/dashboard/v1-backtest-gate")
+async def dashboard_v1_backtest_gate(
+    history_limit: int = 8,
+    _: object = Depends(require_approved_user),
+) -> dict[str, object]:
+    """Weekly V1 backtest gate tile (Task #756 / roadmap T-22).
+
+    Returns the most recent persisted ``v1_backtest_gate_runs`` row plus
+    a short history slice so the dashboard tile can render the current
+    overall verdict (green/red), the per-league Brier table, the list
+    of regressed leagues, and a sparkline of recent verdicts."""
+    return await dashboard.get_v1_backtest_gate(history_limit=int(history_limit))
 
 
 @app.get("/api/dashboard/calibration/per-league")

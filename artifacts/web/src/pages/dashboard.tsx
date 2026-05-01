@@ -17,6 +17,7 @@ import OperatorControls from "@/components/dashboard/operator-controls";
 import OverFilledOrdersBadge from "@/components/dashboard/over-filled-orders-badge";
 import CalibratorAb from "@/components/dashboard/calibrator-ab";
 import PerLeagueCalibration from "@/components/dashboard/per-league-calibration";
+import V1BacktestGateTile from "@/components/dashboard/v1-backtest-gate-tile";
 import { PeriodProvider, PeriodStrip } from "@/components/dashboard/period-context";
 import { PlacedByProvider } from "@/components/dashboard/placed-by-context";
 import { PlacedByToggle } from "@/components/dashboard/placed-by-toggle";
@@ -119,6 +120,8 @@ export default function Dashboard() {
         <PerLeagueCalibration />
 
         <CalibratorAb />
+
+        <V1BacktestGateTile />
 
         <MacroReleaseSurprises />
 

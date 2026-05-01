@@ -403,6 +403,46 @@ export interface CalibratorAb {
   error?: string | null;
 }
 
+/**
+ * Verbatim `_build_parity_gate_status` manifest from the offline replay script.
+ */
+export type V1BacktestGateRunParityGateStatus = { [key: string]: unknown };
+
+/**
+ * League → calibrator-applied Brier on this run; baseline for next week's regression diff.
+ */
+export type V1BacktestGateRunPerLeagueBrier = { [key: string]: number };
+
+/**
+ * One persisted row of `v1_backtest_gate_runs` (latest-first).
+ */
+export interface V1BacktestGateRun {
+  id: number;
+  /** ISO-8601 UTC. */
+  run_at: string;
+  /** PASS / FAIL / DEGRADED_… / ERROR / UNKNOWN */
+  overall_verdict: string;
+  /** Verbatim `_build_parity_gate_status` manifest from the offline replay script. */
+  parity_gate_status: V1BacktestGateRunParityGateStatus;
+  /** League → calibrator-applied Brier on this run; baseline for next week's regression diff. */
+  per_league_brier: V1BacktestGateRunPerLeagueBrier;
+  /** Leagues whose Brier got worse than the prior run by more than `_BRIER_TOLERANCE`. */
+  regressed_leagues: string[];
+  /** Path to the full JSON report on disk */
+  report_path?: string | null;
+  duration_seconds?: number | null;
+  notes?: string | null;
+}
+
+/**
+ * Latest weekly V1-backtest gate run + history. The dashboard tile renders red when `latest.regressed_leagues` is non-empty or when `latest.overall_verdict` is `FAIL` / `ERROR`.
+ */
+export interface V1BacktestGate {
+  latest?: V1BacktestGateRun | null;
+  history: V1BacktestGateRun[];
+  error?: string | null;
+}
+
 export interface SwarmPersonaToday {
   persona_id: string;
   debates: number;
@@ -1733,6 +1773,15 @@ export type SearchAllParams = {
 export type GetCalibratorAbParams = {
   /**
    * How many recent snapshots (across all roles) to return per league.
+   * @minimum 1
+   * @maximum 50
+   */
+  history_limit?: number;
+};
+
+export type GetV1BacktestGateParams = {
+  /**
+   * How many recent runs to return in ``history`` (latest first).
    * @minimum 1
    * @maximum 50
    */

@@ -5977,3 +5977,78 @@ async def get_upcoming_game_context(market_id: str) -> dict[str, Any]:
         "recent_swarm_debate": debate,
         "ticks": ticks,
     }
+
+
+# ---------------------------------------------------------------------------
+# V1 backtest gate tile (Task #756 / roadmap T-22)
+# ---------------------------------------------------------------------------
+
+
+async def get_v1_backtest_gate(history_limit: int = 8) -> dict[str, Any]:
+    """Latest weekly V1 backtest gate row + a short history slice.
+
+    Drives the dashboard tile that goes red the moment any per-league
+    Brier regresses against the prior week (see
+    ``app.notifications.v1_backtest_gate.run_weekly_v1_backtest``).
+    Returns ``{latest: {...} | None, history: [...]}`` so the React
+    component can render an empty state on first boot without a special
+    case.
+    """
+    history_limit = max(1, min(50, int(history_limit or 8)))
+    try:
+        rows = await db.fetch(
+            """
+            SELECT id,
+                   to_char(run_at, 'YYYY-MM-DD"T"HH24:MI:SSZ') AS run_at,
+                   overall_verdict,
+                   parity_gate_status,
+                   per_league_brier,
+                   regressed_leagues,
+                   report_path,
+                   duration_seconds,
+                   notes
+              FROM v1_backtest_gate_runs
+             ORDER BY run_at DESC
+             LIMIT $1
+            """,
+            history_limit,
+        )
+    except Exception as e:
+        log.warning("v1_backtest_gate query failed: %s", e)
+        return {"latest": None, "history": [], "error": str(e)[:240]}
+
+    import json as _json
+
+    def _to_obj(v: Any) -> Any:
+        if v is None or isinstance(v, (dict, list)):
+            return v
+        if isinstance(v, (str, bytes, bytearray)):
+            try:
+                return _json.loads(v)
+            except (ValueError, TypeError):
+                return None
+        return v
+
+    items: list[dict[str, Any]] = []
+    for r in rows:
+        parity = _to_obj(r["parity_gate_status"]) or {}
+        plb = _to_obj(r["per_league_brier"]) or {}
+        items.append(
+            {
+                "id": int(r["id"]),
+                "run_at": r["run_at"],
+                "overall_verdict": str(r["overall_verdict"] or ""),
+                "parity_gate_status": parity,
+                "per_league_brier": plb,
+                "regressed_leagues": list(r["regressed_leagues"] or []),
+                "report_path": r["report_path"],
+                "duration_seconds": (
+                    float(r["duration_seconds"])
+                    if r["duration_seconds"] is not None
+                    else None
+                ),
+                "notes": r["notes"],
+            }
+        )
+    latest = items[0] if items else None
+    return {"latest": latest, "history": items}

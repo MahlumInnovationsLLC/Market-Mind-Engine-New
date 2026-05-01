@@ -56,6 +56,7 @@ import type {
   GetRecentTradesParams,
   GetSlippageGuardRejectsParams,
   GetSwarmPersonasTodayParams,
+  GetV1BacktestGateParams,
   GetVerticalPerformanceParams,
   GetVerticalsOverviewParams,
   HealthStatus,
@@ -93,6 +94,7 @@ import type {
   TradingCycleList,
   UpgradeRequiredError,
   UserSubscription,
+  V1BacktestGate,
   VerticalPerformance,
   VerticalVisibility,
   VerticalsOverview,
@@ -976,6 +978,107 @@ export function useGetCalibratorAb<
   },
 ): UseQueryResult<TData, TError> & { queryKey: QueryKey } {
   const queryOptions = getGetCalibratorAbQueryOptions(params, options);
+
+  const query = useQuery(queryOptions) as UseQueryResult<TData, TError> & {
+    queryKey: QueryKey;
+  };
+
+  return { ...query, queryKey: queryOptions.queryKey };
+}
+
+/**
+ * Returns the most recent persisted ``v1_backtest_gate_runs`` row plus a short history slice so the dashboard tile can render the current overall verdict (PASS / FAIL / DEGRADED_…), the per-league Brier table, the list of regressed leagues, and a sparkline of recent verdicts.  The tile turns red as soon as ``regressed_leagues`` is non-empty.
+ * @summary Weekly V1 backtest gate (latest run + history)
+ */
+export const getGetV1BacktestGateUrl = (params?: GetV1BacktestGateParams) => {
+  const normalizedParams = new URLSearchParams();
+
+  Object.entries(params || {}).forEach(([key, value]) => {
+    if (value !== undefined) {
+      normalizedParams.append(key, value === null ? "null" : value.toString());
+    }
+  });
+
+  const stringifiedParams = normalizedParams.toString();
+
+  return stringifiedParams.length > 0
+    ? `/api/dashboard/v1-backtest-gate?${stringifiedParams}`
+    : `/api/dashboard/v1-backtest-gate`;
+};
+
+export const getV1BacktestGate = async (
+  params?: GetV1BacktestGateParams,
+  options?: RequestInit,
+): Promise<V1BacktestGate> => {
+  return customFetch<V1BacktestGate>(getGetV1BacktestGateUrl(params), {
+    ...options,
+    method: "GET",
+  });
+};
+
+export const getGetV1BacktestGateQueryKey = (
+  params?: GetV1BacktestGateParams,
+) => {
+  return [
+    `/api/dashboard/v1-backtest-gate`,
+    ...(params ? [params] : []),
+  ] as const;
+};
+
+export const getGetV1BacktestGateQueryOptions = <
+  TData = Awaited<ReturnType<typeof getV1BacktestGate>>,
+  TError = ErrorType<unknown>,
+>(
+  params?: GetV1BacktestGateParams,
+  options?: {
+    query?: UseQueryOptions<
+      Awaited<ReturnType<typeof getV1BacktestGate>>,
+      TError,
+      TData
+    >;
+    request?: SecondParameter<typeof customFetch>;
+  },
+) => {
+  const { query: queryOptions, request: requestOptions } = options ?? {};
+
+  const queryKey =
+    queryOptions?.queryKey ?? getGetV1BacktestGateQueryKey(params);
+
+  const queryFn: QueryFunction<
+    Awaited<ReturnType<typeof getV1BacktestGate>>
+  > = ({ signal }) => getV1BacktestGate(params, { signal, ...requestOptions });
+
+  return { queryKey, queryFn, ...queryOptions } as UseQueryOptions<
+    Awaited<ReturnType<typeof getV1BacktestGate>>,
+    TError,
+    TData
+  > & { queryKey: QueryKey };
+};
+
+export type GetV1BacktestGateQueryResult = NonNullable<
+  Awaited<ReturnType<typeof getV1BacktestGate>>
+>;
+export type GetV1BacktestGateQueryError = ErrorType<unknown>;
+
+/**
+ * @summary Weekly V1 backtest gate (latest run + history)
+ */
+
+export function useGetV1BacktestGate<
+  TData = Awaited<ReturnType<typeof getV1BacktestGate>>,
+  TError = ErrorType<unknown>,
+>(
+  params?: GetV1BacktestGateParams,
+  options?: {
+    query?: UseQueryOptions<
+      Awaited<ReturnType<typeof getV1BacktestGate>>,
+      TError,
+      TData
+    >;
+    request?: SecondParameter<typeof customFetch>;
+  },
+): UseQueryResult<TData, TError> & { queryKey: QueryKey } {
+  const queryOptions = getGetV1BacktestGateQueryOptions(params, options);
 
   const query = useQuery(queryOptions) as UseQueryResult<TData, TError> & {
     queryKey: QueryKey;
