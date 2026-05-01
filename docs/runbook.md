@@ -2160,10 +2160,18 @@ The shadow loop closes the bias by running on every settlement cycle
    `shadow_prediction_id`).  `predictions.outcome` is text
    (`'yes'` / `'no'` / `'void'`) per migration 0022; the settler
    normalises to int for the shadow tables and **drops `void`
-   markets** entirely (no calibration signal).  Voids are reported
-   on the cycle summary as `voids_skipped` so an unusually high
-   void rate is visible in `last_cycle.shadow` without log
-   spelunking.
+   markets** from the calibration buffer entirely (no calibration
+   signal).  Void rows are nevertheless **terminally stamped**
+   on `shadow_predictions` (`settled_at` ← underlying resolution,
+   `outcome` ← NULL) so the next cycle's `WHERE settled_at IS
+   NULL` pending scan does not re-read them forever and starve
+   the LIMIT window for fresh resolvable rows.  Voids are
+   reported on the cycle summary as `voids_skipped` so an
+   unusually high void rate is visible in `last_cycle.shadow`
+   without log spelunking.  An operator can audit "settled in
+   Postgres but never made it to the buffer" with
+   `SELECT count(*) FROM shadow_predictions WHERE settled_at IS
+   NOT NULL AND outcome IS NULL` (= total voids since launch).
 3. **Drift parity** — `_calibration_and_drift_shadow(vertical)`
    computes 24 h Brier off `shadow_learning_buffer` per registered
    vertical, writes a `calibration_snapshots` row tagged

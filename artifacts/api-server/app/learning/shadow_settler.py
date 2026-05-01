@@ -134,11 +134,19 @@ async def _fetch_pending_resolutions(limit: int) -> list[dict[str, Any]]:
 
 
 async def _stamp_shadow(
-    shadow_id: int, *, outcome: int, settled_at: datetime,
+    shadow_id: int, *, outcome: int | None, settled_at: datetime,
 ) -> bool:
     """Stamp the resolution onto the shadow_predictions row.  Returns
     True iff the row was newly stamped (i.e. our UPDATE actually
-    flipped settled_at from NULL to a value)."""
+    flipped settled_at from NULL to a value).
+
+    ``outcome`` is allowed to be ``None`` for the void-terminal path:
+    the underlying market resolved without a yes/no signal (Kalshi
+    returned ``'void'``), so no calibration row is written but we
+    still need to flip ``settled_at`` to non-NULL so the pending scan
+    in :func:`_fetch_pending_resolutions` stops re-reading the row
+    every cycle (otherwise voids accumulate and starve the LIMIT
+    window for fresh resolvable rows)."""
     try:
         # `UPDATE ... RETURNING id` returns NULL when the WHERE clause
         # filtered the row out (e.g. another worker already stamped
@@ -153,7 +161,8 @@ async def _stamp_shadow(
                AND settled_at IS NULL
             RETURNING id
             """,
-            shadow_id, settled_at, int(outcome),
+            shadow_id, settled_at,
+            int(outcome) if outcome is not None else None,
         )
         return rid is not None
     except Exception as e:
@@ -241,9 +250,22 @@ async def run_cycle(*, limit: int = DEFAULT_BATCH_LIMIT) -> ShadowSettleCycleRes
         outcome_int = _normalize_outcome(outcome)
         if outcome_int is None:
             # Void / cancel / unparseable — these carry no calibration
-            # signal.  Count them so an operator can sanity-check the
-            # void rate without spelunking logs, but never raise.
+            # signal so we don't write a buffer row, but we MUST
+            # terminally stamp the shadow row so the pending scan
+            # stops re-reading it every cycle.  Without this, voids
+            # accumulate forever inside the LIMIT window and starve
+            # newer resolvable rows.  We stamp settled_at from the
+            # underlying resolution and leave outcome NULL so the
+            # void status is distinguishable from a real 0/1 result.
             cr.voids_skipped += 1
+            try:
+                await _stamp_shadow(
+                    shadow_id, outcome=None, settled_at=settled_at,
+                )
+            except Exception as e:
+                cr.errors.append(
+                    f"{shadow_id}: void stamp {type(e).__name__}: {e}"
+                )
             continue
 
         try:

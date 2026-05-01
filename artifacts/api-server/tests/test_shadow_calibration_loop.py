@@ -193,13 +193,14 @@ class _InMemoryDb:
             })
             return row_id
 
-        # shadow_settler stamp UPDATE
+        # shadow_settler stamp UPDATE — outcome may be None for the
+        # void-terminal path.
         if "UPDATE shadow_predictions" in q and "SET settled_at" in q:
             shadow_id, settled_at, outcome = args
             for sp in self.shadow_predictions:
                 if sp["id"] == shadow_id and sp.get("settled_at") is None:
                     sp["settled_at"] = settled_at
-                    sp["outcome"] = int(outcome)
+                    sp["outcome"] = int(outcome) if outcome is not None else None
                     return shadow_id
             return None
 
@@ -435,20 +436,30 @@ def test_shadow_settler_normalizes_text_outcomes_and_skips_voids(fake_db):
     assert cr.settled == 2
     assert cr.buffer_inserted == 2
     assert cr.voids_skipped == 1
-    # 'no' -> 0, 'YES' -> 1, void dropped entirely.
+    # 'no' -> 0, 'YES' -> 1, void dropped from the buffer entirely.
     outcomes = sorted(
         b["actual_outcome"] for b in fake_db.shadow_buffer
     )
     assert outcomes == [0, 1]
     market_ids = {b["market_id"] for b in fake_db.shadow_buffer}
     assert market_ids == {"KX-MKT-A", "KX-MKT-B"}
-    # The void row is left un-stamped on shadow_predictions so a future
-    # cycle re-inspects it (cheap; the void status is sticky upstream).
+    # The void row MUST be terminally stamped — settled_at flipped to
+    # non-NULL but outcome left NULL — so a subsequent cycle's pending
+    # scan (`WHERE settled_at IS NULL`) doesn't re-read it forever
+    # and starve the LIMIT window for fresh resolvable rows.
     void_row = next(
         sp for sp in fake_db.shadow_predictions if sp["id"] == 12
     )
-    assert void_row["settled_at"] is None
+    assert void_row["settled_at"] == settled_at
     assert void_row["outcome"] is None
+
+    # Regression guard: a second cycle finds nothing new — voids must
+    # be terminal.
+    cr2 = asyncio.run(shadow_settler.run_cycle())
+    assert cr2.candidates_scanned == 0
+    assert cr2.voids_skipped == 0
+    assert cr2.settled == 0
+    assert cr2.buffer_inserted == 0
 
 
 def test_shadow_settler_normalize_outcome_helper():
