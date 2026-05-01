@@ -741,30 +741,9 @@ async def get_public_equity_curve(
         return []
 
 
-# ---------------------------------------------------------------------------
-# Tail-risk exposure (task #744).
-#
-# Forensic audit of YTD 2026 SYSTEM trades found that 0.28% of trades
-# (15 of 5,347) drove −$9,604 of cumulative losses on a −$5,878 net
-# book — i.e. without those 15 trades the bot is +$3,726 YTD.  Two
-# patterns explained virtually all of it: deep-OTM tail bets at
-# `t.price < $0.10` (one Feb-20 NBA NO at $0.04 / qty 4,394 lost
-# −$4,218 by itself) and jumbo bets at `t.quantity ≥ 1,000`.
-#
-# This aggregator surfaces a live read-only matrix of:
-#   - **Open exposure** per price-bucket (count, side-aware cost basis,
-#     worst-case max-loss = qty × max(price, 1−price)) sourced from the
-#     `positions` table where `status='open'`.
-#   - **Realized P&L** per price-bucket over a rolling window (default
-#     30 days) sourced from `trades` joined on the same bucket
-#     boundaries — count, wins (pnl > 0), and total realized PnL — so
-#     the operator can compare what each bucket is risking *now* vs
-#     what it has cost over the period.
-#
-# Buckets match the audit's price-bucket taxonomy.  The SQL owns the
-# bucket boundaries — the UI must NOT re-slice client-side, otherwise
-# the tile and any future surface (mobile, alerts) would drift.
-# ---------------------------------------------------------------------------
+# Tail-risk exposure aggregator. Open exposure (positions) + realized
+# PnL (trades) bucketed by entry price; SQL owns the bucket boundaries
+# so web/mobile/alerts share one definition. See replit.md.
 
 # Half-open intervals [lo, hi).  The last bucket uses `hi=1.01` so a
 # rare `price = 1.00` settlement-certain row still lands in `$0.90+`.
@@ -954,20 +933,10 @@ async def get_tail_risk_exposure(
         ORDER BY 1, 2
     """
 
-    # Fallback path: `positions` missing/broken/empty — reconstruct open
-    # exposure from `trades` by netting qty per (vertical, market_id,
-    # side) and only counting markets where `pnl IS NULL` (i.e. the
-    # trade hasn't been settled yet, so the position is still open).
-    # Multiple opening fills for the same market_id × side are netted
-    # into a single position with weighted-average price (VWAP) before
-    # bucketing — this matches what `positions.avg_price` would have
-    # held and prevents multi-fill markets from being double-counted as
-    # separate "open positions".  Less precise than `positions` (a
-    # partially-closed market may still show as fully open if the close
-    # was recorded as a separate trade rather than by updating the
-    # opener's pnl), but a reasonable approximation that keeps the
-    # headline live when the positions table is unavailable or stale.
-    # Realized slice is identical to the primary path.
+    # Fallback when `positions` is missing/empty: reconstruct opens from
+    # unsettled trades (pnl IS NULL), netting (vertical, market_id, side)
+    # at VWAP so multi-fill markets aren't double-counted. Realized slice
+    # is unchanged.
     sql_trades_only = f"""
         WITH bucket_defs AS (
             SELECT * FROM (VALUES
@@ -1095,15 +1064,10 @@ async def get_tail_risk_exposure(
         WHERE n.vwap_price < {_TAIL_PRICE_THRESHOLD!r}::float8
     """
 
-    # Resolve source.  Three failure modes warrant the trades-only
-    # fallback: (a) the positions query throws (table missing/broken);
-    # (b) positions returns no rows at all (table present but empty);
-    # (c) positions returns rows but every `open_count` is zero (table
-    # present, no live opens recorded — common when ingestion is
-    # stale).  In cases (b) and (c), if the trades-only path can
-    # actually reconstruct open exposure (`open_count > 0`) we prefer
-    # it; otherwise we keep the positions-derived rows so the realized
-    # slice still surfaces.
+    # Resolve source: prefer `positions`; fall back to a trades-only
+    # reconstruction if positions throws, returns nothing, or has zero
+    # opens. The realized slice is identical across both paths, so
+    # falling back never blanks the realized columns.
     source = "positions"
     tail_max_loss_exact: float | None = None
     positions_failed = False
@@ -1117,15 +1081,6 @@ async def get_tail_risk_exposure(
         rows = []
         positions_failed = True
 
-    # Three failure modes warrant the trades-only fallback: (a) the
-    # positions query throws (table missing/broken); (b) positions
-    # returns no rows at all; (c) positions returns rows but every
-    # `open_count` is zero (table present, no live opens recorded —
-    # common when ingestion is stale).  Realized slice is identical
-    # between the two paths (same `trades` table, same filters
-    # including `pnl IS NOT NULL`), so swapping wholesale is safe and
-    # never blanks the realized panel even when fallback finds zero
-    # open exposure.
     positions_open_count = sum(int(r["open_count"] or 0) for r in rows)
     if positions_failed or positions_open_count == 0:
         try:

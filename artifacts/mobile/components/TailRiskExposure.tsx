@@ -9,24 +9,10 @@ import { useEffectiveVerticals } from "@/lib/vertical-filter";
 
 import { Card, SectionHeader } from "./Card";
 
-/**
- * Mobile tail-risk exposure tile (task #744).
- *
- * Mirrors the web `TailRiskExposurePanel` against the same
- * `/api/public/tail-risk-exposure` endpoint so the operator sees the
- * same headline tone (RED / WATCH / CONTAINED / NO EXPOSURE) and
- * bucket roll-up on phone as on desktop.  Bucket boundaries + tone
- * thresholds are owned by the server — no client-side bucketing or
- * tone classification, so a future taxonomy change flows through with
- * zero client redeploy.
- *
- * Threads `placedBy` from the existing module-level pub/sub state and
- * the `useEffectiveVerticals` derived list (= explicit chip selection
- * intersected with the visibility set so a non-admin operator never sees
- * exposure from an admin-hidden vertical) so the tile narrows in
- * lock-step with the web `TailRiskExposurePanel` and never silently
- * leaks hidden P&L.
- */
+// Mobile tail-risk exposure tile — mirrors the web tile against the
+// same /api/public/tail-risk-exposure. Buckets and tone thresholds are
+// server-owned; placedBy + useEffectiveVerticals keep the slice in sync
+// with web. See replit.md ("Tail-risk exposure tile").
 
 type BucketRow = {
   vertical: string;
@@ -214,8 +200,7 @@ export default function TailRiskExposure({
           </Text>
         ) : data && concentration ? (
           <>
-            {/* Headline — server-classified tone keeps every surface
-                in agreement on what counts as "elevated". */}
+            {/* Headline: server-classified tone. */}
             <View style={styles.headlineRow} testID="tail-risk-headline">
               <Text
                 style={[styles.eyebrow, { color: colors.mutedForeground }]}
@@ -252,8 +237,7 @@ export default function TailRiskExposure({
               </Text>
             </View>
 
-            {/* Bucket rollup — only render buckets with any open OR
-                realized activity to keep the mobile tile compact. */}
+            {/* Bucket rollup — skip empty buckets to keep the tile compact. */}
             {data.buckets
               .filter(
                 (b) =>
@@ -319,7 +303,7 @@ export default function TailRiskExposure({
                       <Text
                         style={[styles.muted, { color: colors.mutedForeground }]}
                       >
-                        {b.totals.open_count} open · 30d{" "}
+                        {`${b.totals.open_count} open · ${periodLabel} `}
                         <Text
                           style={{ color: pnlColor(b.totals.realized_pnl_usd) }}
                         >
@@ -341,10 +325,7 @@ export default function TailRiskExposure({
                           : null}
                       </Text>
                     </View>
-                    {/* Per-vertical breakdown for buckets that
-                        actually have multiple verticals — keeps the
-                        tile compact when there's only one slice but
-                        surfaces the matrix when there are several. */}
+                    {/* Per-vertical sub-rows when a bucket spans multiple. */}
                     {cells.length > 1
                       ? cells.map((cell) => (
                           <View
@@ -393,8 +374,59 @@ export default function TailRiskExposure({
                 );
               })}
 
-            {/* When there's no activity at all, give the operator a
-                clear empty-state instead of an invisible card. */}
+            {/* Grand-total row (parity with the web tile's tfoot). */}
+            {(data.totals.open_count > 0 || data.totals.realized_count > 0) ? (
+              <View
+                style={[
+                  styles.bucketRow,
+                  styles.totalsRow,
+                  { borderTopColor: colors.border },
+                ]}
+                testID="tail-risk-totals-row"
+              >
+                <View style={styles.bucketHeaderRow}>
+                  <Text
+                    style={[styles.bucketLabel, { color: colors.foreground }]}
+                  >
+                    Total
+                  </Text>
+                  <Text
+                    style={[styles.bucketMaxLoss, { color: colors.foreground }]}
+                  >
+                    {fmtUsd(data.totals.open_max_loss_usd)}
+                  </Text>
+                </View>
+                <View style={styles.bucketMetaRow}>
+                  <Text
+                    style={[styles.muted, { color: colors.mutedForeground }]}
+                    testID="tail-risk-totals-meta"
+                  >
+                    {`${data.totals.open_count} open · ${periodLabel} `}
+                    <Text
+                      style={{ color: pnlColor(data.totals.realized_pnl_usd) }}
+                    >
+                      {fmtUsd(data.totals.realized_pnl_usd)}
+                    </Text>
+                    {data.totals.realized_count > 0
+                      ? ` · ${fmtPct(
+                          data.totals.realized_wins / data.totals.realized_count,
+                          0,
+                        )} win`
+                      : ""}
+                    {data.totals.ev_per_trade !== null ? (
+                      <Text
+                        style={{ color: pnlColor(data.totals.ev_per_trade) }}
+                      >
+                        {" · "}
+                        {fmtEv(data.totals.ev_per_trade)}/trade
+                      </Text>
+                    ) : null}
+                  </Text>
+                </View>
+              </View>
+            ) : null}
+
+            {/* Empty-state copy when there's no activity at all. */}
             {data.totals.open_count === 0 &&
             data.totals.realized_count === 0 ? (
               <Text
@@ -448,6 +480,11 @@ const styles = StyleSheet.create({
   },
   bucketRow: {
     paddingVertical: 8,
+  },
+  totalsRow: {
+    borderTopWidth: 1,
+    marginTop: 4,
+    paddingTop: 8,
   },
   bucketHeaderRow: {
     flexDirection: "row",

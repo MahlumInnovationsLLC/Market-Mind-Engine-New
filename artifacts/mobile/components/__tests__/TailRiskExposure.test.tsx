@@ -174,6 +174,43 @@ describe("TailRiskExposure (mobile)", () => {
       await screen.findByTestId("tail-risk-headline-tone-empty"),
     ).toBeTruthy();
     expect(screen.getByTestId("tail-risk-empty")).toBeTruthy();
+    // No grand-total row when nothing was open or realized — keeps
+    // the empty-state visually clean.
+    expect(screen.queryByTestId("tail-risk-totals-row")).toBeNull();
+  });
+
+  it("renders a grand-total row at the bottom (parity with the web table)", async () => {
+    const r = emptyResponse();
+    r.buckets[0].rows = [
+      {
+        vertical: "sports", open_count: 2,
+        open_cost_usd: 800, open_max_loss_usd: 800,
+        realized_count: 4, realized_wins: 1, realized_pnl_usd: -1200,
+        ev_per_trade: -300,
+      },
+    ];
+    r.buckets[0].totals = {
+      open_count: 2, open_cost_usd: 800, open_max_loss_usd: 800,
+      realized_count: 4, realized_wins: 1, realized_pnl_usd: -1200,
+      ev_per_trade: -300,
+    };
+    r.totals = { ...r.buckets[0].totals };
+    r.tail_concentration = {
+      tail_max_loss_usd: 800, total_max_loss_usd: 800,
+      pct: 1.0, tone: "red", threshold_price: 0.2,
+    };
+    mockApiFetch.mockResolvedValueOnce(r);
+
+    renderTile();
+
+    expect(await screen.findByTestId("tail-risk-totals-row")).toBeTruthy();
+    const meta = screen.getByTestId("tail-risk-totals-meta");
+    const text = meta.props.children
+      .flat(Infinity)
+      .filter((c: unknown) => typeof c === "string")
+      .join("");
+    expect(text).toContain("2 open");
+    expect(text).toContain("25%");
   });
 
   it("renders the Feb-20 NBA regression bucket and red headline tone", async () => {

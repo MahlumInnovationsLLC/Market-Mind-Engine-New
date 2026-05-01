@@ -8,35 +8,10 @@ import { useVerticalFilter } from "@/hooks/use-selected-verticals";
 import { usePeriod } from "./period-context";
 import { usePlacedBy } from "./placed-by-context";
 
-/**
- * Tail-risk exposure tile (task #744).
- *
- * Live read-only matrix surfaced from `/api/public/tail-risk-exposure`.
- * Forensic audit of YTD 2026 SYSTEM trades found that 0.28% of trades
- * (15 of 5,347) drove −$9,604 of cumulative losses on a −$5,878 net
- * book.  The two patterns: deep-OTM tail bets at `t.price < $0.10`
- * (one Feb-20 NBA NO at $0.04 / qty 4,394 lost −$4,218 by itself) and
- * jumbo bets at `t.quantity ≥ 1,000`.  This tile makes the live
- * concentration of those bets visible right under the KPI strip so the
- * operator sees today's tail-risk exposure before the next blow-up.
- *
- * Threads the same operator filters (`placedBy` + `effectiveVerticals`)
- * as KpiSummaryBar / EquityCharts so the tile narrows in lock-step
- * when the operator toggles Manual/System/Both or picks a vertical.
- *
- * Bucket boundaries AND the row-level tail definition are owned by the
- * server.  The response includes:
- *   - `lo`/`hi`/`label`/`is_tail` per bucket — `is_tail=true` only when
- *     the whole bucket sits below `tail_concentration.threshold_price`
- *     (currently $0.20).  The `$0.10–$0.25` bucket straddles that
- *     line, so its UI badge stays off and its share of the tail
- *     headline comes from the dedicated row-level aggregate the server
- *     computes against `price < threshold` (NOT from summing the whole
- *     bucket — that would over-count $0.20–$0.25 trades).
- *   - `totals.ev_per_trade` per bucket and grand total — surfaced by
- *     the server so every consumer (web, mobile, alerts) shares one
- *     definition.
- */
+// Tail-risk exposure tile — read-only matrix from
+// /api/public/tail-risk-exposure. Buckets, the row-level tail definition
+// (price < tail_concentration.threshold_price), and ev_per_trade are
+// owned by the server. See replit.md ("Tail-risk exposure tile").
 
 type BucketRow = {
   vertical: string;
@@ -221,13 +196,7 @@ export default function TailRiskExposurePanel() {
 
       {data && concentration && (
         <>
-          {/* Headline — concentration of OPEN max-loss exposure that
-              sits in trades priced below the server-published
-              threshold.  Tone classification is owned server-side so
-              every surface (web, mobile, alerts) agrees on what
-              "elevated" means, and the threshold itself is read from
-              the response so a future tightening (e.g. $0.20 → $0.15)
-              flows through without a client redeploy. */}
+          {/* Headline: tone + threshold are server-owned. */}
           <div
             className="mb-4 flex flex-wrap items-baseline gap-x-3 gap-y-1"
             data-testid="tail-risk-headline"
@@ -257,11 +226,8 @@ export default function TailRiskExposurePanel() {
             </span>
           </div>
 
-          {/* Bucket table.  No client-side bucketing — server owns the
-              taxonomy and we just render what came back.  Each bucket
-              row is followed by its per-vertical breakdown rows so the
-              full bucket × vertical matrix is visible without a
-              drill-down click. */}
+          {/* Bucket table — server-owned taxonomy; rows include
+              per-vertical breakdown for the full bucket × vertical matrix. */}
           <div className="overflow-x-auto">
             <table
               className="w-full text-xs"
@@ -276,7 +242,7 @@ export default function TailRiskExposurePanel() {
                   <th className="text-right font-normal py-1 pr-2">Realized #</th>
                   <th className="text-right font-normal py-1 pr-2">Win rate</th>
                   <th className="text-right font-normal py-1 pr-2">EV/trade</th>
-                  <th className="text-right font-normal py-1">Realized P&L (30d)</th>
+                  <th className="text-right font-normal py-1">{`Realized P&L (${periodLabel})`}</th>
                 </tr>
               </thead>
               <tbody>
@@ -342,9 +308,7 @@ export default function TailRiskExposurePanel() {
                           {fmtUsd(totals.realized_pnl_usd)}
                         </td>
                       </tr>
-                      {/* Per-vertical cells for this bucket — full
-                          matrix view.  Indented and slightly muted so
-                          they read as a sub-row of the bucket above. */}
+                      {/* Per-vertical sub-rows for this bucket. */}
                       {cells.map((cell) => {
                         const cellWinRate =
                           cell.realized_count > 0
@@ -390,8 +354,7 @@ export default function TailRiskExposurePanel() {
                     </Fragment>
                   );
                 })}
-                {/* Grand totals — match the bucket-row layout so the eye
-                    can scan straight down the columns. */}
+                {/* Grand totals row. */}
                 <tr
                   className="border-t-2 border-border bg-muted/10 font-semibold"
                   data-testid="tail-risk-totals-row"
@@ -435,10 +398,7 @@ export default function TailRiskExposurePanel() {
             </table>
           </div>
 
-          {/* Per-vertical breakdown for the tail buckets only — keeps
-              the audit's "lost −$5,607 in sports alone" signal visible
-              as a one-line summary even though the full matrix is
-              already in the table above. */}
+          {/* One-line per-vertical summary for tail buckets. */}
           {(() => {
             const tailRows = buckets
               .filter((b) => b.is_tail)
@@ -473,7 +433,7 @@ export default function TailRiskExposurePanel() {
                     <span className="font-semibold text-foreground">
                       {vertical}
                     </span>{" "}
-                    {agg.open}× / {fmtUsd(agg.maxLoss)} max-loss / 30d{" "}
+                    {agg.open}× / {fmtUsd(agg.maxLoss)} max-loss / {periodLabel}{" "}
                     <span className={pnlClass(agg.pnl)}>
                       {fmtUsd(agg.pnl)}
                     </span>
