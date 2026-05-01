@@ -434,11 +434,16 @@ class LeagueRefitResult:
 async def _fetch_training_data() -> dict[str, dict[str, list]]:
     """Pull the last 90 days of settled trades+outcomes grouped by league.
 
-    Returns ``{LEAGUE: {"probs":[...], "ys":[...]}}``.  Trades are
-    aligned to the side they were placed on so the calibrator learns
-    P(side wins), matching how ``apply()`` is invoked downstream.
+    Returns ``{LEAGUE: {"probs":[...], "ys":[...], "sources":[...]}}``.
+    Trades are aligned to the side they were placed on so the
+    calibrator learns P(side wins), matching how ``apply()`` is
+    invoked downstream.  ``sources`` is a parallel list of source
+    tags (``'live'`` / ``'v1'`` / ``'shadow'``) which the persistence
+    helper uses to thread a per-source breakdown into the
+    ``calibration_snapshots.config`` JSONB so an operator can audit
+    which fraction of a refit's training came from each source.
 
-    Two sources are UNION'd:
+    Three sources are UNION'd:
 
     * **Live** — current ``trades`` x ``trade_postmortems`` join.  YES-
       aligned ``actual_outcome`` is flipped to side-aligned
@@ -452,15 +457,26 @@ async def _fetch_training_data() -> dict[str, dict[str, list]]:
       (``yes/buy/live_yes/buy yes/no/sell/live_no/buy no``); rows for
       ``pass``, sport-specific bet types, and crypto buy/sell over
       ``league='Unknown'`` are filtered out.
+    * **Shadow** — ``shadow_learning_buffer`` (task #753).  Snapshots
+      of the model's *calibrated* YES probability for every active
+      Kalshi market the orchestrator considered, irrespective of
+      whether we traded it.  The shadow predictor never picks a
+      side, so ``predicted_prob`` and ``actual_outcome`` are both
+      YES-aligned by construction — no flip needed.  This is the
+      central trick of the shadow loop: the calibrator trains on
+      the unbiased universe of Kalshi markets, not just the
+      sub-population our edge gates surfaced for trading.
 
-    The V1 union can be disabled at runtime via
-    ``AXIOM_USE_V1_ARCHIVE_FOR_CALIBRATION=0`` for kill-switch safety.
-    A separate preflight ``SELECT to_regclass(...)`` runs before SQL
-    composition and gates the V1 CTE OUT entirely on environments
-    that haven't run migration 0037 — a WHERE-clause guard would NOT
-    suffice because Postgres resolves FROM-clause relations at parse
-    time, before any predicate evaluates, and a missing table would
-    raise ``UndefinedTable`` and silently drop live rows too.
+    Either union can be disabled at runtime via
+    ``AXIOM_USE_V1_ARCHIVE_FOR_CALIBRATION=0`` /
+    ``AXIOM_USE_SHADOW_BUFFER_FOR_CALIBRATION=0`` for kill-switch
+    safety.  A separate preflight ``SELECT to_regclass(...)`` runs
+    before SQL composition and gates the corresponding CTE OUT
+    entirely on environments that haven't run the relevant
+    migration — a WHERE-clause guard would NOT suffice because
+    Postgres resolves FROM-clause relations at parse time, before
+    any predicate evaluates, and a missing table would raise
+    ``UndefinedTable`` and silently drop live rows too.
     """
     import os
 
@@ -468,15 +484,19 @@ async def _fetch_training_data() -> dict[str, dict[str, list]]:
         os.getenv("AXIOM_USE_V1_ARCHIVE_FOR_CALIBRATION", "1").lower()
         not in ("0", "false", "no", "off")
     )
+    use_shadow = (
+        os.getenv("AXIOM_USE_SHADOW_BUFFER_FOR_CALIBRATION", "1").lower()
+        not in ("0", "false", "no", "off")
+    )
 
     # PostgreSQL resolves FROM-clause relations at PARSE time, before any
     # WHERE predicate runs.  A `to_regclass(...) IS NOT NULL` clause in
     # WHERE does NOT protect the query from `UndefinedTable` when the
     # archive table is absent (fresh dev DBs that never ran migration
-    # 0037).  So we MUST preflight separately and only compose the V1
-    # CTE into the SQL when the table actually exists; otherwise we'd
-    # raise into the broad except below and silently drop live rows
-    # too.
+    # 0037 / 0043).  So we MUST preflight separately and only compose
+    # the corresponding CTE into the SQL when the table actually
+    # exists; otherwise we'd raise into the broad except below and
+    # silently drop live rows too.
     if use_v1:
         try:
             v1_present = await db.fetchval(
@@ -486,6 +506,18 @@ async def _fetch_training_data() -> dict[str, dict[str, list]]:
             log.warning("[calibrators] v1_archive preflight failed: %s", e)
             v1_present = False
         use_v1 = bool(v1_present)
+
+    if use_shadow:
+        try:
+            shadow_present = await db.fetchval(
+                "SELECT to_regclass('public.shadow_learning_buffer') IS NOT NULL"
+            )
+        except Exception as e:
+            log.warning(
+                "[calibrators] shadow_learning_buffer preflight failed: %s", e
+            )
+            shadow_present = False
+        use_shadow = bool(shadow_present)
 
     live_cte = f"""
         live_settled AS (
@@ -499,7 +531,8 @@ async def _fetch_training_data() -> dict[str, dict[str, list]]:
                    WHEN lower(coalesce(t.side, '')) IN ('no','n','sell')
                      THEN 1 - pm.actual_outcome::int
                    ELSE pm.actual_outcome::int
-                 END                                          AS y_side
+                 END                                          AS y_side,
+                 'live'::text                                 AS source
             FROM trades t
             JOIN trade_postmortems pm
               ON pm.trade_id = coalesce(t.trade_id, t.id::text)
@@ -510,8 +543,11 @@ async def _fetch_training_data() -> dict[str, dict[str, list]]:
              AND t.league IS NOT NULL
         )"""
 
+    extra_ctes: list[str] = []
+    union_parts: list[str] = ["SELECT league, p_side, y_side, source FROM live_settled"]
+
     if use_v1:
-        v1_cte = f""",
+        extra_ctes.append(f""",
         v1_settled AS (
           SELECT upper(league)                                AS league,
                  CASE
@@ -522,7 +558,8 @@ async def _fetch_training_data() -> dict[str, dict[str, list]]:
                    ELSE greatest(0.0, least(1.0,
                             predicted_prob::float))
                  END                                          AS p_side,
-                 actual_outcome::int                          AS y_side
+                 actual_outcome::int                          AS y_side,
+                 'v1'::text                                   AS source
             FROM v1_archive.trade_analyses
            WHERE to_regclass('v1_archive.trade_analyses') IS NOT NULL
              AND created_at IS NOT NULL
@@ -533,17 +570,36 @@ async def _fetch_training_data() -> dict[str, dict[str, list]]:
              AND lower(coalesce(analysis_json->>'side', '')) IN
                  ('yes','buy','live_yes','buy yes',
                   'no','sell','live_no','buy no')
-        )"""
-        union_tail = """
-            SELECT league, p_side, y_side FROM live_settled
-            UNION ALL
-            SELECT league, p_side, y_side FROM v1_settled"""
-    else:
-        v1_cte = ""
-        union_tail = """
-            SELECT league, p_side, y_side FROM live_settled"""
+        )""")
+        union_parts.append("SELECT league, p_side, y_side, source FROM v1_settled")
 
-    sql = f"WITH {live_cte}{v1_cte}{union_tail}"
+    if use_shadow:
+        # Shadow predictor never picks a side — predicted_prob is
+        # YES-aligned by construction, and actual_outcome is the YES
+        # resolution.  No side flip needed.  We clamp to [0, 1]
+        # defensively so a calibrator with a slightly out-of-range
+        # output (rare numeric edge case) can't poison the fit.
+        extra_ctes.append(f""",
+        shadow_settled AS (
+          SELECT upper(league)                                AS league,
+                 greatest(0.0, least(1.0,
+                          predicted_prob::float))             AS p_side,
+                 actual_outcome::int                          AS y_side,
+                 'shadow'::text                               AS source
+            FROM shadow_learning_buffer
+           WHERE to_regclass('public.shadow_learning_buffer') IS NOT NULL
+             AND settled_at IS NOT NULL
+             AND settled_at > now() - interval '{int(REFIT_WINDOW_DAYS)} days'
+             AND predicted_prob IS NOT NULL
+             AND actual_outcome IS NOT NULL
+             AND league IS NOT NULL
+        )""")
+        union_parts.append(
+            "SELECT league, p_side, y_side, source FROM shadow_settled"
+        )
+
+    union_tail = "\n            UNION ALL\n            ".join(union_parts)
+    sql = f"WITH {live_cte}{''.join(extra_ctes)}\n            {union_tail}"
 
     try:
         rows = await db.fetch(sql)
@@ -556,17 +612,46 @@ async def _fetch_training_data() -> dict[str, dict[str, list]]:
         lg = str(r["league"] or "").upper()
         if lg not in SUPPORTED_LEAGUES:
             continue
-        bucket = grouped.setdefault(lg, {"probs": [], "ys": []})
+        bucket = grouped.setdefault(
+            lg, {"probs": [], "ys": [], "sources": []}
+        )
         bucket["probs"].append(float(r["p_side"]))
         bucket["ys"].append(int(r["y_side"]))
+        # 'source' is present in every UNION branch, but defensively
+        # default to 'live' when the column is missing so a hand-rolled
+        # query in tests still parses.
+        try:
+            src = r["source"]
+        except (KeyError, TypeError):
+            src = "live"
+        bucket["sources"].append(str(src or "live"))
     return grouped
 
 
 async def _persist_calibrator(
     league: str, state: dict[str, Any], n: int,
     brier_before: float | None, brier_after: float | None,
+    *,
+    source_breakdown: dict[str, int] | None = None,
 ) -> int | None:
-    """Append a per-league calibrator snapshot.  Returns row id."""
+    """Append a per-league calibrator snapshot.  Returns row id.
+
+    ``source_breakdown`` is a ``{source: count}`` dict (e.g.
+    ``{'live': 120, 'shadow': 480, 'v1': 30}``) that gets threaded
+    into ``calibration_snapshots.config.source_breakdown`` so the
+    operator dashboard can show "this calibrator was 80% trained on
+    shadow rows" without re-running the SQL.
+    """
+    config_json = json.dumps({
+        "source": "per_league_refit",
+        "brier_before": (
+            float(brier_before) if brier_before is not None else None
+        ),
+        "brier_after": (
+            float(brier_after) if brier_after is not None else None
+        ),
+        "source_breakdown": dict(source_breakdown or {}),
+    })
     try:
         snap_id = await db.fetchval(
             """
@@ -578,9 +663,7 @@ async def _persist_calibrator(
                     jsonb_build_object('status', 'fitted',
                                        'kind', $7::text,
                                        'window_days', $8::int),
-                    jsonb_build_object('source', 'per_league_refit',
-                                       'brier_before', $9::float,
-                                       'brier_after', $10::float))
+                    $9::jsonb)
             RETURNING id
             """,
             f"per_league:{league}",
@@ -591,8 +674,7 @@ async def _persist_calibrator(
             json.dumps(state),
             state.get("type") or "unknown",
             int(REFIT_WINDOW_DAYS),
-            float(brier_before) if brier_before is not None else None,
-            float(brier_after) if brier_after is not None else None,
+            config_json,
         )
         return int(snap_id) if snap_id is not None else None
     except Exception as e:
@@ -619,9 +701,10 @@ async def refit_all() -> dict[str, Any]:
         return _fit_platt(probs, ys)
 
     for league in SUPPORTED_LEAGUES:
-        bucket = grouped.get(league) or {"probs": [], "ys": []}
+        bucket = grouped.get(league) or {"probs": [], "ys": [], "sources": []}
         probs = bucket["probs"]
         ys = bucket["ys"]
+        sources = bucket.get("sources") or ["live"] * len(probs)
         n = len(probs)
         if n < MIN_REFIT_SAMPLES:
             results.append(LeagueRefitResult(
@@ -640,8 +723,16 @@ async def refit_all() -> dict[str, Any]:
                 league=league, sample_count=n, error=f"{type(e).__name__}: {e}",
             ))
             continue
+        # Per-source counts for the snapshot config — operator-facing
+        # audit trail so we can tell at a glance how shadow-heavy a
+        # given calibrator's training was.
+        breakdown: dict[str, int] = {}
+        for s in sources:
+            key = str(s or "live")
+            breakdown[key] = breakdown.get(key, 0) + 1
         snap_id = await _persist_calibrator(
             league, state, n, brier_before, brier_after,
+            source_breakdown=breakdown,
         )
         results.append(LeagueRefitResult(
             league=league, sample_count=n, type=state.get("type"),

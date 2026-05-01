@@ -840,6 +840,143 @@ async def _calibration_and_drift(vertical: str | None) -> int:
     return raised
 
 
+async def _calibration_and_drift_shadow(vertical: str | None) -> int:
+    """Same 24h Brier drift computation as :func:`_calibration_and_drift`,
+    but driven by ``shadow_learning_buffer`` rather than the live
+    trades x postmortems join.
+
+    The shadow loop (task #753) snapshots the model's calibrated YES
+    probability for *every* active Kalshi market the orchestrator
+    considered, so this helper measures drift on the unbiased
+    universe — catching regressions even when no trade was placed.
+
+    Alerts raised here use the same ``alert_type='brier_drift'`` so
+    the existing retrain consumer dedupes naturally, but the message
+    is prefixed ``[shadow]`` so an operator skimming the alert feed
+    can immediately distinguish "trades drifting" from "shadow
+    universe drifting" — the latter often catches regressions a few
+    hours earlier.
+
+    The snapshot row carries ``config.source = 'shadow'`` so the
+    operator dashboard's calibration history doesn't get confused
+    when both sources fire snapshots within the same window.
+    """
+    if not vertical:
+        return 0
+    # Preflight: a fresh dev DB without migration 0043 wouldn't have
+    # the buffer table.  ``to_regclass`` returns NULL when the table
+    # is missing.  We MUST gate at the Python layer (not in WHERE)
+    # because Postgres resolves FROM-clause relations at parse time.
+    try:
+        present = await db.fetchval(
+            "SELECT to_regclass('public.shadow_learning_buffer') IS NOT NULL"
+        )
+    except Exception as e:
+        log.warning("shadow drift preflight failed for %s: %s", vertical, e)
+        return 0
+    if not present:
+        return 0
+
+    try:
+        agg = await db.fetchrow(
+            """
+            WITH settled AS (
+              SELECT predicted_prob::float AS p_side,
+                     actual_outcome::int   AS y_side
+                FROM shadow_learning_buffer
+               WHERE vertical = $1
+                 AND settled_at IS NOT NULL
+                 AND settled_at > now() - interval '24 hours'
+                 AND predicted_prob IS NOT NULL
+                 AND actual_outcome IS NOT NULL
+            )
+            SELECT count(*)::int                                    AS n,
+                   avg((p_side - y_side) * (p_side - y_side))::float AS brier,
+                   avg(abs(p_side - y_side))::float                  AS mae
+              FROM settled
+            """,
+            vertical,
+        )
+        n = int(agg["n"] or 0)
+        if n == 0:
+            return 0
+        brier = float(agg["brier"] or 0.0)
+        mae = float(agg["mae"] or 0.0)
+        await db.execute(
+            """
+            INSERT INTO calibration_snapshots
+                (vertical, sub_category, ece, mce, brier_score, reliability,
+                 resolution, sample_count, calibrator_state, drift_status, config)
+            VALUES ($1, '24h_shadow', $2, $3, $4, NULL, NULL, $5,
+                    '{}'::jsonb,
+                    jsonb_build_object('brier_warn', $6::float,
+                                       'brier_crit', $7::float),
+                    jsonb_build_object('source', 'shadow'))
+            """,
+            vertical, mae, mae, brier, n, BRIER_DRIFT_WARN, BRIER_DRIFT_CRIT,
+        )
+    except Exception as e:
+        log.warning("shadow calibration snapshot failed for %s: %s", vertical, e)
+        return 0
+
+    if brier >= BRIER_DRIFT_CRIT:
+        sev, thr = "critical", BRIER_DRIFT_CRIT
+    elif brier >= BRIER_DRIFT_WARN:
+        sev, thr = "warning", BRIER_DRIFT_WARN
+    else:
+        return 0
+    raised = 0
+    # Dedupe across both shadow- and trade-driven alerts: we look up
+    # any unack'd brier_drift in the last hour for this vertical.
+    # The retrain consumer keys on (vertical, alert_type), so two
+    # back-to-back alerts (one shadow, one trade) would trigger two
+    # retrains — undesirable.  The trade path's identical guard at
+    # line 794 ensures whichever path fires first wins the hour.
+    try:
+        recent = await db.fetchval(
+            """
+            SELECT 1 FROM model_health_alerts
+             WHERE vertical = $1 AND alert_type = 'brier_drift'
+               AND created_at > now() - interval '1 hour'
+             LIMIT 1
+            """,
+            vertical,
+        )
+        if not recent:
+            msg = (
+                f"[shadow] {vertical} 24h Brier {brier:.3f} "
+                f">= {thr:.3f} ({sev})"
+            )
+            await db.execute(
+                """
+                INSERT INTO model_health_alerts
+                    (vertical, alert_type, severity, metric_name, metric_value,
+                     threshold, message, acknowledged)
+                VALUES ($1, 'brier_drift', $2, 'brier_score_shadow', $3, $4, $5, false)
+                ON CONFLICT (id) DO NOTHING
+                """,
+                vertical, sev, brier, thr, msg,
+            )
+            raised = 1
+            try:
+                from ..notifications import alerts as _alerts
+                if await _alerts.dedupe_or_skip(
+                    "drift", f"shadow:{vertical}:{sev}", ttl_seconds=3600
+                ):
+                    _alerts.drift(
+                        vertical=f"{vertical} (shadow)",
+                        metric="brier_score_24h_shadow",
+                        value=brier,
+                        threshold=thr,
+                        note=f"severity={sev}; {msg}",
+                    )
+            except Exception as e:  # pragma: no cover
+                log.warning("shadow drift alert dispatch failed: %s", e)
+    except Exception as e:
+        log.warning("shadow alert insert failed for %s: %s", vertical, e)
+    return raised
+
+
 # ---------------------------------------------------------------------------
 # Public: settle a market end-to-end
 # ---------------------------------------------------------------------------

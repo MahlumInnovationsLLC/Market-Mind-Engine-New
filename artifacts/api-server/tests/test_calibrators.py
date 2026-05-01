@@ -320,6 +320,11 @@ def test_fetch_training_data_includes_v1_when_present(monkeypatch):
 def test_fetch_training_data_v1_disabled_via_env(monkeypatch):
     """The kill-switch env var skips the preflight AND the V1 CTE."""
     monkeypatch.setenv("AXIOM_USE_V1_ARCHIVE_FOR_CALIBRATION", "0")
+    # Also disable shadow buffer so this test is hermetic against
+    # the unrelated `AXIOM_USE_SHADOW_BUFFER_FOR_CALIBRATION` env
+    # (default on) — its own preflight would otherwise show up in
+    # `fetchval_calls` and confuse the v1-scoped assertions below.
+    monkeypatch.setenv("AXIOM_USE_SHADOW_BUFFER_FOR_CALIBRATION", "0")
 
     captured_sql: list[str] = []
     fetchval_calls: list[str] = []
@@ -337,7 +342,7 @@ def test_fetch_training_data_v1_disabled_via_env(monkeypatch):
 
     asyncio.run(calibrators._fetch_training_data())
 
-    # Preflight skipped entirely — no fetchval call against to_regclass.
+    # Both kill switches set — neither preflight runs.
     assert not any("to_regclass" in q for q in fetchval_calls)
     # No V1 reference in the composed SQL.
     assert "v1_archive" not in captured_sql[0]

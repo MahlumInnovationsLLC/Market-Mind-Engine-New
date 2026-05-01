@@ -2132,3 +2132,135 @@ end-to-end exchange round-trips.
 * Counter goes negative → impossible by construction (the UPDATE
   uses `greatest(0, ...)`); if you see a negative value, someone
   manually wrote it
+
+
+## 19. Shadow-prediction calibration loop (Task #753)
+
+The orchestrator only persists a `predictions` row for markets one of
+the discovery feeds materialises, and only ever assigns
+`model_yes_prob` to markets the edge gates surface for trading.  The
+per-league calibrator therefore trains on a biased sub-population —
+the universe of *traded* markets, not the full universe of *active*
+Kalshi markets.  The Round-13 audit estimated this bias at +1.5–2 %
+win rate over 6 months once corrected.
+
+The shadow loop closes the bias by running on every settlement cycle
+(throttled to once per hour):
+
+1. **Predict** — `app.learning.shadow_predictor.run_cycle()` snapshots
+   the current calibrated YES probability for *every* active Kalshi
+   market in the live `predictions` table whose `updated_at` is in
+   the last 6 h.  Rows land in `shadow_predictions` keyed
+   `(market_id, hour-floored predicted_at)` so re-runs are no-ops.
+2. **Settle** — `app.learning.shadow_settler.run_cycle()` joins
+   `shadow_predictions` (where `settled_at IS NULL`) to live
+   `predictions` on `kalshi_market_id`, copies `outcome` /
+   `settled_at` onto the shadow row, and inserts a matching
+   `shadow_learning_buffer` row (idempotent on
+   `shadow_prediction_id`).
+3. **Drift parity** — `_calibration_and_drift_shadow(vertical)`
+   computes 24 h Brier off `shadow_learning_buffer` per registered
+   vertical, writes a `calibration_snapshots` row tagged
+   `sub_category='24h_shadow'`, and raises `model_health_alerts`
+   with `alert_type='brier_drift'` (message prefixed `[shadow]`) so
+   the existing retrain consumer dedupes naturally.
+4. **Calibrator UNION** — `calibrators._fetch_training_data` UNIONs
+   `shadow_learning_buffer` on top of the live trades x postmortems
+   join and the v1 archive, so the per-league nightly refit learns
+   from the unbiased universe.
+
+### Tables
+
+| Table | Purpose | Primary index |
+| --- | --- | --- |
+| `shadow_predictions` | Snapshot store, hourly inserts | `(market_id, predicted_at)` unique |
+| `shadow_learning_buffer` | Settled snapshots fed into calibrator UNION | `(shadow_prediction_id)` unique partial |
+
+Both migrations (0042, 0043) are `CREATE TABLE IF NOT EXISTS` so
+re-runs on a fork are no-ops.
+
+### Env kill switches
+
+| Variable | Default | Effect when off |
+| --- | --- | --- |
+| `AXIOM_USE_SHADOW_BUFFER_FOR_CALIBRATION` | `1` | Calibrator UNION skips `shadow_learning_buffer`, falling back to live + v1 only |
+
+The shadow predictor / settler themselves are not gated by env (they
+write rows; the calibrator decides whether to consume them).  To
+fully halt the loop, comment out `_run_shadow_cycle` invocation in
+`app/settlement/scheduler.py::_loop`.
+
+### Verifying a cycle ran
+
+```sql
+-- Shadow snapshots written in the last 24 h, by hour
+SELECT date_trunc('hour', predicted_at) AS hr, count(*)
+  FROM shadow_predictions
+ WHERE predicted_at > now() - interval '24 hours'
+ GROUP BY hr ORDER BY hr;
+
+-- Shadow rows already settled and buffered for the next refit
+SELECT vertical, count(*)
+  FROM shadow_learning_buffer
+ WHERE settled_at > now() - interval '24 hours'
+ GROUP BY vertical ORDER BY 2 DESC;
+
+-- Per-league refit's source breakdown (shadow vs live vs v1)
+SELECT sub_category,
+       config->'source_breakdown' AS sources,
+       sample_count, brier_score, created_at
+  FROM calibration_snapshots
+ WHERE sub_category LIKE 'per_league:%'
+ ORDER BY created_at DESC LIMIT 20;
+
+-- Shadow-driven drift alerts in the last 24 h
+SELECT vertical, severity, message, created_at
+  FROM model_health_alerts
+ WHERE alert_type = 'brier_drift'
+   AND message LIKE '[shadow]%'
+   AND created_at > now() - interval '24 hours'
+ ORDER BY created_at DESC;
+```
+
+The settlement scheduler's `last_cycle.shadow` field also exposes the
+per-cycle counts on the operator console — `predictor.snapshots_written`,
+`settler.buffer_inserted`, `drift.alerts_raised`.
+
+### Rollback
+
+* **Disable calibrator consumption** —
+  `replit deploy env set AXIOM_USE_SHADOW_BUFFER_FOR_CALIBRATION=0`
+  then trigger a nightly refit (or wait for the next 24 h cadence).
+  The next per-league fit will exclude shadow rows; existing
+  calibrators stay in service via `apply()` until re-fit.
+* **Halt the writer** — comment out the `_run_shadow_cycle` call in
+  `app/settlement/scheduler.py::_loop` and redeploy.  Existing
+  rows in `shadow_predictions` / `shadow_learning_buffer` stay
+  intact for forensics.
+* **Drop the tables** — both migrations have `downgrade()` paths
+  that drop indexes + table cleanly.  Only do this if you've also
+  flipped the env kill switch (otherwise the next calibrator refit
+  will raise on the missing table — actually it won't: the
+  `to_regclass` preflight gates the CTE OUT entirely on missing
+  tables, so a drop is safe even with the kill switch on, but the
+  loop in `_run_shadow_cycle` will keep trying to write and log
+  warnings.  Belt-and-braces is to comment out the call too).
+
+### Symptom of regression
+
+* Calibrator refit's `source_breakdown` shows `shadow: 0` while
+  `shadow_learning_buffer` has rows → check the
+  `AXIOM_USE_SHADOW_BUFFER_FOR_CALIBRATION` env, then the preflight
+  log line `[calibrators] shadow_learning_buffer preflight failed`.
+* `shadow_predictions` keeps growing but `shadow_learning_buffer`
+  stays small → settler can't find matching settled `predictions`
+  rows; check that the upstream Kalshi settler is stamping
+  `predictions.settled_at` / `predictions.outcome` (it should via
+  `app/feeds/kalshi_crypto_markets.py` for crypto and
+  `app/settlement/pipeline.py::settle_market` for sports).
+* Shadow drift alerts firing but trade-driven drift quiet → the
+  shadow universe is detecting model drift before the trade gates
+  surface a bad bet — by design, this is the **early warning** the
+  loop was built for.  Check the affected vertical's
+  per-league calibrator snapshot breakdown to confirm shadow rows
+  outnumber live rows by a reasonable margin (≥ 5 :1 typical).
