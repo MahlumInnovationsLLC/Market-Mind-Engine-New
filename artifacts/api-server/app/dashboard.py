@@ -6146,4 +6146,100 @@ async def get_v1_backtest_gate(history_limit: int = 8) -> dict[str, Any]:
             }
         )
     latest = items[0] if items else None
-    return {"latest": latest, "history": items}
+
+    # F761 — freshness block: tile turns red the moment the cron loop
+    # silently stops shipping rows.  Thresholds chosen so a one-off
+    # delay (e.g. infra reboot) doesn't false-alarm but a missed weekly
+    # run (>9d for the gate; >36h for the daily honesty report) does.
+    freshness = {
+        "v1_backtest": await _freshness_for_v1_backtest(latest),
+        "daily_report": await _freshness_for_daily_report(),
+    }
+    return {"latest": latest, "history": items, "freshness": freshness}
+
+
+_V1_BACKTEST_FRESH_SECS = 9 * 24 * 3600  # 9 days
+_DAILY_REPORT_FRESH_SECS = 36 * 3600  # 36 hours
+
+
+def _classify_freshness(age_secs: float | None, threshold_secs: int) -> str:
+    if age_secs is None:
+        return "missing"
+    return "fresh" if age_secs <= threshold_secs else "stale"
+
+
+async def _freshness_for_v1_backtest(
+    latest: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Build the V1-backtest freshness sub-block from the latest row."""
+    if latest is None or not latest.get("run_at"):
+        return {
+            "last_run_at": None,
+            "age_seconds": None,
+            "threshold_seconds": _V1_BACKTEST_FRESH_SECS,
+            "status": "missing",
+        }
+    last_run_at = str(latest["run_at"])
+    age = _age_seconds_from_iso(last_run_at)
+    return {
+        "last_run_at": last_run_at,
+        "age_seconds": age,
+        "threshold_seconds": _V1_BACKTEST_FRESH_SECS,
+        "status": _classify_freshness(age, _V1_BACKTEST_FRESH_SECS),
+    }
+
+
+async def _freshness_for_daily_report() -> dict[str, Any]:
+    """Build the daily-honesty-report freshness sub-block.
+
+    Reads ``notification_dedupe`` where ``key='daily_honesty_report'``
+    — that row's ``sent_at`` is bumped each time a fresh dispatch is
+    claimed.
+    """
+    try:
+        row = await db.fetchrow(
+            """
+            SELECT to_char(sent_at AT TIME ZONE 'UTC',
+                           'YYYY-MM-DD"T"HH24:MI:SSZ') AS sent_at_iso,
+                   sent_at
+              FROM notification_dedupe
+             WHERE key = 'daily_honesty_report'
+            """,
+        )
+    except Exception as e:
+        log.warning("daily_honesty_report freshness query failed: %s", e)
+        return {
+            "last_sent_at": None,
+            "age_seconds": None,
+            "threshold_seconds": _DAILY_REPORT_FRESH_SECS,
+            "status": "missing",
+            "error": str(e)[:240],
+        }
+    if row is None or row["sent_at"] is None:
+        return {
+            "last_sent_at": None,
+            "age_seconds": None,
+            "threshold_seconds": _DAILY_REPORT_FRESH_SECS,
+            "status": "missing",
+        }
+    sent_at_iso = row["sent_at_iso"]
+    age = _age_seconds_from_iso(sent_at_iso)
+    return {
+        "last_sent_at": sent_at_iso,
+        "age_seconds": age,
+        "threshold_seconds": _DAILY_REPORT_FRESH_SECS,
+        "status": _classify_freshness(age, _DAILY_REPORT_FRESH_SECS),
+    }
+
+
+def _age_seconds_from_iso(iso: str | None) -> float | None:
+    if not iso:
+        return None
+    try:
+        from datetime import datetime as _dt, timezone as _tz
+
+        s = iso.rstrip("Z")
+        dt = _dt.fromisoformat(s).replace(tzinfo=_tz.utc)
+        return max(0.0, (_dt.now(_tz.utc) - dt).total_seconds())
+    except Exception:
+        return None

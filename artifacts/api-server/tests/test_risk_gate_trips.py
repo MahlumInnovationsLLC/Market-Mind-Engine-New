@@ -1,10 +1,13 @@
 """Tests for the structured risk-gate-trip log (Task #756 / roadmap T-21).
 
-`_emit_tail_risk_trip_alert` must always write a row into
-`risk_gate_trips` so the daily honesty report's `gate_trips_24h`
-panel reflects the *real* trip count, not the (smaller) deduped
-notification count.  The alert dispatch may still be deduped — the
-persistence step must run regardless.
+Two layered guarantees:
+
+1. The low-level :func:`_persist_risk_gate_trip` helper writes a single
+   row into ``risk_gate_trips`` and never bubbles DB errors back up.
+2. :func:`run_all_gates` writes a row for **every** failed gate (not
+   just tail-risk ones), so the daily honesty report's
+   ``gate_trips_24h`` panel becomes a single source of truth across
+   all 19 gates (follow-up #763).
 """
 from __future__ import annotations
 
@@ -129,52 +132,12 @@ def test_persist_risk_gate_trip_swallows_db_errors(
     )
 
 
-def test_emit_tail_risk_trip_alert_persists_even_when_deduped(
+def test_emit_tail_risk_trip_alert_does_not_double_persist(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The persistence step runs *before* the dedupe check, so the
-    honesty report's gate_trips_24h count includes every trip."""
-    cap = _CapturedExec()
-    monkeypatch.setattr(_db, "execute", cap)
-
-    # Force "already-claimed" so the alert dispatch is suppressed.
-    async def _already_seen(*_a: Any, **_kw: Any) -> bool:
-        return False
-
-    monkeypatch.setattr(_alerts, "dedupe_or_skip", _already_seen)
-
-    dispatched: list[Any] = []
-    monkeypatch.setattr(
-        _alerts,
-        "tail_risk_gate_trip",
-        lambda **kw: dispatched.append(kw),
-    )
-
-    ctx = _make_ctx(market_id="KX-DUPE-MARKET")
-    _run(
-        _gates._emit_tail_risk_trip_alert(
-            ctx=ctx,
-            gate_name="tail_risk_size_clamped",
-            reason="tail clamp",
-            details={"foo": "bar"},
-        )
-    )
-
-    # Persistence happened…
-    assert any(
-        "INSERT INTO risk_gate_trips" in q for q, _ in cap.calls
-    ), cap.calls
-    persisted_args = next(
-        args for q, args in cap.calls if "INSERT INTO risk_gate_trips" in q
-    )
-    assert persisted_args[1] == "KX-DUPE-MARKET"
-    # …but the broadcast did NOT (deduped).
-    assert dispatched == []
-
-
-def test_emit_tail_risk_trip_alert_persists_and_dispatches_on_first_seen(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+    """``_emit_tail_risk_trip_alert`` deliberately leaves persistence to
+    :func:`run_all_gates` so the row is written exactly once per trip
+    (follow-up #763 made the central writer authoritative)."""
     cap = _CapturedExec()
     monkeypatch.setattr(_db, "execute", cap)
 
@@ -182,24 +145,142 @@ def test_emit_tail_risk_trip_alert_persists_and_dispatches_on_first_seen(
         return True
 
     monkeypatch.setattr(_alerts, "dedupe_or_skip", _first_seen)
+    monkeypatch.setattr(_alerts, "tail_risk_gate_trip", lambda **kw: None)
 
-    dispatched: list[dict[str, Any]] = []
-    monkeypatch.setattr(
-        _alerts,
-        "tail_risk_gate_trip",
-        lambda **kw: dispatched.append(kw),
-    )
-
-    ctx = _make_ctx(market_id="KX-FRESH-MARKET")
     _run(
         _gates._emit_tail_risk_trip_alert(
-            ctx=ctx,
+            ctx=_make_ctx(market_id="KX-NODOUBLE"),
             gate_name="tail_risk_size_clamped",
             reason="tail clamp",
             details={"k": "v"},
         )
     )
-    assert any(
+
+    # No INSERT from inside the alert helper.
+    assert not any(
         "INSERT INTO risk_gate_trips" in q for q, _ in cap.calls
     )
-    assert dispatched and dispatched[0]["market_id"] == "KX-FRESH-MARKET"
+
+
+# ---------------------------------------------------------------------------
+# F763 — `run_all_gates` writes a row for every failed gate
+# ---------------------------------------------------------------------------
+
+
+def _run_one_failing_gate(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    gate_name: str,
+    reason: str,
+    details: dict[str, Any],
+) -> _CapturedExec:
+    """Helper: monkey-patch GATES to a single failing gate, then run."""
+    cap = _CapturedExec()
+    monkeypatch.setattr(_db, "execute", cap)
+
+    async def _fail(_ctx: Any) -> Any:
+        return _gates.GateResult(gate_name, False, reason, details)
+
+    monkeypatch.setattr(_gates, "GATES", ((gate_name, _fail),))
+
+    ctx = _make_ctx(market_id=f"KX-{gate_name.upper()}-MK")
+    ok, results = _run(_gates.run_all_gates(ctx))
+    assert ok is False
+    assert len(results) == 1
+    assert results[0].name == gate_name
+    return cap
+
+
+def _assert_persisted(cap: _CapturedExec, *, gate_name: str) -> tuple:
+    insert_calls = [
+        (q, args) for q, args in cap.calls if "INSERT INTO risk_gate_trips" in q
+    ]
+    assert len(insert_calls) == 1, (
+        f"expected exactly one risk_gate_trips INSERT for {gate_name!r}, "
+        f"got {len(insert_calls)}: {cap.calls}"
+    )
+    args = insert_calls[0][1]
+    assert args[0] == gate_name
+    return args
+
+
+def test_run_all_gates_persists_kill_switch_trip(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cap = _run_one_failing_gate(
+        monkeypatch,
+        gate_name="kill_switch",
+        reason="trading_mode=halt",
+        details={"trading_mode": "halt"},
+    )
+    args = _assert_persisted(cap, gate_name="kill_switch")
+    import json
+
+    assert json.loads(args[7]) == {"trading_mode": "halt"}
+
+
+def test_run_all_gates_persists_daily_loss_trip(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cap = _run_one_failing_gate(
+        monkeypatch,
+        gate_name="daily_loss",
+        reason="daily loss cap exceeded",
+        details={"loss_usd": 1234.5, "threshold_usd": 1000.0},
+    )
+    args = _assert_persisted(cap, gate_name="daily_loss")
+    import json
+
+    decoded = json.loads(args[7])
+    assert decoded["loss_usd"] == 1234.5
+
+
+def test_run_all_gates_persists_kelly_fraction_trip(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cap = _run_one_failing_gate(
+        monkeypatch,
+        gate_name="kelly_fraction",
+        reason="kelly > cap",
+        details={"kelly": 0.42, "cap": 0.10},
+    )
+    _assert_persisted(cap, gate_name="kelly_fraction")
+
+
+def test_run_all_gates_persist_failure_does_not_break_gate_decision(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A DB-side INSERT failure must not mask the FAIL decision."""
+
+    async def _boom(*_a: Any, **_kw: Any) -> str:
+        raise RuntimeError("connection refused")
+
+    monkeypatch.setattr(_db, "execute", _boom)
+
+    async def _fail(_ctx: Any) -> Any:
+        return _gates.GateResult("kill_switch", False, "halted", {})
+
+    monkeypatch.setattr(_gates, "GATES", (("kill_switch", _fail),))
+
+    ok, results = _run(_gates.run_all_gates(_make_ctx()))
+    assert ok is False
+    assert results[0].name == "kill_switch" and results[0].passed is False
+
+
+def test_run_all_gates_does_not_persist_on_pass(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No row is written for gates that pass — the table is FAIL-only."""
+    cap = _CapturedExec()
+    monkeypatch.setattr(_db, "execute", cap)
+
+    async def _ok(_ctx: Any) -> Any:
+        return _gates.GateResult("kill_switch", True, "", {})
+
+    monkeypatch.setattr(_gates, "GATES", (("kill_switch", _ok),))
+
+    ok, _results = _run(_gates.run_all_gates(_make_ctx()))
+    assert ok is True
+    assert not any(
+        "INSERT INTO risk_gate_trips" in q for q, _ in cap.calls
+    )

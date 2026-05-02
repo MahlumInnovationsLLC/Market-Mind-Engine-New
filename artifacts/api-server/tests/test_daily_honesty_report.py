@@ -501,3 +501,86 @@ def test_classify_drift_red_beats_yellow_beats_green() -> None:
     assert dhr._classify_drift(
         brier_after=0.10, drift_status="ok", age_hours=15 * 24,
     )[0] == "red"
+
+
+# ---------------------------------------------------------------------------
+# F762 — investor deck surfaced in the daily report
+# ---------------------------------------------------------------------------
+
+
+def test_collect_latest_investor_deck_picks_first_with_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Walks rows latest-first and returns the first one whose
+    ``notes`` JSON carries an `investor_deck_path`."""
+    rows = [
+        {
+            "run_at_iso": "2026-04-30T13:00:00Z",
+            "notes": json.dumps({"unrelated": "yo"}),
+        },
+        {
+            "run_at_iso": "2026-04-23T13:00:00Z",
+            "notes": json.dumps(
+                {"investor_deck_path": "/x/y/investor_deck_latest.pptx"}
+            ),
+        },
+    ]
+    fake = _FakeDB({"FROM v1_backtest_gate_runs": rows})
+    monkeypatch.setattr(dhr, "db", fake)
+
+    out = _run(dhr.collect_latest_investor_deck())
+    assert out["investor_deck_path"] == "/x/y/investor_deck_latest.pptx"
+    assert out["built_at"] == "2026-04-23T13:00:00Z"
+
+
+def test_collect_latest_investor_deck_returns_none_when_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake = _FakeDB({"FROM v1_backtest_gate_runs": []})
+    monkeypatch.setattr(dhr, "db", fake)
+
+    out = _run(dhr.collect_latest_investor_deck())
+    assert out == {"investor_deck_path": None, "built_at": None}
+
+
+def test_collect_latest_investor_deck_swallows_db_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _Boom:
+        async def fetch(self, *_a: Any, **_kw: Any) -> Any:
+            raise RuntimeError("db gone")
+
+    monkeypatch.setattr(dhr, "db", _Boom())
+    out = _run(dhr.collect_latest_investor_deck())
+    assert "error" in out
+
+
+def test_render_text_surfaces_investor_deck_path() -> None:
+    payload = {
+        "date_utc": "2026-05-01",
+        "divergence": {"days": 7, "items": []},
+        "calibrator_drift": {"items": []},
+        "tail_risk": {},
+        "gate_trips_24h": {"items": []},
+        "investor_deck": {
+            "investor_deck_path": "/srv/reports/investor_deck_latest.pptx",
+            "built_at": "2026-04-30T13:00:00Z",
+        },
+    }
+    _subject, body = dhr.render_text(payload)
+    assert "Latest investor deck:" in body
+    assert "/srv/reports/investor_deck_latest.pptx" in body
+    assert "built 2026-04-30T13:00:00Z" in body
+
+
+def test_render_text_handles_missing_investor_deck() -> None:
+    payload = {
+        "date_utc": "2026-05-01",
+        "divergence": {"days": 7, "items": []},
+        "calibrator_drift": {"items": []},
+        "tail_risk": {},
+        "gate_trips_24h": {"items": []},
+        "investor_deck": {"investor_deck_path": None, "built_at": None},
+    }
+    _subject, body = dhr.render_text(payload)
+    assert "not built yet" in body

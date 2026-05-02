@@ -459,6 +459,56 @@ async def collect_gate_trips_24h() -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
+async def collect_latest_investor_deck() -> dict[str, Any]:
+    """Look up the most recent ``v1_backtest_gate_runs`` row whose
+    ``notes`` JSON carries an ``investor_deck_path`` and return the
+    deck location + the run timestamp.
+
+    Wired by F762: the weekly cron auto-builds the deck and stamps the
+    path into ``notes``; the daily honesty report surfaces a clickable
+    link so the operator can grab a fresh PPTX without rummaging
+    through the reports directory.
+    """
+    try:
+        rows = await db.fetch(
+            """
+            SELECT to_char(run_at AT TIME ZONE 'UTC',
+                           'YYYY-MM-DD"T"HH24:MI:SSZ') AS run_at_iso,
+                   notes
+              FROM v1_backtest_gate_runs
+             WHERE notes IS NOT NULL
+             ORDER BY run_at DESC
+             LIMIT 5
+            """,
+        )
+    except Exception as e:
+        log.warning("investor deck lookup failed: %s", e)
+        return {"error": str(e)[:240]}
+
+    import json as _json
+
+    for r in rows:
+        notes_raw = r["notes"]
+        if not notes_raw:
+            continue
+        try:
+            payload = _json.loads(notes_raw) if isinstance(
+                notes_raw, (str, bytes, bytearray)
+            ) else notes_raw
+        except (ValueError, TypeError):
+            continue
+        if not isinstance(payload, dict):
+            continue
+        path = payload.get("investor_deck_path")
+        if not path:
+            continue
+        return {
+            "investor_deck_path": str(path),
+            "built_at": r["run_at_iso"],
+        }
+    return {"investor_deck_path": None, "built_at": None}
+
+
 async def collect_report(date_utc: str) -> dict[str, Any]:
     """Build the four-section payload.  Sections that fail are marked
     with an ``error`` field but never raise."""
@@ -466,8 +516,9 @@ async def collect_report(date_utc: str) -> dict[str, Any]:
     drift_t = asyncio.create_task(collect_calibrator_drift_status())
     tail_t = asyncio.create_task(collect_tail_risk_summary())
     gate_t = asyncio.create_task(collect_gate_trips_24h())
-    divergence, drift_status, tail_risk, gate_trips = await asyncio.gather(
-        div_t, drift_t, tail_t, gate_t
+    deck_t = asyncio.create_task(collect_latest_investor_deck())
+    divergence, drift_status, tail_risk, gate_trips, investor_deck = (
+        await asyncio.gather(div_t, drift_t, tail_t, gate_t, deck_t)
     )
     return {
         "date_utc": date_utc,
@@ -475,6 +526,7 @@ async def collect_report(date_utc: str) -> dict[str, Any]:
         "calibrator_drift": drift_status,
         "tail_risk": tail_risk,
         "gate_trips_24h": gate_trips,
+        "investor_deck": investor_deck,
     }
 
 
@@ -629,6 +681,26 @@ def render_text(payload: dict[str, Any]) -> tuple[str, str]:
                 f"  {it['gate_name']:<30s}  count={it['count']:>4d}  "
                 f"last={it.get('last_at') or '(n/a)'}"
             )
+    lines.append("")
+
+    # Latest investor deck (F762)
+    deck = payload.get("investor_deck") or {}
+    if deck.get("error"):
+        lines.append(
+            f"Latest investor deck: lookup failed — {deck['error']}"
+        )
+    elif deck.get("investor_deck_path"):
+        built = deck.get("built_at") or "(unknown)"
+        lines.append(
+            f"Latest investor deck: {deck['investor_deck_path']}  "
+            f"(built {built})"
+        )
+    else:
+        lines.append(
+            "Latest investor deck: not built yet — weekly cron will "
+            "produce one on the next run."
+        )
+
     lines.append("")
     lines.append(
         "Read the runbook section 21 for what each red signal means."
@@ -790,6 +862,29 @@ def render_html(payload: dict[str, Any]) -> str:
             parts.append("</table>")
         else:
             parts.append("<p>no gate trips in the last 24 hours</p>")
+
+    deck = payload.get("investor_deck") or {}
+    _section_h("Latest investor deck")
+    if deck.get("error"):
+        parts.append(
+            f"<p style=\"color:#b00;\">lookup failed: "
+            f"{html.escape(str(deck['error']))}</p>"
+        )
+    elif deck.get("investor_deck_path"):
+        built = html.escape(str(deck.get("built_at") or "(unknown)"))
+        path = html.escape(str(deck["investor_deck_path"]))
+        parts.append(
+            f"<p style=\"font-family:ui-monospace,SFMono-Regular,Menlo,"
+            f"monospace;font-size:12px;\">"
+            f"<b>{path}</b><br/>"
+            f"<span style=\"color:#666;\">built {built}</span></p>"
+        )
+    else:
+        parts.append(
+            "<p style=\"color:#666;font-size:12px;\">"
+            "not built yet — weekly cron will produce one on the "
+            "next run.</p>"
+        )
 
     parts.append(
         "<p style=\"color:#666;font-size:12px;margin-top:24px;\">"

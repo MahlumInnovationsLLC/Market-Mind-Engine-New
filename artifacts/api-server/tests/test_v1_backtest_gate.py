@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -256,14 +257,40 @@ def test_run_weekly_v1_backtest_handles_replay_crash(
 
 
 class _DashboardFakeDB:
-    def __init__(self, rows: list[dict[str, Any]]) -> None:
+    def __init__(
+        self,
+        rows: list[dict[str, Any]],
+        *,
+        daily_report_sent_at_iso: str | None = None,
+        raise_on_dedupe: bool = False,
+    ) -> None:
         self._rows = rows
+        self._daily = daily_report_sent_at_iso
+        self._raise_on_dedupe = raise_on_dedupe
 
     async def fetch(self, query: str, *args: Any) -> list[dict[str, Any]]:
         if "FROM v1_backtest_gate_runs" in query:
             limit = int(args[0]) if args else 8
             return self._rows[:limit]
         return []
+
+    async def fetchrow(
+        self, query: str, *args: Any
+    ) -> dict[str, Any] | None:
+        if "FROM notification_dedupe" in query:
+            if self._raise_on_dedupe:
+                raise RuntimeError("dedupe table missing")
+            if self._daily is None:
+                return None
+            from datetime import datetime as _dt, timezone as _tz
+
+            return {
+                "sent_at_iso": self._daily,
+                "sent_at": _dt.fromisoformat(
+                    self._daily.rstrip("Z")
+                ).replace(tzinfo=_tz.utc),
+            }
+        return None
 
 
 def test_get_v1_backtest_gate_returns_latest_and_history(
@@ -310,7 +337,11 @@ def test_get_v1_backtest_gate_empty_table(
 ) -> None:
     monkeypatch.setattr(dashboard, "db", _DashboardFakeDB([]))
     out = _run(dashboard.get_v1_backtest_gate(history_limit=8))
-    assert out == {"latest": None, "history": []}
+    assert out["latest"] is None
+    assert out["history"] == []
+    # F761 — freshness present even with an empty table.
+    assert out["freshness"]["v1_backtest"]["status"] == "missing"
+    assert out["freshness"]["daily_report"]["status"] == "missing"
 
 
 def test_get_v1_backtest_gate_clamps_history_limit(
@@ -325,8 +356,238 @@ def test_get_v1_backtest_gate_clamps_history_limit(
             captured["limit"] = args[0] if args else None
             return []
 
+        async def fetchrow(self, _q: str, *_a: Any) -> Any:
+            return None
+
     monkeypatch.setattr(dashboard, "db", _Capture())
     _run(dashboard.get_v1_backtest_gate(history_limit=999))
     assert captured["limit"] == 50
     _run(dashboard.get_v1_backtest_gate(history_limit=0))
     assert captured["limit"] == 8  # falsy → default
+
+
+# ---------------------------------------------------------------------------
+# F761 — freshness block on get_v1_backtest_gate()
+# ---------------------------------------------------------------------------
+
+
+def _iso_ago(seconds: float) -> str:
+    from datetime import datetime as _dt, timedelta as _td, timezone as _tz
+
+    t = _dt.now(_tz.utc) - _td(seconds=seconds)
+    return t.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _row(run_at_iso: str) -> dict[str, Any]:
+    return {
+        "id": 1,
+        "run_at": run_at_iso,
+        "overall_verdict": "PASS",
+        "parity_gate_status": json.dumps({"overall": "PASS"}),
+        "per_league_brier": json.dumps({"NBA": 0.18}),
+        "regressed_leagues": [],
+        "report_path": None,
+        "duration_seconds": 11.0,
+        "notes": None,
+    }
+
+
+def test_freshness_v1_backtest_just_inside_threshold_is_fresh(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """At exactly 9 days old the V1 backtest is still `fresh`."""
+    nine_days = 9 * 24 * 3600 - 5  # tiny buffer to dodge race
+    monkeypatch.setattr(
+        dashboard,
+        "db",
+        _DashboardFakeDB([_row(_iso_ago(nine_days))]),
+    )
+    out = _run(dashboard.get_v1_backtest_gate(history_limit=8))
+    assert out["freshness"]["v1_backtest"]["status"] == "fresh"
+
+
+def test_freshness_v1_backtest_past_threshold_is_stale(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One second past 9 days flips to `stale`."""
+    over = 9 * 24 * 3600 + 60
+    monkeypatch.setattr(
+        dashboard,
+        "db",
+        _DashboardFakeDB([_row(_iso_ago(over))]),
+    )
+    out = _run(dashboard.get_v1_backtest_gate(history_limit=8))
+    fresh = out["freshness"]["v1_backtest"]
+    assert fresh["status"] == "stale"
+    assert fresh["age_seconds"] is not None and fresh["age_seconds"] >= over
+
+
+def test_freshness_daily_report_just_inside_threshold_is_fresh(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """At exactly 36h since last dispatch the daily report is `fresh`."""
+    monkeypatch.setattr(
+        dashboard,
+        "db",
+        _DashboardFakeDB(
+            [_row(_iso_ago(60))],
+            daily_report_sent_at_iso=_iso_ago(36 * 3600 - 30),
+        ),
+    )
+    out = _run(dashboard.get_v1_backtest_gate(history_limit=8))
+    assert out["freshness"]["daily_report"]["status"] == "fresh"
+
+
+def test_freshness_daily_report_past_threshold_is_stale(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        dashboard,
+        "db",
+        _DashboardFakeDB(
+            [_row(_iso_ago(60))],
+            daily_report_sent_at_iso=_iso_ago(36 * 3600 + 600),
+        ),
+    )
+    out = _run(dashboard.get_v1_backtest_gate(history_limit=8))
+    assert out["freshness"]["daily_report"]["status"] == "stale"
+
+
+def test_freshness_daily_report_missing_when_no_dedupe_row(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        dashboard,
+        "db",
+        _DashboardFakeDB(
+            [_row(_iso_ago(60))],
+            daily_report_sent_at_iso=None,
+        ),
+    )
+    out = _run(dashboard.get_v1_backtest_gate(history_limit=8))
+    assert out["freshness"]["daily_report"]["status"] == "missing"
+    assert out["freshness"]["daily_report"]["last_sent_at"] is None
+
+
+def test_freshness_daily_report_swallows_db_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failing dedupe-table query degrades to `missing`, never raises."""
+    monkeypatch.setattr(
+        dashboard,
+        "db",
+        _DashboardFakeDB([_row(_iso_ago(60))], raise_on_dedupe=True),
+    )
+    out = _run(dashboard.get_v1_backtest_gate(history_limit=8))
+    assert out["freshness"]["daily_report"]["status"] == "missing"
+    assert out["freshness"]["daily_report"].get("error")
+
+
+# ---------------------------------------------------------------------------
+# F762 — auto-build investor deck after weekly cron
+# ---------------------------------------------------------------------------
+
+
+def test_run_weekly_v1_backtest_auto_builds_investor_deck(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When a JSON report is written, the cron auto-runs `build_deck()`
+    in a worker thread and stamps the resulting PPTX path into the
+    persisted row's ``notes`` field as JSON."""
+    fake = _GateFakeDB(prior_row=None)
+    monkeypatch.setattr(gate, "db", fake)
+
+    async def _stub_run(**_kw: Any) -> dict[str, Any]:
+        return _stub_audit_report({"NBA": 0.18})
+
+    monkeypatch.setattr(
+        "scripts.backtest_v1_archive.run", _stub_run, raising=False
+    )
+
+    # Capture the build_deck call without actually invoking python-pptx.
+    captured: dict[str, Any] = {}
+
+    async def _patched_to_thread(_func, *_args, **kwargs):
+        captured["output_path"] = kwargs.get("output_path")
+        captured["report_path"] = kwargs.get("report_path")
+        out = kwargs.get("output_path")
+        if out is not None:
+            out.write_bytes(b"PPTX-stub")
+        return out
+
+    monkeypatch.setattr(gate.asyncio, "to_thread", _patched_to_thread)
+    monkeypatch.setattr(
+        gate, "_write_json_enabled", lambda: True, raising=False
+    )
+
+    out = _run(gate.run_weekly_v1_backtest(limit=100))
+
+    assert out["report_path"] is not None
+    assert out["investor_deck_path"] is not None
+    assert out["investor_deck_path"].endswith("investor_deck_latest.pptx")
+    # Deck output sits next to the JSON report.
+    assert captured["output_path"] == Path(out["investor_deck_path"])
+    assert captured["report_path"] == Path(out["report_path"])
+
+    # Persisted notes carry the deck path as JSON for the daily report
+    # (`collect_latest_investor_deck`) to surface.
+    assert len(fake.rows) == 1
+    notes_raw = fake.rows[0]["notes"]
+    assert notes_raw is not None
+    decoded = json.loads(notes_raw)
+    assert decoded["investor_deck_path"] == out["investor_deck_path"]
+
+
+def test_run_weekly_v1_backtest_deck_failure_does_not_break_cron(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """If `build_deck()` blows up the cron still persists the gate row."""
+    fake = _GateFakeDB(prior_row=None)
+    monkeypatch.setattr(gate, "db", fake)
+
+    async def _stub_run(**_kw: Any) -> dict[str, Any]:
+        return _stub_audit_report({"NBA": 0.18})
+
+    monkeypatch.setattr(
+        "scripts.backtest_v1_archive.run", _stub_run, raising=False
+    )
+
+    async def _boom(_func, *_a, **_kw):
+        raise RuntimeError("python-pptx exploded")
+
+    monkeypatch.setattr(gate.asyncio, "to_thread", _boom)
+
+    out = _run(gate.run_weekly_v1_backtest(limit=100))
+    assert out["overall_verdict"] == "PASS"
+    assert out["investor_deck_path"] is None
+    # Row is still written; notes stays None when no deck path.
+    assert len(fake.rows) == 1
+    assert fake.rows[0]["notes"] is None
+
+
+def test_run_weekly_v1_backtest_skips_deck_when_no_report_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Without `write_json=True` no deck is built — there is no input."""
+    fake = _GateFakeDB(prior_row=None)
+    monkeypatch.setattr(gate, "db", fake)
+
+    async def _stub_run(**_kw: Any) -> dict[str, Any]:
+        return _stub_audit_report({"NBA": 0.18})
+
+    monkeypatch.setattr(
+        "scripts.backtest_v1_archive.run", _stub_run, raising=False
+    )
+
+    called: list[bool] = []
+
+    async def _patched_to_thread(_func, *_a, **_kw):
+        called.append(True)
+        return None
+
+    monkeypatch.setattr(gate.asyncio, "to_thread", _patched_to_thread)
+
+    out = _run(gate.run_weekly_v1_backtest(limit=100, write_json=False))
+    assert out["report_path"] is None
+    assert out["investor_deck_path"] is None
+    assert called == []

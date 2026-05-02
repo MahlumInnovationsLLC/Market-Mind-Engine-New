@@ -651,10 +651,83 @@ export const GetV1BacktestGateResponse = zod
           "One persisted row of `v1_backtest_gate_runs` (latest-first).",
         ),
     ),
+    freshness: zod
+      .object({
+        v1_backtest: zod
+          .object({
+            last_run_at: zod
+              .string()
+              .nullish()
+              .describe(
+                "ISO-8601 UTC of the most recent successful run\/dispatch (V1-backtest variant).",
+              ),
+            last_sent_at: zod
+              .string()
+              .nullish()
+              .describe(
+                "ISO-8601 UTC of the most recent dispatch (daily-report variant).",
+              ),
+            age_seconds: zod
+              .number()
+              .nullish()
+              .describe(
+                "Seconds since `last_run_at` \/ `last_sent_at`. `null` when missing.",
+              ),
+            threshold_seconds: zod
+              .number()
+              .describe("Threshold above which the row flips to `stale`."),
+            status: zod
+              .enum(["fresh", "stale", "missing"])
+              .describe(
+                "Source-data freshness classification. `fresh` = last activity within the configured threshold; `stale` = older than the threshold; `missing` = no row at all.",
+              ),
+            error: zod.string().nullish(),
+          })
+          .describe(
+            "One freshness sub-block (V1 backtest cron, daily honesty report, …).",
+          ),
+        daily_report: zod
+          .object({
+            last_run_at: zod
+              .string()
+              .nullish()
+              .describe(
+                "ISO-8601 UTC of the most recent successful run\/dispatch (V1-backtest variant).",
+              ),
+            last_sent_at: zod
+              .string()
+              .nullish()
+              .describe(
+                "ISO-8601 UTC of the most recent dispatch (daily-report variant).",
+              ),
+            age_seconds: zod
+              .number()
+              .nullish()
+              .describe(
+                "Seconds since `last_run_at` \/ `last_sent_at`. `null` when missing.",
+              ),
+            threshold_seconds: zod
+              .number()
+              .describe("Threshold above which the row flips to `stale`."),
+            status: zod
+              .enum(["fresh", "stale", "missing"])
+              .describe(
+                "Source-data freshness classification. `fresh` = last activity within the configured threshold; `stale` = older than the threshold; `missing` = no row at all.",
+              ),
+            error: zod.string().nullish(),
+          })
+          .describe(
+            "One freshness sub-block (V1 backtest cron, daily honesty report, …).",
+          ),
+      })
+      .optional()
+      .describe(
+        "Freshness sub-blocks rendered next to the V1-backtest gate tile.",
+      ),
     error: zod.string().nullish(),
   })
   .describe(
-    "Latest weekly V1-backtest gate run + history. The dashboard tile renders red when `latest.regressed_leagues` is non-empty or when `latest.overall_verdict` is `FAIL` \/ `ERROR`.",
+    "Latest weekly V1-backtest gate run + history. The dashboard tile renders red when `latest.regressed_leagues` is non-empty, when `latest.overall_verdict` is `FAIL` \/ `ERROR`, or when `freshness.v1_backtest.status` \/ `freshness.daily_report.status` is `stale` \/ `missing`.",
   );
 
 /**

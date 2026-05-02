@@ -16,10 +16,121 @@ interface V1BacktestGateRun {
   notes: string | null;
 }
 
+type FreshnessStatus = "fresh" | "stale" | "missing";
+
+interface FreshnessSlice {
+  last_run_at?: string | null;
+  last_sent_at?: string | null;
+  age_seconds: number | null;
+  threshold_seconds: number;
+  status: FreshnessStatus;
+  error?: string | null;
+}
+
+interface V1BacktestFreshness {
+  v1_backtest: FreshnessSlice;
+  daily_report: FreshnessSlice;
+}
+
 interface V1BacktestGateResponse {
   latest: V1BacktestGateRun | null;
   history: V1BacktestGateRun[];
+  freshness?: V1BacktestFreshness;
   error?: string | null;
+}
+
+function fmtAge(secs: number | null | undefined): string {
+  if (secs == null || !Number.isFinite(secs)) return "—";
+  if (secs < 90) return `${Math.round(secs)}s`;
+  const mins = secs / 60;
+  if (mins < 90) return `${Math.round(mins)}m`;
+  const hours = mins / 60;
+  if (hours < 48) return `${hours.toFixed(1)}h`;
+  const days = hours / 24;
+  return `${days.toFixed(1)}d`;
+}
+
+function freshnessTone(status: FreshnessStatus): {
+  label: string;
+  cls: string;
+  rowCls: string;
+} {
+  if (status === "fresh") {
+    return {
+      label: "fresh",
+      cls: "text-success",
+      rowCls: "border-success/40 bg-success/5",
+    };
+  }
+  if (status === "stale") {
+    return {
+      label: "stale",
+      cls: "text-destructive",
+      rowCls: "border-destructive/40 bg-destructive/5",
+    };
+  }
+  return {
+    label: "missing",
+    cls: "text-destructive",
+    rowCls: "border-destructive/40 bg-destructive/5",
+  };
+}
+
+function FreshnessBanner({
+  freshness,
+}: {
+  freshness: V1BacktestFreshness | undefined;
+}) {
+  if (!freshness) return null;
+  const rows: Array<{
+    key: "v1_backtest" | "daily_report";
+    label: string;
+    slice: FreshnessSlice;
+    timestampLabel: string;
+    timestamp: string | null | undefined;
+  }> = [
+    {
+      key: "v1_backtest",
+      label: "Weekly V1 backtest cron",
+      slice: freshness.v1_backtest,
+      timestampLabel: "last run",
+      timestamp: freshness.v1_backtest.last_run_at,
+    },
+    {
+      key: "daily_report",
+      label: "Daily honesty report",
+      slice: freshness.daily_report,
+      timestampLabel: "last sent",
+      timestamp: freshness.daily_report.last_sent_at,
+    },
+  ];
+  return (
+    <div
+      className="flex flex-col gap-1.5"
+      data-testid="v1-backtest-gate-freshness"
+    >
+      {rows.map(({ key, label, slice, timestampLabel, timestamp }) => {
+        const tone = freshnessTone(slice.status);
+        return (
+          <div
+            key={key}
+            className={`flex items-center justify-between gap-2 text-[10px] border rounded-md px-2 py-1 ${tone.rowCls}`}
+            data-testid={`v1-backtest-gate-freshness-${key}`}
+          >
+            <span className="text-muted-foreground">
+              {label} ·{" "}
+              <span className="text-foreground/80">
+                {timestampLabel} {fmtTime(timestamp ?? null)}
+              </span>
+            </span>
+            <span className={`font-semibold uppercase tracking-widest ${tone.cls}`}>
+              {tone.label} · {fmtAge(slice.age_seconds)}
+            </span>
+          </div>
+        );
+      })}
+    </div>
+  );
 }
 
 function fmt(n: number | null | undefined, digits = 4): string {
@@ -148,6 +259,7 @@ export default function V1BacktestGateTile() {
 
       {!q.isLoading && !q.isError && latest && (
         <div className="flex flex-col gap-3">
+          <FreshnessBanner freshness={q.data?.freshness} />
           <div className="flex items-baseline justify-between gap-3">
             <div className="flex items-center gap-2">
               <span
@@ -231,8 +343,11 @@ export default function V1BacktestGateTile() {
       )}
 
       {!q.isLoading && !q.isError && !latest && (
-        <div className="text-xs text-muted-foreground py-6 text-center">
-          No V1 backtest gate runs yet.
+        <div className="flex flex-col gap-3">
+          <FreshnessBanner freshness={q.data?.freshness} />
+          <div className="text-xs text-muted-foreground py-6 text-center">
+            No V1 backtest gate runs yet.
+          </div>
         </div>
       )}
     </GlassCard>

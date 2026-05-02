@@ -2481,14 +2481,37 @@ signals (Task #756 / roadmap T-21):
    literal screenshot since the cron container has no headless
    browser).
 4. **Risk-gate trips (last 24 h)** — count of rows in
-   `risk_gate_trips` per `gate_name`. Tail-risk gate trips are written
-   here unconditionally (even when the broadcast is deduped) so the
-   operator can see what *would* have alerted overnight. **Scope
-   today**: only the tail-risk gate writes `risk_gate_trips` rows; the
-   notional-cap, daily-loss, canary, and vertical-halt gates still emit
-   alerts without persisting structured rows. Follow-up task #763
-   widens coverage so this panel becomes a single source of truth for
-   all gate behaviour.
+   `risk_gate_trips` per `gate_name`. Persistence is wired centrally
+   inside `app.risk.gates.run_all_gates`, so **every** failed gate
+   (kill-switch, daily-loss, vertical-halt, market-cooldown, swarm
+   approval, min-edge, drift, agreement, tail-price, jumbo-quantity,
+   sharpe-ratio, ruin-monte-carlo, segment-throttler, kelly-fraction,
+   bankroll-floor, global-exposure-cap, per-vertical-cap, max-concurrent
+   positions, duplicate-trade) writes one append-only row even when the
+   downstream alert dispatch is deduped. The panel is a single source
+   of truth for what *would* have alerted overnight (follow-up #763).
+5. **Latest investor deck** — auto-built every weekly V1 backtest cron
+   (§22) and surfaced as a one-line link to the most recent
+   `investor_deck_latest.pptx`. Looked up via the latest
+   `v1_backtest_gate_runs.notes` JSON. "not built yet" is normal until
+   the first weekly cron tick after rollout (follow-up #762).
+
+### Tile freshness sentinels (V1 backtest gate)
+
+The dashboard tile **Weekly parity vs V1 archive** carries a small
+freshness banner with two rows (follow-up #761). Each row turns red
+when the upstream cron silently stops shipping:
+
+* **Weekly V1 backtest cron** — fresh ≤ 9 days since the last
+  `v1_backtest_gate_runs.run_at`; older ⇒ stale; no rows ever ⇒
+  missing.
+* **Daily honesty report** — fresh ≤ 36 hours since the last
+  `notification_dedupe.sent_at` for `key='daily_honesty_report'`;
+  older ⇒ stale; never sent ⇒ missing.
+
+A red banner is the cheapest way to catch a wedged scheduler — far
+faster than waiting for a missed weekly tick to surface as a stale
+verdict on the rest of the tile.
 
 ### What red looks like
 
@@ -2555,6 +2578,18 @@ regresses (Task #756 / roadmap T-22).
    `artifacts/api-server/reports/v1_backtest_full_archive_<ts>.json`
    so the investor-deck script (`scripts/build_investor_deck.py`,
    §monthly) can pick it up.
+6. Whenever step 5 produces a JSON report, the cron immediately
+   auto-runs `build_deck()` from `scripts.build_investor_deck` and
+   writes the PPTX next to it as
+   `artifacts/api-server/reports/investor_deck_latest.pptx` (a fixed
+   "latest" name so the daily honesty report can deep-link to a
+   stable path). The deck path is stamped into the new
+   `v1_backtest_gate_runs` row's `notes` field as JSON
+   (`{"investor_deck_path": "..."}`), and the daily honesty report
+   surfaces it under the **Latest investor deck** section so IR/operator
+   always has a fresh PPTX without an extra manual step. Failures in
+   the deck builder are logged but never break the cron — the gate
+   row is still persisted.
 
 ### What counts as a regression
 

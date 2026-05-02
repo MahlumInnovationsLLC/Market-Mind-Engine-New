@@ -5,13 +5,15 @@
  * Axiom-Predict API — backend for the prediction-market trading platform.
  * OpenAPI spec version: 0.1.0
  */
+import type { V1BacktestFreshness } from "./v1BacktestFreshness";
 import type { V1BacktestGateRun } from "./v1BacktestGateRun";
 
 /**
- * Latest weekly V1-backtest gate run + history. The dashboard tile renders red when `latest.regressed_leagues` is non-empty or when `latest.overall_verdict` is `FAIL` / `ERROR`.
+ * Latest weekly V1-backtest gate run + history. The dashboard tile renders red when `latest.regressed_leagues` is non-empty, when `latest.overall_verdict` is `FAIL` / `ERROR`, or when `freshness.v1_backtest.status` / `freshness.daily_report.status` is `stale` / `missing`.
  */
 export interface V1BacktestGate {
   latest?: V1BacktestGateRun | null;
   history: V1BacktestGateRun[];
+  freshness?: V1BacktestFreshness;
   error?: string | null;
 }

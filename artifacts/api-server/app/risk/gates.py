@@ -123,13 +123,14 @@ async def _emit_tail_risk_trip_alert(
     reason: str,
     details: dict[str, Any],
 ) -> None:
-    """Best-effort fire of the tail-risk trip alert. Never raises."""
-    # Persist the structured row first so the daily honesty report
-    # ``gate_trips_24h`` panel has the count even when the email/
-    # Telegram dedupe below suppresses the broadcast.
-    await _persist_risk_gate_trip(
-        ctx=ctx, gate_name=gate_name, reason=reason, details=details,
-    )
+    """Best-effort fire of the tail-risk trip alert. Never raises.
+
+    Note: ``risk_gate_trips`` persistence is handled centrally inside
+    :func:`run_all_gates` for *every* failed gate, so this helper
+    deliberately does not write a row of its own — that would
+    double-count the trip in the daily honesty report's
+    ``gate_trips_24h`` panel.
+    """
     try:
         from ..notifications import alerts as _alerts
 
@@ -1729,6 +1730,11 @@ async def run_all_gates(
 
     Returns (all_passed, results_so_far).  `results_so_far` ends at the
     first failure when short-circuited; otherwise contains all 12.
+
+    On any FAIL we also write one append-only row to ``risk_gate_trips``
+    so the daily honesty report's "Gate trips (last 24h)" panel reflects
+    every gate, not just the tail-risk gate.  Persistence is best-effort
+    and never affects the gate decision.
     """
     results: list[GateResult] = []
     for name, fn in GATES:
@@ -1744,5 +1750,18 @@ async def run_all_gates(
             except Exception as e:
                 log.warning("pipeline event publish failed: %s", e)
         if not r.passed:
+            try:
+                await _persist_risk_gate_trip(
+                    ctx=ctx,
+                    gate_name=name,
+                    reason=r.reason or "",
+                    details=dict(r.details or {}),
+                )
+            except Exception as e:  # pragma: no cover — persistence must never break the gate
+                log.warning(
+                    "risk_gate_trips persist (run_all_gates) failed for %s: %s",
+                    name,
+                    e,
+                )
             return False, results
     return True, results

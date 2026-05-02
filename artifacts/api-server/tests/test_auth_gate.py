@@ -56,6 +56,8 @@ PROTECTED_ROUTES: tuple[str, ...] = (
     "/api/dashboard/crypto/backtest-retention",
     # Task #699 — sportradar leaderboards history retention status panel on the operator dashboard.
     "/api/dashboard/sportradar-leaderboards-retention",
+    # Task #757 — Supabase growth/retention loop status panel on the operator dashboard.
+    "/api/dashboard/supabase-growth-retention",
     "/api/dashboard/bankroll/recent",
     "/api/dashboard/slippage-guard-rejects",
     "/api/dashboard/recent-debates",

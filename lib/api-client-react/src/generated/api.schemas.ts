@@ -435,11 +435,48 @@ export interface V1BacktestGateRun {
 }
 
 /**
- * Latest weekly V1-backtest gate run + history. The dashboard tile renders red when `latest.regressed_leagues` is non-empty or when `latest.overall_verdict` is `FAIL` / `ERROR`.
+ * Source-data freshness classification. `fresh` = last activity within the configured threshold; `stale` = older than the threshold; `missing` = no row at all.
+ */
+export type FreshnessStatus =
+  (typeof FreshnessStatus)[keyof typeof FreshnessStatus];
+
+export const FreshnessStatus = {
+  fresh: "fresh",
+  stale: "stale",
+  missing: "missing",
+} as const;
+
+/**
+ * One freshness sub-block (V1 backtest cron, daily honesty report, …).
+ */
+export interface FreshnessSlice {
+  /** ISO-8601 UTC of the most recent successful run/dispatch (V1-backtest variant). */
+  last_run_at?: string | null;
+  /** ISO-8601 UTC of the most recent dispatch (daily-report variant). */
+  last_sent_at?: string | null;
+  /** Seconds since `last_run_at` / `last_sent_at`. `null` when missing. */
+  age_seconds?: number | null;
+  /** Threshold above which the row flips to `stale`. */
+  threshold_seconds: number;
+  status: FreshnessStatus;
+  error?: string | null;
+}
+
+/**
+ * Freshness sub-blocks rendered next to the V1-backtest gate tile.
+ */
+export interface V1BacktestFreshness {
+  v1_backtest: FreshnessSlice;
+  daily_report: FreshnessSlice;
+}
+
+/**
+ * Latest weekly V1-backtest gate run + history. The dashboard tile renders red when `latest.regressed_leagues` is non-empty, when `latest.overall_verdict` is `FAIL` / `ERROR`, or when `freshness.v1_backtest.status` / `freshness.daily_report.status` is `stale` / `missing`.
  */
 export interface V1BacktestGate {
   latest?: V1BacktestGateRun | null;
   history: V1BacktestGateRun[];
+  freshness?: V1BacktestFreshness;
   error?: string | null;
 }
 

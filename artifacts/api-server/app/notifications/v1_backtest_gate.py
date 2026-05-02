@@ -360,6 +360,22 @@ async def run_weekly_v1_backtest(
         except Exception as e:
             log.warning("v1_backtest_gate report write failed: %s", e)
 
+    # F762 — best-effort auto-build the investor deck from this run's
+    # JSON report so the operator/IR team always has a fresh PPTX
+    # without an extra manual step.  Failure is logged but never
+    # blocks the cron — the deck is a downstream artefact, not a gate.
+    investor_deck_path: str | None = None
+    if report_path:
+        investor_deck_path = await _build_investor_deck_best_effort(
+            report_path
+        )
+
+    notes_payload: str | None = None
+    if investor_deck_path:
+        notes_payload = _json.dumps(
+            {"investor_deck_path": investor_deck_path}
+        )
+
     duration = time.monotonic() - started
     new_id: int | None = None
     if persist:
@@ -370,6 +386,7 @@ async def run_weekly_v1_backtest(
             regressed_leagues=regressed_leagues,
             report_path=report_path,
             duration_seconds=duration,
+            notes=notes_payload,
         )
 
     return {
@@ -380,10 +397,46 @@ async def run_weekly_v1_backtest(
         "regressed_leagues": regressed_leagues,
         "regression_detail": regression_detail,
         "report_path": report_path,
+        "investor_deck_path": investor_deck_path,
         "duration_seconds": duration,
         "row_kept_count": int(report.get("row_kept_count") or 0),
         "row_input_count": int(report.get("row_input_count") or 0),
     }
+
+
+# Fixed location for the latest deck so the daily honesty report can
+# always link to a stable path.  Older decks (per-run, timestamped)
+# can be added later if archival becomes a requirement.
+_INVESTOR_DECK_LATEST_NAME = "investor_deck_latest.pptx"
+
+
+async def _build_investor_deck_best_effort(report_path: str) -> str | None:
+    """Run :func:`scripts.build_investor_deck.build_deck` in a worker
+    thread (the slide builder uses ``python-pptx`` synchronously).
+
+    Returns the resulting deck path on success, ``None`` on any
+    failure — the cron must not fail because the deck builder did.
+    """
+    try:
+        from scripts.build_investor_deck import build_deck
+
+        in_path = Path(report_path)
+        if not in_path.exists():
+            log.warning(
+                "investor deck skipped: report_path missing %s", report_path
+            )
+            return None
+        out_path = in_path.parent / _INVESTOR_DECK_LATEST_NAME
+        result = await asyncio.to_thread(
+            build_deck,
+            report_path=in_path,
+            output_path=out_path,
+        )
+        log.info("investor deck rebuilt: %s", result)
+        return str(result)
+    except Exception as e:  # pragma: no cover — defensive
+        log.warning("investor deck auto-build failed: %s", e)
+        return None
 
 
 # ---------------------------------------------------------------------------

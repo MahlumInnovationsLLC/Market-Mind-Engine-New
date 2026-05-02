@@ -1476,12 +1476,53 @@ components:
         notes: { type: string, nullable: true }
       required: [id, run_at, overall_verdict, parity_gate_status, per_league_brier, regressed_leagues]
 
+    FreshnessStatus:
+      type: string
+      enum: [fresh, stale, missing]
+      description: >-
+        Source-data freshness classification. `fresh` = last activity
+        within the configured threshold; `stale` = older than the
+        threshold; `missing` = no row at all.
+
+    FreshnessSlice:
+      type: object
+      description: One freshness sub-block (V1 backtest cron, daily honesty report, …).
+      properties:
+        last_run_at:
+          type: string
+          nullable: true
+          description: ISO-8601 UTC of the most recent successful run/dispatch (V1-backtest variant).
+        last_sent_at:
+          type: string
+          nullable: true
+          description: ISO-8601 UTC of the most recent dispatch (daily-report variant).
+        age_seconds:
+          type: number
+          nullable: true
+          description: Seconds since `last_run_at` / `last_sent_at`. `null` when missing.
+        threshold_seconds:
+          type: integer
+          description: Threshold above which the row flips to `stale`.
+        status: { $ref: "#/components/schemas/FreshnessStatus" }
+        error: { type: string, nullable: true }
+      required: [threshold_seconds, status]
+
+    V1BacktestFreshness:
+      type: object
+      description: Freshness sub-blocks rendered next to the V1-backtest gate tile.
+      properties:
+        v1_backtest: { $ref: "#/components/schemas/FreshnessSlice" }
+        daily_report: { $ref: "#/components/schemas/FreshnessSlice" }
+      required: [v1_backtest, daily_report]
+
     V1BacktestGate:
       type: object
       description: >-
         Latest weekly V1-backtest gate run + history. The dashboard tile
-        renders red when `latest.regressed_leagues` is non-empty or when
-        `latest.overall_verdict` is `FAIL` / `ERROR`.
+        renders red when `latest.regressed_leagues` is non-empty, when
+        `latest.overall_verdict` is `FAIL` / `ERROR`, or when
+        `freshness.v1_backtest.status` / `freshness.daily_report.status`
+        is `stale` / `missing`.
       properties:
         latest:
           allOf: [{ $ref: "#/components/schemas/V1BacktestGateRun" }]
@@ -1489,6 +1530,7 @@ components:
         history:
           type: array
           items: { $ref: "#/components/schemas/V1BacktestGateRun" }
+        freshness: { $ref: "#/components/schemas/V1BacktestFreshness" }
         error: { type: string, nullable: true }
       required: [history]
 
