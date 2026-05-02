@@ -25,7 +25,8 @@ import asyncio
 import hashlib
 import logging
 from datetime import datetime, timezone
-from typing import Any, Iterable
+from pathlib import Path
+from typing import Any, Iterable, Sequence
 
 from . import postmark
 
@@ -3688,6 +3689,7 @@ def _dispatch(
     tag: str,
     dry_run: bool,
     html_body: str | None = None,
+    attachments: "Sequence[Path | str] | None" = None,
 ) -> dict[str, Any]:
     if dry_run:
         log.info("alert dry_run subject=%r tag=%s", subject, tag)
@@ -3700,12 +3702,21 @@ def _dispatch(
             "would_send_to": postmark.alert_recipients(),
             "user_pref_column": _TAG_TO_USER_PREF.get(tag),
             "configured": postmark.is_configured(),
+            "attachments": [str(a) for a in (attachments or [])],
         }
     postmark.send_in_background(
-        subject=subject, text_body=text_body, html_body=html_body, tag=tag
+        subject=subject,
+        text_body=text_body,
+        html_body=html_body,
+        tag=tag,
+        attachments=attachments,
     )
     _schedule_user_email_fanout(
-        subject=subject, text_body=text_body, tag=tag, html_body=html_body
+        subject=subject,
+        text_body=text_body,
+        tag=tag,
+        html_body=html_body,
+        attachments=attachments,
     )
     return {
         "dry_run": False,
@@ -3715,11 +3726,17 @@ def _dispatch(
         "configured": postmark.is_configured(),
         "recipients": postmark.alert_recipients(),
         "user_pref_column": _TAG_TO_USER_PREF.get(tag),
+        "attachments": [str(a) for a in (attachments or [])],
     }
 
 
 def _schedule_user_email_fanout(
-    *, subject: str, text_body: str, tag: str, html_body: str | None = None
+    *,
+    subject: str,
+    text_body: str,
+    tag: str,
+    html_body: str | None = None,
+    attachments: "Sequence[Path | str] | None" = None,
 ) -> None:
     """Send a copy of the alert to each end-user who's opted in for
     this alert type.
@@ -3753,6 +3770,7 @@ def _schedule_user_email_fanout(
                 html_body=html_body,
                 to=targets,
                 tag=tag,
+                attachments=attachments,
             )
         except Exception as e:  # pragma: no cover
             log.warning("user-pref email fanout (%s) failed: %s", tag, e)

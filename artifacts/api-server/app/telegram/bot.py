@@ -461,6 +461,61 @@ def send_to_chats_in_background(chat_ids: list[int], text: str) -> None:
     loop.create_task(_runner())
 
 
+async def send_document_to_chat(
+    chat_id: int,
+    file_path: "str | Path",
+    *,
+    caption: str | None = None,
+) -> bool:
+    """Upload a single file to ``chat_id`` via Telegram's
+    /sendDocument endpoint.
+
+    Returns ``True`` on a 200 response, ``False`` for any other path
+    (no token, file missing, HTTP error, network failure).  Never
+    raises — the daily honesty report's PDF push must not be able to
+    derail the rest of dispatch.
+    """
+    from pathlib import Path as _Path
+
+    token = _resolve_token()
+    if not token:
+        log.info(
+            "telegram send_document skipped (no token): chat=%s",
+            chat_id,
+        )
+        return False
+    p = _Path(file_path)
+    if not p.is_file():
+        log.warning("telegram send_document missing file: %s", p)
+        return False
+    global _token
+    _token = token
+    try:
+        data: dict[str, Any] = {"chat_id": str(int(chat_id))}
+        if caption:
+            # Telegram captions are capped at 1024 chars.
+            data["caption"] = caption[:1024]
+        with p.open("rb") as fh:
+            files = {"document": (p.name, fh.read())}
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            r = await client.post(
+                _url("sendDocument"),
+                data=data,
+                files=files,
+            )
+        if r.status_code != 200:
+            log.warning(
+                "telegram sendDocument HTTP %s: %s",
+                r.status_code,
+                r.text[:200],
+            )
+            return False
+        return True
+    except Exception as e:  # pragma: no cover
+        log.warning("telegram sendDocument failed: %s", e)
+        return False
+
+
 async def _send(client: httpx.AsyncClient, chat_id: int, text: str) -> None:
     if not text:
         return

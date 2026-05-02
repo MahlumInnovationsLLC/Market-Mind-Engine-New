@@ -2456,9 +2456,14 @@ its `brier.calibrated_delta` should match the bootstrap's
 
 ## 21. Daily honesty report (09:00 local)
 
-Each day around **13:00 UTC** (≈ 09:00 ET) the API server fires a
-single Telegram + email digest summarising four operator-visible
-signals (Task #756 / roadmap T-21):
+Each day around **09:00 in `DAILY_HONESTY_REPORT_TZ`** (default
+`America/New_York`) the API server fires a single Telegram + email
+digest summarising four operator-visible signals (Task #756 / roadmap
+T-21). The cron container also writes two artifact files per day —
+the multi-page PDF the operator reads on the train and the PNG
+snapshot of the tail-risk tile — both attached to the email and the
+PDF additionally pushed to opted-in Telegram chats via
+`/sendDocument`. See **Artifact files** below for paths.
 
 1. **Shadow-vs-live divergence** — per-league
    `|brier(shadow last 7d) − brier(live last 7d)|`, computed from the
@@ -2476,10 +2481,11 @@ signals (Task #756 / roadmap T-21):
    `dashboard.get_tail_risk_exposure(days=30)`: `tail_max_loss_usd`,
    `total_max_loss_usd`, % of portfolio exposed to the tail bucket,
    the dashboard tile's tone, and the threshold price used to slice
-   markets into the tail bucket. When `DASHBOARD_BASE_URL` is set, the
-   report appends a one-click link to the live tile (used in lieu of a
-   literal screenshot since the cron container has no headless
-   browser).
+   markets into the tail bucket. A real PNG snapshot of the per-bucket
+   bar chart is rendered with matplotlib's Agg backend (no headless
+   browser, no X server) and shipped as both an email attachment and
+   an embedded image inside the PDF. When `DASHBOARD_BASE_URL` is set,
+   the report also appends a one-click link to the live tile.
 4. **Risk-gate trips (last 24 h)** — count of rows in
    `risk_gate_trips` per `gate_name`. Persistence is wired centrally
    inside `app.risk.gates.run_all_gates`, so **every** failed gate
@@ -2540,14 +2546,59 @@ Set `dry_run` to `false` to actually send. The endpoint bypasses the
 once-per-day `notification_dedupe` row keyed `daily_honesty_report`
 so it can be replayed safely after a busted run.
 
+### Artifact files
+
+Both files land under `artifacts/api-server/reports/` and are named
+by **local date** in the configured TZ (so the filename matches the
+calendar day the operator reads the report on, not the UTC day the
+cron container ticked through):
+
+| File | Description |
+| --- | --- |
+| `daily_honesty_<YYYY-MM-DD>.pdf` | Five-section multi-page PDF (cover header + divergence + drift + tail risk + gate trips + investor deck link). Rendered with reportlab; embeds the tail-risk PNG when present. Attached to every email and pushed to every opted-in Telegram chat as a document. |
+| `tail_risk_tile_<YYYY-MM-DD>.png` | Horizontal bar chart of per-bucket open `max_loss_usd`. Tail bucket is highlighted in red, headline `tail / total / pct` shown in the title, and the threshold-price + tone footnote appears bottom-right. Rendered with matplotlib Agg. Skipped (silently, with a log line) when there are zero non-zero buckets. |
+
+Both renderers are **fail-soft**: if matplotlib or reportlab can't be
+imported (e.g. during a partial deploy), the email body still goes
+out with the text + HTML rendering and the artifacts attachment list
+is just empty. Operators looking for "where did the PDF go" should
+grep `artifacts/api-server: API Server` workflow logs for
+`daily-report PDF skipped` or `tail-risk chart skipped`.
+
+### Local-time scheduling
+
+`DAILY_HONESTY_REPORT_TZ` controls the IANA timezone used for both
+the schedule and the dedupe key (default `America/New_York`).
+Configure send time with **either** new env pair (preferred):
+
+* `DAILY_HONESTY_REPORT_HOUR` — 0–23, in the configured TZ.
+* `DAILY_HONESTY_REPORT_MINUTE` — 0–59, in the configured TZ.
+
+Or fall back to the **legacy UTC pair** for backcompat:
+
+* `DAILY_HONESTY_REPORT_HOUR_UTC` — 0–23 UTC.
+* `DAILY_HONESTY_REPORT_MINUTE_UTC` — 0–59 UTC.
+
+When the new envs are unset the scheduler synthesises the local-TZ
+target by converting today's UTC clock to the configured TZ — this
+keeps the existing 13:00-UTC operator habit ≈ 09:00 ET stable across
+DST except on the spring-forward / fall-back day itself (one-hour
+shift, acceptable for a single daily digest). **The legacy
+`*_HOUR_UTC` envs are deprecated and will be removed after the
+Mac Studio cutover** — switch to the new pair plus an explicit
+`DAILY_HONESTY_REPORT_TZ` whenever you touch the env file.
+
+Dedupe is keyed on the **local** date (`YYYY-MM-DD` in the
+configured TZ), so a 21:00-PT send doesn't get re-fired by a UTC
+midnight rollover and a process restart inside the same local day
+will skip a second send.
+
 ### Mute / disable
 
 Set `DAILY_HONESTY_REPORT_ENABLED=0` to disable the scheduler entirely
-(restart the API server workflow to apply). To shift the send time,
-set `DAILY_HONESTY_REPORT_HOUR_UTC` and
-`DAILY_HONESTY_REPORT_MINUTE_UTC`. The dedupe row makes the cron
-restart-safe — repeated process restarts on the same UTC date will
-not refire.
+(restart the API server workflow to apply). The dedupe row makes the
+cron restart-safe — repeated process restarts on the same local date
+will not refire.
 
 ---
 

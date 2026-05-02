@@ -19,11 +19,14 @@ call sites should never crash because email isn't wired yet.
 from __future__ import annotations
 
 import asyncio
+import base64
 import logging
+import mimetypes
 import os
 import time
 from dataclasses import dataclass, field
-from typing import Iterable
+from pathlib import Path
+from typing import Any, Iterable, Sequence
 
 import httpx
 
@@ -122,6 +125,39 @@ def status() -> dict:
 # ---------------------------------------------------------------------------
 
 
+def _build_attachments(
+    attachments: Sequence[Path | str] | None,
+) -> list[dict[str, str]]:
+    """Read each path off disk, base64-encode it, and return Postmark's
+    Attachments[] payload shape.  Missing / unreadable files are
+    skipped with a log line so a transient FS hiccup can't shadow the
+    text body.
+    """
+    if not attachments:
+        return []
+    out: list[dict[str, str]] = []
+    for raw in attachments:
+        try:
+            p = Path(raw)
+            if not p.is_file():
+                log.warning("postmark attachment missing: %s", p)
+                continue
+            data = p.read_bytes()
+            ctype = (
+                mimetypes.guess_type(p.name)[0] or "application/octet-stream"
+            )
+            out.append(
+                {
+                    "Name": p.name,
+                    "Content": base64.b64encode(data).decode("ascii"),
+                    "ContentType": ctype,
+                }
+            )
+        except Exception as e:
+            log.warning("postmark attachment read failed (%s): %s", raw, e)
+    return out
+
+
 async def _send_one(
     *,
     to: str,
@@ -130,6 +166,7 @@ async def _send_one(
     html_body: str | None,
     tag: str | None,
     dry_run: bool = False,
+    attachments: Sequence[Path | str] | None = None,
 ) -> _SendRecord:
     token = os.environ.get("POSTMARK_SERVER_TOKEN")
     from_email = os.environ.get("POSTMARK_FROM_EMAIL") or DEFAULT_FROM
@@ -160,7 +197,7 @@ async def _send_one(
         _record(rec)
         return rec
 
-    payload = {
+    payload: dict[str, Any] = {
         "From": from_email,
         "To": to,
         "Subject": subject,
@@ -171,6 +208,9 @@ async def _send_one(
         payload["HtmlBody"] = html_body
     if tag:
         payload["Tag"] = tag
+    pm_attachments = _build_attachments(attachments)
+    if pm_attachments:
+        payload["Attachments"] = pm_attachments
 
     try:
         async with httpx.AsyncClient(timeout=15.0) as c:
@@ -225,10 +265,16 @@ async def send(
     to: Iterable[str] | None = None,
     tag: str | None = None,
     dry_run: bool = False,
+    attachments: Sequence[Path | str] | None = None,
 ) -> list[dict]:
     """Send `subject`/`text_body` to every operator (or the explicit
     `to` list when provided).  Returns a list of per-recipient result
-    dicts.  Never raises — failures are logged + recorded."""
+    dicts.  Never raises — failures are logged + recorded.
+
+    `attachments` is an optional list of file paths.  Each is read off
+    disk, base64-encoded, and forwarded as a Postmark Attachments[]
+    entry.  Missing files are skipped with a log line so the text body
+    still goes out."""
     recipients = list(to) if to is not None else alert_recipients()
     if not recipients:
         rec = _SendRecord(
@@ -256,6 +302,7 @@ async def send(
                 html_body=html_body,
                 tag=tag,
                 dry_run=dry_run,
+                attachments=attachments,
             )
             for r in recipients
         ],

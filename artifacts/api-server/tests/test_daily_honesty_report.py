@@ -319,11 +319,22 @@ def test_fire_now_dry_run_renders_without_dispatch(
         tag: str,
         dry_run: bool,
         html_body: str | None = None,
+        attachments: Any = None,
     ) -> dict[str, Any]:
         dispatch_calls.append(
-            {"subject": subject, "tag": tag, "dry_run": dry_run}
+            {
+                "subject": subject,
+                "tag": tag,
+                "dry_run": dry_run,
+                "attachments": [str(p) for p in (attachments or [])],
+            }
         )
-        return {"tag": tag, "dispatched": False, "dry_run": dry_run}
+        return {
+            "tag": tag,
+            "dispatched": False,
+            "dry_run": dry_run,
+            "attachments": [str(p) for p in (attachments or [])],
+        }
 
     monkeypatch.setattr(alerts, "_dispatch", _fake_dispatch)
 
@@ -333,13 +344,22 @@ def test_fire_now_dry_run_renders_without_dispatch(
     assert "Daily honesty report" in out["subject"]
     assert "Shadow-vs-live divergence" in out["body"]
     assert "<html>" in out["html_body"]
-    assert dispatch_calls == [
-        {
-            "subject": out["subject"],
-            "tag": "daily-honesty-report",
-            "dry_run": True,
-        }
-    ]
+    assert len(dispatch_calls) == 1
+    call = dispatch_calls[0]
+    assert call["subject"] == out["subject"]
+    assert call["tag"] == "daily-honesty-report"
+    assert call["dry_run"] is True
+    # The PDF + PNG render side-effects fire even on dry-run because
+    # the dispatch attachment list mirrors the artifact paths the
+    # operator would receive in production.  Both must point under
+    # the artifact's reports/ dir, but render itself is best-effort
+    # so the list may be empty when the optional libs aren't
+    # importable in this environment — assert structure only.
+    assert isinstance(call["attachments"], list)
+    for a in call["attachments"]:
+        assert "reports/" in a or "reports\\" in a
+    artifacts = out["artifacts"]
+    assert "pdf_path" in artifacts and "chart_path" in artifacts
     # No telegram broadcast on dry runs (fire_now only fires it when
     # dry_run is False).  We assert by *not* importing the module —
     # a broadcast call would fail because no telegram client is wired.
@@ -409,9 +429,15 @@ def test_scheduler_fires_past_target_only_once(
     monkeypatch.setattr(dhr, "_get_last_sent_date", lambda: _async_value(None))
     monkeypatch.setattr(dhr, "_mark_sent", lambda _date: _async_value(True))
 
-    # Force "past target" to be true: configure 00:00 UTC.
-    monkeypatch.setenv("DAILY_HONESTY_REPORT_HOUR_UTC", "0")
-    monkeypatch.setenv("DAILY_HONESTY_REPORT_MINUTE_UTC", "0")
+    # Force "past target" to be true: pin the schedule to 00:00 in UTC
+    # so the loop's local-TZ comparison fires regardless of the
+    # wall-clock the test happens to run at.  (G1 — local-time
+    # scheduling.)
+    monkeypatch.setenv("DAILY_HONESTY_REPORT_TZ", "UTC")
+    monkeypatch.setenv("DAILY_HONESTY_REPORT_HOUR", "0")
+    monkeypatch.setenv("DAILY_HONESTY_REPORT_MINUTE", "0")
+    monkeypatch.delenv("DAILY_HONESTY_REPORT_HOUR_UTC", raising=False)
+    monkeypatch.delenv("DAILY_HONESTY_REPORT_MINUTE_UTC", raising=False)
 
     async def _go() -> None:
         # Stop the loop almost immediately so we exercise just one tick.
@@ -584,3 +610,357 @@ def test_render_text_handles_missing_investor_deck() -> None:
     }
     _subject, body = dhr.render_text(payload)
     assert "not built yet" in body
+
+
+# ---------------------------------------------------------------------------
+# G1 — local-time scheduling
+# ---------------------------------------------------------------------------
+
+
+def test_send_hour_minute_prefer_local_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """When the new TZ-aware envs are set, the legacy *_UTC ones are
+    ignored entirely."""
+    monkeypatch.setenv("DAILY_HONESTY_REPORT_TZ", "America/New_York")
+    monkeypatch.setenv("DAILY_HONESTY_REPORT_HOUR", "9")
+    monkeypatch.setenv("DAILY_HONESTY_REPORT_MINUTE", "15")
+    monkeypatch.setenv("DAILY_HONESTY_REPORT_HOUR_UTC", "22")
+    monkeypatch.setenv("DAILY_HONESTY_REPORT_MINUTE_UTC", "45")
+    assert dhr._send_hour() == 9
+    assert dhr._send_minute() == 15
+
+
+def test_send_hour_minute_fallback_converts_utc_anchor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Without the new envs, _send_hour/_minute synthesise a local-TZ
+    target from _HOUR_UTC/_MINUTE_UTC via today's UTC→local conversion
+    so wall-clock behaviour stays stable across DST."""
+    monkeypatch.delenv("DAILY_HONESTY_REPORT_HOUR", raising=False)
+    monkeypatch.delenv("DAILY_HONESTY_REPORT_MINUTE", raising=False)
+    monkeypatch.setenv("DAILY_HONESTY_REPORT_TZ", "UTC")
+    monkeypatch.setenv("DAILY_HONESTY_REPORT_HOUR_UTC", "13")
+    monkeypatch.setenv("DAILY_HONESTY_REPORT_MINUTE_UTC", "30")
+    # TZ=UTC → conversion is identity → expect 13:30 back.
+    assert dhr._send_hour() == 13
+    assert dhr._send_minute() == 30
+
+    monkeypatch.setenv("DAILY_HONESTY_REPORT_TZ", "America/New_York")
+    # ET is UTC-4 (DST) or UTC-5 (standard).  13:00 UTC must land on
+    # either 08:30 or 09:30 ET — both valid DST states.
+    h = dhr._send_hour()
+    m = dhr._send_minute()
+    assert h in (8, 9)
+    assert m == 30
+
+
+def test_send_hour_invalid_tz_falls_back_to_utc(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("DAILY_HONESTY_REPORT_TZ", "Not/A_Real_Zone")
+    monkeypatch.delenv("DAILY_HONESTY_REPORT_HOUR", raising=False)
+    monkeypatch.delenv("DAILY_HONESTY_REPORT_MINUTE", raising=False)
+    monkeypatch.setenv("DAILY_HONESTY_REPORT_HOUR_UTC", "5")
+    monkeypatch.setenv("DAILY_HONESTY_REPORT_MINUTE_UTC", "0")
+    # Bad TZ → fallback UTC → identity conversion → 05:00.
+    assert dhr._send_hour() == 5
+    assert dhr._send_minute() == 0
+
+
+def test_local_today_str_matches_now_local(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("DAILY_HONESTY_REPORT_TZ", "UTC")
+    today = dhr._local_today_str()
+    assert today == dhr._now_local().date().isoformat()
+    assert len(today) == 10 and today[4] == "-" and today[7] == "-"
+
+
+# ---------------------------------------------------------------------------
+# G2 — PNG tail-risk chart
+# ---------------------------------------------------------------------------
+
+
+def _tail_summary_with_buckets(open_max_loss_usd: float = 1234.5) -> dict[str, Any]:
+    return {
+        "tail_max_loss_usd": 800.0,
+        "total_max_loss_usd": 2000.0,
+        "pct_of_total": 0.40,
+        "tone": "yellow",
+        "threshold_price": 1.50,
+        "source": "v_open_position_max_loss_30d",
+        "buckets": [
+            {
+                "label": "<1.50",
+                "lo": 0.0,
+                "hi": 1.50,
+                "is_tail": True,
+                "open_max_loss_usd": open_max_loss_usd,
+                "open_count": 3,
+            },
+            {
+                "label": "1.50–2.50",
+                "lo": 1.50,
+                "hi": 2.50,
+                "is_tail": False,
+                "open_max_loss_usd": 765.5,
+                "open_count": 2,
+            },
+        ],
+        "error": None,
+    }
+
+
+def test_render_tail_risk_chart_writes_png(tmp_path) -> None:
+    pytest.importorskip("matplotlib")
+    out = dhr.render_tail_risk_chart_png(
+        _tail_summary_with_buckets(),
+        date_str="2026-04-30",
+        output_dir=tmp_path,
+    )
+    assert out is not None
+    assert out.is_file()
+    # PNG magic bytes — proves we wrote a real image, not a stub.
+    assert out.read_bytes()[:8] == b"\x89PNG\r\n\x1a\n"
+    assert out.name == "tail_risk_tile_2026-04-30.png"
+
+
+def test_render_tail_risk_chart_skips_when_no_rows(tmp_path) -> None:
+    pytest.importorskip("matplotlib")
+    payload = _tail_summary_with_buckets(open_max_loss_usd=0.0)
+    payload["buckets"][1]["open_max_loss_usd"] = 0.0
+    out = dhr.render_tail_risk_chart_png(
+        payload, date_str="2026-04-30", output_dir=tmp_path
+    )
+    assert out is None
+    # Nothing should have been written.
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_render_tail_risk_chart_skips_on_error_payload(tmp_path) -> None:
+    out = dhr.render_tail_risk_chart_png(
+        {"error": "db timeout", "buckets": []},
+        date_str="2026-04-30",
+        output_dir=tmp_path,
+    )
+    assert out is None
+
+
+def test_render_tail_risk_chart_failsoft_when_matplotlib_missing(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    """If matplotlib raises on import, we log + return None instead
+    of crashing the whole report build."""
+    import builtins as _builtins
+
+    real_import = _builtins.__import__
+
+    def _fake_import(name, *a, **kw):
+        if name == "matplotlib":
+            raise ImportError("simulated")
+        return real_import(name, *a, **kw)
+
+    monkeypatch.setattr(_builtins, "__import__", _fake_import)
+    out = dhr.render_tail_risk_chart_png(
+        _tail_summary_with_buckets(),
+        date_str="2026-04-30",
+        output_dir=tmp_path,
+    )
+    assert out is None
+
+
+# ---------------------------------------------------------------------------
+# G3 — PDF artifact
+# ---------------------------------------------------------------------------
+
+
+def _full_payload(date_utc: str = "2026-04-30") -> dict[str, Any]:
+    return {
+        "date_utc": date_utc,
+        "divergence": {
+            "days": 7,
+            "items": [
+                {
+                    "league": "NBA",
+                    "abs_delta": 0.16,
+                    "brier_live": 0.00,
+                    "n_live": 50,
+                    "brier_shadow": 0.16,
+                    "n_shadow": 50,
+                }
+            ],
+            "samples_too_small": [{"league": "NHL"}],
+        },
+        "calibrator_drift": {
+            "items": [
+                {
+                    "tone": "red",
+                    "league": "NBA",
+                    "brier_after": 0.31,
+                    "age_hours": 18 * 24,
+                    "why": "stale + brier high",
+                }
+            ]
+        },
+        "tail_risk": _tail_summary_with_buckets(),
+        "gate_trips_24h": {
+            "total": 3,
+            "items": [
+                {
+                    "gate_name": "max_loss",
+                    "count": 2,
+                    "last_at": "2026-04-30T08:00:00Z",
+                },
+                {
+                    "gate_name": "drawdown",
+                    "count": 1,
+                    "last_at": "2026-04-30T07:30:00Z",
+                },
+            ],
+        },
+        "investor_deck": {
+            "investor_deck_path": "/srv/reports/investor_deck_latest.pptx",
+            "built_at": "2026-04-29T13:00:00Z",
+        },
+    }
+
+
+def test_render_daily_report_pdf_full_payload(tmp_path) -> None:
+    pytest.importorskip("reportlab")
+    out = dhr.render_daily_report_pdf(
+        _full_payload(),
+        text_body="ignored",
+        chart_path=None,
+        output_dir=tmp_path,
+    )
+    assert out is not None
+    assert out.is_file()
+    assert out.read_bytes()[:5] == b"%PDF-"
+    assert out.name == "daily_honesty_2026-04-30.pdf"
+    # Sanity: should be more than a few hundred bytes given five
+    # sections.
+    assert out.stat().st_size > 1500
+
+
+def test_render_daily_report_pdf_empty_payload_still_renders(tmp_path) -> None:
+    pytest.importorskip("reportlab")
+    payload = {
+        "date_utc": "2026-05-01",
+        "divergence": {"days": 7, "items": [], "samples_too_small": []},
+        "calibrator_drift": {"items": []},
+        "tail_risk": {
+            "tail_max_loss_usd": None,
+            "total_max_loss_usd": None,
+            "pct_of_total": None,
+            "tone": None,
+            "threshold_price": None,
+            "source": None,
+            "buckets": [],
+        },
+        "gate_trips_24h": {"total": 0, "items": []},
+        "investor_deck": {"investor_deck_path": None, "built_at": None},
+    }
+    out = dhr.render_daily_report_pdf(
+        payload, text_body="ignored", chart_path=None, output_dir=tmp_path
+    )
+    assert out is not None and out.is_file()
+    assert out.read_bytes()[:5] == b"%PDF-"
+
+
+def test_render_daily_report_pdf_embeds_chart_when_present(tmp_path) -> None:
+    pytest.importorskip("reportlab")
+    pytest.importorskip("matplotlib")
+    chart = dhr.render_tail_risk_chart_png(
+        _tail_summary_with_buckets(),
+        date_str="2026-04-30",
+        output_dir=tmp_path,
+    )
+    assert chart is not None
+    out = dhr.render_daily_report_pdf(
+        _full_payload(),
+        text_body="ignored",
+        chart_path=chart,
+        output_dir=tmp_path,
+    )
+    assert out is not None and out.is_file()
+    # Embedded image inflates size meaningfully vs. text-only.
+    assert out.stat().st_size > 4000
+
+
+def test_render_daily_report_pdf_failsoft_when_reportlab_missing(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    import builtins as _builtins
+
+    real_import = _builtins.__import__
+
+    def _fake_import(name, *a, **kw):
+        if name.startswith("reportlab"):
+            raise ImportError("simulated")
+        return real_import(name, *a, **kw)
+
+    monkeypatch.setattr(_builtins, "__import__", _fake_import)
+    out = dhr.render_daily_report_pdf(
+        _full_payload(),
+        text_body="ignored",
+        chart_path=None,
+        output_dir=tmp_path,
+    )
+    assert out is None
+
+
+# ---------------------------------------------------------------------------
+# G4 — alerts._dispatch threads attachments through to postmark
+# ---------------------------------------------------------------------------
+
+
+def test_alerts_dispatch_threads_attachments_dry_run(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    f1 = tmp_path / "a.pdf"
+    f2 = tmp_path / "b.png"
+    f1.write_bytes(b"%PDF-1.4 stub")
+    f2.write_bytes(b"\x89PNG stub")
+    out = alerts._dispatch(
+        "subj",
+        "body",
+        tag="daily-honesty-report",
+        dry_run=True,
+        attachments=[f1, f2],
+    )
+    assert out["dry_run"] is True
+    assert out["attachments"] == [str(f1), str(f2)]
+
+
+def test_alerts_dispatch_threads_attachments_into_postmark(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    f1 = tmp_path / "report.pdf"
+    f1.write_bytes(b"%PDF-1.4 stub")
+
+    captured: dict[str, Any] = {}
+
+    def _fake_send_in_background(**kw: Any) -> None:
+        captured["bg"] = kw
+
+    def _fake_schedule(**kw: Any) -> None:
+        captured["fanout"] = kw
+
+    from app.notifications import postmark as _pm
+
+    monkeypatch.setattr(_pm, "send_in_background", _fake_send_in_background)
+    monkeypatch.setattr(
+        alerts, "_schedule_user_email_fanout", _fake_schedule
+    )
+    monkeypatch.setattr(_pm, "is_configured", lambda: True)
+    monkeypatch.setattr(_pm, "alert_recipients", lambda: ["ops@example.com"])
+
+    out = alerts._dispatch(
+        "subj",
+        "body",
+        tag="daily-honesty-report",
+        dry_run=False,
+        attachments=[f1],
+    )
+    assert out["queued"] is True
+    assert captured["bg"]["attachments"] == [f1]
+    assert captured["fanout"]["attachments"] == [f1]

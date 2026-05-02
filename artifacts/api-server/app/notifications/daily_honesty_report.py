@@ -36,8 +36,15 @@ import asyncio
 import json as _json
 import logging
 import os
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
+from pathlib import Path
 from typing import Any
+
+try:
+    from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+except ImportError:  # pragma: no cover — stdlib in py3.9+
+    ZoneInfo = None  # type: ignore[assignment]
+    ZoneInfoNotFoundError = Exception  # type: ignore[assignment, misc]
 
 from .. import db
 from ..health import error_log
@@ -45,6 +52,12 @@ from . import alerts
 
 
 log = logging.getLogger("axiom.notifications.daily_honesty_report")
+
+
+# Where the PDF + PNG artifacts land.  Same convention as the V1
+# backtest archive (see runbook §22) so operators only have one path
+# pattern to remember.  Lazy-created on first write.
+REPORTS_DIR = Path(__file__).resolve().parents[2] / "reports"
 
 
 # ---------------------------------------------------------------------------
@@ -57,20 +70,113 @@ def _enabled() -> bool:
     return raw in ("1", "true", "yes", "on", "y")
 
 
-def _send_hour() -> int:
+# ---------------------------------------------------------------------------
+# Local-time scheduling (G1).
+#
+# Two-mode design so the cutover from "UTC only" to "local TZ" doesn't
+# silently shift the existing 13:00-UTC operator habit:
+#
+#   * Default: ``DAILY_HONESTY_REPORT_TZ=America/New_York`` and the
+#     scheduler reads ``_HOUR`` / ``_MINUTE`` (in that TZ).  When those
+#     env vars are absent we synthesise them from the legacy
+#     ``_HOUR_UTC`` / ``_MINUTE_UTC`` by converting today's UTC clock
+#     into the configured local TZ — this preserves wall-clock
+#     ~9-am-ET behavior across DST, modulo a one-hour shift on the
+#     spring-forward / fall-back day itself (acceptable for a single
+#     daily digest).
+#   * ``_TZ=UTC`` keeps strict legacy behavior.
+#
+# Dedupe is keyed on the configured-TZ date so a 21:00-PT send doesn't
+# get re-fired by a UTC midnight rollover.
+# ---------------------------------------------------------------------------
+
+
+_DEFAULT_TZ = "America/New_York"
+
+
+def _local_tz() -> "ZoneInfo":  # pragma: no cover — trivial
+    name = (os.environ.get("DAILY_HONESTY_REPORT_TZ") or _DEFAULT_TZ).strip()
+    if ZoneInfo is None:
+        return timezone.utc  # type: ignore[return-value]
     try:
-        return max(
-            0, min(23, int(os.environ.get("DAILY_HONESTY_REPORT_HOUR_UTC") or "13"))
+        return ZoneInfo(name)
+    except ZoneInfoNotFoundError:
+        log.warning(
+            "DAILY_HONESTY_REPORT_TZ=%r is not a valid IANA name; "
+            "falling back to UTC",
+            name,
         )
+        return ZoneInfo("UTC")
+
+
+def _now_local() -> datetime:
+    return datetime.now(tz=_local_tz())
+
+
+def _local_today_str() -> str:
+    return _now_local().date().isoformat()
+
+
+def _send_hour() -> int:
+    """Local-TZ hour the digest fires at (default: derived from
+    ``_HOUR_UTC`` for backcompat — see module docstring)."""
+    raw = os.environ.get("DAILY_HONESTY_REPORT_HOUR")
+    if raw is None or raw == "":
+        # Legacy fallback: convert UTC HH:MM to the configured local TZ
+        # using today as the conversion anchor (DST-aware).
+        try:
+            hu = max(
+                0,
+                min(
+                    23,
+                    int(os.environ.get("DAILY_HONESTY_REPORT_HOUR_UTC") or "13"),
+                ),
+            )
+            mu = max(
+                0,
+                min(
+                    59,
+                    int(os.environ.get("DAILY_HONESTY_REPORT_MINUTE_UTC") or "0"),
+                ),
+            )
+        except (TypeError, ValueError):
+            hu, mu = 13, 0
+        anchor = datetime.now(tz=timezone.utc).replace(
+            hour=hu, minute=mu, second=0, microsecond=0
+        )
+        return anchor.astimezone(_local_tz()).hour
+    try:
+        return max(0, min(23, int(raw)))
     except (TypeError, ValueError):
-        return 13
+        return 9  # ~typical 9am operator habit
 
 
 def _send_minute() -> int:
-    try:
-        return max(
-            0, min(59, int(os.environ.get("DAILY_HONESTY_REPORT_MINUTE_UTC") or "0"))
+    raw = os.environ.get("DAILY_HONESTY_REPORT_MINUTE")
+    if raw is None or raw == "":
+        try:
+            hu = max(
+                0,
+                min(
+                    23,
+                    int(os.environ.get("DAILY_HONESTY_REPORT_HOUR_UTC") or "13"),
+                ),
+            )
+            mu = max(
+                0,
+                min(
+                    59,
+                    int(os.environ.get("DAILY_HONESTY_REPORT_MINUTE_UTC") or "0"),
+                ),
+            )
+        except (TypeError, ValueError):
+            hu, mu = 13, 0
+        anchor = datetime.now(tz=timezone.utc).replace(
+            hour=hu, minute=mu, second=0, microsecond=0
         )
+        return anchor.astimezone(_local_tz()).minute
+    try:
+        return max(0, min(59, int(raw)))
     except (TypeError, ValueError):
         return 0
 
@@ -393,7 +499,11 @@ async def collect_calibrator_drift_status() -> dict[str, Any]:
 
 
 async def collect_tail_risk_summary() -> dict[str, Any]:
-    """Headline numbers from the existing tail-risk dashboard tile."""
+    """Headline numbers from the existing tail-risk dashboard tile.
+
+    Now also surfaces the per-bucket totals so the PNG chart helper
+    (G2) can draw a bar per bucket without a second DB round-trip.
+    """
     out: dict[str, Any] = {
         "tail_max_loss_usd": None,
         "total_max_loss_usd": None,
@@ -401,6 +511,7 @@ async def collect_tail_risk_summary() -> dict[str, Any]:
         "tone": None,
         "threshold_price": None,
         "source": None,
+        "buckets": [],
         "error": None,
     }
     try:
@@ -418,6 +529,27 @@ async def collect_tail_risk_summary() -> dict[str, Any]:
     out["tone"] = tc.get("tone")
     out["threshold_price"] = tc.get("threshold_price")
     out["source"] = (tile or {}).get("source")
+    # Slim copy of the bucket rollup the chart needs — label, lo/hi
+    # boundary, is_tail flag, and the open-position max-loss total.
+    buckets = []
+    for b in (tile or {}).get("buckets") or []:
+        try:
+            totals = b.get("totals") or {}
+            buckets.append(
+                {
+                    "label": str(b.get("label") or ""),
+                    "lo": float(b.get("lo") or 0.0),
+                    "hi": float(b.get("hi") or 0.0),
+                    "is_tail": bool(b.get("is_tail")),
+                    "open_max_loss_usd": float(
+                        totals.get("open_max_loss_usd") or 0.0
+                    ),
+                    "open_count": int(totals.get("open_count") or 0),
+                }
+            )
+        except (TypeError, ValueError):
+            continue
+    out["buckets"] = buckets
     return out
 
 
@@ -557,12 +689,12 @@ def _divergence_bar(delta: float, *, width: int = 24, hi: float = 0.10) -> str:
 
 
 def _dashboard_url(path: str) -> str | None:
-    """Stand-in for the operator's screenshot — link to the live tile.
+    """Optional one-click deep-link to the live tile.
 
-    A true PNG screenshot would require a headless-browser dependency we
-    don't carry in the cron container; an authenticated link to the live
-    dashboard delivers the same operator value with one click and stays
-    correct as the tile evolves.
+    Surfaced under the tail-risk section as a complement to the PNG
+    snapshot we now ship as an attachment (see
+    :func:`render_tail_risk_chart_png`).  Returns ``None`` when
+    ``DASHBOARD_BASE_URL`` isn't configured.
     """
     base = os.environ.get("DASHBOARD_BASE_URL") or ""
     base = base.strip().rstrip("/")
@@ -571,6 +703,481 @@ def _dashboard_url(path: str) -> str | None:
     if not path.startswith("/"):
         path = "/" + path
     return f"{base}{path}"
+
+
+# ---------------------------------------------------------------------------
+# G2 — PNG tail-risk tile snapshot.
+#
+# We render with matplotlib's Agg backend (no headless browser, no
+# X server) so the cron container stays lean.  The tile is a single
+# horizontal bar chart of per-bucket open_max_loss_usd, with the tail
+# bucket highlighted in red and a one-line caption summarising the
+# headline tail %.
+# ---------------------------------------------------------------------------
+
+
+def _ensure_reports_dir() -> Path:
+    REPORTS_DIR.mkdir(parents=True, exist_ok=True)
+    return REPORTS_DIR
+
+
+def render_tail_risk_chart_png(
+    tail_summary: dict[str, Any],
+    *,
+    date_str: str,
+    output_dir: Path | None = None,
+) -> Path | None:
+    """Render the tail-risk tile to a PNG file and return its path.
+
+    Returns ``None`` (no exception) when:
+      * matplotlib isn't installed,
+      * the tail-risk section carries an ``error``, or
+      * there are zero non-zero buckets to plot.
+    """
+    if not tail_summary or tail_summary.get("error"):
+        return None
+    buckets = list(tail_summary.get("buckets") or [])
+    if not buckets:
+        return None
+    plottable = [
+        b for b in buckets if (b.get("open_max_loss_usd") or 0.0) > 0.0
+    ]
+    if not plottable:
+        return None
+
+    try:
+        import matplotlib  # noqa: WPS433 — local import keeps cold start cheap
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+    except Exception as e:  # pragma: no cover — install-time issue
+        log.warning("tail-risk chart skipped: matplotlib unavailable (%s)", e)
+        return None
+
+    out_dir = output_dir or _ensure_reports_dir()
+    try:
+        out_dir.mkdir(parents=True, exist_ok=True)
+    except Exception as e:  # pragma: no cover — disk full / RO mount
+        log.warning("tail-risk chart: cannot create %s (%s)", out_dir, e)
+        return None
+    out_path = out_dir / f"tail_risk_tile_{date_str}.png"
+
+    labels = [str(b.get("label") or "?") for b in plottable]
+    values = [float(b.get("open_max_loss_usd") or 0.0) for b in plottable]
+    is_tail = [bool(b.get("is_tail")) for b in plottable]
+    counts = [int(b.get("open_count") or 0) for b in plottable]
+    colors = ["#b00000" if t else "#1565c0" for t in is_tail]
+
+    tail_pct = tail_summary.get("pct_of_total")
+    tone = (tail_summary.get("tone") or "").lower()
+    tone_color = {
+        "red": "#b00000",
+        "yellow": "#b07e00",
+        "green": "#0a7d0a",
+    }.get(tone, "#444")
+
+    try:
+        fig, ax = plt.subplots(figsize=(8.5, 4.6), dpi=150)
+        y_pos = list(range(len(labels)))
+        ax.barh(y_pos, values, color=colors, edgecolor="#333", linewidth=0.5)
+        ax.set_yticks(y_pos)
+        ax.set_yticklabels(labels)
+        ax.invert_yaxis()
+        ax.set_xlabel("open max loss (USD)")
+        for i, (v, n) in enumerate(zip(values, counts)):
+            ax.text(
+                v,
+                i,
+                f"  ${v:,.0f}  (n={n})",
+                va="center",
+                ha="left",
+                fontsize=8,
+                color="#222",
+            )
+        ax.spines["top"].set_visible(False)
+        ax.spines["right"].set_visible(False)
+        # Headline + sub-caption.
+        tail_usd = tail_summary.get("tail_max_loss_usd") or 0.0
+        total_usd = tail_summary.get("total_max_loss_usd") or 0.0
+        pct_str = (
+            f"{(float(tail_pct) * 100):.1f}%"
+            if isinstance(tail_pct, (int, float))
+            else "(n/a)"
+        )
+        title = (
+            f"Tail-risk concentration — {date_str}   "
+            f"tail=${tail_usd:,.0f} / total=${total_usd:,.0f}  "
+            f"({pct_str} in tail)"
+        )
+        ax.set_title(title, fontsize=11, color=tone_color, loc="left")
+        thr = tail_summary.get("threshold_price")
+        if thr is not None:
+            try:
+                fig.text(
+                    0.99,
+                    0.01,
+                    f"tail bucket = price < {float(thr):.3f}   "
+                    f"tone = {tone or '(n/a)'}",
+                    ha="right",
+                    fontsize=8,
+                    color="#666",
+                )
+            except (TypeError, ValueError):
+                pass
+        fig.tight_layout()
+        fig.savefig(out_path, format="png", bbox_inches="tight")
+        plt.close(fig)
+    except Exception as e:
+        log.warning("tail-risk chart render failed: %s", e)
+        return None
+    return out_path
+
+
+# ---------------------------------------------------------------------------
+# G3 — PDF artifact.
+#
+# Built with reportlab.  We keep the layout deliberately spartan
+# (heading + paragraphs + tables + the embedded PNG) so the cron
+# container doesn't need any extra fonts or templates installed.
+# ---------------------------------------------------------------------------
+
+
+def render_daily_report_pdf(
+    payload: dict[str, Any],
+    *,
+    text_body: str,
+    chart_path: Path | None = None,
+    output_dir: Path | None = None,
+) -> Path | None:
+    """Build a multi-page PDF of the daily honesty report.
+
+    Returns ``None`` when reportlab isn't installed (logged once).
+    Never raises — the email still goes out with the text body even if
+    the PDF fails to render.
+    """
+    try:
+        from reportlab.lib import colors
+        from reportlab.lib.pagesizes import letter
+        from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+        from reportlab.lib.units import inch
+        from reportlab.platypus import (
+            Image,
+            PageBreak,
+            Paragraph,
+            SimpleDocTemplate,
+            Spacer,
+            Table,
+            TableStyle,
+        )
+    except Exception as e:  # pragma: no cover — install-time issue
+        log.warning("daily-report PDF skipped: reportlab unavailable (%s)", e)
+        return None
+
+    date_str = str(payload.get("date_utc") or "unknown")
+    out_dir = output_dir or _ensure_reports_dir()
+    try:
+        out_dir.mkdir(parents=True, exist_ok=True)
+    except Exception as e:  # pragma: no cover — disk full / RO mount
+        log.warning("daily-report PDF: cannot create %s (%s)", out_dir, e)
+        return None
+    out_path = out_dir / f"daily_honesty_{date_str}.pdf"
+
+    try:
+        styles = getSampleStyleSheet()
+        h1 = styles["Heading1"]
+        h2 = styles["Heading2"]
+        body_style = ParagraphStyle(
+            "body",
+            parent=styles["BodyText"],
+            fontName="Helvetica",
+            fontSize=9,
+            leading=12,
+        )
+        mono = ParagraphStyle(
+            "mono",
+            parent=styles["BodyText"],
+            fontName="Courier",
+            fontSize=8,
+            leading=10,
+        )
+        small = ParagraphStyle(
+            "small",
+            parent=styles["BodyText"],
+            fontName="Helvetica",
+            fontSize=8,
+            leading=10,
+            textColor=colors.HexColor("#666666"),
+        )
+
+        story: list[Any] = []
+        story.append(Paragraph(f"Axiom daily honesty report — {date_str}", h1))
+        story.append(
+            Paragraph(
+                "Operator-visible signals — divergence, calibrator drift, "
+                "tail-risk concentration, gate trips, and the latest "
+                "investor deck.  See runbook §21 for what each red signal "
+                "means.",
+                body_style,
+            )
+        )
+        story.append(Spacer(1, 0.2 * inch))
+
+        # Section 1: divergence
+        div = payload.get("divergence") or {}
+        story.append(
+            Paragraph(
+                f"1. Shadow-vs-live divergence (last "
+                f"{div.get('days', '?')}d, |Brier delta| per league)",
+                h2,
+            )
+        )
+        if div.get("error"):
+            story.append(
+                Paragraph(f"<b>error:</b> {div['error']}", body_style)
+            )
+        else:
+            items = list(div.get("items") or [])
+            if items:
+                tbl_data = [["League", "|Δ|", "Brier (live)", "n live", "Brier (shadow)", "n shadow"]]
+                for it in items:
+                    tbl_data.append(
+                        [
+                            it.get("league", "?"),
+                            f"{it.get('abs_delta', 0):.4f}",
+                            f"{it.get('brier_live', 0):.4f}",
+                            str(it.get("n_live", 0)),
+                            f"{it.get('brier_shadow', 0):.4f}",
+                            str(it.get("n_shadow", 0)),
+                        ]
+                    )
+                tbl = Table(tbl_data, hAlign="LEFT")
+                tbl.setStyle(
+                    TableStyle(
+                        [
+                            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#f0f0f0")),
+                            ("FONTNAME", (0, 0), (-1, -1), "Courier"),
+                            ("FONTSIZE", (0, 0), (-1, -1), 8),
+                            ("BOX", (0, 0), (-1, -1), 0.25, colors.grey),
+                            ("INNERGRID", (0, 0), (-1, -1), 0.25, colors.lightgrey),
+                            ("LEFTPADDING", (0, 0), (-1, -1), 4),
+                            ("RIGHTPADDING", (0, 0), (-1, -1), 4),
+                        ]
+                    )
+                )
+                story.append(tbl)
+            ts = div.get("samples_too_small") or []
+            if ts:
+                story.append(Spacer(1, 0.1 * inch))
+                story.append(
+                    Paragraph(
+                        "<i>Insufficient samples (skipped):</i> "
+                        + ", ".join(it["league"] for it in ts),
+                        body_style,
+                    )
+                )
+            if not items and not ts:
+                story.append(
+                    Paragraph(
+                        "no settled rows on either side yet", body_style
+                    )
+                )
+        story.append(Spacer(1, 0.2 * inch))
+
+        # Section 2: calibrator drift
+        cd = payload.get("calibrator_drift") or {}
+        story.append(Paragraph("2. Calibrator drift status", h2))
+        if cd.get("error"):
+            story.append(
+                Paragraph(f"<b>error:</b> {cd['error']}", body_style)
+            )
+        else:
+            items = list(cd.get("items") or [])
+            if items:
+                tbl_data = [["Tone", "League", "Brier", "Age (h)", "Why"]]
+                tone_color_hex = {
+                    "green": colors.HexColor("#0a7d0a"),
+                    "yellow": colors.HexColor("#b07e00"),
+                    "red": colors.HexColor("#b00000"),
+                }
+                style_cmds: list[Any] = [
+                    ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#f0f0f0")),
+                    ("FONTNAME", (0, 0), (-1, -1), "Courier"),
+                    ("FONTSIZE", (0, 0), (-1, -1), 8),
+                    ("BOX", (0, 0), (-1, -1), 0.25, colors.grey),
+                    ("INNERGRID", (0, 0), (-1, -1), 0.25, colors.lightgrey),
+                    ("LEFTPADDING", (0, 0), (-1, -1), 4),
+                    ("RIGHTPADDING", (0, 0), (-1, -1), 4),
+                ]
+                for i, it in enumerate(items, start=1):
+                    tone = (it.get("tone") or "").lower()
+                    color = tone_color_hex.get(tone)
+                    if color is not None:
+                        style_cmds.append(("TEXTCOLOR", (0, i), (0, i), color))
+                    brier_str = (
+                        f"{it['brier_after']:.4f}"
+                        if it.get("brier_after") is not None
+                        else "(n/a)"
+                    )
+                    age_str = (
+                        f"{it['age_hours']:.1f}"
+                        if it.get("age_hours") is not None
+                        else "(n/a)"
+                    )
+                    tbl_data.append(
+                        [
+                            tone.upper() or "?",
+                            it.get("league", "?"),
+                            brier_str,
+                            age_str,
+                            it.get("why", ""),
+                        ]
+                    )
+                tbl = Table(tbl_data, hAlign="LEFT")
+                tbl.setStyle(TableStyle(style_cmds))
+                story.append(tbl)
+            else:
+                story.append(
+                    Paragraph(
+                        "no per-league calibrator snapshots yet",
+                        body_style,
+                    )
+                )
+        story.append(Spacer(1, 0.2 * inch))
+
+        # Section 3: tail-risk + embedded chart
+        tr = payload.get("tail_risk") or {}
+        story.append(Paragraph("3. Tail-risk concentration (last 30d)", h2))
+        if tr.get("error"):
+            story.append(
+                Paragraph(f"<b>error:</b> {tr['error']}", body_style)
+            )
+        else:
+            facts = [
+                ("tail_max_loss", _fmt_usd(tr.get("tail_max_loss_usd"))),
+                ("total_max_loss", _fmt_usd(tr.get("total_max_loss_usd"))),
+                ("pct_in_tail", _fmt_pct(tr.get("pct_of_total"))),
+                ("tone", str(tr.get("tone") or "(n/a)")),
+                (
+                    "threshold_price",
+                    str(tr.get("threshold_price") or "(n/a)"),
+                ),
+                ("source", str(tr.get("source") or "(n/a)")),
+            ]
+            tbl = Table(facts, hAlign="LEFT")
+            tbl.setStyle(
+                TableStyle(
+                    [
+                        ("FONTNAME", (0, 0), (-1, -1), "Courier"),
+                        ("FONTSIZE", (0, 0), (-1, -1), 9),
+                        ("FONTNAME", (0, 0), (0, -1), "Courier-Bold"),
+                        ("LEFTPADDING", (0, 0), (-1, -1), 2),
+                        ("RIGHTPADDING", (0, 0), (-1, -1), 8),
+                    ]
+                )
+            )
+            story.append(tbl)
+            if chart_path is not None and Path(chart_path).is_file():
+                try:
+                    story.append(Spacer(1, 0.15 * inch))
+                    story.append(
+                        Image(str(chart_path), width=6.5 * inch, height=3.5 * inch)
+                    )
+                except Exception as e:  # pragma: no cover
+                    log.warning("PDF chart embed failed: %s", e)
+        story.append(PageBreak())
+
+        # Section 4: gate trips
+        gt = payload.get("gate_trips_24h") or {}
+        story.append(Paragraph("4. Risk-gate trips (last 24h)", h2))
+        if gt.get("error"):
+            story.append(
+                Paragraph(f"<b>error:</b> {gt['error']}", body_style)
+            )
+        elif not gt.get("items"):
+            story.append(
+                Paragraph(
+                    "no gate trips in the last 24 hours", body_style
+                )
+            )
+        else:
+            story.append(
+                Paragraph(
+                    f"<b>total trips:</b> {gt.get('total', 0)}",
+                    body_style,
+                )
+            )
+            tbl_data = [["Gate", "Count", "Last at"]]
+            for it in gt["items"]:
+                tbl_data.append(
+                    [
+                        it.get("gate_name", "?"),
+                        str(it.get("count", 0)),
+                        str(it.get("last_at") or "(n/a)"),
+                    ]
+                )
+            tbl = Table(tbl_data, hAlign="LEFT")
+            tbl.setStyle(
+                TableStyle(
+                    [
+                        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#f0f0f0")),
+                        ("FONTNAME", (0, 0), (-1, -1), "Courier"),
+                        ("FONTSIZE", (0, 0), (-1, -1), 8),
+                        ("BOX", (0, 0), (-1, -1), 0.25, colors.grey),
+                        ("INNERGRID", (0, 0), (-1, -1), 0.25, colors.lightgrey),
+                        ("LEFTPADDING", (0, 0), (-1, -1), 4),
+                        ("RIGHTPADDING", (0, 0), (-1, -1), 4),
+                    ]
+                )
+            )
+            story.append(tbl)
+        story.append(Spacer(1, 0.2 * inch))
+
+        # Investor deck deep-link
+        deck = payload.get("investor_deck") or {}
+        story.append(Paragraph("Latest investor deck", h2))
+        if deck.get("error"):
+            story.append(
+                Paragraph(
+                    f"lookup failed: {deck['error']}", body_style
+                )
+            )
+        elif deck.get("investor_deck_path"):
+            built = str(deck.get("built_at") or "(unknown)")
+            path_s = str(deck["investor_deck_path"])
+            story.append(Paragraph(f"<b>{path_s}</b>", mono))
+            story.append(Paragraph(f"built {built}", small))
+        else:
+            story.append(
+                Paragraph(
+                    "not built yet — weekly cron will produce one on the "
+                    "next run.",
+                    small,
+                )
+            )
+
+        story.append(Spacer(1, 0.3 * inch))
+        story.append(
+            Paragraph(
+                "Read the runbook §21 for what each red signal means. "
+                "Generated by app.notifications.daily_honesty_report.",
+                small,
+            )
+        )
+
+        doc = SimpleDocTemplate(
+            str(out_path),
+            pagesize=letter,
+            leftMargin=0.6 * inch,
+            rightMargin=0.6 * inch,
+            topMargin=0.6 * inch,
+            bottomMargin=0.6 * inch,
+            title=f"Axiom daily honesty report — {date_str}",
+            author="axiom.notifications.daily_honesty_report",
+        )
+        doc.build(story)
+    except Exception as e:
+        log.warning("daily-report PDF render failed: %s", e)
+        return None
+    return out_path
 
 
 def render_text(payload: dict[str, Any]) -> tuple[str, str]:
@@ -899,11 +1506,55 @@ async def fire_now(*, dry_run: bool = False) -> dict[str, Any]:
 
     Returns the rendered payload + dispatch result so the admin
     fire-now endpoint can echo it back to the operator for inspection.
+
+    Side effects:
+      * a PNG of the tail-risk tile is written to
+        ``artifacts/api-server/reports/tail_risk_tile_<date>.png``
+        when there's at least one non-zero bucket — **always**,
+        including ``dry_run`` runs, so the operator can inspect the
+        generated artifact alongside the rendered text body;
+      * a multi-page PDF artifact is written to
+        ``artifacts/api-server/reports/daily_honesty_<date>.pdf`` —
+        also always, for the same reason.
+
+    What ``dry_run`` actually gates:
+      * Postmark email send (and the user-pref fanout).
+      * Telegram text broadcast and PDF document push.
+
+    Both attachment paths are echoed back in the return value so an
+    admin fire-now operator can read them off disk for sanity-checking.
     """
-    today = datetime.now(tz=timezone.utc).date().isoformat()
+    # Date stamp uses the configured local TZ so the artifact filename
+    # matches the day the operator reads the report on.  (Backcompat:
+    # the dispatch payload still surfaces a ``date_utc`` field with
+    # the same value to avoid breaking any downstream consumer.)
+    today = _local_today_str()
     payload = await collect_report(today)
     subject, body = render_text(payload)
     html_body = render_html(payload)
+
+    # G2 — render the PNG tile snapshot (best-effort).
+    chart_path: Path | None = None
+    try:
+        chart_path = render_tail_risk_chart_png(
+            payload.get("tail_risk") or {}, date_str=today
+        )
+    except Exception as e:  # pragma: no cover — render is fail-soft
+        log.warning("honesty-report chart render failed: %s", e)
+        chart_path = None
+
+    # G3 — render the PDF artifact (best-effort).
+    pdf_path: Path | None = None
+    try:
+        pdf_path = render_daily_report_pdf(
+            payload, text_body=body, chart_path=chart_path
+        )
+    except Exception as e:  # pragma: no cover — render is fail-soft
+        log.warning("honesty-report PDF render failed: %s", e)
+        pdf_path = None
+
+    attachments: list[Path] = [p for p in (pdf_path, chart_path) if p]
+
     dispatch_result: dict[str, Any] = {}
     try:
         dispatch_result = alerts._dispatch(
@@ -912,17 +1563,46 @@ async def fire_now(*, dry_run: bool = False) -> dict[str, Any]:
             tag=_DISPATCH_TAG,
             dry_run=dry_run,
             html_body=html_body,
+            attachments=attachments or None,
         )
+    except TypeError:
+        # Older _dispatch signature (no `attachments` kwarg) — keep
+        # working when this module is loaded ahead of the alerts
+        # rebuild during a partial deploy.
+        try:
+            dispatch_result = alerts._dispatch(
+                subject,
+                body,
+                tag=_DISPATCH_TAG,
+                dry_run=dry_run,
+                html_body=html_body,
+            )
+        except Exception as e:  # pragma: no cover
+            log.warning("honesty-report dispatch failed: %s", e)
+            dispatch_result = {"error": f"{type(e).__name__}: {e}"[:240]}
     except Exception as e:  # pragma: no cover — _dispatch already logs
         log.warning("honesty-report dispatch failed: %s", e)
         dispatch_result = {"error": f"{type(e).__name__}: {e}"[:240]}
+
+    telegram_result: dict[str, Any] = {"text_broadcast": False, "pdf_sent": 0}
     if not dry_run:
         try:
             from ..telegram import notify as _tg_notify
 
             _tg_notify.broadcast_in_background(f"{subject}\n\n{body}")
+            telegram_result["text_broadcast"] = True
         except Exception as e:  # pragma: no cover
             log.warning("honesty-report telegram broadcast failed: %s", e)
+        if pdf_path is not None:
+            try:
+                telegram_result["pdf_sent"] = await _broadcast_document(
+                    pdf_path, caption=subject
+                )
+            except Exception as e:  # pragma: no cover
+                log.warning(
+                    "honesty-report telegram document push failed: %s", e
+                )
+
     return {
         "date_utc": today,
         "subject": subject,
@@ -931,7 +1611,45 @@ async def fire_now(*, dry_run: bool = False) -> dict[str, Any]:
         "payload": payload,
         "dispatch": dispatch_result,
         "dry_run": bool(dry_run),
+        "artifacts": {
+            "pdf_path": str(pdf_path) if pdf_path else None,
+            "chart_path": str(chart_path) if chart_path else None,
+        },
+        "telegram": telegram_result,
     }
+
+
+async def _broadcast_document(file_path: Path, *, caption: str) -> int:
+    """Send a single file to every opted-in Telegram chat.
+
+    Returns the count of chats the upload succeeded for.  Best-effort:
+    a per-chat failure logs and is counted as 0, but never raises.
+    """
+    try:
+        from ..telegram import notify as _tg_notify
+        from ..telegram import bot as _tg_bot
+    except Exception as e:  # pragma: no cover
+        log.warning("telegram modules unavailable for document push: %s", e)
+        return 0
+    try:
+        chat_ids = await _tg_notify.push_enabled_chat_ids()
+    except Exception as e:  # pragma: no cover
+        log.warning("push_enabled_chat_ids failed in document push: %s", e)
+        return 0
+    if not chat_ids:
+        return 0
+    results = await asyncio.gather(
+        *(
+            _tg_bot.send_document_to_chat(c, file_path, caption=caption)
+            for c in chat_ids
+        ),
+        return_exceptions=True,
+    )
+    sent = 0
+    for r in results:
+        if r is True:
+            sent += 1
+    return sent
 
 
 # ---------------------------------------------------------------------------
@@ -946,15 +1664,17 @@ _last_sent_date: str | None = None
 
 async def _loop() -> None:
     global _last_sent_date
+    tz = _local_tz()
     log.info(
-        "honesty-report scheduler started: hour=%02d:%02d UTC",
+        "honesty-report scheduler started: %02d:%02d %s",
         _send_hour(),
         _send_minute(),
+        getattr(tz, "key", str(tz)),
     )
     _last_sent_date = await _get_last_sent_date()
     while not _stop.is_set():
         try:
-            now = datetime.now(tz=timezone.utc)
+            now = _now_local()
             today = now.date().isoformat()
             target_hour = _send_hour()
             target_minute = _send_minute()
