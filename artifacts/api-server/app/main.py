@@ -617,6 +617,18 @@ async def lifespan(_: FastAPI):
             "sportradar leaderboards retention start failed: %s", e
         )
 
+    # Supabase growth retention loops (task #757). Two tiers:
+    # archive-then-delete for ML / training tables (90-day default),
+    # and delete-only for operational / audit logs (30-day default).
+    # All loops default DISABLED — operator opts each one in via
+    # AXIOM_<PREFIX>_RETENTION_ENABLED=1 after reviewing the dry-run
+    # output from ``scripts/archive_and_prune_backlog.py``.
+    try:
+        from . import retention_loops_v757 as _retention_loops_v757
+        await _retention_loops_v757.start_all()
+    except Exception as e:
+        log.warning("task #757 retention loops start failed: %s", e)
+
     # Kick off model artifact reassembly in the background so a cold cache
     # (~240 MiB download) doesn't block the HTTP server from accepting
     # traffic. Health endpoints surface progress while it warms up.
@@ -731,6 +743,11 @@ async def lifespan(_: FastAPI):
             log.warning(
                 "sportradar leaderboards retention stop error: %s", e
             )
+        try:
+            from . import retention_loops_v757 as _retention_loops_v757
+            await _retention_loops_v757.stop_all()
+        except Exception as e:
+            log.warning("task #757 retention loops stop error: %s", e)
         try:
             await rc_billing.stop()
         except Exception as e:
@@ -6869,6 +6886,26 @@ async def dashboard_sportradar_leaderboards_retention(
     (``ok`` / ``stale`` / ``error`` / ``disabled``).
     """
     return await dashboard.get_sportradar_leaderboards_retention_status()
+
+
+@app.get("/api/dashboard/supabase-growth-retention")
+async def dashboard_supabase_growth_retention(
+    _: object = Depends(require_approved_user),
+) -> dict[str, object]:
+    """Operator-facing snapshot of the task #757 retention loops.
+
+    Returns the ``state()`` for every archive-then-delete loop and
+    every delete-only loop registered in
+    :mod:`app.retention_loops_v757`, each enriched with the same
+    derived ``health`` and ``seconds_since_last_tick`` fields the
+    per-loop endpoints above expose, plus aggregate ``counts`` so
+    the dashboard can render a single header badge.
+
+    Loops default DISABLED — operator opts each one in via
+    ``AXIOM_<PREFIX>_RETENTION_ENABLED=1`` after reviewing the
+    dry-run output from ``scripts/archive_and_prune_backlog.py``.
+    """
+    return await dashboard.get_supabase_growth_retention_status()
 
 
 @app.get("/api/dashboard/bankroll/recent")

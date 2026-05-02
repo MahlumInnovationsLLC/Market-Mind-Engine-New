@@ -1,0 +1,62 @@
+"""Periodic archive-then-prune for ``precip_emos_observations`` (task #757).
+
+KXRAIN ensemble snapshots persisted for the nightly EMOS refit.
+Once a market settles and the refit consumes it, the row is dead
+weight on disk but is still useful as training data.
+
+Archive flavor: rows older than the configured horizon are streamed
+to the Supabase Storage bucket as gzip-compressed JSONL under
+``archives/precip_emos_observations/dt=YYYY-MM-DD/part-<n>.jsonl.gz`` (with a
+sibling ``part-<n>.manifest.json`` sidecar) before being deleted from
+Postgres.  See :mod:`app.archive_helper` for the chunking +
+interruption semantics, and ``docs/retention_runbook.md`` for the
+re-import recipe.
+
+Defaults (operator-overridable via env):
+  * ``AXIOM_PRECIP_EMOS_OBSERVATIONS_RETENTION_ENABLED``         (default 0 — disabled)
+  * ``AXIOM_PRECIP_EMOS_OBSERVATIONS_RETENTION_DAYS``            (default 90)
+  * ``AXIOM_PRECIP_EMOS_OBSERVATIONS_CLEANUP_INTERVAL_SECONDS``  (default 21600 — 6h)
+
+The loop is **disabled by default** so a fresh deploy doesn't
+auto-trigger the sweep before the operator has reviewed the dry-run
+output from ``scripts/archive_and_prune_backlog.py``.
+"""
+from __future__ import annotations
+
+from typing import Any
+
+from .retention_base import ArchiveThenDeleteRetention
+
+
+_loop = ArchiveThenDeleteRetention(
+    name='precip_emos_observations',
+    table='precip_emos_observations',
+    ts_column='created_at',
+    env_prefix='AXIOM_PRECIP_EMOS_OBSERVATIONS',
+    default_days=90,
+    pk_columns=('id',),
+)
+
+
+async def start() -> None:
+    await _loop.start()
+
+
+async def stop() -> None:
+    await _loop.stop()
+
+
+async def cleanup_once() -> int:
+    return await _loop.cleanup_once()
+
+
+def state() -> dict[str, Any]:
+    return _loop.state()
+
+
+def cutoff_iso() -> str:
+    return _loop.cutoff().isoformat()
+
+
+def _reset_state_for_tests() -> None:
+    _loop._reset_state_for_tests()

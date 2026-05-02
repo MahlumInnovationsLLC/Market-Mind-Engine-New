@@ -4431,6 +4431,101 @@ async def get_sportradar_leaderboards_retention_status() -> dict[str, Any]:
     }
 
 
+def _retention_health_for(snap: dict[str, Any]) -> tuple[str, float | None]:
+    """Compute ``(health, seconds_since_last_tick)`` from a ``state()`` dict.
+
+    Shared by the per-loop wrappers above and the task #757 batch
+    wrapper so the same health rules — disabled / error / stale / ok —
+    apply uniformly across every retention loop in the system.
+    """
+    import time
+
+    last_tick = snap.get("last_tick_at")
+    started_at = snap.get("started_at")
+    interval = float(snap.get("interval_seconds") or 0.0) or 21600.0
+    grace = max(2.0 * interval, 60.0)
+
+    now = time.time()
+    seconds_since = (now - float(last_tick)) if last_tick else None
+
+    if not snap.get("enabled", True):
+        health = "disabled"
+    elif snap.get("last_error"):
+        health = "error"
+    elif last_tick is None:
+        if started_at and (now - float(started_at)) > grace:
+            health = "stale"
+        elif not snap.get("running"):
+            health = "stale"
+        else:
+            health = "ok"
+    elif seconds_since is not None and seconds_since > grace:
+        health = "stale"
+    else:
+        health = "ok"
+
+    return health, seconds_since
+
+
+async def get_supabase_growth_retention_status() -> dict[str, Any]:
+    """Operator-facing snapshot of the task #757 retention loops.
+
+    Returns a single dict with two ranked sections — ``archive`` and
+    ``delete_only`` — each containing one entry per loop with the
+    underlying ``state()`` dict plus the same derived
+    ``health`` / ``seconds_since_last_tick`` fields the per-loop
+    wrappers above expose.  The dashboard renders these as a single
+    "Supabase growth" panel with one row per loop.
+
+    Always returns a dict; never raises.
+    """
+    from . import retention_loops_v757
+
+    def _enrich(module_list: tuple[Any, ...]) -> list[dict[str, Any]]:
+        out: list[dict[str, Any]] = []
+        for module in module_list:
+            try:
+                snap = module.state()
+            except Exception as e:  # noqa: BLE001
+                out.append(
+                    {
+                        "name": getattr(module, "__name__", "?"),
+                        "health": "error",
+                        "last_error": f"{type(e).__name__}: {e}",
+                    }
+                )
+                continue
+            health, seconds_since = _retention_health_for(snap)
+            out.append(
+                {
+                    **snap,
+                    "seconds_since_last_tick": seconds_since,
+                    "health": health,
+                }
+            )
+        return out
+
+    archive_rows = _enrich(retention_loops_v757.ARCHIVE_MODULES)
+    delete_rows = _enrich(retention_loops_v757.DELETE_ONLY_MODULES)
+
+    # Aggregate badges so the dashboard can render a single "23 loops
+    # ok / 0 stale / 0 error / 22 disabled" header without re-walking
+    # the rows in the frontend.
+    all_rows = archive_rows + delete_rows
+    counts = {"ok": 0, "stale": 0, "error": 0, "disabled": 0}
+    for row in all_rows:
+        h = row.get("health")
+        if h in counts:
+            counts[h] += 1
+
+    return {
+        "archive": archive_rows,
+        "delete_only": delete_rows,
+        "counts": counts,
+        "total": len(all_rows),
+    }
+
+
 async def get_nfl_exposure(trading_mode: str = "live") -> dict[str, Any]:
     """NFL per-league + per-game + Sunday-window exposure with cap headroom.
 

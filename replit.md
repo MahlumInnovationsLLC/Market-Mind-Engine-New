@@ -51,6 +51,11 @@ Axiom Predict is a prediction-market trading platform designed for advanced trad
 - Verification script (`verify_v155_artifacts.py`) confirms integrity, predictor count, and performs smoke tests.
 - V1 historical data (trade_analyses) imported into a `v1_archive` schema for calibrator refitting.
 
+**Supabase Growth Retention (task #757):**
+- Per-table retention loops in `app/<table>_retention.py` keep high-growth Supabase tables bounded. Two tiers: archive-then-delete for ML/training tables (90-day default — predictions, market_price_ticks, autoresearch_features, tech_evidence, line_snapshots, sportradar_tournament_replays, precip_emos_observations) and delete-only for operational/audit logs (30-day default — pipeline_events, settlement_events, mobile_notification_log, bankroll_events, rc_events, stripe_events, rc_webhook_deliveries, billing_churn_events, admin_audit_log, position_drift_resolutions, order_recovery_attempts, stale_cancel_observations, vertical_halt_history, gatekeeper_setting_history, model_rollback_log).
+- Loops factored on `app/retention_base.py` (`DeleteOnlyRetention`, `ArchiveThenDeleteRetention`) and `app/archive_helper.py` (gzip JSONL chunks under `archives/<table>/dt=YYYY-MM-DD/part-<n>.jsonl.gz` with sibling `manifest.json` sidecar; upload-then-delete per chunk for crash safety).
+- All loops default DISABLED — operator opts in via `AXIOM_<PREFIX>_RETENTION_ENABLED=1` after reviewing the dry-run from `scripts/archive_and_prune_backlog.py`. Registry + lifecycle hook live in `app/retention_loops_v757.py`; dashboard at `/api/dashboard/supabase-growth-retention`. See `docs/retention_runbook.md`.
+
 ## External Dependencies
 
 - **Database:** Supabase Postgres (via `asyncpg`).

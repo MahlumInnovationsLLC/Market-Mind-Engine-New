@@ -77,6 +77,42 @@ async def head_object(path: str) -> dict[str, Any] | None:
         }
 
 
+async def upload_bytes(
+    remote: str,
+    payload: bytes,
+    *,
+    content_type: str = "application/octet-stream",
+    upsert: bool = True,
+) -> dict[str, Any]:
+    """Upload an in-memory blob to ``remote`` inside the configured bucket.
+
+    Used by the retention archive helper (task #757) to push compressed
+    JSONL chunks before deleting the source rows.  Returns a small dict
+    with the uploaded ``size`` and ``key`` so callers can record a
+    manifest entry without a second round-trip.
+
+    ``upsert=True`` lets the helper retry the same chunk safely after
+    an interrupted run — Supabase Storage will overwrite the partial
+    object instead of 409-ing.
+    """
+    s = get_settings()
+    headers = {
+        "Content-Type": content_type,
+        # Supabase Storage uses these instead of HTTP semantics to
+        # decide between insert and overwrite.
+        "x-upsert": "true" if upsert else "false",
+        "cache-control": "no-cache",
+    }
+    async with _client() as c:
+        r = await c.post(
+            f"/object/{s.supabase_bucket}/{remote}",
+            content=payload,
+            headers=headers,
+        )
+        r.raise_for_status()
+    return {"key": remote, "size": len(payload)}
+
+
 async def download_to_path(remote: str, dest: Path, *, force: bool = False) -> Path:
     """Stream a single object to disk."""
     s = get_settings()
