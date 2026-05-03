@@ -224,11 +224,12 @@ def test_dispatch_passes_html_body_to_postmark(monkeypatch) -> None:
     off to Postmark so the dispatched email carries the new HTML."""
     captured: dict[str, Any] = {}
 
-    def _fake_send(*, subject: str, text_body: str, html_body=None, tag: str):
+    def _fake_send(*, subject: str, text_body: str, html_body=None, tag: str, attachments=None):
         captured["subject"] = subject
         captured["text_body"] = text_body
         captured["html_body"] = html_body
         captured["tag"] = tag
+        captured["attachments"] = attachments
 
     monkeypatch.setattr(alerts.postmark, "send_in_background", _fake_send)
     # Squash the user-fanout side effect so this test stays focused on
