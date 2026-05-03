@@ -747,7 +747,14 @@ def render_tail_risk_chart_png(
 
     try:
         import matplotlib  # noqa: WPS433 — local import keeps cold start cheap
-        matplotlib.use("Agg")
+        # Use ``force=False`` so we don't blow up when another caller in
+        # the same process (a debug script, a different report) already
+        # bound a backend — matplotlib raises ValueError on a second
+        # ``.use()`` without ``force``. Agg is also the global default
+        # in our containers, so the no-op-when-already-bound case is
+        # the common path.
+        if matplotlib.get_backend().lower() != "agg":
+            matplotlib.use("Agg", force=False)
         import matplotlib.pyplot as plt
     except Exception as e:  # pragma: no cover — install-time issue
         log.warning("tail-risk chart skipped: matplotlib unavailable (%s)", e)
