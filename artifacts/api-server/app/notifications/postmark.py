@@ -125,19 +125,40 @@ def status() -> dict:
 # ---------------------------------------------------------------------------
 
 
+# Either a filesystem path (read at send time) or an in-memory
+# (filename, bytes, content_type) tuple captured earlier so a later
+# disk-cleanup can't strand the attachment between dispatch and the
+# async fanout.
+AttachmentLike = "Path | str | tuple[str, bytes, str]"
+
+
 def _build_attachments(
-    attachments: Sequence[Path | str] | None,
+    attachments: "Sequence[AttachmentLike] | None",
 ) -> list[dict[str, str]]:
-    """Read each path off disk, base64-encode it, and return Postmark's
-    Attachments[] payload shape.  Missing / unreadable files are
-    skipped with a log line so a transient FS hiccup can't shadow the
-    text body.
+    """Read each attachment and return Postmark's Attachments[] payload
+    shape.  Path/str entries are read off disk at call time; pre-
+    materialised ``(name, bytes, content_type)`` tuples are used as-is
+    so a deleted source file can't silently drop the attachment.
+    Missing / unreadable files are skipped with a log line so a
+    transient FS hiccup can't shadow the text body.
     """
     if not attachments:
         return []
     out: list[dict[str, str]] = []
     for raw in attachments:
         try:
+            if isinstance(raw, tuple):
+                name, data, ctype = raw
+                out.append(
+                    {
+                        "Name": name,
+                        "Content": base64.b64encode(data).decode("ascii"),
+                        "ContentType": ctype
+                        or mimetypes.guess_type(name)[0]
+                        or "application/octet-stream",
+                    }
+                )
+                continue
             p = Path(raw)
             if not p.is_file():
                 log.warning("postmark attachment missing: %s", p)

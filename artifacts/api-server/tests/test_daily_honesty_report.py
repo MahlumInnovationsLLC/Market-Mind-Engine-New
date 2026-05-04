@@ -962,5 +962,98 @@ def test_alerts_dispatch_threads_attachments_into_postmark(
         attachments=[f1],
     )
     assert out["queued"] is True
-    assert captured["bg"]["attachments"] == [f1]
-    assert captured["fanout"]["attachments"] == [f1]
+    # `_dispatch` now materialises attachments into
+    # (filename, bytes, content_type) tuples once at dispatch time and
+    # threads the *bytes* through to both the operator send and the
+    # async user-pref fanout.  See test below for why.
+    bg_atts = captured["bg"]["attachments"]
+    fan_atts = captured["fanout"]["attachments"]
+    assert bg_atts == fan_atts
+    assert len(bg_atts) == 1
+    name, data, ctype = bg_atts[0]
+    assert name == "report.pdf"
+    assert data == b"%PDF-1.4 stub"
+    assert ctype == "application/pdf"
+    # The dispatch return value still echoes string filenames so
+    # callers/telemetry stay backwards compatible.
+    assert out["attachments"] == [str(f1)]
+
+
+def test_alerts_dispatch_attachments_survive_disk_cleanup(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    """Regression: a future `reports/*` pruner must not be able to
+    strand the async user-pref fanout with a missing attachment file.
+
+    Simulates the report file being deleted *between* `_dispatch`
+    capturing its bytes and the background fanout actually firing,
+    then asserts Postmark still receives a fully-formed
+    Attachments[] entry rather than silently dropping it.
+    """
+    import asyncio as _asyncio
+    import base64 as _b64
+
+    from app.notifications import postmark as _pm
+
+    f1 = tmp_path / "doomed.pdf"
+    payload = b"%PDF-1.4 doomed"
+    f1.write_bytes(payload)
+
+    captured: dict[str, Any] = {}
+
+    def _fake_send_in_background(**kw: Any) -> None:
+        captured["bg"] = kw
+
+    fanout_kwargs: dict[str, Any] = {}
+
+    def _fake_schedule(**kw: Any) -> None:
+        fanout_kwargs.update(kw)
+
+    monkeypatch.setattr(_pm, "send_in_background", _fake_send_in_background)
+    monkeypatch.setattr(alerts, "_schedule_user_email_fanout", _fake_schedule)
+    monkeypatch.setattr(_pm, "is_configured", lambda: True)
+    monkeypatch.setattr(_pm, "alert_recipients", lambda: ["ops@example.com"])
+
+    alerts._dispatch(
+        "subj",
+        "body",
+        tag="daily-honesty-report",
+        dry_run=False,
+        attachments=[f1],
+    )
+
+    # Disk-cleanup script wipes the file *after* dispatch returned but
+    # *before* the async fanout actually constructs its payload.
+    f1.unlink()
+    assert not f1.exists()
+
+    # Build the Postmark payload from whatever the fanout was handed.
+    pm_payload = _pm._build_attachments(fanout_kwargs["attachments"])
+    assert len(pm_payload) == 1
+    assert pm_payload[0]["Name"] == "doomed.pdf"
+    assert _b64.b64decode(pm_payload[0]["Content"]) == payload
+    assert pm_payload[0]["ContentType"] == "application/pdf"
+
+    # And the operator send saw the same materialised bytes.
+    bg_payload = _pm._build_attachments(captured["bg"]["attachments"])
+    assert bg_payload == pm_payload
+
+    # Smoke-check: a real `_pm.send` call against the materialised
+    # tuples completes without touching the (now-deleted) path.
+    sent: list[dict[str, Any]] = []
+
+    async def _fake_send_one(**kw: Any) -> _pm._SendRecord:
+        sent.append(kw)
+        return _pm._SendRecord(sent_at=0.0, to=kw["to"], subject=kw["subject"], ok=True)
+
+    monkeypatch.setattr(_pm, "_send_one", _fake_send_one)
+    _asyncio.run(
+        _pm.send(
+            subject="subj",
+            text_body="body",
+            to=["user@example.com"],
+            tag="daily-honesty-report",
+            attachments=fanout_kwargs["attachments"],
+        )
+    )
+    assert sent and sent[0]["attachments"] == fanout_kwargs["attachments"]

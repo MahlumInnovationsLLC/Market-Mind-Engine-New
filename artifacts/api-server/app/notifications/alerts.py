@@ -3682,6 +3682,45 @@ def _render_daily_pnl_summary_html(
 # ---------------------------------------------------------------------------
 
 
+def _materialize_attachments(
+    attachments: "Sequence[Path | str | tuple[str, bytes, str]] | None",
+) -> tuple[list[tuple[str, bytes, str]], list[str]]:
+    """Read each path-style attachment off disk *now* and return
+    in-memory ``(filename, bytes, content_type)`` tuples plus a parallel
+    list of original string paths for telemetry/return-value echoing.
+
+    Pre-materialised tuples pass through untouched.  Missing/unreadable
+    files are skipped with a log line so the text body still goes out
+    -- mirrors :func:`postmark._build_attachments` semantics, just
+    earlier in the pipeline.
+
+    Reading at dispatch time (rather than inside the async fanout) means
+    a future artifact-pruning script that wipes ``reports/*`` between
+    dispatch and fanout can't silently drop the attachment.
+    """
+    import mimetypes as _mt
+
+    materialised: list[tuple[str, bytes, str]] = []
+    echoed: list[str] = []
+    for raw in attachments or []:
+        if isinstance(raw, tuple):
+            materialised.append(raw)
+            echoed.append(raw[0])
+            continue
+        try:
+            p = Path(raw)
+            echoed.append(str(p))
+            if not p.is_file():
+                log.warning("alert attachment missing at dispatch: %s", p)
+                continue
+            data = p.read_bytes()
+            ctype = _mt.guess_type(p.name)[0] or "application/octet-stream"
+            materialised.append((p.name, data, ctype))
+        except Exception as e:
+            log.warning("alert attachment read failed (%s): %s", raw, e)
+    return materialised, echoed
+
+
 def _dispatch(
     subject: str,
     text_body: str,
@@ -3689,8 +3728,11 @@ def _dispatch(
     tag: str,
     dry_run: bool,
     html_body: str | None = None,
-    attachments: "Sequence[Path | str] | None" = None,
+    attachments: "Sequence[Path | str | tuple[str, bytes, str]] | None" = None,
 ) -> dict[str, Any]:
+    # Capture attachment bytes once at dispatch time so a later disk
+    # cleanup can't strand the async user-fanout with missing files.
+    pm_attachments, attachment_names = _materialize_attachments(attachments)
     if dry_run:
         log.info("alert dry_run subject=%r tag=%s", subject, tag)
         return {
@@ -3702,21 +3744,21 @@ def _dispatch(
             "would_send_to": postmark.alert_recipients(),
             "user_pref_column": _TAG_TO_USER_PREF.get(tag),
             "configured": postmark.is_configured(),
-            "attachments": [str(a) for a in (attachments or [])],
+            "attachments": attachment_names,
         }
     postmark.send_in_background(
         subject=subject,
         text_body=text_body,
         html_body=html_body,
         tag=tag,
-        attachments=attachments,
+        attachments=pm_attachments or None,
     )
     _schedule_user_email_fanout(
         subject=subject,
         text_body=text_body,
         tag=tag,
         html_body=html_body,
-        attachments=attachments,
+        attachments=pm_attachments or None,
     )
     return {
         "dry_run": False,
@@ -3726,7 +3768,7 @@ def _dispatch(
         "configured": postmark.is_configured(),
         "recipients": postmark.alert_recipients(),
         "user_pref_column": _TAG_TO_USER_PREF.get(tag),
-        "attachments": [str(a) for a in (attachments or [])],
+        "attachments": attachment_names,
     }
 
 
