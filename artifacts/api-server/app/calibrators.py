@@ -104,6 +104,20 @@ SUPPORTED_LEAGUES: tuple[str, ...] = (
     # v1; per-coin (BTC vs ETH vs SOL) calibration is intentionally
     # out-of-scope until signal warrants it.
     "CRYPTO",
+    # Weather (task #767).  WEATHER markets ship through the GRU+EMOS
+    # temperature stack and the precipitation predictor, both of which
+    # already route their post-stack probability through `apply()` —
+    # registering the league here is what stops `apply()` from
+    # silently bypassing with `reason="unsupported league"`, which had
+    # been shipping uncalibrated weather trades into Kelly sizing
+    # (textbook EV leak).  The settlement retrain loop's per-league
+    # snapshot scaffold picks WEATHER up automatically once it appears
+    # in this tuple.  The new `gate_uncalibrated_vertical` risk gate
+    # blocks weather candidates whose `(WEATHER)` snapshot is absent
+    # until the calibrator has been fit; operators may opt into "ship
+    # raw" via `risk.uncalibrated_raw_mode_weather` (audited + surfaced
+    # as a red row in the daily honesty report).
+    "WEATHER",
 )
 
 # Below this sample count we fall back to Platt; below MIN_REFIT we

@@ -401,4 +401,4 @@ def test_round2_gates_registered_between_agreement_and_kelly():
         )
     # 17 from the round-2 audit + 2 added by task #743 (tail-risk policy
     # gates `tail_price_size_cap` + `jumbo_quantity_cap`).
-    assert len(_gates.GATES) == 19
+    assert len(_gates.GATES) == 20

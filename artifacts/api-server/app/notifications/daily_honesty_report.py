@@ -591,6 +591,61 @@ async def collect_gate_trips_24h() -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
+async def collect_uncalibrated_trades_24h() -> dict[str, Any]:
+    """Count of live trades that shipped via the
+    `gate_uncalibrated_vertical` raw-mode escape hatch in the last
+    24h (Task #767).
+
+    Source rows are ``risk_gate_trips`` entries with
+    ``gate_name='uncalibrated_vertical_raw_mode'`` — the raw-mode
+    pass-through path persists one row per opted-in candidate so the
+    count here is "live trades that bypassed the calibrator gate",
+    not "candidates the gate considered".
+
+    Returns:
+        ``{"total": int, "items": [{vertical, league, count, last_at}],
+           "tone": "red"|"green", "error": str|None}``
+    """
+    out: dict[str, Any] = {
+        "total": 0,
+        "items": [],
+        "tone": "green",
+        "error": None,
+    }
+    try:
+        rows = await db.fetch(
+            """
+            SELECT vertical,
+                   COALESCE(details->>'league', '(none)')        AS league,
+                   count(*)::int                                 AS n,
+                   to_char(max(created_at),
+                           'YYYY-MM-DD"T"HH24:MI:SSZ')           AS last_at
+              FROM risk_gate_trips
+             WHERE created_at > now() - interval '24 hours'
+               AND gate_name = 'uncalibrated_vertical_raw_mode'
+             GROUP BY vertical, COALESCE(details->>'league', '(none)')
+             ORDER BY n DESC, vertical ASC
+            """
+        )
+    except Exception as e:
+        log.warning("uncalibrated_trades_24h query failed: %s", e)
+        out["error"] = f"{type(e).__name__}: {e}"[:240]
+        return out
+    items = [
+        {
+            "vertical": r["vertical"],
+            "league": r["league"],
+            "count": int(r["n"]),
+            "last_at": r["last_at"],
+        }
+        for r in rows
+    ]
+    out["items"] = items
+    out["total"] = sum(it["count"] for it in items)
+    out["tone"] = "red" if out["total"] > 0 else "green"
+    return out
+
+
 async def collect_latest_investor_deck() -> dict[str, Any]:
     """Look up the most recent ``v1_backtest_gate_runs`` row whose
     ``notes`` JSON carries an ``investor_deck_path`` and return the
@@ -648,16 +703,23 @@ async def collect_report(date_utc: str) -> dict[str, Any]:
     drift_t = asyncio.create_task(collect_calibrator_drift_status())
     tail_t = asyncio.create_task(collect_tail_risk_summary())
     gate_t = asyncio.create_task(collect_gate_trips_24h())
+    raw_t = asyncio.create_task(collect_uncalibrated_trades_24h())
     deck_t = asyncio.create_task(collect_latest_investor_deck())
-    divergence, drift_status, tail_risk, gate_trips, investor_deck = (
-        await asyncio.gather(div_t, drift_t, tail_t, gate_t, deck_t)
-    )
+    (
+        divergence,
+        drift_status,
+        tail_risk,
+        gate_trips,
+        uncalibrated_raw,
+        investor_deck,
+    ) = await asyncio.gather(div_t, drift_t, tail_t, gate_t, raw_t, deck_t)
     return {
         "date_utc": date_utc,
         "divergence": divergence,
         "calibrator_drift": drift_status,
         "tail_risk": tail_risk,
         "gate_trips_24h": gate_trips,
+        "uncalibrated_raw": uncalibrated_raw,
         "investor_deck": investor_deck,
     }
 
@@ -1138,6 +1200,76 @@ def render_daily_report_pdf(
             story.append(tbl)
         story.append(Spacer(1, 0.2 * inch))
 
+        # Section 5: uncalibrated raw-mode trades (Task #767)
+        ur = payload.get("uncalibrated_raw") or {}
+        story.append(
+            Paragraph(
+                "5. Uncalibrated live trades (last 24h, raw-mode override)",
+                h2,
+            )
+        )
+        if ur.get("error"):
+            story.append(
+                Paragraph(f"<b>error:</b> {ur['error']}", body_style)
+            )
+        else:
+            total_raw = int(ur.get("total") or 0)
+            if total_raw == 0:
+                story.append(
+                    Paragraph(
+                        "<font color=\"#0a7d0a\"><b>0 raw-mode trades "
+                        "shipped</b></font> — calibrator gate held.",
+                        body_style,
+                    )
+                )
+            else:
+                story.append(
+                    Paragraph(
+                        f"<font color=\"#b00000\"><b>{total_raw} raw-mode "
+                        "trade(s) shipped</b></font> — operator opted a "
+                        "vertical out of the calibrator gate.",
+                        body_style,
+                    )
+                )
+                items = list(ur.get("items") or [])
+                if items:
+                    raw_data = [["Vertical", "League", "Count", "Last at"]]
+                    for it in items:
+                        raw_data.append(
+                            [
+                                str(it.get("vertical") or "?"),
+                                str(it.get("league") or "?"),
+                                str(int(it.get("count", 0))),
+                                str(it.get("last_at") or "(n/a)"),
+                            ]
+                        )
+                    raw_tbl = Table(raw_data, hAlign="LEFT")
+                    raw_style = [
+                        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#f0f0f0")),
+                        ("FONTNAME", (0, 0), (-1, -1), "Courier"),
+                        ("FONTSIZE", (0, 0), (-1, -1), 8),
+                        ("BOX", (0, 0), (-1, -1), 0.25, colors.grey),
+                        ("INNERGRID", (0, 0), (-1, -1), 0.25, colors.lightgrey),
+                        ("LEFTPADDING", (0, 0), (-1, -1), 4),
+                        ("RIGHTPADDING", (0, 0), (-1, -1), 4),
+                        # Highlight count column in red so the page screams "EV leak".
+                        (
+                            "TEXTCOLOR",
+                            (2, 1),
+                            (2, -1),
+                            colors.HexColor("#b00000"),
+                        ),
+                        (
+                            "FONTNAME",
+                            (2, 1),
+                            (2, -1),
+                            "Courier-Bold",
+                        ),
+                    ]
+                    raw_tbl.setStyle(TableStyle(raw_style))
+                    story.append(raw_tbl)
+        story.append(Spacer(1, 0.2 * inch))
+
         # Investor deck deep-link
         deck = payload.get("investor_deck") or {}
         story.append(Paragraph("Latest investor deck", h2))
@@ -1293,6 +1425,27 @@ def render_text(payload: dict[str, Any]) -> tuple[str, str]:
         for it in gt["items"]:
             lines.append(
                 f"  {it['gate_name']:<30s}  count={it['count']:>4d}  "
+                f"last={it.get('last_at') or '(n/a)'}"
+            )
+    lines.append("")
+
+    # Section 5 — uncalibrated live trades (Task #767)
+    ur = payload.get("uncalibrated_raw") or {}
+    lines.append("== 5. Uncalibrated live trades (last 24h, raw-mode override) ==")
+    if ur.get("error"):
+        lines.append(f"  ERROR: {ur['error']}")
+    elif int(ur.get("total") or 0) == 0:
+        lines.append("  [GREEN] 0 raw-mode trades shipped (calibrator gate held)")
+    else:
+        lines.append(
+            f"  [RED]   {ur.get('total', 0)} raw-mode trades shipped "
+            "(operator opted a vertical out of the calibrator gate)"
+        )
+        for it in ur.get("items") or []:
+            lines.append(
+                f"    {str(it.get('vertical') or '?'):<14s} "
+                f"{str(it.get('league') or '?'):<10s} "
+                f"count={it.get('count', 0):>4d}  "
                 f"last={it.get('last_at') or '(n/a)'}"
             )
     lines.append("")
@@ -1476,6 +1629,43 @@ def render_html(payload: dict[str, Any]) -> str:
             parts.append("</table>")
         else:
             parts.append("<p>no gate trips in the last 24 hours</p>")
+
+    ur = payload.get("uncalibrated_raw") or {}
+    _section_h("Uncalibrated live trades (last 24h, raw-mode override)")
+    if not _err(ur):
+        total = int(ur.get("total") or 0)
+        if total == 0:
+            parts.append(
+                "<p style=\"color:#0a7d0a;font-weight:600;\">"
+                "0 raw-mode trades shipped (calibrator gate held).</p>"
+            )
+        else:
+            parts.append(
+                f"<p style=\"color:#b00000;font-weight:600;\">"
+                f"{total} raw-mode trade(s) shipped — operator opted a "
+                "vertical out of the calibrator gate.</p>"
+            )
+            items = ur.get("items") or []
+            if items:
+                parts.append(
+                    "<table cellpadding=4 style=\"border-collapse:collapse;"
+                    "font-family:ui-monospace,SFMono-Regular,Menlo,monospace;"
+                    "font-size:12px;\">"
+                )
+                parts.append(
+                    "<tr style=\"background:#f0f0f0;\">"
+                    "<th>Vertical</th><th>League</th>"
+                    "<th>Count</th><th>Last at</th></tr>"
+                )
+                for it in items:
+                    parts.append(
+                        f"<tr><td>{html.escape(str(it.get('vertical') or '?'))}</td>"
+                        f"<td>{html.escape(str(it.get('league') or '?'))}</td>"
+                        f"<td style=\"color:#b00000;font-weight:600;\">"
+                        f"{int(it.get('count', 0))}</td>"
+                        f"<td>{html.escape(str(it.get('last_at') or '(n/a)'))}</td></tr>"
+                    )
+                parts.append("</table>")
 
     deck = payload.get("investor_deck") or {}
     _section_h("Latest investor deck")

@@ -439,6 +439,26 @@ LEAGUE_CONFIGS: dict[str, LeagueConfig] = {
         live_action_blackout=False,
         max_daily_trades=20,
     ),
+    # Weather (task #767).  WEATHER joined `SUPPORTED_LEAGUES` so the
+    # GRU+EMOS temperature stack and the precipitation predictor stop
+    # silently bypassing the calibrator.  The
+    # `test_league_configs_table_covers_every_supported_league`
+    # invariant requires every supported league to carry a
+    # `LeagueConfig`, so we add a conservative entry here:
+    # weather markets resolve once-per-day on a fixed schedule and
+    # carry no in-progress event frame, so per-event/live-blackout
+    # mirror the commodities/tech-AI shape and `max_daily_trades`
+    # caps churn at one trade per location/day in expectation.
+    "WEATHER": LeagueConfig(
+        league="WEATHER",
+        priority=11,
+        allocation_pct=0.05,
+        per_game_cap_pct=0.005,
+        per_event_cap_pct=0.02,
+        n_way_market=False,
+        live_action_blackout=False,
+        max_daily_trades=20,
+    ),
 }
 
 

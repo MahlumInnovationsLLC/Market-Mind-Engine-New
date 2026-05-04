@@ -349,7 +349,7 @@ def test_gate_count_invariant_preserved():
     vertical risk plumbing is the only thing allowed to grow this
     number (14 → 17 in task #730: sharpe_ratio + ruin_monte_carlo +
     segment_throttler audit gates)."""
-    assert len(GATES) == 19
+    assert len(GATES) == 20
 
 
 def test_league_configs_table_covers_every_supported_league():

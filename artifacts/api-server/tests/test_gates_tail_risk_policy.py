@@ -432,10 +432,27 @@ def test_feb20_nba_rejected_by_jumbo_quantity_cap():
     assert res.details["cap"] == 750
 
 
-def test_feb20_nba_rejected_by_run_all_gates_pipeline():
+def test_feb20_nba_rejected_by_run_all_gates_pipeline(monkeypatch):
     """End-to-end through ``run_all_gates``: the cycle short-circuits at
     the tail gate (the first new gate after `agreement`) and never
     reaches the DB-touching round-2 / sizing gates."""
+    # Task #767: stub a fitted NBA calibrator so the new
+    # `gate_uncalibrated_vertical` (which sits between
+    # `vertical_halted` and `market_cooldown`) waves the candidate
+    # through and the test can keep asserting the *tail* gate is what
+    # rejects this real-world Feb-20 NBA candidate.
+    from app import calibrators as _cal
+
+    class _Snap:
+        type = "isotonic"
+        fit_at = "2026-05-01T12:00:00Z"
+        sample_count = 250
+
+    class _State:
+        def champion(self, _league):
+            return _Snap()
+
+    monkeypatch.setattr(_cal, "get_state", lambda: _State(), raising=True)
     ctx = _feb_20_nba_ctx()
     events: list[dict] = []
 

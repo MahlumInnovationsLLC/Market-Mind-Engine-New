@@ -136,7 +136,10 @@ _BASELINE_BUILTINS: dict[str, dict[str, Any]] = {
         "predictor_hook": None,
         "feature_builder_hook": None,
         "duplicate_trade_exempt": False,
-        "enabled": True,
+        # Hard-disabled in task #767 — registered for dashboard
+        # frozen-order back-compat only; the orchestrator's scheduler
+        # skips disabled verticals.
+        "enabled": False,
     },
 }
 

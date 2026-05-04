@@ -59,7 +59,23 @@ REGISTRY.register(VerticalSpec(
     name="politics",
     leagues=("POLITICS",),
     persona_profile="politics",
-    description="Legacy politics vertical kept for backward compatibility.",
+    # Hard-disabled in task #767: the legacy politics vertical has no
+    # live data feed and no fitted calibrator, but was still wired
+    # into orchestrator.scheduler so a stray
+    # `AXIOM_ORCHESTRATOR_VERTICALS=politics` could ship uncalibrated
+    # raw probabilities into Kelly sizing.  We keep the spec
+    # registered so the dashboard's frozen-order snapshot
+    # (sports/weather/crypto/crypto-binary/politics) and the registry
+    # introspection endpoints stay backwards-compatible, but
+    # `enabled=False` causes `_CycleScheduler.start` to skip spawning
+    # a loop task — there is no env-only escape hatch.  Use the
+    # `elections` vertical for live political markets.
+    enabled=False,
+    description=(
+        "Legacy politics vertical — hard-disabled in task #767; the "
+        "live elections vertical replaces it.  Kept registered for "
+        "dashboard frozen-order back-compat only."
+    ),
 ))
 
 # Commodities (task #198).  Per-contract LGB+XGB binary-close stack

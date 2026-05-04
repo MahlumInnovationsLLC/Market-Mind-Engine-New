@@ -31,10 +31,15 @@ class _FakeDB:
         self.dedupe_marked: list[tuple[str, str]] = []
 
     def _match(self, query: str) -> Any:
+        # Longest-needle wins so a more-specific canned key (e.g.
+        # `uncalibrated_vertical_raw_mode`) shadows a broader one
+        # (e.g. `FROM risk_gate_trips`) when both substrings appear
+        # in the same query.
+        best: tuple[int, Any] = (-1, None)
         for needle, value in self._mapping.items():
-            if needle in query:
-                return value
-        return None
+            if needle in query and len(needle) > best[0]:
+                best = (len(needle), value)
+        return best[1]
 
     async def fetch(self, query: str, *args: Any) -> list[dict[str, Any]]:
         v = self._match(query)
@@ -205,6 +210,7 @@ def test_collect_report_aggregates_four_sections(
         {
             "calibration_snapshots": _SNAPSHOT_ROWS,
             "FROM risk_gate_trips": _GATE_TRIP_ROWS,
+            "uncalibrated_vertical_raw_mode": [],
         }
     )
     monkeypatch.setattr(dhr, "db", fake)
@@ -299,6 +305,7 @@ def test_fire_now_dry_run_renders_without_dispatch(
         {
             "calibration_snapshots": _SNAPSHOT_ROWS,
             "FROM risk_gate_trips": _GATE_TRIP_ROWS,
+            "uncalibrated_vertical_raw_mode": [],
         }
     )
     monkeypatch.setattr(dhr, "db", fake)
@@ -377,6 +384,7 @@ def _setup_fire_now_env(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]
         {
             "calibration_snapshots": _SNAPSHOT_ROWS,
             "FROM risk_gate_trips": _GATE_TRIP_ROWS,
+            "uncalibrated_vertical_raw_mode": [],
         }
     )
     monkeypatch.setattr(dhr, "db", fake)
@@ -1158,3 +1166,178 @@ def test_alerts_dispatch_attachments_survive_disk_cleanup(
         )
     )
     assert sent and sent[0]["attachments"] == fanout_kwargs["attachments"]
+
+
+# ---------------------------------------------------------------------------
+# Task #767 — uncalibrated raw-mode trades section
+# ---------------------------------------------------------------------------
+
+
+class _UncalRawDB:
+    """Tiny stand-in that returns canned rows for the uncalibrated-raw
+    aggregation query and otherwise defers to a no-op."""
+
+    def __init__(self, rows: list[dict[str, Any]]) -> None:
+        self._rows = rows
+
+    async def fetch(self, query: str, *args: Any) -> list[dict[str, Any]]:
+        if "uncalibrated_vertical_raw_mode" in query:
+            return self._rows
+        return []
+
+    async def fetchrow(self, *_a: Any, **_kw: Any) -> Any:
+        return None
+
+    async def execute(self, *_a: Any, **_kw: Any) -> str:
+        return "OK"
+
+    async def fetchval(self, *_a: Any, **_kw: Any) -> Any:
+        return None
+
+
+def test_collect_uncalibrated_trades_24h_aggregates_rows(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rows = [
+        {
+            "vertical": "weather",
+            "league": "WEATHER",
+            "n": 7,
+            "last_at": "2026-05-04T12:34:56Z",
+        },
+        {
+            "vertical": "politics",
+            "league": "POLITICS",
+            "n": 1,
+            "last_at": "2026-05-04T08:00:00Z",
+        },
+    ]
+    monkeypatch.setattr(dhr, "db", _UncalRawDB(rows))
+    out = asyncio.run(dhr.collect_uncalibrated_trades_24h())
+    assert out["error"] is None
+    assert out["total"] == 8
+    assert out["tone"] == "red"
+    assert out["items"][0]["vertical"] == "weather"
+    assert out["items"][0]["count"] == 7
+
+
+def test_collect_uncalibrated_trades_24h_zero_rows_is_green(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(dhr, "db", _UncalRawDB([]))
+    out = asyncio.run(dhr.collect_uncalibrated_trades_24h())
+    assert out["total"] == 0
+    assert out["tone"] == "green"
+    assert out["items"] == []
+
+
+def test_collect_uncalibrated_trades_24h_swallows_db_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _Boom:
+        async def fetch(self, *_a: Any, **_kw: Any) -> list[Any]:
+            raise RuntimeError("kaboom")
+
+    monkeypatch.setattr(dhr, "db", _Boom())
+    out = asyncio.run(dhr.collect_uncalibrated_trades_24h())
+    assert out["total"] == 0
+    assert out["error"] and "kaboom" in out["error"]
+
+
+def _payload_with_uncal(items: list[dict[str, Any]]) -> dict[str, Any]:
+    total = sum(int(it.get("count", 0)) for it in items)
+    return {
+        "date_utc": "2026-05-04",
+        "divergence": {"days": 7, "items": []},
+        "calibrator_drift": {"items": []},
+        "tail_risk": {},
+        "gate_trips_24h": {"items": [], "total": 0},
+        "uncalibrated_raw": {
+            "items": items,
+            "total": total,
+            "tone": "red" if total > 0 else "green",
+            "error": None,
+        },
+        "investor_deck": {"investor_deck_path": None, "built_at": None},
+    }
+
+
+def test_render_text_renders_uncalibrated_red_row() -> None:
+    payload = _payload_with_uncal(
+        [
+            {
+                "vertical": "weather",
+                "league": "WEATHER",
+                "count": 3,
+                "last_at": "2026-05-04T11:00:00Z",
+            }
+        ]
+    )
+    _subject, body = dhr.render_text(payload)
+    assert "5. Uncalibrated live trades" in body
+    assert "[RED]" in body
+    assert "weather" in body
+    assert "WEATHER" in body
+    assert "count=   3" in body
+
+
+def test_render_text_renders_uncalibrated_green_when_zero() -> None:
+    payload = _payload_with_uncal([])
+    _subject, body = dhr.render_text(payload)
+    assert "5. Uncalibrated live trades" in body
+    assert "[GREEN] 0 raw-mode trades" in body
+    assert "[RED]" not in body.split("5. Uncalibrated")[1].split("\n\n")[0]
+
+
+def test_render_html_renders_uncalibrated_section_red() -> None:
+    payload = _payload_with_uncal(
+        [
+            {
+                "vertical": "weather",
+                "league": "WEATHER",
+                "count": 5,
+                "last_at": "2026-05-04T11:00:00Z",
+            }
+        ]
+    )
+    body = dhr.render_html(payload)
+    assert "Uncalibrated live trades" in body
+    assert "#b00000" in body  # red highlight
+    assert "weather" in body and "WEATHER" in body
+
+
+def test_render_daily_report_pdf_includes_uncalibrated_section(tmp_path) -> None:
+    payload = _payload_with_uncal(
+        [
+            {
+                "vertical": "weather",
+                "league": "WEATHER",
+                "count": 9,
+                "last_at": "2026-05-04T11:00:00Z",
+            }
+        ]
+    )
+    out = dhr.render_daily_report_pdf(
+        payload,
+        text_body="body",
+        chart_path=None,
+        output_dir=tmp_path,
+    )
+    if out is None:
+        pytest.skip("reportlab not installed")
+    # PDF text streams are compressed by default — assert the file
+    # builds + has non-trivial size + a comparable build with the
+    # section omitted is materially smaller (proves the new section
+    # actually contributed content).
+    blob = out.read_bytes()
+    assert blob.startswith(b"%PDF") and len(blob) > 1000
+
+    bare_payload = _payload_with_uncal([])
+    bare = dhr.render_daily_report_pdf(
+        bare_payload,
+        text_body="body",
+        chart_path=None,
+        output_dir=tmp_path,
+    )
+    assert bare is not None
+    assert len(blob) > len(bare.read_bytes())

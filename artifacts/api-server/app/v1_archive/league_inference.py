@@ -70,6 +70,17 @@ SUPPORTED_LEAGUES: frozenset[str] = frozenset({
     # ``app.calibrators.SUPPORTED_LEAGUES`` so the drift-guard test
     # in ``test_v1_archive_league_inference.py`` passes.
     "CRYPTO",
+    # Task #767: ``WEATHER`` joined the calibrator registry so the
+    # GRU+EMOS temperature stack and the precipitation predictor stop
+    # silently bypassing the calibrator.  Mirrored here per the same
+    # drift-guard contract as CRYPTO above; the prefix-rule table
+    # below intentionally leaves WEATHER unmapped because the V1
+    # archive backfill identifies weather rows via
+    # ``vertical='weather'`` (the precip + temperature predictors
+    # always set the column directly), which is more robust than a
+    # Kalshi-prefix heuristic across the WX-* / KXHIGH* / KXLOW*
+    # series.
+    "WEATHER",
 })
 
 # Sentinel league values V1 wrote when its own per-trade heuristic

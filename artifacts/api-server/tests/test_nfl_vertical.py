@@ -280,7 +280,7 @@ def test_gate_count_invariant_preserved():
     """Spec requires NFL sub-checks fold into existing gates rather
     than adding new entries.  Cross-vertical risk plumbing is the only
     thing allowed to grow this number (14 → 17 in task #730 (sharpe_ratio + ruin_monte_carlo + segment_throttler audit gates) and 17 → 19 in task #743 (tail_price_size_cap + jumbo_quantity_cap tail-risk policy gates)."""
-    assert len(GATES) == 19
+    assert len(GATES) == 20
 
 
 # ---------------------------------------------------------------------------

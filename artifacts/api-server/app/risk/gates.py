@@ -328,6 +328,138 @@ async def gate_vertical_halted(ctx: RiskContext) -> GateResult:
     return GateResult("vertical_halted", True, "", {"vertical": vertical})
 
 
+def _raw_mode_override_key(vertical: str) -> str:
+    """Operator-override key that opts a vertical out of the
+    `gate_uncalibrated_vertical` block.  Naming matches the rest of
+    the per-vertical knob convention (`risk.<knob>_<vertical>`)."""
+    return f"uncalibrated_raw_mode_{(vertical or '').strip().lower()}"
+
+
+async def gate_uncalibrated_vertical(ctx: RiskContext) -> GateResult:
+    """Refuse to ship a live trade whose ``(vertical, league)`` does
+    not have a fitted calibrator snapshot (Task #767).
+
+    Until task #767 the ``apply()`` call in every predictor would
+    silently bypass with ``info.reason="unsupported league"`` /
+    ``"no fitted calibrator"`` and return the raw stack output, which
+    then fed Kelly sizing — a textbook EV leak.  This gate closes the
+    loop by rejecting any candidate whose ``ctx.league`` is missing
+    from ``calibrators.SUPPORTED_LEAGUES`` *or* whose champion
+    snapshot has not yet been fit.
+
+    Operators can opt a single vertical into "ship raw" via the
+    runtime override ``risk.uncalibrated_raw_mode_<vertical>``.  When
+    opted in, the gate **passes** but persists a
+    ``risk_gate_trips`` row with ``gate_name='uncalibrated_vertical_raw_mode'``
+    so the daily honesty report's "Uncalibrated live trades (24h)" row
+    can surface the count in red.
+
+    Degrades open: candidates that don't carry a league (legacy /
+    test paths) skip the gate so this never accidentally halts a
+    fully-calibrated vertical.
+    """
+    league = (ctx.league or "").strip().upper()
+    vertical = (ctx.vertical or "").strip().lower()
+    base_details: dict[str, Any] = {"vertical": vertical, "league": league or None}
+    if not league:
+        return GateResult(
+            "uncalibrated_vertical",
+            True,
+            "no league on candidate (gate skipped)",
+            base_details,
+        )
+
+    # Lazy import — `app.calibrators` carries module-level state and
+    # we want the gate file to stay safe to import in tooling that
+    # doesn't initialise that state.
+    try:
+        from .. import calibrators as _cal
+    except Exception as e:  # pragma: no cover — import failure is fatal elsewhere
+        return GateResult(
+            "uncalibrated_vertical",
+            True,
+            f"calibrators import failed (degraded): {e}",
+            base_details,
+        )
+
+    supported = league in getattr(_cal, "SUPPORTED_LEAGUES", ())
+    snapshot = None
+    try:
+        snapshot = _cal.get_state().champion(league)
+    except Exception as e:  # pragma: no cover — defensive
+        log.warning("uncalibrated_vertical: state.champion(%s) raised: %s", league, e)
+        snapshot = None
+
+    if supported and snapshot is not None:
+        return GateResult(
+            "uncalibrated_vertical",
+            True,
+            "",
+            {
+                **base_details,
+                "calibrator_loaded": True,
+                "calibrator_type": getattr(snapshot, "type", None),
+                "fit_at": getattr(snapshot, "fit_at", None),
+                "sample_count": getattr(snapshot, "sample_count", None),
+            },
+        )
+
+    # No calibrator — check the raw-mode escape hatch.
+    raw_key = _raw_mode_override_key(vertical)
+    raw_flag = ctx.operator_overrides.get(raw_key)
+    raw_enabled = False
+    if isinstance(raw_flag, bool):
+        raw_enabled = raw_flag
+    elif isinstance(raw_flag, (int, float)):
+        raw_enabled = bool(raw_flag)
+    elif isinstance(raw_flag, str):
+        raw_enabled = raw_flag.strip().lower() in ("1", "true", "yes", "on", "y")
+
+    fail_reason = (
+        "calibrator missing for vertical "
+        if not supported
+        else "no fitted calibrator snapshot for league "
+    ) + repr(league)
+    details = {
+        **base_details,
+        "calibrator_loaded": False,
+        "supported": supported,
+        "raw_mode_key": raw_key,
+    }
+    if not raw_enabled:
+        return GateResult(
+            "uncalibrated_vertical",
+            False,
+            fail_reason + " (no raw-mode override)",
+            details,
+        )
+
+    # Raw-mode opt-in: PASS but persist a tracking row so the daily
+    # honesty report can surface the count in red.  Best-effort —
+    # persistence failure must never block a candidate the operator
+    # has explicitly opted in.
+    try:
+        await _persist_risk_gate_trip(
+            ctx=ctx,
+            gate_name="uncalibrated_vertical_raw_mode",
+            reason=fail_reason + " (operator opted into raw mode)",
+            details={**details, "raw_mode": True},
+        )
+    except Exception as e:  # pragma: no cover — persist is best-effort
+        log.warning(
+            "uncalibrated_vertical raw-mode persist failed for vertical=%s league=%s: %s",
+            vertical,
+            league,
+            e,
+        )
+    return GateResult(
+        "uncalibrated_vertical",
+        True,
+        "raw-mode override active (uncalibrated trade shipped)",
+        {**details, "raw_mode": True},
+    )
+
+
 async def gate_kill_switch(ctx: RiskContext) -> GateResult:
     """Global trading_mode != 'halt'.  AXIOM_TRADING_MODE env or
     operator_overrides['trading_mode'] both honored — operator override
@@ -1682,6 +1814,14 @@ GATES: tuple[tuple[str, GateFn], ...] = (
     ("kill_switch", gate_kill_switch),
     ("daily_loss", gate_daily_loss),
     ("vertical_halted", gate_vertical_halted),
+    # Task #767 — block any candidate whose (vertical, league) lacks a
+    # calibrator snapshot, unless the operator has opted that vertical
+    # into "ship raw" via runtime settings.  Sits before the cooldown /
+    # swarm gates because (a) it's a pure in-process state read (no
+    # DB round-trip) and (b) calibrator coverage is a precondition for
+    # *every* downstream sizing decision — no point doing more work
+    # on a candidate we wouldn't ship even if it cleared agreement.
+    ("uncalibrated_vertical", gate_uncalibrated_vertical),
     ("market_cooldown", gate_market_cooldown),
     ("swarm_approval", gate_swarm_approval),
     ("min_edge", gate_min_edge),
@@ -1713,10 +1853,11 @@ GATES: tuple[tuple[str, GateFn], ...] = (
     ("max_concurrent_positions", gate_max_concurrent_positions),
     ("duplicate_trade", gate_duplicate_trade),
 )
-assert len(GATES) == 19, (
-    "19 gates: 12 original + daily_loss (task #268) + vertical_halted "
+assert len(GATES) == 20, (
+    "20 gates: 12 original + daily_loss (task #268) + vertical_halted "
     "(task #271) + sharpe_ratio + ruin_monte_carlo + segment_throttler "
-    "(task #730) + tail_price_size_cap + jumbo_quantity_cap (task #743)"
+    "(task #730) + tail_price_size_cap + jumbo_quantity_cap (task #743) "
+    "+ uncalibrated_vertical (task #767)"
 )
 
 

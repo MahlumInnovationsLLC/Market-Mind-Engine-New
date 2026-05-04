@@ -284,3 +284,123 @@ def test_run_all_gates_does_not_persist_on_pass(
     assert not any(
         "INSERT INTO risk_gate_trips" in q for q, _ in cap.calls
     )
+
+
+# ---------------------------------------------------------------------------
+# Task #767 — gate_uncalibrated_vertical
+# ---------------------------------------------------------------------------
+
+
+class _StubSnapshot:
+    def __init__(self) -> None:
+        self.type = "isotonic"
+        self.fit_at = "2026-05-01T12:00:00Z"
+        self.sample_count = 250
+
+
+class _StubCalState:
+    def __init__(self, leagues_with_snapshot: set[str]) -> None:
+        self._leagues = leagues_with_snapshot
+
+    def champion(self, league: str):
+        return _StubSnapshot() if league in self._leagues else None
+
+
+def _patch_calibrators(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    supported: tuple[str, ...] = ("NBA", "WEATHER"),
+    fitted: set[str] = frozenset({"NBA"}),
+) -> None:
+    from app import calibrators as _cal
+
+    monkeypatch.setattr(_cal, "SUPPORTED_LEAGUES", supported, raising=True)
+    monkeypatch.setattr(
+        _cal, "get_state", lambda: _StubCalState(set(fitted)), raising=True
+    )
+
+
+def test_gate_uncalibrated_vertical_passes_when_calibrator_fitted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_calibrators(monkeypatch)
+    cap = _CapturedExec()
+    monkeypatch.setattr(_db, "execute", cap)
+    ctx = _make_ctx(vertical="sports", league="NBA")
+    res = _run(_gates.gate_uncalibrated_vertical(ctx))
+    assert res.passed is True
+    assert res.details["calibrator_loaded"] is True
+    assert not cap.calls  # no risk_gate_trips persistence on the happy path
+
+
+def test_gate_uncalibrated_vertical_blocks_when_calibrator_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_calibrators(monkeypatch, fitted=set())  # no fitted snapshot
+    cap = _CapturedExec()
+    monkeypatch.setattr(_db, "execute", cap)
+    ctx = _make_ctx(vertical="weather", league="WEATHER", operator_overrides={})
+    res = _run(_gates.gate_uncalibrated_vertical(ctx))
+    assert res.passed is False
+    assert "no fitted calibrator snapshot" in res.reason
+    assert res.details["calibrator_loaded"] is False
+    # Block path does not persist a row — the run_all_gates wrapper does that.
+    assert not cap.calls
+
+
+def test_gate_uncalibrated_vertical_blocks_unsupported_league(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_calibrators(monkeypatch, supported=("NBA",), fitted={"NBA"})
+    cap = _CapturedExec()
+    monkeypatch.setattr(_db, "execute", cap)
+    ctx = _make_ctx(vertical="weather", league="WEATHER")
+    res = _run(_gates.gate_uncalibrated_vertical(ctx))
+    assert res.passed is False
+    assert "calibrator missing for vertical" in res.reason
+    assert res.details["supported"] is False
+
+
+def test_gate_uncalibrated_vertical_raw_mode_passes_and_persists(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_calibrators(monkeypatch, supported=("NBA",), fitted={"NBA"})
+    cap = _CapturedExec()
+    monkeypatch.setattr(_db, "execute", cap)
+    ctx = _make_ctx(
+        vertical="weather",
+        league="WEATHER",
+        operator_overrides={"uncalibrated_raw_mode_weather": True},
+    )
+    res = _run(_gates.gate_uncalibrated_vertical(ctx))
+    assert res.passed is True
+    assert res.details["raw_mode"] is True
+    # Exactly one INSERT into risk_gate_trips with the raw-mode marker.
+    inserts = [
+        args
+        for q, args in cap.calls
+        if "INSERT INTO risk_gate_trips" in q
+    ]
+    assert len(inserts) == 1
+    assert inserts[0][0] == "uncalibrated_vertical_raw_mode"
+    assert inserts[0][2] == "weather"  # vertical
+
+
+def test_gate_uncalibrated_vertical_skips_when_no_league(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_calibrators(monkeypatch)
+    ctx = _make_ctx(vertical="legacy", league=None)
+    res = _run(_gates.gate_uncalibrated_vertical(ctx))
+    assert res.passed is True
+    assert "gate skipped" in res.reason
+
+
+def test_gates_registry_includes_uncalibrated_vertical() -> None:
+    """Registry order is observable; #767 inserts immediately after
+    `vertical_halted` so the cheap calibrator check runs before any
+    DB-touching gate."""
+    names = [n for n, _ in _gates.GATES]
+    assert "uncalibrated_vertical" in names
+    assert names.index("uncalibrated_vertical") == names.index("vertical_halted") + 1
+    assert len(_gates.GATES) == 20

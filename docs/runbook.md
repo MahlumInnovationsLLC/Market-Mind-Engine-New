@@ -2496,7 +2496,25 @@ PDF additionally pushed to opted-in Telegram chats via
    positions, duplicate-trade) writes one append-only row even when the
    downstream alert dispatch is deduped. The panel is a single source
    of truth for what *would* have alerted overnight (follow-up #763).
-5. **Latest investor deck** — auto-built every weekly V1 backtest cron
+5. **Uncalibrated live trades (last 24 h)** — count of live trades
+   that shipped via the `gate_uncalibrated_vertical` raw-mode escape
+   hatch (Task #767). The new gate refuses to ship any candidate whose
+   `(vertical, league)` lacks a fitted calibrator snapshot — but
+   operators can opt a single vertical into "ship raw" by setting
+   `risk.uncalibrated_raw_mode_<vertical>=true` in `system_settings`
+   (e.g. `risk.uncalibrated_raw_mode_weather`). When opted in, the
+   gate **passes** but writes a `risk_gate_trips` row with
+   `gate_name='uncalibrated_vertical_raw_mode'` so this section can
+   surface the count in red. **GREEN** when zero (the calibrator gate
+   held); **RED** with a per-(vertical, league) breakdown when ≥ 1
+   trade shipped raw. The operator-visible message is "operator opted
+   a vertical out of the calibrator gate" — i.e. the leak is
+   intentional and audited, not silent. The legacy `politics` vertical
+   was hard-disabled in the same task (no live data feed, no
+   calibrator) so a stray `AXIOM_ORCHESTRATOR_VERTICALS=politics`
+   can no longer ship raw probabilities into Kelly sizing — use the
+   live `elections` vertical instead.
+6. **Latest investor deck** — auto-built every weekly V1 backtest cron
    (§22) and surfaced as a one-line link to the most recent
    `investor_deck_latest.pptx`. Looked up via the latest
    `v1_backtest_gate_runs.notes` JSON. "not built yet" is normal until
@@ -2527,6 +2545,7 @@ verdict on the rest of the tile.
 | Calibrator drift | RED tone on any league | Brier blew past 0.25, drift status flipped to `rolled_back` / `fitting_failed` / `drift_breach`, or the snapshot is older than 14 days (refit job stalled). |
 | Tail risk | `tone == "red"` | One or two markets account for too large a fraction of the open `tail_max_loss`. Inspect the per-position table and consider trimming. |
 | Gate trips | `tail_risk_size_clamped` count > 0 | Sizing layer keeps trying to over-allocate into the tail bucket. Tighten `RISK_GATE_TAIL_MAX_LOSS_USD` or the per-market clamp (see §16). |
+| Uncalibrated raw trades | total > 0 | A vertical has `risk.uncalibrated_raw_mode_<name>=true` set in `system_settings`, so the calibrator gate is bypassed and raw stack probabilities feed Kelly sizing. Either fit a calibrator for that league (preferred) or revoke the override (`UPDATE system_settings SET value='false' WHERE key='risk.uncalibrated_raw_mode_<name>'`). The per-(vertical, league) breakdown identifies which feed to fix. |
 
 ### Manual fire-now
 
