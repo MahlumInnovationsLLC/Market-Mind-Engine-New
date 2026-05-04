@@ -1231,6 +1231,45 @@ def test_collect_uncalibrated_trades_24h_zero_rows_is_green(
     assert out["items"] == []
 
 
+def test_collect_uncalibrated_trades_24h_dedupes_one_order_per_lifecycle(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression for code-review finding: an order with both
+    `submitted` and `filled` lifecycle events must contribute count=1,
+    not count=2.  The SQL-level dedupe lives in the inner CTE
+    (`GROUP BY ol.order_id, ol.vertical, ol.market_id`); this test
+    pins the SQL-shape contract so a future edit can't silently
+    re-introduce the over-count.
+    """
+    captured: dict[str, str] = {}
+
+    class _Capture:
+        async def fetch(self, query: str, *args: Any) -> list[Any]:
+            captured["q"] = query
+            # Simulate Postgres returning the *post*-dedupe shape: one
+            # order with submitted+filled is a single row with n=1.
+            return [
+                {
+                    "vertical": "weather",
+                    "league": "WEATHER",
+                    "n": 1,
+                    "last_at": "2026-05-04T11:00:00Z",
+                }
+            ]
+
+    monkeypatch.setattr(dhr, "db", _Capture())
+    out = asyncio.run(dhr.collect_uncalibrated_trades_24h())
+    assert out["total"] == 1, "one order with submitted+filled must count once"
+    q_norm = " ".join(captured["q"].split())
+    # SQL contract: dedupe by (order_id, vertical, market_id), not by
+    # (order_id, ..., created_at) — including created_at would split
+    # the submitted and filled rows back apart.
+    assert "GROUP BY ol.order_id, ol.vertical, ol.market_id" in q_norm
+    assert "max(ol.created_at)" in q_norm
+    # And the join must filter on shipped events specifically.
+    assert "event_type IN ('submitted', 'filled')" in q_norm
+
+
 def test_collect_uncalibrated_trades_24h_swallows_db_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

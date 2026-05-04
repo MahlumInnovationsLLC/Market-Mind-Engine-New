@@ -629,12 +629,16 @@ async def collect_uncalibrated_trades_24h() -> dict[str, Any]:
                    AND market_id IS NOT NULL
             ),
             shipped AS (
-                SELECT DISTINCT
-                       ol.order_id,
+                -- One row per unique shipped order.  An order can have
+                -- multiple lifecycle events (e.g. submitted + filled);
+                -- we collapse to the order_id so the operator sees a
+                -- count of orders that actually went out, not a count
+                -- of lifecycle events.
+                SELECT ol.order_id,
                        ol.vertical,
                        ol.market_id,
-                       m.league,
-                       ol.created_at
+                       max(m.league)         AS league,
+                       max(ol.created_at)    AS last_event_at
                   FROM order_lifecycle ol
                   JOIN raw_markers   m
                     ON m.vertical  = ol.vertical
@@ -643,11 +647,12 @@ async def collect_uncalibrated_trades_24h() -> dict[str, Any]:
                                          AND m.created_at + interval '2 hours'
                  WHERE ol.created_at > now() - interval '24 hours'
                    AND ol.event_type IN ('submitted', 'filled')
+                 GROUP BY ol.order_id, ol.vertical, ol.market_id
             )
             SELECT vertical,
                    league,
                    count(*)::int                            AS n,
-                   to_char(max(created_at),
+                   to_char(max(last_event_at),
                            'YYYY-MM-DD"T"HH24:MI:SSZ')      AS last_at
               FROM shipped
              GROUP BY vertical, league
