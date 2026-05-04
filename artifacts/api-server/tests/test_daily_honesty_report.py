@@ -366,6 +366,107 @@ def test_fire_now_dry_run_renders_without_dispatch(
 
 
 # ---------------------------------------------------------------------------
+# Task #765 — operator-visible banner when PDF/chart render returns None
+# ---------------------------------------------------------------------------
+
+
+def _setup_fire_now_env(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
+    """Wire up enough mocks for `fire_now(dry_run=True)` to run end-to-end
+    and return the captured dispatch-call list."""
+    fake = _DivergenceFakeDB(
+        {
+            "calibration_snapshots": _SNAPSHOT_ROWS,
+            "FROM risk_gate_trips": _GATE_TRIP_ROWS,
+        }
+    )
+    monkeypatch.setattr(dhr, "db", fake)
+
+    async def _fake_tail(*, days: int = 30) -> dict[str, Any]:
+        return _TAIL_TILE
+
+    import app.dashboard as _dashboard
+
+    monkeypatch.setattr(_dashboard, "get_tail_risk_exposure", _fake_tail)
+
+    dispatch_calls: list[dict[str, Any]] = []
+
+    def _fake_dispatch(
+        subject: str,
+        body: str,
+        *,
+        tag: str,
+        dry_run: bool,
+        html_body: str | None = None,
+        attachments: Any = None,
+    ) -> dict[str, Any]:
+        dispatch_calls.append(
+            {
+                "subject": subject,
+                "body": body,
+                "html_body": html_body,
+                "tag": tag,
+                "attachments": [str(p) for p in (attachments or [])],
+            }
+        )
+        return {"tag": tag, "dispatched": False, "dry_run": dry_run}
+
+    monkeypatch.setattr(alerts, "_dispatch", _fake_dispatch)
+    return dispatch_calls
+
+
+_BANNER = "(PDF artifact unavailable today — see API server logs)"
+
+
+def test_fire_now_banner_appears_when_pdf_render_returns_none(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
+    dispatch_calls = _setup_fire_now_env(monkeypatch)
+
+    monkeypatch.setattr(
+        dhr, "render_daily_report_pdf", lambda *a, **kw: None
+    )
+    fake_chart = tmp_path / "chart.png"
+    fake_chart.write_bytes(b"\x89PNG fake")
+    monkeypatch.setattr(
+        dhr, "render_tail_risk_chart_png", lambda *a, **kw: fake_chart
+    )
+
+    out = _run(dhr.fire_now(dry_run=True))
+
+    assert _BANNER in out["body"]
+    assert _BANNER in out["html_body"]
+    assert out["body"].startswith(_BANNER)
+    assert len(dispatch_calls) == 1
+    assert _BANNER in dispatch_calls[0]["body"]
+    assert _BANNER in dispatch_calls[0]["html_body"]
+
+
+def test_fire_now_banner_absent_when_both_artifacts_render(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
+    dispatch_calls = _setup_fire_now_env(monkeypatch)
+
+    fake_pdf = tmp_path / "report.pdf"
+    fake_pdf.write_bytes(b"%PDF-1.4 fake")
+    fake_chart = tmp_path / "chart.png"
+    fake_chart.write_bytes(b"\x89PNG fake")
+    monkeypatch.setattr(
+        dhr, "render_daily_report_pdf", lambda *a, **kw: fake_pdf
+    )
+    monkeypatch.setattr(
+        dhr, "render_tail_risk_chart_png", lambda *a, **kw: fake_chart
+    )
+
+    out = _run(dhr.fire_now(dry_run=True))
+
+    assert _BANNER not in out["body"]
+    assert _BANNER not in out["html_body"]
+    assert len(dispatch_calls) == 1
+    assert _BANNER not in dispatch_calls[0]["body"]
+    assert _BANNER not in dispatch_calls[0]["html_body"]
+
+
+# ---------------------------------------------------------------------------
 # T012.C — dedupe is idempotent within a UTC day
 # ---------------------------------------------------------------------------
 

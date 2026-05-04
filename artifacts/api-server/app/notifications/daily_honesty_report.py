@@ -1562,6 +1562,20 @@ async def fire_now(*, dry_run: bool = False) -> dict[str, Any]:
 
     attachments: list[Path] = [p for p in (pdf_path, chart_path) if p]
 
+    # Operator-visible banner: when either artifact failed to render the
+    # email would otherwise go out with no attachment and no indication
+    # anything is missing — forcing whoever reads it to grep server logs
+    # to discover the gap.  Prepend a one-liner to both bodies.
+    if pdf_path is None or chart_path is None:
+        _banner = (
+            "(PDF artifact unavailable today — see API server logs)"
+        )
+        body = f"{_banner}\n\n{body}"
+        html_body = (
+            "<p style=\"color:#b00;font-weight:bold;\">"
+            f"{_banner}</p>{html_body}"
+        )
+
     dispatch_result: dict[str, Any] = {}
     try:
         dispatch_result = alerts._dispatch(
