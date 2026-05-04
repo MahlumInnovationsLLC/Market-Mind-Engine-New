@@ -592,15 +592,18 @@ async def collect_gate_trips_24h() -> dict[str, Any]:
 
 
 async def collect_uncalibrated_trades_24h() -> dict[str, Any]:
-    """Count of live trades that shipped via the
+    """Count of live trades that **actually shipped** via the
     `gate_uncalibrated_vertical` raw-mode escape hatch in the last
     24h (Task #767).
 
-    Source rows are ``risk_gate_trips`` entries with
-    ``gate_name='uncalibrated_vertical_raw_mode'`` — the raw-mode
-    pass-through path persists one row per opted-in candidate so the
-    count here is "live trades that bypassed the calibrator gate",
-    not "candidates the gate considered".
+    Joins ``order_lifecycle`` (the canonical record of orders that
+    were actually submitted/filled by the executor) with the
+    ``risk_gate_trips`` raw-mode markers on ``(vertical, market_id)``
+    so the count reflects orders that **left the building**, not
+    candidates the gate merely considered before downstream gates
+    rejected them.  An order shows up here iff a raw-mode marker for
+    the same ``(vertical, market_id)`` was persisted within ±2h of
+    the order being submitted/filled in the same 24h window.
 
     Returns:
         ``{"total": int, "items": [{vertical, league, count, last_at}],
@@ -615,15 +618,39 @@ async def collect_uncalibrated_trades_24h() -> dict[str, Any]:
     try:
         rows = await db.fetch(
             """
+            WITH raw_markers AS (
+                SELECT vertical,
+                       market_id,
+                       COALESCE(details->>'league', '(none)') AS league,
+                       created_at
+                  FROM risk_gate_trips
+                 WHERE created_at > now() - interval '24 hours'
+                   AND gate_name = 'uncalibrated_vertical_raw_mode'
+                   AND market_id IS NOT NULL
+            ),
+            shipped AS (
+                SELECT DISTINCT
+                       ol.order_id,
+                       ol.vertical,
+                       ol.market_id,
+                       m.league,
+                       ol.created_at
+                  FROM order_lifecycle ol
+                  JOIN raw_markers   m
+                    ON m.vertical  = ol.vertical
+                   AND m.market_id = ol.market_id
+                   AND ol.created_at BETWEEN m.created_at - interval '2 hours'
+                                         AND m.created_at + interval '2 hours'
+                 WHERE ol.created_at > now() - interval '24 hours'
+                   AND ol.event_type IN ('submitted', 'filled')
+            )
             SELECT vertical,
-                   COALESCE(details->>'league', '(none)')        AS league,
-                   count(*)::int                                 AS n,
+                   league,
+                   count(*)::int                            AS n,
                    to_char(max(created_at),
-                           'YYYY-MM-DD"T"HH24:MI:SSZ')           AS last_at
-              FROM risk_gate_trips
-             WHERE created_at > now() - interval '24 hours'
-               AND gate_name = 'uncalibrated_vertical_raw_mode'
-             GROUP BY vertical, COALESCE(details->>'league', '(none)')
+                           'YYYY-MM-DD"T"HH24:MI:SSZ')      AS last_at
+              FROM shipped
+             GROUP BY vertical, league
              ORDER BY n DESC, vertical ASC
             """
         )

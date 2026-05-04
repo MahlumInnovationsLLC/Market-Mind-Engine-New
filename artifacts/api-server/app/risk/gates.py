@@ -354,43 +354,43 @@ async def gate_uncalibrated_vertical(ctx: RiskContext) -> GateResult:
     so the daily honesty report's "Uncalibrated live trades (24h)" row
     can surface the count in red.
 
-    Degrades open: candidates that don't carry a league (legacy /
-    test paths) skip the gate so this never accidentally halts a
-    fully-calibrated vertical.
+    Fail-closed: missing league, missing vertical, calibrators import
+    failure, or state-lookup error all REJECT (unless the operator has
+    set the per-vertical raw-mode override).  This is deliberate — the
+    whole point of the gate is to prevent silent uncalibrated EV leaks,
+    so any "we don't know" must be treated as "no calibrator".
     """
     league = (ctx.league or "").strip().upper()
     vertical = (ctx.vertical or "").strip().lower()
     base_details: dict[str, Any] = {"vertical": vertical, "league": league or None}
-    if not league:
-        return GateResult(
-            "uncalibrated_vertical",
-            True,
-            "no league on candidate (gate skipped)",
-            base_details,
-        )
 
-    # Lazy import — `app.calibrators` carries module-level state and
-    # we want the gate file to stay safe to import in tooling that
-    # doesn't initialise that state.
-    try:
-        from .. import calibrators as _cal
-    except Exception as e:  # pragma: no cover — import failure is fatal elsewhere
-        return GateResult(
-            "uncalibrated_vertical",
-            True,
-            f"calibrators import failed (degraded): {e}",
-            base_details,
-        )
-
-    supported = league in getattr(_cal, "SUPPORTED_LEAGUES", ())
+    # Resolve calibrator state up front; track the failure mode so the
+    # raw-mode escape hatch below can persist it.
+    supported = False
     snapshot = None
-    try:
-        snapshot = _cal.get_state().champion(league)
-    except Exception as e:  # pragma: no cover — defensive
-        log.warning("uncalibrated_vertical: state.champion(%s) raised: %s", league, e)
-        snapshot = None
+    state_error: str | None = None
+    if not league:
+        state_error = "missing league on candidate"
+    elif not vertical:
+        state_error = "missing vertical on candidate"
+    else:
+        try:
+            from .. import calibrators as _cal
+            supported = league in getattr(_cal, "SUPPORTED_LEAGUES", ())
+            try:
+                snapshot = _cal.get_state().champion(league)
+            except Exception as e:  # pragma: no cover — defensive
+                log.warning(
+                    "uncalibrated_vertical: state.champion(%s) raised: %s",
+                    league,
+                    e,
+                )
+                snapshot = None
+                state_error = f"calibrator state lookup failed: {e}"
+        except Exception as e:  # pragma: no cover — fatal everywhere else
+            state_error = f"calibrators import failed: {e}"
 
-    if supported and snapshot is not None:
+    if state_error is None and supported and snapshot is not None:
         return GateResult(
             "uncalibrated_vertical",
             True,
@@ -415,16 +415,18 @@ async def gate_uncalibrated_vertical(ctx: RiskContext) -> GateResult:
     elif isinstance(raw_flag, str):
         raw_enabled = raw_flag.strip().lower() in ("1", "true", "yes", "on", "y")
 
-    fail_reason = (
-        "calibrator missing for vertical "
-        if not supported
-        else "no fitted calibrator snapshot for league "
-    ) + repr(league)
+    if state_error is not None:
+        fail_reason = state_error
+    elif not supported:
+        fail_reason = f"calibrator missing for league {league!r}"
+    else:
+        fail_reason = f"no fitted calibrator snapshot for league {league!r}"
     details = {
         **base_details,
         "calibrator_loaded": False,
         "supported": supported,
         "raw_mode_key": raw_key,
+        "state_error": state_error,
     }
     if not raw_enabled:
         return GateResult(

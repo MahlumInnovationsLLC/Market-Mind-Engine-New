@@ -357,7 +357,7 @@ def test_gate_uncalibrated_vertical_blocks_unsupported_league(
     ctx = _make_ctx(vertical="weather", league="WEATHER")
     res = _run(_gates.gate_uncalibrated_vertical(ctx))
     assert res.passed is False
-    assert "calibrator missing for vertical" in res.reason
+    assert "calibrator missing for league" in res.reason
     assert res.details["supported"] is False
 
 
@@ -386,14 +386,45 @@ def test_gate_uncalibrated_vertical_raw_mode_passes_and_persists(
     assert inserts[0][2] == "weather"  # vertical
 
 
-def test_gate_uncalibrated_vertical_skips_when_no_league(
+def test_gate_uncalibrated_vertical_fails_closed_when_no_league(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Fail-closed: a candidate without a league is rejected (no
+    silent passthrough), since "we don't know the league" is exactly
+    the silent-EV-leak shape this gate exists to close."""
     _patch_calibrators(monkeypatch)
+    cap = _CapturedExec()
+    monkeypatch.setattr(_db, "execute", cap)
     ctx = _make_ctx(vertical="legacy", league=None)
     res = _run(_gates.gate_uncalibrated_vertical(ctx))
+    assert res.passed is False
+    assert "missing league" in res.reason
+    assert res.details["state_error"] == "missing league on candidate"
+    # Block path does not persist a row — run_all_gates wrapper does that.
+    assert not cap.calls
+
+
+def test_gate_uncalibrated_vertical_no_league_with_raw_mode_passes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The operator escape hatch wins even on a missing-league
+    candidate — explicit opt-in, persisted as a raw-mode marker."""
+    _patch_calibrators(monkeypatch)
+    cap = _CapturedExec()
+    monkeypatch.setattr(_db, "execute", cap)
+    ctx = _make_ctx(
+        vertical="legacy",
+        league=None,
+        operator_overrides={"uncalibrated_raw_mode_legacy": True},
+    )
+    res = _run(_gates.gate_uncalibrated_vertical(ctx))
     assert res.passed is True
-    assert "gate skipped" in res.reason
+    assert res.details["raw_mode"] is True
+    inserts = [
+        args for q, args in cap.calls if "INSERT INTO risk_gate_trips" in q
+    ]
+    assert len(inserts) == 1
+    assert inserts[0][0] == "uncalibrated_vertical_raw_mode"
 
 
 def test_gates_registry_includes_uncalibrated_vertical() -> None:
