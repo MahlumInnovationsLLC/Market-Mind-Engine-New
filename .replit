@@ -100,7 +100,7 @@ externalPort = 3000
 
 [nix]
 channel = "stable-25_05"
-packages = ["cairo", "cargo", "ffmpeg-full", "freetype", "ghostscript", "gitFull", "glibcLocales", "gobject-introspection", "gtk3", "libiconv", "libxcrypt", "ocl-icd", "opencl-headers", "openssl", "pkg-config", "playwright-driver", "postgresql", "qhull", "rustc", "tcl", "tk"]
+packages = ["cairo", "cargo", "freetype", "glibcLocales", "libiconv", "libxcrypt", "ocl-icd", "opencl-headers", "openssl", "pkg-config", "postgresql", "qhull", "rustc", "tcl", "tk"]
 
 [userenv]
 

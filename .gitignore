@@ -53,3 +53,6 @@ Thumbs.db
 # Replit
 .cache/
 .local/
+
+# Generated daily reports / artifacts
+artifacts/api-server/reports/
