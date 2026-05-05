@@ -22,7 +22,6 @@
     pkgs.alsa-lib
     pkgs.cairo
     pkgs.pango
-    pkgs.gtk3
     pkgs.libdrm
     pkgs.cups
     pkgs.atk
