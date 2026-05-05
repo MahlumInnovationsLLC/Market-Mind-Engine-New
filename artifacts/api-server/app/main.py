@@ -100,6 +100,7 @@ from .settlement import (
     settle_market,
     settlement_event_hub,
 )
+from .settlement import pipeline as settlement_pipeline
 from .swarm import llm_log_hub, refresh_persona_weights, run_debate
 from .swarm import profiles as swarm_profiles, toggles as swarm_toggles
 from .kalshi import (
@@ -2036,6 +2037,116 @@ async def admin_watchdog_status(
             "error": f"{type(e).__name__}: {e}",
             "endpoint": url,
         }
+
+
+@app.get("/api/admin/soccer-settlement-review")
+async def admin_list_soccer_settlement_review(
+    only_unresolved: bool = True,
+    limit: int = 100,
+    actor: AuthedUser = Depends(require_admin),
+) -> dict[str, object]:
+    """List soccer settlement review rows for the admin console.
+
+    By default returns only the open queue (``resolved_at IS NULL``);
+    set ``only_unresolved=false`` to include resolved history.  Each
+    row carries the primary (Sportradar) and fallback (ESPN) payloads
+    so the admin UI can render the disagreement side-by-side without
+    re-fetching upstream.  See runbook §23.
+    """
+    lim = max(1, min(500, int(limit)))
+    where = "WHERE resolved_at IS NULL" if only_unresolved else ""
+    pool = await db.get_pool()
+    rows = await pool.fetch(
+        f"""
+        SELECT id, market_id, game_id, league,
+               primary_source, primary_payload,
+               fallback_source, fallback_payload,
+               disagreement_kind,
+               to_char(created_at, 'YYYY-MM-DD"T"HH24:MI:SSZ') AS created_at,
+               to_char(resolved_at, 'YYYY-MM-DD"T"HH24:MI:SSZ') AS resolved_at,
+               resolved_by, resolved_by_email,
+               resolution, resolved_result, notes,
+               EXTRACT(EPOCH FROM (now() - created_at))::float AS age_seconds
+          FROM soccer_settlement_review
+         {where}
+         ORDER BY created_at DESC
+         LIMIT $1
+        """,
+        lim,
+    )
+
+    def _decode(v: object) -> object:
+        if v is None or isinstance(v, (dict, list)):
+            return v
+        if isinstance(v, (str, bytes, bytearray)):
+            try:
+                return json.loads(v)
+            except (ValueError, TypeError):
+                return None
+        return v
+
+    items: list[dict[str, object]] = []
+    for r in rows:
+        items.append(
+            {
+                "id": int(r["id"]),
+                "market_id": r["market_id"],
+                "game_id": r["game_id"],
+                "league": r["league"],
+                "primary_source": r["primary_source"],
+                "primary_payload": _decode(r["primary_payload"]),
+                "fallback_source": r["fallback_source"],
+                "fallback_payload": _decode(r["fallback_payload"]),
+                "disagreement_kind": r["disagreement_kind"],
+                "created_at": r["created_at"],
+                "resolved_at": r["resolved_at"],
+                "resolved_by": r["resolved_by"],
+                "resolved_by_email": r["resolved_by_email"],
+                "resolution": r["resolution"],
+                "resolved_result": r["resolved_result"],
+                "notes": r["notes"],
+                "age_seconds": (
+                    float(r["age_seconds"]) if r["age_seconds"] is not None else None
+                ),
+            }
+        )
+    return {"items": items, "count": len(items)}
+
+
+@app.post("/api/admin/soccer-settlement-review/{review_id}/resolve")
+async def admin_resolve_soccer_settlement_review(
+    review_id: int,
+    body: dict[str, object] | None = None,
+    actor: AuthedUser = Depends(require_admin),
+) -> dict[str, object]:
+    """Resolve one queued soccer settlement review.
+
+    Body: ``{"resolution": "sportradar"|"fallback"|"manual_home"|
+    "manual_draw"|"manual_away", "notes": str?}``.  Audit row is
+    written before settlement runs so a settle-time crash still leaves
+    a trail.  See runbook §23 for when to pick which option.
+    """
+    actor_email = (await check_approval(actor))[1]
+    payload = body or {}
+    resolution = str(payload.get("resolution") or "").strip()
+    notes_raw = payload.get("notes")
+    notes = (
+        str(notes_raw).strip() if isinstance(notes_raw, str) and notes_raw.strip() else None
+    )
+    try:
+        result = await settlement_pipeline.apply_soccer_review_resolution(
+            review_id=int(review_id),
+            actor_user_id=actor.user_id,
+            actor_email=actor_email,
+            resolution=resolution,
+            notes=notes,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        log.warning("soccer review resolve failed for %s: %s", review_id, e)
+        raise HTTPException(status_code=500, detail=f"resolve failed: {e}")
+    return result
 
 
 @app.get("/api/admin/rc-webhook/stats")
@@ -5646,6 +5757,22 @@ async def dashboard_v1_backtest_gate(
     overall verdict (green/red), the per-league Brier table, the list
     of regressed leagues, and a sparkline of recent verdicts."""
     return await dashboard.get_v1_backtest_gate(history_limit=int(history_limit))
+
+
+@app.get("/api/dashboard/soccer-settlement-review")
+async def dashboard_soccer_settlement_review(
+    _: object = Depends(require_approved_user),
+) -> dict[str, object]:
+    """Soccer settlement review tile (Task #769).
+
+    Counts open ``soccer_settlement_review`` rows — soccer markets the
+    settlement loop parked because Sportradar (primary) and ESPN
+    (fallback) disagreed, or because Sportradar was stale and ESPN was
+    unavailable.  Tile is RED when the oldest open row is older than
+    ``SOCCER_REVIEW_RED_THRESHOLD_SECS`` (6h by default).  See runbook
+    §23 for the resolve flow.
+    """
+    return await dashboard.get_soccer_settlement_review_summary()
 
 
 @app.get("/api/dashboard/calibration/per-league")

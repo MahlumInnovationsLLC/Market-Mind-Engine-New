@@ -22,6 +22,7 @@ from datetime import date, datetime, timezone
 from typing import Any
 
 from .. import db
+from ..feeds import espn_soccer
 from ..sports.leagues import get_league_config
 from .streams import settlement_event_hub
 
@@ -1422,6 +1423,468 @@ async def _sportradar_soccer_match_summary(
     }
 
 
+# ---------------------------------------------------------------------------
+# Backup soccer settlement source — Task #769.
+#
+# Sportradar is the primary signal but a single-source settlement loop is
+# one outage away from mis-settling a stack of bets.  When we're about to
+# settle a soccer market on Sportradar alone (Kalshi hasn't published
+# YES/NO yet), we additionally consult ESPN's free public scoreboard for
+# the same match and require the two sources to agree before auto-settling.
+# Disagreements — or "primary stale + secondary unavailable" cases — are
+# parked on the `soccer_settlement_review` queue for an operator decision
+# instead of being silently auto-settled.
+# ---------------------------------------------------------------------------
+
+
+# How long after kickoff we'll wait for Sportradar to publish a final
+# scoreline before treating "no primary verdict yet" as stale enough to
+# require an explicit review when the secondary is also unavailable.  90'
+# regulation + 30' extra time + 15' handover headroom.
+_PRIMARY_STALE_AFTER_SECS: float = 3 * 3600.0
+
+# Dashboard tile RED threshold — operator hasn't resolved a queued
+# soccer settlement review within this many seconds.  Surfaced via
+# ``app.dashboard.get_soccer_settlement_review_summary`` and the
+# ``/api/dashboard/soccer-settlement-review`` endpoint.
+SOCCER_REVIEW_RED_THRESHOLD_SECS: float = 6 * 3600.0
+
+
+async def _market_debate_game_id(
+    market_id: str,
+) -> tuple[str | None, str | None]:
+    """Return ``(game_id, league)`` from the most recent debate row."""
+    try:
+        row = await db.fetchrow(
+            """
+            SELECT game_id, league
+              FROM swarm_debates
+             WHERE ((game_context->>'kalshi_market_id') = $1 OR game_id = $1)
+               AND game_id IS NOT NULL
+             ORDER BY created_at DESC
+             LIMIT 1
+            """,
+            market_id,
+        )
+    except Exception as e:
+        log.debug("debate game_id lookup failed for %s: %s", market_id, e)
+        return (None, None)
+    if not row:
+        return (None, None)
+    return (row.get("game_id"), row.get("league"))
+
+
+async def _market_scheduled_age_seconds(market_id: str) -> float | None:
+    """Seconds since the soccer market's match was scheduled to kick off.
+
+    ``None`` when no schedules row is on file.  Used to decide whether a
+    missing primary verdict is stale enough to demand explicit review.
+    """
+    try:
+        row = await db.fetchrow(
+            """
+            SELECT s.scheduled
+              FROM swarm_debates d
+              JOIN sportradar_schedules s ON s.game_id = d.game_id
+             WHERE ((d.game_context->>'kalshi_market_id') = $1 OR d.game_id = $1)
+               AND d.game_id IS NOT NULL
+             ORDER BY d.created_at DESC, s.updated_at DESC
+             LIMIT 1
+            """,
+            market_id,
+        )
+    except Exception as e:
+        log.debug("scheduled-age lookup failed for %s: %s", market_id, e)
+        return None
+    if not row or row.get("scheduled") is None:
+        return None
+    sched = row["scheduled"]
+    if isinstance(sched, datetime):
+        if sched.tzinfo is None:
+            sched = sched.replace(tzinfo=timezone.utc)
+        return (datetime.now(timezone.utc) - sched).total_seconds()
+    return None
+
+
+async def _espn_soccer_match_summary(
+    market_id: str,
+) -> dict[str, Any] | None:
+    """ESPN-side counterpart to :func:`_sportradar_soccer_match_summary`.
+
+    Joins the same ``swarm_debates`` → ``sportradar_schedules`` chain to
+    recover the league + home/away team names + scheduled kickoff, then
+    asks the ESPN public scoreboard for the same shape Sportradar
+    returns.  ``None`` when:
+
+      * the league has no ESPN slug wired up
+      * the schedules cache lacks team names
+      * ESPN itself returned no final match
+    """
+    game_id, league = await _market_debate_game_id(market_id)
+    if not league or not game_id:
+        return None
+    cfg = get_league_config(league)
+    if cfg is None or not cfg.three_way_market:
+        return None
+    if league not in espn_soccer.supported_leagues():
+        return None
+    try:
+        sched = await db.fetchrow(
+            """
+            SELECT home_team, away_team, scheduled
+              FROM sportradar_schedules
+             WHERE game_id = $1
+             ORDER BY updated_at DESC
+             LIMIT 1
+            """,
+            game_id,
+        )
+    except Exception as e:
+        log.debug("schedules read for ESPN fallback failed (%s): %s", game_id, e)
+        return None
+    if not sched or not sched["home_team"] or not sched["away_team"]:
+        return None
+    return await espn_soccer.fetch_match_summary(
+        league=league,
+        home_team=sched["home_team"],
+        away_team=sched["away_team"],
+        scheduled_at=sched.get("scheduled"),
+    )
+
+
+async def _resolve_soccer_settlement(
+    *,
+    market_id: str,
+    league: str,
+    sportradar_summary: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Decide whether to auto-settle this soccer market or queue it.
+
+    Decision matrix (``primary`` = Sportradar, ``fallback`` = ESPN)::
+
+      primary final    fallback final    → settle on agreement, queue on
+                                            disagreement
+      primary final    fallback unavail. → settle on primary alone (single
+                                            source acceptable when primary
+                                            is itself final)
+      primary unavail. fallback final    → queue if primary stale
+                                            (kickoff > 3h ago); otherwise
+                                            skip and wait
+      primary unavail. fallback unavail. → skip (wait for either source)
+
+    Returns a dict with keys::
+
+      action:            "settle" | "queue" | "skip"
+      result_3way:       str | None              (only set when action=settle)
+      match_summary:     dict | None             (the source picked for settle)
+      primary:           dict | None             (sportradar payload)
+      fallback:          dict | None             (espn payload)
+      disagreement_kind: str | None              (only when action=queue)
+    """
+    out: dict[str, Any] = {
+        "action": "skip",
+        "result_3way": None,
+        "match_summary": None,
+        "primary": sportradar_summary,
+        "fallback": None,
+        "disagreement_kind": None,
+    }
+
+    fallback_summary: dict[str, Any] | None = None
+    # Only call ESPN when the league has a slug wired up; saves an HTTP
+    # round-trip for non-supported leagues (currently a no-op since every
+    # 3-way league is supported, but the supported_leagues() check keeps
+    # the contract honest if we add a new league before wiring its slug).
+    if league and league.upper() in espn_soccer.supported_leagues():
+        try:
+            fallback_summary = await _espn_soccer_match_summary(market_id)
+        except Exception as e:  # pragma: no cover — fallback is best-effort
+            log.info(
+                "ESPN fallback lookup failed for %s: %s — treating as unavailable",
+                market_id, e,
+            )
+            fallback_summary = None
+    out["fallback"] = fallback_summary
+
+    primary_final = (
+        isinstance(sportradar_summary, dict)
+        and sportradar_summary.get("result") in THREE_WAY_OUTCOMES
+    )
+    fallback_final = (
+        isinstance(fallback_summary, dict)
+        and fallback_summary.get("result") in THREE_WAY_OUTCOMES
+    )
+
+    if primary_final and fallback_final:
+        if sportradar_summary["result"] == fallback_summary["result"]:
+            out["action"] = "settle"
+            out["result_3way"] = sportradar_summary["result"]
+            out["match_summary"] = sportradar_summary
+        else:
+            out["action"] = "queue"
+            out["disagreement_kind"] = "disagree"
+        return out
+
+    if primary_final and not fallback_final:
+        # Single-source settlement is acceptable when the primary itself
+        # has a final scoreline; ESPN being slow / down does not by
+        # itself warrant a hold.
+        out["action"] = "settle"
+        out["result_3way"] = sportradar_summary["result"]
+        out["match_summary"] = sportradar_summary
+        return out
+
+    if fallback_final and not primary_final:
+        # Primary hasn't reported a final result yet.  If the match was
+        # scheduled long enough ago that the primary is clearly stale,
+        # queue for review so an operator can sign off on settling from
+        # the secondary alone.  Otherwise skip and wait for the primary.
+        age = await _market_scheduled_age_seconds(market_id)
+        if age is not None and age > _PRIMARY_STALE_AFTER_SECS:
+            out["action"] = "queue"
+            out["disagreement_kind"] = "primary_stale_secondary_final"
+        return out
+
+    # Neither source has a final result yet — nothing to do this cycle.
+    return out
+
+
+async def _has_open_soccer_review(market_id: str) -> bool:
+    try:
+        n = await db.fetchval(
+            """
+            SELECT 1 FROM soccer_settlement_review
+             WHERE market_id = $1 AND resolved_at IS NULL
+             LIMIT 1
+            """,
+            market_id,
+        )
+    except Exception as e:
+        log.debug("open soccer review check failed for %s: %s", market_id, e)
+        return False
+    return bool(n)
+
+
+async def enqueue_soccer_review(
+    *,
+    market_id: str,
+    league: str | None,
+    game_id: str | None,
+    primary: dict[str, Any] | None,
+    fallback: dict[str, Any] | None,
+    disagreement_kind: str,
+) -> int | None:
+    """Insert (idempotent on open market) into ``soccer_settlement_review``.
+
+    Returns the new row id, or ``None`` when an open row already covers
+    this market or the insert failed.  Wrapped in its own helper so the
+    admin module can re-queue from outside the cycle (and for testing).
+    """
+    if await _has_open_soccer_review(market_id):
+        return None
+    try:
+        row = await db.fetchrow(
+            """
+            INSERT INTO soccer_settlement_review
+                (market_id, game_id, league,
+                 primary_source, primary_payload,
+                 fallback_source, fallback_payload,
+                 disagreement_kind)
+            VALUES ($1, $2, $3,
+                    'sportradar', $4::jsonb,
+                    'espn',       $5::jsonb,
+                    $6)
+            RETURNING id
+            """,
+            market_id,
+            game_id,
+            league,
+            json.dumps(primary, default=str) if primary else None,
+            json.dumps(fallback, default=str) if fallback else None,
+            disagreement_kind,
+        )
+    except Exception as e:
+        # Race with the partial unique index — another cycle just wrote
+        # the same row.  Treat as a successful idempotent no-op.
+        log.info("soccer review enqueue for %s skipped: %s", market_id, e)
+        return None
+    return int(row["id"]) if row else None
+
+
+# Allowed values for the admin resolve endpoint.  Two source-pick
+# verdicts plus three manual overrides covering every 3-way outcome.
+SOCCER_REVIEW_RESOLUTIONS: frozenset[str] = frozenset({
+    "sportradar", "fallback", "manual_home", "manual_draw", "manual_away",
+})
+
+
+async def apply_soccer_review_resolution(
+    *,
+    review_id: int,
+    actor_user_id: str,
+    actor_email: str | None,
+    resolution: str,
+    notes: str | None = None,
+) -> dict[str, Any]:
+    """Resolve one queued soccer review and route through ``settle_market``.
+
+    Writes an ``admin_audit_log`` row before flipping the review row
+    closed so a settle-time crash still leaves an operator-visible
+    trail.  ``settle_market`` is idempotent on (market_id, trade_id) —
+    re-resolving a partially-settled row is safe.
+    """
+    if resolution not in SOCCER_REVIEW_RESOLUTIONS:
+        raise ValueError(f"unknown soccer review resolution: {resolution!r}")
+
+    review = await db.fetchrow(
+        """
+        SELECT id, market_id, game_id, league,
+               primary_payload, fallback_payload, disagreement_kind,
+               resolved_at
+          FROM soccer_settlement_review
+         WHERE id = $1
+        """,
+        int(review_id),
+    )
+    if review is None:
+        raise ValueError(f"soccer review {review_id} not found")
+    if review["resolved_at"] is not None:
+        raise ValueError(f"soccer review {review_id} already resolved")
+
+    def _decode(v: Any) -> dict[str, Any] | None:
+        if v is None:
+            return None
+        if isinstance(v, dict):
+            return v
+        if isinstance(v, (str, bytes, bytearray)):
+            try:
+                return json.loads(v)
+            except (ValueError, TypeError):
+                return None
+        return None
+
+    primary = _decode(review["primary_payload"])
+    fallback = _decode(review["fallback_payload"])
+
+    if resolution == "sportradar":
+        if not primary or primary.get("result") not in THREE_WAY_OUTCOMES:
+            raise ValueError(
+                "cannot resolve via sportradar — primary payload missing result"
+            )
+        result_3way = primary["result"]
+        chosen = primary
+    elif resolution == "fallback":
+        if not fallback or fallback.get("result") not in THREE_WAY_OUTCOMES:
+            raise ValueError(
+                "cannot resolve via fallback — fallback payload missing result"
+            )
+        result_3way = fallback["result"]
+        chosen = fallback
+    else:  # manual_home / manual_draw / manual_away
+        result_3way = resolution.removeprefix("manual_")
+        # Synthesize a match_summary so settle_market's per-leg path
+        # still has team names (used in postmortem narrative).  Borrow
+        # them from whichever source had them, else leave None.
+        ref = primary or fallback or {}
+        chosen = {
+            "result": result_3way,
+            "home_team": ref.get("home_team"),
+            "away_team": ref.get("away_team"),
+            "home_score": ref.get("home_score"),
+            "away_score": ref.get("away_score"),
+            "status": "manual",
+            "source": "manual",
+        }
+
+    market_id = review["market_id"]
+
+    # Audit BEFORE we mutate so even a downstream crash leaves a trail.
+    try:
+        await db.execute(
+            """
+            INSERT INTO admin_audit_log
+                (actor_user_id, actor_email,
+                 target_user_id, target_email,
+                 action, before_value, after_value)
+            VALUES ($1, $2, $3, $4,
+                    'soccer_settlement_review_resolve',
+                    $5::jsonb, $6::jsonb)
+            """,
+            actor_user_id,
+            actor_email,
+            actor_user_id,  # target_user_id NOT NULL — actor is the closest fit
+            actor_email,
+            json.dumps(
+                {
+                    "review_id": int(review_id),
+                    "market_id": market_id,
+                    "league": review["league"],
+                    "game_id": review["game_id"],
+                    "disagreement_kind": review["disagreement_kind"],
+                    "primary": primary,
+                    "fallback": fallback,
+                },
+                default=str,
+            ),
+            json.dumps(
+                {
+                    "resolution": resolution,
+                    "result_3way": result_3way,
+                    "notes": notes,
+                },
+                default=str,
+            ),
+        )
+    except Exception as e:
+        log.warning(
+            "soccer review audit log insert failed for %s: %s", review_id, e
+        )
+
+    # Mark resolved BEFORE settle so a re-trigger doesn't double-settle
+    # and the dashboard tile drops below RED immediately.
+    await db.execute(
+        """
+        UPDATE soccer_settlement_review
+           SET resolved_at       = now(),
+               resolved_by       = $2,
+               resolved_by_email = $3,
+               resolution        = $4,
+               resolved_result   = $5,
+               notes             = $6
+         WHERE id = $1
+        """,
+        int(review_id),
+        actor_user_id,
+        actor_email,
+        resolution,
+        result_3way,
+        notes,
+    )
+
+    # Route back through the canonical settle path so per-leg derivation,
+    # persona Brier updates, postmortems, and the online-learning buffer
+    # all fire as if the cycle had auto-settled.
+    settle_res = await settle_market(
+        market_id,
+        outcome_yes=0,
+        settle_price=None,
+        result_3way=result_3way,
+        match_summary=chosen,
+    )
+
+    return {
+        "ok": True,
+        "review_id": int(review_id),
+        "market_id": market_id,
+        "resolution": resolution,
+        "result_3way": result_3way,
+        "trades_settled": int(settle_res.get("trades_settled", 0)),
+        "persona_metrics_updated": int(
+            settle_res.get("persona_metrics_updated", 0)
+        ),
+    }
+
+
 def _parse_kalshi_outcome(market: dict[str, Any]) -> tuple[int, float | None] | None:
     """Inspect a Kalshi `/markets/{ticker}` response and return
     (outcome_yes, settle_price) if the market is final, else None."""
@@ -1505,17 +1968,65 @@ async def run_cycle(*, market_limit: int = 50) -> CycleResult:
                 # leg has not yet been published — and ensures a draw
                 # correctly settles BOTH the home and away YES legs as
                 # NO without being treated as a 2-way moneyline miss.
+                #
+                # When Kalshi has NOT yet published a YES/NO outcome and
+                # we'd be settling a soccer market on Sportradar alone,
+                # cross-check the result against the ESPN public
+                # scoreboard via :func:`_resolve_soccer_settlement` so a
+                # Sportradar outage cannot mis-settle bets (Task #769).
+                # Disagreements / "primary stale + secondary unavailable"
+                # cases are parked on ``soccer_settlement_review`` for an
+                # operator to resolve from the dashboard.
                 result_3way: str | None = None
                 match_summary: dict[str, Any] | None = None
+                queued_for_review = False
                 try:
                     league = await _league_for_market(ticker)
                     cfg = get_league_config(league) if league else None
                     if cfg is not None and cfg.three_way_market:
-                        match_summary = await _sportradar_soccer_match_summary(ticker)
-                        if match_summary is not None:
-                            result_3way = match_summary.get("result")
+                        primary_summary = await _sportradar_soccer_match_summary(ticker)
+                        if parsed is not None:
+                            # Kalshi has the canonical YES/NO outcome —
+                            # honour it directly; the agreement check
+                            # only gates Sportradar-only settlement.
+                            match_summary = primary_summary
+                            if primary_summary is not None:
+                                result_3way = primary_summary.get("result")
+                        else:
+                            decision = await _resolve_soccer_settlement(
+                                market_id=ticker,
+                                league=league or "",
+                                sportradar_summary=primary_summary,
+                            )
+                            action = decision["action"]
+                            if action == "settle":
+                                match_summary = decision["match_summary"]
+                                result_3way = decision["result_3way"]
+                            elif action == "queue":
+                                queued_for_review = True
+                                game_id, _ = await _market_debate_game_id(ticker)
+                                review_id = await enqueue_soccer_review(
+                                    market_id=ticker,
+                                    league=league,
+                                    game_id=game_id,
+                                    primary=decision["primary"],
+                                    fallback=decision["fallback"],
+                                    disagreement_kind=str(
+                                        decision["disagreement_kind"]
+                                    ),
+                                )
+                                cr.errors.append(
+                                    f"{ticker}: soccer settlement queued for review "
+                                    f"({decision['disagreement_kind']}, "
+                                    f"review_id={review_id})"
+                                )
+                            # action == "skip" → fall through, neither
+                            # parsed nor result_3way set, cycle skips.
                 except Exception as e:
                     log.debug("3-way result lookup failed for %s: %s", ticker, e)
+
+                if queued_for_review:
+                    continue
 
                 if parsed is not None:
                     outcome_yes, settle_price = parsed

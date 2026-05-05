@@ -6243,3 +6243,109 @@ def _age_seconds_from_iso(iso: str | None) -> float | None:
         return max(0.0, (_dt.now(_tz.utc) - dt).total_seconds())
     except Exception:
         return None
+
+
+# ---------------------------------------------------------------------------
+# Soccer-settlement review tile (Task #769)
+# ---------------------------------------------------------------------------
+#
+# Sportradar is the primary settlement source for 3-way soccer markets,
+# with the ESPN public scoreboard as an independent fallback.  When the
+# two disagree (or the primary is stale and the fallback is unavailable)
+# the settlement loop parks the row on ``soccer_settlement_review``
+# instead of auto-settling.  The dashboard tile turns RED when at least
+# one row has been sitting unresolved for longer than the threshold
+# defined in ``app.settlement.pipeline.SOCCER_REVIEW_RED_THRESHOLD_SECS``
+# (default 6h).  GREEN otherwise.
+
+async def get_soccer_settlement_review_summary() -> dict[str, Any]:
+    """Aggregate the open soccer settlement review queue for the tile.
+
+    Returns ``{"open_count", "oldest_age_seconds", "red",
+    "red_threshold_seconds", "newest_market_id", "items"}`` where:
+
+      * ``open_count`` — rows with ``resolved_at IS NULL``
+      * ``oldest_age_seconds`` — float seconds since the oldest open row
+        was created (``None`` when the queue is empty)
+      * ``red`` — True iff ``oldest_age_seconds > red_threshold_seconds``
+      * ``items`` — up to 10 most-recent open rows, each with
+        ``id``, ``market_id``, ``league``, ``disagreement_kind``,
+        ``created_at`` (ISO-8601), and ``age_seconds``
+
+    The endpoint and tile both consume this directly; the React layer
+    can render an empty state for ``open_count == 0`` without a special
+    case.
+    """
+    from .settlement.pipeline import SOCCER_REVIEW_RED_THRESHOLD_SECS
+
+    out: dict[str, Any] = {
+        "open_count": 0,
+        "oldest_age_seconds": None,
+        "red": False,
+        "red_threshold_seconds": float(SOCCER_REVIEW_RED_THRESHOLD_SECS),
+        "newest_market_id": None,
+        "items": [],
+    }
+
+    try:
+        agg = await db.fetchrow(
+            """
+            SELECT count(*)                                            AS open_count,
+                   EXTRACT(EPOCH FROM (now() - min(created_at)))::float AS oldest_age_seconds,
+                   max(market_id)                                      AS newest_market_id
+              FROM soccer_settlement_review
+             WHERE resolved_at IS NULL
+            """,
+        )
+    except Exception as e:
+        log.warning("soccer_settlement_review aggregate failed: %s", e)
+        return out
+
+    if agg is None:
+        return out
+
+    out["open_count"] = int(agg["open_count"] or 0)
+    if agg["oldest_age_seconds"] is not None:
+        out["oldest_age_seconds"] = float(agg["oldest_age_seconds"])
+    out["red"] = bool(
+        out["oldest_age_seconds"] is not None
+        and out["oldest_age_seconds"] > out["red_threshold_seconds"]
+    )
+    if agg["newest_market_id"] is not None:
+        out["newest_market_id"] = str(agg["newest_market_id"])
+
+    if out["open_count"] == 0:
+        return out
+
+    try:
+        rows = await db.fetch(
+            """
+            SELECT id, market_id, league, disagreement_kind,
+                   to_char(created_at, 'YYYY-MM-DD"T"HH24:MI:SSZ') AS created_at,
+                   EXTRACT(EPOCH FROM (now() - created_at))::float  AS age_seconds
+              FROM soccer_settlement_review
+             WHERE resolved_at IS NULL
+             ORDER BY created_at DESC
+             LIMIT 10
+            """,
+        )
+    except Exception as e:
+        log.warning("soccer_settlement_review listing failed: %s", e)
+        return out
+
+    items: list[dict[str, Any]] = []
+    for r in rows:
+        items.append(
+            {
+                "id": int(r["id"]),
+                "market_id": str(r["market_id"]),
+                "league": r["league"],
+                "disagreement_kind": r["disagreement_kind"],
+                "created_at": r["created_at"],
+                "age_seconds": (
+                    float(r["age_seconds"]) if r["age_seconds"] is not None else None
+                ),
+            }
+        )
+    out["items"] = items
+    return out

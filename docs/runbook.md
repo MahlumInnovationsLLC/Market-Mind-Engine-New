@@ -2700,3 +2700,102 @@ Set `V1_BACKTEST_GATE_ENABLED=0` to keep the scheduler from firing
 (useful while paper-replaying a calibrator change in isolation). To
 slow it down without disabling, raise
 `V1_BACKTEST_GATE_INTERVAL_SECONDS` — defaults to 604 800 (one week).
+
+## 23. Backup soccer settlement source (Task #769)
+
+The settlement loop has used Sportradar as the only source for soccer
+3-way (home / draw / away) match results since launch.  A single
+upstream incident — wrong scoreline, schedule mismatch, regional
+outage — therefore translates one-for-one into mis-settled bets.  This
+section covers the secondary read from ESPN's free public scoreboard
+and the operator-facing review queue that catches every disagreement.
+
+### What the code does
+
+* **Primary**: `app/feeds/sportradar.py` (existing) — consulted via
+  `_sportradar_soccer_match_summary` in `app/settlement/pipeline.py`.
+* **Fallback**: `app/feeds/espn_soccer.py` (Task #769) — keyless,
+  HTTP-only call to `site.api.espn.com`, fuzzy team-name match against
+  the requested kickoff date ±1 day.  Opt out with
+  `AXIOM_ESPN_SOCCER_DISABLED=1`.
+* **Decision matrix**: `_resolve_soccer_settlement` —
+  * both agree → settle
+  * disagree → enqueue (kind=`disagree`)
+  * primary final + fallback unavailable → settle (single source OK
+    when the primary itself is final)
+  * fallback final + primary stale (kickoff > 3h ago) → enqueue
+    (kind=`primary_stale_secondary_final`)
+  * neither final → skip (wait for next cycle)
+* **Override**: when Kalshi's own YES/NO is published the cycle uses
+  it directly — the agreement check only gates Sportradar-only
+  settlement, so a Kalshi-final market is never blocked here.
+
+### Tunables
+
+| env var | default | meaning |
+| --- | --- | --- |
+| `AXIOM_ESPN_SOCCER_DISABLED` | unset | `1`/`true` opts the fallback out (primary becomes single source again — read the warning in *Disable* below). |
+| `SOCCER_REVIEW_RED_THRESHOLD_SECS` | 21600 | Tile turns red when the oldest open row is older than this many seconds. Const lives in `app/settlement/pipeline.py`. |
+| `_PRIMARY_STALE_AFTER_SECS` | 10800 | How long after kickoff to wait for the primary before treating "no primary verdict" as stale enough to demand review. |
+
+### Dashboard tile
+
+`/api/dashboard/soccer-settlement-review` returns
+`{open_count, oldest_age_seconds, red, red_threshold_seconds, items}`.
+GREEN when the queue is empty or the oldest open row is younger than
+the threshold; RED otherwise.  Up to ten most recent open rows are
+returned in `items` so the operator panel can show market id, league,
+disagreement kind, age.
+
+### Resolve flow
+
+```
+GET  /api/admin/soccer-settlement-review
+POST /api/admin/soccer-settlement-review/{review_id}/resolve
+       body: {"resolution": <one of below>, "notes": "<optional>"}
+```
+
+| `resolution`     | when to use |
+| ---------------- | ----------- |
+| `sportradar`     | Sportradar's verdict has been verified upstream (match centre, official broadcaster) — settle on the primary. |
+| `fallback`       | ESPN's verdict has been verified — settle on the secondary (Sportradar will be patched up out of band). |
+| `manual_home`    | Operator override — match ended in a home win regardless of what either source says. |
+| `manual_draw`    | Operator override — match ended in a draw. |
+| `manual_away`    | Operator override — match ended in an away win. |
+
+The endpoint writes an `admin_audit_log` row (action
+`soccer_settlement_review_resolve`) with the full primary + fallback
+payloads in `before_value` and the chosen resolution in `after_value`,
+then UPDATEs the review row closed and routes the chosen 3-way result
+back through `settle_market` so per-leg derivation, persona Brier
+updates, postmortems, and the online-learning buffer all fire as if
+the cycle had auto-settled.
+
+`settle_market` is idempotent on `(market_id, trade_id)`, so a
+re-resolve after a partial-settle crash is safe.
+
+### What red looks like
+
+The dashboard tile flips RED in two scenarios:
+
+1. **`disagree` kind** — Sportradar and ESPN both reported a final
+   scoreline but pointed at different match results.  Pull the match
+   centre on both feeds to confirm; pick `sportradar` / `fallback`
+   accordingly.  If the operator's own observation contradicts both,
+   use `manual_*`.
+2. **`primary_stale_secondary_final` kind** — kickoff was over 3h ago
+   and ESPN has a final scoreline but Sportradar still hasn't
+   published one.  Verify the ESPN scoreline against a third source
+   (broadcaster site, league official site) and pick `fallback`; if
+   the third source disagrees, pick `manual_*`.
+
+If RED persists for more than 30 minutes the daily honesty report
+(§21) and the operator inbox both surface the queue depth + oldest
+age so on-call cannot miss it.
+
+### Disable
+
+Setting `AXIOM_ESPN_SOCCER_DISABLED=1` reverts to single-source
+Sportradar settlement.  Use only when ESPN itself is the misbehaving
+party — every soccer market settled while disabled is exposed to a
+Sportradar-only outage.  Re-enable as soon as ESPN recovers.
