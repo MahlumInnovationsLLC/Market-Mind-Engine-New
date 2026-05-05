@@ -2725,7 +2725,11 @@ and the operator-facing review queue that catches every disagreement.
     when the primary itself is final)
   * fallback final + primary stale (kickoff > 3h ago) → enqueue
     (kind=`primary_stale_secondary_final`)
-  * neither final → skip (wait for next cycle)
+  * **both unavailable + primary stale (kickoff > 3h ago) → enqueue
+    (kind=`primary_stale_secondary_down`)** — keeps a market with both
+    upstreams misbehaving from sitting unsettled forever.
+  * neither final + primary fresh (or no schedule on file) → skip
+    (wait for next cycle)
 * **Override**: when Kalshi's own YES/NO is published the cycle uses
   it directly — the agreement check only gates Sportradar-only
   settlement, so a Kalshi-final market is never blocked here.
@@ -2766,10 +2770,22 @@ POST /api/admin/soccer-settlement-review/{review_id}/resolve
 The endpoint writes an `admin_audit_log` row (action
 `soccer_settlement_review_resolve`) with the full primary + fallback
 payloads in `before_value` and the chosen resolution in `after_value`,
-then UPDATEs the review row closed and routes the chosen 3-way result
-back through `settle_market` so per-leg derivation, persona Brier
-updates, postmortems, and the online-learning buffer all fire as if
-the cycle had auto-settled.
+then routes the chosen 3-way result through `settle_market` (per-leg
+derivation, persona Brier updates, postmortems, online-learning buffer
+all fire as if the cycle had auto-settled) and, **only after settle
+returns successfully**, UPDATEs the review row closed and stamps
+`settle_completed_at`.  This ordering guarantees a transient settle
+failure (DB blip, kalshi timeout) never leaves a row marked
+closed-but-unsettled.
+
+If settle raises, the audit row is preserved (operator-visible trail)
+and the review row stays open — the operator can retry by hitting the
+resolve endpoint again, or pick a different resolution if the primary
+verdict turned out to be wrong.
+
+A row with `resolved_at` set but `settle_completed_at` NULL is treated
+as a partial resolve and is still eligible for retry; once both
+columns are stamped, further resolve attempts return 400.
 
 `settle_market` is idempotent on `(market_id, trade_id)`, so a
 re-resolve after a partial-settle crash is safe.
@@ -2788,6 +2804,12 @@ The dashboard tile flips RED in two scenarios:
    published one.  Verify the ESPN scoreline against a third source
    (broadcaster site, league official site) and pick `fallback`; if
    the third source disagrees, pick `manual_*`.
+3. **`primary_stale_secondary_down` kind** — kickoff was over 3h ago
+   and *neither* upstream has a final scoreline.  Verify the result
+   against a broadcaster site or the league's own site, then pick
+   `manual_*` to settle on the verified outcome.  This kind is the
+   only one that *requires* a manual override — there's no source
+   payload to defer to.
 
 If RED persists for more than 30 minutes the daily honesty report
 (§21) and the operator inbox both surface the queue depth + oldest

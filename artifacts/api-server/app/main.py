@@ -2064,6 +2064,8 @@ async def admin_list_soccer_settlement_review(
                disagreement_kind,
                to_char(created_at, 'YYYY-MM-DD"T"HH24:MI:SSZ') AS created_at,
                to_char(resolved_at, 'YYYY-MM-DD"T"HH24:MI:SSZ') AS resolved_at,
+               to_char(settle_completed_at, 'YYYY-MM-DD"T"HH24:MI:SSZ')
+                   AS settle_completed_at,
                resolved_by, resolved_by_email,
                resolution, resolved_result, notes,
                EXTRACT(EPOCH FROM (now() - created_at))::float AS age_seconds
@@ -2100,6 +2102,7 @@ async def admin_list_soccer_settlement_review(
                 "disagreement_kind": r["disagreement_kind"],
                 "created_at": r["created_at"],
                 "resolved_at": r["resolved_at"],
+                "settle_completed_at": r["settle_completed_at"],
                 "resolved_by": r["resolved_by"],
                 "resolved_by_email": r["resolved_by_email"],
                 "resolution": r["resolution"],

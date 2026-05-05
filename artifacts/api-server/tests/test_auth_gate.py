@@ -186,6 +186,11 @@ PROTECTED_ROUTES: tuple[str, ...] = (
     "/api/dashboard/tournament-leaderboard-timeline",
     # Per-source weather freshness badge — operator dashboard only.
     "/api/weather/freshness",
+    # Task #769 — backup soccer settlement source: operator review queue
+    # listing + dashboard tile feed.  Covers Sportradar/ESPN
+    # disagreements and primary-stale + secondary-down enqueues.
+    "/api/admin/soccer-settlement-review",
+    "/api/dashboard/soccer-settlement-review",
 )
 
 # Mutating endpoints — auth-protected, accept POST / PUT / DELETE.  These
@@ -287,6 +292,10 @@ PROTECTED_MUTATING_ENDPOINTS: tuple[tuple[str, str], ...] = (
     ("POST", "/api/admin/orders/{client_order_id}/resolve"),
     # Task #712 — operator per-trade alert opt-out preferences (POST).
     ("POST", "/api/admin/operator-alerts/preferences"),
+    # Task #769 — backup soccer settlement source: operator one-click
+    # resolve endpoint that routes the chosen 3-way result back through
+    # ``settle_market`` after writing an admin_audit_log row.
+    ("POST", "/api/admin/soccer-settlement-review/{review_id}/resolve"),
 )
 
 # Path-only view of the mutating-endpoint inventory, used by the

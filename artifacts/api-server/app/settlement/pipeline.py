@@ -1645,7 +1645,20 @@ async def _resolve_soccer_settlement(
             out["disagreement_kind"] = "primary_stale_secondary_final"
         return out
 
-    # Neither source has a final result yet — nothing to do this cycle.
+    # Neither source has a final result yet.  Two sub-cases:
+    #
+    #   * primary stale + secondary down — queue for review so the
+    #     market doesn't sit unsettled forever when both upstreams are
+    #     misbehaving.  Operator can resolve manually from the
+    #     dashboard once they've verified the scoreline out-of-band.
+    #     This is the "secondary down + primary stale → queued" half
+    #     of Task #769's done criteria.
+    #   * primary fresh — nothing to do this cycle, both sources may
+    #     just be slow.
+    age = await _market_scheduled_age_seconds(market_id)
+    if age is not None and age > _PRIMARY_STALE_AFTER_SECS:
+        out["action"] = "queue"
+        out["disagreement_kind"] = "primary_stale_secondary_down"
     return out
 
 
@@ -1740,7 +1753,7 @@ async def apply_soccer_review_resolution(
         """
         SELECT id, market_id, game_id, league,
                primary_payload, fallback_payload, disagreement_kind,
-               resolved_at
+               resolved_at, resolution, resolved_result, settle_completed_at
           FROM soccer_settlement_review
          WHERE id = $1
         """,
@@ -1748,7 +1761,19 @@ async def apply_soccer_review_resolution(
     )
     if review is None:
         raise ValueError(f"soccer review {review_id} not found")
-    if review["resolved_at"] is not None:
+    # Allow retries when the row was previously closed by an attempt
+    # that completed the resolve+audit step but failed to finish the
+    # downstream ``settle_market`` call.  ``settle_completed_at`` only
+    # gets stamped once settle returns successfully — if it's NULL on
+    # an already-resolved row we may safely re-run with the same (or
+    # a corrected) resolution.  ``settle_market`` is idempotent on
+    # (market_id, trade_id), so a re-run after a partial settle is
+    # safe.
+    already_settled = (
+        review["resolved_at"] is not None
+        and review.get("settle_completed_at") is not None
+    )
+    if already_settled:
         raise ValueError(f"soccer review {review_id} already resolved")
 
     def _decode(v: Any) -> dict[str, Any] | None:
@@ -1840,17 +1865,36 @@ async def apply_soccer_review_resolution(
             "soccer review audit log insert failed for %s: %s", review_id, e
         )
 
-    # Mark resolved BEFORE settle so a re-trigger doesn't double-settle
-    # and the dashboard tile drops below RED immediately.
+    # Route back through the canonical settle path FIRST so a transient
+    # downstream failure (DB blip, kalshi timeout) doesn't leave the
+    # review row marked closed-but-unsettled.  ``settle_market`` is
+    # idempotent on (market_id, trade_id), so a retry that re-runs
+    # this is safe.  Stamp ``resolved_at`` + ``resolution`` only after
+    # settle returns; stamp ``settle_completed_at`` at the same time
+    # so a future retry can tell the difference between "previously
+    # resolved fully" and "previously resolved but settle crashed".
+    settle_res = await settle_market(
+        market_id,
+        outcome_yes=0,
+        settle_price=None,
+        result_3way=result_3way,
+        match_summary=chosen,
+    )
+
+    # Settle succeeded — flip the row closed and stamp the completion
+    # marker.  Use ``COALESCE`` on resolved_at so a retry that comes in
+    # after a previous attempt set resolved_at but failed before
+    # settle_completed_at preserves the original audit timestamp.
     await db.execute(
         """
         UPDATE soccer_settlement_review
-           SET resolved_at       = now(),
-               resolved_by       = $2,
-               resolved_by_email = $3,
-               resolution        = $4,
-               resolved_result   = $5,
-               notes             = $6
+           SET resolved_at         = COALESCE(resolved_at, now()),
+               resolved_by         = $2,
+               resolved_by_email   = $3,
+               resolution          = $4,
+               resolved_result     = $5,
+               notes               = $6,
+               settle_completed_at = now()
          WHERE id = $1
         """,
         int(review_id),
@@ -1859,17 +1903,6 @@ async def apply_soccer_review_resolution(
         resolution,
         result_3way,
         notes,
-    )
-
-    # Route back through the canonical settle path so per-leg derivation,
-    # persona Brier updates, postmortems, and the online-learning buffer
-    # all fire as if the cycle had auto-settled.
-    settle_res = await settle_market(
-        market_id,
-        outcome_yes=0,
-        settle_price=None,
-        result_3way=result_3way,
-        match_summary=chosen,
     )
 
     return {

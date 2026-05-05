@@ -62,7 +62,12 @@ CREATE TABLE IF NOT EXISTS soccer_settlement_review (
     resolved_by_email   text,
     resolution          text,
     resolved_result     text,
-    notes               text
+    notes               text,
+    -- Stamped only after the downstream ``settle_market`` call returns
+    -- successfully.  When ``resolved_at`` is set but this column is
+    -- NULL the resolve attempt completed audit + flipping the row but
+    -- crashed before settling — a retry endpoint may safely re-run.
+    settle_completed_at timestamptz
 );
 
 CREATE INDEX IF NOT EXISTS soccer_settlement_review_unresolved_idx

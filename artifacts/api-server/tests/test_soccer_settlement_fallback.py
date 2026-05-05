@@ -152,16 +152,56 @@ def test_resolve_soccer_fallback_only_skips_when_primary_fresh(monkeypatch):
     assert decision["result_3way"] is None
 
 
-def test_resolve_soccer_neither_source_skips(monkeypatch):
-    _stub_resolve_helpers(monkeypatch, fallback=None, age_seconds=4 * 3600)
+def test_resolve_soccer_neither_source_fresh_skips(monkeypatch):
+    # Both sources unavailable AND kickoff was very recent — the
+    # cycle should hold and try again later, NOT enqueue.
+    _stub_resolve_helpers(monkeypatch, fallback=None, age_seconds=15 * 60)
     decision = asyncio.run(
         _pipeline._resolve_soccer_settlement(
-            market_id="MKT-EPL-NONE",
+            market_id="MKT-EPL-FRESH-DOWN",
             league="EPL",
             sportradar_summary=None,
         )
     )
     assert decision["action"] == "skip"
+    assert decision["disagreement_kind"] is None
+
+
+def test_resolve_soccer_secondary_down_primary_stale_queues(monkeypatch):
+    # Validator-flagged required scenario: ESPN unavailable AND
+    # Sportradar still hasn't published a final scoreline more than 3h
+    # past kickoff.  Without queuing here the market would sit forever
+    # waiting for a primary verdict that may never come (Task #769
+    # done criterion).
+    _stub_resolve_helpers(monkeypatch, fallback=None, age_seconds=5 * 3600)
+    decision = asyncio.run(
+        _pipeline._resolve_soccer_settlement(
+            market_id="MKT-EPL-BOTH-DOWN-STALE",
+            league="EPL",
+            sportradar_summary=None,
+        )
+    )
+    assert decision["action"] == "queue"
+    assert decision["disagreement_kind"] == "primary_stale_secondary_down"
+    assert decision["result_3way"] is None
+    assert decision["primary"] is None
+    assert decision["fallback"] is None
+
+
+def test_resolve_soccer_neither_source_no_schedule_skips(monkeypatch):
+    # Both sources unavailable AND we don't even have a scheduled
+    # kickoff on file (age=None) — can't say whether primary is
+    # actually stale, so hold rather than auto-enqueue.
+    _stub_resolve_helpers(monkeypatch, fallback=None, age_seconds=None)
+    decision = asyncio.run(
+        _pipeline._resolve_soccer_settlement(
+            market_id="MKT-EPL-NO-SCHEDULE",
+            league="EPL",
+            sportradar_summary=None,
+        )
+    )
+    assert decision["action"] == "skip"
+    assert decision["disagreement_kind"] is None
 
 
 def test_resolve_soccer_unsupported_league_skips_fallback(monkeypatch):
@@ -298,6 +338,9 @@ def _make_review_row(**overrides: Any) -> dict[str, Any]:
         "fallback_payload": json.dumps(_summary("away", source="espn")),
         "disagreement_kind": "disagree",
         "resolved_at": None,
+        "resolution": None,
+        "resolved_result": None,
+        "settle_completed_at": None,
     }
     base.update(overrides)
     return base
@@ -384,7 +427,15 @@ def test_apply_resolution_rejects_unknown_resolution(monkeypatch):
 
 
 def test_apply_resolution_rejects_already_resolved(monkeypatch):
-    review = _make_review_row(resolved_at=datetime.now(timezone.utc))
+    # A row with BOTH resolved_at and settle_completed_at set is fully
+    # resolved end-to-end — second resolve attempts must be rejected
+    # so the operator UI doesn't double-settle.
+    review = _make_review_row(
+        resolved_at=datetime.now(timezone.utc),
+        settle_completed_at=datetime.now(timezone.utc),
+        resolution="sportradar",
+        resolved_result="home",
+    )
     _stub_resolve_db(monkeypatch, review=review)
     with pytest.raises(ValueError, match="already resolved"):
         asyncio.run(
@@ -395,6 +446,86 @@ def test_apply_resolution_rejects_already_resolved(monkeypatch):
                 resolution="sportradar",
             )
         )
+
+
+def test_apply_resolution_settle_failure_leaves_row_open_for_retry(monkeypatch):
+    """settle_market raising must NOT mark the row resolved.
+
+    Validator-flagged correctness fix: previously the row was flipped
+    closed *before* settle ran, so a transient settle failure left the
+    market unsettled but locked out of further resolve attempts.  Now
+    settle runs first and the UPDATE only fires on success.
+    """
+    update_calls: list[Any] = []
+    settle_calls: list[Any] = []
+
+    async def _fake_fetchrow(query: str, *args: Any) -> dict[str, Any] | None:
+        if "FROM soccer_settlement_review" in query and "WHERE id" in query:
+            return _make_review_row()
+        return None
+
+    async def _fake_execute(query: str, *args: Any) -> str:
+        if "UPDATE soccer_settlement_review" in query:
+            update_calls.append(args)
+        # admin_audit_log is fire-and-forget and may run; we don't
+        # care for this assertion.
+        return "OK"
+
+    async def _fake_settle_failing(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        settle_calls.append({"args": args, "kwargs": kwargs})
+        raise RuntimeError("kalshi timeout")
+
+    monkeypatch.setattr(_pipeline.db, "fetchrow", _fake_fetchrow)
+    monkeypatch.setattr(_pipeline.db, "execute", _fake_execute)
+    monkeypatch.setattr(_pipeline, "settle_market", _fake_settle_failing)
+
+    with pytest.raises(RuntimeError, match="kalshi timeout"):
+        asyncio.run(
+            _pipeline.apply_soccer_review_resolution(
+                review_id=7,
+                actor_user_id="user_admin1",
+                actor_email="ops@example.com",
+                resolution="sportradar",
+            )
+        )
+
+    assert len(settle_calls) == 1, "settle_market should have been attempted"
+    assert update_calls == [], (
+        "review row must NOT be flipped closed when settle_market fails — "
+        "the operator must be able to retry"
+    )
+
+
+def test_apply_resolution_retry_after_partial_settle_succeeds(monkeypatch):
+    """A previous resolved-but-unsettled row must accept a retry.
+
+    settle_completed_at IS NULL on the prior attempt → the second call
+    is allowed through and runs settle + completes the row.
+    """
+    captured = _stub_resolve_db(
+        monkeypatch,
+        review=_make_review_row(
+            # resolved_at set by an earlier (partial) attempt that
+            # crashed before settle returned, but settle_completed_at
+            # is still NULL.
+            resolved_at=datetime.now(timezone.utc),
+            resolution="sportradar",
+            resolved_result="home",
+            settle_completed_at=None,
+        ),
+    )
+
+    out = asyncio.run(
+        _pipeline.apply_soccer_review_resolution(
+            review_id=7,
+            actor_user_id="user_admin1",
+            actor_email="ops@example.com",
+            resolution="sportradar",
+        )
+    )
+    assert out["ok"] is True
+    assert len(captured["settle"]) == 1, "retry should have re-run settle"
+    assert len(captured["update"]) == 1, "retry should re-stamp settle_completed_at"
 
 
 def test_apply_resolution_rejects_missing_review(monkeypatch):
