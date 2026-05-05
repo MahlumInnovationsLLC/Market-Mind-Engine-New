@@ -2514,7 +2514,28 @@ PDF additionally pushed to opted-in Telegram chats via
    calibrator) so a stray `AXIOM_ORCHESTRATOR_VERTICALS=politics`
    can no longer ship raw probabilities into Kelly sizing — use the
    live `elections` vertical instead.
-6. **Latest investor deck** — auto-built every weekly V1 backtest cron
+6. **Missing-league candidates (last 24 h)** — count of candidates that
+   reached the risk gates without a `ctx.league` set (Task #771).
+   `gate_uncalibrated_vertical` already fail-closes when the league
+   field is missing (the `state_error="missing league on candidate"`
+   branch ⇒ REJECT unless the per-vertical raw-mode override is set),
+   but a feed bug that silently drops the league field would just look
+   like an ordinary calibrator-gate rejection on the dashboard. To
+   make the bug loud the orchestrator now logs at WARN
+   (`candidate missing league: vertical=<v> market_id=<id>`) and
+   persists a `risk_gate_trips` row with
+   `gate_name='missing_league_on_candidate'` **before** the gate runs;
+   this section reads back the per-(vertical, market_id) breakdown.
+   **GREEN** when zero (every candidate carried a league); **RED**
+   with a per-row breakdown when ≥ 1 candidate showed up without one.
+   **Decision (T-771):** the missing-league case stays a
+   *fail-closed gate rejection* — the gate is unchanged. The new
+   counter is purely upstream instrumentation so operators can
+   distinguish a feed bug (lots of trips on one vertical) from
+   ordinary calibrator-gate rejections; fix the feed in
+   `artifacts/api-server/app/verticals/` (or whichever predictor
+   builds the candidate dict) so `cand["league"]` is populated.
+7. **Latest investor deck** — auto-built every weekly V1 backtest cron
    (§22) and surfaced as a one-line link to the most recent
    `investor_deck_latest.pptx`. Looked up via the latest
    `v1_backtest_gate_runs.notes` JSON. "not built yet" is normal until
@@ -2546,6 +2567,7 @@ verdict on the rest of the tile.
 | Tail risk | `tone == "red"` | One or two markets account for too large a fraction of the open `tail_max_loss`. Inspect the per-position table and consider trimming. |
 | Gate trips | `tail_risk_size_clamped` count > 0 | Sizing layer keeps trying to over-allocate into the tail bucket. Tighten `RISK_GATE_TAIL_MAX_LOSS_USD` or the per-market clamp (see §16). |
 | Uncalibrated raw trades | total > 0 | A vertical has `risk.uncalibrated_raw_mode_<name>=true` set in `system_settings`, so the calibrator gate is bypassed and raw stack probabilities feed Kelly sizing. Either fit a calibrator for that league (preferred) or revoke the override (`UPDATE system_settings SET value='false' WHERE key='risk.uncalibrated_raw_mode_<name>'`). The per-(vertical, league) breakdown identifies which feed to fix. |
+| Missing-league candidates | total > 0 | An upstream feed in `artifacts/api-server/app/verticals/` or a predictor in `app/orchestrator/cycle.py` is producing candidate dicts with no `league` field. The gate fail-closes (so no leak shipped), but the feed needs fixing — grep API server logs for `candidate missing league:` to identify the offending market/vertical. |
 
 ### Manual fire-now
 

@@ -1619,6 +1619,65 @@ async def run_cycle(vertical: str = "sports") -> CycleResult:
             except InvalidCommodityTicker:
                 pass
 
+        # Upstream missing-league instrumentation (task #771).
+        #
+        # `gate_uncalibrated_vertical` already fail-closes when
+        # `ctx.league` is missing (state_error path → REJECT unless
+        # the per-vertical raw-mode override is set), but a feed bug
+        # that silently drops the league field would just look like
+        # an ordinary calibrator-gate rejection on the dashboard —
+        # the same "silent EV leak" shape the gate is meant to close.
+        #
+        # Before constructing the RiskContext we log a WARN with
+        # vertical + market_id and persist a `risk_gate_trips` marker
+        # row (gate_name='missing_league_on_candidate') so the daily
+        # honesty report's new "Missing-league candidates (24h)"
+        # section surfaces the count alongside raw-mode trades.
+        # We deliberately do NOT skip the candidate — the existing
+        # gate is already fail-closed; this is purely instrumentation
+        # so the upstream feed bug becomes loud (see runbook §21).
+        _cand_league = cand.get("league")
+        _league_missing = (
+            _cand_league is None
+            or (isinstance(_cand_league, str) and not _cand_league.strip())
+        )
+        if _league_missing:
+            log.warning(
+                "candidate missing league: vertical=%s market_id=%s "
+                "(gate_uncalibrated_vertical will fail-closed; see runbook §21)",
+                vertical,
+                market_id,
+            )
+            try:
+                import json as _json_ml
+                await db.execute(
+                    """
+                    INSERT INTO risk_gate_trips
+                        (gate_name, market_id, vertical, side,
+                         intended_quantity, current_price, reason, details)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb)
+                    """,
+                    "missing_league_on_candidate",
+                    str(market_id),
+                    vertical,
+                    side,
+                    int(intended_qty) if intended_qty is not None else None,
+                    float(current_price) if current_price is not None else None,
+                    "candidate reached risk gates without a league set",
+                    _json_ml.dumps({
+                        "vertical": vertical,
+                        "market_id": str(market_id),
+                        "matchup": cand.get("matchup"),
+                        "game_id": cand.get("game_id"),
+                    }),
+                )
+            except Exception as _ml_e:  # pragma: no cover — persist is best-effort
+                log.warning(
+                    "missing_league_on_candidate persist failed for %s: %s",
+                    market_id,
+                    _ml_e,
+                )
+
         ctx = RiskContext(
             market_id=str(market_id),
             side=side,

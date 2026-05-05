@@ -678,6 +678,63 @@ async def collect_uncalibrated_trades_24h() -> dict[str, Any]:
     return out
 
 
+async def collect_missing_league_24h() -> dict[str, Any]:
+    """Count of production candidates that reached the risk gates with
+    no ``ctx.league`` set in the last 24h (Task #771).
+
+    Backed by the upstream check in
+    :mod:`app.orchestrator.cycle` which logs at WARN and persists a
+    ``risk_gate_trips`` row with
+    ``gate_name='missing_league_on_candidate'`` whenever a candidate
+    arrives at the gates without a league.  ``gate_uncalibrated_vertical``
+    already fail-closes on the same condition (state_error path), so
+    this counter is purely instrumentation: it lets operators
+    distinguish a feed bug (lots of missing-league trips on one
+    vertical) from an ordinary calibrator-gate rejection.
+
+    GREEN when zero; RED with a per-(vertical, market_id) breakdown
+    when ≥ 1 candidate showed up with a missing league.
+    """
+    out: dict[str, Any] = {
+        "total": 0,
+        "items": [],
+        "tone": "green",
+        "error": None,
+    }
+    try:
+        rows = await db.fetch(
+            """
+            SELECT vertical,
+                   COALESCE(market_id, '(unknown)')          AS market_id,
+                   count(*)::int                              AS n,
+                   to_char(max(created_at),
+                           'YYYY-MM-DD"T"HH24:MI:SSZ')        AS last_at
+              FROM risk_gate_trips
+             WHERE created_at > now() - interval '24 hours'
+               AND gate_name = 'missing_league_on_candidate'
+             GROUP BY vertical, market_id
+             ORDER BY n DESC, vertical ASC, market_id ASC
+            """
+        )
+    except Exception as e:
+        log.warning("missing_league_24h query failed: %s", e)
+        out["error"] = f"{type(e).__name__}: {e}"[:240]
+        return out
+    items = [
+        {
+            "vertical": r["vertical"],
+            "market_id": r["market_id"],
+            "count": int(r["n"]),
+            "last_at": r["last_at"],
+        }
+        for r in rows
+    ]
+    out["items"] = items
+    out["total"] = sum(it["count"] for it in items)
+    out["tone"] = "red" if out["total"] > 0 else "green"
+    return out
+
+
 async def collect_latest_investor_deck() -> dict[str, Any]:
     """Look up the most recent ``v1_backtest_gate_runs`` row whose
     ``notes`` JSON carries an ``investor_deck_path`` and return the
@@ -736,6 +793,7 @@ async def collect_report(date_utc: str) -> dict[str, Any]:
     tail_t = asyncio.create_task(collect_tail_risk_summary())
     gate_t = asyncio.create_task(collect_gate_trips_24h())
     raw_t = asyncio.create_task(collect_uncalibrated_trades_24h())
+    miss_t = asyncio.create_task(collect_missing_league_24h())
     deck_t = asyncio.create_task(collect_latest_investor_deck())
     (
         divergence,
@@ -743,8 +801,11 @@ async def collect_report(date_utc: str) -> dict[str, Any]:
         tail_risk,
         gate_trips,
         uncalibrated_raw,
+        missing_league,
         investor_deck,
-    ) = await asyncio.gather(div_t, drift_t, tail_t, gate_t, raw_t, deck_t)
+    ) = await asyncio.gather(
+        div_t, drift_t, tail_t, gate_t, raw_t, miss_t, deck_t
+    )
     return {
         "date_utc": date_utc,
         "divergence": divergence,
@@ -752,6 +813,7 @@ async def collect_report(date_utc: str) -> dict[str, Any]:
         "tail_risk": tail_risk,
         "gate_trips_24h": gate_trips,
         "uncalibrated_raw": uncalibrated_raw,
+        "missing_league": missing_league,
         "investor_deck": investor_deck,
     }
 
@@ -1302,6 +1364,77 @@ def render_daily_report_pdf(
                     story.append(raw_tbl)
         story.append(Spacer(1, 0.2 * inch))
 
+        # Section 6: missing-league candidates (Task #771)
+        ml = payload.get("missing_league") or {}
+        story.append(
+            Paragraph(
+                "6. Missing-league candidates (last 24h)",
+                h2,
+            )
+        )
+        if ml.get("error"):
+            story.append(
+                Paragraph(f"<b>error:</b> {ml['error']}", body_style)
+            )
+        else:
+            total_ml = int(ml.get("total") or 0)
+            if total_ml == 0:
+                story.append(
+                    Paragraph(
+                        "<font color=\"#0a7d0a\"><b>0 candidates "
+                        "reached the gates without a league</b></font>.",
+                        body_style,
+                    )
+                )
+            else:
+                story.append(
+                    Paragraph(
+                        f"<font color=\"#b00000\"><b>{total_ml} "
+                        "candidate(s) reached the gates with no "
+                        "league set</b></font> — upstream feed bug. "
+                        "<font face=\"Courier\">gate_uncalibrated_vertical"
+                        "</font> fail-closed; see runbook §21.",
+                        body_style,
+                    )
+                )
+                items_ml = list(ml.get("items") or [])
+                if items_ml:
+                    ml_data = [["Vertical", "Market", "Count", "Last at"]]
+                    for it in items_ml:
+                        ml_data.append(
+                            [
+                                str(it.get("vertical") or "?"),
+                                str(it.get("market_id") or "?"),
+                                str(int(it.get("count", 0))),
+                                str(it.get("last_at") or "(n/a)"),
+                            ]
+                        )
+                    ml_tbl = Table(ml_data, hAlign="LEFT")
+                    ml_style = [
+                        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#f0f0f0")),
+                        ("FONTNAME", (0, 0), (-1, -1), "Courier"),
+                        ("FONTSIZE", (0, 0), (-1, -1), 8),
+                        ("BOX", (0, 0), (-1, -1), 0.25, colors.grey),
+                        ("INNERGRID", (0, 0), (-1, -1), 0.25, colors.lightgrey),
+                        ("LEFTPADDING", (0, 0), (-1, -1), 4),
+                        ("RIGHTPADDING", (0, 0), (-1, -1), 4),
+                        (
+                            "TEXTCOLOR",
+                            (2, 1),
+                            (2, -1),
+                            colors.HexColor("#b00000"),
+                        ),
+                        (
+                            "FONTNAME",
+                            (2, 1),
+                            (2, -1),
+                            "Courier-Bold",
+                        ),
+                    ]
+                    ml_tbl.setStyle(TableStyle(ml_style))
+                    story.append(ml_tbl)
+        story.append(Spacer(1, 0.2 * inch))
+
         # Investor deck deep-link
         deck = payload.get("investor_deck") or {}
         story.append(Paragraph("Latest investor deck", h2))
@@ -1477,6 +1610,32 @@ def render_text(payload: dict[str, Any]) -> tuple[str, str]:
             lines.append(
                 f"    {str(it.get('vertical') or '?'):<14s} "
                 f"{str(it.get('league') or '?'):<10s} "
+                f"count={it.get('count', 0):>4d}  "
+                f"last={it.get('last_at') or '(n/a)'}"
+            )
+    lines.append("")
+
+    # Section 6 — missing-league candidates (Task #771)
+    ml = payload.get("missing_league") or {}
+    lines.append(
+        "== 6. Missing-league candidates (last 24h) =="
+    )
+    if ml.get("error"):
+        lines.append(f"  ERROR: {ml['error']}")
+    elif int(ml.get("total") or 0) == 0:
+        lines.append(
+            "  [GREEN] 0 candidates reached the gates without a league"
+        )
+    else:
+        lines.append(
+            f"  [RED]   {ml.get('total', 0)} candidate(s) reached the "
+            "gates with no league set "
+            "(upstream feed bug — gate_uncalibrated_vertical fail-closed)"
+        )
+        for it in ml.get("items") or []:
+            lines.append(
+                f"    {str(it.get('vertical') or '?'):<14s} "
+                f"market={str(it.get('market_id') or '?'):<24s} "
                 f"count={it.get('count', 0):>4d}  "
                 f"last={it.get('last_at') or '(n/a)'}"
             )
@@ -1693,6 +1852,44 @@ def render_html(payload: dict[str, Any]) -> str:
                     parts.append(
                         f"<tr><td>{html.escape(str(it.get('vertical') or '?'))}</td>"
                         f"<td>{html.escape(str(it.get('league') or '?'))}</td>"
+                        f"<td style=\"color:#b00000;font-weight:600;\">"
+                        f"{int(it.get('count', 0))}</td>"
+                        f"<td>{html.escape(str(it.get('last_at') or '(n/a)'))}</td></tr>"
+                    )
+                parts.append("</table>")
+
+    ml = payload.get("missing_league") or {}
+    _section_h("Missing-league candidates (last 24h)")
+    if not _err(ml):
+        total = int(ml.get("total") or 0)
+        if total == 0:
+            parts.append(
+                "<p style=\"color:#0a7d0a;font-weight:600;\">"
+                "0 candidates reached the gates without a league.</p>"
+            )
+        else:
+            parts.append(
+                f"<p style=\"color:#b00000;font-weight:600;\">"
+                f"{total} candidate(s) reached the gates with no league "
+                "set — upstream feed bug. "
+                "<code>gate_uncalibrated_vertical</code> fail-closed.</p>"
+            )
+            items = ml.get("items") or []
+            if items:
+                parts.append(
+                    "<table cellpadding=4 style=\"border-collapse:collapse;"
+                    "font-family:ui-monospace,SFMono-Regular,Menlo,monospace;"
+                    "font-size:12px;\">"
+                )
+                parts.append(
+                    "<tr style=\"background:#f0f0f0;\">"
+                    "<th>Vertical</th><th>Market</th>"
+                    "<th>Count</th><th>Last at</th></tr>"
+                )
+                for it in items:
+                    parts.append(
+                        f"<tr><td>{html.escape(str(it.get('vertical') or '?'))}</td>"
+                        f"<td>{html.escape(str(it.get('market_id') or '?'))}</td>"
                         f"<td style=\"color:#b00000;font-weight:600;\">"
                         f"{int(it.get('count', 0))}</td>"
                         f"<td>{html.escape(str(it.get('last_at') or '(n/a)'))}</td></tr>"

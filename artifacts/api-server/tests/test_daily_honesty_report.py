@@ -211,6 +211,7 @@ def test_collect_report_aggregates_four_sections(
             "calibration_snapshots": _SNAPSHOT_ROWS,
             "FROM risk_gate_trips": _GATE_TRIP_ROWS,
             "uncalibrated_vertical_raw_mode": [],
+            "missing_league_on_candidate": [],
         }
     )
     monkeypatch.setattr(dhr, "db", fake)
@@ -306,6 +307,7 @@ def test_fire_now_dry_run_renders_without_dispatch(
             "calibration_snapshots": _SNAPSHOT_ROWS,
             "FROM risk_gate_trips": _GATE_TRIP_ROWS,
             "uncalibrated_vertical_raw_mode": [],
+            "missing_league_on_candidate": [],
         }
     )
     monkeypatch.setattr(dhr, "db", fake)
@@ -385,6 +387,7 @@ def _setup_fire_now_env(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]
             "calibration_snapshots": _SNAPSHOT_ROWS,
             "FROM risk_gate_trips": _GATE_TRIP_ROWS,
             "uncalibrated_vertical_raw_mode": [],
+            "missing_league_on_candidate": [],
         }
     )
     monkeypatch.setattr(dhr, "db", fake)
@@ -1380,3 +1383,192 @@ def test_render_daily_report_pdf_includes_uncalibrated_section(tmp_path) -> None
     )
     assert bare is not None
     assert len(blob) > len(bare.read_bytes())
+
+
+# ---------------------------------------------------------------------------
+# Task #771 — missing-league candidates section
+# ---------------------------------------------------------------------------
+
+
+class _MissingLeagueDB:
+    """Stand-in returning canned rows for the missing-league aggregation."""
+
+    def __init__(self, rows: list[dict[str, Any]]) -> None:
+        self._rows = rows
+
+    async def fetch(self, query: str, *args: Any) -> list[dict[str, Any]]:
+        if "missing_league_on_candidate" in query:
+            return self._rows
+        return []
+
+    async def fetchrow(self, *_a: Any, **_kw: Any) -> Any:
+        return None
+
+    async def execute(self, *_a: Any, **_kw: Any) -> str:
+        return "OK"
+
+    async def fetchval(self, *_a: Any, **_kw: Any) -> Any:
+        return None
+
+
+def test_collect_missing_league_24h_aggregates_rows(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rows = [
+        {
+            "vertical": "sports",
+            "market_id": "KXNBA-LAKBOS",
+            "n": 4,
+            "last_at": "2026-05-04T12:34:56Z",
+        },
+        {
+            "vertical": "weather",
+            "market_id": "KXHIGH-NYC",
+            "n": 1,
+            "last_at": "2026-05-04T08:00:00Z",
+        },
+    ]
+    monkeypatch.setattr(dhr, "db", _MissingLeagueDB(rows))
+    out = asyncio.run(dhr.collect_missing_league_24h())
+    assert out["error"] is None
+    assert out["total"] == 5
+    assert out["tone"] == "red"
+    assert out["items"][0]["vertical"] == "sports"
+    assert out["items"][0]["market_id"] == "KXNBA-LAKBOS"
+    assert out["items"][0]["count"] == 4
+
+
+def test_collect_missing_league_24h_zero_rows_is_green(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(dhr, "db", _MissingLeagueDB([]))
+    out = asyncio.run(dhr.collect_missing_league_24h())
+    assert out["total"] == 0
+    assert out["tone"] == "green"
+    assert out["items"] == []
+
+
+def test_collect_missing_league_24h_swallows_db_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _Boom:
+        async def fetch(self, *_a: Any, **_kw: Any) -> list[Any]:
+            raise RuntimeError("db down")
+
+    monkeypatch.setattr(dhr, "db", _Boom())
+    out = asyncio.run(dhr.collect_missing_league_24h())
+    assert out["total"] == 0
+    assert out["error"] and "db down" in out["error"]
+
+
+def _payload_with_missing_league(items: list[dict[str, Any]]) -> dict[str, Any]:
+    total = sum(int(it.get("count", 0)) for it in items)
+    return {
+        "date_utc": "2026-05-04",
+        "divergence": {"days": 7, "items": []},
+        "calibrator_drift": {"items": []},
+        "tail_risk": {},
+        "gate_trips_24h": {"items": [], "total": 0},
+        "uncalibrated_raw": {
+            "items": [],
+            "total": 0,
+            "tone": "green",
+            "error": None,
+        },
+        "missing_league": {
+            "items": items,
+            "total": total,
+            "tone": "red" if total > 0 else "green",
+            "error": None,
+        },
+        "investor_deck": {"investor_deck_path": None, "built_at": None},
+    }
+
+
+def test_render_text_renders_missing_league_red_row() -> None:
+    payload = _payload_with_missing_league(
+        [
+            {
+                "vertical": "sports",
+                "market_id": "KXNBA-LAKBOS",
+                "count": 3,
+                "last_at": "2026-05-04T11:00:00Z",
+            }
+        ]
+    )
+    _subject, body = dhr.render_text(payload)
+    assert "6. Missing-league candidates" in body
+    assert "[RED]" in body
+    assert "sports" in body
+    assert "KXNBA-LAKBOS" in body
+    assert "count=   3" in body
+
+
+def test_render_text_renders_missing_league_green_when_zero() -> None:
+    payload = _payload_with_missing_league([])
+    _subject, body = dhr.render_text(payload)
+    assert "6. Missing-league candidates" in body
+    assert "[GREEN] 0 candidates reached the gates without a league" in body
+
+
+def test_render_html_renders_missing_league_section_red() -> None:
+    payload = _payload_with_missing_league(
+        [
+            {
+                "vertical": "sports",
+                "market_id": "KXNBA-LAKBOS",
+                "count": 2,
+                "last_at": "2026-05-04T11:00:00Z",
+            }
+        ]
+    )
+    body = dhr.render_html(payload)
+    assert "Missing-league candidates" in body
+    assert "#b00000" in body
+    assert "KXNBA-LAKBOS" in body
+
+
+def test_render_daily_report_pdf_includes_missing_league_section(tmp_path) -> None:
+    payload = _payload_with_missing_league(
+        [
+            {
+                "vertical": "sports",
+                "market_id": "KXNBA-LAKBOS",
+                "count": 6,
+                "last_at": "2026-05-04T11:00:00Z",
+            }
+        ]
+    )
+    out = dhr.render_daily_report_pdf(
+        payload,
+        text_body="body",
+        chart_path=None,
+        output_dir=tmp_path,
+    )
+    if out is None:
+        pytest.skip("reportlab not installed")
+    blob = out.read_bytes()
+    assert blob.startswith(b"%PDF") and len(blob) > 1000
+
+    bare = dhr.render_daily_report_pdf(
+        _payload_with_missing_league([]),
+        text_body="body",
+        chart_path=None,
+        output_dir=tmp_path,
+    )
+    assert bare is not None
+    assert len(blob) > len(bare.read_bytes())
+
+
+def test_collect_report_includes_missing_league_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`collect_report` must surface the new ``missing_league`` section
+    so downstream renderers (text/HTML/PDF) get a populated dict."""
+    monkeypatch.setattr(
+        dhr, "db", _MissingLeagueDB([])
+    )
+    payload = asyncio.run(dhr.collect_report("2026-05-04"))
+    assert "missing_league" in payload
+    assert payload["missing_league"]["total"] == 0
+    assert payload["missing_league"]["tone"] == "green"
