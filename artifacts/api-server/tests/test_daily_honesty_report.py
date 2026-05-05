@@ -452,6 +452,34 @@ def test_fire_now_banner_appears_when_pdf_render_returns_none(
     assert _BANNER in dispatch_calls[0]["html_body"]
 
 
+def test_fire_now_banner_absent_when_only_chart_returns_none(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
+    """Chart-None is the legitimate 'no non-zero buckets' case and must
+    NOT trigger the operator banner — only a real PDF failure should.
+    (architect HIGH fix — banner was previously firing on quiet days
+    when the tail-risk tile had nothing to plot.)"""
+    dispatch_calls = _setup_fire_now_env(monkeypatch)
+
+    fake_pdf = tmp_path / "report.pdf"
+    fake_pdf.write_bytes(b"%PDF-1.4 fake")
+    monkeypatch.setattr(
+        dhr, "render_daily_report_pdf", lambda *a, **kw: fake_pdf
+    )
+    monkeypatch.setattr(
+        dhr, "render_tail_risk_chart_png", lambda *a, **kw: None
+    )
+
+    out = _run(dhr.fire_now(dry_run=True))
+
+    assert _BANNER not in out["body"]
+    assert _BANNER not in out["html_body"]
+    assert len(dispatch_calls) == 1
+    assert _BANNER not in dispatch_calls[0]["body"]
+    # The PDF is still attached even though the chart was skipped.
+    assert dispatch_calls[0]["attachments"] == [str(fake_pdf)]
+
+
 def test_fire_now_banner_absent_when_both_artifacts_render(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Any
 ) -> None:

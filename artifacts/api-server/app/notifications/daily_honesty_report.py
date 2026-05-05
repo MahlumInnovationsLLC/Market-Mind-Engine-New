@@ -938,6 +938,7 @@ def render_tail_risk_chart_png(
         "green": "#0a7d0a",
     }.get(tone, "#444")
 
+    fig = None
     try:
         fig, ax = plt.subplots(figsize=(8.5, 4.6), dpi=150)
         y_pos = list(range(len(labels)))
@@ -988,10 +989,18 @@ def render_tail_risk_chart_png(
                 pass
         fig.tight_layout()
         fig.savefig(out_path, format="png", bbox_inches="tight")
-        plt.close(fig)
     except Exception as e:
         log.warning("tail-risk chart render failed: %s", e)
         return None
+    finally:
+        # Always close the figure to avoid a matplotlib backend leak across
+        # repeated scheduler runs — `plt.subplots` keeps a global reference
+        # to every figure until `plt.close` is called.  (architect HIGH fix)
+        if fig is not None:
+            try:
+                plt.close(fig)
+            except Exception:  # pragma: no cover — close should never raise
+                pass
     return out_path
 
 
@@ -1981,11 +1990,14 @@ async def fire_now(*, dry_run: bool = False) -> dict[str, Any]:
 
     attachments: list[Path] = [p for p in (pdf_path, chart_path) if p]
 
-    # Operator-visible banner: when either artifact failed to render the
-    # email would otherwise go out with no attachment and no indication
-    # anything is missing — forcing whoever reads it to grep server logs
-    # to discover the gap.  Prepend a one-liner to both bodies.
-    if pdf_path is None or chart_path is None:
+    # Operator-visible banner: only fire when the **PDF** failed to
+    # render — the PDF is the canonical artifact and has no
+    # legitimate "skip" path (it returns None only on reportlab-missing
+    # or disk failure).  The PNG chart legitimately returns None when
+    # there are zero non-zero buckets (the desired "no chart needed"
+    # case), so a chart-None must NOT trigger the banner — that would
+    # alarm the operator on every quiet day.  (architect HIGH fix)
+    if pdf_path is None:
         _banner = (
             "(PDF artifact unavailable today — see API server logs)"
         )
@@ -2078,11 +2090,24 @@ async def _broadcast_document(file_path: Path, *, caption: str) -> int:
         return 0
     if not chat_ids:
         return 0
+    # Bound concurrency so a 1k-chat fan-out doesn't overwhelm Telegram's
+    # per-bot rate limit (and our own outbound socket pool).  4 in flight
+    # is conservative — Telegram's documented bot limit is ~30 msg/s.
+    # (architect HIGH fix)
+    sem = asyncio.Semaphore(4)
+
+    async def _send_one(c: str) -> bool:
+        async with sem:
+            try:
+                return await _tg_bot.send_document_to_chat(
+                    c, file_path, caption=caption
+                )
+            except Exception as e:  # pragma: no cover — bot wraps its own
+                log.warning("telegram sendDocument chat=%s: %s", c, e)
+                return False
+
     results = await asyncio.gather(
-        *(
-            _tg_bot.send_document_to_chat(c, file_path, caption=caption)
-            for c in chat_ids
-        ),
+        *(_send_one(c) for c in chat_ids),
         return_exceptions=True,
     )
     sent = 0
