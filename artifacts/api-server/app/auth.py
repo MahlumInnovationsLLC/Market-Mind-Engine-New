@@ -167,6 +167,40 @@ def _allowed_emails() -> set[str]:
     return {e.strip().lower() for e in raw.split(",") if e.strip()}
 
 
+def _auto_approve_email_domains() -> set[str]:
+    """Test-only operator-allow-list bypass.
+
+    When ``OPERATOR_AUTO_APPROVE_EMAIL_DOMAINS`` is set to a
+    comma-separated list of email domains (e.g. ``"example.com"``),
+    any authenticated Clerk user whose primary email lives in one of
+    those domains is treated as approved — *regardless* of the
+    persisted ``app_users`` row, the ``OPERATOR_ALLOWED_EMAILS``
+    static list, and Clerk metadata.
+
+    Exists so the e2e test harness can sign in via Clerk's testing
+    tickets (which mint fresh users with ``@example.com`` style
+    addresses on every run) without an operator hand-approving each
+    one. Production deployments leave this env var unset, in which
+    case the function returns the empty set and is a no-op.
+    """
+    raw = os.environ.get("OPERATOR_AUTO_APPROVE_EMAIL_DOMAINS", "")
+    return {
+        d.strip().lower().lstrip("@")
+        for d in raw.split(",")
+        if d.strip()
+    }
+
+
+def _email_in_auto_approve_domain(email: str | None) -> bool:
+    if not email:
+        return False
+    domains = _auto_approve_email_domains()
+    if not domains:
+        return False
+    _, _, domain = email.lower().partition("@")
+    return bool(domain) and domain in domains
+
+
 def _email_from_claims(claims: dict[str, Any]) -> str | None:
     # Clerk session tokens may include email when the JWT template is
     # configured for it; fall back through a few common shapes.
@@ -338,6 +372,16 @@ async def check_approval(user: AuthedUser) -> tuple[bool, str | None]:
     """
     email = _email_from_claims(user.claims)
 
+    # Test-only bypass: if the user's email lives in an
+    # OPERATOR_AUTO_APPROVE_EMAIL_DOMAINS domain, short-circuit BEFORE
+    # the app_users lookup so the bypass survives even when the row
+    # exists but was last persisted with approved=False (e.g. the
+    # test ticket was created on an earlier run when the env var was
+    # not yet set). The env var is empty in production, so the check
+    # is a no-op there.
+    if _email_in_auto_approve_domain(email):
+        return True, email
+
     try:
         from . import admin as admin_module
 
@@ -348,7 +392,18 @@ async def check_approval(user: AuthedUser) -> tuple[bool, str | None]:
 
     if row is not None:
         approved = bool(row.get("approved") or row.get("is_admin"))
-        return approved, (row.get("email") or email)
+        row_email = row.get("email") or email
+        # Test-only bypass: if the persisted row carries an email
+        # whose domain is in OPERATOR_AUTO_APPROVE_EMAIL_DOMAINS, treat
+        # the user as approved even when the row says otherwise. The
+        # JWT may not have carried the email claim (so the upfront
+        # bypass at the top of this function had nothing to match
+        # against), but the row was upserted from a previous request
+        # that did resolve the email via the Clerk Backend API. The
+        # env var is empty in production, so this is a no-op there.
+        if not approved and _email_in_auto_approve_domain(row_email):
+            return True, row_email
+        return approved, row_email
 
     # Bootstrap path only — no app_users row yet.
     allowed = _allowed_emails()
@@ -365,6 +420,12 @@ async def check_approval(user: AuthedUser) -> tuple[bool, str | None]:
     data = await _fetch_clerk_user(user.user_id)
     if not email:
         email = _email_from_clerk_user(data)
+    # Re-check the auto-approve domain bypass after we've resolved
+    # the email via the Clerk Backend API — the JWT may not have
+    # carried the email claim, in which case the upfront check above
+    # had nothing to match against.
+    if _email_in_auto_approve_domain(email):
+        return True, email
     if email and (email in allowed or email in bootstrap_admins):
         return True, email
     if (
