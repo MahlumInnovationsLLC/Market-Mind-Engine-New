@@ -1,0 +1,29 @@
+{
+  "trades_total": 5349,
+  "trades_settled": 5347,
+  "trades_vetoed": 21,
+  "veto_rate_pct": 0.39,
+  "actual_net_pnl_usd": -5663.03,
+  "loss_prevented_usd": 6952.41,
+  "profit_forfeited_usd": 116.73,
+  "counterfactual_net_pnl_usd": 1172.65,
+  "counterfactual_delta_usd": 6835.68,
+  "audit_total_loss_usd": 39181.69,
+  "pct_audit_losses_prevented": 17.74,
+  "by_gate": {
+    "tail_price_size_cap": {
+      "vetoed": 4,
+      "settled_vetoed": 4,
+      "loss_prevented_usd": 4928.13,
+      "profit_forfeited_usd": 112.98
+    },
+    "jumbo_quantity_cap": {
+      "vetoed": 17,
+      "settled_vetoed": 17,
+      "loss_prevented_usd": 2024.28,
+      "profit_forfeited_usd": 3.75
+    }
+  },
+  "mode": "tail_only",
+  "overrides_applied": {}
+}

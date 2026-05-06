@@ -139,6 +139,36 @@ dashboard screen wires from its local `period` state.  Default = 30
 days for both (preserves historical behaviour and keeps the test
 harness compatible).
 
+**Tail-risk policy gates — counterfactual replay (May 2026, task
+#745).**  `scripts/replay_tail_risk_2026.py` reconstructs a
+`RiskContext` from each SYSTEM trade in the YTD 2026 cohort
+(`placed_by IN ('orchestrator','autotrader','swarm','operator_recovery')`,
+`executed_at >= 2026-01-01`) and runs the **full `app.risk.gates.GATES`
+tuple** (default) with side effects suppressed (the script
+monkey-patches `_emit_tail_risk_trip_alert` and
+`_persist_risk_gate_trip` to no-ops via `_suppress_gate_side_effects()`
+so a backtest never spams operator alerts or pollutes the daily
+honesty report's `risk_gate_trips` panel).  Globally-stateful gates
+(`kill_switch`, `daily_loss`, `vertical_halted`,
+`uncalibrated_vertical`) are bypassed via replay-only operator
+overrides because their verdict reflects *current* operator state,
+not the state at trade time.  `--tail-only` runs just the two new
+gates; `--from-json` swaps the DB cohort for a fixture.  Per-trade
+veto reasons → `--out-csv`; aggregate → `--out-json`/stdout.
+
+**Headline (live cohort, 2026-05-05; report at
+`artifacts/api-server/reports/tail_risk_replay_2026-05-05.{csv,json}`):**
+on **5,349 SYSTEM trades** (5,347 settled, total realised audit loss
+$39,181.69) the two new gates would have **vetoed 21 trades and
+prevented $6,952.41 of losses — 17.74 % of audit losses prevented**
+while forfeiting $116.73 of incidental profit, flipping the cohort's
+realised P&L from **−$5,663 to +$1,173 (+$6,836 net delta)**.
+By gate: `tail_price_size_cap` 4 vetoes ($4,928 prevented / $113
+forfeited), `jumbo_quantity_cap` 17 vetoes ($2,024 prevented / $4
+forfeited).  Re-run with `python -m scripts.replay_tail_risk_2026
+--from-db --out-csv reports/tail_risk_replay_<date>.csv --out-json
+reports/tail_risk_replay_<date>.json` to refresh.
+
 **Typed client.** The endpoint is published in
 `lib/api-spec/openapi.yaml` as `getPublicTailRiskExposure` and the
 Orval codegen produces typed React-Query hooks in
