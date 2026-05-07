@@ -1,10 +1,10 @@
 import { describe, it, expect, afterEach, vi } from "vitest";
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { Router } from "wouter";
 import { memoryLocation } from "wouter/memory-location";
 import React from "react";
 
-const { state } = vi.hoisted(() => ({
+const { state, overviewSpy } = vi.hoisted(() => ({
   state: {
     access: { data: { is_admin: false } as { is_admin: boolean } | null },
     overview: {
@@ -13,13 +13,20 @@ const { state } = vi.hoisted(() => ({
       error: undefined as unknown,
     },
   },
+  overviewSpy: vi.fn(),
 }));
 
 vi.mock("@workspace/api-client-react", () => ({
   getGetMyAccessQueryKey: () => ["my-access"],
-  getGetVerticalsOverviewQueryKey: () => ["vertical-overview"],
+  getGetVerticalsOverviewQueryKey: (params: unknown) => [
+    "vertical-overview",
+    params,
+  ],
   useGetMyAccess: () => state.access,
-  useGetVerticalsOverview: () => state.overview,
+  useGetVerticalsOverview: (...args: unknown[]) => {
+    overviewSpy(...args);
+    return state.overview;
+  },
 }));
 
 vi.mock("@/components/intelligence/vertical-admin-controls", () => ({
@@ -35,6 +42,7 @@ afterEach(() => {
   state.overview.data = undefined;
   state.overview.isLoading = false;
   state.overview.error = undefined;
+  overviewSpy.mockClear();
 });
 
 function renderPage() {
@@ -127,5 +135,38 @@ describe("VerticalsPage", () => {
     state.overview.data = { verticals: [] };
     renderPage();
     expect(screen.getByText(/NO_VERTICALS_REGISTERED/i)).toBeTruthy();
+  });
+
+  // Locks the /verticals provider wrapper: toggle clicks must update
+  // both the request params and the React-Query key.
+  it("threads the Manual/System/Both toggle into both the placed_by arg and the React-Query key", () => {
+    state.overview.data = { verticals: [] };
+    renderPage();
+
+    function expectFilter(value: "manual" | "system" | "all") {
+      expect(overviewSpy).toHaveBeenLastCalledWith(
+        expect.objectContaining({ days: 7, placed_by: value }),
+        expect.objectContaining({
+          query: expect.objectContaining({
+            queryKey: [
+              "vertical-overview",
+              expect.objectContaining({ days: 7, placed_by: value }),
+            ],
+          }),
+        }),
+      );
+    }
+
+    // Default for any page wrapped in <PlacedByProvider> is "system".
+    expectFilter("system");
+
+    fireEvent.click(screen.getByTestId("button-placed-by-manual"));
+    expectFilter("manual");
+
+    fireEvent.click(screen.getByTestId("button-placed-by-all"));
+    expectFilter("all");
+
+    fireEvent.click(screen.getByTestId("button-placed-by-system"));
+    expectFilter("system");
   });
 });
