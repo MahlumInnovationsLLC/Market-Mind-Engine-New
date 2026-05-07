@@ -116,22 +116,28 @@ keyed by the original column names.  Datetimes are ISO-8601 strings,
 ``Decimal`` columns are rendered as strings, and raw ``bytes``
 columns are wrapped as ``{"__bytes_b64__": "<base64>"}``.
 
-Skeleton restore (PG-bound, replace ``<table>`` and edit the
-``INSERT`` to match the schema)::
+For the common case ("audit needs row X back in Postgres"), use the
+one-shot CLI added in task #760::
 
-    import base64, gzip, json, asyncpg
-    rows = []
-    for line in gzip.open("part-0000.jsonl.gz", "rt"):
-        d = json.loads(line)
-        for k, v in list(d.items()):
-            if isinstance(v, dict) and "__bytes_b64__" in v:
-                d[k] = base64.b64decode(v["__bytes_b64__"])
-        rows.append(d)
-    # …feed `rows` into a parameterised INSERT …
+    # Dry-run a single chunk (default).
+    python -m scripts.restore_archived_chunk \
+        --object-key archives/predictions/dt=2026-04-22/part-0000.jsonl.gz
 
-For the common case of "I just want to grep an archived row for
-audit purposes," ``zcat archives/<table>/dt=*/part-*.jsonl.gz | jq
-'select(.id == "…")'`` is enough.
+    # Apply every chunk under a date partition.
+    python -m scripts.restore_archived_chunk \
+        --prefix archives/predictions/dt=2026-04-22/ --apply
+
+The destination table is inferred from the canonical
+``archives/<table>/...`` layout; pass ``--table`` when the object
+lives elsewhere.  Inserts use ``ON CONFLICT DO NOTHING`` so re-running
+against rows that are already present is a no-op.  Datetimes,
+``Decimal`` columns, and base64-armored bytes round-trip back to their
+native Python / Postgres types via ``information_schema.columns``
+type lookup.
+
+For ad-hoc grep-style audits (no Postgres write needed), ``zcat
+archives/<table>/dt=*/part-*.jsonl.gz | jq 'select(.id == "…")'`` is
+still the fastest path.
 
 ## Failure modes
 
