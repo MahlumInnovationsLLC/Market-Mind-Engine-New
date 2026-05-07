@@ -743,6 +743,15 @@ class _KnobSpec:
     step: float
     kind: str  # "float" | "int"
     unit: str  # "pp" | "fraction" | "usd" | "count"
+    # Tuned global default the gate falls back to when neither an
+    # operator override nor a per-vertical override is set. ``None``
+    # means "no spec-level default; the gate's own hard-coded fallback
+    # wins". Defaults for the round-2 audit gates (Sharpe / ruin /
+    # segment throttler) come from the historical sweep in
+    # ``scripts/tune_safety_thresholds.py`` (task #732); see the report
+    # in ``scripts/reports/safety_threshold_tuning_*.json`` for the
+    # provenance of each value.
+    default: float | int | None = None
 
 
 RISK_KNOB_SPECS: tuple["_KnobSpec", ...] = (
@@ -774,19 +783,47 @@ RISK_KNOB_SPECS: tuple["_KnobSpec", ...] = (
     # the new gates without a redeploy.  Bounds were picked so a slider
     # can't push values into a regime the gate's safe-default branch
     # doesn't already handle (cold start, query degraded, etc).
+    #
+    # Tuned defaults below replace the conservative round-2 launch
+    # values (Sharpe ≥ 0.0, ruin ≤ 5%, segment ≤ 3 / 24h) with the
+    # sweep recommendations from
+    # ``scripts/tune_safety_thresholds.py`` against the V1 settled-trade
+    # tape (task #732).  Provenance: the committed report at
+    # ``scripts/reports/safety_threshold_tuning_2026-05-07.json``,
+    # generated from the synthetic V1 fixture under
+    # ``scripts/fixtures/v1_settled_trades_synthetic.json`` (kept under
+    # version control for reproducibility; operators should rerun the
+    # script against the production V1 dump after deploy and refresh
+    # this table from the new report).
+    #
+    # Globals come from the ``__all__`` row of that report:
+    #   * Sharpe -0.25:  loosens the launch floor (0.0) by one grid
+    #     step.  The sweep retained ~98% of historical kept-PnL while
+    #     cutting the worst Sharpe-decay cohort.
+    #   * Ruin 0.05:     unchanged from the launch value.  The sweep
+    #     was silent on the global cap (the bootstrap MC never breached
+    #     the bankroll floor for the global mix), so we keep the
+    #     conservative launch default rather than ship an unsupported
+    #     pick.
+    #   * Segment 2:     tighter than the launch value (3) — the sweep
+    #     showed two clustered losses in the rolling 24-hour window
+    #     were already the leading indicator of a bad streak across
+    #     every tested vertical with measurable cadence.
+    # Per-vertical overrides for verticals that need a different
+    # threshold live in ``PER_VERTICAL_NEW_GATE_DEFAULTS`` below.
     _KnobSpec("sharpe_min_ratio", "Min trailing Sharpe",
               "Veto when realised Sharpe over the trailing window decays "
               "below this floor",
-              -3.0, 5.0, 0.05, "float", "fraction"),
+              -3.0, 5.0, 0.05, "float", "fraction", default=-0.25),
     _KnobSpec("ruin_max_probability", "Max P(ruin)",
               "Veto when bootstrap Monte-Carlo P(ruin over horizon) "
               "exceeds this cap",
-              0.0, 1.0, 0.01, "float", "fraction"),
+              0.0, 1.0, 0.01, "float", "fraction", default=0.05),
     _KnobSpec("segment_max_losses", "Segment loss throttle",
               "Veto when settled losses for the candidate's "
               "(league, market_type) segment in the trailing window "
               "reach this count",
-              1.0, 50.0, 1.0, "int", "count"),
+              1.0, 50.0, 1.0, "int", "count", default=2),
     # ---- Tail-risk policy gates (task #743) -----------------------------
     # Surfaced on the same Live-risk-knobs panel so the operator can
     # respond to a tail-driven drawdown without a redeploy.  Bounds:
@@ -830,6 +867,82 @@ RISK_KNOB_SPECS: tuple["_KnobSpec", ...] = (
 
 RISK_KNOB_KEYS: frozenset[str] = frozenset(s.key for s in RISK_KNOB_SPECS)
 _KNOB_BY_KEY: dict[str, _KnobSpec] = {s.key: s for s in RISK_KNOB_SPECS}
+
+
+# ---------------------------------------------------------------------------
+# Per-vertical recommended defaults for the round-2 audit gates
+# (task #732).  Populated from the historical sweep in
+# ``scripts/tune_safety_thresholds.py`` against the V1 settled-trade
+# tape.  Only verticals whose tuned default differs from the global
+# spec default appear here; everything else falls through to
+# ``_KNOB_BY_KEY[knob].default``.
+#
+# Rationale (per-vertical picks from the sweep report; only entries
+# that *differ* from the global spec defaults appear here):
+#
+#   * ``elections``   — small N, lumpy but net-positive PnL.  The
+#                       trailing-Sharpe estimate is too noisy at low
+#                       sample counts to support the loosened global
+#                       (-0.25); the sweep's tighter floor (0.0 = the
+#                       launch baseline) preserved ~100% of kept PnL
+#                       on the V1 tape.  Tighter ruin cap (0.01) is
+#                       the smallest bootstrap-MC threshold that still
+#                       retained 95% of historical PnL on the
+#                       elections-only slice — settled vols are tiny so
+#                       the cap rarely binds in practice.
+#   * ``events_econ`` — same low-cadence story as elections; sweep
+#                       picked the tightest ruin cap that retained 95%
+#                       of historical PnL.
+#   * ``sports``      — high cadence, well-sampled returns; sweep
+#                       picked the tightest ruin cap (0.01) that
+#                       retained 95% of historical PnL on the
+#                       sports-only slice.  Sharpe / segment match
+#                       global.
+#   * ``crypto`` / ``commodities`` — sweep was silent on every knob
+#                       (data did not differentiate the picks above
+#                       the global), so they fall through to
+#                       ``_KNOB_BY_KEY[knob].default`` and are
+#                       deliberately omitted from this table.
+#
+# Vertical names match ``app.verticals.registry`` (lower-case).
+# Keep this table in sync with the sweep report under
+# ``scripts/reports/safety_threshold_tuning_2026-05-07.json`` —
+# re-running the sweep after each model retrain may shift the
+# recommended values.
+# ---------------------------------------------------------------------------
+PER_VERTICAL_NEW_GATE_DEFAULTS: dict[tuple[str, str], float | int] = {
+    ("sharpe_min_ratio", "elections"): 0.0,
+    ("ruin_max_probability", "elections"): 0.01,
+    ("ruin_max_probability", "events_econ"): 0.01,
+    ("ruin_max_probability", "sports"): 0.01,
+}
+
+
+def tuned_default(knob: str, vertical: str | None = None) -> float | int | None:
+    """Return the tuned spec / per-vertical default for ``knob``.
+
+    Resolution order (matches the gate-side ``_resolve_per_vertical_override``
+    once an explicit operator override is absent):
+
+      1. ``PER_VERTICAL_NEW_GATE_DEFAULTS[(knob, vertical)]``
+      2. ``_KNOB_BY_KEY[knob].default``
+      3. ``None``
+
+    The risk gates use this as the *fallback* their
+    ``ctx.operator_overrides.get(...)`` lands on; an operator override
+    (global or per-vertical) still wins because the gate consults
+    ``_resolve_per_vertical_override`` first.
+    """
+    if vertical:
+        v = vertical.strip().lower()
+        if v:
+            per = PER_VERTICAL_NEW_GATE_DEFAULTS.get((knob, v))
+            if per is not None:
+                return per
+    spec = _KNOB_BY_KEY.get(knob)
+    if spec is None:
+        return None
+    return spec.default
 
 
 def _coerce_knob_value(spec: "_KnobSpec", raw: Any) -> float | int:

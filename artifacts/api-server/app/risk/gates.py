@@ -1040,9 +1040,14 @@ async def gate_sharpe_ratio(ctx: RiskContext) -> GateResult:
         ctx, "sharpe_min_samples",
         ctx.operator_overrides.get("sharpe_min_samples", 10),
     ))
+    from ..runtime_settings import tuned_default as _tuned_default
+    _sharpe_default = _tuned_default("sharpe_min_ratio", ctx.vertical)
     threshold = float(_resolve_per_vertical_override(
         ctx, "sharpe_min_ratio",
-        ctx.operator_overrides.get("sharpe_min_ratio", 0.0),
+        ctx.operator_overrides.get(
+            "sharpe_min_ratio",
+            _sharpe_default if _sharpe_default is not None else 0.0,
+        ),
     ))
     if window < 5:
         window = 5
@@ -1149,9 +1154,14 @@ async def gate_ruin_monte_carlo(ctx: RiskContext) -> GateResult:
 
     Cold-start, missing bankroll snapshot, or DB failure all PASS.
     """
+    from ..runtime_settings import tuned_default as _tuned_default
+    _ruin_default = _tuned_default("ruin_max_probability", ctx.vertical)
     threshold = float(_resolve_per_vertical_override(
         ctx, "ruin_max_probability",
-        ctx.operator_overrides.get("ruin_max_probability", 0.05),
+        ctx.operator_overrides.get(
+            "ruin_max_probability",
+            _ruin_default if _ruin_default is not None else 0.05,
+        ),
     ))
     paths = int(_resolve_per_vertical_override(
         ctx, "ruin_paths",
@@ -1275,9 +1285,14 @@ async def gate_segment_throttler(ctx: RiskContext) -> GateResult:
     """
     league = (ctx.league or "").strip().upper()
     market_type = (ctx.market_type or "").strip().lower()
+    from ..runtime_settings import tuned_default as _tuned_default
+    _seg_default = _tuned_default("segment_max_losses", ctx.vertical)
     max_losses = int(_resolve_per_vertical_override(
         ctx, "segment_max_losses",
-        ctx.operator_overrides.get("segment_max_losses", 3),
+        ctx.operator_overrides.get(
+            "segment_max_losses",
+            _seg_default if _seg_default is not None else 3,
+        ),
     ))
     window_hours = float(_resolve_per_vertical_override(
         ctx, "segment_window_hours",

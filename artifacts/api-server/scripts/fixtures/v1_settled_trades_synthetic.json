@@ -1,0 +1,6162 @@
+[
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_ETH",
+    "market_type": "binary",
+    "pnl": 0.9844,
+    "notional": 20.43,
+    "settled_at": "2025-01-01T21:51:46+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NBA",
+    "market_type": "moneyline",
+    "pnl": -0.695,
+    "notional": 13.25,
+    "settled_at": "2025-01-02T04:46:38+00:00"
+  },
+  {
+    "vertical": "commodities",
+    "league": "COMMODITIES",
+    "market_type": "binary",
+    "pnl": -1.4627,
+    "notional": 11.18,
+    "settled_at": "2025-01-02T11:38:36+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_BTC",
+    "market_type": "binary",
+    "pnl": -1.3146,
+    "notional": 28.94,
+    "settled_at": "2025-01-03T01:05:49+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_BTC",
+    "market_type": "binary",
+    "pnl": 0.5732,
+    "notional": 12.35,
+    "settled_at": "2025-01-03T08:58:30+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NBA",
+    "market_type": "moneyline",
+    "pnl": 0.7701,
+    "notional": 27.85,
+    "settled_at": "2025-01-03T23:31:27+00:00"
+  },
+  {
+    "vertical": "events_econ",
+    "league": "EVENTS_ECON",
+    "market_type": "binary",
+    "pnl": 0.3502,
+    "notional": 33.8,
+    "settled_at": "2025-01-04T02:57:31+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "EPL",
+    "market_type": "moneyline",
+    "pnl": 0.333,
+    "notional": 23.73,
+    "settled_at": "2025-01-04T11:50:35+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NFL",
+    "market_type": "moneyline",
+    "pnl": 0.7104,
+    "notional": 33.86,
+    "settled_at": "2025-01-04T12:37:16+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_BTC",
+    "market_type": "binary",
+    "pnl": 0.6566,
+    "notional": 14.13,
+    "settled_at": "2025-01-04T13:53:36+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NFL",
+    "market_type": "spread",
+    "pnl": 0.9099,
+    "notional": 16.88,
+    "settled_at": "2025-01-04T16:35:10+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_BTC",
+    "market_type": "binary",
+    "pnl": 0.8149,
+    "notional": 9.9,
+    "settled_at": "2025-01-05T04:21:03+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_ETH",
+    "market_type": "binary",
+    "pnl": 0.8417,
+    "notional": 31.16,
+    "settled_at": "2025-01-05T15:38:14+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "EPL",
+    "market_type": "moneyline",
+    "pnl": -1.5234,
+    "notional": 12.74,
+    "settled_at": "2025-01-07T02:06:09+00:00"
+  },
+  {
+    "vertical": "events_econ",
+    "league": "EVENTS_ECON",
+    "market_type": "binary",
+    "pnl": 1.0927,
+    "notional": 27.37,
+    "settled_at": "2025-01-07T09:38:23+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_ETH",
+    "market_type": "binary",
+    "pnl": 1.0375,
+    "notional": 36.38,
+    "settled_at": "2025-01-07T21:10:49+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_ETH",
+    "market_type": "binary",
+    "pnl": 1.0214,
+    "notional": 13.57,
+    "settled_at": "2025-01-08T01:59:48+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NBA",
+    "market_type": "spread",
+    "pnl": -0.7795,
+    "notional": 11.93,
+    "settled_at": "2025-01-08T04:54:30+00:00"
+  },
+  {
+    "vertical": "commodities",
+    "league": "COMMODITIES",
+    "market_type": "binary",
+    "pnl": 0.4256,
+    "notional": 8.73,
+    "settled_at": "2025-01-08T06:23:32+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NBA",
+    "market_type": "moneyline",
+    "pnl": -0.9123,
+    "notional": 12.7,
+    "settled_at": "2025-01-08T14:56:36+00:00"
+  },
+  {
+    "vertical": "elections",
+    "league": "ELECTIONS",
+    "market_type": "binary",
+    "pnl": 0.9615,
+    "notional": 20.38,
+    "settled_at": "2025-01-08T20:28:03+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_BTC",
+    "market_type": "binary",
+    "pnl": 0.734,
+    "notional": 23.5,
+    "settled_at": "2025-01-09T14:28:17+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NBA",
+    "market_type": "moneyline",
+    "pnl": 1.4335,
+    "notional": 11.44,
+    "settled_at": "2025-01-09T15:08:00+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_BTC",
+    "market_type": "binary",
+    "pnl": 0.7646,
+    "notional": 28.54,
+    "settled_at": "2025-01-10T13:54:53+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NBA",
+    "market_type": "moneyline",
+    "pnl": 0.7451,
+    "notional": 31.66,
+    "settled_at": "2025-01-11T01:07:12+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_BTC",
+    "market_type": "binary",
+    "pnl": -0.904,
+    "notional": 31.4,
+    "settled_at": "2025-01-11T06:34:55+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NBA",
+    "market_type": "moneyline",
+    "pnl": 0.8161,
+    "notional": 30.65,
+    "settled_at": "2025-01-11T20:16:57+00:00"
+  },
+  {
+    "vertical": "commodities",
+    "league": "COMMODITIES",
+    "market_type": "binary",
+    "pnl": 0.5794,
+    "notional": 18.27,
+    "settled_at": "2025-01-12T00:06:09+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NFL",
+    "market_type": "moneyline",
+    "pnl": 1.294,
+    "notional": 10.83,
+    "settled_at": "2025-01-12T08:28:58+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NBA",
+    "market_type": "moneyline",
+    "pnl": 1.0019,
+    "notional": 39.15,
+    "settled_at": "2025-01-12T13:26:46+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "EPL",
+    "market_type": "moneyline",
+    "pnl": 1.1619,
+    "notional": 19.37,
+    "settled_at": "2025-01-13T04:39:26+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "EPL",
+    "market_type": "moneyline",
+    "pnl": 1.3028,
+    "notional": 33.08,
+    "settled_at": "2025-01-13T22:34:53+00:00"
+  },
+  {
+    "vertical": "commodities",
+    "league": "COMMODITIES",
+    "market_type": "binary",
+    "pnl": 0.9483,
+    "notional": 36.59,
+    "settled_at": "2025-01-14T07:47:47+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NFL",
+    "market_type": "moneyline",
+    "pnl": -0.7449,
+    "notional": 30.46,
+    "settled_at": "2025-01-15T10:04:20+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NBA",
+    "market_type": "spread",
+    "pnl": 0.9867,
+    "notional": 9.95,
+    "settled_at": "2025-01-15T10:16:28+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "MLB",
+    "market_type": "moneyline",
+    "pnl": 1.3416,
+    "notional": 23.47,
+    "settled_at": "2025-01-15T17:27:19+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NBA",
+    "market_type": "spread",
+    "pnl": -1.2178,
+    "notional": 12.35,
+    "settled_at": "2025-01-16T10:22:07+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_BTC",
+    "market_type": "binary",
+    "pnl": 0.687,
+    "notional": 35.72,
+    "settled_at": "2025-01-16T13:39:00+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NFL",
+    "market_type": "spread",
+    "pnl": 1.0278,
+    "notional": 20.51,
+    "settled_at": "2025-01-16T17:14:52+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NFL",
+    "market_type": "spread",
+    "pnl": -1.1673,
+    "notional": 22.22,
+    "settled_at": "2025-01-16T20:09:31+00:00"
+  },
+  {
+    "vertical": "commodities",
+    "league": "COMMODITIES",
+    "market_type": "binary",
+    "pnl": -1.899,
+    "notional": 23.23,
+    "settled_at": "2025-01-17T02:05:02+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NBA",
+    "market_type": "moneyline",
+    "pnl": 1.0418,
+    "notional": 37.13,
+    "settled_at": "2025-01-17T12:05:20+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "MLB",
+    "market_type": "moneyline",
+    "pnl": -0.857,
+    "notional": 17.09,
+    "settled_at": "2025-01-17T19:08:36+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_ETH",
+    "market_type": "binary",
+    "pnl": -0.4585,
+    "notional": 33.58,
+    "settled_at": "2025-01-18T02:32:52+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NFL",
+    "market_type": "moneyline",
+    "pnl": -0.4285,
+    "notional": 9.91,
+    "settled_at": "2025-01-18T08:19:06+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_ETH",
+    "market_type": "binary",
+    "pnl": 0.5336,
+    "notional": 14.02,
+    "settled_at": "2025-01-18T13:54:15+00:00"
+  },
+  {
+    "vertical": "events_econ",
+    "league": "EVENTS_ECON",
+    "market_type": "binary",
+    "pnl": -0.8213,
+    "notional": 31.66,
+    "settled_at": "2025-01-18T19:32:22+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "MLB",
+    "market_type": "moneyline",
+    "pnl": -0.9376,
+    "notional": 20.98,
+    "settled_at": "2025-01-18T20:06:19+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_BTC",
+    "market_type": "binary",
+    "pnl": 0.3218,
+    "notional": 21.33,
+    "settled_at": "2025-01-20T05:23:47+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NFL",
+    "market_type": "moneyline",
+    "pnl": 0.8288,
+    "notional": 33.67,
+    "settled_at": "2025-01-20T12:03:06+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "MLB",
+    "market_type": "moneyline",
+    "pnl": -0.8591,
+    "notional": 25.49,
+    "settled_at": "2025-01-21T03:32:19+00:00"
+  },
+  {
+    "vertical": "commodities",
+    "league": "COMMODITIES",
+    "market_type": "binary",
+    "pnl": 0.883,
+    "notional": 10.91,
+    "settled_at": "2025-01-21T16:02:53+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NFL",
+    "market_type": "spread",
+    "pnl": -1.0999,
+    "notional": 34.6,
+    "settled_at": "2025-01-21T17:36:50+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NFL",
+    "market_type": "spread",
+    "pnl": -0.4864,
+    "notional": 21.57,
+    "settled_at": "2025-01-22T10:24:19+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NFL",
+    "market_type": "spread",
+    "pnl": -1.0071,
+    "notional": 32.09,
+    "settled_at": "2025-01-22T15:58:49+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NBA",
+    "market_type": "spread",
+    "pnl": -0.8716,
+    "notional": 36.95,
+    "settled_at": "2025-01-23T01:39:16+00:00"
+  },
+  {
+    "vertical": "commodities",
+    "league": "COMMODITIES",
+    "market_type": "binary",
+    "pnl": -1.3718,
+    "notional": 38.56,
+    "settled_at": "2025-01-23T03:01:12+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "MLB",
+    "market_type": "moneyline",
+    "pnl": -0.75,
+    "notional": 19.09,
+    "settled_at": "2025-01-23T06:52:54+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NFL",
+    "market_type": "spread",
+    "pnl": -0.4227,
+    "notional": 37.47,
+    "settled_at": "2025-01-23T14:19:46+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NBA",
+    "market_type": "spread",
+    "pnl": 1.4304,
+    "notional": 12.8,
+    "settled_at": "2025-01-23T14:53:28+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "MLB",
+    "market_type": "moneyline",
+    "pnl": -0.3162,
+    "notional": 15.4,
+    "settled_at": "2025-01-23T17:39:22+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_BTC",
+    "market_type": "binary",
+    "pnl": 1.1097,
+    "notional": 18.88,
+    "settled_at": "2025-01-24T05:42:56+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NFL",
+    "market_type": "spread",
+    "pnl": 0.4706,
+    "notional": 33.31,
+    "settled_at": "2025-01-24T09:26:22+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NBA",
+    "market_type": "spread",
+    "pnl": 1.049,
+    "notional": 33.54,
+    "settled_at": "2025-01-24T09:36:44+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "EPL",
+    "market_type": "moneyline",
+    "pnl": -0.4055,
+    "notional": 15.09,
+    "settled_at": "2025-01-24T13:44:47+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NBA",
+    "market_type": "moneyline",
+    "pnl": 0.5887,
+    "notional": 37.71,
+    "settled_at": "2025-01-24T16:44:40+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "EPL",
+    "market_type": "moneyline",
+    "pnl": 1.3348,
+    "notional": 16.34,
+    "settled_at": "2025-01-26T01:35:51+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_BTC",
+    "market_type": "binary",
+    "pnl": -0.8351,
+    "notional": 24.43,
+    "settled_at": "2025-01-26T01:43:03+00:00"
+  },
+  {
+    "vertical": "elections",
+    "league": "ELECTIONS",
+    "market_type": "binary",
+    "pnl": -0.8068,
+    "notional": 23.24,
+    "settled_at": "2025-01-26T02:26:36+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NBA",
+    "market_type": "spread",
+    "pnl": 0.4662,
+    "notional": 32.42,
+    "settled_at": "2025-01-26T14:26:01+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_ETH",
+    "market_type": "binary",
+    "pnl": -0.7346,
+    "notional": 39.8,
+    "settled_at": "2025-01-27T13:24:20+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_BTC",
+    "market_type": "binary",
+    "pnl": -0.7945,
+    "notional": 25.02,
+    "settled_at": "2025-01-28T22:25:16+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NBA",
+    "market_type": "moneyline",
+    "pnl": -0.9964,
+    "notional": 34.01,
+    "settled_at": "2025-01-29T01:10:59+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NBA",
+    "market_type": "spread",
+    "pnl": -1.1845,
+    "notional": 22.84,
+    "settled_at": "2025-01-29T05:18:41+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "MLB",
+    "market_type": "moneyline",
+    "pnl": -1.425,
+    "notional": 34.42,
+    "settled_at": "2025-01-29T23:04:39+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NFL",
+    "market_type": "moneyline",
+    "pnl": 0.7492,
+    "notional": 23.03,
+    "settled_at": "2025-01-30T13:34:39+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_BTC",
+    "market_type": "binary",
+    "pnl": -0.4811,
+    "notional": 27.53,
+    "settled_at": "2025-02-01T04:22:37+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_BTC",
+    "market_type": "binary",
+    "pnl": -0.4583,
+    "notional": 17.72,
+    "settled_at": "2025-02-02T04:58:30+00:00"
+  },
+  {
+    "vertical": "elections",
+    "league": "ELECTIONS",
+    "market_type": "binary",
+    "pnl": 0.7423,
+    "notional": 17.9,
+    "settled_at": "2025-02-02T05:28:04+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NFL",
+    "market_type": "spread",
+    "pnl": -1.1529,
+    "notional": 38.38,
+    "settled_at": "2025-02-03T09:30:19+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NBA",
+    "market_type": "moneyline",
+    "pnl": -1.2846,
+    "notional": 9.89,
+    "settled_at": "2025-02-03T17:10:21+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_BTC",
+    "market_type": "binary",
+    "pnl": -0.911,
+    "notional": 37.43,
+    "settled_at": "2025-02-03T20:16:35+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NFL",
+    "market_type": "spread",
+    "pnl": 1.1656,
+    "notional": 33.74,
+    "settled_at": "2025-02-04T00:48:55+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_BTC",
+    "market_type": "binary",
+    "pnl": 0.8815,
+    "notional": 28.91,
+    "settled_at": "2025-02-04T01:01:40+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_ETH",
+    "market_type": "binary",
+    "pnl": -0.3661,
+    "notional": 15.07,
+    "settled_at": "2025-02-04T05:24:41+00:00"
+  },
+  {
+    "vertical": "elections",
+    "league": "ELECTIONS",
+    "market_type": "binary",
+    "pnl": 1.2412,
+    "notional": 29.27,
+    "settled_at": "2025-02-04T11:04:31+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_BTC",
+    "market_type": "binary",
+    "pnl": -0.7125,
+    "notional": 13.75,
+    "settled_at": "2025-02-04T12:21:26+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NBA",
+    "market_type": "moneyline",
+    "pnl": -1.1712,
+    "notional": 17.53,
+    "settled_at": "2025-02-04T21:11:17+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NBA",
+    "market_type": "moneyline",
+    "pnl": -0.8869,
+    "notional": 33.61,
+    "settled_at": "2025-02-05T09:41:02+00:00"
+  },
+  {
+    "vertical": "events_econ",
+    "league": "EVENTS_ECON",
+    "market_type": "binary",
+    "pnl": 1.0534,
+    "notional": 12.36,
+    "settled_at": "2025-02-05T11:33:52+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NBA",
+    "market_type": "spread",
+    "pnl": -1.2957,
+    "notional": 29.37,
+    "settled_at": "2025-02-06T03:00:26+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NBA",
+    "market_type": "spread",
+    "pnl": 1.2206,
+    "notional": 37.31,
+    "settled_at": "2025-02-06T09:32:08+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_BTC",
+    "market_type": "binary",
+    "pnl": -0.9957,
+    "notional": 30.9,
+    "settled_at": "2025-02-06T10:34:44+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NFL",
+    "market_type": "moneyline",
+    "pnl": 1.193,
+    "notional": 11.78,
+    "settled_at": "2025-02-06T14:06:59+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_BTC",
+    "market_type": "binary",
+    "pnl": 0.8291,
+    "notional": 33.09,
+    "settled_at": "2025-02-06T17:25:59+00:00"
+  },
+  {
+    "vertical": "commodities",
+    "league": "COMMODITIES",
+    "market_type": "binary",
+    "pnl": 0.4775,
+    "notional": 27.76,
+    "settled_at": "2025-02-08T00:26:15+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_BTC",
+    "market_type": "binary",
+    "pnl": 1.3112,
+    "notional": 19.08,
+    "settled_at": "2025-02-09T01:12:47+00:00"
+  },
+  {
+    "vertical": "commodities",
+    "league": "COMMODITIES",
+    "market_type": "binary",
+    "pnl": 0.8424,
+    "notional": 14.49,
+    "settled_at": "2025-02-09T23:36:06+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "MLB",
+    "market_type": "moneyline",
+    "pnl": -0.7993,
+    "notional": 21.76,
+    "settled_at": "2025-02-10T08:34:54+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_ETH",
+    "market_type": "binary",
+    "pnl": 0.9473,
+    "notional": 21.11,
+    "settled_at": "2025-02-10T11:55:34+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_ETH",
+    "market_type": "binary",
+    "pnl": 1.2215,
+    "notional": 13.34,
+    "settled_at": "2025-02-11T01:36:52+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_BTC",
+    "market_type": "binary",
+    "pnl": -1.45,
+    "notional": 17.87,
+    "settled_at": "2025-02-11T12:44:56+00:00"
+  },
+  {
+    "vertical": "commodities",
+    "league": "COMMODITIES",
+    "market_type": "binary",
+    "pnl": 0.771,
+    "notional": 39.2,
+    "settled_at": "2025-02-11T14:18:00+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NFL",
+    "market_type": "moneyline",
+    "pnl": -0.6938,
+    "notional": 22.85,
+    "settled_at": "2025-02-11T19:00:19+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_BTC",
+    "market_type": "binary",
+    "pnl": 0.4538,
+    "notional": 10.16,
+    "settled_at": "2025-02-12T16:53:25+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_ETH",
+    "market_type": "binary",
+    "pnl": -1.1589,
+    "notional": 33.12,
+    "settled_at": "2025-02-12T17:14:37+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "MLB",
+    "market_type": "moneyline",
+    "pnl": 1.3434,
+    "notional": 8.51,
+    "settled_at": "2025-02-12T22:48:21+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_ETH",
+    "market_type": "binary",
+    "pnl": -0.7907,
+    "notional": 20.96,
+    "settled_at": "2025-02-13T01:22:09+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "EPL",
+    "market_type": "moneyline",
+    "pnl": 0.7004,
+    "notional": 20.68,
+    "settled_at": "2025-02-13T06:55:35+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_BTC",
+    "market_type": "binary",
+    "pnl": -0.866,
+    "notional": 32.75,
+    "settled_at": "2025-02-13T12:39:19+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NFL",
+    "market_type": "moneyline",
+    "pnl": -1.2539,
+    "notional": 29.7,
+    "settled_at": "2025-02-13T19:50:41+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_BTC",
+    "market_type": "binary",
+    "pnl": 0.3857,
+    "notional": 10.92,
+    "settled_at": "2025-02-14T06:40:43+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "EPL",
+    "market_type": "moneyline",
+    "pnl": -1.2535,
+    "notional": 27.82,
+    "settled_at": "2025-02-14T07:10:44+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NBA",
+    "market_type": "spread",
+    "pnl": -1.3118,
+    "notional": 17.79,
+    "settled_at": "2025-02-15T18:58:24+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_ETH",
+    "market_type": "binary",
+    "pnl": 0.5861,
+    "notional": 30.53,
+    "settled_at": "2025-02-15T23:31:50+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NBA",
+    "market_type": "moneyline",
+    "pnl": 1.3228,
+    "notional": 39.89,
+    "settled_at": "2025-02-15T23:34:51+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "EPL",
+    "market_type": "moneyline",
+    "pnl": -0.4903,
+    "notional": 17.07,
+    "settled_at": "2025-02-16T02:54:34+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_ETH",
+    "market_type": "binary",
+    "pnl": 0.5597,
+    "notional": 13.82,
+    "settled_at": "2025-02-16T04:20:34+00:00"
+  },
+  {
+    "vertical": "elections",
+    "league": "ELECTIONS",
+    "market_type": "binary",
+    "pnl": 0.7468,
+    "notional": 35.79,
+    "settled_at": "2025-02-16T12:09:15+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_BTC",
+    "market_type": "binary",
+    "pnl": -1.1621,
+    "notional": 18.7,
+    "settled_at": "2025-02-17T06:14:31+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_BTC",
+    "market_type": "binary",
+    "pnl": -1.1095,
+    "notional": 33.76,
+    "settled_at": "2025-02-17T08:22:23+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NBA",
+    "market_type": "moneyline",
+    "pnl": 0.7705,
+    "notional": 27.45,
+    "settled_at": "2025-02-18T04:32:00+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "EPL",
+    "market_type": "moneyline",
+    "pnl": -1.1201,
+    "notional": 27.7,
+    "settled_at": "2025-02-19T10:15:23+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_BTC",
+    "market_type": "binary",
+    "pnl": -0.9665,
+    "notional": 15.61,
+    "settled_at": "2025-02-19T15:24:08+00:00"
+  },
+  {
+    "vertical": "commodities",
+    "league": "COMMODITIES",
+    "market_type": "binary",
+    "pnl": -1.5614,
+    "notional": 15.82,
+    "settled_at": "2025-02-19T19:42:57+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NBA",
+    "market_type": "moneyline",
+    "pnl": 0.4531,
+    "notional": 37.89,
+    "settled_at": "2025-02-20T10:22:48+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NFL",
+    "market_type": "spread",
+    "pnl": -0.8217,
+    "notional": 26.05,
+    "settled_at": "2025-02-20T14:57:30+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NFL",
+    "market_type": "moneyline",
+    "pnl": 0.8183,
+    "notional": 31.31,
+    "settled_at": "2025-02-21T00:35:28+00:00"
+  },
+  {
+    "vertical": "events_econ",
+    "league": "EVENTS_ECON",
+    "market_type": "binary",
+    "pnl": -0.8472,
+    "notional": 34.68,
+    "settled_at": "2025-02-22T01:33:50+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_BTC",
+    "market_type": "binary",
+    "pnl": -1.2338,
+    "notional": 19.37,
+    "settled_at": "2025-02-22T02:25:12+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "EPL",
+    "market_type": "moneyline",
+    "pnl": 0.9723,
+    "notional": 21.76,
+    "settled_at": "2025-02-22T06:43:16+00:00"
+  },
+  {
+    "vertical": "commodities",
+    "league": "COMMODITIES",
+    "market_type": "binary",
+    "pnl": 1.3514,
+    "notional": 32.21,
+    "settled_at": "2025-02-22T19:55:53+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "EPL",
+    "market_type": "moneyline",
+    "pnl": 0.8081,
+    "notional": 16.48,
+    "settled_at": "2025-02-23T00:00:55+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NBA",
+    "market_type": "moneyline",
+    "pnl": 1.3558,
+    "notional": 17.94,
+    "settled_at": "2025-02-23T08:47:17+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NBA",
+    "market_type": "spread",
+    "pnl": -1.2215,
+    "notional": 9.84,
+    "settled_at": "2025-02-23T08:58:27+00:00"
+  },
+  {
+    "vertical": "commodities",
+    "league": "COMMODITIES",
+    "market_type": "binary",
+    "pnl": -2.2188,
+    "notional": 14.93,
+    "settled_at": "2025-02-24T02:56:24+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_ETH",
+    "market_type": "binary",
+    "pnl": 0.8507,
+    "notional": 15.44,
+    "settled_at": "2025-02-24T05:21:41+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_BTC",
+    "market_type": "binary",
+    "pnl": -0.6339,
+    "notional": 31.61,
+    "settled_at": "2025-02-24T13:41:42+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "EPL",
+    "market_type": "moneyline",
+    "pnl": 1.0589,
+    "notional": 32.55,
+    "settled_at": "2025-02-24T13:42:39+00:00"
+  },
+  {
+    "vertical": "commodities",
+    "league": "COMMODITIES",
+    "market_type": "binary",
+    "pnl": -7.4783,
+    "notional": 8.0,
+    "settled_at": "2025-02-24T14:45:03+00:00"
+  },
+  {
+    "vertical": "events_econ",
+    "league": "EVENTS_ECON",
+    "market_type": "binary",
+    "pnl": -1.0197,
+    "notional": 9.61,
+    "settled_at": "2025-02-24T17:33:17+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_ETH",
+    "market_type": "binary",
+    "pnl": -1.0561,
+    "notional": 25.25,
+    "settled_at": "2025-02-24T17:59:17+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_ETH",
+    "market_type": "binary",
+    "pnl": -1.1825,
+    "notional": 35.09,
+    "settled_at": "2025-02-25T04:24:02+00:00"
+  },
+  {
+    "vertical": "events_econ",
+    "league": "EVENTS_ECON",
+    "market_type": "binary",
+    "pnl": 1.0937,
+    "notional": 35.1,
+    "settled_at": "2025-02-25T09:55:12+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_ETH",
+    "market_type": "binary",
+    "pnl": 1.0062,
+    "notional": 38.67,
+    "settled_at": "2025-02-25T13:41:53+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NBA",
+    "market_type": "moneyline",
+    "pnl": 0.7195,
+    "notional": 27.66,
+    "settled_at": "2025-02-25T22:17:30+00:00"
+  },
+  {
+    "vertical": "elections",
+    "league": "ELECTIONS",
+    "market_type": "binary",
+    "pnl": 0.5496,
+    "notional": 29.77,
+    "settled_at": "2025-02-26T05:03:23+00:00"
+  },
+  {
+    "vertical": "commodities",
+    "league": "COMMODITIES",
+    "market_type": "binary",
+    "pnl": -1.4921,
+    "notional": 32.42,
+    "settled_at": "2025-02-26T21:10:54+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "MLB",
+    "market_type": "moneyline",
+    "pnl": 1.2678,
+    "notional": 8.03,
+    "settled_at": "2025-02-27T23:52:36+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NFL",
+    "market_type": "spread",
+    "pnl": -1.3766,
+    "notional": 10.11,
+    "settled_at": "2025-02-28T10:00:54+00:00"
+  },
+  {
+    "vertical": "commodities",
+    "league": "COMMODITIES",
+    "market_type": "binary",
+    "pnl": 1.1195,
+    "notional": 9.74,
+    "settled_at": "2025-02-28T13:02:44+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NFL",
+    "market_type": "moneyline",
+    "pnl": -1.0865,
+    "notional": 19.42,
+    "settled_at": "2025-02-28T23:40:54+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_BTC",
+    "market_type": "binary",
+    "pnl": 0.9875,
+    "notional": 23.44,
+    "settled_at": "2025-03-01T04:07:34+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NBA",
+    "market_type": "spread",
+    "pnl": 0.7381,
+    "notional": 24.59,
+    "settled_at": "2025-03-01T22:49:41+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NBA",
+    "market_type": "spread",
+    "pnl": 0.6655,
+    "notional": 22.7,
+    "settled_at": "2025-03-02T14:26:55+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NBA",
+    "market_type": "spread",
+    "pnl": 1.1775,
+    "notional": 29.12,
+    "settled_at": "2025-03-03T00:37:29+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_ETH",
+    "market_type": "binary",
+    "pnl": 0.996,
+    "notional": 14.97,
+    "settled_at": "2025-03-03T14:02:22+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NFL",
+    "market_type": "moneyline",
+    "pnl": -0.8029,
+    "notional": 14.1,
+    "settled_at": "2025-03-03T19:03:09+00:00"
+  },
+  {
+    "vertical": "commodities",
+    "league": "COMMODITIES",
+    "market_type": "binary",
+    "pnl": -1.1556,
+    "notional": 14.94,
+    "settled_at": "2025-03-04T03:48:15+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NBA",
+    "market_type": "spread",
+    "pnl": 0.7313,
+    "notional": 25.87,
+    "settled_at": "2025-03-04T11:22:15+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "MLB",
+    "market_type": "moneyline",
+    "pnl": 0.9193,
+    "notional": 10.29,
+    "settled_at": "2025-03-04T17:39:36+00:00"
+  },
+  {
+    "vertical": "events_econ",
+    "league": "EVENTS_ECON",
+    "market_type": "binary",
+    "pnl": 1.0518,
+    "notional": 8.5,
+    "settled_at": "2025-03-05T05:15:44+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "EPL",
+    "market_type": "moneyline",
+    "pnl": 0.9929,
+    "notional": 19.32,
+    "settled_at": "2025-03-06T00:22:24+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NFL",
+    "market_type": "moneyline",
+    "pnl": -1.3578,
+    "notional": 32.12,
+    "settled_at": "2025-03-06T01:08:13+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_ETH",
+    "market_type": "binary",
+    "pnl": -1.5094,
+    "notional": 12.21,
+    "settled_at": "2025-03-06T09:03:07+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "EPL",
+    "market_type": "moneyline",
+    "pnl": 0.3587,
+    "notional": 37.57,
+    "settled_at": "2025-03-06T17:27:03+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NFL",
+    "market_type": "moneyline",
+    "pnl": 0.6464,
+    "notional": 25.89,
+    "settled_at": "2025-03-06T22:03:31+00:00"
+  },
+  {
+    "vertical": "commodities",
+    "league": "COMMODITIES",
+    "market_type": "binary",
+    "pnl": 0.793,
+    "notional": 19.7,
+    "settled_at": "2025-03-07T01:21:08+00:00"
+  },
+  {
+    "vertical": "commodities",
+    "league": "COMMODITIES",
+    "market_type": "binary",
+    "pnl": 0.8232,
+    "notional": 25.54,
+    "settled_at": "2025-03-08T13:38:43+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_BTC",
+    "market_type": "binary",
+    "pnl": -0.8962,
+    "notional": 35.92,
+    "settled_at": "2025-03-08T21:43:47+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NBA",
+    "market_type": "spread",
+    "pnl": 0.6868,
+    "notional": 22.84,
+    "settled_at": "2025-03-08T22:13:42+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "MLB",
+    "market_type": "moneyline",
+    "pnl": -0.799,
+    "notional": 21.56,
+    "settled_at": "2025-03-08T22:34:10+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NBA",
+    "market_type": "moneyline",
+    "pnl": -1.4323,
+    "notional": 20.23,
+    "settled_at": "2025-03-09T03:53:47+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_BTC",
+    "market_type": "binary",
+    "pnl": -1.2395,
+    "notional": 18.81,
+    "settled_at": "2025-03-09T04:26:36+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NBA",
+    "market_type": "moneyline",
+    "pnl": 0.9448,
+    "notional": 17.67,
+    "settled_at": "2025-03-10T00:47:46+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_BTC",
+    "market_type": "binary",
+    "pnl": 0.9411,
+    "notional": 30.9,
+    "settled_at": "2025-03-10T11:45:58+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NFL",
+    "market_type": "moneyline",
+    "pnl": 0.793,
+    "notional": 19.92,
+    "settled_at": "2025-03-10T19:31:15+00:00"
+  },
+  {
+    "vertical": "commodities",
+    "league": "COMMODITIES",
+    "market_type": "binary",
+    "pnl": -1.2424,
+    "notional": 9.61,
+    "settled_at": "2025-03-11T00:00:00+00:00"
+  },
+  {
+    "vertical": "commodities",
+    "league": "COMMODITIES",
+    "market_type": "binary",
+    "pnl": -1.1964,
+    "notional": 9.31,
+    "settled_at": "2025-03-11T00:15:00+00:00"
+  },
+  {
+    "vertical": "commodities",
+    "league": "COMMODITIES",
+    "market_type": "binary",
+    "pnl": -0.916,
+    "notional": 16.39,
+    "settled_at": "2025-03-11T00:30:00+00:00"
+  },
+  {
+    "vertical": "commodities",
+    "league": "COMMODITIES",
+    "market_type": "binary",
+    "pnl": -1.2171,
+    "notional": 19.59,
+    "settled_at": "2025-03-11T00:45:00+00:00"
+  },
+  {
+    "vertical": "commodities",
+    "league": "COMMODITIES",
+    "market_type": "binary",
+    "pnl": -1.4085,
+    "notional": 18.06,
+    "settled_at": "2025-03-11T01:00:00+00:00"
+  },
+  {
+    "vertical": "commodities",
+    "league": "COMMODITIES",
+    "market_type": "binary",
+    "pnl": -0.763,
+    "notional": 33.93,
+    "settled_at": "2025-03-11T01:15:00+00:00"
+  },
+  {
+    "vertical": "commodities",
+    "league": "COMMODITIES",
+    "market_type": "binary",
+    "pnl": -1.6433,
+    "notional": 12.57,
+    "settled_at": "2025-03-11T01:30:00+00:00"
+  },
+  {
+    "vertical": "commodities",
+    "league": "COMMODITIES",
+    "market_type": "binary",
+    "pnl": -1.0514,
+    "notional": 15.41,
+    "settled_at": "2025-03-11T01:45:00+00:00"
+  },
+  {
+    "vertical": "commodities",
+    "league": "COMMODITIES",
+    "market_type": "binary",
+    "pnl": -0.771,
+    "notional": 24.24,
+    "settled_at": "2025-03-11T02:00:00+00:00"
+  },
+  {
+    "vertical": "commodities",
+    "league": "COMMODITIES",
+    "market_type": "binary",
+    "pnl": -0.9492,
+    "notional": 24.59,
+    "settled_at": "2025-03-11T02:15:00+00:00"
+  },
+  {
+    "vertical": "commodities",
+    "league": "COMMODITIES",
+    "market_type": "binary",
+    "pnl": -1.1152,
+    "notional": 20.78,
+    "settled_at": "2025-03-11T02:30:00+00:00"
+  },
+  {
+    "vertical": "commodities",
+    "league": "COMMODITIES",
+    "market_type": "binary",
+    "pnl": -0.8893,
+    "notional": 22.04,
+    "settled_at": "2025-03-11T02:45:00+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NFL",
+    "market_type": "spread",
+    "pnl": 1.52,
+    "notional": 18.54,
+    "settled_at": "2025-03-12T02:18:41+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NBA",
+    "market_type": "spread",
+    "pnl": 0.5445,
+    "notional": 33.53,
+    "settled_at": "2025-03-12T05:02:44+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_ETH",
+    "market_type": "binary",
+    "pnl": 0.7695,
+    "notional": 31.44,
+    "settled_at": "2025-03-12T06:42:38+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_BTC",
+    "market_type": "binary",
+    "pnl": -0.9209,
+    "notional": 12.2,
+    "settled_at": "2025-03-12T21:44:56+00:00"
+  },
+  {
+    "vertical": "events_econ",
+    "league": "EVENTS_ECON",
+    "market_type": "binary",
+    "pnl": 0.9283,
+    "notional": 30.51,
+    "settled_at": "2025-03-13T16:53:07+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_BTC",
+    "market_type": "binary",
+    "pnl": 0.5989,
+    "notional": 24.31,
+    "settled_at": "2025-03-14T11:34:30+00:00"
+  },
+  {
+    "vertical": "commodities",
+    "league": "COMMODITIES",
+    "market_type": "binary",
+    "pnl": 0.6117,
+    "notional": 36.14,
+    "settled_at": "2025-03-14T15:46:52+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NFL",
+    "market_type": "moneyline",
+    "pnl": -0.9625,
+    "notional": 36.07,
+    "settled_at": "2025-03-14T18:17:51+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_BTC",
+    "market_type": "binary",
+    "pnl": 0.7644,
+    "notional": 31.38,
+    "settled_at": "2025-03-15T05:08:46+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NBA",
+    "market_type": "moneyline",
+    "pnl": -1.2119,
+    "notional": 12.41,
+    "settled_at": "2025-03-15T09:40:11+00:00"
+  },
+  {
+    "vertical": "commodities",
+    "league": "COMMODITIES",
+    "market_type": "binary",
+    "pnl": 0.7236,
+    "notional": 37.36,
+    "settled_at": "2025-03-15T11:33:00+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "EPL",
+    "market_type": "moneyline",
+    "pnl": -1.0211,
+    "notional": 28.44,
+    "settled_at": "2025-03-15T16:22:05+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NFL",
+    "market_type": "spread",
+    "pnl": 0.8977,
+    "notional": 9.52,
+    "settled_at": "2025-03-15T21:53:44+00:00"
+  },
+  {
+    "vertical": "elections",
+    "league": "ELECTIONS",
+    "market_type": "binary",
+    "pnl": 0.6522,
+    "notional": 25.03,
+    "settled_at": "2025-03-15T23:33:30+00:00"
+  },
+  {
+    "vertical": "commodities",
+    "league": "COMMODITIES",
+    "market_type": "binary",
+    "pnl": -0.7538,
+    "notional": 13.43,
+    "settled_at": "2025-03-16T11:45:15+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NFL",
+    "market_type": "spread",
+    "pnl": -0.7199,
+    "notional": 32.71,
+    "settled_at": "2025-03-16T13:47:14+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "EPL",
+    "market_type": "moneyline",
+    "pnl": 0.7107,
+    "notional": 20.8,
+    "settled_at": "2025-03-16T23:38:14+00:00"
+  },
+  {
+    "vertical": "commodities",
+    "league": "COMMODITIES",
+    "market_type": "binary",
+    "pnl": -1.4048,
+    "notional": 10.51,
+    "settled_at": "2025-03-17T16:49:15+00:00"
+  },
+  {
+    "vertical": "commodities",
+    "league": "COMMODITIES",
+    "market_type": "binary",
+    "pnl": -1.0936,
+    "notional": 14.29,
+    "settled_at": "2025-03-18T03:26:48+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "MLB",
+    "market_type": "moneyline",
+    "pnl": 0.9365,
+    "notional": 32.84,
+    "settled_at": "2025-03-18T04:46:33+00:00"
+  },
+  {
+    "vertical": "elections",
+    "league": "ELECTIONS",
+    "market_type": "binary",
+    "pnl": 1.6997,
+    "notional": 10.54,
+    "settled_at": "2025-03-18T04:50:05+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NBA",
+    "market_type": "spread",
+    "pnl": -0.8128,
+    "notional": 21.53,
+    "settled_at": "2025-03-18T12:47:04+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NFL",
+    "market_type": "moneyline",
+    "pnl": 1.0047,
+    "notional": 8.88,
+    "settled_at": "2025-03-18T15:24:57+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_ETH",
+    "market_type": "binary",
+    "pnl": 1.247,
+    "notional": 29.1,
+    "settled_at": "2025-03-20T05:08:06+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "MLB",
+    "market_type": "moneyline",
+    "pnl": 0.6931,
+    "notional": 22.35,
+    "settled_at": "2025-03-20T16:22:20+00:00"
+  },
+  {
+    "vertical": "elections",
+    "league": "ELECTIONS",
+    "market_type": "binary",
+    "pnl": 1.197,
+    "notional": 39.85,
+    "settled_at": "2025-03-21T13:00:38+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NBA",
+    "market_type": "spread",
+    "pnl": 1.0765,
+    "notional": 34.81,
+    "settled_at": "2025-03-21T17:49:25+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NFL",
+    "market_type": "moneyline",
+    "pnl": 0.8871,
+    "notional": 30.12,
+    "settled_at": "2025-03-21T20:15:47+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NBA",
+    "market_type": "moneyline",
+    "pnl": -0.5564,
+    "notional": 18.92,
+    "settled_at": "2025-03-22T09:02:14+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NFL",
+    "market_type": "moneyline",
+    "pnl": 0.3399,
+    "notional": 22.94,
+    "settled_at": "2025-03-23T03:56:24+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NBA",
+    "market_type": "moneyline",
+    "pnl": -1.1315,
+    "notional": 23.16,
+    "settled_at": "2025-03-23T11:48:36+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_ETH",
+    "market_type": "binary",
+    "pnl": -1.3485,
+    "notional": 33.8,
+    "settled_at": "2025-03-23T15:30:20+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_ETH",
+    "market_type": "binary",
+    "pnl": 1.1086,
+    "notional": 25.44,
+    "settled_at": "2025-03-23T23:25:35+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NBA",
+    "market_type": "moneyline",
+    "pnl": -0.5749,
+    "notional": 37.23,
+    "settled_at": "2025-03-24T12:20:26+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_ETH",
+    "market_type": "binary",
+    "pnl": -1.0698,
+    "notional": 20.9,
+    "settled_at": "2025-03-24T15:26:08+00:00"
+  },
+  {
+    "vertical": "commodities",
+    "league": "COMMODITIES",
+    "market_type": "binary",
+    "pnl": -1.6785,
+    "notional": 15.32,
+    "settled_at": "2025-03-25T08:43:02+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NFL",
+    "market_type": "moneyline",
+    "pnl": 1.215,
+    "notional": 18.92,
+    "settled_at": "2025-03-25T21:33:28+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_BTC",
+    "market_type": "binary",
+    "pnl": 1.0812,
+    "notional": 39.99,
+    "settled_at": "2025-03-25T21:39:23+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NBA",
+    "market_type": "moneyline",
+    "pnl": -1.3715,
+    "notional": 39.25,
+    "settled_at": "2025-03-26T00:00:00+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NBA",
+    "market_type": "moneyline",
+    "pnl": -1.3815,
+    "notional": 18.45,
+    "settled_at": "2025-03-26T00:15:00+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NBA",
+    "market_type": "moneyline",
+    "pnl": -1.2821,
+    "notional": 32.7,
+    "settled_at": "2025-03-26T00:30:00+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NBA",
+    "market_type": "moneyline",
+    "pnl": -0.9961,
+    "notional": 17.64,
+    "settled_at": "2025-03-26T00:45:00+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NBA",
+    "market_type": "moneyline",
+    "pnl": -1.1105,
+    "notional": 15.99,
+    "settled_at": "2025-03-26T01:00:00+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NBA",
+    "market_type": "moneyline",
+    "pnl": -0.8955,
+    "notional": 29.94,
+    "settled_at": "2025-03-26T01:15:00+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NBA",
+    "market_type": "moneyline",
+    "pnl": -1.3652,
+    "notional": 14.99,
+    "settled_at": "2025-03-26T01:30:00+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NBA",
+    "market_type": "moneyline",
+    "pnl": -1.2881,
+    "notional": 24.51,
+    "settled_at": "2025-03-26T01:45:00+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NBA",
+    "market_type": "moneyline",
+    "pnl": -1.3939,
+    "notional": 12.3,
+    "settled_at": "2025-03-26T02:00:00+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NBA",
+    "market_type": "moneyline",
+    "pnl": -0.9544,
+    "notional": 26.71,
+    "settled_at": "2025-03-26T02:15:00+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NBA",
+    "market_type": "moneyline",
+    "pnl": -1.4875,
+    "notional": 33.6,
+    "settled_at": "2025-03-26T02:30:00+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NBA",
+    "market_type": "moneyline",
+    "pnl": -1.212,
+    "notional": 30.8,
+    "settled_at": "2025-03-26T02:45:00+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NBA",
+    "market_type": "moneyline",
+    "pnl": -0.8254,
+    "notional": 14.87,
+    "settled_at": "2025-03-26T03:00:00+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NBA",
+    "market_type": "moneyline",
+    "pnl": -0.9028,
+    "notional": 17.9,
+    "settled_at": "2025-03-26T03:15:00+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NBA",
+    "market_type": "moneyline",
+    "pnl": -0.8962,
+    "notional": 27.8,
+    "settled_at": "2025-03-26T03:30:00+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_BTC",
+    "market_type": "binary",
+    "pnl": -0.5988,
+    "notional": 9.49,
+    "settled_at": "2025-03-26T04:17:32+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_ETH",
+    "market_type": "binary",
+    "pnl": 1.0118,
+    "notional": 28.92,
+    "settled_at": "2025-03-26T09:48:37+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NFL",
+    "market_type": "spread",
+    "pnl": 1.2321,
+    "notional": 20.04,
+    "settled_at": "2025-03-26T19:26:00+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "MLB",
+    "market_type": "moneyline",
+    "pnl": 0.6086,
+    "notional": 14.17,
+    "settled_at": "2025-03-27T04:18:14+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "MLB",
+    "market_type": "moneyline",
+    "pnl": -0.7183,
+    "notional": 19.21,
+    "settled_at": "2025-03-27T08:13:44+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NBA",
+    "market_type": "moneyline",
+    "pnl": 0.7059,
+    "notional": 22.37,
+    "settled_at": "2025-03-28T15:26:29+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_BTC",
+    "market_type": "binary",
+    "pnl": -1.3135,
+    "notional": 11.57,
+    "settled_at": "2025-03-28T17:50:28+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NFL",
+    "market_type": "moneyline",
+    "pnl": -0.669,
+    "notional": 34.53,
+    "settled_at": "2025-03-28T21:34:04+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NBA",
+    "market_type": "moneyline",
+    "pnl": -1.3314,
+    "notional": 22.59,
+    "settled_at": "2025-03-29T05:31:22+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NBA",
+    "market_type": "moneyline",
+    "pnl": 0.8015,
+    "notional": 8.27,
+    "settled_at": "2025-03-29T08:46:21+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NBA",
+    "market_type": "moneyline",
+    "pnl": 1.0694,
+    "notional": 14.8,
+    "settled_at": "2025-03-29T22:40:12+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "MLB",
+    "market_type": "moneyline",
+    "pnl": -1.3203,
+    "notional": 8.07,
+    "settled_at": "2025-03-30T02:22:42+00:00"
+  },
+  {
+    "vertical": "commodities",
+    "league": "COMMODITIES",
+    "market_type": "binary",
+    "pnl": -1.5187,
+    "notional": 29.06,
+    "settled_at": "2025-03-30T07:21:57+00:00"
+  },
+  {
+    "vertical": "commodities",
+    "league": "COMMODITIES",
+    "market_type": "binary",
+    "pnl": -1.5078,
+    "notional": 38.01,
+    "settled_at": "2025-03-30T13:29:27+00:00"
+  },
+  {
+    "vertical": "elections",
+    "league": "ELECTIONS",
+    "market_type": "binary",
+    "pnl": 1.2693,
+    "notional": 14.15,
+    "settled_at": "2025-03-30T14:17:29+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NBA",
+    "market_type": "moneyline",
+    "pnl": 0.4782,
+    "notional": 14.16,
+    "settled_at": "2025-03-30T17:36:33+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NFL",
+    "market_type": "moneyline",
+    "pnl": 0.6917,
+    "notional": 20.29,
+    "settled_at": "2025-04-01T06:52:01+00:00"
+  },
+  {
+    "vertical": "commodities",
+    "league": "COMMODITIES",
+    "market_type": "binary",
+    "pnl": -1.5126,
+    "notional": 15.27,
+    "settled_at": "2025-04-02T01:54:50+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_BTC",
+    "market_type": "binary",
+    "pnl": 1.2244,
+    "notional": 21.97,
+    "settled_at": "2025-04-02T07:38:06+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NBA",
+    "market_type": "moneyline",
+    "pnl": 0.6782,
+    "notional": 12.64,
+    "settled_at": "2025-04-02T18:59:23+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_BTC",
+    "market_type": "binary",
+    "pnl": 0.761,
+    "notional": 28.1,
+    "settled_at": "2025-04-02T20:44:32+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_ETH",
+    "market_type": "binary",
+    "pnl": -0.9748,
+    "notional": 21.41,
+    "settled_at": "2025-04-03T16:51:46+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_BTC",
+    "market_type": "binary",
+    "pnl": 0.9827,
+    "notional": 9.68,
+    "settled_at": "2025-04-04T06:13:53+00:00"
+  },
+  {
+    "vertical": "commodities",
+    "league": "COMMODITIES",
+    "market_type": "binary",
+    "pnl": -1.0038,
+    "notional": 17.7,
+    "settled_at": "2025-04-04T17:00:04+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "EPL",
+    "market_type": "moneyline",
+    "pnl": 0.6298,
+    "notional": 31.11,
+    "settled_at": "2025-04-05T02:05:16+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NFL",
+    "market_type": "moneyline",
+    "pnl": 1.0562,
+    "notional": 28.92,
+    "settled_at": "2025-04-05T17:43:33+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NFL",
+    "market_type": "moneyline",
+    "pnl": -1.239,
+    "notional": 14.66,
+    "settled_at": "2025-04-05T18:38:12+00:00"
+  },
+  {
+    "vertical": "commodities",
+    "league": "COMMODITIES",
+    "market_type": "binary",
+    "pnl": 0.8627,
+    "notional": 13.06,
+    "settled_at": "2025-04-06T13:23:16+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_ETH",
+    "market_type": "binary",
+    "pnl": -1.1634,
+    "notional": 14.93,
+    "settled_at": "2025-04-07T11:24:00+00:00"
+  },
+  {
+    "vertical": "commodities",
+    "league": "COMMODITIES",
+    "market_type": "binary",
+    "pnl": 0.7494,
+    "notional": 27.06,
+    "settled_at": "2025-04-07T12:57:16+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NFL",
+    "market_type": "moneyline",
+    "pnl": -0.8292,
+    "notional": 36.38,
+    "settled_at": "2025-04-07T23:52:31+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NFL",
+    "market_type": "spread",
+    "pnl": -0.7624,
+    "notional": 8.27,
+    "settled_at": "2025-04-08T01:08:14+00:00"
+  },
+  {
+    "vertical": "commodities",
+    "league": "COMMODITIES",
+    "market_type": "binary",
+    "pnl": -1.4657,
+    "notional": 14.79,
+    "settled_at": "2025-04-08T02:49:50+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_BTC",
+    "market_type": "binary",
+    "pnl": 0.6183,
+    "notional": 16.07,
+    "settled_at": "2025-04-08T15:48:18+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_ETH",
+    "market_type": "binary",
+    "pnl": 0.9807,
+    "notional": 30.27,
+    "settled_at": "2025-04-08T22:50:45+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_ETH",
+    "market_type": "binary",
+    "pnl": 0.7193,
+    "notional": 36.01,
+    "settled_at": "2025-04-09T14:31:22+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_ETH",
+    "market_type": "binary",
+    "pnl": 0.6714,
+    "notional": 12.28,
+    "settled_at": "2025-04-10T07:52:00+00:00"
+  },
+  {
+    "vertical": "elections",
+    "league": "ELECTIONS",
+    "market_type": "binary",
+    "pnl": -0.9841,
+    "notional": 8.69,
+    "settled_at": "2025-04-10T17:03:26+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_BTC",
+    "market_type": "binary",
+    "pnl": -1.1577,
+    "notional": 39.31,
+    "settled_at": "2025-04-10T17:17:15+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_ETH",
+    "market_type": "binary",
+    "pnl": 0.7055,
+    "notional": 27.51,
+    "settled_at": "2025-04-11T08:51:57+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_ETH",
+    "market_type": "binary",
+    "pnl": -0.9821,
+    "notional": 18.68,
+    "settled_at": "2025-04-11T09:25:16+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_BTC",
+    "market_type": "binary",
+    "pnl": -0.8971,
+    "notional": 26.28,
+    "settled_at": "2025-04-11T10:08:13+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_BTC",
+    "market_type": "binary",
+    "pnl": 0.9516,
+    "notional": 24.81,
+    "settled_at": "2025-04-11T11:36:53+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NFL",
+    "market_type": "moneyline",
+    "pnl": 0.632,
+    "notional": 35.46,
+    "settled_at": "2025-04-11T16:53:59+00:00"
+  },
+  {
+    "vertical": "elections",
+    "league": "ELECTIONS",
+    "market_type": "binary",
+    "pnl": -1.3711,
+    "notional": 14.38,
+    "settled_at": "2025-04-11T19:02:40+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NFL",
+    "market_type": "moneyline",
+    "pnl": -0.7875,
+    "notional": 35.38,
+    "settled_at": "2025-04-12T05:30:57+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_BTC",
+    "market_type": "binary",
+    "pnl": -0.7397,
+    "notional": 16.78,
+    "settled_at": "2025-04-12T13:22:13+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_BTC",
+    "market_type": "binary",
+    "pnl": 0.5238,
+    "notional": 39.01,
+    "settled_at": "2025-04-12T20:47:17+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NBA",
+    "market_type": "spread",
+    "pnl": -0.4087,
+    "notional": 20.28,
+    "settled_at": "2025-04-12T23:40:25+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "MLB",
+    "market_type": "moneyline",
+    "pnl": 0.9053,
+    "notional": 14.88,
+    "settled_at": "2025-04-13T06:11:48+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_BTC",
+    "market_type": "binary",
+    "pnl": 0.9157,
+    "notional": 24.56,
+    "settled_at": "2025-04-13T11:04:46+00:00"
+  },
+  {
+    "vertical": "events_econ",
+    "league": "EVENTS_ECON",
+    "market_type": "binary",
+    "pnl": 1.0237,
+    "notional": 16.75,
+    "settled_at": "2025-04-13T14:07:13+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NFL",
+    "market_type": "spread",
+    "pnl": 1.3364,
+    "notional": 39.39,
+    "settled_at": "2025-04-15T04:07:15+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_ETH",
+    "market_type": "binary",
+    "pnl": -1.1037,
+    "notional": 38.25,
+    "settled_at": "2025-04-15T11:52:42+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "MLB",
+    "market_type": "moneyline",
+    "pnl": -0.8696,
+    "notional": 37.08,
+    "settled_at": "2025-04-15T21:01:25+00:00"
+  },
+  {
+    "vertical": "elections",
+    "league": "ELECTIONS",
+    "market_type": "binary",
+    "pnl": -0.998,
+    "notional": 30.4,
+    "settled_at": "2025-04-16T06:07:24+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "MLB",
+    "market_type": "moneyline",
+    "pnl": 0.8821,
+    "notional": 28.55,
+    "settled_at": "2025-04-17T03:27:00+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NFL",
+    "market_type": "spread",
+    "pnl": 0.855,
+    "notional": 25.29,
+    "settled_at": "2025-04-18T20:54:51+00:00"
+  },
+  {
+    "vertical": "events_econ",
+    "league": "EVENTS_ECON",
+    "market_type": "binary",
+    "pnl": 0.9608,
+    "notional": 25.49,
+    "settled_at": "2025-04-19T02:44:45+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NBA",
+    "market_type": "spread",
+    "pnl": 0.4262,
+    "notional": 24.42,
+    "settled_at": "2025-04-19T09:29:58+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_ETH",
+    "market_type": "binary",
+    "pnl": -1.0265,
+    "notional": 10.33,
+    "settled_at": "2025-04-19T11:14:45+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NFL",
+    "market_type": "moneyline",
+    "pnl": 1.2034,
+    "notional": 39.79,
+    "settled_at": "2025-04-19T21:01:00+00:00"
+  },
+  {
+    "vertical": "elections",
+    "league": "ELECTIONS",
+    "market_type": "binary",
+    "pnl": 0.585,
+    "notional": 32.36,
+    "settled_at": "2025-04-21T11:02:16+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NBA",
+    "market_type": "moneyline",
+    "pnl": -0.8724,
+    "notional": 14.63,
+    "settled_at": "2025-04-21T20:09:18+00:00"
+  },
+  {
+    "vertical": "commodities",
+    "league": "COMMODITIES",
+    "market_type": "binary",
+    "pnl": 0.9195,
+    "notional": 15.23,
+    "settled_at": "2025-04-21T23:10:58+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_ETH",
+    "market_type": "binary",
+    "pnl": -1.0809,
+    "notional": 31.81,
+    "settled_at": "2025-04-21T23:40:59+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_ETH",
+    "market_type": "binary",
+    "pnl": 1.1482,
+    "notional": 28.53,
+    "settled_at": "2025-04-21T23:45:25+00:00"
+  },
+  {
+    "vertical": "elections",
+    "league": "ELECTIONS",
+    "market_type": "binary",
+    "pnl": -1.0393,
+    "notional": 30.93,
+    "settled_at": "2025-04-22T06:26:21+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_BTC",
+    "market_type": "binary",
+    "pnl": -0.8412,
+    "notional": 18.42,
+    "settled_at": "2025-04-22T19:58:39+00:00"
+  },
+  {
+    "vertical": "commodities",
+    "league": "COMMODITIES",
+    "market_type": "binary",
+    "pnl": 0.5771,
+    "notional": 11.74,
+    "settled_at": "2025-04-23T18:00:01+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_ETH",
+    "market_type": "binary",
+    "pnl": 1.0899,
+    "notional": 34.85,
+    "settled_at": "2025-04-23T22:25:26+00:00"
+  },
+  {
+    "vertical": "elections",
+    "league": "ELECTIONS",
+    "market_type": "binary",
+    "pnl": -1.0598,
+    "notional": 12.41,
+    "settled_at": "2025-04-24T18:12:31+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NBA",
+    "market_type": "spread",
+    "pnl": -0.9566,
+    "notional": 9.09,
+    "settled_at": "2025-04-25T22:22:39+00:00"
+  },
+  {
+    "vertical": "elections",
+    "league": "ELECTIONS",
+    "market_type": "binary",
+    "pnl": 0.8164,
+    "notional": 17.01,
+    "settled_at": "2025-04-26T03:30:51+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NBA",
+    "market_type": "moneyline",
+    "pnl": -1.0646,
+    "notional": 24.44,
+    "settled_at": "2025-04-27T01:26:44+00:00"
+  },
+  {
+    "vertical": "events_econ",
+    "league": "EVENTS_ECON",
+    "market_type": "binary",
+    "pnl": -1.5558,
+    "notional": 9.82,
+    "settled_at": "2025-04-27T11:16:45+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_ETH",
+    "market_type": "binary",
+    "pnl": 1.2142,
+    "notional": 33.77,
+    "settled_at": "2025-04-27T16:01:34+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_BTC",
+    "market_type": "binary",
+    "pnl": -0.5123,
+    "notional": 10.35,
+    "settled_at": "2025-04-28T01:03:33+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NBA",
+    "market_type": "spread",
+    "pnl": -0.9327,
+    "notional": 27.34,
+    "settled_at": "2025-04-28T04:56:35+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NFL",
+    "market_type": "moneyline",
+    "pnl": 1.1347,
+    "notional": 11.31,
+    "settled_at": "2025-04-28T12:25:41+00:00"
+  },
+  {
+    "vertical": "commodities",
+    "league": "COMMODITIES",
+    "market_type": "binary",
+    "pnl": -1.4854,
+    "notional": 14.88,
+    "settled_at": "2025-04-28T20:09:16+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_ETH",
+    "market_type": "binary",
+    "pnl": 1.3524,
+    "notional": 23.24,
+    "settled_at": "2025-04-29T00:54:23+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NFL",
+    "market_type": "moneyline",
+    "pnl": 1.1817,
+    "notional": 32.85,
+    "settled_at": "2025-04-29T03:37:06+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_BTC",
+    "market_type": "binary",
+    "pnl": -1.1351,
+    "notional": 19.24,
+    "settled_at": "2025-04-29T04:09:41+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NBA",
+    "market_type": "moneyline",
+    "pnl": -1.1003,
+    "notional": 16.2,
+    "settled_at": "2025-04-30T02:11:41+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "MLB",
+    "market_type": "moneyline",
+    "pnl": 0.9024,
+    "notional": 33.2,
+    "settled_at": "2025-04-30T12:17:52+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_BTC",
+    "market_type": "binary",
+    "pnl": -0.8263,
+    "notional": 17.91,
+    "settled_at": "2025-04-30T16:53:27+00:00"
+  },
+  {
+    "vertical": "commodities",
+    "league": "COMMODITIES",
+    "market_type": "binary",
+    "pnl": 0.8494,
+    "notional": 21.17,
+    "settled_at": "2025-05-01T04:44:39+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NFL",
+    "market_type": "spread",
+    "pnl": -1.3222,
+    "notional": 26.95,
+    "settled_at": "2025-05-01T09:03:15+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NBA",
+    "market_type": "spread",
+    "pnl": -1.0855,
+    "notional": 21.6,
+    "settled_at": "2025-05-01T12:16:02+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_BTC",
+    "market_type": "binary",
+    "pnl": 0.8217,
+    "notional": 20.17,
+    "settled_at": "2025-05-02T04:34:42+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "MLB",
+    "market_type": "moneyline",
+    "pnl": 1.0224,
+    "notional": 24.03,
+    "settled_at": "2025-05-02T19:06:14+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NBA",
+    "market_type": "moneyline",
+    "pnl": -0.9424,
+    "notional": 12.34,
+    "settled_at": "2025-05-02T22:41:10+00:00"
+  },
+  {
+    "vertical": "commodities",
+    "league": "COMMODITIES",
+    "market_type": "binary",
+    "pnl": 0.8585,
+    "notional": 8.15,
+    "settled_at": "2025-05-03T18:43:35+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "EPL",
+    "market_type": "moneyline",
+    "pnl": 0.9274,
+    "notional": 19.35,
+    "settled_at": "2025-05-04T02:04:14+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_BTC",
+    "market_type": "binary",
+    "pnl": 0.8646,
+    "notional": 12.67,
+    "settled_at": "2025-05-04T09:14:34+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NBA",
+    "market_type": "moneyline",
+    "pnl": 1.1737,
+    "notional": 13.2,
+    "settled_at": "2025-05-06T11:58:14+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NFL",
+    "market_type": "spread",
+    "pnl": 1.0453,
+    "notional": 26.01,
+    "settled_at": "2025-05-06T14:41:50+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NFL",
+    "market_type": "moneyline",
+    "pnl": 0.8313,
+    "notional": 33.08,
+    "settled_at": "2025-05-06T15:32:22+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NFL",
+    "market_type": "spread",
+    "pnl": 1.2118,
+    "notional": 12.71,
+    "settled_at": "2025-05-06T18:39:08+00:00"
+  },
+  {
+    "vertical": "elections",
+    "league": "ELECTIONS",
+    "market_type": "binary",
+    "pnl": 1.1689,
+    "notional": 11.14,
+    "settled_at": "2025-05-06T19:46:36+00:00"
+  },
+  {
+    "vertical": "events_econ",
+    "league": "EVENTS_ECON",
+    "market_type": "binary",
+    "pnl": 0.5739,
+    "notional": 36.66,
+    "settled_at": "2025-05-07T04:12:36+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NBA",
+    "market_type": "moneyline",
+    "pnl": 1.095,
+    "notional": 13.35,
+    "settled_at": "2025-05-07T05:06:53+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_BTC",
+    "market_type": "binary",
+    "pnl": -0.7713,
+    "notional": 28.73,
+    "settled_at": "2025-05-07T06:51:46+00:00"
+  },
+  {
+    "vertical": "elections",
+    "league": "ELECTIONS",
+    "market_type": "binary",
+    "pnl": -0.9813,
+    "notional": 11.78,
+    "settled_at": "2025-05-08T10:43:18+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NBA",
+    "market_type": "spread",
+    "pnl": -1.1899,
+    "notional": 30.5,
+    "settled_at": "2025-05-10T22:05:49+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NBA",
+    "market_type": "moneyline",
+    "pnl": -0.3977,
+    "notional": 19.68,
+    "settled_at": "2025-05-11T10:14:05+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_BTC",
+    "market_type": "binary",
+    "pnl": -1.0191,
+    "notional": 18.03,
+    "settled_at": "2025-05-11T11:02:36+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "EPL",
+    "market_type": "moneyline",
+    "pnl": 0.4667,
+    "notional": 25.36,
+    "settled_at": "2025-05-11T18:23:48+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "MLB",
+    "market_type": "moneyline",
+    "pnl": -1.1081,
+    "notional": 32.92,
+    "settled_at": "2025-05-12T18:40:04+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "MLB",
+    "market_type": "moneyline",
+    "pnl": 1.2464,
+    "notional": 12.18,
+    "settled_at": "2025-05-14T02:38:01+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_BTC",
+    "market_type": "binary",
+    "pnl": 1.094,
+    "notional": 24.62,
+    "settled_at": "2025-05-14T03:40:17+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NFL",
+    "market_type": "spread",
+    "pnl": 1.0937,
+    "notional": 21.23,
+    "settled_at": "2025-05-14T04:10:30+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "EPL",
+    "market_type": "moneyline",
+    "pnl": -0.9684,
+    "notional": 32.42,
+    "settled_at": "2025-05-14T15:42:07+00:00"
+  },
+  {
+    "vertical": "elections",
+    "league": "ELECTIONS",
+    "market_type": "binary",
+    "pnl": -1.087,
+    "notional": 9.25,
+    "settled_at": "2025-05-15T02:27:28+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NBA",
+    "market_type": "spread",
+    "pnl": 0.8781,
+    "notional": 10.44,
+    "settled_at": "2025-05-15T09:22:44+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "MLB",
+    "market_type": "moneyline",
+    "pnl": -0.9898,
+    "notional": 31.66,
+    "settled_at": "2025-05-16T03:59:26+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_BTC",
+    "market_type": "binary",
+    "pnl": -0.8179,
+    "notional": 8.62,
+    "settled_at": "2025-05-16T11:56:58+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NFL",
+    "market_type": "moneyline",
+    "pnl": 1.0129,
+    "notional": 16.6,
+    "settled_at": "2025-05-16T16:05:18+00:00"
+  },
+  {
+    "vertical": "elections",
+    "league": "ELECTIONS",
+    "market_type": "binary",
+    "pnl": 1.0543,
+    "notional": 23.52,
+    "settled_at": "2025-05-16T21:16:50+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "MLB",
+    "market_type": "moneyline",
+    "pnl": 1.0952,
+    "notional": 9.5,
+    "settled_at": "2025-05-17T00:27:31+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "EPL",
+    "market_type": "moneyline",
+    "pnl": 0.7302,
+    "notional": 13.24,
+    "settled_at": "2025-05-17T02:01:43+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "MLB",
+    "market_type": "moneyline",
+    "pnl": -0.6958,
+    "notional": 33.87,
+    "settled_at": "2025-05-17T05:57:55+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NBA",
+    "market_type": "moneyline",
+    "pnl": 1.3891,
+    "notional": 35.17,
+    "settled_at": "2025-05-17T14:11:09+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NFL",
+    "market_type": "spread",
+    "pnl": 0.6956,
+    "notional": 24.58,
+    "settled_at": "2025-05-17T16:39:58+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NFL",
+    "market_type": "spread",
+    "pnl": -0.9586,
+    "notional": 13.64,
+    "settled_at": "2025-05-18T02:35:28+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NFL",
+    "market_type": "spread",
+    "pnl": -1.2564,
+    "notional": 11.33,
+    "settled_at": "2025-05-18T18:16:55+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NFL",
+    "market_type": "spread",
+    "pnl": -1.0897,
+    "notional": 31.16,
+    "settled_at": "2025-05-18T19:31:59+00:00"
+  },
+  {
+    "vertical": "commodities",
+    "league": "COMMODITIES",
+    "market_type": "binary",
+    "pnl": 0.8298,
+    "notional": 39.6,
+    "settled_at": "2025-05-19T01:04:28+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_BTC",
+    "market_type": "binary",
+    "pnl": -0.5456,
+    "notional": 21.22,
+    "settled_at": "2025-05-20T02:17:43+00:00"
+  },
+  {
+    "vertical": "commodities",
+    "league": "COMMODITIES",
+    "market_type": "binary",
+    "pnl": 1.3098,
+    "notional": 24.75,
+    "settled_at": "2025-05-20T13:14:52+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_ETH",
+    "market_type": "binary",
+    "pnl": -0.693,
+    "notional": 8.16,
+    "settled_at": "2025-05-20T17:01:53+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_BTC",
+    "market_type": "binary",
+    "pnl": 0.7518,
+    "notional": 21.74,
+    "settled_at": "2025-05-21T04:00:03+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_BTC",
+    "market_type": "binary",
+    "pnl": 1.3071,
+    "notional": 38.18,
+    "settled_at": "2025-05-21T04:19:33+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NFL",
+    "market_type": "spread",
+    "pnl": 1.0097,
+    "notional": 9.2,
+    "settled_at": "2025-05-21T06:02:56+00:00"
+  },
+  {
+    "vertical": "commodities",
+    "league": "COMMODITIES",
+    "market_type": "binary",
+    "pnl": 0.3129,
+    "notional": 10.94,
+    "settled_at": "2025-05-21T06:05:09+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "EPL",
+    "market_type": "moneyline",
+    "pnl": -0.8585,
+    "notional": 16.07,
+    "settled_at": "2025-05-21T13:17:19+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_ETH",
+    "market_type": "binary",
+    "pnl": 1.3117,
+    "notional": 15.68,
+    "settled_at": "2025-05-21T18:14:13+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_BTC",
+    "market_type": "binary",
+    "pnl": -0.7663,
+    "notional": 13.45,
+    "settled_at": "2025-05-22T01:28:58+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_ETH",
+    "market_type": "binary",
+    "pnl": 0.4445,
+    "notional": 34.18,
+    "settled_at": "2025-05-22T05:03:55+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "MLB",
+    "market_type": "moneyline",
+    "pnl": 0.9436,
+    "notional": 25.21,
+    "settled_at": "2025-05-22T12:25:35+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "MLB",
+    "market_type": "moneyline",
+    "pnl": 1.3595,
+    "notional": 37.31,
+    "settled_at": "2025-05-22T15:47:18+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NBA",
+    "market_type": "moneyline",
+    "pnl": 0.4857,
+    "notional": 29.33,
+    "settled_at": "2025-05-22T20:46:05+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_ETH",
+    "market_type": "binary",
+    "pnl": -1.0671,
+    "notional": 38.5,
+    "settled_at": "2025-05-23T00:40:59+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "EPL",
+    "market_type": "moneyline",
+    "pnl": -0.6469,
+    "notional": 23.15,
+    "settled_at": "2025-05-23T15:19:35+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_ETH",
+    "market_type": "binary",
+    "pnl": -1.1882,
+    "notional": 14.83,
+    "settled_at": "2025-05-23T22:45:52+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "EPL",
+    "market_type": "moneyline",
+    "pnl": -0.9401,
+    "notional": 18.89,
+    "settled_at": "2025-05-24T03:46:38+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "EPL",
+    "market_type": "moneyline",
+    "pnl": 1.4693,
+    "notional": 8.33,
+    "settled_at": "2025-05-24T21:00:50+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_ETH",
+    "market_type": "binary",
+    "pnl": 0.4866,
+    "notional": 37.27,
+    "settled_at": "2025-05-25T10:23:50+00:00"
+  },
+  {
+    "vertical": "commodities",
+    "league": "COMMODITIES",
+    "market_type": "binary",
+    "pnl": 0.8837,
+    "notional": 24.89,
+    "settled_at": "2025-05-26T19:37:20+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_BTC",
+    "market_type": "binary",
+    "pnl": 0.74,
+    "notional": 13.72,
+    "settled_at": "2025-05-27T11:20:15+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_BTC",
+    "market_type": "binary",
+    "pnl": -0.9345,
+    "notional": 29.78,
+    "settled_at": "2025-05-27T13:42:31+00:00"
+  },
+  {
+    "vertical": "events_econ",
+    "league": "EVENTS_ECON",
+    "market_type": "binary",
+    "pnl": -0.7331,
+    "notional": 23.56,
+    "settled_at": "2025-05-28T01:03:35+00:00"
+  },
+  {
+    "vertical": "events_econ",
+    "league": "EVENTS_ECON",
+    "market_type": "binary",
+    "pnl": 0.6908,
+    "notional": 27.63,
+    "settled_at": "2025-05-28T04:58:48+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_BTC",
+    "market_type": "binary",
+    "pnl": -0.8015,
+    "notional": 15.06,
+    "settled_at": "2025-05-29T02:10:02+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NFL",
+    "market_type": "spread",
+    "pnl": 0.4254,
+    "notional": 10.35,
+    "settled_at": "2025-05-29T02:40:17+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NFL",
+    "market_type": "spread",
+    "pnl": -1.9584,
+    "notional": 22.61,
+    "settled_at": "2025-05-29T15:30:19+00:00"
+  },
+  {
+    "vertical": "commodities",
+    "league": "COMMODITIES",
+    "market_type": "binary",
+    "pnl": 1.1929,
+    "notional": 38.02,
+    "settled_at": "2025-05-29T21:26:07+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_BTC",
+    "market_type": "binary",
+    "pnl": -1.0844,
+    "notional": 21.66,
+    "settled_at": "2025-06-01T14:43:58+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NFL",
+    "market_type": "spread",
+    "pnl": 1.2103,
+    "notional": 23.71,
+    "settled_at": "2025-06-02T03:07:41+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_ETH",
+    "market_type": "binary",
+    "pnl": -0.8608,
+    "notional": 8.65,
+    "settled_at": "2025-06-02T10:21:56+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NBA",
+    "market_type": "moneyline",
+    "pnl": -1.0184,
+    "notional": 26.65,
+    "settled_at": "2025-06-02T19:01:46+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "MLB",
+    "market_type": "moneyline",
+    "pnl": 0.7971,
+    "notional": 30.69,
+    "settled_at": "2025-06-02T19:33:16+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_BTC",
+    "market_type": "binary",
+    "pnl": 0.6805,
+    "notional": 18.67,
+    "settled_at": "2025-06-03T19:56:30+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_BTC",
+    "market_type": "binary",
+    "pnl": 0.8919,
+    "notional": 19.92,
+    "settled_at": "2025-06-03T22:07:09+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_ETH",
+    "market_type": "binary",
+    "pnl": 0.9917,
+    "notional": 29.56,
+    "settled_at": "2025-06-03T23:10:27+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_ETH",
+    "market_type": "binary",
+    "pnl": -0.8412,
+    "notional": 37.99,
+    "settled_at": "2025-06-04T00:00:00+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_ETH",
+    "market_type": "binary",
+    "pnl": -1.0908,
+    "notional": 26.74,
+    "settled_at": "2025-06-04T00:15:00+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_ETH",
+    "market_type": "binary",
+    "pnl": -1.2599,
+    "notional": 17.87,
+    "settled_at": "2025-06-04T00:30:00+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_ETH",
+    "market_type": "binary",
+    "pnl": -1.1055,
+    "notional": 14.65,
+    "settled_at": "2025-06-04T00:45:00+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_ETH",
+    "market_type": "binary",
+    "pnl": -1.1438,
+    "notional": 39.04,
+    "settled_at": "2025-06-04T01:00:00+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_ETH",
+    "market_type": "binary",
+    "pnl": -0.934,
+    "notional": 35.86,
+    "settled_at": "2025-06-04T01:15:00+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_ETH",
+    "market_type": "binary",
+    "pnl": -1.0707,
+    "notional": 31.39,
+    "settled_at": "2025-06-04T01:30:00+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_ETH",
+    "market_type": "binary",
+    "pnl": -0.8847,
+    "notional": 8.86,
+    "settled_at": "2025-06-04T01:45:00+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_ETH",
+    "market_type": "binary",
+    "pnl": -1.3194,
+    "notional": 29.4,
+    "settled_at": "2025-06-04T02:00:00+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_ETH",
+    "market_type": "binary",
+    "pnl": -1.5307,
+    "notional": 11.22,
+    "settled_at": "2025-06-04T02:15:00+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_ETH",
+    "market_type": "binary",
+    "pnl": -0.9573,
+    "notional": 11.96,
+    "settled_at": "2025-06-04T02:30:00+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_ETH",
+    "market_type": "binary",
+    "pnl": -1.1292,
+    "notional": 28.43,
+    "settled_at": "2025-06-04T02:45:00+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_ETH",
+    "market_type": "binary",
+    "pnl": -0.8378,
+    "notional": 39.26,
+    "settled_at": "2025-06-04T03:00:00+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_ETH",
+    "market_type": "binary",
+    "pnl": -1.1238,
+    "notional": 27.73,
+    "settled_at": "2025-06-04T03:15:00+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_ETH",
+    "market_type": "binary",
+    "pnl": -0.9192,
+    "notional": 27.3,
+    "settled_at": "2025-06-04T03:30:00+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NFL",
+    "market_type": "moneyline",
+    "pnl": 1.5154,
+    "notional": 27.93,
+    "settled_at": "2025-06-04T06:08:57+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_BTC",
+    "market_type": "binary",
+    "pnl": 0.6967,
+    "notional": 9.24,
+    "settled_at": "2025-06-04T19:27:31+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "MLB",
+    "market_type": "moneyline",
+    "pnl": 1.3149,
+    "notional": 10.17,
+    "settled_at": "2025-06-04T20:30:43+00:00"
+  },
+  {
+    "vertical": "commodities",
+    "league": "COMMODITIES",
+    "market_type": "binary",
+    "pnl": 0.9135,
+    "notional": 28.17,
+    "settled_at": "2025-06-05T05:50:57+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_BTC",
+    "market_type": "binary",
+    "pnl": 0.3253,
+    "notional": 25.03,
+    "settled_at": "2025-06-05T07:16:09+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NFL",
+    "market_type": "moneyline",
+    "pnl": 1.1823,
+    "notional": 32.97,
+    "settled_at": "2025-06-05T13:16:10+00:00"
+  },
+  {
+    "vertical": "commodities",
+    "league": "COMMODITIES",
+    "market_type": "binary",
+    "pnl": 0.9186,
+    "notional": 19.87,
+    "settled_at": "2025-06-05T21:29:55+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "EPL",
+    "market_type": "moneyline",
+    "pnl": 1.1098,
+    "notional": 11.88,
+    "settled_at": "2025-06-05T22:24:39+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_ETH",
+    "market_type": "binary",
+    "pnl": 0.6314,
+    "notional": 22.24,
+    "settled_at": "2025-06-06T07:49:15+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "MLB",
+    "market_type": "moneyline",
+    "pnl": 0.761,
+    "notional": 35.48,
+    "settled_at": "2025-06-06T10:30:05+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_BTC",
+    "market_type": "binary",
+    "pnl": -0.939,
+    "notional": 25.88,
+    "settled_at": "2025-06-07T04:18:00+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NBA",
+    "market_type": "spread",
+    "pnl": -0.5797,
+    "notional": 17.48,
+    "settled_at": "2025-06-07T16:18:03+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NFL",
+    "market_type": "moneyline",
+    "pnl": -0.7268,
+    "notional": 15.42,
+    "settled_at": "2025-06-07T16:29:31+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_BTC",
+    "market_type": "binary",
+    "pnl": 1.1156,
+    "notional": 16.43,
+    "settled_at": "2025-06-08T11:16:43+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_BTC",
+    "market_type": "binary",
+    "pnl": -0.9098,
+    "notional": 26.82,
+    "settled_at": "2025-06-08T20:17:10+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NBA",
+    "market_type": "moneyline",
+    "pnl": -0.5658,
+    "notional": 22.9,
+    "settled_at": "2025-06-09T00:54:19+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NBA",
+    "market_type": "spread",
+    "pnl": -1.5024,
+    "notional": 33.13,
+    "settled_at": "2025-06-09T06:41:56+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_ETH",
+    "market_type": "binary",
+    "pnl": -0.9267,
+    "notional": 17.09,
+    "settled_at": "2025-06-09T09:48:49+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "EPL",
+    "market_type": "moneyline",
+    "pnl": 0.8841,
+    "notional": 39.65,
+    "settled_at": "2025-06-09T14:54:11+00:00"
+  },
+  {
+    "vertical": "events_econ",
+    "league": "EVENTS_ECON",
+    "market_type": "binary",
+    "pnl": -0.5232,
+    "notional": 20.52,
+    "settled_at": "2025-06-09T17:36:15+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_BTC",
+    "market_type": "binary",
+    "pnl": 0.5995,
+    "notional": 27.55,
+    "settled_at": "2025-06-09T22:03:09+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NBA",
+    "market_type": "moneyline",
+    "pnl": 0.6446,
+    "notional": 16.95,
+    "settled_at": "2025-06-10T10:36:21+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NFL",
+    "market_type": "spread",
+    "pnl": 0.5511,
+    "notional": 14.16,
+    "settled_at": "2025-06-10T19:50:39+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NBA",
+    "market_type": "moneyline",
+    "pnl": 0.8619,
+    "notional": 18.69,
+    "settled_at": "2025-06-10T23:40:14+00:00"
+  },
+  {
+    "vertical": "commodities",
+    "league": "COMMODITIES",
+    "market_type": "binary",
+    "pnl": 0.9837,
+    "notional": 10.12,
+    "settled_at": "2025-06-11T02:27:50+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NFL",
+    "market_type": "spread",
+    "pnl": 0.9487,
+    "notional": 16.83,
+    "settled_at": "2025-06-11T05:51:27+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NFL",
+    "market_type": "moneyline",
+    "pnl": 1.013,
+    "notional": 22.97,
+    "settled_at": "2025-06-11T16:35:59+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_ETH",
+    "market_type": "binary",
+    "pnl": -0.7182,
+    "notional": 20.5,
+    "settled_at": "2025-06-11T21:47:39+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NBA",
+    "market_type": "moneyline",
+    "pnl": -0.8189,
+    "notional": 10.56,
+    "settled_at": "2025-06-12T10:07:37+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_ETH",
+    "market_type": "binary",
+    "pnl": -0.8304,
+    "notional": 14.54,
+    "settled_at": "2025-06-12T15:05:47+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "MLB",
+    "market_type": "moneyline",
+    "pnl": -1.2701,
+    "notional": 14.34,
+    "settled_at": "2025-06-12T16:40:34+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NBA",
+    "market_type": "moneyline",
+    "pnl": -0.8025,
+    "notional": 18.47,
+    "settled_at": "2025-06-12T18:08:46+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_BTC",
+    "market_type": "binary",
+    "pnl": 0.6036,
+    "notional": 16.02,
+    "settled_at": "2025-06-13T21:02:49+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NBA",
+    "market_type": "spread",
+    "pnl": -1.5536,
+    "notional": 11.2,
+    "settled_at": "2025-06-14T12:38:42+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "EPL",
+    "market_type": "moneyline",
+    "pnl": 1.1198,
+    "notional": 39.04,
+    "settled_at": "2025-06-14T13:06:58+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NBA",
+    "market_type": "spread",
+    "pnl": 0.8458,
+    "notional": 24.77,
+    "settled_at": "2025-06-14T14:57:05+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NFL",
+    "market_type": "spread",
+    "pnl": -0.8914,
+    "notional": 8.64,
+    "settled_at": "2025-06-15T17:02:46+00:00"
+  },
+  {
+    "vertical": "elections",
+    "league": "ELECTIONS",
+    "market_type": "binary",
+    "pnl": -0.6875,
+    "notional": 31.08,
+    "settled_at": "2025-06-16T05:41:25+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NBA",
+    "market_type": "spread",
+    "pnl": 1.4208,
+    "notional": 10.86,
+    "settled_at": "2025-06-16T12:43:55+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "MLB",
+    "market_type": "moneyline",
+    "pnl": -0.5806,
+    "notional": 10.38,
+    "settled_at": "2025-06-16T12:49:31+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NBA",
+    "market_type": "moneyline",
+    "pnl": 0.7923,
+    "notional": 27.88,
+    "settled_at": "2025-06-16T22:14:29+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_ETH",
+    "market_type": "binary",
+    "pnl": 0.3706,
+    "notional": 32.64,
+    "settled_at": "2025-06-17T10:49:28+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NBA",
+    "market_type": "spread",
+    "pnl": -1.4801,
+    "notional": 32.84,
+    "settled_at": "2025-06-17T19:08:36+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_ETH",
+    "market_type": "binary",
+    "pnl": -0.8447,
+    "notional": 16.93,
+    "settled_at": "2025-06-18T00:40:26+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_ETH",
+    "market_type": "binary",
+    "pnl": 0.7837,
+    "notional": 19.42,
+    "settled_at": "2025-06-18T02:59:53+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_BTC",
+    "market_type": "binary",
+    "pnl": 1.0413,
+    "notional": 35.59,
+    "settled_at": "2025-06-18T19:28:25+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_ETH",
+    "market_type": "binary",
+    "pnl": 1.0293,
+    "notional": 19.54,
+    "settled_at": "2025-06-19T02:22:52+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NBA",
+    "market_type": "moneyline",
+    "pnl": -1.0881,
+    "notional": 32.39,
+    "settled_at": "2025-06-19T12:53:12+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NFL",
+    "market_type": "moneyline",
+    "pnl": -0.6374,
+    "notional": 32.11,
+    "settled_at": "2025-06-20T03:32:40+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NFL",
+    "market_type": "moneyline",
+    "pnl": -0.7491,
+    "notional": 23.97,
+    "settled_at": "2025-06-20T04:13:33+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NFL",
+    "market_type": "spread",
+    "pnl": -1.0519,
+    "notional": 18.61,
+    "settled_at": "2025-06-21T02:17:29+00:00"
+  },
+  {
+    "vertical": "commodities",
+    "league": "COMMODITIES",
+    "market_type": "binary",
+    "pnl": 0.7587,
+    "notional": 13.72,
+    "settled_at": "2025-06-21T16:57:34+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_BTC",
+    "market_type": "binary",
+    "pnl": -1.0748,
+    "notional": 26.71,
+    "settled_at": "2025-06-22T00:32:03+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_ETH",
+    "market_type": "binary",
+    "pnl": -0.9195,
+    "notional": 25.6,
+    "settled_at": "2025-06-22T00:56:54+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NFL",
+    "market_type": "spread",
+    "pnl": 1.0768,
+    "notional": 29.33,
+    "settled_at": "2025-06-22T05:25:55+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NBA",
+    "market_type": "moneyline",
+    "pnl": -0.5996,
+    "notional": 21.83,
+    "settled_at": "2025-06-23T02:19:17+00:00"
+  },
+  {
+    "vertical": "commodities",
+    "league": "COMMODITIES",
+    "market_type": "binary",
+    "pnl": -1.6858,
+    "notional": 27.52,
+    "settled_at": "2025-06-23T15:44:46+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "MLB",
+    "market_type": "moneyline",
+    "pnl": 1.2866,
+    "notional": 28.68,
+    "settled_at": "2025-06-23T23:30:59+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_BTC",
+    "market_type": "binary",
+    "pnl": -1.2986,
+    "notional": 31.59,
+    "settled_at": "2025-06-24T07:38:11+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_ETH",
+    "market_type": "binary",
+    "pnl": 0.7822,
+    "notional": 39.76,
+    "settled_at": "2025-06-24T23:49:36+00:00"
+  },
+  {
+    "vertical": "commodities",
+    "league": "COMMODITIES",
+    "market_type": "binary",
+    "pnl": -1.5387,
+    "notional": 21.77,
+    "settled_at": "2025-06-25T00:18:21+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NBA",
+    "market_type": "moneyline",
+    "pnl": -1.0465,
+    "notional": 30.85,
+    "settled_at": "2025-06-25T04:07:45+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "MLB",
+    "market_type": "moneyline",
+    "pnl": -1.2236,
+    "notional": 36.75,
+    "settled_at": "2025-06-25T04:59:10+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_BTC",
+    "market_type": "binary",
+    "pnl": -0.7077,
+    "notional": 14.66,
+    "settled_at": "2025-06-25T09:02:09+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "MLB",
+    "market_type": "moneyline",
+    "pnl": 1.2328,
+    "notional": 31.8,
+    "settled_at": "2025-06-25T13:43:47+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "MLB",
+    "market_type": "moneyline",
+    "pnl": -1.0777,
+    "notional": 17.75,
+    "settled_at": "2025-06-25T20:35:33+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NFL",
+    "market_type": "moneyline",
+    "pnl": -0.9151,
+    "notional": 21.28,
+    "settled_at": "2025-06-26T03:53:47+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NBA",
+    "market_type": "moneyline",
+    "pnl": 0.659,
+    "notional": 32.68,
+    "settled_at": "2025-06-26T17:50:59+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NBA",
+    "market_type": "moneyline",
+    "pnl": -0.6623,
+    "notional": 10.66,
+    "settled_at": "2025-06-27T01:19:33+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_ETH",
+    "market_type": "binary",
+    "pnl": 1.0572,
+    "notional": 24.08,
+    "settled_at": "2025-06-27T07:05:12+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NFL",
+    "market_type": "spread",
+    "pnl": 1.1786,
+    "notional": 39.93,
+    "settled_at": "2025-06-27T12:46:39+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NFL",
+    "market_type": "moneyline",
+    "pnl": 1.0942,
+    "notional": 38.99,
+    "settled_at": "2025-06-28T04:30:30+00:00"
+  },
+  {
+    "vertical": "commodities",
+    "league": "COMMODITIES",
+    "market_type": "binary",
+    "pnl": 0.9237,
+    "notional": 28.24,
+    "settled_at": "2025-06-28T04:33:59+00:00"
+  },
+  {
+    "vertical": "commodities",
+    "league": "COMMODITIES",
+    "market_type": "binary",
+    "pnl": -0.9314,
+    "notional": 24.04,
+    "settled_at": "2025-06-28T08:11:50+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_BTC",
+    "market_type": "binary",
+    "pnl": 1.1469,
+    "notional": 21.32,
+    "settled_at": "2025-06-28T09:37:59+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NFL",
+    "market_type": "moneyline",
+    "pnl": -1.2207,
+    "notional": 11.05,
+    "settled_at": "2025-06-28T18:24:51+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NBA",
+    "market_type": "moneyline",
+    "pnl": 0.9005,
+    "notional": 8.4,
+    "settled_at": "2025-06-29T01:21:36+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NBA",
+    "market_type": "spread",
+    "pnl": -0.983,
+    "notional": 11.16,
+    "settled_at": "2025-06-29T10:21:03+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NBA",
+    "market_type": "spread",
+    "pnl": 0.9274,
+    "notional": 30.42,
+    "settled_at": "2025-06-30T01:50:41+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_BTC",
+    "market_type": "binary",
+    "pnl": 0.7751,
+    "notional": 13.44,
+    "settled_at": "2025-06-30T17:18:01+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_ETH",
+    "market_type": "binary",
+    "pnl": -1.2855,
+    "notional": 28.25,
+    "settled_at": "2025-07-01T05:06:16+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NFL",
+    "market_type": "spread",
+    "pnl": -1.2281,
+    "notional": 17.04,
+    "settled_at": "2025-07-01T14:03:55+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NBA",
+    "market_type": "moneyline",
+    "pnl": 1.5948,
+    "notional": 20.72,
+    "settled_at": "2025-07-01T21:33:30+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NFL",
+    "market_type": "moneyline",
+    "pnl": -1.2049,
+    "notional": 29.03,
+    "settled_at": "2025-07-02T07:17:43+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NFL",
+    "market_type": "moneyline",
+    "pnl": -0.7236,
+    "notional": 18.32,
+    "settled_at": "2025-07-02T10:24:35+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "EPL",
+    "market_type": "moneyline",
+    "pnl": -0.7318,
+    "notional": 14.1,
+    "settled_at": "2025-07-02T15:31:04+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_BTC",
+    "market_type": "binary",
+    "pnl": 0.8964,
+    "notional": 31.44,
+    "settled_at": "2025-07-02T22:05:30+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_BTC",
+    "market_type": "binary",
+    "pnl": 0.2823,
+    "notional": 17.71,
+    "settled_at": "2025-07-02T22:17:09+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_ETH",
+    "market_type": "binary",
+    "pnl": 0.9067,
+    "notional": 21.05,
+    "settled_at": "2025-07-03T15:40:18+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_BTC",
+    "market_type": "binary",
+    "pnl": -0.7163,
+    "notional": 31.06,
+    "settled_at": "2025-07-03T20:44:48+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "MLB",
+    "market_type": "moneyline",
+    "pnl": 1.2094,
+    "notional": 36.14,
+    "settled_at": "2025-07-04T01:21:07+00:00"
+  },
+  {
+    "vertical": "commodities",
+    "league": "COMMODITIES",
+    "market_type": "binary",
+    "pnl": 0.3585,
+    "notional": 31.98,
+    "settled_at": "2025-07-05T01:55:39+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NFL",
+    "market_type": "moneyline",
+    "pnl": 0.5878,
+    "notional": 16.5,
+    "settled_at": "2025-07-05T07:23:39+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_BTC",
+    "market_type": "binary",
+    "pnl": 0.9285,
+    "notional": 37.21,
+    "settled_at": "2025-07-06T06:14:39+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NFL",
+    "market_type": "spread",
+    "pnl": -1.0891,
+    "notional": 15.69,
+    "settled_at": "2025-07-07T03:31:20+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_ETH",
+    "market_type": "binary",
+    "pnl": -0.7728,
+    "notional": 24.86,
+    "settled_at": "2025-07-07T06:19:47+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NFL",
+    "market_type": "spread",
+    "pnl": -0.4854,
+    "notional": 15.91,
+    "settled_at": "2025-07-07T13:54:06+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NFL",
+    "market_type": "moneyline",
+    "pnl": -0.8239,
+    "notional": 30.03,
+    "settled_at": "2025-07-08T00:10:32+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NBA",
+    "market_type": "moneyline",
+    "pnl": -1.1747,
+    "notional": 27.49,
+    "settled_at": "2025-07-08T01:26:37+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_BTC",
+    "market_type": "binary",
+    "pnl": -0.8691,
+    "notional": 10.07,
+    "settled_at": "2025-07-08T01:39:41+00:00"
+  },
+  {
+    "vertical": "elections",
+    "league": "ELECTIONS",
+    "market_type": "binary",
+    "pnl": 0.6051,
+    "notional": 31.97,
+    "settled_at": "2025-07-08T02:12:12+00:00"
+  },
+  {
+    "vertical": "commodities",
+    "league": "COMMODITIES",
+    "market_type": "binary",
+    "pnl": -1.6217,
+    "notional": 27.58,
+    "settled_at": "2025-07-08T09:03:06+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_ETH",
+    "market_type": "binary",
+    "pnl": -0.4685,
+    "notional": 25.5,
+    "settled_at": "2025-07-09T09:22:28+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NBA",
+    "market_type": "moneyline",
+    "pnl": 0.5804,
+    "notional": 35.31,
+    "settled_at": "2025-07-10T09:16:14+00:00"
+  },
+  {
+    "vertical": "commodities",
+    "league": "COMMODITIES",
+    "market_type": "binary",
+    "pnl": 0.9339,
+    "notional": 19.29,
+    "settled_at": "2025-07-10T11:48:55+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NBA",
+    "market_type": "moneyline",
+    "pnl": -0.782,
+    "notional": 15.81,
+    "settled_at": "2025-07-10T14:55:31+00:00"
+  },
+  {
+    "vertical": "commodities",
+    "league": "COMMODITIES",
+    "market_type": "binary",
+    "pnl": 0.6562,
+    "notional": 16.39,
+    "settled_at": "2025-07-10T16:26:43+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NFL",
+    "market_type": "moneyline",
+    "pnl": 0.8056,
+    "notional": 25.76,
+    "settled_at": "2025-07-11T12:12:06+00:00"
+  },
+  {
+    "vertical": "commodities",
+    "league": "COMMODITIES",
+    "market_type": "binary",
+    "pnl": 0.8342,
+    "notional": 10.16,
+    "settled_at": "2025-07-11T14:58:54+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "EPL",
+    "market_type": "moneyline",
+    "pnl": 0.8761,
+    "notional": 29.81,
+    "settled_at": "2025-07-11T19:22:41+00:00"
+  },
+  {
+    "vertical": "commodities",
+    "league": "COMMODITIES",
+    "market_type": "binary",
+    "pnl": 0.8487,
+    "notional": 24.0,
+    "settled_at": "2025-07-11T20:09:34+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_ETH",
+    "market_type": "binary",
+    "pnl": 1.0597,
+    "notional": 12.83,
+    "settled_at": "2025-07-11T20:56:06+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NFL",
+    "market_type": "moneyline",
+    "pnl": 1.2273,
+    "notional": 27.75,
+    "settled_at": "2025-07-12T04:34:36+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NBA",
+    "market_type": "moneyline",
+    "pnl": 0.725,
+    "notional": 37.08,
+    "settled_at": "2025-07-12T04:36:26+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_ETH",
+    "market_type": "binary",
+    "pnl": -0.855,
+    "notional": 35.97,
+    "settled_at": "2025-07-12T11:20:44+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "MLB",
+    "market_type": "moneyline",
+    "pnl": -1.0129,
+    "notional": 23.08,
+    "settled_at": "2025-07-13T03:52:26+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NFL",
+    "market_type": "moneyline",
+    "pnl": 0.9569,
+    "notional": 34.34,
+    "settled_at": "2025-07-13T16:43:38+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_ETH",
+    "market_type": "binary",
+    "pnl": 0.8818,
+    "notional": 28.09,
+    "settled_at": "2025-07-13T17:37:20+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NFL",
+    "market_type": "spread",
+    "pnl": -1.1931,
+    "notional": 24.08,
+    "settled_at": "2025-07-14T00:00:00+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NFL",
+    "market_type": "spread",
+    "pnl": -1.2054,
+    "notional": 13.42,
+    "settled_at": "2025-07-14T00:15:00+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NFL",
+    "market_type": "spread",
+    "pnl": -0.707,
+    "notional": 24.55,
+    "settled_at": "2025-07-14T00:30:00+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NFL",
+    "market_type": "spread",
+    "pnl": -1.4109,
+    "notional": 36.14,
+    "settled_at": "2025-07-14T00:45:00+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NFL",
+    "market_type": "spread",
+    "pnl": -1.0126,
+    "notional": 31.31,
+    "settled_at": "2025-07-14T01:00:00+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NFL",
+    "market_type": "spread",
+    "pnl": -1.3614,
+    "notional": 17.94,
+    "settled_at": "2025-07-14T01:15:00+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NFL",
+    "market_type": "spread",
+    "pnl": -0.5013,
+    "notional": 39.19,
+    "settled_at": "2025-07-14T01:30:00+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NFL",
+    "market_type": "spread",
+    "pnl": -1.1134,
+    "notional": 39.76,
+    "settled_at": "2025-07-14T01:45:00+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NBA",
+    "market_type": "moneyline",
+    "pnl": 0.9174,
+    "notional": 29.49,
+    "settled_at": "2025-07-14T02:32:08+00:00"
+  },
+  {
+    "vertical": "events_econ",
+    "league": "EVENTS_ECON",
+    "market_type": "binary",
+    "pnl": 0.9235,
+    "notional": 26.59,
+    "settled_at": "2025-07-14T14:41:23+00:00"
+  },
+  {
+    "vertical": "commodities",
+    "league": "COMMODITIES",
+    "market_type": "binary",
+    "pnl": 0.3462,
+    "notional": 15.14,
+    "settled_at": "2025-07-15T02:40:51+00:00"
+  },
+  {
+    "vertical": "commodities",
+    "league": "COMMODITIES",
+    "market_type": "binary",
+    "pnl": 0.8637,
+    "notional": 18.78,
+    "settled_at": "2025-07-15T09:34:06+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_ETH",
+    "market_type": "binary",
+    "pnl": 0.4395,
+    "notional": 14.18,
+    "settled_at": "2025-07-15T15:29:25+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NBA",
+    "market_type": "moneyline",
+    "pnl": -0.6999,
+    "notional": 10.85,
+    "settled_at": "2025-07-17T21:19:51+00:00"
+  },
+  {
+    "vertical": "commodities",
+    "league": "COMMODITIES",
+    "market_type": "binary",
+    "pnl": -1.3571,
+    "notional": 33.63,
+    "settled_at": "2025-07-17T23:22:50+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NBA",
+    "market_type": "spread",
+    "pnl": -1.0313,
+    "notional": 25.35,
+    "settled_at": "2025-07-18T03:28:38+00:00"
+  },
+  {
+    "vertical": "elections",
+    "league": "ELECTIONS",
+    "market_type": "binary",
+    "pnl": 1.1633,
+    "notional": 39.61,
+    "settled_at": "2025-07-18T14:22:40+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_ETH",
+    "market_type": "binary",
+    "pnl": 0.9582,
+    "notional": 8.67,
+    "settled_at": "2025-07-19T06:43:28+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NFL",
+    "market_type": "moneyline",
+    "pnl": 1.1013,
+    "notional": 14.66,
+    "settled_at": "2025-07-19T07:38:51+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NFL",
+    "market_type": "moneyline",
+    "pnl": -1.5368,
+    "notional": 35.94,
+    "settled_at": "2025-07-19T09:18:13+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "EPL",
+    "market_type": "moneyline",
+    "pnl": -1.077,
+    "notional": 10.47,
+    "settled_at": "2025-07-20T03:03:25+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_ETH",
+    "market_type": "binary",
+    "pnl": -1.2081,
+    "notional": 12.31,
+    "settled_at": "2025-07-20T11:21:26+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_BTC",
+    "market_type": "binary",
+    "pnl": 0.7663,
+    "notional": 36.94,
+    "settled_at": "2025-07-21T01:14:36+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "EPL",
+    "market_type": "moneyline",
+    "pnl": 0.8968,
+    "notional": 24.93,
+    "settled_at": "2025-07-21T21:10:44+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_BTC",
+    "market_type": "binary",
+    "pnl": 1.2582,
+    "notional": 38.23,
+    "settled_at": "2025-07-22T10:05:00+00:00"
+  },
+  {
+    "vertical": "commodities",
+    "league": "COMMODITIES",
+    "market_type": "binary",
+    "pnl": -1.4703,
+    "notional": 16.38,
+    "settled_at": "2025-07-23T10:51:11+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_ETH",
+    "market_type": "binary",
+    "pnl": -0.8501,
+    "notional": 37.68,
+    "settled_at": "2025-07-23T20:47:24+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_BTC",
+    "market_type": "binary",
+    "pnl": 1.366,
+    "notional": 21.07,
+    "settled_at": "2025-07-23T23:02:03+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NFL",
+    "market_type": "spread",
+    "pnl": -0.9758,
+    "notional": 21.86,
+    "settled_at": "2025-07-23T23:31:39+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "MLB",
+    "market_type": "moneyline",
+    "pnl": 0.929,
+    "notional": 33.53,
+    "settled_at": "2025-07-24T05:01:39+00:00"
+  },
+  {
+    "vertical": "commodities",
+    "league": "COMMODITIES",
+    "market_type": "binary",
+    "pnl": 0.5679,
+    "notional": 32.88,
+    "settled_at": "2025-07-24T05:02:38+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NBA",
+    "market_type": "spread",
+    "pnl": 0.6048,
+    "notional": 13.85,
+    "settled_at": "2025-07-24T07:09:43+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NFL",
+    "market_type": "moneyline",
+    "pnl": -0.5247,
+    "notional": 29.46,
+    "settled_at": "2025-07-24T15:16:56+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NBA",
+    "market_type": "moneyline",
+    "pnl": 0.5407,
+    "notional": 21.14,
+    "settled_at": "2025-07-24T23:02:08+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NFL",
+    "market_type": "moneyline",
+    "pnl": 0.9708,
+    "notional": 31.57,
+    "settled_at": "2025-07-25T02:43:09+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "MLB",
+    "market_type": "moneyline",
+    "pnl": -1.3187,
+    "notional": 24.12,
+    "settled_at": "2025-07-25T06:07:55+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_ETH",
+    "market_type": "binary",
+    "pnl": 1.1554,
+    "notional": 30.48,
+    "settled_at": "2025-07-25T15:36:58+00:00"
+  },
+  {
+    "vertical": "commodities",
+    "league": "COMMODITIES",
+    "market_type": "binary",
+    "pnl": -1.4686,
+    "notional": 38.5,
+    "settled_at": "2025-07-25T17:58:00+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "MLB",
+    "market_type": "moneyline",
+    "pnl": 0.3448,
+    "notional": 33.29,
+    "settled_at": "2025-07-25T22:55:02+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NBA",
+    "market_type": "moneyline",
+    "pnl": -0.623,
+    "notional": 21.29,
+    "settled_at": "2025-07-25T23:51:39+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NBA",
+    "market_type": "moneyline",
+    "pnl": 1.0294,
+    "notional": 31.68,
+    "settled_at": "2025-07-26T09:08:34+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_BTC",
+    "market_type": "binary",
+    "pnl": 1.0971,
+    "notional": 21.29,
+    "settled_at": "2025-07-26T11:32:59+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NFL",
+    "market_type": "spread",
+    "pnl": -0.9492,
+    "notional": 9.23,
+    "settled_at": "2025-07-26T13:26:10+00:00"
+  },
+  {
+    "vertical": "events_econ",
+    "league": "EVENTS_ECON",
+    "market_type": "binary",
+    "pnl": 0.6355,
+    "notional": 8.62,
+    "settled_at": "2025-07-26T17:17:03+00:00"
+  },
+  {
+    "vertical": "commodities",
+    "league": "COMMODITIES",
+    "market_type": "binary",
+    "pnl": 0.7399,
+    "notional": 27.26,
+    "settled_at": "2025-07-26T20:33:56+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_BTC",
+    "market_type": "binary",
+    "pnl": 0.7246,
+    "notional": 21.75,
+    "settled_at": "2025-07-27T11:30:03+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NFL",
+    "market_type": "spread",
+    "pnl": 1.0235,
+    "notional": 13.91,
+    "settled_at": "2025-07-27T14:11:27+00:00"
+  },
+  {
+    "vertical": "events_econ",
+    "league": "EVENTS_ECON",
+    "market_type": "binary",
+    "pnl": -1.1348,
+    "notional": 16.37,
+    "settled_at": "2025-07-27T15:43:15+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NFL",
+    "market_type": "moneyline",
+    "pnl": 1.2497,
+    "notional": 33.77,
+    "settled_at": "2025-07-27T22:39:57+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NFL",
+    "market_type": "spread",
+    "pnl": -1.3688,
+    "notional": 15.8,
+    "settled_at": "2025-07-28T05:07:34+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NBA",
+    "market_type": "moneyline",
+    "pnl": -1.0225,
+    "notional": 32.82,
+    "settled_at": "2025-07-28T05:37:45+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NBA",
+    "market_type": "moneyline",
+    "pnl": -1.2055,
+    "notional": 34.26,
+    "settled_at": "2025-07-28T05:52:32+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NBA",
+    "market_type": "moneyline",
+    "pnl": -0.6359,
+    "notional": 37.95,
+    "settled_at": "2025-07-29T05:40:00+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_BTC",
+    "market_type": "binary",
+    "pnl": -0.53,
+    "notional": 20.76,
+    "settled_at": "2025-07-30T00:00:00+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_BTC",
+    "market_type": "binary",
+    "pnl": -0.7227,
+    "notional": 32.46,
+    "settled_at": "2025-07-30T00:15:00+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_BTC",
+    "market_type": "binary",
+    "pnl": -1.1857,
+    "notional": 11.88,
+    "settled_at": "2025-07-30T00:30:00+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_BTC",
+    "market_type": "binary",
+    "pnl": -1.0341,
+    "notional": 32.25,
+    "settled_at": "2025-07-30T00:45:00+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_BTC",
+    "market_type": "binary",
+    "pnl": -1.2217,
+    "notional": 37.21,
+    "settled_at": "2025-07-30T01:00:00+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_BTC",
+    "market_type": "binary",
+    "pnl": -0.9732,
+    "notional": 10.78,
+    "settled_at": "2025-07-30T01:15:00+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_BTC",
+    "market_type": "binary",
+    "pnl": -1.1343,
+    "notional": 24.53,
+    "settled_at": "2025-07-30T01:30:00+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_BTC",
+    "market_type": "binary",
+    "pnl": -1.0032,
+    "notional": 15.72,
+    "settled_at": "2025-07-30T01:45:00+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_BTC",
+    "market_type": "binary",
+    "pnl": -0.8066,
+    "notional": 34.6,
+    "settled_at": "2025-07-30T02:00:00+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_BTC",
+    "market_type": "binary",
+    "pnl": -1.1506,
+    "notional": 31.42,
+    "settled_at": "2025-07-30T02:15:00+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_BTC",
+    "market_type": "binary",
+    "pnl": -1.1736,
+    "notional": 16.68,
+    "settled_at": "2025-07-30T02:30:00+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_BTC",
+    "market_type": "binary",
+    "pnl": -1.5333,
+    "notional": 24.86,
+    "settled_at": "2025-07-30T02:45:00+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_BTC",
+    "market_type": "binary",
+    "pnl": -1.1451,
+    "notional": 36.63,
+    "settled_at": "2025-07-30T03:00:00+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_BTC",
+    "market_type": "binary",
+    "pnl": -0.9113,
+    "notional": 37.37,
+    "settled_at": "2025-07-30T03:15:00+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_BTC",
+    "market_type": "binary",
+    "pnl": -1.2437,
+    "notional": 36.08,
+    "settled_at": "2025-07-30T03:30:00+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_BTC",
+    "market_type": "binary",
+    "pnl": -1.18,
+    "notional": 25.95,
+    "settled_at": "2025-07-30T03:45:00+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_BTC",
+    "market_type": "binary",
+    "pnl": -0.9936,
+    "notional": 19.38,
+    "settled_at": "2025-07-30T04:00:00+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_BTC",
+    "market_type": "binary",
+    "pnl": -1.433,
+    "notional": 38.92,
+    "settled_at": "2025-07-30T04:15:00+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_BTC",
+    "market_type": "binary",
+    "pnl": -0.9145,
+    "notional": 31.88,
+    "settled_at": "2025-07-30T04:30:00+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_BTC",
+    "market_type": "binary",
+    "pnl": -1.3477,
+    "notional": 9.99,
+    "settled_at": "2025-07-30T04:45:00+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_BTC",
+    "market_type": "binary",
+    "pnl": -1.061,
+    "notional": 25.37,
+    "settled_at": "2025-07-30T04:59:29+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NFL",
+    "market_type": "spread",
+    "pnl": 1.0464,
+    "notional": 24.82,
+    "settled_at": "2025-07-30T17:25:39+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "EPL",
+    "market_type": "moneyline",
+    "pnl": -0.5918,
+    "notional": 38.04,
+    "settled_at": "2025-07-31T11:00:29+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NFL",
+    "market_type": "spread",
+    "pnl": 0.7901,
+    "notional": 21.98,
+    "settled_at": "2025-07-31T11:19:36+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NBA",
+    "market_type": "moneyline",
+    "pnl": 1.1744,
+    "notional": 27.03,
+    "settled_at": "2025-07-31T15:12:10+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "EPL",
+    "market_type": "moneyline",
+    "pnl": -0.9607,
+    "notional": 24.82,
+    "settled_at": "2025-07-31T23:20:25+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_BTC",
+    "market_type": "binary",
+    "pnl": 0.7903,
+    "notional": 14.42,
+    "settled_at": "2025-08-01T00:11:21+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "MLB",
+    "market_type": "moneyline",
+    "pnl": 1.211,
+    "notional": 15.64,
+    "settled_at": "2025-08-01T03:19:14+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "MLB",
+    "market_type": "moneyline",
+    "pnl": 1.2779,
+    "notional": 39.29,
+    "settled_at": "2025-08-01T15:36:27+00:00"
+  },
+  {
+    "vertical": "events_econ",
+    "league": "EVENTS_ECON",
+    "market_type": "binary",
+    "pnl": -0.9922,
+    "notional": 19.5,
+    "settled_at": "2025-08-01T16:09:48+00:00"
+  },
+  {
+    "vertical": "elections",
+    "league": "ELECTIONS",
+    "market_type": "binary",
+    "pnl": -1.0729,
+    "notional": 8.87,
+    "settled_at": "2025-08-02T04:11:33+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "EPL",
+    "market_type": "moneyline",
+    "pnl": -1.163,
+    "notional": 33.75,
+    "settled_at": "2025-08-02T05:37:47+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "EPL",
+    "market_type": "moneyline",
+    "pnl": -0.8204,
+    "notional": 12.98,
+    "settled_at": "2025-08-03T16:17:46+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_BTC",
+    "market_type": "binary",
+    "pnl": -0.9221,
+    "notional": 13.23,
+    "settled_at": "2025-08-03T20:54:26+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NFL",
+    "market_type": "moneyline",
+    "pnl": 1.1202,
+    "notional": 12.04,
+    "settled_at": "2025-08-04T00:15:02+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_BTC",
+    "market_type": "binary",
+    "pnl": 0.6547,
+    "notional": 28.09,
+    "settled_at": "2025-08-04T01:27:35+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_ETH",
+    "market_type": "binary",
+    "pnl": 1.2265,
+    "notional": 27.17,
+    "settled_at": "2025-08-04T22:52:50+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "MLB",
+    "market_type": "moneyline",
+    "pnl": 0.5913,
+    "notional": 31.58,
+    "settled_at": "2025-08-04T23:35:41+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NBA",
+    "market_type": "moneyline",
+    "pnl": 1.036,
+    "notional": 10.58,
+    "settled_at": "2025-08-06T04:09:09+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "MLB",
+    "market_type": "moneyline",
+    "pnl": 0.8257,
+    "notional": 36.14,
+    "settled_at": "2025-08-06T13:02:34+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_BTC",
+    "market_type": "binary",
+    "pnl": 1.2542,
+    "notional": 9.54,
+    "settled_at": "2025-08-06T13:38:35+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "EPL",
+    "market_type": "moneyline",
+    "pnl": -0.8485,
+    "notional": 33.04,
+    "settled_at": "2025-08-06T18:38:21+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NBA",
+    "market_type": "spread",
+    "pnl": 0.8034,
+    "notional": 36.13,
+    "settled_at": "2025-08-06T23:30:35+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_BTC",
+    "market_type": "binary",
+    "pnl": 0.7518,
+    "notional": 21.65,
+    "settled_at": "2025-08-07T11:15:54+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NFL",
+    "market_type": "moneyline",
+    "pnl": 1.075,
+    "notional": 17.72,
+    "settled_at": "2025-08-07T14:14:29+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NBA",
+    "market_type": "moneyline",
+    "pnl": -0.4433,
+    "notional": 30.62,
+    "settled_at": "2025-08-07T17:33:45+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NBA",
+    "market_type": "moneyline",
+    "pnl": -0.6011,
+    "notional": 24.09,
+    "settled_at": "2025-08-08T14:45:33+00:00"
+  },
+  {
+    "vertical": "commodities",
+    "league": "COMMODITIES",
+    "market_type": "binary",
+    "pnl": 0.9009,
+    "notional": 12.26,
+    "settled_at": "2025-08-09T02:28:41+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_BTC",
+    "market_type": "binary",
+    "pnl": 1.1456,
+    "notional": 11.12,
+    "settled_at": "2025-08-09T21:54:51+00:00"
+  },
+  {
+    "vertical": "commodities",
+    "league": "COMMODITIES",
+    "market_type": "binary",
+    "pnl": 0.9144,
+    "notional": 26.0,
+    "settled_at": "2025-08-10T09:08:13+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NFL",
+    "market_type": "moneyline",
+    "pnl": 1.5552,
+    "notional": 15.21,
+    "settled_at": "2025-08-12T01:59:05+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_ETH",
+    "market_type": "binary",
+    "pnl": -1.0596,
+    "notional": 18.15,
+    "settled_at": "2025-08-12T02:16:32+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NBA",
+    "market_type": "moneyline",
+    "pnl": 1.1884,
+    "notional": 10.91,
+    "settled_at": "2025-08-12T13:53:46+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NFL",
+    "market_type": "moneyline",
+    "pnl": 0.6636,
+    "notional": 21.5,
+    "settled_at": "2025-08-12T20:53:45+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_BTC",
+    "market_type": "binary",
+    "pnl": -0.3831,
+    "notional": 33.89,
+    "settled_at": "2025-08-13T09:37:02+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NFL",
+    "market_type": "spread",
+    "pnl": -1.5853,
+    "notional": 27.23,
+    "settled_at": "2025-08-13T09:55:04+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NBA",
+    "market_type": "spread",
+    "pnl": 1.0529,
+    "notional": 34.97,
+    "settled_at": "2025-08-13T10:21:36+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NBA",
+    "market_type": "moneyline",
+    "pnl": 1.2467,
+    "notional": 15.46,
+    "settled_at": "2025-08-13T12:15:46+00:00"
+  },
+  {
+    "vertical": "events_econ",
+    "league": "EVENTS_ECON",
+    "market_type": "binary",
+    "pnl": -1.2936,
+    "notional": 15.54,
+    "settled_at": "2025-08-13T15:24:36+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_BTC",
+    "market_type": "binary",
+    "pnl": -1.5649,
+    "notional": 32.81,
+    "settled_at": "2025-08-13T19:08:34+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NFL",
+    "market_type": "moneyline",
+    "pnl": -1.414,
+    "notional": 10.68,
+    "settled_at": "2025-08-14T00:16:05+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_BTC",
+    "market_type": "binary",
+    "pnl": 0.938,
+    "notional": 17.26,
+    "settled_at": "2025-08-14T16:55:22+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NBA",
+    "market_type": "moneyline",
+    "pnl": -1.3347,
+    "notional": 11.78,
+    "settled_at": "2025-08-14T19:15:25+00:00"
+  },
+  {
+    "vertical": "commodities",
+    "league": "COMMODITIES",
+    "market_type": "binary",
+    "pnl": 0.7996,
+    "notional": 31.44,
+    "settled_at": "2025-08-15T14:03:39+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "EPL",
+    "market_type": "moneyline",
+    "pnl": 0.9531,
+    "notional": 31.06,
+    "settled_at": "2025-08-15T22:22:37+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "EPL",
+    "market_type": "moneyline",
+    "pnl": 1.2437,
+    "notional": 25.99,
+    "settled_at": "2025-08-16T03:51:31+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_ETH",
+    "market_type": "binary",
+    "pnl": -1.2444,
+    "notional": 38.44,
+    "settled_at": "2025-08-16T15:46:34+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NBA",
+    "market_type": "spread",
+    "pnl": 0.5772,
+    "notional": 29.05,
+    "settled_at": "2025-08-16T18:04:43+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_BTC",
+    "market_type": "binary",
+    "pnl": 0.8078,
+    "notional": 26.48,
+    "settled_at": "2025-08-17T00:36:47+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_BTC",
+    "market_type": "binary",
+    "pnl": -0.5424,
+    "notional": 35.3,
+    "settled_at": "2025-08-17T02:04:37+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_ETH",
+    "market_type": "binary",
+    "pnl": -1.0324,
+    "notional": 23.38,
+    "settled_at": "2025-08-17T04:06:10+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "MLB",
+    "market_type": "moneyline",
+    "pnl": -1.2802,
+    "notional": 38.19,
+    "settled_at": "2025-08-18T09:56:30+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_ETH",
+    "market_type": "binary",
+    "pnl": 0.7829,
+    "notional": 17.92,
+    "settled_at": "2025-08-18T14:20:56+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_ETH",
+    "market_type": "binary",
+    "pnl": 0.7929,
+    "notional": 35.04,
+    "settled_at": "2025-08-20T15:24:33+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_ETH",
+    "market_type": "binary",
+    "pnl": -0.6052,
+    "notional": 26.78,
+    "settled_at": "2025-08-21T03:29:21+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_BTC",
+    "market_type": "binary",
+    "pnl": 0.9975,
+    "notional": 25.36,
+    "settled_at": "2025-08-21T05:49:21+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "MLB",
+    "market_type": "moneyline",
+    "pnl": 1.1424,
+    "notional": 10.63,
+    "settled_at": "2025-08-21T06:37:16+00:00"
+  },
+  {
+    "vertical": "commodities",
+    "league": "COMMODITIES",
+    "market_type": "binary",
+    "pnl": -2.0929,
+    "notional": 13.19,
+    "settled_at": "2025-08-21T08:59:03+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NFL",
+    "market_type": "spread",
+    "pnl": -0.7163,
+    "notional": 25.09,
+    "settled_at": "2025-08-21T10:59:51+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NFL",
+    "market_type": "spread",
+    "pnl": -1.165,
+    "notional": 36.81,
+    "settled_at": "2025-08-21T16:26:59+00:00"
+  },
+  {
+    "vertical": "elections",
+    "league": "ELECTIONS",
+    "market_type": "binary",
+    "pnl": -1.1063,
+    "notional": 38.28,
+    "settled_at": "2025-08-21T21:31:43+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NBA",
+    "market_type": "spread",
+    "pnl": 0.5766,
+    "notional": 16.91,
+    "settled_at": "2025-08-22T19:52:00+00:00"
+  },
+  {
+    "vertical": "commodities",
+    "league": "COMMODITIES",
+    "market_type": "binary",
+    "pnl": 0.6188,
+    "notional": 9.14,
+    "settled_at": "2025-08-23T02:10:08+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "MLB",
+    "market_type": "moneyline",
+    "pnl": -0.8588,
+    "notional": 30.08,
+    "settled_at": "2025-08-23T02:18:48+00:00"
+  },
+  {
+    "vertical": "events_econ",
+    "league": "EVENTS_ECON",
+    "market_type": "binary",
+    "pnl": -1.0399,
+    "notional": 33.18,
+    "settled_at": "2025-08-23T08:25:46+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NFL",
+    "market_type": "moneyline",
+    "pnl": 0.5614,
+    "notional": 14.1,
+    "settled_at": "2025-08-23T11:31:39+00:00"
+  },
+  {
+    "vertical": "commodities",
+    "league": "COMMODITIES",
+    "market_type": "binary",
+    "pnl": 0.7381,
+    "notional": 11.16,
+    "settled_at": "2025-08-24T07:21:57+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NFL",
+    "market_type": "moneyline",
+    "pnl": 0.8499,
+    "notional": 35.1,
+    "settled_at": "2025-08-24T14:02:02+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NFL",
+    "market_type": "spread",
+    "pnl": -0.9233,
+    "notional": 39.53,
+    "settled_at": "2025-08-24T20:51:16+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_BTC",
+    "market_type": "binary",
+    "pnl": -0.6037,
+    "notional": 39.23,
+    "settled_at": "2025-08-24T21:13:42+00:00"
+  },
+  {
+    "vertical": "commodities",
+    "league": "COMMODITIES",
+    "market_type": "binary",
+    "pnl": 1.0535,
+    "notional": 8.97,
+    "settled_at": "2025-08-24T23:32:29+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_BTC",
+    "market_type": "binary",
+    "pnl": 1.2614,
+    "notional": 8.23,
+    "settled_at": "2025-08-25T11:31:04+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NFL",
+    "market_type": "spread",
+    "pnl": 0.9799,
+    "notional": 25.48,
+    "settled_at": "2025-08-25T12:49:40+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NFL",
+    "market_type": "spread",
+    "pnl": 1.0551,
+    "notional": 18.39,
+    "settled_at": "2025-08-25T18:14:58+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NBA",
+    "market_type": "spread",
+    "pnl": 1.1248,
+    "notional": 32.66,
+    "settled_at": "2025-08-27T06:49:58+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NBA",
+    "market_type": "moneyline",
+    "pnl": -1.3779,
+    "notional": 36.37,
+    "settled_at": "2025-08-27T14:15:10+00:00"
+  },
+  {
+    "vertical": "commodities",
+    "league": "COMMODITIES",
+    "market_type": "binary",
+    "pnl": -1.4942,
+    "notional": 26.54,
+    "settled_at": "2025-08-28T21:56:03+00:00"
+  },
+  {
+    "vertical": "commodities",
+    "league": "COMMODITIES",
+    "market_type": "binary",
+    "pnl": 1.1319,
+    "notional": 33.27,
+    "settled_at": "2025-08-28T22:42:21+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_ETH",
+    "market_type": "binary",
+    "pnl": -1.3164,
+    "notional": 24.25,
+    "settled_at": "2025-08-29T21:53:22+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NBA",
+    "market_type": "moneyline",
+    "pnl": 1.0632,
+    "notional": 8.23,
+    "settled_at": "2025-08-30T18:03:17+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_BTC",
+    "market_type": "binary",
+    "pnl": -1.0994,
+    "notional": 31.6,
+    "settled_at": "2025-08-30T21:57:22+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NFL",
+    "market_type": "moneyline",
+    "pnl": -1.497,
+    "notional": 27.0,
+    "settled_at": "2025-09-01T12:25:07+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "EPL",
+    "market_type": "moneyline",
+    "pnl": -0.9273,
+    "notional": 11.65,
+    "settled_at": "2025-09-02T01:22:27+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "MLB",
+    "market_type": "moneyline",
+    "pnl": -0.495,
+    "notional": 12.06,
+    "settled_at": "2025-09-02T08:04:43+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_BTC",
+    "market_type": "binary",
+    "pnl": 0.7591,
+    "notional": 33.84,
+    "settled_at": "2025-09-02T16:48:53+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "EPL",
+    "market_type": "moneyline",
+    "pnl": 1.1563,
+    "notional": 22.57,
+    "settled_at": "2025-09-04T15:28:50+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NBA",
+    "market_type": "moneyline",
+    "pnl": -0.7017,
+    "notional": 30.09,
+    "settled_at": "2025-09-05T06:08:42+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "MLB",
+    "market_type": "moneyline",
+    "pnl": -1.1226,
+    "notional": 13.51,
+    "settled_at": "2025-09-05T14:35:00+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_ETH",
+    "market_type": "binary",
+    "pnl": -1.1272,
+    "notional": 8.57,
+    "settled_at": "2025-09-05T17:03:57+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_ETH",
+    "market_type": "binary",
+    "pnl": 0.4798,
+    "notional": 36.93,
+    "settled_at": "2025-09-05T17:18:47+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "MLB",
+    "market_type": "moneyline",
+    "pnl": 1.1078,
+    "notional": 34.89,
+    "settled_at": "2025-09-06T19:01:17+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_BTC",
+    "market_type": "binary",
+    "pnl": -0.7673,
+    "notional": 32.43,
+    "settled_at": "2025-09-07T02:19:58+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NFL",
+    "market_type": "moneyline",
+    "pnl": 0.6353,
+    "notional": 16.23,
+    "settled_at": "2025-09-07T11:04:57+00:00"
+  },
+  {
+    "vertical": "events_econ",
+    "league": "EVENTS_ECON",
+    "market_type": "binary",
+    "pnl": 1.641,
+    "notional": 8.77,
+    "settled_at": "2025-09-07T19:25:20+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_BTC",
+    "market_type": "binary",
+    "pnl": 0.9099,
+    "notional": 36.35,
+    "settled_at": "2025-09-07T20:05:17+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "MLB",
+    "market_type": "moneyline",
+    "pnl": -0.8426,
+    "notional": 10.37,
+    "settled_at": "2025-09-07T23:46:23+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_BTC",
+    "market_type": "binary",
+    "pnl": 0.4183,
+    "notional": 16.99,
+    "settled_at": "2025-09-08T03:24:11+00:00"
+  },
+  {
+    "vertical": "elections",
+    "league": "ELECTIONS",
+    "market_type": "binary",
+    "pnl": -0.7297,
+    "notional": 36.51,
+    "settled_at": "2025-09-08T23:49:44+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_BTC",
+    "market_type": "binary",
+    "pnl": 0.2342,
+    "notional": 19.43,
+    "settled_at": "2025-09-09T05:19:33+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_ETH",
+    "market_type": "binary",
+    "pnl": 0.7341,
+    "notional": 20.34,
+    "settled_at": "2025-09-09T19:28:43+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_BTC",
+    "market_type": "binary",
+    "pnl": -1.3871,
+    "notional": 28.99,
+    "settled_at": "2025-09-10T04:58:55+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NBA",
+    "market_type": "spread",
+    "pnl": 0.5283,
+    "notional": 39.7,
+    "settled_at": "2025-09-10T08:37:59+00:00"
+  },
+  {
+    "vertical": "commodities",
+    "league": "COMMODITIES",
+    "market_type": "binary",
+    "pnl": -1.4768,
+    "notional": 25.68,
+    "settled_at": "2025-09-10T14:30:43+00:00"
+  },
+  {
+    "vertical": "commodities",
+    "league": "COMMODITIES",
+    "market_type": "binary",
+    "pnl": -1.09,
+    "notional": 39.82,
+    "settled_at": "2025-09-10T21:21:58+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_ETH",
+    "market_type": "binary",
+    "pnl": 0.8644,
+    "notional": 25.78,
+    "settled_at": "2025-09-11T06:19:27+00:00"
+  },
+  {
+    "vertical": "elections",
+    "league": "ELECTIONS",
+    "market_type": "binary",
+    "pnl": -1.2604,
+    "notional": 34.29,
+    "settled_at": "2025-09-11T12:25:35+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_ETH",
+    "market_type": "binary",
+    "pnl": -0.9701,
+    "notional": 16.6,
+    "settled_at": "2025-09-11T19:42:49+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_BTC",
+    "market_type": "binary",
+    "pnl": -0.8407,
+    "notional": 35.19,
+    "settled_at": "2025-09-12T13:40:49+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_ETH",
+    "market_type": "binary",
+    "pnl": -1.4164,
+    "notional": 9.24,
+    "settled_at": "2025-09-12T14:09:54+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_ETH",
+    "market_type": "binary",
+    "pnl": 0.4322,
+    "notional": 32.12,
+    "settled_at": "2025-09-12T15:23:24+00:00"
+  },
+  {
+    "vertical": "events_econ",
+    "league": "EVENTS_ECON",
+    "market_type": "binary",
+    "pnl": 1.2184,
+    "notional": 12.13,
+    "settled_at": "2025-09-13T01:40:03+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_ETH",
+    "market_type": "binary",
+    "pnl": 1.1078,
+    "notional": 15.18,
+    "settled_at": "2025-09-13T03:56:19+00:00"
+  },
+  {
+    "vertical": "commodities",
+    "league": "COMMODITIES",
+    "market_type": "binary",
+    "pnl": 0.6862,
+    "notional": 19.47,
+    "settled_at": "2025-09-13T05:41:27+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NFL",
+    "market_type": "moneyline",
+    "pnl": 1.0161,
+    "notional": 34.94,
+    "settled_at": "2025-09-13T16:33:37+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NFL",
+    "market_type": "moneyline",
+    "pnl": 1.1194,
+    "notional": 14.65,
+    "settled_at": "2025-09-14T04:45:53+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NFL",
+    "market_type": "spread",
+    "pnl": -0.5683,
+    "notional": 35.57,
+    "settled_at": "2025-09-14T05:03:59+00:00"
+  },
+  {
+    "vertical": "commodities",
+    "league": "COMMODITIES",
+    "market_type": "binary",
+    "pnl": 0.7947,
+    "notional": 22.26,
+    "settled_at": "2025-09-14T20:21:31+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "MLB",
+    "market_type": "moneyline",
+    "pnl": 1.1787,
+    "notional": 29.09,
+    "settled_at": "2025-09-14T21:44:23+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_BTC",
+    "market_type": "binary",
+    "pnl": 0.8428,
+    "notional": 14.53,
+    "settled_at": "2025-09-15T00:38:43+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NBA",
+    "market_type": "spread",
+    "pnl": 0.8742,
+    "notional": 36.93,
+    "settled_at": "2025-09-15T04:09:05+00:00"
+  },
+  {
+    "vertical": "events_econ",
+    "league": "EVENTS_ECON",
+    "market_type": "binary",
+    "pnl": -1.4308,
+    "notional": 15.94,
+    "settled_at": "2025-09-16T13:51:43+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NBA",
+    "market_type": "moneyline",
+    "pnl": 0.6458,
+    "notional": 24.51,
+    "settled_at": "2025-09-16T22:41:34+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NFL",
+    "market_type": "moneyline",
+    "pnl": -0.8726,
+    "notional": 32.38,
+    "settled_at": "2025-09-17T01:54:24+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_BTC",
+    "market_type": "binary",
+    "pnl": 1.028,
+    "notional": 21.69,
+    "settled_at": "2025-09-17T20:36:38+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_BTC",
+    "market_type": "binary",
+    "pnl": -0.8181,
+    "notional": 36.51,
+    "settled_at": "2025-09-18T03:46:59+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_ETH",
+    "market_type": "binary",
+    "pnl": 1.1054,
+    "notional": 39.88,
+    "settled_at": "2025-09-18T07:15:43+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NFL",
+    "market_type": "moneyline",
+    "pnl": -0.8922,
+    "notional": 38.44,
+    "settled_at": "2025-09-18T08:47:12+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NBA",
+    "market_type": "moneyline",
+    "pnl": -1.226,
+    "notional": 16.78,
+    "settled_at": "2025-09-18T09:43:37+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_ETH",
+    "market_type": "binary",
+    "pnl": -1.2258,
+    "notional": 14.71,
+    "settled_at": "2025-09-18T20:44:28+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NBA",
+    "market_type": "spread",
+    "pnl": 0.9734,
+    "notional": 22.88,
+    "settled_at": "2025-09-19T00:48:19+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NFL",
+    "market_type": "moneyline",
+    "pnl": -0.5741,
+    "notional": 24.11,
+    "settled_at": "2025-09-19T02:02:47+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_BTC",
+    "market_type": "binary",
+    "pnl": 0.4751,
+    "notional": 8.59,
+    "settled_at": "2025-09-19T23:13:38+00:00"
+  },
+  {
+    "vertical": "commodities",
+    "league": "COMMODITIES",
+    "market_type": "binary",
+    "pnl": 0.5853,
+    "notional": 28.64,
+    "settled_at": "2025-09-20T12:04:30+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "MLB",
+    "market_type": "moneyline",
+    "pnl": -1.0227,
+    "notional": 29.88,
+    "settled_at": "2025-09-21T07:41:15+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_ETH",
+    "market_type": "binary",
+    "pnl": -1.1608,
+    "notional": 25.68,
+    "settled_at": "2025-09-21T08:09:06+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NFL",
+    "market_type": "moneyline",
+    "pnl": 0.5476,
+    "notional": 22.45,
+    "settled_at": "2025-09-22T00:55:28+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NFL",
+    "market_type": "moneyline",
+    "pnl": 1.2484,
+    "notional": 13.46,
+    "settled_at": "2025-09-22T09:10:19+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_ETH",
+    "market_type": "binary",
+    "pnl": 1.5897,
+    "notional": 15.73,
+    "settled_at": "2025-09-22T13:54:51+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NBA",
+    "market_type": "spread",
+    "pnl": -0.9995,
+    "notional": 15.38,
+    "settled_at": "2025-09-22T19:21:58+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NBA",
+    "market_type": "moneyline",
+    "pnl": 0.5386,
+    "notional": 24.0,
+    "settled_at": "2025-09-23T04:23:49+00:00"
+  },
+  {
+    "vertical": "commodities",
+    "league": "COMMODITIES",
+    "market_type": "binary",
+    "pnl": 0.8022,
+    "notional": 32.23,
+    "settled_at": "2025-09-23T15:12:00+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NBA",
+    "market_type": "moneyline",
+    "pnl": -0.9568,
+    "notional": 27.42,
+    "settled_at": "2025-09-23T23:24:46+00:00"
+  },
+  {
+    "vertical": "events_econ",
+    "league": "EVENTS_ECON",
+    "market_type": "binary",
+    "pnl": 0.9435,
+    "notional": 9.02,
+    "settled_at": "2025-09-24T04:08:11+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_ETH",
+    "market_type": "binary",
+    "pnl": 1.0535,
+    "notional": 38.43,
+    "settled_at": "2025-09-24T05:53:33+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_BTC",
+    "market_type": "binary",
+    "pnl": -1.2048,
+    "notional": 10.68,
+    "settled_at": "2025-09-24T17:24:06+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NBA",
+    "market_type": "spread",
+    "pnl": 0.7665,
+    "notional": 21.62,
+    "settled_at": "2025-09-25T02:13:26+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NFL",
+    "market_type": "moneyline",
+    "pnl": -0.6631,
+    "notional": 10.93,
+    "settled_at": "2025-09-25T06:52:24+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "EPL",
+    "market_type": "moneyline",
+    "pnl": 1.2451,
+    "notional": 30.67,
+    "settled_at": "2025-09-25T16:33:03+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_ETH",
+    "market_type": "binary",
+    "pnl": -0.828,
+    "notional": 24.81,
+    "settled_at": "2025-09-26T04:03:52+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "EPL",
+    "market_type": "moneyline",
+    "pnl": 1.1365,
+    "notional": 21.64,
+    "settled_at": "2025-09-26T04:32:21+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_BTC",
+    "market_type": "binary",
+    "pnl": -1.123,
+    "notional": 22.4,
+    "settled_at": "2025-09-26T13:28:39+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_ETH",
+    "market_type": "binary",
+    "pnl": -1.3274,
+    "notional": 25.64,
+    "settled_at": "2025-09-26T15:08:12+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_BTC",
+    "market_type": "binary",
+    "pnl": -0.6979,
+    "notional": 15.87,
+    "settled_at": "2025-09-26T19:48:42+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "MLB",
+    "market_type": "moneyline",
+    "pnl": 0.5653,
+    "notional": 37.17,
+    "settled_at": "2025-09-26T22:08:38+00:00"
+  },
+  {
+    "vertical": "sports",
+    "league": "NBA",
+    "market_type": "moneyline",
+    "pnl": 0.8704,
+    "notional": 17.5,
+    "settled_at": "2025-09-26T23:44:42+00:00"
+  },
+  {
+    "vertical": "crypto",
+    "league": "CRYPTO_ETH",
+    "market_type": "binary",
+    "pnl": 0.8402,
+    "notional": 24.24,
+    "settled_at": "2025-09-27T08:19:27+00:00"
+  }
+]
