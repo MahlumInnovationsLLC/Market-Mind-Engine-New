@@ -1207,6 +1207,257 @@ export const GetSportradarLeaderboardsRetentionStatusResponse = zod
   );
 
 /**
+ * @summary Health snapshot of every task
+ */
+export const GetSupabaseGrowthRetentionStatusResponse = zod
+  .object({
+    archive: zod
+      .array(
+        zod
+          .object({
+            name: zod.string().describe("Stable display name for the loop."),
+            flavor: zod
+              .enum(["archive", "delete-only", "base"])
+              .optional()
+              .describe(
+                "`archive` = archive-then-delete (ML \/ training tables). `delete-only` = pure DELETE past horizon.",
+              ),
+            table: zod
+              .string()
+              .optional()
+              .describe("Underlying Postgres table being pruned."),
+            ts_column: zod
+              .string()
+              .optional()
+              .describe("Timestamp column the cutoff is applied against."),
+            running: zod
+              .boolean()
+              .optional()
+              .describe("Whether the asyncio task is currently alive."),
+            enabled: zod
+              .boolean()
+              .optional()
+              .describe(
+                "Whether the loop is allowed to run per AXIOM_<PREFIX>_RETENTION_ENABLED.",
+              ),
+            started_at: zod
+              .number()
+              .nullish()
+              .describe("Unix seconds the loop was started."),
+            last_tick_at: zod
+              .number()
+              .nullish()
+              .describe("Unix seconds of the most recent sweep."),
+            last_error: zod
+              .string()
+              .nullish()
+              .describe("Most recent sweep error, or null."),
+            last_deleted: zod
+              .number()
+              .optional()
+              .describe("Rows deleted on the most recent sweep."),
+            total_deleted: zod
+              .number()
+              .optional()
+              .describe("Lifetime rows deleted since the loop started."),
+            retention_days: zod
+              .number()
+              .optional()
+              .describe("Resolved retention horizon in days."),
+            interval_seconds: zod
+              .number()
+              .optional()
+              .describe("Sweep cadence in seconds."),
+            seconds_since_last_tick: zod
+              .number()
+              .nullish()
+              .describe(
+                "Wall-clock seconds since `last_tick_at`, or null if the loop has never ticked.",
+              ),
+            last_archived_rows: zod
+              .number()
+              .optional()
+              .describe(
+                "(archive flavor) Rows uploaded to Supabase Storage on the most recent sweep.",
+              ),
+            total_archived_rows: zod
+              .number()
+              .optional()
+              .describe("(archive flavor) Lifetime rows uploaded."),
+            last_bytes_compressed: zod
+              .number()
+              .optional()
+              .describe(
+                "(archive flavor) Compressed bytes uploaded on the most recent sweep.",
+              ),
+            total_bytes_compressed: zod
+              .number()
+              .optional()
+              .describe("(archive flavor) Lifetime compressed bytes uploaded."),
+            last_object_key: zod
+              .string()
+              .nullish()
+              .describe(
+                "(archive flavor) Storage key of the most recent uploaded chunk.",
+              ),
+            chunk_size: zod
+              .number()
+              .optional()
+              .describe("(archive flavor) Rows per upload chunk."),
+            max_rows_per_run: zod
+              .number()
+              .nullish()
+              .describe("(archive flavor) Per-sweep cap on rows processed."),
+            pk_columns: zod
+              .array(zod.string())
+              .optional()
+              .describe(
+                "(archive flavor) Primary-key columns used to identify archived rows.",
+              ),
+            health: zod
+              .enum(["ok", "stale", "error", "disabled"])
+              .describe(
+                "Rolled-up verdict for the row pill:\n`ok` — running and ticked within `2 \* interval_seconds`.\n`stale` — meant to be running but hasn't ticked in time.\n`error` — most recent sweep raised; the loop will retry next tick.\n`disabled` — turned off by AXIOM_<PREFIX>_RETENTION_ENABLED=0 (the default).\n",
+              ),
+          })
+          .describe(
+            'One row per task #757 retention loop, mirroring the loop\'s\ninternal `state()` plus the same derived `health` \/\n`seconds_since_last_tick` fields the per-loop endpoints expose.\nAll fields except `name` and `health` are optional because\nloops that fail to report `state()` are surfaced as a stub row\nwith just `{name, health: \"error\", last_error}`.\n',
+          ),
+      )
+      .describe("Archive-then-delete loops (ML \/ training tables)."),
+    delete_only: zod
+      .array(
+        zod
+          .object({
+            name: zod.string().describe("Stable display name for the loop."),
+            flavor: zod
+              .enum(["archive", "delete-only", "base"])
+              .optional()
+              .describe(
+                "`archive` = archive-then-delete (ML \/ training tables). `delete-only` = pure DELETE past horizon.",
+              ),
+            table: zod
+              .string()
+              .optional()
+              .describe("Underlying Postgres table being pruned."),
+            ts_column: zod
+              .string()
+              .optional()
+              .describe("Timestamp column the cutoff is applied against."),
+            running: zod
+              .boolean()
+              .optional()
+              .describe("Whether the asyncio task is currently alive."),
+            enabled: zod
+              .boolean()
+              .optional()
+              .describe(
+                "Whether the loop is allowed to run per AXIOM_<PREFIX>_RETENTION_ENABLED.",
+              ),
+            started_at: zod
+              .number()
+              .nullish()
+              .describe("Unix seconds the loop was started."),
+            last_tick_at: zod
+              .number()
+              .nullish()
+              .describe("Unix seconds of the most recent sweep."),
+            last_error: zod
+              .string()
+              .nullish()
+              .describe("Most recent sweep error, or null."),
+            last_deleted: zod
+              .number()
+              .optional()
+              .describe("Rows deleted on the most recent sweep."),
+            total_deleted: zod
+              .number()
+              .optional()
+              .describe("Lifetime rows deleted since the loop started."),
+            retention_days: zod
+              .number()
+              .optional()
+              .describe("Resolved retention horizon in days."),
+            interval_seconds: zod
+              .number()
+              .optional()
+              .describe("Sweep cadence in seconds."),
+            seconds_since_last_tick: zod
+              .number()
+              .nullish()
+              .describe(
+                "Wall-clock seconds since `last_tick_at`, or null if the loop has never ticked.",
+              ),
+            last_archived_rows: zod
+              .number()
+              .optional()
+              .describe(
+                "(archive flavor) Rows uploaded to Supabase Storage on the most recent sweep.",
+              ),
+            total_archived_rows: zod
+              .number()
+              .optional()
+              .describe("(archive flavor) Lifetime rows uploaded."),
+            last_bytes_compressed: zod
+              .number()
+              .optional()
+              .describe(
+                "(archive flavor) Compressed bytes uploaded on the most recent sweep.",
+              ),
+            total_bytes_compressed: zod
+              .number()
+              .optional()
+              .describe("(archive flavor) Lifetime compressed bytes uploaded."),
+            last_object_key: zod
+              .string()
+              .nullish()
+              .describe(
+                "(archive flavor) Storage key of the most recent uploaded chunk.",
+              ),
+            chunk_size: zod
+              .number()
+              .optional()
+              .describe("(archive flavor) Rows per upload chunk."),
+            max_rows_per_run: zod
+              .number()
+              .nullish()
+              .describe("(archive flavor) Per-sweep cap on rows processed."),
+            pk_columns: zod
+              .array(zod.string())
+              .optional()
+              .describe(
+                "(archive flavor) Primary-key columns used to identify archived rows.",
+              ),
+            health: zod
+              .enum(["ok", "stale", "error", "disabled"])
+              .describe(
+                "Rolled-up verdict for the row pill:\n`ok` — running and ticked within `2 \* interval_seconds`.\n`stale` — meant to be running but hasn't ticked in time.\n`error` — most recent sweep raised; the loop will retry next tick.\n`disabled` — turned off by AXIOM_<PREFIX>_RETENTION_ENABLED=0 (the default).\n",
+              ),
+          })
+          .describe(
+            'One row per task #757 retention loop, mirroring the loop\'s\ninternal `state()` plus the same derived `health` \/\n`seconds_since_last_tick` fields the per-loop endpoints expose.\nAll fields except `name` and `health` are optional because\nloops that fail to report `state()` are surfaced as a stub row\nwith just `{name, health: \"error\", last_error}`.\n',
+          ),
+      )
+      .describe("Delete-only loops (operational \/ audit logs)."),
+    counts: zod
+      .object({
+        ok: zod.number(),
+        stale: zod.number(),
+        error: zod.number(),
+        disabled: zod.number(),
+      })
+      .describe(
+        "Aggregate count of loops in each health bucket, used by the panel header badge.",
+      ),
+    total: zod
+      .number()
+      .describe("Total number of loops registered (archive + delete_only)."),
+  })
+  .describe(
+    "Operator-facing snapshot of every task #757 retention loop —\narchive-then-delete loops streamed to Supabase Storage and the\ndelete-only loops that prune operational tables in place. Loops\ndefault DISABLED so a fresh deploy doesn't auto-trigger a\ndestructive sweep before the operator has reviewed the dry-run.\n",
+  );
+
+/**
  * @summary Detail rows for trades the pre-submit slippage guard rejected
  */
 export const getSlippageGuardRejectsQuerySinceHoursDefault = 24;

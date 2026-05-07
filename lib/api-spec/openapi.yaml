@@ -345,6 +345,18 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/SportradarLeaderboardsRetentionStatus" }
 
+  /dashboard/supabase-growth-retention:
+    get:
+      operationId: getSupabaseGrowthRetentionStatus
+      tags: [dashboard]
+      summary: Health snapshot of every task #757 Supabase-growth retention loop
+      responses:
+        "200":
+          description: Per-loop state for the archive-then-delete and delete-only loops, plus aggregate health counts
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SupabaseGrowthRetentionStatus" }
+
   /dashboard/slippage-guard-rejects:
     get:
       operationId: getSlippageGuardRejects
@@ -1773,6 +1785,95 @@ components:
         - policy
         - interval_seconds
         - health
+
+    SupabaseGrowthRetentionLoop:
+      type: object
+      description: |
+        One row per task #757 retention loop, mirroring the loop's
+        internal `state()` plus the same derived `health` /
+        `seconds_since_last_tick` fields the per-loop endpoints expose.
+        All fields except `name` and `health` are optional because
+        loops that fail to report `state()` are surfaced as a stub row
+        with just `{name, health: "error", last_error}`.
+      properties:
+        name: { type: string, description: "Stable display name for the loop." }
+        flavor:
+          type: string
+          enum: [archive, delete-only, base]
+          description: "`archive` = archive-then-delete (ML / training tables). `delete-only` = pure DELETE past horizon."
+        table: { type: string, description: "Underlying Postgres table being pruned." }
+        ts_column: { type: string, description: "Timestamp column the cutoff is applied against." }
+        running: { type: boolean, description: "Whether the asyncio task is currently alive." }
+        enabled: { type: boolean, description: "Whether the loop is allowed to run per AXIOM_<PREFIX>_RETENTION_ENABLED." }
+        started_at: { type: number, nullable: true, description: "Unix seconds the loop was started." }
+        last_tick_at: { type: number, nullable: true, description: "Unix seconds of the most recent sweep." }
+        last_error: { type: string, nullable: true, description: "Most recent sweep error, or null." }
+        last_deleted: { type: integer, description: "Rows deleted on the most recent sweep." }
+        total_deleted: { type: integer, description: "Lifetime rows deleted since the loop started." }
+        retention_days: { type: integer, description: "Resolved retention horizon in days." }
+        interval_seconds: { type: number, description: "Sweep cadence in seconds." }
+        seconds_since_last_tick:
+          type: number
+          nullable: true
+          description: Wall-clock seconds since `last_tick_at`, or null if the loop has never ticked.
+        last_archived_rows: { type: integer, description: "(archive flavor) Rows uploaded to Supabase Storage on the most recent sweep." }
+        total_archived_rows: { type: integer, description: "(archive flavor) Lifetime rows uploaded." }
+        last_bytes_compressed: { type: integer, description: "(archive flavor) Compressed bytes uploaded on the most recent sweep." }
+        total_bytes_compressed: { type: integer, description: "(archive flavor) Lifetime compressed bytes uploaded." }
+        last_object_key: { type: string, nullable: true, description: "(archive flavor) Storage key of the most recent uploaded chunk." }
+        chunk_size: { type: integer, description: "(archive flavor) Rows per upload chunk." }
+        max_rows_per_run: { type: integer, nullable: true, description: "(archive flavor) Per-sweep cap on rows processed." }
+        pk_columns:
+          type: array
+          items: { type: string }
+          description: "(archive flavor) Primary-key columns used to identify archived rows."
+        health:
+          type: string
+          enum: [ok, stale, error, disabled]
+          description: |
+            Rolled-up verdict for the row pill:
+            `ok` — running and ticked within `2 * interval_seconds`.
+            `stale` — meant to be running but hasn't ticked in time.
+            `error` — most recent sweep raised; the loop will retry next tick.
+            `disabled` — turned off by AXIOM_<PREFIX>_RETENTION_ENABLED=0 (the default).
+      required:
+        - name
+        - health
+
+    SupabaseGrowthRetentionCounts:
+      type: object
+      description: Aggregate count of loops in each health bucket, used by the panel header badge.
+      properties:
+        ok: { type: integer }
+        stale: { type: integer }
+        error: { type: integer }
+        disabled: { type: integer }
+      required: [ok, stale, error, disabled]
+
+    SupabaseGrowthRetentionStatus:
+      type: object
+      description: |
+        Operator-facing snapshot of every task #757 retention loop —
+        archive-then-delete loops streamed to Supabase Storage and the
+        delete-only loops that prune operational tables in place. Loops
+        default DISABLED so a fresh deploy doesn't auto-trigger a
+        destructive sweep before the operator has reviewed the dry-run.
+      properties:
+        archive:
+          type: array
+          items: { $ref: "#/components/schemas/SupabaseGrowthRetentionLoop" }
+          description: Archive-then-delete loops (ML / training tables).
+        delete_only:
+          type: array
+          items: { $ref: "#/components/schemas/SupabaseGrowthRetentionLoop" }
+          description: Delete-only loops (operational / audit logs).
+        counts: { $ref: "#/components/schemas/SupabaseGrowthRetentionCounts" }
+        total: { type: integer, description: "Total number of loops registered (archive + delete_only)." }
+      required:
+        - archive
+        - delete_only
+        - counts
+        - total
 
     SlippageGuardReject:
       type: object

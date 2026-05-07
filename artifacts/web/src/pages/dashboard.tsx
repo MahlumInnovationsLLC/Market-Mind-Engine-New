@@ -8,6 +8,7 @@ import BankrollPanel from "@/components/dashboard/bankroll-panel";
 import CryptoBacktestRetentionPanel from "@/components/dashboard/crypto-backtest-retention-panel";
 import CryptoOhlcvRetentionPanel from "@/components/dashboard/crypto-ohlcv-retention-panel";
 import SportradarLeaderboardsRetentionPanel from "@/components/dashboard/sportradar-leaderboards-retention-panel";
+import SupabaseGrowthRetentionPanel from "@/components/dashboard/supabase-growth-retention-panel";
 import EquityCharts from "@/components/dashboard/equity-charts";
 import HighlightsPanel from "@/components/dashboard/highlights-panel";
 import KpiSummaryBar from "@/components/dashboard/kpi-summary-bar";
@@ -162,6 +163,8 @@ export default function Dashboard() {
           <CryptoBacktestRetentionPanel />
           <SportradarLeaderboardsRetentionPanel />
         </div>
+
+        <SupabaseGrowthRetentionPanel />
 
         <GlassCard tone="solid" padding="md" data-testid="card-swarm-debates">
           <SectionHeader

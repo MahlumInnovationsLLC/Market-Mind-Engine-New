@@ -83,6 +83,7 @@ import type {
   SettlementStatus,
   SlippageGuardRejectList,
   SportradarLeaderboardsRetentionStatus,
+  SupabaseGrowthRetentionStatus,
   SwarmDebateList,
   SwarmDebateRequest,
   SwarmDebateResult,
@@ -1708,6 +1709,86 @@ export function useGetSportradarLeaderboardsRetentionStatus<
 }): UseQueryResult<TData, TError> & { queryKey: QueryKey } {
   const queryOptions =
     getGetSportradarLeaderboardsRetentionStatusQueryOptions(options);
+
+  const query = useQuery(queryOptions) as UseQueryResult<TData, TError> & {
+    queryKey: QueryKey;
+  };
+
+  return { ...query, queryKey: queryOptions.queryKey };
+}
+
+/**
+ * @summary Health snapshot of every task
+ */
+export const getGetSupabaseGrowthRetentionStatusUrl = () => {
+  return `/api/dashboard/supabase-growth-retention`;
+};
+
+export const getSupabaseGrowthRetentionStatus = async (
+  options?: RequestInit,
+): Promise<SupabaseGrowthRetentionStatus> => {
+  return customFetch<SupabaseGrowthRetentionStatus>(
+    getGetSupabaseGrowthRetentionStatusUrl(),
+    {
+      ...options,
+      method: "GET",
+    },
+  );
+};
+
+export const getGetSupabaseGrowthRetentionStatusQueryKey = () => {
+  return [`/api/dashboard/supabase-growth-retention`] as const;
+};
+
+export const getGetSupabaseGrowthRetentionStatusQueryOptions = <
+  TData = Awaited<ReturnType<typeof getSupabaseGrowthRetentionStatus>>,
+  TError = ErrorType<unknown>,
+>(options?: {
+  query?: UseQueryOptions<
+    Awaited<ReturnType<typeof getSupabaseGrowthRetentionStatus>>,
+    TError,
+    TData
+  >;
+  request?: SecondParameter<typeof customFetch>;
+}) => {
+  const { query: queryOptions, request: requestOptions } = options ?? {};
+
+  const queryKey =
+    queryOptions?.queryKey ?? getGetSupabaseGrowthRetentionStatusQueryKey();
+
+  const queryFn: QueryFunction<
+    Awaited<ReturnType<typeof getSupabaseGrowthRetentionStatus>>
+  > = ({ signal }) =>
+    getSupabaseGrowthRetentionStatus({ signal, ...requestOptions });
+
+  return { queryKey, queryFn, ...queryOptions } as UseQueryOptions<
+    Awaited<ReturnType<typeof getSupabaseGrowthRetentionStatus>>,
+    TError,
+    TData
+  > & { queryKey: QueryKey };
+};
+
+export type GetSupabaseGrowthRetentionStatusQueryResult = NonNullable<
+  Awaited<ReturnType<typeof getSupabaseGrowthRetentionStatus>>
+>;
+export type GetSupabaseGrowthRetentionStatusQueryError = ErrorType<unknown>;
+
+/**
+ * @summary Health snapshot of every task
+ */
+
+export function useGetSupabaseGrowthRetentionStatus<
+  TData = Awaited<ReturnType<typeof getSupabaseGrowthRetentionStatus>>,
+  TError = ErrorType<unknown>,
+>(options?: {
+  query?: UseQueryOptions<
+    Awaited<ReturnType<typeof getSupabaseGrowthRetentionStatus>>,
+    TError,
+    TData
+  >;
+  request?: SecondParameter<typeof customFetch>;
+}): UseQueryResult<TData, TError> & { queryKey: QueryKey } {
+  const queryOptions = getGetSupabaseGrowthRetentionStatusQueryOptions(options);
 
   const query = useQuery(queryOptions) as UseQueryResult<TData, TError> & {
     queryKey: QueryKey;

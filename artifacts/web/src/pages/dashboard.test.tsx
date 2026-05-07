@@ -41,6 +41,9 @@ vi.mock(
     default: stub("stub-sportradar-leaderboards-retention"),
   }),
 );
+vi.mock("@/components/dashboard/supabase-growth-retention-panel", () => ({
+  default: stub("stub-supabase-growth-retention"),
+}));
 vi.mock("@/components/dashboard/equity-charts", () => ({
   default: stub("stub-equity-charts"),
 }));
@@ -180,6 +183,7 @@ describe("Dashboard", () => {
       "stub-crypto-ohlcv",
       "stub-crypto-backtest",
       "stub-sportradar-leaderboards-retention",
+      "stub-supabase-growth-retention",
       "stub-swarm-debates",
       "stub-swarm-analysts",
       "stub-swarm-personas-today",
