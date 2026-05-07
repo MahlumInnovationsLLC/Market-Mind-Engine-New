@@ -906,3 +906,129 @@ def test_full_stack_inference_skips_literal_unknown():
     assert summary["rows_predicted"] == 0
     assert summary["rows_skipped"] == 2
     assert summary["skip_reasons"].get("missing_league") == 2
+
+
+# --- _amain end-to-end (CLI plumbing + ensure_artifacts bootstrap) ----------
+
+
+def _amain_archive_rows() -> list[dict]:
+    """Hand-built 6-row in-memory archive: NBA + NFL, side=yes, mixed outcomes.
+
+    Each row carries ``predicted_prob`` + ``analysis_json.side`` so the
+    surrogate builder can synthesize a 32-slot vector and the V1-baseline
+    arm in ``_attempt_full_stack_inference`` is satisfied.
+    """
+    return [
+        {"league": "NBA", "actual_outcome": 1, "predicted_prob": 0.62,
+         "analysis_json": {"side": "yes"}},
+        {"league": "NBA", "actual_outcome": 0, "predicted_prob": 0.41,
+         "analysis_json": {"side": "yes"}},
+        {"league": "NBA", "actual_outcome": 1, "predicted_prob": 0.58,
+         "analysis_json": {"side": "yes"}},
+        {"league": "NFL", "actual_outcome": 0, "predicted_prob": 0.35,
+         "analysis_json": {"side": "yes"}},
+        {"league": "NFL", "actual_outcome": 1, "predicted_prob": 0.71,
+         "analysis_json": {"side": "yes"}},
+        {"league": "NFL", "actual_outcome": 0, "predicted_prob": 0.44,
+         "analysis_json": {"side": "yes"}},
+    ]
+
+
+def test_amain_full_stack_surrogate_bootstraps_and_runs(monkeypatch, tmp_path):
+    """``_amain --full-stack --surrogate-features`` must:
+
+    * Call ``models_loader.ensure_artifacts()`` exactly once before running.
+    * Stub out ``app.predictor.predict`` so no real ML / asyncpg pool is hit.
+    * Produce a report with rows_predicted > 0, surrogate counts populated,
+      and the surrogate-active triage note.
+    """
+    bootstrap_calls: list[bool] = []
+
+    async def _fake_ensure_artifacts(*, force: bool = False):
+        bootstrap_calls.append(force)
+        return None
+
+    async def _stub_predict(features, *, league):
+        return _StubPrediction(0.55)
+
+    from app import models_loader, predictor
+    monkeypatch.setattr(models_loader, "ensure_artifacts", _fake_ensure_artifacts)
+    monkeypatch.setattr(predictor, "predict", _stub_predict)
+
+    out = tmp_path / "report.json"
+    rc = asyncio.run(bt._amain([
+        "--inline-rows", json.dumps(_amain_archive_rows()),
+        "--no-load-calibrators",
+        "--full-stack",
+        "--surrogate-features",
+        "--json-out", str(out),
+    ]))
+    assert rc == 0
+    assert bootstrap_calls == [False], (
+        f"ensure_artifacts must be called once with --full-stack; got {bootstrap_calls!r}"
+    )
+
+    report = json.loads(out.read_text())
+    assert report["source"] == "in-memory"
+    assert report["row_input_count"] == 6
+    assert report["row_kept_count"] == 6
+
+    fs = report["full_stack_attempt"]
+    assert fs["surrogate_features_enabled"] is True
+    assert fs["rows_predicted"] > 0
+    assert fs["rows_predicted"] == 6
+    assert fs["feature_source"]["surrogate"] == 6
+    assert fs["feature_source"]["archived"] == 0
+
+    # Surrogate-active triage note: ``feature_builder_mismatch`` is NOT
+    # active (we predicted via the surrogate), and the human-readable
+    # note flags surrogate use as DEGRADED / not-V1-parity.
+    triage = report["triage"]
+    fbm = triage["feature_builder_mismatch"]
+    assert fbm["active"] is False
+    assert fbm["evidence"]["rows_predicted_via_surrogate"] == 6
+    assert fbm["evidence"]["surrogate_features_enabled"] is True
+    assert "--surrogate-features active" in fbm["note"]
+    assert "NOT V1 parity" in fbm["note"]
+
+    assert "full_stack_scored" in report
+    fss = report["full_stack_scored"]
+    assert fss["audit_path"] == "full_stack_paired_vs_v1_archived_predicted_prob"
+    assert set(fss["per_league"].keys()) == {"NBA", "NFL"}
+
+
+def test_amain_without_full_stack_skips_bootstrap(monkeypatch, tmp_path):
+    """Default mode (no --full-stack) must NOT call ensure_artifacts.
+
+    Also confirms the predictor is never invoked when the full-stack arm
+    is off, so the calibrator-only audit path stays decoupled from the
+    models_loader bootstrap.
+    """
+    bootstrap_calls: list[bool] = []
+
+    async def _fake_ensure_artifacts(*, force: bool = False):  # pragma: no cover
+        bootstrap_calls.append(force)
+        return None
+
+    async def _never_predict(*args, **kwargs):  # pragma: no cover
+        raise AssertionError("predictor must not run without --full-stack")
+
+    from app import models_loader, predictor
+    monkeypatch.setattr(models_loader, "ensure_artifacts", _fake_ensure_artifacts)
+    monkeypatch.setattr(predictor, "predict", _never_predict)
+
+    out = tmp_path / "report.json"
+    rc = asyncio.run(bt._amain([
+        "--inline-rows", json.dumps(_amain_archive_rows()),
+        "--no-load-calibrators",
+        "--json-out", str(out),
+    ]))
+    assert rc == 0
+    assert bootstrap_calls == [], (
+        f"ensure_artifacts must NOT be called without --full-stack; got {bootstrap_calls!r}"
+    )
+
+    report = json.loads(out.read_text())
+    assert report["full_stack_attempt"] is None
+    assert "full_stack_scored" not in report
+    assert report["row_kept_count"] == 6
