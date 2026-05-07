@@ -815,6 +815,17 @@ RISK_KNOB_SPECS: tuple["_KnobSpec", ...] = (
               "Hard ceiling on contract count per candidate. "
               "Set to 0 to disable the gate.",
               0.0, 100_000.0, 25.0, "int", "count"),
+    # ---- Tail-risk burst-rate alert (task #746) ------------------------
+    # Pages operators when the count of vetoes attributed to the two
+    # tail-risk gates (`tail_price_size_cap`, `jumbo_quantity_cap`)
+    # exceeds this threshold inside any rolling 60-minute window.
+    # Surfaced on the same Live-risk-knobs panel so operators can tune
+    # the burst sensitivity (or silence it via 0) without a redeploy.
+    _KnobSpec("tail_risk_burst_threshold", "Tail-risk burst threshold",
+              "Page operators when either tail-risk gate logs more "
+              "than this many vetoes in a rolling 60-minute window. "
+              "Set to 0 to disable the burst alert.",
+              0.0, 1_000.0, 1.0, "int", "count"),
 )
 
 RISK_KNOB_KEYS: frozenset[str] = frozenset(s.key for s in RISK_KNOB_SPECS)

@@ -62,6 +62,7 @@ _TAG_TO_USER_PREF: dict[str, str] = {
     "stale-cancel-volume-anomaly": "email_drift",
     "stale-cancel-failure-spike":  "email_halt",
     "tail-risk-gate-trip":         "email_drift",
+    "tail-risk-burst":             "email_drift",
 }
 
 
@@ -267,6 +268,11 @@ USER_VISIBLE_ALERTS: dict[str, dict[str, Any]] = {
     },
     "tail_risk_gate_trip": {
         "label": "Tail-risk gate trip",
+        "scope": "broadcast",
+        "channels": [("email", "email_drift")],
+    },
+    "tail_risk_burst": {
+        "label": "Tail-risk gate burst",
         "scope": "broadcast",
         "channels": [("email", "email_drift")],
     },
@@ -2136,6 +2142,84 @@ def tail_risk_gate_trip(
             _tg_notify.broadcast_in_background(f"{subject}\n\n{body}")
         except Exception as e:  # pragma: no cover — broadcast must not break alerting
             log.warning("tail-risk telegram broadcast failed: %s", e)
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Tail-risk gate burst (warn severity, Task #746).
+#
+# Fired by `notifications.tail_risk_burst.check_tail_risk_burst` when the
+# rolling 60-minute count of vetoes from either tail-risk gate
+# (`tail_price_size_cap` / `jumbo_quantity_cap`) crosses the
+# operator-tunable burst threshold (`risk.tail_risk_burst_threshold`,
+# default 10). Distinct from the per-veto `tail_risk_gate_trip` alert
+# above: a burst means many tail-flagged candidates landed in a short
+# window — either the model is recommending a deep-OTM/jumbo regime
+# the operator should investigate or the gate caps need an emergency
+# loosen — so the body carries a per-vertical breakdown and a
+# deep-link to the tail-risk dashboard tile.
+# ---------------------------------------------------------------------------
+
+
+def tail_risk_burst(
+    *,
+    gate_name: str,
+    count: int,
+    threshold: int,
+    window_minutes: int,
+    by_vertical: list[tuple[str, int]] | None = None,
+    last_market_id: str | None = None,
+    last_at: str | None = None,
+    dashboard_url: str | None = None,
+    dry_run: bool = False,
+) -> dict[str, Any]:
+    """Operator alert for a burst of tail-risk gate vetoes (Task #746).
+
+    Ships through the same Postmark + Telegram fan-out the round-2
+    audit gates' alerts use (mirrors the per-veto `tail_risk_gate_trip`
+    helper above). Telegram failure must not shadow the email path.
+    """
+    subject = (
+        f"[axiom][TAIL-RISK BURST] {gate_name} fired {count}× in "
+        f"{window_minutes}m (cap {threshold})"
+    )
+    rows: list[tuple[str, Any]] = [
+        ("gate", gate_name),
+        ("vetoes_in_window", count),
+        ("burst_threshold", threshold),
+        ("window_minutes", window_minutes),
+    ]
+    if by_vertical:
+        breakdown = ", ".join(f"{v or '(unknown)'}={n}" for v, n in by_vertical)
+        rows.append(("by_vertical", breakdown))
+    if last_market_id is not None:
+        rows.append(("last_market_id", last_market_id))
+    if last_at is not None:
+        rows.append(("last_trip_at", last_at))
+    if dashboard_url:
+        rows.append(("dashboard", dashboard_url))
+    rows.append(("at", _utc_now_iso()))
+    body = (
+        f"The tail-risk gate '{gate_name}' has logged {count} vetoes in "
+        f"the last {window_minutes} minutes — over the burst threshold "
+        f"of {threshold}. Either the model is recommending a regime of "
+        "deep-OTM / jumbo bets worth investigating, or the gate caps "
+        "are mis-tuned for the current market state and need an "
+        "emergency loosen. Open the tail-risk dashboard tile to see "
+        "the per-vertical breakdown and recent vetoes:\n\n"
+        + (f"  {dashboard_url}\n\n" if dashboard_url else "")
+        + _format_lines(rows)
+        + "\n"
+    )
+    result = _dispatch(
+        subject, body, tag="tail-risk-burst", dry_run=dry_run
+    )
+    if not dry_run:
+        try:
+            from ..telegram import notify as _tg_notify
+            _tg_notify.broadcast_in_background(f"{subject}\n\n{body}")
+        except Exception as e:  # pragma: no cover — broadcast must not break alerting
+            log.warning("tail-risk-burst telegram broadcast failed: %s", e)
     return result
 
 

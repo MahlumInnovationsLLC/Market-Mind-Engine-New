@@ -1429,6 +1429,18 @@ async def run_cycle(vertical: str = "sports") -> CycleResult:
     except Exception as e:  # pragma: no cover — defensive
         log.debug("cap-warn check failed to schedule: %s", e)
 
+    # Best-effort tail-risk burst-rate check (task #746): page the
+    # on-call when either tail-risk gate logs more than the operator-
+    # tunable threshold of vetoes inside the rolling 60-minute window.
+    # Dedup is handled inside the helper so a sustained burst pages
+    # once per TTL.  Scheduled as a fire-and-forget task to keep the
+    # hot path off Postmark latency; failures are swallowed.
+    try:
+        from ..notifications.tail_risk_burst import check_tail_risk_burst
+        asyncio.create_task(check_tail_risk_burst())
+    except Exception as e:  # pragma: no cover — defensive
+        log.debug("tail-risk burst check failed to schedule: %s", e)
+
     # 1) Cached approved debates first (cheap — no fresh LLM cost).
     cached = await _cached_debates(vertical, limit=10, aggression_mode=aggression_mode)
     # 2) Then up to N fresh swarm debates if budget allows.
