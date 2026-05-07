@@ -26,6 +26,7 @@ import PipelineTracker from "@/components/dashboard/pipeline-tracker";
 import TailRiskExposurePanel from "@/components/dashboard/tail-risk-exposure-panel";
 import TelegramConcierge from "@/components/dashboard/telegram-concierge";
 import TournamentLeaderboardsPanel from "@/components/dashboard/tournament-leaderboards-panel";
+import TournamentReplaysPanel from "@/components/dashboard/tournament-replays-panel";
 import TournamentTimelinePanel from "@/components/dashboard/tournament-timeline-panel";
 import TradeStatsPanel from "@/components/dashboard/trade-stats-panel";
 import VerticalCards from "@/components/dashboard/vertical-cards";
@@ -123,6 +124,8 @@ export default function Dashboard() {
         <CalibratorAb />
 
         <V1BacktestGateTile />
+
+        <TournamentReplaysPanel />
 
         <MacroReleaseSurprises />
 
