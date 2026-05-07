@@ -1821,6 +1821,7 @@ components:
         last_bytes_compressed: { type: integer, description: "(archive flavor) Compressed bytes uploaded on the most recent sweep." }
         total_bytes_compressed: { type: integer, description: "(archive flavor) Lifetime compressed bytes uploaded." }
         last_object_key: { type: string, nullable: true, description: "(archive flavor) Storage key of the most recent uploaded chunk." }
+        last_object_url: { type: string, nullable: true, description: "(archive flavor) Fully-qualified Supabase Storage URL for `last_object_key`, or null if the loop has never uploaded a chunk." }
         chunk_size: { type: integer, description: "(archive flavor) Rows per upload chunk." }
         max_rows_per_run: { type: integer, nullable: true, description: "(archive flavor) Per-sweep cap on rows processed." }
         pk_columns:

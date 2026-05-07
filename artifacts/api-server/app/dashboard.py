@@ -4480,6 +4480,16 @@ async def get_supabase_growth_retention_status() -> dict[str, Any]:
     Always returns a dict; never raises.
     """
     from . import retention_loops_v757
+    from .config import get_settings
+
+    settings = get_settings()
+    storage_base = (settings.supabase_storage_url or "").rstrip("/")
+    bucket = settings.supabase_bucket or ""
+
+    def _object_url(key: str | None) -> str | None:
+        if not key or not storage_base or not bucket:
+            return None
+        return f"{storage_base}/object/{bucket}/{key}"
 
     def _enrich(module_list: tuple[Any, ...]) -> list[dict[str, Any]]:
         out: list[dict[str, Any]] = []
@@ -4496,13 +4506,18 @@ async def get_supabase_growth_retention_status() -> dict[str, Any]:
                 )
                 continue
             health, seconds_since = _retention_health_for(snap)
-            out.append(
-                {
-                    **snap,
-                    "seconds_since_last_tick": seconds_since,
-                    "health": health,
-                }
-            )
+            row = {
+                **snap,
+                "seconds_since_last_tick": seconds_since,
+                "health": health,
+            }
+            # Archive loops carry a last_object_key into Supabase Storage;
+            # surface a fully-qualified URL so the dashboard can link the
+            # operator straight at the chunk without them having to hand-
+            # build the bucket path.
+            if "last_object_key" in snap:
+                row["last_object_url"] = _object_url(snap.get("last_object_key"))
+            out.append(row)
         return out
 
     archive_rows = _enrich(retention_loops_v757.ARCHIVE_MODULES)

@@ -1300,6 +1300,12 @@ export const GetSupabaseGrowthRetentionStatusResponse = zod
               .describe(
                 "(archive flavor) Storage key of the most recent uploaded chunk.",
               ),
+            last_object_url: zod
+              .string()
+              .nullish()
+              .describe(
+                "(archive flavor) Fully-qualified Supabase Storage URL for `last_object_key`, or null if the loop has never uploaded a chunk.",
+              ),
             chunk_size: zod
               .number()
               .optional()
@@ -1413,6 +1419,12 @@ export const GetSupabaseGrowthRetentionStatusResponse = zod
               .nullish()
               .describe(
                 "(archive flavor) Storage key of the most recent uploaded chunk.",
+              ),
+            last_object_url: zod
+              .string()
+              .nullish()
+              .describe(
+                "(archive flavor) Fully-qualified Supabase Storage URL for `last_object_key`, or null if the loop has never uploaded a chunk.",
               ),
             chunk_size: zod
               .number()

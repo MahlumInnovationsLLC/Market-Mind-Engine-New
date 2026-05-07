@@ -333,3 +333,77 @@ def test_dashboard_supabase_growth_returns_per_loop_health(monkeypatch):
         assert "table" in row
         assert "retention_days" in row
         assert row["seconds_since_last_tick"] is None
+        # Archive rows must always carry a last_object_url field — null
+        # when no chunk has been uploaded yet — so the dashboard can
+        # always know whether to render the "view in Supabase Storage"
+        # link without re-checking the bucket config.
+        assert "last_object_url" in row
+        assert row["last_object_url"] is None
+
+
+def test_dashboard_supabase_growth_builds_object_url_from_settings(monkeypatch):
+    """When an archive loop has uploaded a chunk, the dashboard must
+    glue the configured Supabase Storage base URL + bucket + the loop's
+    ``last_object_key`` into a clickable URL the operator can open."""
+    from app import config as _config
+    from app import dashboard
+
+    real_settings = _config.get_settings()
+
+    class _StubSettings:
+        supabase_storage_url = "https://example.supabase.co/storage/v1"
+        supabase_bucket = "axiom-archive"
+
+        def __getattr__(self, item: str) -> Any:
+            return getattr(real_settings, item)
+
+    monkeypatch.setattr(_config, "get_settings", lambda: _StubSettings())
+
+    class _FakeArchiveModule:
+        __name__ = "fake_archive"
+
+        @staticmethod
+        def state() -> dict[str, Any]:
+            return {
+                "name": "fake_archive",
+                "flavor": "archive",
+                "table": "fake_table",
+                "ts_column": "created_at",
+                "running": False,
+                "enabled": False,
+                "started_at": None,
+                "last_tick_at": None,
+                "last_error": None,
+                "last_deleted": 0,
+                "total_deleted": 0,
+                "retention_days": 30,
+                "interval_seconds": 21600,
+                "pk_columns": ["id"],
+                "chunk_size": 1000,
+                "max_rows_per_run": 50000,
+                "last_archived_rows": 0,
+                "total_archived_rows": 123,
+                "last_bytes_compressed": 0,
+                "total_bytes_compressed": 4567,
+                "last_object_key": "fake_table/2026/05/07/chunk-001.jsonl.gz",
+            }
+
+    monkeypatch.setattr(
+        dashboard, "__name__", dashboard.__name__,
+    )  # no-op to keep monkeypatch import alive
+    from app import retention_loops_v757 as _rlv757
+
+    monkeypatch.setattr(
+        _rlv757, "ARCHIVE_MODULES", (_FakeArchiveModule(),)
+    )
+    monkeypatch.setattr(_rlv757, "DELETE_ONLY_MODULES", ())
+
+    payload = asyncio.run(dashboard.get_supabase_growth_retention_status())
+    assert len(payload["archive"]) == 1
+    row = payload["archive"][0]
+    assert row["last_object_key"] == "fake_table/2026/05/07/chunk-001.jsonl.gz"
+    assert (
+        row["last_object_url"]
+        == "https://example.supabase.co/storage/v1/object/axiom-archive/"
+        "fake_table/2026/05/07/chunk-001.jsonl.gz"
+    )

@@ -810,6 +810,8 @@ export interface SupabaseGrowthRetentionLoop {
   total_bytes_compressed?: number;
   /** (archive flavor) Storage key of the most recent uploaded chunk. */
   last_object_key?: string | null;
+  /** (archive flavor) Fully-qualified Supabase Storage URL for `last_object_key`, or null if the loop has never uploaded a chunk. */
+  last_object_url?: string | null;
   /** (archive flavor) Rows per upload chunk. */
   chunk_size?: number;
   /** (archive flavor) Per-sweep cap on rows processed. */
