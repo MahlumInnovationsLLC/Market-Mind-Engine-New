@@ -150,6 +150,15 @@ function SportradarLeaderboardsRetentionBody({
             DISABLED VIA ENV
           </span>
         ) : null}
+        {data.last_deleted && data.last_deleted > 0 ? (
+          <span
+            className="px-2 py-0.5 text-[10px] uppercase tracking-widest border border-warn/60 text-warn bg-warn/10"
+            data-testid="sportradar-leaderboards-retention-trimming-badge"
+            title="The most recent sweep deleted rows from sportradar_tournament_leaderboards."
+          >
+            TRIMMING
+          </span>
+        ) : null}
         <span className="ml-auto inline-flex items-center gap-1.5 text-[11px] text-muted-foreground">
           <Trophy className="h-3 w-3" aria-hidden />
           sportradar_tournament_leaderboards
