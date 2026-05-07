@@ -49,7 +49,19 @@ Axiom Predict is a prediction-market trading platform designed for advanced trad
 **Model Artifacts (v155):**
 - Model bundle published to `axiom-predict-artifacts/exports/` includes `models_manifest.json` and multi-part archives for models and source code.
 - Verification script (`verify_v155_artifacts.py`) confirms integrity, predictor count, and performs smoke tests.
-- V1 historical data (trade_analyses) imported into a `v1_archive` schema for calibrator refitting.
+- V1 historical data imported into a `v1_archive` schema for calibrator refitting.
+  Phase 1 (`trade_analyses`, 667,092 rows) plus Phase 2 — `weather_observations`
+  (133,205 rows), `llm_predictions` (57,390 rows), and `line_snapshots`
+  (4,722,447 rows) — are all loaded by `scripts/import_v1_history.py`. The
+  4.7M-row `line_snapshots` dump uses a chunked, idempotent
+  `INSERT … ON CONFLICT (id) DO NOTHING` path because a single
+  `psql --single-transaction` of the 608 MiB plain SQL exceeds the runner's
+  foreground budget. After Phase 2, `calibrators.refit_all()` produces real
+  fits for 8 leagues — NBA (n=3,158, isotonic, Brier 0.109), NCAAB (n=1,356,
+  iso, 0.169), CRYPTO (n=2,289, iso, 0.182), NHL (n=300, iso, 0.123), MLB
+  (n=165, iso, 0.123), PGA (n=52, iso, 0.068), EVENTS_ECON (n=19, Platt) and
+  COMMODITIES (n=10, Platt) — replacing the placeholder `market_prior` rows.
+  Re-run with `python -m scripts.import_v1_history --table {trade_analyses|weather_observations|llm_predictions|line_snapshots|all}`.
 
 **Supabase Growth Retention (task #757):**
 - Per-table retention loops in `app/<table>_retention.py` keep high-growth Supabase tables bounded. Two tiers: archive-then-delete for ML/training tables (90-day default — predictions, market_price_ticks, autoresearch_features, tech_evidence, line_snapshots, sportradar_tournament_replays, precip_emos_observations) and delete-only for operational/audit logs (30-day default — pipeline_events, settlement_events, mobile_notification_log, bankroll_events, rc_events, stripe_events, rc_webhook_deliveries, billing_churn_events, admin_audit_log, position_drift_resolutions, order_recovery_attempts, stale_cancel_observations, vertical_halt_history, gatekeeper_setting_history, model_rollback_log).
