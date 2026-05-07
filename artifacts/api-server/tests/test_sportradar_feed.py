@@ -52,20 +52,26 @@ def test_register_extra_feeds_skips_when_key_missing(monkeypatch):
     sportradar.register_sportradar_extra_feeds()
 
     # N leagues × 3 feed types (rosters + injuries + live), plus the
-    # cross-sport tournament-leaderboard refresher (task #449) that
-    # covers PGA + F1 in a single poller.  Derived from
+    # cross-sport tournament-leaderboard refresher (task #449) and the
+    # tournament auto-replay sweep (task #707).  Derived from
     # SPORTRADAR_SPORTS so adding a league (task #196 added 7 soccer
     # competitions) doesn't require fixing this assertion.
     snap = reg.snapshot()
     names = {s["name"] for s in snap}
-    assert len(snap) == 3 * len(SPORTRADAR_SPORTS) + 1
+    assert len(snap) == 3 * len(SPORTRADAR_SPORTS) + 2
     for sport in SPORTRADAR_SPORTS:
         assert f"sportradar_{sport}_rosters" in names
         assert f"sportradar_{sport}_injuries" in names
         assert f"sportradar_{sport}_live" in names
     assert "sportradar_tournament_leaderboards" in names
-    assert all(s["enabled"] is False for s in snap)
-    assert all(s["skipped_reason"] for s in snap)
+    assert "sportradar_tournament_auto_replay" in names
+    # The auto-replay feed is enabled even without a Sportradar API key
+    # (it walks already-persisted snapshots), so the "everything else
+    # disabled" invariant only applies to the per-sport pollers + the
+    # leaderboard refresher.
+    other = [s for s in snap if s["name"] != "sportradar_tournament_auto_replay"]
+    assert all(s["enabled"] is False for s in other)
+    assert all(s["skipped_reason"] for s in other)
 
 
 def test_register_extra_feeds_enabled_with_global_key(monkeypatch):
@@ -106,8 +112,9 @@ def test_register_is_idempotent(monkeypatch):
     sportradar.register_sportradar_extra_feeds()
     sportradar.register_sportradar_extra_feeds()  # second call must not raise
     # Per-sport (rosters + injuries + live) plus the cross-sport
-    # tournament-leaderboard refresher (task #449) -> +1.
-    assert len(reg.snapshot()) == 3 * len(SPORTRADAR_SPORTS) + 1
+    # tournament-leaderboard refresher (task #449) and the tournament
+    # auto-replay sweep (task #707) -> +2.
+    assert len(reg.snapshot()) == 3 * len(SPORTRADAR_SPORTS) + 2
 
 
 def test_flatten_injuries_handles_typical_payload():

@@ -596,6 +596,193 @@ def test_list_recent_runs_normalises_persisted_rows(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# Auto-replay hook (task #707) — fires once per finished tournament.
+# ---------------------------------------------------------------------------
+
+
+def _stub_auto_replay_db(monkeypatch, *, finished, already):
+    """Wire ``db.fetch`` so the finished-event lookup returns
+    ``finished`` and the already-replayed lookup returns ``already``.
+    Keeps the auto-replay tests focused on the orchestration logic
+    without standing up a real Postgres.
+    """
+    calls: list[tuple[str, tuple]] = []
+
+    async def fake_fetch(query, *args):
+        calls.append((query, args))
+        normalised = " ".join(query.split())
+        if "FROM sportradar_schedules" in normalised:
+            return [{"game_id": eid} for eid in finished]
+        if "FROM sportradar_tournament_replays" in normalised:
+            return [{"event_id": eid} for eid in already]
+        return []
+
+    monkeypatch.setattr(db_module, "fetch", fake_fetch)
+    return calls
+
+
+def test_auto_replay_runs_only_for_unreplayed_finished_events(monkeypatch):
+    """The auto-replay hook must replay every finished tournament that
+    doesn't already have a persisted run, skip the ones that do, and
+    record each new run via ``record_run`` so the dashboard's accuracy
+    trend keeps growing.
+    """
+    _stub_auto_replay_db(
+        monkeypatch,
+        finished=["sr:tournament:pga-1", "sr:race:f1-1", "sr:tournament:pga-2"],
+        already=["sr:tournament:pga-1"],
+    )
+
+    replayed_for: list[str] = []
+
+    async def fake_replay_event(event_id, *, since=None, until=None, **_kw):
+        replayed_for.append(event_id)
+        return tournament_backtest.TournamentReplayResult(
+            event_id=event_id,
+            league="PGA",
+            name="The Masters",
+            winner="Rahm",
+            n_snapshots=4,
+            accuracy=0.5,
+            brier_score=0.25,
+            log_loss=0.5,
+            snapshots=[],
+            started_at="2026-04-26T12:00:00+00:00",
+            completed_at="2026-04-26T12:00:01+00:00",
+        )
+
+    recorded: list[str] = []
+
+    async def fake_record_run(result):
+        recorded.append(result.event_id)
+
+    monkeypatch.setattr(tournament_backtest, "replay_event", fake_replay_event)
+    monkeypatch.setattr(tournament_backtest, "record_run", fake_record_run)
+
+    summary = _run(tournament_backtest.auto_replay_finished_tournaments())
+
+    # pga-1 is already replayed → skipped; the other two are graded.
+    assert replayed_for == ["sr:race:f1-1", "sr:tournament:pga-2"]
+    assert recorded == ["sr:race:f1-1", "sr:tournament:pga-2"]
+    assert summary == {
+        "finished": 3,
+        "skipped": 1,
+        "replayed": 2,
+        "failed": 0,
+        "event_ids": ["sr:race:f1-1", "sr:tournament:pga-2"],
+    }
+
+
+def test_auto_replay_isolates_per_event_failures(monkeypatch):
+    """One event blowing up in ``replay_event`` must not block the
+    rest of the sweep — failures are logged + counted but the next
+    event still gets graded.
+    """
+    _stub_auto_replay_db(
+        monkeypatch,
+        finished=["sr:tournament:pga-1", "sr:tournament:pga-2"],
+        already=[],
+    )
+
+    async def fake_replay_event(event_id, *, since=None, until=None, **_kw):
+        if event_id == "sr:tournament:pga-1":
+            raise RuntimeError("snapshot table missing")
+        return tournament_backtest.TournamentReplayResult(
+            event_id=event_id,
+            league="PGA",
+            name="",
+            winner="Rahm",
+            n_snapshots=2,
+            accuracy=1.0,
+            brier_score=0.1,
+            log_loss=0.2,
+            snapshots=[],
+            started_at="2026-04-26T12:00:00+00:00",
+            completed_at="2026-04-26T12:00:01+00:00",
+        )
+
+    recorded: list[str] = []
+
+    async def fake_record_run(result):
+        recorded.append(result.event_id)
+
+    monkeypatch.setattr(tournament_backtest, "replay_event", fake_replay_event)
+    monkeypatch.setattr(tournament_backtest, "record_run", fake_record_run)
+
+    summary = _run(tournament_backtest.auto_replay_finished_tournaments())
+
+    # pga-1 raised → counted as failed, pga-2 still graded + persisted.
+    assert recorded == ["sr:tournament:pga-2"]
+    assert summary["failed"] == 1
+    assert summary["replayed"] == 1
+    assert summary["event_ids"] == ["sr:tournament:pga-2"]
+
+
+def test_auto_replay_skips_record_for_empty_replays(monkeypatch):
+    """Events whose snapshot history hasn't landed yet (n_snapshots
+    == 0) must NOT be persisted — leaving them out of the persisted
+    table means the next poll cycle gets a chance to grade them once
+    snapshots actually arrive (the idempotency check would otherwise
+    permanently lock the event out).
+    """
+    _stub_auto_replay_db(
+        monkeypatch,
+        finished=["sr:tournament:pga-1"],
+        already=[],
+    )
+
+    async def fake_replay_event(event_id, *, since=None, until=None, **_kw):
+        return tournament_backtest.TournamentReplayResult(
+            event_id=event_id,
+            league="",
+            name="",
+            winner=None,
+            n_snapshots=0,
+            accuracy=0.0,
+            brier_score=0.0,
+            log_loss=0.0,
+            snapshots=[],
+            started_at="2026-04-26T12:00:00+00:00",
+            completed_at="2026-04-26T12:00:01+00:00",
+        )
+
+    record_called = False
+
+    async def fake_record_run(_result):
+        nonlocal record_called
+        record_called = True
+
+    monkeypatch.setattr(tournament_backtest, "replay_event", fake_replay_event)
+    monkeypatch.setattr(tournament_backtest, "record_run", fake_record_run)
+
+    summary = _run(tournament_backtest.auto_replay_finished_tournaments())
+    assert record_called is False
+    assert summary["replayed"] == 0
+    assert summary["finished"] == 1
+
+
+def test_auto_replay_returns_empty_summary_on_missing_schedules(monkeypatch):
+    """A fresh DB without ``sportradar_schedules`` must return a
+    zeroed summary rather than raise — the registered Feed poller
+    relies on this so the operator console doesn't flip the auto-
+    replay row to error on bootstrap.
+    """
+    async def boom(*_a, **_k):
+        raise RuntimeError("relation does not exist")
+
+    monkeypatch.setattr(db_module, "fetch", boom)
+
+    summary = _run(tournament_backtest.auto_replay_finished_tournaments())
+    assert summary == {
+        "finished": 0,
+        "skipped": 0,
+        "replayed": 0,
+        "failed": 0,
+        "event_ids": [],
+    }
+
+
+# ---------------------------------------------------------------------------
 # Admin endpoint round-trip — auth, validation, payload shape.
 # ---------------------------------------------------------------------------
 

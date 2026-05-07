@@ -433,6 +433,133 @@ async def list_recent_runs(*, limit: int = 50) -> list[dict[str, Any]]:
     ]
 
 
+# Schedule statuses that mark a tournament / race weekend as finished
+# and therefore eligible for an automatic replay.  Sportradar's golf
+# v3 uses "closed" once the final round wraps, F1 v2 uses "ended" /
+# "complete", and a few legacy payloads emit "finished" — accept all
+# four so the auto-replay hook fires on every shape we see in the
+# wild without bespoke per-league branching.
+_FINISHED_TOURNAMENT_STATUSES: frozenset[str] = frozenset({
+    "closed", "complete", "completed", "ended", "finished",
+})
+
+
+async def _finished_tournament_event_ids() -> list[str]:
+    """Return every ``sportradar_schedules.game_id`` whose status marks
+    the tournament as finished (closed / complete / ended / finished).
+
+    Restricted to the two leagues whose leaderboard snapshots are
+    persisted (PGA + F1) so the auto-replay loop doesn't waste a SQL
+    round-trip walking soccer / NBA games it could never replay.
+
+    Best-effort: returns ``[]`` when the schedules table is missing
+    (fresh dev DB) so the caller can no-op cleanly without the
+    surrounding feed flipping to error.
+    """
+    try:
+        rows = await db.fetch(
+            """
+            SELECT game_id
+              FROM sportradar_schedules
+             WHERE league = ANY($1::text[])
+               AND lower(status) = ANY($2::text[])
+             ORDER BY game_id
+            """,
+            ["PGA", "F1"],
+            list(_FINISHED_TOURNAMENT_STATUSES),
+        )
+    except Exception as e:  # noqa: BLE001
+        log.info(
+            "[tournament_backtest] finished-event lookup skipped (%s)", e,
+        )
+        return []
+    return [str(r["game_id"]) for r in rows if r["game_id"]]
+
+
+async def _already_replayed_event_ids(event_ids: list[str]) -> set[str]:
+    """Return the subset of ``event_ids`` that already have at least
+    one persisted replay row.
+
+    Used by :func:`auto_replay_finished_tournaments` to keep the auto
+    hook idempotent — once a tournament has been replayed we don't
+    re-grade it on every poll cycle.  Returns an empty set when the
+    persisted-runs table is missing so the caller falls back to
+    "replay everything" rather than silently skipping every event.
+    """
+    if not event_ids:
+        return set()
+    try:
+        rows = await db.fetch(
+            """
+            SELECT DISTINCT event_id
+              FROM sportradar_tournament_replays
+             WHERE event_id = ANY($1::text[])
+            """,
+            list(event_ids),
+        )
+    except Exception as e:  # noqa: BLE001
+        log.info(
+            "[tournament_backtest] already-replayed lookup skipped (%s)", e,
+        )
+        return set()
+    return {str(r["event_id"]) for r in rows if r["event_id"]}
+
+
+async def auto_replay_finished_tournaments() -> dict[str, Any]:
+    """Replay every newly-finished tournament once and persist the
+    summary so the operator dashboard's accuracy trend keeps growing
+    without an operator manually POSTing to the admin endpoint.
+
+    Walks ``sportradar_schedules`` for events whose status flipped to
+    one of :data:`_FINISHED_TOURNAMENT_STATUSES`, skips any event that
+    already has a persisted replay (idempotent — a tournament is
+    graded exactly once), and runs :func:`replay_event` +
+    :func:`record_run` for the rest.  Per-event failures are logged
+    and isolated so one missing snapshot history can't block the rest
+    of the sweep.
+
+    Returns a small bookkeeping dict (``finished``, ``skipped``,
+    ``replayed``, ``failed``, ``event_ids``) so the caller — typically
+    a registered ``Feed`` poller — can stash it on feed metadata for
+    the operator console without re-running the sweep.
+    """
+    finished_ids = await _finished_tournament_event_ids()
+    already = await _already_replayed_event_ids(finished_ids)
+    pending = [eid for eid in finished_ids if eid not in already]
+
+    replayed: list[str] = []
+    failed: list[str] = []
+    for event_id in pending:
+        try:
+            result = await replay_event(event_id)
+        except Exception:  # noqa: BLE001 — one event must not blank the rest
+            log.exception(
+                "[tournament_backtest] auto-replay failed for %s", event_id,
+            )
+            failed.append(event_id)
+            continue
+        # ``record_run`` is itself best-effort and skips empty replays
+        # (n_snapshots == 0).  Treat an empty replay as "nothing to
+        # grade" — leave it out of ``replayed`` so the next poll cycle
+        # tries again once snapshots actually land.
+        if result.n_snapshots <= 0:
+            log.info(
+                "[tournament_backtest] auto-replay skipped %s (no snapshots)",
+                event_id,
+            )
+            continue
+        await record_run(result)
+        replayed.append(event_id)
+
+    return {
+        "finished": len(finished_ids),
+        "skipped": len(already),
+        "replayed": len(replayed),
+        "failed": len(failed),
+        "event_ids": replayed,
+    }
+
+
 __all__ = [
     "SnapshotScore",
     "TournamentReplayResult",
@@ -440,4 +567,5 @@ __all__ = [
     "replay_events_in_range",
     "record_run",
     "list_recent_runs",
+    "auto_replay_finished_tournaments",
 ]

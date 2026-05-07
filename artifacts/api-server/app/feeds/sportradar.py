@@ -1714,6 +1714,15 @@ ROSTERS_CADENCE_SECONDS = max(
 LEADERBOARD_CADENCE_SECONDS = max(
     30, int(os.environ.get("AXIOM_SPORTRADAR_LEADERBOARD_CADENCE") or "120")
 )
+# Auto-replay sweeps look for tournaments whose schedule status just
+# flipped to a "finished" enum and grade them once.  The work is
+# idempotent (already-replayed events are skipped via a SELECT against
+# `sportradar_tournament_replays`) so a 5-minute cadence is plenty —
+# the sweep only does real work the cycle a tournament settles.
+TOURNAMENT_AUTO_REPLAY_CADENCE_SECONDS = max(
+    60,
+    int(os.environ.get("AXIOM_SPORTRADAR_TOURNAMENT_AUTO_REPLAY_CADENCE") or "300"),
+)
 
 
 def register_sportradar_extra_feeds() -> None:
@@ -1780,6 +1789,37 @@ def register_sportradar_extra_feeds() -> None:
                 enabled=bool(api_key) and has_live_path,
                 skipped_reason=_reason(has_live_path, "live"),
             ))
+
+    # Auto-replay finished tournaments (task #707).  Once a tournament's
+    # schedule status flips to "closed" / "finished" / "ended" the
+    # backtest harness grades the persisted snapshot history end-to-end
+    # and writes the rollup into ``sportradar_tournament_replays`` so
+    # the operator dashboard's accuracy trend keeps growing without an
+    # operator manually POSTing to the admin endpoint.  Idempotent —
+    # already-replayed events are skipped, so the feed mostly no-ops.
+    auto_replay_name = "sportradar_tournament_auto_replay"
+    if registry.status_of(auto_replay_name) is None:
+        from ..sports import tournament_backtest as _tb
+
+        async def _auto_replay() -> int:
+            summary = await _tb.auto_replay_finished_tournaments()
+            registry.set_metadata(
+                auto_replay_name,
+                last_run_at=_utc_iso(),
+                finished=int(summary.get("finished", 0)),
+                skipped=int(summary.get("skipped", 0)),
+                replayed=int(summary.get("replayed", 0)),
+                failed=int(summary.get("failed", 0)),
+                last_event_ids=list(summary.get("event_ids", [])),
+            )
+            return int(summary.get("replayed", 0))
+
+        registry.register(Feed(
+            name=auto_replay_name,
+            cadence_seconds=float(TOURNAMENT_AUTO_REPLAY_CADENCE_SECONDS),
+            poll=_auto_replay,
+            enabled=True,
+        ))
 
     # Cross-sport tournament leaderboard refresher (task #449).  One
     # poller covers both PGA tournaments and F1 race weekends so the
