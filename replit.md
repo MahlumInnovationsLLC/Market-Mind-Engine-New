@@ -169,6 +169,17 @@ forfeited).  Re-run with `python -m scripts.replay_tail_risk_2026
 --from-db --out-csv reports/tail_risk_replay_<date>.csv --out-json
 reports/tail_risk_replay_<date>.json` to refresh.
 
+**Bucket drill-in (May 2026).**  Each bucket row in the tile is a
+button: clicking on web (or tapping on mobile) navigates to
+`/positions?bucket_lo=…&bucket_hi=…&days=…&placed_by=…&vertical=…&sort=max_loss`,
+mirroring the same days/placed_by/vertical filters that drove the
+tile.  The positions page parses those params, restricts rows to
+trades with `entry/100 ∈ [lo, hi)`, surfaces a "Drilling in from
+tail-risk tile" banner with a Clear button, and supports a
+`max_loss` sort key (qty × entry cents).  Hovering a bucket on web
+exposes a `title` peek listing the top 5 contributors by max-loss
+without leaving the dashboard.
+
 **Typed client.** The endpoint is published in
 `lib/api-spec/openapi.yaml` as `getPublicTailRiskExposure` and the
 Orval codegen produces typed React-Query hooks in

@@ -1,8 +1,8 @@
 import { describe, it, expect, afterEach, beforeEach, vi } from "vitest";
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 
-const { state } = vi.hoisted(() => ({
+const { state, setLocationMock } = vi.hoisted(() => ({
   state: {
     placedBy: "all" as "all" | "manual" | "system",
     verticals: [] as string[],
@@ -11,6 +11,11 @@ const { state } = vi.hoisted(() => ({
     fetchResponses: [] as Array<{ ok: boolean; status?: number; body?: unknown }>,
     lastUrl: "" as string,
   },
+  setLocationMock: vi.fn(),
+}));
+
+vi.mock("wouter", () => ({
+  useLocation: () => ["/dashboard", setLocationMock] as const,
 }));
 
 vi.mock("@/lib/api", () => ({
@@ -49,6 +54,7 @@ beforeEach(() => {
   state.days = 30;
   state.fetchResponses = [];
   state.lastUrl = "";
+  setLocationMock.mockReset();
   global.fetch = vi.fn(async (url: string) => {
     state.lastUrl = url;
     const next = state.fetchResponses.shift() ?? { ok: true, body: emptyBody() };
@@ -255,6 +261,65 @@ describe("TailRiskExposurePanel", () => {
     expect(cell0.textContent).toContain("$4,218");
     const cell3 = screen.getByTestId("tail-risk-cell-3-sports");
     expect(cell3.textContent).toContain("sports");
+  });
+
+  it("navigates to /positions with bucket+filter params when a bucket row is clicked", async () => {
+    state.placedBy = "system";
+    state.verticals = ["sports"];
+    state.period = "7d";
+    state.days = 7;
+    const body = emptyBody() as any;
+    body.buckets[0] = {
+      label: "<$0.10", lo: 0.0, hi: 0.1, is_tail: true,
+      rows: [
+        {
+          vertical: "sports",
+          open_count: 1, open_cost_usd: 4218.24, open_max_loss_usd: 4218.24,
+          realized_count: 1, realized_wins: 0, realized_pnl_usd: -4218,
+          ev_per_trade: -4218,
+        },
+      ],
+      totals: {
+        open_count: 1, open_cost_usd: 4218.24, open_max_loss_usd: 4218.24,
+        realized_count: 1, realized_wins: 0, realized_pnl_usd: -4218,
+        ev_per_trade: -4218,
+      },
+    };
+    body.totals = body.buckets[0].totals;
+    body.tail_concentration = {
+      tail_max_loss_usd: 4218.24, total_max_loss_usd: 4218.24,
+      pct: 1.0, tone: "red", threshold_price: 0.2,
+    };
+    state.fetchResponses = [{ ok: true, body }];
+
+    renderPanel();
+
+    const row = await screen.findByTestId("tail-risk-bucket-0");
+    expect(row.getAttribute("role")).toBe("button");
+    expect(row.getAttribute("title")).toContain("Top contributors");
+    expect(row.getAttribute("title")).toContain("sports");
+    expect(screen.getByTestId("tail-risk-bucket-0-drill")).toBeTruthy();
+
+    fireEvent.click(row);
+
+    expect(setLocationMock).toHaveBeenCalledTimes(1);
+    const url = setLocationMock.mock.calls[0][0] as string;
+    expect(url.startsWith("/positions?")).toBe(true);
+    expect(url).toContain("bucket_lo=0");
+    expect(url).toContain("bucket_hi=0.1");
+    expect(url).toContain("days=7");
+    expect(url).toContain("placed_by=system");
+    expect(url).toContain("vertical=sports");
+    expect(url).toContain("sort=max_loss");
+  });
+
+  it("does not make empty buckets clickable", async () => {
+    state.fetchResponses = [{ ok: true, body: emptyBody() }];
+    renderPanel();
+    const row = await screen.findByTestId("tail-risk-bucket-0");
+    expect(row.getAttribute("role")).toBeNull();
+    fireEvent.click(row);
+    expect(setLocationMock).not.toHaveBeenCalled();
   });
 
   it("surfaces an error message when the request fails", async () => {

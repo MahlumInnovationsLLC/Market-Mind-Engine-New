@@ -1,5 +1,5 @@
-import { useMemo, useState } from "react";
-import { useLocation } from "wouter";
+import { useEffect, useMemo, useState } from "react";
+import { useLocation, useSearch } from "wouter";
 import { useQuery } from "@tanstack/react-query";
 import { useAuth } from "@clerk/react";
 import {
@@ -40,6 +40,7 @@ type SortKey =
   | "mark"
   | "value"
   | "pnl"
+  | "max_loss"
   | "edge"
   | "age";
 
@@ -160,10 +161,72 @@ type Row = {
   exchange: string | null;
   status: string;
   tradeRef: string | null;
+  placedBy: string | null;
 };
+
+// Parse the bucket filter shipped from the tail-risk tile.
+// We accept lo/hi as fractional dollars (0..1) — the same units the
+// /api/public/tail-risk-exposure endpoint emits — and apply them to
+// each row's `entry` (cents 0..100) inside the filter step.
+type BucketFilter = {
+  lo: number;
+  hi: number;
+  label: string;
+};
+
+type PlacedByFilter = "manual" | "system" | null;
+
+function parseSearchParams(search: string): {
+  bucket: BucketFilter | null;
+  vertical: string | null;
+  verticals: string[];
+  placedBy: PlacedByFilter;
+  days: number | null;
+  sort: SortKey | null;
+} {
+  const sp = new URLSearchParams(search);
+  const loRaw = sp.get("bucket_lo");
+  const hiRaw = sp.get("bucket_hi");
+  const lo = loRaw !== null ? Number.parseFloat(loRaw) : NaN;
+  const hi = hiRaw !== null ? Number.parseFloat(hiRaw) : NaN;
+  const bucket =
+    Number.isFinite(lo) && Number.isFinite(hi) && hi > lo
+      ? { lo, hi, label: sp.get("bucket_label") ?? `$${lo.toFixed(2)}–$${hi.toFixed(2)}` }
+      : null;
+  // The tail-risk tile sends a CSV when multiple verticals are
+  // selected; treat the CSV as an inclusion set so multi-vertical
+  // drill-in actually scopes the trade list.
+  const verticalCsv = sp.get("vertical");
+  const verticals = verticalCsv
+    ? verticalCsv
+        .split(",")
+        .map((s) => s.trim())
+        .filter((s) => s.length > 0)
+    : [];
+  // Keep the legacy single-vertical pointer to drive the chip
+  // selection only when exactly one vertical was passed.
+  const vertical = verticals.length === 1 ? verticals[0] : null;
+  const placedByRaw = sp.get("placed_by");
+  const placedBy: PlacedByFilter =
+    placedByRaw === "manual" || placedByRaw === "system" ? placedByRaw : null;
+  const daysRaw = sp.get("days");
+  const days = daysRaw && /^\d+$/.test(daysRaw) ? Number.parseInt(daysRaw, 10) : null;
+  const sortRaw = sp.get("sort");
+  const sort: SortKey | null =
+    sortRaw === "max_loss" ||
+    sortRaw === "pnl" ||
+    sortRaw === "value" ||
+    sortRaw === "entry" ||
+    sortRaw === "age"
+      ? sortRaw
+      : null;
+  return { bucket, vertical, verticals, placedBy, days, sort };
+}
 
 export default function PositionsPage() {
   const [, setLocation] = useLocation();
+  const search = useSearch();
+  const parsed = useMemo(() => parseSearchParams(search), [search]);
   const { getToken, isSignedIn } = useAuth();
   const tokenFn = useMemo(
     () => () => getToken().then((t) => t ?? null),
@@ -190,11 +253,26 @@ export default function PositionsPage() {
     },
   });
 
-  const [verticalFilter, setVerticalFilter] = useState<string | null>(null);
+  const [verticalFilter, setVerticalFilter] = useState<string | null>(
+    parsed.vertical,
+  );
   const [exchangeFilter, setExchangeFilter] = useState<string | null>(null);
   const [statusFilter, setStatusFilter] = useState<"open" | "all">("open");
-  const [sortKey, setSortKey] = useState<SortKey>("pnl");
+  const [sortKey, setSortKey] = useState<SortKey>(parsed.sort ?? "pnl");
   const [sortDir, setSortDir] = useState<SortDir>("desc");
+  // Bucket + days filters live in the URL only; they're cleared by
+  // navigating away to /positions (or hitting the inline Clear).
+  const bucketFilter = parsed.bucket;
+  const daysFilter = parsed.days;
+
+  // When the operator drills in from the tail-risk tile, mirror the URL
+  // intent into the local filter state so the chips reflect what's
+  // actually being applied. Only run on URL changes — don't fight a
+  // user-toggled chip after they land.
+  useEffect(() => {
+    if (parsed.vertical) setVerticalFilter(parsed.vertical);
+    if (parsed.sort) setSortKey(parsed.sort);
+  }, [parsed.vertical, parsed.sort]);
 
   const rows: Row[] = useMemo(() => {
     const positions = positionsQ.data?.items ?? [];
@@ -263,6 +341,7 @@ export default function PositionsPage() {
         exchange: latest?.exchange ?? "kalshi",
         status: p.position === 0 ? "closed" : "open",
         tradeRef: latest?.trade_id ?? (latest?.id ? String(latest.id) : null),
+        placedBy: latest?.placed_by ?? null,
       };
     });
   }, [positionsQ.data, tradesQ.data]);
@@ -279,13 +358,62 @@ export default function PositionsPage() {
   }, [rows]);
 
   const filtered = useMemo(() => {
+    const daysCutoff = daysFilter ? daysFilter * 86_400 : null;
+    // Build the multi-vertical inclusion set once. lower-cased so we
+    // tolerate casing drift between the tile and trade rows.
+    const verticalSet =
+      parsed.verticals.length > 1
+        ? new Set(parsed.verticals.map((v) => v.toLowerCase()))
+        : null;
+    // Map the URL placed_by ("manual"|"system") onto the placed_by tag
+    // attached to each enriching trade. The trade tag uses the
+    // migration-0039 vocabulary (manual_ui / orchestrator / autotrader /
+    // swarm / operator_recovery / rh_import / unknown); collapse those
+    // onto the two operator-facing buckets so the drill-in matches the
+    // tile's filter.
+    const placedByMatcher: ((v: string | null) => boolean) | null =
+      parsed.placedBy === "manual"
+        ? (v) => v === "manual_ui" || v === "operator_recovery" || v === "rh_import"
+        : parsed.placedBy === "system"
+          ? (v) => v === "orchestrator" || v === "autotrader" || v === "swarm"
+          : null;
     return rows.filter((r) => {
       if (statusFilter === "open" && r.status !== "open") return false;
       if (verticalFilter && r.vertical !== verticalFilter) return false;
+      if (
+        verticalSet &&
+        (!r.vertical || !verticalSet.has(r.vertical.toLowerCase()))
+      )
+        return false;
+      if (placedByMatcher && !placedByMatcher(r.placedBy)) return false;
       if (exchangeFilter && r.exchange !== exchangeFilter) return false;
+      if (bucketFilter) {
+        // entry is per-contract cents (0..100); the bucket is in
+        // fractional dollars (0..1).  Drop rows with no entry price
+        // — we can't know which bucket they belong to.
+        if (r.entry === null) return false;
+        const dollars = r.entry / 100;
+        if (dollars < bucketFilter.lo || dollars >= bucketFilter.hi) return false;
+      }
+      if (daysCutoff !== null) {
+        // Restrict to positions whose latest fill is within the same
+        // window the tail-risk tile was looking at.  Rows with no
+        // age (no recent fill match) are kept conservatively so the
+        // operator can still see the open book.
+        if (r.ageSeconds !== null && r.ageSeconds > daysCutoff) return false;
+      }
       return true;
     });
-  }, [rows, statusFilter, verticalFilter, exchangeFilter]);
+  }, [
+    rows,
+    statusFilter,
+    verticalFilter,
+    exchangeFilter,
+    bucketFilter,
+    daysFilter,
+    parsed.verticals,
+    parsed.placedBy,
+  ]);
 
   const sorted = useMemo(() => {
     const dir = sortDir === "asc" ? 1 : -1;
@@ -306,6 +434,11 @@ export default function PositionsPage() {
           return r.currentValueCents ?? -Infinity;
         case "pnl":
           return r.pnlCents;
+        case "max_loss":
+          // Max-loss for a YES contract is the entry price × qty
+          // (worst case — settles at $0).  In cents.  Rows missing an
+          // entry sort to the bottom on a desc sort.
+          return r.entry !== null ? Math.abs(r.qty) * r.entry : -Infinity;
         case "edge":
           return r.edge ?? -Infinity;
         case "age":
@@ -352,6 +485,61 @@ export default function PositionsPage() {
           {sorted.length} of {rows.length} shown
         </div>
       </header>
+
+      {(bucketFilter ||
+        daysFilter !== null ||
+        parsed.verticals.length > 0 ||
+        parsed.placedBy) && (
+        <GlassCard
+          tone="solid"
+          padding="sm"
+          data-testid="positions-bucket-banner"
+        >
+          <div className="flex flex-wrap items-center gap-3 text-[11px]">
+            <span className="uppercase tracking-widest text-accent-cyan/80">
+              Drilling in from tail-risk tile
+            </span>
+            {bucketFilter && (
+              <span
+                className="border border-loss/40 bg-loss/10 px-2 py-0.5 uppercase tracking-widest text-loss"
+                data-testid="positions-bucket-chip"
+              >
+                Bucket {bucketFilter.label}
+              </span>
+            )}
+            {daysFilter !== null && (
+              <span className="border border-border bg-card/40 px-2 py-0.5 uppercase tracking-widest text-muted-foreground">
+                Last {daysFilter}d
+              </span>
+            )}
+            {parsed.verticals.map((v) => (
+              <span
+                key={v}
+                className="border border-border bg-card/40 px-2 py-0.5 uppercase tracking-widest text-muted-foreground"
+                data-testid={`positions-bucket-vertical-${v}`}
+              >
+                {v}
+              </span>
+            ))}
+            {parsed.placedBy && (
+              <span
+                className="border border-border bg-card/40 px-2 py-0.5 uppercase tracking-widest text-muted-foreground"
+                data-testid={`positions-bucket-placed-by`}
+              >
+                {parsed.placedBy}
+              </span>
+            )}
+            <button
+              type="button"
+              onClick={() => setLocation("/positions")}
+              data-testid="positions-bucket-clear"
+              className="ml-auto border border-border px-2 py-0.5 uppercase tracking-widest text-muted-foreground hover:border-primary hover:text-primary"
+            >
+              Clear drill-in
+            </button>
+          </div>
+        </GlassCard>
+      )}
 
       <GlassCard tone="solid" padding="sm" data-testid="card-positions-filters">
         <div className="flex flex-wrap items-center gap-4">

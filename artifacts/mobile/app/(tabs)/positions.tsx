@@ -1,4 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
+import { useLocalSearchParams, useRouter } from "expo-router";
 import React, { useMemo, useState } from "react";
 import {
   ActivityIndicator,
@@ -78,39 +79,135 @@ const FILTERS: { id: Filter; label: string }[] = [
 export default function PositionsScreen() {
   const colors = useColors();
   const insets = useSafeAreaInsets();
+  const router = useRouter();
   const [filter, setFilter] = useState<Filter>("all");
   // Trade-provenance filter (T005). Shared module-level state so the
   // selection persists across tab switches.
   const { placedBy } = usePlacedBy();
 
+  // Bucket drill-in from the tail-risk tile. lo/hi are fractional
+  // dollars (0..1), matching trade.price units, so we apply them
+  // directly. We also accept a single vertical (CSV is ignored — the
+  // tile sends them comma-joined when multiple are selected).
+  const params = useLocalSearchParams<{
+    bucket_lo?: string;
+    bucket_hi?: string;
+    bucket_label?: string;
+    vertical?: string;
+    days?: string;
+    sort?: string;
+    placed_by?: string;
+  }>();
+  const bucketLo =
+    typeof params.bucket_lo === "string"
+      ? Number.parseFloat(params.bucket_lo)
+      : NaN;
+  const bucketHi =
+    typeof params.bucket_hi === "string"
+      ? Number.parseFloat(params.bucket_hi)
+      : NaN;
+  const bucket =
+    Number.isFinite(bucketLo) && Number.isFinite(bucketHi) && bucketHi > bucketLo
+      ? {
+          lo: bucketLo,
+          hi: bucketHi,
+          label:
+            (typeof params.bucket_label === "string" && params.bucket_label) ||
+            `$${bucketLo.toFixed(2)}–$${bucketHi.toFixed(2)}`,
+        }
+      : null;
+  // Treat the `vertical` param as a CSV inclusion set so multi-vertical
+  // drill-ins from the tile actually scope the trade list.
+  const verticalSet = useMemo(() => {
+    if (typeof params.vertical !== "string" || params.vertical.length === 0)
+      return null;
+    const parts = params.vertical
+      .split(",")
+      .map((s) => s.trim().toLowerCase())
+      .filter((s) => s.length > 0);
+    return parts.length > 0 ? new Set(parts) : null;
+  }, [params.vertical]);
+  const verticalParam =
+    typeof params.vertical === "string" && !params.vertical.includes(",")
+      ? params.vertical
+      : null;
+  // URL placed_by overrides the dashboard provenance toggle so the
+  // drill-in honours the same scope the tile was filtered by.
+  const placedByOverride =
+    params.placed_by === "manual" || params.placed_by === "system"
+      ? params.placed_by
+      : null;
+  const effectivePlacedBy = placedByOverride ?? placedBy;
+  const daysParam =
+    typeof params.days === "string" && /^\d+$/.test(params.days)
+      ? Number.parseInt(params.days, 10)
+      : null;
+  const sortMaxLoss = params.sort === "max_loss";
+
   const { data, isLoading, isError, error, refetch, isFetching } = useQuery({
-    queryKey: ["dashboard", "recent-trades", placedBy],
+    queryKey: ["dashboard", "recent-trades", effectivePlacedBy],
     queryFn: () =>
       apiFetch<TradeList>(
-        `/api/dashboard/recent-trades?limit=50&placed_by=${placedBy}`,
+        `/api/dashboard/recent-trades?limit=50&placed_by=${effectivePlacedBy}`,
       ),
     refetchInterval: 30_000,
   });
 
   const filtered = useMemo(() => {
-    const items = data?.items ?? [];
+    let items = data?.items ?? [];
+    // Apply the URL drill-in filters first so they compose with the
+    // operator's chip selection.
+    if (bucket) {
+      items = items.filter((t) => {
+        if (typeof t.price !== "number") return false;
+        return t.price >= bucket.lo && t.price < bucket.hi;
+      });
+    }
+    if (verticalSet) {
+      items = items.filter((t) =>
+        verticalSet.has((t.vertical ?? "").toLowerCase()),
+      );
+    } else if (verticalParam) {
+      items = items.filter(
+        (t) => (t.vertical ?? "").toLowerCase() === verticalParam.toLowerCase(),
+      );
+    }
+    if (daysParam !== null) {
+      const cutoffMs = Date.now() - daysParam * 86_400_000;
+      items = items.filter((t) => {
+        if (!t.executed_at) return true;
+        const ts = new Date(t.executed_at).getTime();
+        return Number.isNaN(ts) || ts >= cutoffMs;
+      });
+    }
     switch (filter) {
       case "live":
-        return items.filter(
+        items = items.filter(
           (t) => (t.trading_mode ?? "").toLowerCase() === "live",
         );
+        break;
       case "paper":
-        return items.filter(
+        items = items.filter(
           (t) => (t.trading_mode ?? "").toLowerCase() === "paper",
         );
+        break;
       case "wins":
-        return items.filter((t) => (t.pnl ?? 0) > 0);
+        items = items.filter((t) => (t.pnl ?? 0) > 0);
+        break;
       case "losses":
-        return items.filter((t) => (t.pnl ?? 0) < 0);
-      default:
-        return items;
+        items = items.filter((t) => (t.pnl ?? 0) < 0);
+        break;
     }
-  }, [data, filter]);
+    if (sortMaxLoss) {
+      // Per-trade max-loss = qty × price (worst case settles at $0).
+      items = [...items].sort((a, b) => {
+        const al = (a.quantity ?? 0) * (a.price ?? 0);
+        const bl = (b.quantity ?? 0) * (b.price ?? 0);
+        return bl - al;
+      });
+    }
+    return items;
+  }, [data, filter, bucket, verticalSet, verticalParam, daysParam, sortMaxLoss]);
 
   if (isLoading) {
     return (
@@ -150,6 +247,65 @@ export default function PositionsScreen() {
               testID="banner-positions-delayed"
             />
           ) : null}
+          {(bucket ||
+            verticalParam ||
+            verticalSet ||
+            daysParam !== null ||
+            placedByOverride) && (
+            <View
+              style={[
+                styles.drillBanner,
+                { borderColor: colors.destructive },
+              ]}
+              testID="positions-bucket-banner"
+            >
+              <View style={styles.drillBannerRow}>
+                <Text
+                  style={[
+                    styles.drillBannerLabel,
+                    { color: colors.destructive },
+                  ]}
+                  testID="positions-bucket-chip"
+                >
+                  {bucket
+                    ? `BUCKET ${bucket.label}`
+                    : "TAIL-RISK DRILL"}
+                </Text>
+                <Pressable
+                  onPress={() => router.push("/(tabs)/positions" as never)}
+                  testID="positions-bucket-clear"
+                >
+                  <Text
+                    style={[
+                      styles.drillBannerClear,
+                      { color: colors.mutedForeground },
+                    ]}
+                  >
+                    CLEAR
+                  </Text>
+                </Pressable>
+              </View>
+              <Text
+                style={[
+                  styles.drillBannerMeta,
+                  { color: colors.mutedForeground },
+                ]}
+              >
+                {[
+                  daysParam !== null ? `${daysParam}D` : null,
+                  verticalSet
+                    ? Array.from(verticalSet).join("+").toUpperCase()
+                    : verticalParam
+                      ? verticalParam.toUpperCase()
+                      : null,
+                  placedByOverride ? placedByOverride.toUpperCase() : null,
+                  sortMaxLoss ? "BY MAX-LOSS" : null,
+                ]
+                  .filter((s): s is string => !!s)
+                  .join(" · ")}
+              </Text>
+            </View>
+          )}
           <PlacedByToggle testID="positions-placed-by-toggle" />
           <ScrollView
             horizontal
@@ -297,4 +453,31 @@ const styles = StyleSheet.create({
   },
   tagMuted: { fontSize: 11, fontFamily: "Inter_500Medium" },
   meta: { fontSize: 11, fontFamily: "Inter_400Regular" },
+  drillBanner: {
+    borderWidth: 1,
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+    marginBottom: 8,
+    gap: 4,
+  },
+  drillBannerRow: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+  },
+  drillBannerLabel: {
+    fontSize: 11,
+    letterSpacing: 1.5,
+    fontFamily: "Inter_700Bold",
+  },
+  drillBannerClear: {
+    fontSize: 10,
+    letterSpacing: 1.5,
+    fontFamily: "Inter_700Bold",
+  },
+  drillBannerMeta: {
+    fontSize: 10,
+    letterSpacing: 1.2,
+    fontFamily: "Inter_500Medium",
+  },
 });

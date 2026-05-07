@@ -1,4 +1,5 @@
 import { Fragment } from "react";
+import { useLocation } from "wouter";
 import { useQuery } from "@tanstack/react-query";
 
 import { resolveApiUrl } from "@/lib/api";
@@ -116,8 +117,26 @@ export default function TailRiskExposurePanel() {
   const { placedBy } = usePlacedBy();
   const { effectiveVerticals } = useVerticalFilter();
   const { period, days } = usePeriod();
+  const [, setLocation] = useLocation();
   const periodLabel = period.toUpperCase();
   const verticalsCsv = effectiveVerticals.slice().sort().join(",");
+
+  // Open the positions page pre-filtered to the price bucket the
+  // operator clicked. We thread the same days/placed_by/vertical
+  // filters that drove this tile so the resulting list lines up
+  // with what they were just looking at, and request the
+  // max-loss sort so the worst contributors land at the top.
+  const openBucket = (b: Bucket) => {
+    const params = new URLSearchParams();
+    params.set("bucket_lo", String(b.lo));
+    params.set("bucket_hi", String(b.hi));
+    params.set("bucket_label", b.label);
+    params.set("days", String(days));
+    params.set("placed_by", placedBy);
+    if (verticalsCsv) params.set("vertical", verticalsCsv);
+    params.set("sort", "max_loss");
+    setLocation(`/positions?${params.toString()}`);
+  };
 
   const q = useQuery<TailRiskExposure>({
     queryKey: ["public-tail-risk-exposure", placedBy, verticalsCsv, days],
@@ -235,19 +254,67 @@ export default function TailRiskExposurePanel() {
                   const cells = b.rows
                     .slice()
                     .sort((a, c) => c.open_max_loss_usd - a.open_max_loss_usd);
+                  // Top 5 contributors by max-loss for the hover peek; we
+                  // surface them in a `title` so operators can scan the
+                  // worst names without leaving the dashboard.
+                  const topContribs = cells.slice(0, 5);
+                  const peekText =
+                    totals.open_count === 0 && totals.realized_count === 0
+                      ? `${b.label}: no exposure`
+                      : `Top contributors in ${b.label} (sorted by max-loss):\n` +
+                        topContribs
+                          .map(
+                            (c) =>
+                              `• ${c.vertical} — ${fmtUsd(c.open_max_loss_usd)} max-loss · ${c.open_count} open`,
+                          )
+                          .join("\n") +
+                        `\n\nClick to open the matching trades.`;
+                  const isInteractive =
+                    totals.open_count > 0 || totals.realized_count > 0;
                   return (
                     <Fragment key={b.label}>
                       <tr
                         data-testid={`tail-risk-bucket-${idx}`}
                         data-bucket-label={b.label}
                         data-tail={isTail ? "true" : "false"}
-                        className={`border-t border-border/40 ${isTail ? "bg-loss/5" : ""}`}
+                        title={peekText}
+                        role={isInteractive ? "button" : undefined}
+                        tabIndex={isInteractive ? 0 : undefined}
+                        aria-label={
+                          isInteractive
+                            ? `Open trades in price bucket ${b.label}`
+                            : undefined
+                        }
+                        onClick={isInteractive ? () => openBucket(b) : undefined}
+                        onKeyDown={
+                          isInteractive
+                            ? (e) => {
+                                if (e.key === "Enter" || e.key === " ") {
+                                  e.preventDefault();
+                                  openBucket(b);
+                                }
+                              }
+                            : undefined
+                        }
+                        className={`border-t border-border/40 ${isTail ? "bg-loss/5" : ""} ${
+                          isInteractive
+                            ? "cursor-pointer hover:bg-primary/10 focus:outline focus:outline-2 focus:outline-primary"
+                            : ""
+                        }`}
                       >
                         <td className="py-1.5 pr-2 font-medium text-foreground">
                           {b.label}
                           {isTail && (
                             <span className="ml-2 text-[9px] uppercase tracking-widest text-loss">
                               tail
+                            </span>
+                          )}
+                          {isInteractive && (
+                            <span
+                              className="ml-2 text-[9px] uppercase tracking-widest text-primary/70"
+                              data-testid={`tail-risk-bucket-${idx}-drill`}
+                            >
+                              drill ↗
                             </span>
                           )}
                         </td>

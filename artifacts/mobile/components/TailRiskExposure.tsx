@@ -1,6 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
+import { useRouter } from "expo-router";
 import React from "react";
-import { StyleSheet, Text, View } from "react-native";
+import { Pressable, StyleSheet, Text, View } from "react-native";
 
 import { useColors } from "@/hooks/useColors";
 import { apiFetch } from "@/lib/api";
@@ -106,10 +107,28 @@ export default function TailRiskExposure({
   period,
 }: TailRiskExposureProps = {}) {
   const colors = useColors();
+  const router = useRouter();
   const { placedBy } = usePlacedBy();
   const effective = useEffectiveVerticals();
   const verticalsCsv = effective.slice().sort().join(",");
   const periodLabel = PERIOD_LABEL[period ?? days] ?? `${days}D`;
+
+  // Drill into the trade list pre-filtered to the bucket the operator
+  // tapped — same days/placed_by/vertical scope as the tile.
+  const openBucket = (b: Bucket) => {
+    router.push({
+      pathname: "/(tabs)/positions",
+      params: {
+        bucket_lo: String(b.lo),
+        bucket_hi: String(b.hi),
+        bucket_label: b.label,
+        days: String(days),
+        placed_by: placedBy,
+        ...(verticalsCsv ? { vertical: verticalsCsv } : {}),
+        sort: "max_loss",
+      },
+    } as never);
+  };
 
   const q = useQuery<TailRiskExposure>({
     queryKey: ["public-tail-risk-exposure", placedBy, verticalsCsv, days],
@@ -218,14 +237,25 @@ export default function TailRiskExposure({
                 const cells = b.rows
                   .slice()
                   .sort((a, c) => c.open_max_loss_usd - a.open_max_loss_usd);
+                const interactive =
+                  b.totals.open_count > 0 || b.totals.realized_count > 0;
                 return (
-                  <View
+                  <Pressable
                     key={b.label}
-                    style={[
+                    onPress={interactive ? () => openBucket(b) : undefined}
+                    disabled={!interactive}
+                    accessibilityRole={interactive ? "button" : undefined}
+                    accessibilityLabel={
+                      interactive
+                        ? `Open trades in price bucket ${b.label}`
+                        : undefined
+                    }
+                    style={({ pressed }) => [
                       styles.bucketRow,
                       {
                         borderTopColor: colors.border,
                         borderTopWidth: idx === 0 ? 0 : 1,
+                        opacity: pressed && interactive ? 0.6 : 1,
                       },
                     ]}
                     testID={`tail-risk-bucket-${b.label}`}
@@ -336,7 +366,7 @@ export default function TailRiskExposure({
                         </Text>
                       </View>
                     ))}
-                  </View>
+                  </Pressable>
                 );
               })}
 
