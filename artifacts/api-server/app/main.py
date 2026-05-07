@@ -159,16 +159,42 @@ async def lifespan(_: FastAPI):
     # baseline migration owns the schema that used to be created by
     # lazy ALTERs at request time. Run on a worker thread so the sync
     # psycopg engine doesn't block the event loop.
-    try:
-        await asyncio.to_thread(db_migrations.run_migrations_sync)
-        ready_gate.mark_check(
-            "migrations",
-            ok=True,
-            detail=f"head={db_migrations.current_revision()}",
-        )
-    except Exception as e:
-        log.error("alembic migrations failed: %s", e)
-        ready_gate.mark_check("migrations", ok=False, detail=f"{type(e).__name__}: {e}")
+    #
+    # Set ``AXIOM_SKIP_ALEMBIC_AT_STARTUP=1`` to skip this in environments
+    # where the schema is managed out-of-band (e.g. Supabase migrations
+    # applied by a release pipeline) and a fresh container should not
+    # block its `/api/healthz` bind on a slow `alembic upgrade head`
+    # against an IO-starved DB. When skipped, we still record the
+    # current revision so the readyz panel and operator dashboard can
+    # show what the running pod is at.
+    skip_alembic = (os.environ.get("AXIOM_SKIP_ALEMBIC_AT_STARTUP") or "").strip() in ("1", "true", "True")
+    if skip_alembic:
+        try:
+            rev = await asyncio.to_thread(db_migrations.current_revision)
+            ready_gate.mark_check(
+                "migrations",
+                ok=True,
+                detail=f"skipped_at_startup head={rev}",
+            )
+            log.info("alembic upgrade skipped at startup (AXIOM_SKIP_ALEMBIC_AT_STARTUP=1, head=%s)", rev)
+        except Exception as e:
+            log.warning("alembic revision lookup failed (skip mode): %s", e)
+            ready_gate.mark_check(
+                "migrations",
+                ok=True,
+                detail=f"skipped_at_startup revision_lookup_failed={type(e).__name__}",
+            )
+    else:
+        try:
+            await asyncio.to_thread(db_migrations.run_migrations_sync)
+            ready_gate.mark_check(
+                "migrations",
+                ok=True,
+                detail=f"head={db_migrations.current_revision()}",
+            )
+        except Exception as e:
+            log.error("alembic migrations failed: %s", e)
+            ready_gate.mark_check("migrations", ok=False, detail=f"{type(e).__name__}: {e}")
     # Auto-arm the four tail-risk knob defaults in `system_settings`
     # (Task #750).  The gates already fall back to the same values via
     # in-code defaults, so behaviour is unchanged either way — this

@@ -67,6 +67,7 @@ class WatchdogState:
         backoff_initial: float,
         backoff_cap: float,
         supervise: bool,
+        startup_grace_sec: float = 0.0,
     ) -> None:
         self.target = target
         self.threshold = threshold
@@ -76,6 +77,11 @@ class WatchdogState:
         self.backoff_initial = backoff_initial
         self.backoff_cap = backoff_cap
         self.supervise = supervise
+        # Suppress restart-trigger evaluation during the first
+        # ``startup_grace_sec`` seconds after the child boots. Lets a
+        # slow alembic / model-warmup phase complete without flapping.
+        self.startup_grace_sec = max(0.0, startup_grace_sec)
+        self.last_child_start_at: float | None = None
 
         self.lock = threading.Lock()
         self.consecutive_failures = 0
@@ -236,6 +242,7 @@ class ChildSupervisor:
             )
             self.state.child_pid = self.proc.pid
             self.state.child_exit_code = None
+            self.state.last_child_start_at = time.time()
             log.info("[watchdog] child started pid=%d", self.proc.pid)
 
     def stop(self, *, timeout: float = 10.0) -> None:
@@ -348,7 +355,24 @@ def probe_loop(
                 status, err, latency,
                 state.consecutive_failures, state.threshold,
             )
-        if state.consecutive_failures >= state.threshold:
+        # Startup grace: while the child is still inside its boot
+        # window, suppress restart-trigger evaluation. Long startup
+        # work (e.g. `alembic upgrade head` against an IO-starved DB)
+        # would otherwise flap the supervisor every 15s and never let
+        # the child finish booting.
+        in_grace = (
+            state.startup_grace_sec > 0
+            and state.last_child_start_at is not None
+            and (time.time() - state.last_child_start_at) < state.startup_grace_sec
+        )
+        if in_grace and state.consecutive_failures >= state.threshold:
+            log.info(
+                "[watchdog] probe failures suppressed: child in startup "
+                "grace (%.0fs of %.0fs)",
+                time.time() - (state.last_child_start_at or time.time()),
+                state.startup_grace_sec,
+            )
+        if state.consecutive_failures >= state.threshold and not in_grace:
             reason = (
                 f"{state.consecutive_failures} consecutive probe failures "
                 f"(last_error={err})"
@@ -536,6 +560,11 @@ def _parse_args(argv: list[str]) -> tuple[argparse.Namespace, list[str]]:
         default=float(os.environ.get("WATCHDOG_BACKOFF_CAP_SEC", "120")),
     )
     p.add_argument(
+        "--startup-grace-sec", type=float,
+        default=float(os.environ.get("WATCHDOG_STARTUP_GRACE_SEC", "90")),
+        help="seconds after each child start during which probe failures don't trigger restarts",
+    )
+    p.add_argument(
         "--supervise", action="store_true",
         help="spawn the supervised command (after `--`) and respawn on failure",
     )
@@ -569,6 +598,7 @@ def main(argv: list[str] | None = None) -> int:
         backoff_initial=args.backoff_initial,
         backoff_cap=args.backoff_cap,
         supervise=args.supervise,
+        startup_grace_sec=args.startup_grace_sec,
     )
 
     stop_event = threading.Event()
