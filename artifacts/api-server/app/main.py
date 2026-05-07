@@ -6748,6 +6748,38 @@ async def admin_resolve_dead_lettered_order(
             affected = None
     if affected == 0:
         # Concurrent resolver won the race — DO NOT emit success.
+        # CROSS-ACTION ORPHAN GUARD: if WE were claim_filled but a
+        # different action (force_retry / mark_cancelled) won the
+        # resolution UPDATE, the manual fill row we wrote above
+        # before the UPDATE is now an orphan — a row in
+        # ``order_fills`` with no matching ``claim_filled`` resolution.
+        # Left on disk it silently enters PnL as a phantom trade.
+        # Compensate with a scoped DELETE by the deterministic
+        # (order_id, fill_id) key, additionally guarded on
+        # ``source='operator_manual'`` so we can never clobber a
+        # legitimate WS-derived fill that happens to share the key.
+        # Best-effort: failure here only logs (the audit trail of
+        # the winning resolution still records the cross-action
+        # mismatch and the phantom fill can be reconciled by hand)
+        # — but the response stays 409 either way.
+        if action == "claim_filled":
+            try:
+                await db.execute(
+                    """
+                    DELETE FROM order_fills
+                     WHERE order_id = $1
+                       AND fill_id  = $2
+                       AND source   = 'operator_manual'
+                    """,
+                    coid, fill_id,
+                )
+            except Exception as e:
+                log.error(
+                    "claim_filled lost race for %s; orphan manual "
+                    "fill cleanup failed (%s) — manual reconciliation "
+                    "required",
+                    coid, e,
+                )
         raise HTTPException(
             status_code=409,
             detail="resolution lost concurrency race (already resolved)",

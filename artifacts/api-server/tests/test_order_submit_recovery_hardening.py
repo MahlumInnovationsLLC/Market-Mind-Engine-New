@@ -895,6 +895,138 @@ def test_resolve_claim_filled_skips_rollup_when_update_loses_race(
     # CRITICAL: rollup must NOT have run — that's the corruption
     # vector this test guards against.
     assert resolve_db["rollup_calls"] == []
+    # Cross-action orphan guard: the manual fill we wrote before
+    # the UPDATE must be DELETE'd on the lost-race branch so it
+    # can't enter PnL as a phantom trade. Scoped to the
+    # deterministic key + source='operator_manual'.
+    # (The test wrapper records every call AND delegates to the
+    # fixture's recorder, so the DELETE shows up twice — assert
+    # the contents, not the exact count.)
+    deletes = [
+        e for e in resolve_db["executes"]
+        if e[0].startswith("DELETE FROM order_fills")
+    ]
+    assert deletes, resolve_db["executes"]
+    assert "operator_manual" in deletes[0][0]
+    assert deletes[0][1] == ("coid-1", "manual:coid-1")
+
+
+def _install_cross_action_winner(monkeypatch, resolve_db, winner_action):
+    """Patch ``db.execute`` so the resolution UPDATE behaves as if a
+    different operator already won the race with ``winner_action`` —
+    i.e. the row is now resolved with that action and our UPDATE
+    matches zero rows.
+    """
+    from app import main as _m
+
+    real_execute = _m.db.execute
+
+    async def _race_execute(sql, *args):
+        sql_compact = " ".join(sql.split())
+        resolve_db["executes"].append((sql_compact, args))
+        if sql_compact.startswith("UPDATE order_recovery_attempts"):
+            row = resolve_db["rows"].get(args[0])
+            if row is not None:
+                # Simulate the winner having already flipped the row.
+                row["resolved_at"] = "now"
+                row["resolution_action"] = winner_action
+                row["resolver_email"] = "other-op@axiom-predict.com"
+            return "UPDATE 0"
+        return await real_execute(sql, *args)
+
+    monkeypatch.setattr(_m.db, "execute", _race_execute)
+
+
+@pytest.mark.parametrize("winner_action", ["force_retry", "mark_cancelled"])
+def test_resolve_claim_filled_cleans_up_orphan_fill_on_cross_action_race(
+    monkeypatch, override_admin, resolve_db, winner_action,
+):
+    """Cross-action concurrency: operator A clicks ``claim_filled``
+    at the same instant operator B clicks ``force_retry`` (or
+    ``mark_cancelled``). B wins the resolution UPDATE; A's
+    pre-UPDATE manual-fill INSERT is now an orphan and would silently
+    enter PnL as a phantom trade.
+
+    The endpoint must compensate by DELETE'ing the orphan fill row
+    by the deterministic ``(order_id, fill_id)`` key with a
+    ``source='operator_manual'`` guard, then return 409. The winning
+    resolution row stays untouched.
+    """
+    _install_cross_action_winner(monkeypatch, resolve_db, winner_action)
+
+    client = TestClient(app)
+    resp = client.post(
+        "/api/admin/orders/coid-1/resolve",
+        json={
+            "action": "claim_filled",
+            "fill_price_cents": 47,
+            "reason": "racing",
+        },
+    )
+    assert resp.status_code == 409, resp.text
+    # The fill INSERT happened (we got there before the UPDATE race)…
+    assert len(resolve_db["fill_calls"]) == 1
+    assert resolve_db["fill_calls"][0]["fill_id"] == "manual:coid-1"
+    # …and the compensating DELETE fired with the deterministic key
+    # and the source='operator_manual' guard so a legitimate WS fill
+    # sharing the key would never be touched.
+    deletes = [
+        e for e in resolve_db["executes"]
+        if e[0].startswith("DELETE FROM order_fills")
+    ]
+    assert deletes, resolve_db["executes"]
+    assert "operator_manual" in deletes[0][0]
+    assert deletes[0][1] == ("coid-1", "manual:coid-1")
+    # Position rollup MUST NOT run on the loser path — that's the
+    # other half of the phantom-trade vector.
+    assert resolve_db["rollup_calls"] == []
+    # The winner's resolution row stays as the winner left it; the
+    # loser does not overwrite resolution_action / resolver_email.
+    row = resolve_db["rows"]["coid-1"]
+    assert row["resolution_action"] == winner_action
+    assert row["resolver_email"] == "other-op@axiom-predict.com"
+
+
+def test_resolve_claim_filled_orphan_cleanup_failure_still_returns_409(
+    monkeypatch, override_admin, resolve_db,
+):
+    """If the compensating DELETE itself blows up (DB blip during
+    cleanup), the endpoint must still surface 409 to the operator —
+    the orphan row is logged loudly for manual reconciliation, but
+    we never silently report success on a lost race.
+    """
+    from app import main as _m
+
+    real_execute = _m.db.execute
+
+    async def _race_then_boom(sql, *args):
+        sql_compact = " ".join(sql.split())
+        resolve_db["executes"].append((sql_compact, args))
+        if sql_compact.startswith("UPDATE order_recovery_attempts"):
+            return "UPDATE 0"
+        if sql_compact.startswith("DELETE FROM order_fills"):
+            raise RuntimeError("simulated cleanup outage")
+        return await real_execute(sql, *args)
+
+    monkeypatch.setattr(_m.db, "execute", _race_then_boom)
+
+    client = TestClient(app)
+    resp = client.post(
+        "/api/admin/orders/coid-1/resolve",
+        json={
+            "action": "claim_filled",
+            "fill_price_cents": 47,
+            "reason": "racing",
+        },
+    )
+    assert resp.status_code == 409
+    # The DELETE was attempted (and recorded in executes) even
+    # though it raised — the handler logs and continues to 409.
+    assert any(
+        e[0].startswith("DELETE FROM order_fills")
+        for e in resolve_db["executes"]
+    )
+    assert resolve_db["rollup_calls"] == []
 
 
 def test_resolve_claim_filled_500s_when_fill_insert_fails(
