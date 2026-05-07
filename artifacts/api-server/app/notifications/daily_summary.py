@@ -54,8 +54,14 @@ _last_gc_date: str | None = None
 
 # How many days of expired dedupe rows we keep around for forensic
 # debugging before the daily GC sweeps them. Daily-summary markers
-# (`expires_at IS NULL`) are always preserved.
+# (`expires_at IS NULL`) are always preserved. Operator override via
+# `AXIOM_NOTIFICATION_DEDUPE_RETENTION_DAYS` — see
+# `alerts._resolve_dedupe_retention_days`.
 _DEDUPE_GC_RETAIN_DAYS = 7
+
+
+def _dedupe_gc_retention_days() -> int:
+    return alerts._resolve_dedupe_retention_days(_DEDUPE_GC_RETAIN_DAYS)
 
 
 # ---------------------------------------------------------------------------
@@ -410,7 +416,7 @@ async def _run_dedupe_gc(today: str) -> None:
         return
     try:
         result = await alerts.gc_expired_dedupe(
-            older_than_days=_DEDUPE_GC_RETAIN_DAYS
+            older_than_days=_dedupe_gc_retention_days()
         )
     except Exception as e:  # pragma: no cover — gc_expired_dedupe already logs
         log.warning("dedupe gc tick failed: %s", e)

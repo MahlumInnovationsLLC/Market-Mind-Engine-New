@@ -24,6 +24,8 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
+import os
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable, Sequence
@@ -386,6 +388,72 @@ async def list_user_history(
             # so the UI doesn't imply confirmed delivery.
             "attempted": True,
         })
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Day-throttled wrapper around `gc_expired_dedupe` for the orchestrator
+# cycle tail. The cycle ticks every ~120s — without throttling we'd
+# hammer Postgres with a redundant DELETE every cycle.  The module-level
+# stamp survives across `run_cycle` invocations within a single worker
+# process, so the actual DELETE only runs once per `GC_INTERVAL_SECS`.
+#
+# Retention window is configurable via
+# `AXIOM_NOTIFICATION_DEDUPE_RETENTION_DAYS` (default 7 days — long
+# enough for forensic "did we page on this?" lookups, short enough to
+# keep the table small).
+# ---------------------------------------------------------------------------
+
+
+DEFAULT_DEDUPE_RETENTION_DAYS: int = 7
+DEDUPE_GC_INTERVAL_SECS: int = 86400
+
+_LAST_DEDUPE_GC_TS: float = 0.0
+
+
+def _resolve_dedupe_retention_days(default: int = DEFAULT_DEDUPE_RETENTION_DAYS) -> int:
+    raw = os.environ.get("AXIOM_NOTIFICATION_DEDUPE_RETENTION_DAYS")
+    if raw is None or raw == "":
+        return default
+    try:
+        return max(1, int(float(raw)))
+    except (TypeError, ValueError):
+        return default
+
+
+async def maybe_gc_dedupe(
+    *,
+    retention_days: int | None = None,
+    interval_secs: int = DEDUPE_GC_INTERVAL_SECS,
+    now: float | None = None,
+) -> dict[str, Any]:
+    """Day-throttled wrapper around :func:`gc_expired_dedupe`.
+
+    Designed to be called from the orchestrator cycle tail every cycle,
+    but the actual DELETE only fires once per ``interval_secs`` per
+    worker process. In-between calls return immediately with
+    ``{"skipped": True}`` so the cycle never pays for redundant
+    retention sweeps.
+
+    Returns the underlying ``gc_expired_dedupe`` result on the cycle
+    that actually ran, or ``{"skipped": True}`` when short-circuited.
+    The ``now`` kwarg is for tests; production callers can omit it.
+    """
+    global _LAST_DEDUPE_GC_TS
+    current = float(now if now is not None else time.time())
+    if current - _LAST_DEDUPE_GC_TS < float(interval_secs):
+        return {"skipped": True}
+    days = (
+        int(retention_days)
+        if retention_days is not None
+        else _resolve_dedupe_retention_days()
+    )
+    out = await gc_expired_dedupe(older_than_days=days)
+    # Only advance the throttle stamp when the sweep actually succeeded
+    # so a transient DB outage gets retried on the next cycle instead
+    # of being skipped for a full day.
+    if "error" not in out:
+        _LAST_DEDUPE_GC_TS = current
     return out
 
 

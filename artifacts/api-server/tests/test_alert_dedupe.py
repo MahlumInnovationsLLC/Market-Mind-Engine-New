@@ -377,6 +377,81 @@ def test_gc_expired_dedupe_fails_soft(monkeypatch: pytest.MonkeyPatch) -> None:
     assert "error" in out
 
 
+def test_maybe_gc_dedupe_throttles_to_once_per_interval(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The cycle tail calls this every cycle but the DELETE must only
+    actually fire once per ``DEDUPE_GC_INTERVAL_SECS`` (24h) per worker
+    process — proves the throttle gate works so we don't hammer
+    Postgres with redundant retention sweeps every ~120s."""
+    monkeypatch.setattr(_alerts, "_LAST_DEDUPE_GC_TS", 0.0, raising=False)
+    calls: list[int] = []
+
+    async def _fake_gc(*, older_than_days: int) -> dict[str, Any]:
+        calls.append(older_than_days)
+        return {"deleted": 4, "remaining": 11}
+
+    monkeypatch.setattr(_alerts, "gc_expired_dedupe", _fake_gc)
+    # First call: throttle gate is open (last==0), GC actually runs.
+    out = asyncio.run(_alerts.maybe_gc_dedupe(now=1_000_000.0))
+    assert out == {"deleted": 4, "remaining": 11}
+    assert calls == [7]
+    # Second call 1h later: still inside the 24h window → short-circuit.
+    out = asyncio.run(_alerts.maybe_gc_dedupe(now=1_000_000.0 + 3600))
+    assert out == {"skipped": True}
+    assert calls == [7]
+    # Third call after the interval elapses → runs again.
+    out = asyncio.run(_alerts.maybe_gc_dedupe(now=1_000_000.0 + 86401))
+    assert out == {"deleted": 4, "remaining": 11}
+    assert calls == [7, 7]
+
+
+def test_maybe_gc_dedupe_honors_env_retention(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`AXIOM_NOTIFICATION_DEDUPE_RETENTION_DAYS` overrides the default
+    7-day retention window."""
+    monkeypatch.setattr(_alerts, "_LAST_DEDUPE_GC_TS", 0.0, raising=False)
+    monkeypatch.setenv("AXIOM_NOTIFICATION_DEDUPE_RETENTION_DAYS", "30")
+    seen: list[int] = []
+
+    async def _fake_gc(*, older_than_days: int) -> dict[str, Any]:
+        seen.append(older_than_days)
+        return {"deleted": 0, "remaining": 0}
+
+    monkeypatch.setattr(_alerts, "gc_expired_dedupe", _fake_gc)
+    asyncio.run(_alerts.maybe_gc_dedupe(now=1_000_000.0))
+    assert seen == [30]
+
+
+def test_maybe_gc_dedupe_does_not_advance_stamp_on_db_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When the underlying GC reports an error the throttle stamp must
+    NOT advance, so the next cycle retries instead of waiting a full
+    day."""
+    monkeypatch.setattr(_alerts, "_LAST_DEDUPE_GC_TS", 0.0, raising=False)
+
+    async def _fake_gc(*, older_than_days: int) -> dict[str, Any]:
+        return {"deleted": 0, "remaining": 0, "error": "db gone"}
+
+    monkeypatch.setattr(_alerts, "gc_expired_dedupe", _fake_gc)
+    out = asyncio.run(_alerts.maybe_gc_dedupe(now=1_000_000.0))
+    assert "error" in out
+    assert _alerts._LAST_DEDUPE_GC_TS == 0.0
+    # Next call still attempts the sweep rather than short-circuiting.
+    calls: list[int] = []
+
+    async def _fake_gc_ok(*, older_than_days: int) -> dict[str, Any]:
+        calls.append(older_than_days)
+        return {"deleted": 1, "remaining": 5}
+
+    monkeypatch.setattr(_alerts, "gc_expired_dedupe", _fake_gc_ok)
+    out = asyncio.run(_alerts.maybe_gc_dedupe(now=1_000_000.0 + 60))
+    assert out == {"deleted": 1, "remaining": 5}
+    assert calls == [7]
+
+
 def test_dedupe_fails_open_on_db_error(monkeypatch: pytest.MonkeyPatch) -> None:
     async def boom(*_a: Any, **_kw: Any) -> Any:
         raise RuntimeError("db gone")

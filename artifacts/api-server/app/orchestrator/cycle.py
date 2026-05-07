@@ -1384,6 +1384,23 @@ async def run_cycle(vertical: str = "sports") -> CycleResult:
                 "stale_cancel baseline/anomaly path crashed (cycle continues): %s",
                 e,
             )
+        # Notification dedupe retention: prune `notification_dedupe`
+        # rows whose TTL expired more than the configured retention
+        # window ago (default 7 days, override via
+        # AXIOM_NOTIFICATION_DEDUPE_RETENTION_DAYS). Day-throttled per
+        # worker process so the DELETE only actually executes once
+        # per 24h regardless of cycle cadence. Wired here (rather than
+        # via a separate scheduler) so retention is automatically
+        # active as soon as the cycle is — daily_summary ALSO runs the
+        # GC on its own scheduler, but operators can disable that and
+        # we still want bounded growth.
+        try:
+            from ..notifications import alerts as _alerts_gc
+            await _alerts_gc.maybe_gc_dedupe()
+        except Exception as e:  # pragma: no cover — defensive
+            log.warning(
+                "notification_dedupe gc crashed (cycle continues): %s", e,
+            )
     except Exception as e:  # pragma: no cover — defensive: sweep must never block the cycle
         log.warning("stale resting sweep crashed (cycle continues): %s", e)
 
