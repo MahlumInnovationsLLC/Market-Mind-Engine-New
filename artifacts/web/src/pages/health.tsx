@@ -427,6 +427,8 @@ export function HealthPanel() {
 
         <CryptoAccuracyPanel token={token} />
 
+        <SurrogateBacktestPanel token={token} />
+
 
         <section className="space-y-3">
           <div className="flex items-baseline justify-between gap-3 flex-wrap">
@@ -2052,6 +2054,239 @@ export function CryptoAccuracyPanel({
           );
         })}
       </div>
+    </section>
+  );
+}
+
+type SurrogateBacktestLeague = {
+  league: string;
+  sample_count: number;
+  calibrator_applied_count: number;
+  surrogate_coverage_pct: number | null;
+  calibrator_type: string | null;
+  delta_vs_v1: number | null;
+  brier_v1_raw: number | null;
+  brier_calibrated: number | null;
+  verdict: string | null;
+};
+
+type SurrogateBacktestResponse = {
+  available: boolean;
+  reason: string | null;
+  report_path: string | null;
+  report_filename: string | null;
+  // Auth-gated server route operators can hit to download the raw
+  // JSON in one click. Older builds may omit the field — the panel
+  // falls back to the on-disk path string in that case.
+  report_url?: string | null;
+  generated_at: string | null;
+  started_at?: string | null;
+  completed_at?: string | null;
+  row_input_count: number | null;
+  row_kept_count: number | null;
+  leagues: SurrogateBacktestLeague[];
+  summary: Record<string, unknown> | null;
+  degraded_baseline: boolean;
+  disclaimer: string;
+};
+
+function fmtBrierDelta(v: number | null): string {
+  if (v === null || v === undefined || Number.isNaN(v)) return "—";
+  // Show explicit sign so "+0.05" reads as a regression and "-0.05"
+  // as an improvement at a glance.
+  const sign = v > 0 ? "+" : v < 0 ? "−" : "";
+  return `${sign}${Math.abs(v).toFixed(4)}`;
+}
+
+function fmtCoverage(v: number | null): string {
+  if (v === null || v === undefined || Number.isNaN(v)) return "—";
+  return `${v.toFixed(1)}%`;
+}
+
+function deltaToneClass(v: number | null): string {
+  if (v === null || v === undefined || Number.isNaN(v)) {
+    return "text-muted-foreground";
+  }
+  if (v < 0) return "text-success";
+  if (v > 0) return "text-destructive";
+  return "text-foreground";
+}
+
+export function SurrogateBacktestPanel({
+  token,
+}: {
+  token: () => Promise<string | null>;
+}) {
+  const [data, setData] = useState<SurrogateBacktestResponse | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    async function load() {
+      try {
+        const res = await apiFetch<SurrogateBacktestResponse>(
+          "/api/health/surrogate-backtest",
+          { getToken: token },
+        );
+        if (cancelled) return;
+        setData(res);
+        setError(null);
+      } catch (e: unknown) {
+        if (cancelled) return;
+        setError(
+          formatErrorMessage(
+            e,
+            e instanceof ApiError ? `HTTP ${e.status} :: ${e.message}` : undefined,
+          ),
+        );
+      }
+    }
+    load();
+    // The backtest report only changes when an operator runs the
+    // script offline — refresh every 5 minutes so we pick up new
+    // runs without hammering disk on every snapshot tick.
+    const id = setInterval(load, 5 * 60_000);
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+    };
+  }, [token]);
+
+  const leagues = data?.leagues ?? [];
+
+  return (
+    <section className="space-y-3" data-testid="panel-surrogate-backtest">
+      <div className="flex items-baseline justify-between gap-3 flex-wrap">
+        <h2 className="text-sm uppercase tracking-widest text-muted-foreground">
+          Surrogate vs V1 Brier (per-league)
+        </h2>
+        <span className="text-[10px] uppercase tracking-widest text-muted-foreground/70">
+          source ::{" "}
+          {data?.report_filename ?? "scripts/reports/v1_backtest_sample_surrogate_*.json"}
+          {data?.generated_at ? ` · generated ${data.generated_at}` : ""}
+        </span>
+      </div>
+      <div
+        className="border border-warning/40 bg-warning/5 text-warning text-[11px] p-2"
+        data-testid="surrogate-backtest-disclaimer"
+      >
+        <span className="font-bold uppercase tracking-widest mr-1">
+          DEGRADED baseline:
+        </span>
+        {data?.disclaimer ??
+          "surrogate features stand in for real V1 feature dumps until #731 lands."}
+      </div>
+      {error && (
+        <div className="border border-destructive bg-destructive/10 text-destructive p-2 text-xs">
+          {error}
+        </div>
+      )}
+      {!error && data && !data.available && (
+        <div
+          className="border border-border bg-card p-3 text-xs text-muted-foreground"
+          data-testid="surrogate-backtest-empty"
+        >
+          {data.reason ?? "no surrogate backtest report on disk"}
+        </div>
+      )}
+      {data && data.available && leagues.length > 0 && (
+        <div className="border border-border bg-card overflow-x-auto text-xs">
+          <table className="w-full">
+            <thead className="text-[10px] uppercase tracking-widest text-muted-foreground">
+              <tr className="border-b border-border">
+                <th className="text-left p-2">league</th>
+                <th className="text-right p-2">delta vs v1 (brier)</th>
+                <th className="text-right p-2">brier (v1 raw → calibrated)</th>
+                <th className="text-right p-2">samples</th>
+                <th className="text-right p-2">surrogate coverage</th>
+                <th className="text-left p-2">calibrator</th>
+                <th className="text-left p-2">verdict</th>
+              </tr>
+            </thead>
+            <tbody>
+              {leagues.map((row) => (
+                <tr
+                  key={row.league}
+                  className="border-b border-border/40"
+                  data-testid={`surrogate-backtest-row-${row.league}`}
+                >
+                  <td className="p-2 font-bold">{row.league}</td>
+                  <td
+                    className={`p-2 text-right tabular-nums ${deltaToneClass(row.delta_vs_v1)}`}
+                    data-testid={`surrogate-backtest-delta-${row.league}`}
+                  >
+                    {fmtBrierDelta(row.delta_vs_v1)}
+                  </td>
+                  <td className="p-2 text-right tabular-nums text-muted-foreground">
+                    {row.brier_v1_raw !== null
+                      ? row.brier_v1_raw.toFixed(4)
+                      : "—"}{" "}
+                    →{" "}
+                    {row.brier_calibrated !== null
+                      ? row.brier_calibrated.toFixed(4)
+                      : "—"}
+                  </td>
+                  <td
+                    className="p-2 text-right tabular-nums"
+                    data-testid={`surrogate-backtest-samples-${row.league}`}
+                  >
+                    {row.sample_count}
+                  </td>
+                  <td
+                    className="p-2 text-right tabular-nums"
+                    data-testid={`surrogate-backtest-coverage-${row.league}`}
+                  >
+                    {fmtCoverage(row.surrogate_coverage_pct)}
+                  </td>
+                  <td className="p-2 text-muted-foreground">
+                    {row.calibrator_type ?? "—"}
+                  </td>
+                  <td className="p-2 text-muted-foreground uppercase tracking-widest text-[10px]">
+                    {row.verdict ?? "—"}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+      {data && data.available && (data.report_url || data.report_path) && (
+        <div className="text-[10px] text-muted-foreground/70 uppercase tracking-widest">
+          full report ::{" "}
+          {data.report_url ? (
+            <a
+              href={data.report_url}
+              target="_blank"
+              rel="noreferrer"
+              className="text-foreground underline normal-case tracking-normal break-all hover:text-primary"
+              data-testid="surrogate-backtest-report-link"
+              title={data.report_path ?? undefined}
+            >
+              {data.report_filename ?? data.report_url}
+            </a>
+          ) : (
+            <code
+              className="normal-case tracking-normal break-all"
+              data-testid="surrogate-backtest-report-path"
+            >
+              {data.report_path}
+            </code>
+          )}
+          {data.report_url && data.report_path && (
+            <span
+              className="ml-2 normal-case tracking-normal text-muted-foreground/60"
+              data-testid="surrogate-backtest-report-path-hint"
+            >
+              ({data.report_path})
+            </span>
+          )}
+          {data.row_kept_count !== null && data.row_input_count !== null && (
+            <span className="ml-2 normal-case tracking-normal">
+              · {data.row_kept_count}/{data.row_input_count} rows kept
+            </span>
+          )}
+        </div>
+      )}
     </section>
   );
 }

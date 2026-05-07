@@ -39,6 +39,10 @@ PROTECTED_ROUTES: tuple[str, ...] = (
     "/api/health/snapshot",
     "/api/health/errors",
     "/api/health/model-alerts",
+    # Task #739 — per-league surrogate-vs-V1 Brier deltas surfaced on
+    # the operator dashboard, plus the underlying-JSON download.
+    "/api/health/surrogate-backtest",
+    "/api/health/surrogate-backtest/report.json",
     "/api/dashboard/overview",
     "/api/dashboard/recent-trades",
     "/api/dashboard/swarm-personas",

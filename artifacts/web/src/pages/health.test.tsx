@@ -42,6 +42,7 @@ import {
   CryptoAccuracyPanel,
   CryptoFreshnessWidget,
   CryptoOutcomeBadge,
+  SurrogateBacktestPanel,
 } from "./health";
 
 afterEach(() => cleanup());
@@ -1390,5 +1391,160 @@ describe("CryptoAccuracyPanel", () => {
     // window cards.
     expect(screen.getByTestId("panel-crypto-accuracy")).toBeTruthy();
     expect(screen.queryByTestId("crypto-accuracy-window-24h")).toBeNull();
+  });
+});
+
+describe("SurrogateBacktestPanel", () => {
+  beforeEach(() => {
+    apiFetchMock.mockReset();
+  });
+
+  it("renders the per-league delta table with degraded-baseline disclaimer", async () => {
+    apiFetchMock.mockResolvedValueOnce({
+      available: true,
+      reason: null,
+      report_path: "/repo/scripts/reports/v1_backtest_sample_surrogate_8k_2026-04-29.json",
+      report_filename: "v1_backtest_sample_surrogate_8k_2026-04-29.json",
+      report_url: "/api/health/surrogate-backtest/report.json",
+      generated_at: "2026-04-29T20:26:24+00:00",
+      row_input_count: 8000,
+      row_kept_count: 757,
+      degraded_baseline: true,
+      disclaimer:
+        "DEGRADED baseline — surrogate features stand in for real V1 feature dumps until #731 lands.",
+      summary: { league_count: 4 },
+      leagues: [
+        {
+          league: "MLB",
+          sample_count: 41,
+          calibrator_applied_count: 41,
+          surrogate_coverage_pct: 100.0,
+          calibrator_type: "isotonic",
+          delta_vs_v1: -0.1897,
+          brier_v1_raw: 0.21,
+          brier_calibrated: 0.02,
+          verdict: "improved",
+        },
+        {
+          league: "NBA",
+          sample_count: 367,
+          calibrator_applied_count: 360,
+          surrogate_coverage_pct: 98.09,
+          calibrator_type: "isotonic",
+          delta_vs_v1: -0.0964,
+          brier_v1_raw: 0.36,
+          brier_calibrated: 0.27,
+          verdict: "improved",
+        },
+        {
+          league: "NCAAB",
+          sample_count: 31,
+          calibrator_applied_count: 31,
+          surrogate_coverage_pct: 100.0,
+          calibrator_type: "platt",
+          delta_vs_v1: 0.05,
+          brier_v1_raw: 0.40,
+          brier_calibrated: 0.45,
+          verdict: "regressed",
+        },
+      ],
+    });
+
+    render(<SurrogateBacktestPanel token={vi.fn(async () => null)} />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("surrogate-backtest-row-MLB")).toBeTruthy();
+    });
+
+    // Disclaimer banner is always present so an operator scanning the
+    // page can't mistake the table for a green V1-parity sign-off.
+    const disclaimer = screen.getByTestId("surrogate-backtest-disclaimer");
+    expect(disclaimer.textContent).toMatch(/DEGRADED/);
+    expect(disclaimer.textContent).toMatch(/#731/);
+
+    // Delta cells render with explicit signs so improvement vs.
+    // regression is unambiguous at a glance.
+    expect(
+      screen.getByTestId("surrogate-backtest-delta-MLB").textContent,
+    ).toMatch(/−0\.1897/);
+    expect(
+      screen.getByTestId("surrogate-backtest-delta-NCAAB").textContent,
+    ).toMatch(/\+0\.0500/);
+
+    // Sample counts and surrogate coverage% are surfaced verbatim.
+    expect(
+      screen.getByTestId("surrogate-backtest-samples-NBA").textContent,
+    ).toBe("367");
+    expect(
+      screen.getByTestId("surrogate-backtest-coverage-NBA").textContent,
+    ).toBe("98.1%");
+
+    // Freshness + report-path link give operators a single click to
+    // pull the underlying JSON for triage.
+    const link = screen.getByTestId("surrogate-backtest-report-link");
+    expect(link.tagName.toLowerCase()).toBe("a");
+    expect(link.getAttribute("href")).toBe(
+      "/api/health/surrogate-backtest/report.json",
+    );
+    expect(link.getAttribute("target")).toBe("_blank");
+    expect(link.textContent).toBe(
+      "v1_backtest_sample_surrogate_8k_2026-04-29.json",
+    );
+    // The on-disk path stays visible alongside the link so operators
+    // can still copy it for in-shell triage.
+    expect(
+      screen.getByTestId("surrogate-backtest-report-path-hint").textContent,
+    ).toMatch(
+      /\/repo\/scripts\/reports\/v1_backtest_sample_surrogate_8k_2026-04-29\.json/,
+    );
+
+    // The endpoint we hit is the dedicated surrogate-backtest one.
+    expect(apiFetchMock.mock.calls[0]?.[0]).toBe(
+      "/api/health/surrogate-backtest",
+    );
+  });
+
+  it("renders the disclaimer and a placeholder when no report is on disk", async () => {
+    apiFetchMock.mockResolvedValueOnce({
+      available: false,
+      reason: "no surrogate backtest report on disk",
+      report_path: null,
+      report_filename: null,
+      generated_at: null,
+      row_input_count: null,
+      row_kept_count: null,
+      degraded_baseline: true,
+      disclaimer:
+        "DEGRADED baseline — surrogate features stand in for real V1 feature dumps until #731 lands.",
+      summary: null,
+      leagues: [],
+    });
+
+    render(<SurrogateBacktestPanel token={vi.fn(async () => null)} />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("surrogate-backtest-empty")).toBeTruthy();
+    });
+    // Disclaimer must still render even with no report — operators
+    // need the warning context regardless of whether numbers are
+    // available.
+    expect(screen.getByTestId("surrogate-backtest-disclaimer")).toBeTruthy();
+    expect(
+      screen.getByTestId("surrogate-backtest-empty").textContent,
+    ).toMatch(/no surrogate backtest report/);
+  });
+
+  it("surfaces a fetch error without blanking the panel chrome", async () => {
+    apiFetchMock.mockRejectedValueOnce(new Error("network down"));
+
+    render(<SurrogateBacktestPanel token={vi.fn(async () => null)} />);
+
+    await waitFor(() => {
+      expect(screen.getByText(/network down/)).toBeTruthy();
+    });
+    // Panel + disclaimer chrome remain visible so the operator still
+    // sees the section is alive.
+    expect(screen.getByTestId("panel-surrogate-backtest")).toBeTruthy();
+    expect(screen.getByTestId("surrogate-backtest-disclaimer")).toBeTruthy();
   });
 });

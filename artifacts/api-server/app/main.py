@@ -18,6 +18,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Literal
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response, WebSocket, WebSocketDisconnect
+from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
@@ -38,6 +39,7 @@ from . import (
     ready_gate,
     runtime_settings as runtime_settings_mod,
     storage,
+    surrogate_report,
 )
 from .notifications import (
     alerts as notif_alerts,
@@ -4713,6 +4715,55 @@ async def health_errors(
         ),
         "errors_24h": health.errors_in_last_24h(),
     }
+
+
+@app.get("/api/health/surrogate-backtest")
+async def health_surrogate_backtest(
+    _: object = Depends(require_approved_user),
+) -> dict[str, object]:
+    """Per-league surrogate-vs-V1 Brier deltas from the most recent
+    ``scripts/backtest_v1_archive.py --surrogate-features`` run.
+
+    The numbers are explicitly tagged ``degraded_baseline=True`` until
+    task #731 (real V1 feature dumps) lands — the disclaimer field
+    spells out *why* the comparison is not V1 parity so the dashboard
+    can render the warning without re-deriving it.
+
+    Operators can pull the underlying JSON via
+    ``/api/health/surrogate-backtest/report.json`` for full triage
+    detail; the dashboard panel renders that path as a clickable link.
+    """
+    payload = surrogate_report.load_latest()
+    # Stable, auth-gated URL the dashboard links to so operators can
+    # download the raw JSON in one click instead of hunting through
+    # ``scripts/reports/``.
+    payload["report_url"] = (
+        "/api/health/surrogate-backtest/report.json"
+        if payload.get("available")
+        else None
+    )
+    return payload
+
+
+@app.get("/api/health/surrogate-backtest/report.json")
+async def health_surrogate_backtest_report_json(
+    _: object = Depends(require_approved_user),
+) -> Response:
+    """Stream the most recent surrogate backtest JSON report straight
+    from disk. Auth-gated identically to the structured endpoint so
+    only approved operators can pull it.
+    """
+    path = surrogate_report.latest_report_path()
+    if path is None:
+        raise HTTPException(
+            status_code=404,
+            detail="no surrogate backtest report on disk",
+        )
+    return FileResponse(
+        path=str(path),
+        media_type="application/json",
+        filename=path.name,
+    )
 
 
 @app.get("/api/health/model-alerts")
