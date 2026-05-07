@@ -44,11 +44,13 @@ log = logging.getLogger("axiom.kalshi.reconciler")
 
 
 def _interval_seconds() -> float:
+    # Default raised from 60s → 180s to cut Supabase disk-IO; reconciler
+    # only needs to catch drift, not run live. Env override still wins.
     raw = os.environ.get("AXIOM_RECONCILER_INTERVAL_SECS")
     try:
-        v = float(raw) if raw is not None else 60.0
+        v = float(raw) if raw is not None else 180.0
     except (TypeError, ValueError):
-        v = 60.0
+        v = 180.0
     return max(10.0, v)
 
 

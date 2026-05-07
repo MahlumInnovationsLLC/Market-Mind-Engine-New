@@ -402,7 +402,7 @@ def get_settings() -> Settings:
             os.environ.get("AXIOM_ORCHESTRATOR_ENABLED"), default=True
         ),
         cycle_interval_seconds=max(
-            10, int(os.environ.get("AXIOM_CYCLE_INTERVAL_SECONDS") or "120")
+            10, int(os.environ.get("AXIOM_CYCLE_INTERVAL_SECONDS") or "300")
         ),
         max_fresh_debates_per_cycle=max(
             0, int(os.environ.get("AXIOM_MAX_FRESH_DEBATES_PER_CYCLE") or "1")
@@ -412,7 +412,7 @@ def get_settings() -> Settings:
             os.environ.get("AXIOM_SETTLEMENT_ENABLED"), default=True
         ),
         settlement_interval_seconds=max(
-            10, int(os.environ.get("AXIOM_SETTLEMENT_INTERVAL_SECONDS") or "60")
+            10, int(os.environ.get("AXIOM_SETTLEMENT_INTERVAL_SECONDS") or "180")
         ),
         slippage_guard_max_edge_pct=max(
             0.0, float(os.environ.get("AXIOM_SLIPPAGE_GUARD_MAX_EDGE_PCT") or "50")
@@ -443,7 +443,7 @@ def get_settings() -> Settings:
             1, int(os.environ.get("AXIOM_LLM_FALLBACK_ALERT_MIN_SAMPLES") or "8")
         ),
         llm_fallback_alert_interval_seconds=max(
-            10, int(os.environ.get("AXIOM_LLM_FALLBACK_ALERT_INTERVAL_SECONDS") or "120")
+            10, int(os.environ.get("AXIOM_LLM_FALLBACK_ALERT_INTERVAL_SECONDS") or "300")
         ),
         operator_user_id=(
             (os.environ.get("AXIOM_OPERATOR_USER_ID") or "").strip() or None

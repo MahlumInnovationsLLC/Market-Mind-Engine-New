@@ -37,7 +37,7 @@ log = logging.getLogger("axiom.kalshi.tick_cache_refresh")
 # trader is likely to revisit warm, which is overwhelmingly the
 # last day's worth of Kalshi trades.  All knobs are operator-tunable
 # via env vars; see :func:`state` for the resolved view.
-DEFAULT_INTERVAL_SECONDS = 5 * 60        # 5-minute sweep
+DEFAULT_INTERVAL_SECONDS = 15 * 60       # 15-minute sweep (raised from 5m to cut Supabase disk-IO)
 DEFAULT_LOOKBACK_HOURS = 24              # markets traded in the last 24h
 DEFAULT_WINDOW_HOURS = 4                 # cache the last 4h of bars per market
 DEFAULT_PERIOD_INTERVAL = 1              # 1-minute bars (most useful resolution)
