@@ -623,6 +623,303 @@ def test_diff_positions_self_heals_open_rows_when_flag_on(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# queue_health() + drift-queue-backlog health card thresholds (task #716)
+# ---------------------------------------------------------------------------
+
+
+def _install_queue_health(monkeypatch, *, open_count, oldest_age, snoozed):
+    """Stub ``reconciler.queue_health`` with a fixed snapshot."""
+    from app.kalshi import reconciler
+
+    async def _qh():
+        return {
+            "open_count": open_count,
+            "oldest_open_age_seconds": oldest_age,
+            "snoozed_count": snoozed,
+        }
+
+    monkeypatch.setattr(reconciler, "queue_health", _qh)
+
+
+def _stub_alert_capture(monkeypatch):
+    """Replace ``raise_drift_queue_backlog_alert`` with a capturing stub
+    so the threshold tests never hit the real DB / email path."""
+    from app.notifications import alerts as _alerts
+
+    raised: list[dict] = []
+
+    async def _capture(**kw):
+        raised.append(kw)
+        return True
+
+    monkeypatch.setattr(
+        _alerts, "raise_drift_queue_backlog_alert", _capture
+    )
+    return raised
+
+
+def test_drift_queue_card_ok_under_thresholds(monkeypatch):
+    """20 open, 24h oldest, 5 snoozed — exactly AT both edges, so the
+    card stays ``ok`` and no alert is raised."""
+    from app import health
+    _install_queue_health(
+        monkeypatch, open_count=20, oldest_age=24 * 3600, snoozed=5,
+    )
+    raised = _stub_alert_capture(monkeypatch)
+
+    card = _run(health._probe_drift_resolution_queue())
+
+    assert card["key"] == "drift_resolution_queue"
+    assert card["label"] == "Drift resolution queue"
+    assert card["status"] == "ok"
+    assert card["extras"]["open_count"] == 20
+    assert card["extras"]["snoozed_count"] == 5
+    assert raised == [], "no alert at the OK boundary"
+
+
+def test_drift_queue_card_degraded_on_open_count(monkeypatch):
+    """21 open trips the degraded threshold (open_count > 20)."""
+    from app import health
+    _install_queue_health(
+        monkeypatch, open_count=21, oldest_age=0, snoozed=2,
+    )
+    raised = _stub_alert_capture(monkeypatch)
+
+    card = _run(health._probe_drift_resolution_queue())
+
+    assert card["status"] == "degraded"
+    assert len(raised) == 1
+    assert raised[0]["severity"] == "degraded"
+    assert raised[0]["open_count"] == 21
+    assert raised[0]["snoozed_count"] == 2
+
+
+def test_drift_queue_card_degraded_on_oldest_age(monkeypatch):
+    """A single drift open for >24h trips degraded even if the queue
+    is small."""
+    from app import health
+    _install_queue_health(
+        monkeypatch, open_count=3, oldest_age=24 * 3600 + 60, snoozed=0,
+    )
+    raised = _stub_alert_capture(monkeypatch)
+
+    card = _run(health._probe_drift_resolution_queue())
+
+    assert card["status"] == "degraded"
+    assert len(raised) == 1
+    assert raised[0]["severity"] == "degraded"
+
+
+def test_drift_queue_card_down_on_open_count(monkeypatch):
+    """51 open trips the down threshold (open_count > 50)."""
+    from app import health
+    _install_queue_health(
+        monkeypatch, open_count=51, oldest_age=0, snoozed=0,
+    )
+    raised = _stub_alert_capture(monkeypatch)
+
+    card = _run(health._probe_drift_resolution_queue())
+
+    assert card["status"] == "down"
+    assert len(raised) == 1
+    assert raised[0]["severity"] == "down"
+    assert raised[0]["open_count"] == 51
+
+
+def test_drift_queue_card_down_on_oldest_age(monkeypatch):
+    """A single drift open for >72h trips down regardless of queue size."""
+    from app import health
+    _install_queue_health(
+        monkeypatch, open_count=2, oldest_age=72 * 3600 + 60, snoozed=0,
+    )
+    raised = _stub_alert_capture(monkeypatch)
+
+    card = _run(health._probe_drift_resolution_queue())
+
+    assert card["status"] == "down"
+    assert len(raised) == 1
+    assert raised[0]["severity"] == "down"
+
+
+# ---------------------------------------------------------------------------
+# queue_health() SQL helper
+# ---------------------------------------------------------------------------
+
+
+def test_queue_health_returns_zero_dict_on_db_error(monkeypatch):
+    from app.kalshi import reconciler
+    from app import db as app_db
+
+    async def _boom(*a, **k):
+        raise RuntimeError("conn lost")
+
+    monkeypatch.setattr(app_db, "fetchrow", _boom)
+    snap = _run(reconciler.queue_health())
+    assert snap == {
+        "open_count": 0,
+        "oldest_open_age_seconds": 0,
+        "snoozed_count": 0,
+    }
+
+
+def test_queue_health_normalises_row(monkeypatch):
+    from app.kalshi import reconciler
+    db = _install_db(monkeypatch)
+    db.fetchrow_responses.append({
+        "open_count": 7,
+        "snoozed_count": 3,
+        "oldest_open_age_seconds": 90_061,
+    })
+    snap = _run(reconciler.queue_health())
+    assert snap == {
+        "open_count": 7,
+        "oldest_open_age_seconds": 90_061,
+        "snoozed_count": 3,
+    }
+
+
+# ---------------------------------------------------------------------------
+# raise_drift_queue_backlog_alert — severity mapping + persisted threshold
+# ---------------------------------------------------------------------------
+
+
+def _stub_alerts_pipeline(monkeypatch):
+    """Bypass dedupe + email so we can assert the persisted INSERT."""
+    from app.notifications import alerts as _alerts
+
+    async def _claim(*a, **k):
+        return True
+    monkeypatch.setattr(_alerts, "dedupe_or_skip", _claim)
+    sent: list[dict] = []
+    def _drift_email(**kw):
+        sent.append(kw)
+        return {}
+    monkeypatch.setattr(_alerts, "drift", _drift_email)
+    return sent
+
+
+def test_raise_drift_queue_backlog_degraded_persists_warn_and_count(monkeypatch):
+    """A `degraded` card status normalises to severity=`warn` and the
+    persisted threshold reflects the count threshold (20), not 50."""
+    from app.notifications import alerts as _alerts
+    db = _install_db(monkeypatch)
+    sent = _stub_alerts_pipeline(monkeypatch)
+
+    raised = _run(_alerts.raise_drift_queue_backlog_alert(
+        severity="degraded",
+        open_count=25,
+        oldest_open_age_seconds=0,
+        snoozed_count=2,
+    ))
+
+    assert raised is True
+    inserts = [(q, a) for q, a in db.executes if "model_health_alerts" in q]
+    assert len(inserts) == 1
+    args = inserts[0][1]
+    # (severity, metric_name, metric_value, threshold, message)
+    assert args[0] == "warn"
+    assert args[1] == "open_count"
+    assert args[2] == 25.0
+    assert args[3] == 20.0
+    # Email dispatch sees the same threshold pair.
+    assert sent and sent[0]["threshold"] == 20.0
+    assert sent[0]["value"] == 25.0
+
+
+def test_raise_drift_queue_backlog_down_persists_high_and_count(monkeypatch):
+    """A `down` card status normalises to severity=`high` with the
+    50-row threshold attached."""
+    from app.notifications import alerts as _alerts
+    db = _install_db(monkeypatch)
+    _stub_alerts_pipeline(monkeypatch)
+
+    raised = _run(_alerts.raise_drift_queue_backlog_alert(
+        severity="down",
+        open_count=60,
+        oldest_open_age_seconds=0,
+        snoozed_count=0,
+    ))
+
+    assert raised is True
+    inserts = [(q, a) for q, a in db.executes if "model_health_alerts" in q]
+    assert len(inserts) == 1
+    args = inserts[0][1]
+    assert args[0] == "high"
+    assert args[1] == "open_count"
+    assert args[2] == 60.0
+    assert args[3] == 50.0
+
+
+def test_raise_drift_queue_backlog_age_trigger_persists_age_dimension(
+    monkeypatch,
+):
+    """When only the oldest-open age trips degraded, the persisted
+    metric_name + threshold reflect the AGE dimension, not open_count."""
+    from app.notifications import alerts as _alerts
+    db = _install_db(monkeypatch)
+    _stub_alerts_pipeline(monkeypatch)
+
+    raised = _run(_alerts.raise_drift_queue_backlog_alert(
+        severity="degraded",
+        open_count=2,
+        oldest_open_age_seconds=24 * 3600 + 600,
+        snoozed_count=0,
+    ))
+
+    assert raised is True
+    inserts = [(q, a) for q, a in db.executes if "model_health_alerts" in q]
+    assert len(inserts) == 1
+    args = inserts[0][1]
+    assert args[0] == "warn"
+    assert args[1] == "oldest_open_age_seconds"
+    assert args[2] == float(24 * 3600 + 600)
+    assert args[3] == float(24 * 3600)
+
+
+def test_raise_drift_queue_backlog_age_trigger_down_uses_72h(monkeypatch):
+    """Age-only down trigger persists the 72h threshold, not 24h."""
+    from app.notifications import alerts as _alerts
+    db = _install_db(monkeypatch)
+    _stub_alerts_pipeline(monkeypatch)
+
+    _run(_alerts.raise_drift_queue_backlog_alert(
+        severity="down",
+        open_count=1,
+        oldest_open_age_seconds=72 * 3600 + 60,
+        snoozed_count=0,
+    ))
+    inserts = [(q, a) for q, a in db.executes if "model_health_alerts" in q]
+    args = inserts[0][1]
+    assert args[0] == "high"
+    assert args[1] == "oldest_open_age_seconds"
+    assert args[3] == float(72 * 3600)
+
+
+def test_raise_drift_queue_backlog_dedupe_skips_insert(monkeypatch):
+    """When dedupe says "already claimed", no INSERT and no email."""
+    from app.notifications import alerts as _alerts
+    db = _install_db(monkeypatch)
+
+    async def _no_claim(*a, **k):
+        return False
+    monkeypatch.setattr(_alerts, "dedupe_or_skip", _no_claim)
+    sent: list[dict] = []
+    monkeypatch.setattr(
+        _alerts, "drift", lambda **kw: sent.append(kw) or {}
+    )
+
+    raised = _run(_alerts.raise_drift_queue_backlog_alert(
+        severity="degraded",
+        open_count=25,
+        oldest_open_age_seconds=0,
+        snoozed_count=0,
+    ))
+    assert raised is False
+    assert sent == []
+    assert all("model_health_alerts" not in q for q, _ in db.executes)
+
+
+# ---------------------------------------------------------------------------
 # helpers
 # ---------------------------------------------------------------------------
 

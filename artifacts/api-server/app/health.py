@@ -380,6 +380,67 @@ def _probe_kalshi_reconciler() -> dict:
     )
 
 
+async def _probe_drift_resolution_queue() -> dict:
+    """Surface the operator drift-resolution queue depth + oldest-open age.
+
+    Health gating (task #716):
+      * ``degraded`` when ``open_count > 20`` OR ``oldest_open_age > 24h``.
+      * ``down`` when ``open_count > 50`` OR ``oldest_open_age > 72h``.
+
+    Side effect: when the card is degraded/down, fires (and dedupes
+    hourly) a ``drift_queue_backlog`` ``model_health_alerts`` row plus
+    an ``email_drift`` operator email so the on-call sees the backlog
+    even if nobody is staring at the /system page.
+    """
+    from .kalshi import reconciler as kalshi_reconciler  # avoid import cycle
+    try:
+        snap = await kalshi_reconciler.queue_health()
+    except Exception as e:  # pragma: no cover — defensive
+        return _card(
+            key="drift_resolution_queue",
+            label="Drift resolution queue",
+            category="passive",
+            status="degraded",
+            detail=f"queue_health failed: {type(e).__name__}: {e}"[:240],
+        )
+    open_count = int(snap.get("open_count") or 0)
+    oldest_age = int(snap.get("oldest_open_age_seconds") or 0)
+    snoozed = int(snap.get("snoozed_count") or 0)
+
+    if open_count > 50 or oldest_age > 72 * 3600:
+        status = "down"
+    elif open_count > 20 or oldest_age > 24 * 3600:
+        status = "degraded"
+    else:
+        status = "ok"
+
+    hours = oldest_age / 3600.0
+    detail = (
+        f"open={open_count} oldest_open={hours:.1f}h snoozed={snoozed}"
+    )
+
+    if status in ("degraded", "down"):
+        try:
+            from .notifications import alerts as _alerts
+            await _alerts.raise_drift_queue_backlog_alert(
+                severity=status,
+                open_count=open_count,
+                oldest_open_age_seconds=oldest_age,
+                snoozed_count=snoozed,
+            )
+        except Exception as e:  # pragma: no cover — alerting is best-effort
+            log.warning("drift_queue_backlog raise failed: %s", e)
+
+    return _card(
+        key="drift_resolution_queue",
+        label="Drift resolution queue",
+        category="passive",
+        status=status,
+        detail=detail,
+        extras=snap,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Bankroll-sync silence detector
 #
@@ -2529,6 +2590,11 @@ async def _build_snapshot() -> _Snapshot:
     except Exception as e:  # pragma: no cover — defensive
         log.warning("stale_cancel baselines probe failed: %s", e)
         sc_baseline_cards = []
+    try:
+        drift_queue_card = await _probe_drift_resolution_queue()
+    except Exception as e:  # pragma: no cover — defensive
+        log.warning("drift_resolution_queue probe failed: %s", e)
+        drift_queue_card = None
     passive = [
         _probe_kalshi_ws(),
         _probe_kalshi_cluster(),
@@ -2548,6 +2614,8 @@ async def _build_snapshot() -> _Snapshot:
         _probe_orderbook_guard(),
         *_probe_feeds(),
     ]
+    if drift_queue_card is not None:
+        passive.append(drift_queue_card)
     # Side-effect-only evaluation: the operator console already
     # renders the "stale leaderboard" badge from the feed metadata,
     # so this evaluator emits no card — it just fires / auto-resolves

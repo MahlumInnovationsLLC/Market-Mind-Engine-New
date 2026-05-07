@@ -804,6 +804,56 @@ async def snooze_drift(
     }
 
 
+async def queue_health() -> dict[str, Any]:
+    """Snapshot of the operator drift-resolution queue for health alerting.
+
+    Returns a small dict with the only three numbers an operator needs
+    to gauge whether the queue is keeping pace:
+
+      * ``open_count`` — rows in state ``open`` (actionable backlog).
+      * ``oldest_open_age_seconds`` — wall-clock seconds since the
+        oldest open row's ``first_seen_at`` (0 when nothing is open).
+      * ``snoozed_count`` — rows in state ``snoozed`` (deliberately
+        silenced; surfaced for visibility, not gating).
+
+    Failure-safe: any DB error returns zeroes so the health snapshot
+    stays composable. Task #716.
+    """
+    try:
+        row = await db.fetchrow(
+            """
+            SELECT
+              count(*) FILTER (WHERE state = 'open')::bigint     AS open_count,
+              count(*) FILTER (WHERE state = 'snoozed')::bigint  AS snoozed_count,
+              COALESCE(
+                EXTRACT(EPOCH FROM (
+                  now() - min(first_seen_at) FILTER (WHERE state = 'open')
+                ))::bigint,
+                0
+              ) AS oldest_open_age_seconds
+              FROM position_drift_resolutions
+            """
+        )
+    except Exception as e:
+        log.debug("queue_health query failed: %s", e)
+        return {
+            "open_count": 0,
+            "oldest_open_age_seconds": 0,
+            "snoozed_count": 0,
+        }
+    if row is None:
+        return {
+            "open_count": 0,
+            "oldest_open_age_seconds": 0,
+            "snoozed_count": 0,
+        }
+    return {
+        "open_count": int(row["open_count"] or 0),
+        "oldest_open_age_seconds": int(row["oldest_open_age_seconds"] or 0),
+        "snoozed_count": int(row["snoozed_count"] or 0),
+    }
+
+
 async def _self_heal_resolutions(
     active_drift_tickers: set[str], exchange: str = "kalshi",
 ) -> None:

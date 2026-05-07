@@ -65,6 +65,7 @@ _TAG_TO_USER_PREF: dict[str, str] = {
     "stale-cancel-failure-spike":  "email_halt",
     "tail-risk-gate-trip":         "email_drift",
     "tail-risk-burst":             "email_drift",
+    "drift-queue-backlog":         "email_drift",
 }
 
 
@@ -2369,6 +2370,151 @@ def position_drift_resolved(
     return _dispatch(
         subject, body, tag="position-drift-resolved", dry_run=dry_run
     )
+
+
+# ---------------------------------------------------------------------------
+# Drift-resolution queue backlog (task #716)
+#
+# Fires when the operator drift-resolution queue grows past a "you'll
+# miss something" threshold:
+#   * degraded — open_count > 20  OR oldest_open_age > 24h
+#   * down     — open_count > 50  OR oldest_open_age > 72h
+#
+# Persists a `model_health_alerts` row (alert_type='drift_queue_backlog'),
+# deduped to one fresh insert per hour via `notification_dedupe`, and
+# dispatches an `email_drift` operator email.
+# ---------------------------------------------------------------------------
+
+
+_DRIFT_QUEUE_DEDUPE_TTL_SECONDS = 3600
+
+
+def _drift_queue_backlog_message(
+    *, severity: str, open_count: int, oldest_open_age_seconds: int,
+    snoozed_count: int,
+) -> str:
+    hours = oldest_open_age_seconds / 3600.0 if oldest_open_age_seconds else 0.0
+    return (
+        f"Drift-resolution queue backlog ({severity}): "
+        f"open={open_count} oldest_open_age={hours:.1f}h "
+        f"snoozed={snoozed_count}"
+    )
+
+
+_DRIFT_QUEUE_THRESHOLDS = {
+    # severity -> (open_count_threshold, oldest_age_seconds_threshold)
+    "degraded": (20, 24 * 3600),
+    "down":     (50, 72 * 3600),
+}
+
+
+def _drift_queue_backlog_dimension(
+    *, severity: str, open_count: int, oldest_open_age_seconds: int,
+) -> tuple[str, float, float]:
+    """Pick which dimension tripped the threshold so the persisted
+    ``model_health_alerts`` row's ``metric_name``/``metric_value``/
+    ``threshold`` actually describe the triggering condition.
+
+    Returns ``(metric_name, metric_value, threshold)``.  When BOTH
+    dimensions trip simultaneously, prefers ``open_count`` (the
+    operator-facing queue size is the more actionable signal).
+    """
+    count_thr, age_thr = _DRIFT_QUEUE_THRESHOLDS.get(
+        (severity or "degraded").lower(),
+        _DRIFT_QUEUE_THRESHOLDS["degraded"],
+    )
+    if open_count > count_thr:
+        return ("open_count", float(open_count), float(count_thr))
+    if oldest_open_age_seconds > age_thr:
+        return (
+            "oldest_open_age_seconds",
+            float(oldest_open_age_seconds),
+            float(age_thr),
+        )
+    # Defensive fall-through: caller shouldn't have raised, but don't
+    # mis-label the row — pick the larger relative violator.
+    return ("open_count", float(open_count), float(count_thr))
+
+
+async def raise_drift_queue_backlog_alert(
+    *,
+    severity: str,
+    open_count: int,
+    oldest_open_age_seconds: int,
+    snoozed_count: int,
+) -> bool:
+    """Persist + email a drift-queue-backlog alert (deduped hourly).
+
+    ``severity`` is the card status (``"degraded"`` or ``"down"``) and
+    is normalised to the ``model_health_alerts`` severity vocabulary
+    (``warn`` / ``high``) before persistence.
+
+    Returns True if a fresh alert was raised, False if suppressed by
+    the hourly dedupe window or if the DB write failed.
+    """
+    from .. import db as app_db
+
+    card_status = (severity or "degraded").lower()
+    if card_status == "down":
+        sev = "high"
+    elif card_status == "degraded":
+        sev = "warn"
+    else:
+        sev = card_status  # passthrough for callers already on warn/high
+
+    metric_name, metric_value, threshold = _drift_queue_backlog_dimension(
+        severity=card_status,
+        open_count=open_count,
+        oldest_open_age_seconds=oldest_open_age_seconds,
+    )
+    msg = _drift_queue_backlog_message(
+        severity=sev,
+        open_count=open_count,
+        oldest_open_age_seconds=oldest_open_age_seconds,
+        snoozed_count=snoozed_count,
+    )
+    try:
+        if not await dedupe_or_skip(
+            "drift_queue_backlog",
+            f"sev:{sev}",
+            ttl_seconds=_DRIFT_QUEUE_DEDUPE_TTL_SECONDS,
+        ):
+            return False
+    except Exception as e:  # pragma: no cover — dedupe failure is best-effort
+        log.warning("drift_queue_backlog dedupe claim failed: %s", e)
+        return False
+
+    try:
+        await app_db.execute(
+            """
+            INSERT INTO model_health_alerts
+                (vertical, alert_type, severity, metric_name,
+                 metric_value, threshold, message, acknowledged)
+            VALUES ('trading', 'drift_queue_backlog', $1, $2,
+                    $3, $4, $5, false)
+            ON CONFLICT (id) DO NOTHING
+            """,
+            sev,
+            metric_name,
+            metric_value,
+            threshold,
+            msg,
+        )
+    except Exception as e:
+        log.warning("drift_queue_backlog alert insert failed: %s", e)
+        return False
+
+    try:
+        drift(
+            vertical="trading",
+            metric=f"drift_queue_backlog:{metric_name}",
+            value=metric_value,
+            threshold=threshold,
+            note=msg,
+        )
+    except Exception as e:  # pragma: no cover
+        log.warning("drift_queue_backlog email dispatch failed: %s", e)
+    return True
 
 
 # ---------------------------------------------------------------------------
