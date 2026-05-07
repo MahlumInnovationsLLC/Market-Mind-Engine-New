@@ -1424,12 +1424,18 @@ async def handle_ws_fill(message: dict[str, Any]) -> None:
     # fill without backlog. Mirrors the per-user trade-confirmation
     # treatment immediately below.
     try:
+        # `contracts` is the actual ACCEPTED fill quantity for THIS WS
+        # event, not `rec.request.count` (the total requested order
+        # size). On a partial fill of a 100-contract order this used to
+        # over-report as "100x" in the operator firehose, misleading
+        # on-call triage. Mirrors the operator branded-HTML companion
+        # below which already uses `accepted`.
         live_trade_snapshot = {
             "dedupe_key": f"{rec.order_id or coid}:{fill_id}",
             "market_ticker": rec.request.market_ticker,
             "side": rec.request.side,
             "action": rec.request.action,
-            "contracts": int(rec.request.count),
+            "contracts": int(accepted),
             "price_cents": int(price),
             "order_id": rec.order_id,
             "fill_id": fill_id,

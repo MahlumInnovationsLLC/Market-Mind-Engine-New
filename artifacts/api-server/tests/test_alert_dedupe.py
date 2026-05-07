@@ -317,6 +317,83 @@ def test_live_trade_dedupe_fill_replay_no_fill_id(
     assert fake_store.dispatch_count.get("live-trade") == 1
 
 
+def test_live_trade_firehose_uses_accepted_fill_count(
+    fake_store: _FakeDedupeStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression for the bug fixed in task #722: the plain-text
+    operator firehose used to forward `rec.request.count` (the total
+    requested order size) instead of the accepted partial-fill
+    quantity, so a 5-contract fill of a 20-contract order showed up as
+    "20x" in the on-call inbox. The branded HTML companion already
+    reported the executed slice; the firehose must match.
+    """
+    from app.kalshi import lifecycle as _lc
+
+    async def _noop(*_a: Any, **_kw: Any) -> None:
+        return None
+
+    monkeypatch.setattr(_lc, "_record", _noop)
+    monkeypatch.setattr(_lc, "_emit", _noop)
+
+    async def _always_fresh(**_kw: Any) -> bool:
+        return True
+    monkeypatch.setattr(_lc, "_record_fill_idempotent", _always_fresh)
+    monkeypatch.setattr(_lc, "_upsert_position_rollup", _noop)
+
+    # Capture the kwargs handed to `live_trade` so we can assert on the
+    # contract count that landed in the firehose. Bypasses the
+    # dispatch/push/premium fan-out which is irrelevant here.
+    captured: list[dict[str, Any]] = []
+
+    def _capture_live_trade(**kwargs: Any) -> dict[str, Any]:
+        captured.append(kwargs)
+        return {"dispatched": True}
+
+    monkeypatch.setattr(_alerts, "live_trade", _capture_live_trade)
+
+    req = _lc.OrderRequest(
+        market_ticker="MKT", side="yes", action="buy",
+        count=20, limit_price_cents=42, vertical="sports",
+        client_order_id="coid_partial",
+    )
+    rec = _lc.OrderRecord(
+        order_id="ord_partial",
+        request=req,
+        paper=False,
+        state="resting",
+        exchange_order_id="exch_p",
+    )
+
+    async def go() -> None:
+        async with _lc._resting_lock:
+            _lc._resting[req.client_order_id] = rec
+
+        msg = {
+            "msg": {
+                "type": "fill",
+                "msg": {
+                    "client_order_id": req.client_order_id,
+                    "trade_id": "fill_p1",
+                    # 5 contracts accepted out of a 20-contract order.
+                    "count": 5,
+                    "yes_price": 42,
+                    "created_time": "2026-04-21T12:00:00Z",
+                },
+            }
+        }
+        await _lc.handle_ws_fill(msg)
+        # Let the scheduled background dispatch task run.
+        for _ in range(4):
+            await asyncio.sleep(0)
+
+    asyncio.run(go())
+
+    assert len(captured) == 1, captured
+    assert captured[0]["contracts"] == 5
+    assert captured[0]["order_id"] == "ord_partial"
+    assert captured[0]["fill_id"] == "fill_p1"
+
+
 def test_gc_expired_dedupe_drops_only_expired_rows(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
