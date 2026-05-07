@@ -519,8 +519,15 @@ function ThemePickerPanel() {
   );
 }
 
+// The drift queue serves both Kalshi and Polymarket; the operator
+// picks one venue at a time so the table stays focused on a single
+// reconciler partition (task #715).
+const RECONCILER_EXCHANGES = ["kalshi", "polymarket"] as const;
+type ReconcilerExchange = (typeof RECONCILER_EXCHANGES)[number];
+
 type DriftRow = {
   id: number;
+  exchange: string;
   ticker: string;
   vertical: string | null;
   local_qty: number;
@@ -545,6 +552,7 @@ type DriftRow = {
 type DriftListResponse = {
   items: DriftRow[];
   state: string;
+  exchange: string;
   resolution_enabled: boolean;
 };
 
@@ -572,6 +580,8 @@ function ReconcilerDriftsPanel() {
     [getToken],
   );
   const [stateFilter, setStateFilter] = useState<"open" | "snoozed" | "resolved">("open");
+  const [exchangeFilter, setExchangeFilter] =
+    useState<ReconcilerExchange>("kalshi");
   const [busyTicker, setBusyTicker] = useState<string | null>(null);
   const [actionMsg, setActionMsg] = useState<string | null>(null);
   const [pending, setPending] = useState<PendingAction>(null);
@@ -596,10 +606,10 @@ function ReconcilerDriftsPanel() {
   };
 
   const { data, isLoading, error, refetch } = useQuery<DriftListResponse>({
-    queryKey: ["admin", "reconciler", "drifts", stateFilter],
+    queryKey: ["admin", "reconciler", "drifts", stateFilter, exchangeFilter],
     queryFn: () =>
       apiFetch<DriftListResponse>(
-        `/api/admin/reconciler/drifts?state=${stateFilter}&limit=200`,
+        `/api/admin/reconciler/drifts?state=${stateFilter}&limit=200&exchange=${exchangeFilter}`,
         { getToken: tokenFn },
       ),
     enabled: !!isSignedIn,
@@ -611,7 +621,7 @@ function ReconcilerDriftsPanel() {
     setActionMsg(null);
     try {
       const res = await apiFetch<Record<string, unknown>>(
-        `/api/admin/reconciler/drifts/${encodeURIComponent(ticker)}/accept-exchange-truth`,
+        `/api/admin/reconciler/drifts/${encodeURIComponent(ticker)}/accept-exchange-truth?exchange=${exchangeFilter}`,
         { method: "POST", body: { reason }, getToken: tokenFn },
       );
       setActionMsg(
@@ -637,7 +647,7 @@ function ReconcilerDriftsPanel() {
     setActionMsg(null);
     try {
       const res = await apiFetch<Record<string, unknown>>(
-        `/api/admin/reconciler/drifts/${encodeURIComponent(ticker)}/snooze`,
+        `/api/admin/reconciler/drifts/${encodeURIComponent(ticker)}/snooze?exchange=${exchangeFilter}`,
         { method: "POST", body: { until, reason }, getToken: tokenFn },
       );
       setActionMsg(
@@ -668,24 +678,43 @@ function ReconcilerDriftsPanel() {
     <div className="space-y-3" data-testid="reconciler-panel">
       <div className="flex flex-wrap items-center justify-between gap-2">
         <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-accent-cyan/80">
-          Drift queue · {items.length} {stateFilter}
+          Drift queue · {items.length} {stateFilter} · {exchangeFilter}
         </div>
-        <div className="flex gap-1" role="tablist">
-          {(["open", "snoozed", "resolved"] as const).map((s) => (
-            <button
-              key={s}
-              type="button"
-              onClick={() => setStateFilter(s)}
-              className={`border px-2 py-1 text-[10px] uppercase tracking-widest transition ${
-                stateFilter === s
-                  ? "border-primary bg-primary/10 text-primary"
-                  : "border-border bg-card text-muted-foreground hover:border-primary"
-              }`}
-              data-testid={`reconciler-filter-${s}`}
-            >
-              {s}
-            </button>
-          ))}
+        <div className="flex flex-wrap items-center gap-3">
+          <div className="flex gap-1" role="tablist" aria-label="Exchange">
+            {RECONCILER_EXCHANGES.map((x) => (
+              <button
+                key={x}
+                type="button"
+                onClick={() => setExchangeFilter(x)}
+                className={`border px-2 py-1 text-[10px] uppercase tracking-widest transition ${
+                  exchangeFilter === x
+                    ? "border-accent-cyan bg-accent-cyan/10 text-accent-cyan"
+                    : "border-border bg-card text-muted-foreground hover:border-accent-cyan"
+                }`}
+                data-testid={`reconciler-exchange-${x}`}
+              >
+                {x}
+              </button>
+            ))}
+          </div>
+          <div className="flex gap-1" role="tablist" aria-label="State">
+            {(["open", "snoozed", "resolved"] as const).map((s) => (
+              <button
+                key={s}
+                type="button"
+                onClick={() => setStateFilter(s)}
+                className={`border px-2 py-1 text-[10px] uppercase tracking-widest transition ${
+                  stateFilter === s
+                    ? "border-primary bg-primary/10 text-primary"
+                    : "border-border bg-card text-muted-foreground hover:border-primary"
+                }`}
+                data-testid={`reconciler-filter-${s}`}
+              >
+                {s}
+              </button>
+            ))}
+          </div>
         </div>
       </div>
       {flagOff && (

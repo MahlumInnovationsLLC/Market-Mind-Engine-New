@@ -136,13 +136,19 @@ def state() -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
-async def _local_signed_positions() -> dict[str, int]:
-    """Sum open `positions` rows on Kalshi, signed by side.
+async def _local_signed_positions(
+    exchange: str = "kalshi",
+) -> dict[str, int]:
+    """Sum open `positions` rows on ``exchange``, signed by side.
 
     Returns `{market_ticker: signed_qty}` where signed_qty is positive
     for net YES exposure and negative for net NO exposure — matching
     the convention Kalshi's `/portfolio/positions` returns in the
     `position` field.
+
+    ``exchange`` defaults to ``'kalshi'`` so existing call sites stay
+    unchanged; the polymarket reconciler (task #715) passes
+    ``'polymarket'`` to namespace the same query.
     """
     out: dict[str, int] = {}
     try:
@@ -152,10 +158,11 @@ async def _local_signed_positions() -> dict[str, int]:
                    side,
                    coalesce(quantity, 0)::int AS qty
               FROM positions
-             WHERE coalesce(exchange, 'kalshi') = 'kalshi'
+             WHERE coalesce(exchange, 'kalshi') = $1
                AND coalesce(status, 'open') = 'open'
                AND market_id IS NOT NULL
-            """
+            """,
+            exchange,
         )
     except Exception as e:
         log.debug("local position read failed: %s", e)
@@ -184,9 +191,17 @@ async def _upsert_drift_resolution(
     local_qty: int,
     exchange_qty: int,
     drift: int,
+    exchange: str = "kalshi",
 ) -> str:
-    """Upsert the active drift-resolution row for ``ticker`` and return
-    the resulting state (``'open'``, ``'snoozed'``, or ``''`` on error).
+    """Upsert the active drift-resolution row for
+    ``(exchange, ticker)`` and return the resulting state
+    (``'open'``, ``'snoozed'``, or ``''`` on error).
+
+    The per-exchange namespace lets the same queue serve Kalshi and
+    Polymarket without collision: ``(kalshi, MKT-A)`` and
+    ``(polymarket, MKT-A)`` are independent active rows (task #715).
+    ``exchange`` defaults to ``'kalshi'`` so legacy call sites remain
+    correct.
 
     Behaviour:
       * No active row → INSERT new ``open`` row, return ``'open'``.
@@ -204,25 +219,26 @@ async def _upsert_drift_resolution(
             """
             SELECT id, state, snoozed_until
               FROM position_drift_resolutions
-             WHERE ticker = $1
+             WHERE exchange = $1
+               AND ticker = $2
                AND state IN ('open', 'snoozed')
              ORDER BY id DESC
              LIMIT 1
             """,
-            ticker,
+            exchange, ticker,
         )
         if existing is None:
             await db.execute(
                 """
                 INSERT INTO position_drift_resolutions
-                    (ticker, vertical, local_qty, exchange_qty,
+                    (exchange, ticker, vertical, local_qty, exchange_qty,
                      drift_qty, state, first_seen_at, last_seen_at,
                      created_at, updated_at)
-                VALUES ($1, $2, $3, $4, $5, 'open',
+                VALUES ($1, $2, $3, $4, $5, $6, 'open',
                         now(), now(), now(), now())
                 """,
-                ticker, vertical, int(local_qty), int(exchange_qty),
-                int(drift),
+                exchange, ticker, vertical,
+                int(local_qty), int(exchange_qty), int(drift),
             )
             return "open"
 
@@ -274,22 +290,25 @@ async def _upsert_drift_resolution(
         return ""
 
 
-async def _has_any_local_position_row(ticker: str) -> bool:
-    """True if ANY ``positions`` row exists for ``ticker`` (open or
-    closed). Used to distinguish a true orphan (no row at all) from a
-    stale-but-known position. Only true orphans get the auto-skeleton
-    so we never resurrect a closed position.
+async def _has_any_local_position_row(
+    ticker: str, exchange: str = "kalshi",
+) -> bool:
+    """True if ANY ``positions`` row exists for
+    ``(exchange, ticker)`` (open or closed). Used to distinguish a true
+    orphan (no row at all) from a stale-but-known position. Only true
+    orphans get the auto-skeleton so we never resurrect a closed
+    position.
     """
     try:
         v = await db.fetchval(
             """
             SELECT 1
               FROM positions
-             WHERE coalesce(exchange, 'kalshi') = 'kalshi'
-               AND market_id = $1
+             WHERE coalesce(exchange, 'kalshi') = $1
+               AND market_id = $2
              LIMIT 1
             """,
-            ticker,
+            exchange, ticker,
         )
         return v is not None
     except Exception as e:
@@ -299,11 +318,50 @@ async def _has_any_local_position_row(ticker: str) -> bool:
         return True
 
 
+def _orphan_synth_id(ticker: str, exchange: str) -> str:
+    """Audit-tag the synthetic orphan ``positions.order_id``.
+
+    Kalshi keeps the legacy unprefixed shape (``recon-orphan-<ticker>``)
+    so existing rows and audit queries continue to work; non-kalshi
+    venues prefix with the exchange so ``(kalshi, MKT-A)`` and
+    ``(polymarket, MKT-A)`` cannot collide on the unique
+    ``positions.order_id`` index.
+    """
+    if exchange == "kalshi":
+        return f"recon-orphan-{ticker}"
+    return f"recon-orphan-{exchange}-{ticker}"
+
+
+def _accept_truth_synth_id(ticker: str, exchange: str) -> str:
+    """Same audit-tag scheme as ``_orphan_synth_id`` but for the
+    accept-exchange-truth correction row.
+    """
+    if exchange == "kalshi":
+        return f"recon-accept-truth-{ticker}"
+    return f"recon-accept-truth-{exchange}-{ticker}"
+
+
+def _alert_metric_name(ticker: str, exchange: str) -> str:
+    """Per-exchange identity for ``model_health_alerts.metric_name`` so
+    a kalshi ``MKT-A`` drift and a polymarket ``MKT-A`` drift don't
+    suppress / overwrite each other through the per-ticker dedupe
+    window or the ``last_alert_*`` enrichment join (task #715).
+
+    Kalshi keeps the bare ticker shape so historical alert rows and
+    operator queries continue to match; non-kalshi venues are
+    namespaced ``<exchange>:<ticker>``.
+    """
+    if exchange == "kalshi":
+        return ticker
+    return f"{exchange}:{ticker}"
+
+
 async def _create_orphan_skeleton(
-    *, ticker: str, exchange_qty: int, vertical: str | None
+    *, ticker: str, exchange_qty: int, vertical: str | None,
+    exchange: str = "kalshi",
 ) -> bool:
     """Insert a synthetic ``positions`` row for a true orphan exchange
-    position so the next diff loop sees no drift.
+    position on ``exchange`` so the next diff loop sees no drift.
 
     Idempotent via ``ON CONFLICT (order_id) DO UPDATE`` — re-running for
     the same ticker just refreshes the quantity and side.
@@ -312,9 +370,9 @@ async def _create_orphan_skeleton(
         return False
     side = "yes" if exchange_qty > 0 else "no"
     qty = abs(int(exchange_qty))
-    # ``order_id`` carries the audit prefix (``recon-orphan-<ticker>``)
+    # ``order_id`` carries the audit prefix (see ``_orphan_synth_id``)
     # so analysts can filter synthetic rows without a dedicated column.
-    synth_id = f"recon-orphan-{ticker}"
+    synth_id = _orphan_synth_id(ticker, exchange)
     try:
         await db.execute(
             """
@@ -322,7 +380,7 @@ async def _create_orphan_skeleton(
                 order_id, market_id, side, vertical, exchange,
                 quantity, avg_price, status, filled_count, over_filled
             ) VALUES (
-                $1, $2, $3, $4, 'kalshi',
+                $1, $2, $3, $4, $6,
                 $5, 0.0, 'open', $5, false
             )
             ON CONFLICT (order_id) DO UPDATE
@@ -331,7 +389,7 @@ async def _create_orphan_skeleton(
                    side = EXCLUDED.side,
                    status = 'open'
             """,
-            synth_id, ticker, side, vertical, qty,
+            synth_id, ticker, side, vertical, qty, exchange,
         )
     except Exception as e:
         log.warning("orphan-skeleton insert failed (%s): %s", ticker, e)
@@ -351,10 +409,11 @@ async def _create_orphan_skeleton(
                    resolution_reason = 'auto-created skeleton positions row',
                    resolved_at = now(),
                    updated_at = now()
-             WHERE ticker = $1
+             WHERE exchange = $2
+               AND ticker = $1
                AND state IN ('open', 'snoozed')
             """,
-            ticker,
+            ticker, exchange,
         )
     except Exception as e:
         log.debug("orphan-skeleton resolution update failed (%s): %s",
@@ -374,7 +433,8 @@ async def _create_orphan_skeleton(
 
 
 async def list_drifts(
-    *, state: str = "open", limit: int = 100
+    *, state: str = "open", limit: int = 100,
+    exchange: str = "kalshi",
 ) -> list[dict[str, Any]]:
     """Operator-console view of the drift-resolution queue, enriched
     with the context an operator needs to triage each row at a glance:
@@ -395,17 +455,17 @@ async def list_drifts(
     """
     state = (state or "open").lower()
     limit = max(1, min(500, int(limit or 100)))
-    where = "true"
+    where = "pdr.exchange = $2"
     if state == "open":
-        where = "pdr.state = 'open'"
+        where += " AND pdr.state = 'open'"
     elif state == "snoozed":
-        where = "pdr.state = 'snoozed'"
+        where += " AND pdr.state = 'snoozed'"
     elif state == "resolved":
-        where = "pdr.state LIKE 'resolved_%'"
+        where += " AND pdr.state LIKE 'resolved_%'"
     try:
         rows = await db.fetch(
             f"""
-            SELECT pdr.id, pdr.ticker, pdr.vertical,
+            SELECT pdr.id, pdr.exchange, pdr.ticker, pdr.vertical,
                    pdr.local_qty, pdr.exchange_qty, pdr.drift_qty,
                    pdr.state, pdr.resolver_email, pdr.resolution_reason,
                    pdr.snoozed_until, pdr.first_seen_at, pdr.last_seen_at,
@@ -421,7 +481,10 @@ async def list_drifts(
                   SELECT created_at, severity, message
                     FROM model_health_alerts
                    WHERE alert_type = 'position_drift'
-                     AND metric_name = pdr.ticker
+                     AND metric_name = CASE
+                         WHEN pdr.exchange = 'kalshi' THEN pdr.ticker
+                         ELSE pdr.exchange || ':' || pdr.ticker
+                     END
                    ORDER BY created_at DESC
                    LIMIT 1
               ) alert ON true
@@ -429,7 +492,7 @@ async def list_drifts(
              ORDER BY pdr.last_seen_at DESC
              LIMIT $1
             """,
-            limit,
+            limit, exchange,
         )
     except Exception as e:
         log.warning("list_drifts query failed: %s", e)
@@ -457,6 +520,7 @@ async def list_drifts(
 
 async def accept_exchange_truth(
     *, ticker: str, resolver_email: str | None, reason: str | None = None,
+    exchange: str = "kalshi",
 ) -> dict[str, Any]:
     """Operator action: accept the exchange's reported quantity as truth.
 
@@ -475,12 +539,13 @@ async def accept_exchange_truth(
         """
         SELECT id, local_qty, exchange_qty, drift_qty
           FROM position_drift_resolutions
-         WHERE ticker = $1
+         WHERE exchange = $1
+           AND ticker = $2
            AND state IN ('open', 'snoozed')
          ORDER BY id DESC
          LIMIT 1
         """,
-        ticker,
+        exchange, ticker,
     )
     if active is None:
         return {"changed": False, "ticker": ticker, "reason": "no_active_drift"}
@@ -496,7 +561,7 @@ async def accept_exchange_truth(
     # an SMTP hiccup must not undo a successful reconciliation.
     side = "yes" if exch_qty > 0 else "no"
     qty = abs(exch_qty)
-    synth_id = f"recon-accept-truth-{ticker}"
+    synth_id = _accept_truth_synth_id(ticker, exchange)
     try:
         async with db.acquire() as conn:
             async with conn.transaction():
@@ -508,11 +573,11 @@ async def accept_exchange_truth(
                     UPDATE positions
                        SET status = 'closed',
                            quantity = 0
-                     WHERE coalesce(exchange, 'kalshi') = 'kalshi'
+                     WHERE coalesce(exchange, 'kalshi') = $2
                        AND market_id = $1
                        AND coalesce(status, 'open') = 'open'
                     """,
-                    ticker,
+                    ticker, exchange,
                 )
 
                 # 2. Insert synthetic correction row when exchange has
@@ -528,7 +593,7 @@ async def accept_exchange_truth(
                             quantity, avg_price, status, filled_count,
                             over_filled
                         ) VALUES (
-                            $1, $2, $3, NULL, 'kalshi',
+                            $1, $2, $3, NULL, $5,
                             $4, 0.0, 'open', $4, false
                         )
                         ON CONFLICT (order_id) DO UPDATE
@@ -537,11 +602,20 @@ async def accept_exchange_truth(
                                side = EXCLUDED.side,
                                status = 'open'
                         """,
-                        synth_id, ticker, side, qty,
+                        synth_id, ticker, side, qty, exchange,
                     )
 
                 # 3. Acknowledge any unacked operator alerts for this
-                #    ticker so the /system → health banner clears.
+                #    (exchange, ticker) so the /system → health banner
+                #    clears. ``metric_name`` was written by
+                #    ``_raise_position_drift_alert`` /
+                #    ``_record_auto_correction`` via
+                #    ``_alert_metric_name`` (kalshi: bare ticker;
+                #    non-kalshi: ``<exchange>:<ticker>``), so we ack
+                #    against the same identity here — otherwise a
+                #    polymarket resolution would silently leave the
+                #    ``polymarket:<ticker>`` alert rows unacked and
+                #    keep the health banner red.
                 await conn.execute(
                     """
                     UPDATE model_health_alerts
@@ -553,7 +627,7 @@ async def accept_exchange_truth(
                        AND acknowledged = false
                     """,
                     resolver_email or "operator",
-                    ticker,
+                    _alert_metric_name(ticker, exchange),
                 )
 
                 # 4. Resolve the drift queue entry. This row IS the
@@ -623,6 +697,7 @@ async def snooze_drift(
     until: "datetime | str",
     resolver_email: str | None,
     reason: str | None = None,
+    exchange: str = "kalshi",
 ) -> dict[str, Any]:
     """Operator action: silence drift alerts for ``ticker`` until the
     absolute timestamp ``until``.
@@ -673,12 +748,13 @@ async def snooze_drift(
         """
         SELECT id, local_qty, exchange_qty, drift_qty
           FROM position_drift_resolutions
-         WHERE ticker = $1
+         WHERE exchange = $1
+           AND ticker = $2
            AND state IN ('open', 'snoozed')
          ORDER BY id DESC
          LIMIT 1
         """,
-        ticker,
+        exchange, ticker,
     )
     if active is None:
         return {"changed": False, "ticker": ticker, "reason": "no_active_drift"}
@@ -728,13 +804,18 @@ async def snooze_drift(
     }
 
 
-async def _self_heal_resolutions(active_drift_tickers: set[str]) -> None:
-    """Mark any ``open`` resolution rows whose drift has cleared on its
-    own (e.g. a delayed WS fill arrived) as ``resolved_self_healed``.
+async def _self_heal_resolutions(
+    active_drift_tickers: set[str], exchange: str = "kalshi",
+) -> None:
+    """Mark any ``open`` resolution rows on ``exchange`` whose drift
+    has cleared on its own (e.g. a delayed WS fill arrived) as
+    ``resolved_self_healed``.
 
-    Snoozed rows are intentionally left alone — they were silenced
-    deliberately and we don't want a transient zero-drift cycle to
-    quietly cancel the operator's snooze.
+    Scoped per-exchange so a quiet kalshi cycle doesn't sweep
+    polymarket rows (or vice versa). Snoozed rows are intentionally
+    left alone — they were silenced deliberately and we don't want a
+    transient zero-drift cycle to quietly cancel the operator's
+    snooze.
     """
     try:
         await db.execute(
@@ -744,9 +825,10 @@ async def _self_heal_resolutions(active_drift_tickers: set[str]) -> None:
                    resolved_at = now(),
                    updated_at = now()
              WHERE state = 'open'
+               AND exchange = $2
                AND ticker <> ALL($1::text[])
             """,
-            list(active_drift_tickers),
+            list(active_drift_tickers), exchange,
         )
     except Exception as e:
         log.debug("self-heal resolutions sweep failed: %s", e)
@@ -759,6 +841,7 @@ async def _raise_position_drift_alert(
     exchange_qty: int,
     drift: int,
     tolerance: int,
+    exchange: str = "kalshi",
 ) -> bool:
     """Persist + email a drift alert (deduped per ticker for 1 hour).
 
@@ -766,18 +849,22 @@ async def _raise_position_drift_alert(
     the dedupe window.
     """
     global _total_drift_alerts
+    venue_label = exchange.title() if exchange != "kalshi" else "Kalshi"
+    metric_name = _alert_metric_name(ticker, exchange)
     msg = (
-        f"Kalshi position drift on {ticker}: "
+        f"{venue_label} position drift on {ticker}: "
         f"local={local_qty} exchange={exchange_qty} "
         f"drift={drift} (tolerance={tolerance})"
     )
     raised = False
     try:
-        # Suppress same-hour duplicates of the SAME ticker AT THE SAME
-        # drift magnitude. The dedupe key is `(ticker, drift_qty)` so a
+        # Suppress same-hour duplicates of the SAME (exchange, ticker)
+        # AT THE SAME drift magnitude. The dedupe key is
+        # `(metric_name, drift_qty)` where metric_name encodes the
+        # exchange — so a kalshi 5-contract drift on MKT-A doesn't
+        # suppress a polymarket 5-contract drift on MKT-A, and a
         # ticker whose drift jumps from 5 -> 50 still produces a fresh
-        # alert (the magnitude change is itself news), while a stable
-        # 5-contract drift is suppressed for an hour.
+        # alert (the magnitude change is itself news).
         recent = await db.fetchval(
             """
             SELECT 1 FROM model_health_alerts
@@ -787,7 +874,7 @@ async def _raise_position_drift_alert(
                AND created_at > now() - interval '1 hour'
              LIMIT 1
             """,
-            ticker,
+            metric_name,
             float(drift),
         )
         if not recent:
@@ -801,7 +888,7 @@ async def _raise_position_drift_alert(
                 """,
                 "trading",
                 "high" if drift > max(1, tolerance * 5) else "warn",
-                ticker,
+                metric_name,
                 float(drift),
                 float(tolerance),
                 msg,
@@ -814,11 +901,13 @@ async def _raise_position_drift_alert(
         try:
             from ..notifications import alerts as _alerts
             if await _alerts.dedupe_or_skip(
-                "position_drift", f"{ticker}:{drift}", ttl_seconds=3600
+                "position_drift",
+                f"{metric_name}:{drift}",
+                ttl_seconds=3600,
             ):
                 _alerts.drift(
                     vertical="trading",
-                    metric=f"position_drift:{ticker}",
+                    metric=f"position_drift:{metric_name}",
                     value=float(drift),
                     threshold=float(tolerance),
                     note=msg,
@@ -831,6 +920,7 @@ async def _raise_position_drift_alert(
 
 async def _diff_positions(
     exchange_positions: list[Any],
+    exchange: str = "kalshi",
 ) -> tuple[int, int, int, int]:
     """Compare exchange-reported positions vs our local DB.
 
@@ -842,16 +932,20 @@ async def _diff_positions(
     exchange positions that got an auto-skeleton ``positions`` row this
     cycle (resolution flag only). ``snoozed_drifts`` is the number of
     drifts where an active operator snooze suppressed the alert.
+
+    ``exchange`` controls which venue's positions table partition we
+    compare against and which row namespace we write to in the
+    ``position_drift_resolutions`` queue (task #715).
     """
     tolerance = _drift_tolerance()
     resolution_on = _resolution_enabled()
-    local = await _local_signed_positions()
-    exchange: dict[str, int] = {}
+    local = await _local_signed_positions(exchange=exchange)
+    exch_signed: dict[str, int] = {}
     for p in exchange_positions or []:
         ticker = getattr(p, "market_ticker", None) or ""
         if not ticker:
             continue
-        exchange[ticker] = int(getattr(p, "position", 0) or 0)
+        exch_signed[ticker] = int(getattr(p, "position", 0) or 0)
 
     drift_count = 0
     auto_corrected = 0
@@ -859,7 +953,7 @@ async def _diff_positions(
     snoozed_drifts = 0
     active_drift_tickers: set[str] = set()
     seen: set[str] = set()
-    for ticker, exch_qty in exchange.items():
+    for ticker, exch_qty in exch_signed.items():
         seen.add(ticker)
         local_qty = int(local.get(ticker, 0))
         diff = abs(local_qty - exch_qty)
@@ -868,7 +962,7 @@ async def _diff_positions(
         if diff <= tolerance:
             await _record_auto_correction(
                 ticker=ticker, local_qty=local_qty, exchange_qty=exch_qty,
-                drift=diff, tolerance=tolerance,
+                drift=diff, tolerance=tolerance, exchange=exchange,
             )
             auto_corrected += 1
             continue
@@ -880,6 +974,7 @@ async def _diff_positions(
             res_state = await _upsert_drift_resolution(
                 ticker=ticker, vertical=None,
                 local_qty=local_qty, exchange_qty=exch_qty, drift=diff,
+                exchange=exchange,
             )
             active_drift_tickers.add(ticker)
             if res_state == "snoozed":
@@ -889,9 +984,12 @@ async def _diff_positions(
             # Distinguish from "stale local row drifted to 0" by
             # checking ANY row (open or closed) — the latter has a
             # row with status='closed' and shouldn't be resurrected.
-            if local_qty == 0 and not await _has_any_local_position_row(ticker):
+            if local_qty == 0 and not await _has_any_local_position_row(
+                ticker, exchange=exchange,
+            ):
                 created = await _create_orphan_skeleton(
                     ticker=ticker, exchange_qty=exch_qty, vertical=None,
+                    exchange=exchange,
                 )
                 if created:
                     orphan_skeletons += 1
@@ -903,7 +1001,7 @@ async def _diff_positions(
 
         await _raise_position_drift_alert(
             ticker=ticker, local_qty=local_qty, exchange_qty=exch_qty,
-            drift=diff, tolerance=tolerance,
+            drift=diff, tolerance=tolerance, exchange=exchange,
         )
         drift_count += 1
     # Tickers we have locally but the exchange reports none for: a stale
@@ -916,7 +1014,7 @@ async def _diff_positions(
         if diff <= tolerance:
             await _record_auto_correction(
                 ticker=ticker, local_qty=local_qty, exchange_qty=0,
-                drift=diff, tolerance=tolerance,
+                drift=diff, tolerance=tolerance, exchange=exchange,
             )
             auto_corrected += 1
             continue
@@ -924,6 +1022,7 @@ async def _diff_positions(
             res_state = await _upsert_drift_resolution(
                 ticker=ticker, vertical=None,
                 local_qty=local_qty, exchange_qty=0, drift=diff,
+                exchange=exchange,
             )
             active_drift_tickers.add(ticker)
             if res_state == "snoozed":
@@ -931,12 +1030,12 @@ async def _diff_positions(
                 continue
         await _raise_position_drift_alert(
             ticker=ticker, local_qty=local_qty, exchange_qty=0,
-            drift=diff, tolerance=tolerance,
+            drift=diff, tolerance=tolerance, exchange=exchange,
         )
         drift_count += 1
 
     if resolution_on:
-        await _self_heal_resolutions(active_drift_tickers)
+        await _self_heal_resolutions(active_drift_tickers, exchange=exchange)
 
     return drift_count, auto_corrected, orphan_skeletons, snoozed_drifts
 
@@ -948,6 +1047,7 @@ async def _record_auto_correction(
     exchange_qty: int,
     drift: int,
     tolerance: int,
+    exchange: str = "kalshi",
 ) -> None:
     """Persist a within-tolerance drift as an INFO-level, pre-acknowledged
     `model_health_alerts` row so an operator can audit small drifts in
@@ -960,8 +1060,10 @@ async def _record_auto_correction(
     audit row is the "correction" — it documents that we observed
     and accepted the small drift.
     """
+    venue_label = exchange.title() if exchange != "kalshi" else "Kalshi"
+    metric_name = _alert_metric_name(ticker, exchange)
     msg = (
-        f"Kalshi position drift within tolerance on {ticker}: "
+        f"{venue_label} position drift within tolerance on {ticker}: "
         f"local={local_qty} exchange={exchange_qty} "
         f"drift={drift} (tolerance={tolerance})"
     )
@@ -974,7 +1076,7 @@ async def _record_auto_correction(
             VALUES ('trading', 'position_drift', 'info', $1, $2, $3, $4, true)
             ON CONFLICT (id) DO NOTHING
             """,
-            ticker, float(drift), float(tolerance), msg,
+            metric_name, float(drift), float(tolerance), msg,
         )
     except Exception as e:
         log.debug("auto-correction audit insert failed for %s: %s", ticker, e)

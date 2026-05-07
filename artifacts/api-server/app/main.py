@@ -6381,22 +6381,51 @@ async def admin_list_vertical_halt_history(
 # ---------------------------------------------------------------------------
 
 
+# Closed allow-list of exchanges the drift queue serves. Anything else
+# is rejected with 400 so a typo in the URL can't silently scan a
+# nonexistent partition.
+_RECONCILER_EXCHANGES = ("kalshi", "polymarket")
+
+
+def _normalize_recon_exchange(exchange: str) -> str:
+    """Lowercase + validate the ``?exchange=`` query parameter shared
+    by all three reconciler admin endpoints.
+    """
+    v = (exchange or "kalshi").strip().lower()
+    if v not in _RECONCILER_EXCHANGES:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"unsupported exchange '{exchange}'. "
+                f"Valid: {', '.join(_RECONCILER_EXCHANGES)}"
+            ),
+        )
+    return v
+
+
 @app.get("/api/admin/reconciler/drifts")
 async def admin_list_reconciler_drifts(
     state: str = "open",
     limit: int = 100,
+    exchange: str = "kalshi",
     _: AuthedUser = Depends(require_admin),
 ) -> dict[str, object]:
     """List drift-resolution rows. ``state`` ∈ ``open`` (default,
-    actionable queue), ``snoozed``, ``resolved``, ``all``. Rows are
+    actionable queue), ``snoozed``, ``resolved``, ``all``. ``exchange``
+    selects the venue partition (``kalshi`` default, ``polymarket``
+    once the polymarket reconciler comes online — task #715). Rows are
     enriched with ``market_title``, ``age_seconds``, and the latest
     ``last_alert_*`` triple from ``model_health_alerts``.
     """
     from .kalshi import reconciler as _recon
-    items = await _recon.list_drifts(state=state, limit=limit)
+    venue = _normalize_recon_exchange(exchange)
+    items = await _recon.list_drifts(
+        state=state, limit=limit, exchange=venue,
+    )
     return {
         "items": items,
         "state": state,
+        "exchange": venue,
         "resolution_enabled": _recon._resolution_enabled(),
     }
 
@@ -6405,13 +6434,15 @@ async def admin_list_reconciler_drifts(
 async def admin_accept_drift_exchange_truth(
     ticker: str,
     body: AdminAcceptDriftRequest | None = None,
+    exchange: str = "kalshi",
     actor: AuthedUser = Depends(require_admin),
 ) -> dict[str, object]:
     """Operator action: overwrite local positions with the exchange's
-    reported quantity for ``ticker``. Idempotent — returns
-    ``changed=False`` if there is no active drift row for the ticker.
+    reported quantity for ``(exchange, ticker)``. Idempotent — returns
+    ``changed=False`` if there is no active drift row.
     """
     from .kalshi import reconciler as _recon
+    venue = _normalize_recon_exchange(exchange)
     actor_email: str | None = None
     try:
         actor_email = (await check_approval(actor))[1]
@@ -6433,6 +6464,7 @@ async def admin_accept_drift_exchange_truth(
         ticker=ticker.strip(),
         resolver_email=actor_email,
         reason=reason,
+        exchange=venue,
     )
     return result
 
@@ -6441,14 +6473,16 @@ async def admin_accept_drift_exchange_truth(
 async def admin_snooze_reconciler_drift(
     ticker: str,
     body: AdminSnoozeDriftRequest,
+    exchange: str = "kalshi",
     actor: AuthedUser = Depends(require_admin),
 ) -> dict[str, object]:
-    """Operator action: silence drift alerts for ``ticker`` until the
-    absolute UTC timestamp ``body.until``. Does NOT touch
+    """Operator action: silence drift alerts for ``(exchange, ticker)``
+    until the absolute UTC timestamp ``body.until``. Does NOT touch
     ``positions`` — the position is left as-is and the alert stops
     re-firing until the snooze expires (≥ 5 min from now, ≤ 30 days).
     """
     from .kalshi import reconciler as _recon
+    venue = _normalize_recon_exchange(exchange)
     actor_email: str | None = None
     try:
         actor_email = (await check_approval(actor))[1]
@@ -6464,6 +6498,7 @@ async def admin_snooze_reconciler_drift(
         until=body.until,
         resolver_email=actor_email,
         reason=body.reason,
+        exchange=venue,
     )
     return result
 

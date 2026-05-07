@@ -1111,15 +1111,50 @@ precedence chain to `256`.
 ---
 ## 13. Resolve a stuck position drift
 
-Symptom: the Kalshi reconciler keeps re-firing
-`[axiom][POSITION-DRIFT]` alerts for the same ticker every cycle —
-either because the exchange is correct and the local DB is wrong,
-or because the drift is known-benign (e.g. a settled market the
-exchange hasn't propagated yet) and the noise is masking real
-alerts. Drift detection lives in `app.kalshi.reconciler` and is
-audited via the `position_drift_resolutions` table (migration
-`0031`). The operator console for it is `/system → Reconciler`
-(admin-only).
+Symptom: a reconciler (Kalshi today, Polymarket once that pipeline
+comes online) keeps re-firing `[axiom][POSITION-DRIFT]` alerts for
+the same ticker every cycle — either because the exchange is
+correct and the local DB is wrong, or because the drift is
+known-benign (e.g. a settled market the exchange hasn't propagated
+yet) and the noise is masking real alerts. Drift detection lives
+in `app.kalshi.reconciler` and is audited via the
+`position_drift_resolutions` table (migrations `0031` + `0048` —
+the latter adds the `exchange` column so one queue serves both
+venues). The operator console for it is `/system → Reconciler`
+(admin-only); the exchange selector at the top of the panel
+switches between Kalshi and Polymarket.
+
+### Per-exchange namespacing (task #715)
+
+Migration `0048` adds an `exchange` column (default `'kalshi'`,
+existing rows backfill to that value) and replaces the active-row
+unique index with a partial unique on **`(exchange, ticker)`** so
+`(kalshi, MKT-A)` and `(polymarket, MKT-A)` coexist as independent
+queue rows. All admin endpoints accept an optional
+`?exchange=polymarket` query parameter (default `kalshi`):
+
+```
+GET  /api/admin/reconciler/drifts?exchange=polymarket&state=open
+POST /api/admin/reconciler/drifts/{ticker}/accept-exchange-truth?exchange=polymarket
+POST /api/admin/reconciler/drifts/{ticker}/snooze?exchange=polymarket
+```
+
+Synthetic correction rows on `positions.order_id` keep their
+historical kalshi shape (`recon-accept-truth-<ticker>` /
+`recon-orphan-<ticker>`) so existing audit queries don't break;
+non-kalshi venues are exchange-prefixed
+(`recon-accept-truth-polymarket-<ticker>` /
+`recon-orphan-polymarket-<ticker>`) so the unique
+`positions.order_id` index never collides across venues.
+
+The same namespacing applies to `model_health_alerts.metric_name`
+on `alert_type='position_drift'`: kalshi rows keep the bare ticker
+(`MKT-A`), non-kalshi rows are written as `<exchange>:<ticker>`
+(e.g. `polymarket:MKT-A`). This keeps the per-ticker dedupe window
+and the `last_alert_*` enrichment join in `list_drifts` from
+cross-contaminating between venues — a kalshi 5-contract drift on
+`MKT-A` will not suppress (or be surfaced as) a polymarket
+5-contract drift on `MKT-A`.
 
 ### Enable the resolution workflow
 

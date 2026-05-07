@@ -631,3 +631,249 @@ def _stub_async(*, return_value=None):
     async def _f(*a, **kw):
         return return_value
     return _f
+
+
+# ---------------------------------------------------------------------------
+# (exchange, ticker) namespace separation (task #715) — Polymarket can
+# reuse the same drift-resolution table without colliding with Kalshi.
+# ---------------------------------------------------------------------------
+
+
+def test_upsert_namespaces_by_exchange(monkeypatch):
+    """``(kalshi, MKT-A)`` and ``(polymarket, MKT-A)`` are independent
+    active rows. The fetchrow that picks the active row must filter
+    on BOTH exchange and ticker — otherwise the polymarket call would
+    pick up the kalshi row and clobber it.
+    """
+    from app.kalshi import reconciler
+    db = _install_db(monkeypatch)
+    # Polymarket sees no active row → INSERT. The Kalshi row that
+    # exists is irrelevant because it's filtered out by exchange.
+    db.fetchrow_responses.append(None)
+
+    state = _run(reconciler._upsert_drift_resolution(
+        ticker="MKT-A", vertical=None,
+        local_qty=0, exchange_qty=4, drift=4,
+        exchange="polymarket",
+    ))
+
+    assert state == "open"
+    # Active-row lookup is scoped to (exchange, ticker).
+    select_calls = [
+        (q, a) for q, a in db.fetchrows
+        if "FROM position_drift_resolutions" in q
+    ]
+    assert select_calls, "expected fetchrow on position_drift_resolutions"
+    q, args = select_calls[0]
+    assert "exchange = $1" in q
+    assert "ticker = $2" in q
+    assert args[0] == "polymarket" and args[1] == "MKT-A"
+
+    # The INSERT carries the exchange in the column list.
+    insert_calls = [
+        (q, a) for q, a in db.executes
+        if "INSERT INTO position_drift_resolutions" in q
+    ]
+    assert insert_calls
+    q, args = insert_calls[0]
+    assert "exchange" in q
+    assert args[0] == "polymarket"
+    assert args[1] == "MKT-A"
+
+
+def test_accept_truth_namespaces_by_exchange(monkeypatch):
+    """``accept_exchange_truth(exchange='polymarket')`` selects the
+    polymarket row, closes ONLY polymarket positions, and tags the
+    synth row with the exchange-prefixed audit id so it can't collide
+    with a kalshi accept-truth row on the same ticker.
+    """
+    from app.kalshi import reconciler
+    db = _install_db(monkeypatch)
+    db.fetchrow_responses.append({
+        "id": 99, "local_qty": 0, "exchange_qty": 7, "drift_qty": 7,
+    })
+
+    res = _run(reconciler.accept_exchange_truth(
+        ticker="MKT-A", resolver_email="ops@axiom.dev",
+        exchange="polymarket",
+    ))
+
+    assert res["changed"] is True
+    # Active-row lookup scoped to polymarket.
+    select_q, select_args = next(
+        (q, a) for q, a in db.fetchrows
+        if "FROM position_drift_resolutions" in q
+    )
+    assert select_args[0] == "polymarket" and select_args[1] == "MKT-A"
+    # UPDATE positions filter is also scoped to polymarket so we don't
+    # close kalshi rows for the same market_id.
+    close_calls = [
+        (q, a) for q, a in db.executes
+        if "UPDATE positions" in q and "status = 'closed'" in q
+    ]
+    assert close_calls
+    _, close_args = close_calls[0]
+    assert close_args[1] == "polymarket"
+    # Synthetic correction row is tagged with the exchange so it
+    # cannot collide on positions.order_id with the kalshi tag.
+    synth_inserts = [
+        a for q, a in db.executes
+        if "INSERT INTO positions" in q
+    ]
+    assert synth_inserts
+    assert synth_inserts[0][0] == "recon-accept-truth-polymarket-MKT-A"
+    assert synth_inserts[0][4] == "polymarket"
+
+
+def test_orphan_skeleton_tags_non_kalshi_with_exchange(monkeypatch):
+    """The orphan synth-id is exchange-prefixed for non-kalshi venues
+    so ``positions.order_id`` stays unique across exchanges.
+    """
+    from app.kalshi import reconciler
+    db = _install_db(monkeypatch)
+
+    ok = _run(reconciler._create_orphan_skeleton(
+        ticker="MKT-A", exchange_qty=3, vertical=None,
+        exchange="polymarket",
+    ))
+    assert ok is True
+    inserts = [a for q, a in db.executes if "INSERT INTO positions" in q]
+    assert inserts
+    assert inserts[0][0] == "recon-orphan-polymarket-MKT-A"
+    assert inserts[0][5] == "polymarket"
+    # Kalshi-default keeps the legacy unprefixed shape so existing
+    # rows / audit queries don't break.
+    assert reconciler._orphan_synth_id("MKT-A", "kalshi") == "recon-orphan-MKT-A"
+
+
+def test_self_heal_scoped_to_exchange(monkeypatch):
+    """A quiet kalshi cycle must NOT sweep polymarket open rows —
+    ``_self_heal_resolutions`` is per-exchange.
+    """
+    from app.kalshi import reconciler
+    db = _install_db(monkeypatch)
+    _run(reconciler._self_heal_resolutions({"MKT-A"}, exchange="polymarket"))
+
+    sweep_calls = [
+        (q, a) for q, a in db.executes
+        if "resolved_self_healed" in q
+    ]
+    assert sweep_calls
+    q, args = sweep_calls[0]
+    assert "exchange = $2" in q
+    assert args[1] == "polymarket"
+
+
+def test_list_drifts_filters_by_exchange(monkeypatch):
+    from app.kalshi import reconciler
+    db = _install_db(monkeypatch)
+
+    _run(reconciler.list_drifts(state="open", exchange="polymarket"))
+
+    qcalls = [(q, a) for q, a in db.fetches
+              if "FROM position_drift_resolutions" in q]
+    assert qcalls
+    q, args = qcalls[0]
+    assert "pdr.exchange = $2" in q
+    assert args[1] == "polymarket"
+
+
+def test_accept_truth_acks_alerts_with_namespaced_metric_name(monkeypatch):
+    """Polymarket resolution must ack the ``polymarket:<ticker>``
+    alert rows, NOT the bare-ticker rows (which belong to kalshi).
+    Without this the health banner would stay red after a successful
+    polymarket resolution.
+    """
+    from app.kalshi import reconciler
+    db = _install_db(monkeypatch)
+    db.fetchrow_responses.append({
+        "id": 7, "local_qty": 0, "exchange_qty": 3, "drift_qty": 3,
+    })
+    _run(reconciler.accept_exchange_truth(
+        ticker="MKT-A", resolver_email="ops@axiom.dev",
+        exchange="polymarket",
+    ))
+    ack_calls = [
+        (q, a) for q, a in db.executes
+        if "UPDATE model_health_alerts" in q and "acknowledged = true" in q
+    ]
+    assert ack_calls, "expected an alert-ack UPDATE"
+    _, args = ack_calls[0]
+    assert args[1] == "polymarket:MKT-A"
+
+
+def test_record_auto_correction_namespaces_metric_name(monkeypatch):
+    """Within-tolerance INFO rows for non-kalshi venues must use the
+    namespaced metric_name so they don't appear in the kalshi
+    last_alert_* enrichment join.
+    """
+    from app.kalshi import reconciler
+    db = _install_db(monkeypatch)
+    _run(reconciler._record_auto_correction(
+        ticker="MKT-A", local_qty=0, exchange_qty=2,
+        drift=2, tolerance=5, exchange="polymarket",
+    ))
+    inserts = [
+        (q, a) for q, a in db.executes
+        if "INSERT INTO model_health_alerts" in q
+    ]
+    assert inserts
+    _, args = inserts[0]
+    assert args[0] == "polymarket:MKT-A"
+
+
+def test_raise_drift_alert_namespaces_metric_name(monkeypatch):
+    """The DB dedupe lookup AND the INSERT both encode the exchange
+    in metric_name so a kalshi 5-contract drift on MKT-A doesn't
+    suppress a polymarket 5-contract drift on MKT-A.
+    """
+    from app.kalshi import reconciler
+    db = _install_db(monkeypatch)
+    db.fetchval_responses.append(None)  # no recent dup → INSERT path
+    _run(reconciler._raise_position_drift_alert(
+        ticker="MKT-A", local_qty=0, exchange_qty=5,
+        drift=5, tolerance=2, exchange="polymarket",
+    ))
+    dedupe_lookups = [
+        (q, a) for q, a in db.fetchvals
+        if "FROM model_health_alerts" in q
+    ]
+    assert dedupe_lookups
+    _, args = dedupe_lookups[0]
+    assert args[0] == "polymarket:MKT-A"
+    inserts = [
+        (q, a) for q, a in db.executes
+        if "INSERT INTO model_health_alerts" in q
+    ]
+    assert inserts
+    _, args = inserts[0]
+    # vertical, severity, metric_name, ...
+    assert args[2] == "polymarket:MKT-A"
+
+
+def test_diff_positions_uses_exchange_for_local_query(monkeypatch):
+    """Polymarket's diff loop queries positions filtered to
+    ``coalesce(exchange,'kalshi')='polymarket'`` — without this scope
+    a polymarket reconciler tick would treat kalshi positions as its
+    own and double-flag them as drift.
+    """
+    from app.kalshi import reconciler
+    monkeypatch.delenv("AXIOM_RECONCILER_RESOLUTION_ENABLED", raising=False)
+    db = _install_db(monkeypatch)
+    db.fetch_responses.append([])  # empty positions for polymarket
+
+    monkeypatch.setattr(
+        reconciler, "_raise_position_drift_alert",
+        _stub_async(return_value=True),
+    )
+
+    _run(reconciler._diff_positions(
+        [_FakePos("MKT-A", 5)], exchange="polymarket",
+    ))
+
+    pos_reads = [(q, a) for q, a in db.fetches
+                 if "FROM positions" in q]
+    assert pos_reads
+    q, args = pos_reads[0]
+    assert "coalesce(exchange, 'kalshi') = $1" in q
+    assert args[0] == "polymarket"

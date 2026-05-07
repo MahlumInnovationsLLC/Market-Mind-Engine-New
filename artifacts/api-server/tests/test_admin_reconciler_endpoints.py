@@ -161,8 +161,13 @@ def test_drifts_list_admin_happy_path(override_admin, patched_reconciler):
     assert row["market_title"] == "Will BTC close above $50k?"
     assert row["age_seconds"] == 1800
     assert row["last_alert_severity"] == "warning"
-    # Reconciler called with the renamed kwarg (state, not state_filter).
-    assert patched_reconciler["list_drifts"] == [{"state": "open", "limit": 100}]
+    # Reconciler called with the renamed kwarg (state, not state_filter)
+    # and the default exchange forwarded so the kalshi partition is
+    # what gets shown when the operator hasn't picked a venue yet.
+    assert patched_reconciler["list_drifts"] == [
+        {"state": "open", "limit": 100, "exchange": "kalshi"}
+    ]
+    assert body["exchange"] == "kalshi"
 
 
 def test_drifts_list_passes_state_and_limit(override_admin, patched_reconciler):
@@ -171,8 +176,59 @@ def test_drifts_list_passes_state_and_limit(override_admin, patched_reconciler):
     resp = client.get("/api/admin/reconciler/drifts?state=resolved&limit=25")
     assert resp.status_code == 200
     assert patched_reconciler["list_drifts"] == [
-        {"state": "resolved", "limit": 25}
+        {"state": "resolved", "limit": 25, "exchange": "kalshi"}
     ]
+
+
+def test_drifts_list_forwards_exchange(override_admin, patched_reconciler):
+    """``?exchange=polymarket`` reaches the reconciler so the operator
+    can switch venues without page-level state leakage (task #715)."""
+    client = TestClient(app)
+    resp = client.get(
+        "/api/admin/reconciler/drifts?exchange=polymarket&state=open"
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["exchange"] == "polymarket"
+    assert patched_reconciler["list_drifts"] == [
+        {"state": "open", "limit": 100, "exchange": "polymarket"}
+    ]
+
+
+def test_drifts_list_rejects_unknown_exchange(
+    override_admin, patched_reconciler,
+):
+    """A typo'd ``?exchange=`` is rejected at the boundary so we don't
+    silently scan a nonexistent partition. The reconciler is never
+    invoked."""
+    client = TestClient(app)
+    resp = client.get("/api/admin/reconciler/drifts?exchange=ftx")
+    assert resp.status_code == 400, resp.text
+    assert patched_reconciler["list_drifts"] == []
+
+
+def test_accept_truth_forwards_exchange(override_admin, patched_reconciler):
+    client = TestClient(app)
+    resp = client.post(
+        "/api/admin/reconciler/drifts/MKT-A/accept-exchange-truth"
+        "?exchange=polymarket",
+        json={"reason": "polymarket truth"},
+    )
+    assert resp.status_code == 200, resp.text
+    [call] = patched_reconciler["accept_exchange_truth"]
+    assert call["exchange"] == "polymarket"
+    assert call["ticker"] == "MKT-A"
+
+
+def test_snooze_forwards_exchange(override_admin, patched_reconciler):
+    until = (datetime.now(timezone.utc) + timedelta(hours=6)).isoformat()
+    client = TestClient(app)
+    resp = client.post(
+        "/api/admin/reconciler/drifts/MKT-A/snooze?exchange=polymarket",
+        json={"until": until, "reason": "noise"},
+    )
+    assert resp.status_code == 200, resp.text
+    [call] = patched_reconciler["snooze_drift"]
+    assert call["exchange"] == "polymarket"
 
 
 # ---------------------------------------------------------------------------
