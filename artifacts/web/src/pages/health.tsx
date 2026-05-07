@@ -1851,6 +1851,28 @@ function StaleCancelBaselineBlock({
       ? (extras.recent_failures_total as number)
       : 0;
   const peak = Math.max(max, ...recent, 1);
+  const vertical = String(extras.vertical ?? "");
+  const lastVolumeAlert =
+    typeof extras.last_volume_alert === "string"
+      ? (extras.last_volume_alert as string)
+      : null;
+  const lastFailureAlert =
+    typeof extras.last_failure_alert === "string"
+      ? (extras.last_failure_alert as string)
+      : null;
+  const current = recent.length > 0 ? recent[recent.length - 1] : 0;
+  const zScore =
+    stdev > 0 ? (current - mean) / stdev : current > mean ? Infinity : 0;
+  const volumeHover = [
+    `current cancelled=${current}`,
+    `mean=${mean.toFixed(2)}`,
+    `σ=${stdev.toFixed(2)}`,
+    `z=${Number.isFinite(zScore) ? zScore.toFixed(2) : "∞"}`,
+  ].join(" · ");
+  const failureHover = [
+    `failed_cycles=${failedCycles}`,
+    `failed_total=${failedTotal}`,
+  ].join(" · ");
   return (
     <div
       className="space-y-1"
@@ -1894,8 +1916,41 @@ function StaleCancelBaselineBlock({
           </span>
         )}
       </div>
+      <div
+        className="flex items-center gap-3 flex-wrap text-[10px] uppercase tracking-widest text-muted-foreground"
+        data-testid={`stale-cancel-recent-alerts-${vertical}`}
+      >
+        <span className="text-muted-foreground/70">recent alerts ::</span>
+        <span
+          data-testid={`stale-cancel-last-volume-alert-${vertical}`}
+          title={
+            lastVolumeAlert
+              ? `${lastVolumeAlert} — ${volumeHover}`
+              : "no volume anomaly alert recorded"
+          }
+        >
+          volume {lastVolumeAlert ? formatIsoAge(lastVolumeAlert) : "never"}
+        </span>
+        <span
+          data-testid={`stale-cancel-last-failure-alert-${vertical}`}
+          title={
+            lastFailureAlert
+              ? `${lastFailureAlert} — ${failureHover}`
+              : "no failure spike alert recorded"
+          }
+        >
+          failure {lastFailureAlert ? formatIsoAge(lastFailureAlert) : "never"}
+        </span>
+      </div>
     </div>
   );
+}
+
+function formatIsoAge(iso: string): string {
+  const t = Date.parse(iso);
+  if (!Number.isFinite(t)) return iso;
+  const seconds = Math.max(0, Math.floor((Date.now() - t) / 1000));
+  return `${formatAge(seconds)} ago`;
 }
 
 type CryptoAccuracyWindow = {
