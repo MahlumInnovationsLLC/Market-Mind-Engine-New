@@ -1597,6 +1597,204 @@ async def _refresh_f1_leaderboard(api_key: str, event_id: str) -> int:
     return written
 
 
+# ---------------------------------------------------------------------------
+# Authoritative tournament-winner lookup (task #708)
+# ---------------------------------------------------------------------------
+#
+# The replay backtest harness in :mod:`app.sports.tournament_backtest`
+# used to pick the actual winner from the position-1 entrant of the
+# most recent stored leaderboard snapshot.  That works for tournaments
+# that finished cleanly, but it's quietly wrong when polling stopped
+# before the final whistle, when an entrant was DQ'd late, or when the
+# event was cut short.
+#
+# This helper reaches out to the live Sportradar summary endpoint
+# (PGA leaderboard / F1 race summary) and returns the position-1
+# entrant *only* when the payload itself reports a finished status —
+# i.e. when the source-of-truth API confirms the event has wrapped.
+# That gives the replay harness an authoritative winner instead of a
+# stale snapshot inference.
+
+# Tournament-level statuses Sportradar uses to mean "this event is
+# officially over and the published positions are final".  Per-row
+# entry statuses (withdrew / cut / DQ etc.) are handled separately by
+# ``_extract_pga_leaderboard``.
+_FINISHED_TOURNAMENT_STATUSES: frozenset[str] = frozenset({
+    "closed", "ended", "complete", "completed", "finished",
+})
+
+
+def _payload_tournament_status(payload: dict[str, Any]) -> str:
+    """Best-effort extraction of the top-level "is this tournament
+    over yet?" status from a Sportradar PGA leaderboard or F1 race
+    summary payload.
+
+    PGA leaderboard payloads expose status under
+    ``tournament.status``; F1 race summaries expose it under
+    ``sport_event_status.status`` (and also a top-level ``status`` on
+    some weekend rollups).  We check every plausible location and
+    return the first non-empty value, lowercased, so the caller can
+    compare against :data:`_FINISHED_TOURNAMENT_STATUSES`.
+    """
+    if not isinstance(payload, dict):
+        return ""
+    candidates: list[Any] = []
+    tournament = payload.get("tournament")
+    if isinstance(tournament, dict):
+        candidates.append(tournament.get("status"))
+    sport_event_status = payload.get("sport_event_status")
+    if isinstance(sport_event_status, dict):
+        candidates.append(sport_event_status.get("status"))
+    sport_event = payload.get("sport_event")
+    if isinstance(sport_event, dict):
+        candidates.append(sport_event.get("status"))
+    candidates.append(payload.get("status"))
+    for c in candidates:
+        if isinstance(c, str) and c.strip():
+            return c.strip().lower()
+    return ""
+
+
+def _winner_from_extracted_entries(
+    entries: list[dict[str, Any]],
+) -> str | None:
+    """Pick the position-1 entrant out of an already-extracted
+    leaderboard list.  The extractor functions (``_extract_pga_leaderboard``
+    / ``_extract_f1_leaderboard``) have already filtered out DQ /
+    withdrew rows, so this is just "smallest position wins".  Returns
+    ``None`` when the list is empty or every position is unparseable.
+    """
+    best_pos: int | None = None
+    best_name: str | None = None
+    for entry in entries:
+        name = entry.get("name")
+        pos = entry.get("position")
+        if not name or pos is None:
+            continue
+        try:
+            p = int(float(pos))
+        except (TypeError, ValueError):
+            continue
+        if p < 1:
+            continue
+        if best_pos is None or p < best_pos:
+            best_pos = p
+            best_name = str(name)
+    return best_name
+
+
+async def _resolve_tournament_league(event_id: str) -> str | None:
+    """Look up the league (``"PGA"`` / ``"F1"``) for a Sportradar
+    event id by joining ``sportradar_schedules``.  Returns ``None``
+    when the schedule row is missing — the caller falls back to a
+    name-shape heuristic.  Best-effort: a missing table on a fresh
+    DB returns ``None`` rather than raising.
+    """
+    try:
+        row = await db.fetchrow(
+            """
+            SELECT league
+              FROM sportradar_schedules
+             WHERE game_id = $1
+             LIMIT 1
+            """,
+            event_id,
+        )
+    except Exception as e:  # noqa: BLE001
+        log.debug(
+            "[tournament_winner] league lookup skipped for %s (%s)",
+            event_id, e,
+        )
+        return None
+    if not row:
+        return None
+    league = (row["league"] or "").strip().upper()
+    return league or None
+
+
+async def fetch_tournament_winner_from_summary(
+    event_id: str,
+) -> str | None:
+    """Return the *authoritative* tournament winner for ``event_id``
+    by fetching the live Sportradar summary endpoint and trusting its
+    position-1 entrant only when the payload reports a finished
+    status (task #708).
+
+    For PGA tournaments we hit ``tournaments/{id}/leaderboard.json``;
+    for F1 race weekends we hit ``sport_events/{id}/summary.json``.
+    The sport is detected via the ``sportradar_schedules.league``
+    column with a fallback to the event-id shape (``sr:tournament:*``
+    → PGA, ``sr:race:*`` / ``sr:sport_event:*`` → F1).
+
+    Returns ``None`` (so the caller can fall through to its next
+    source) in any of these cases:
+
+    * The API key for the detected sport is not configured.
+    * The HTTP fetch failed or returned an empty payload.
+    * The payload's tournament-level status is not in
+      :data:`_FINISHED_TOURNAMENT_STATUSES` — i.e. Sportradar still
+      thinks the event is in-progress / scheduled / cancelled.
+    * No position-1 entrant could be parsed out of the payload.
+
+    Never raises: a flaky Sportradar response must never blank out the
+    backtest harness.  ``RateLimited`` is caught locally because the
+    backtest is an on-demand operator request, not a scheduled poller
+    — there's no scheduler to apply a per-provider cooldown to.
+    """
+    league = await _resolve_tournament_league(event_id)
+    if not league:
+        # Fall back to event-id shape so a missing schedule row
+        # (fresh DB, manual event id) still picks the right endpoint.
+        if event_id.startswith("sr:tournament:"):
+            league = "PGA"
+        elif event_id.startswith(("sr:race:", "sr:sport_event:")):
+            league = "F1"
+    if league == "PGA":
+        api_key = _api_key_for("pga")
+        if not api_key:
+            return None
+        url = _PGA_LEADERBOARD_TPL.format(tournament_id=event_id)
+        provider = f"sportradar:pga:summary:{event_id}"
+        extractor = _extract_pga_leaderboard
+    elif league == "F1":
+        api_key = _api_key_for("f1")
+        if not api_key:
+            return None
+        url = _F1_RACE_SUMMARY_TPL.format(event_id=event_id)
+        provider = f"sportradar:f1:summary:{event_id}"
+        extractor = _extract_f1_leaderboard
+    else:
+        # No way to know which endpoint to hit — caller falls through.
+        return None
+
+    try:
+        payload = await _get_json(provider, url, api_key)
+    except RateLimited:
+        log.info(
+            "[tournament_winner] rate-limited fetching summary for %s",
+            event_id,
+        )
+        return None
+    except Exception as e:  # noqa: BLE001
+        log.info(
+            "[tournament_winner] summary fetch failed for %s (%s)",
+            event_id, e,
+        )
+        return None
+    if not isinstance(payload, dict) or not payload:
+        return None
+
+    status = _payload_tournament_status(payload)
+    if status not in _FINISHED_TOURNAMENT_STATUSES:
+        # Sportradar still thinks the event is in-progress (or
+        # cancelled / scheduled).  Do NOT trust position 1 as the
+        # final winner — caller falls through to snapshot inference.
+        return None
+
+    entries = extractor(payload)
+    return _winner_from_extracted_entries(entries)
+
+
 TOURNAMENT_LEADERBOARDS_FEED_NAME = "sportradar_tournament_leaderboards"
 
 

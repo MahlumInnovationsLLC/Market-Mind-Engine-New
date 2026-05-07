@@ -26,7 +26,9 @@ Each replay returns a :class:`TournamentReplayResult` carrying:
 * per-snapshot score (probability the *actual* winner had at the time
   + the matching Brier / log-loss),
 * an event-level rollup (mean Brier / mean log-loss / "how often was
-  the actual winner our top pick" accuracy).
+  the actual winner our top pick" accuracy),
+* ``winner_source`` — which authoritative source picked the winner so
+  operators can spot inferred-vs-confirmed at a glance (task #708).
 
 Replays never write into :mod:`app.sports.ratings` — the iter helper
 already isolates the live cache, and we mirror that contract end-to-end
@@ -37,6 +39,15 @@ Completed runs are persisted via :func:`record_run` into
 recent replays without re-walking the snapshot history every render.
 DB writes are best-effort — a flaky persist never masks the in-memory
 report from the operator.
+
+Winner resolution (task #708) is settlement-first: we prefer an
+authoritative source — a matched Kalshi outright market that settled
+YES on a single entrant, or a Sportradar schedule row whose status
+reports the event finished — and only fall back to the position-1-of-
+latest-snapshot heuristic when no settlement source is available.
+The chosen source is recorded on every result + persisted row so a
+glance at the dashboard's recent-runs panel tells operators which
+runs were graded against confirmed vs. inferred winners.
 """
 from __future__ import annotations
 
@@ -48,6 +59,7 @@ from typing import Any
 
 from .. import db
 from ..feeds.sportradar import (
+    fetch_tournament_winner_from_summary,
     iter_tournament_leaderboard_history,
     latest_tournament_leaderboard,
 )
@@ -63,6 +75,21 @@ log = logging.getLogger(__name__)
 # clamp used by the crypto backtest.
 _LOG_LOSS_EPS: float = 1e-9
 
+
+# ---------------------------------------------------------------------------
+# Winner-source provenance (task #708).
+# ---------------------------------------------------------------------------
+#
+# Persisted into ``sportradar_tournament_replays.winner_source`` and
+# round-tripped via :class:`TournamentReplayResult` so the operator
+# dashboard can flag inferred-vs-confirmed runs without re-walking the
+# replay.  Keep the labels stable — the migration's backfill stamps
+# pre-task-708 rows with ``snapshot_inference`` to match.
+WINNER_SOURCE_OVERRIDE = "override"
+WINNER_SOURCE_KALSHI = "kalshi_settlement"
+WINNER_SOURCE_SPORTRADAR = "sportradar_summary"
+WINNER_SOURCE_SNAPSHOT = "snapshot_inference"
+WINNER_SOURCE_UNKNOWN = "unknown"
 
 @dataclass
 class SnapshotScore:
@@ -88,6 +115,10 @@ class TournamentReplayResult:
     snapshots: list[SnapshotScore] = field(default_factory=list)
     started_at: str = ""
     completed_at: str = ""
+    # Where the actual-winner came from (task #708).  Defaults to
+    # ``unknown`` so an empty replay (no winner could be resolved at
+    # all) still serializes a sensible value.
+    winner_source: str = WINNER_SOURCE_UNKNOWN
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -95,6 +126,7 @@ class TournamentReplayResult:
             "league": self.league,
             "name": self.name,
             "winner": self.winner,
+            "winner_source": self.winner_source,
             "n_snapshots": self.n_snapshots,
             "accuracy": round(self.accuracy, 6),
             "brier_score": round(self.brier_score, 6),
@@ -168,11 +200,82 @@ async def _resolve_event_metadata(event_id: str) -> tuple[str, str]:
     return league, name
 
 
-async def _infer_winner_from_history(event_id: str) -> str | None:
-    """Use the most recent stored snapshot's position-1 entrant as the
-    actual winner.  Returns ``None`` when nothing is recorded for the
-    event yet — callers must surface that the report could not be
-    scored rather than silently grading against a missing horse.
+async def _winner_from_kalshi_settlement(event_id: str) -> str | None:
+    """Look for a matched Kalshi outright market that has settled YES
+    on a single entrant for this Sportradar event.
+
+    Each entrant of an N-way outright tournament market is registered
+    as its own ``predictions`` row by the Kalshi sports markets feed.
+    When the tournament concludes, exactly one of those rows transitions
+    to ``outcome='yes'`` with a non-NULL ``settled_at``; the entrant
+    name is stamped into ``predictions.metadata`` (``competitor_name``
+    or ``entrant_name``) by the n-way derivation helper at trade time.
+
+    Returns ``None`` when nothing matches — fresh DB, no matched market,
+    or the market hasn't settled yet — so the caller can fall through
+    to the next source.  Best-effort: a missing predictions table on a
+    bootstrap DB returns ``None`` rather than raising.
+    """
+    try:
+        row = await db.fetchrow(
+            """
+            SELECT
+                COALESCE(
+                    NULLIF(metadata->>'competitor_name', ''),
+                    NULLIF(metadata->>'entrant_name', '')
+                ) AS entrant
+              FROM predictions
+             WHERE game_id = $1
+               AND lower(COALESCE(outcome, '')) = 'yes'
+               AND settled_at IS NOT NULL
+               AND COALESCE(
+                       metadata->>'competitor_name',
+                       metadata->>'entrant_name'
+                   ) IS NOT NULL
+             ORDER BY settled_at DESC
+             LIMIT 1
+            """,
+            event_id,
+        )
+    except Exception as e:  # noqa: BLE001
+        log.debug(
+            "[tournament_backtest] kalshi settlement lookup skipped for %s (%s)",
+            event_id, e,
+        )
+        return None
+    if not row:
+        return None
+    entrant = (row["entrant"] or "").strip()
+    return entrant or None
+
+
+async def _winner_from_sportradar_summary(event_id: str) -> str | None:
+    """Ask the live Sportradar summary endpoint for the authoritative
+    tournament winner.
+
+    Delegates to :func:`app.feeds.sportradar.fetch_tournament_winner_from_summary`
+    which fetches the PGA leaderboard or F1 race summary, checks the
+    payload's *own* tournament-level status (``closed`` / ``ended`` /
+    ``complete`` / ``finished``), and only returns the position-1
+    entrant when Sportradar itself reports the event is over.
+
+    Critically: this never falls through to the locally-cached
+    snapshot — if the live summary doesn't confirm a finished winner,
+    we return ``None`` so the caller drops to
+    :func:`_winner_from_latest_snapshot` and the result gets the
+    honest ``snapshot_inference`` provenance label rather than being
+    mislabeled as ``sportradar_summary``.
+    """
+    return await fetch_tournament_winner_from_summary(event_id)
+
+
+async def _winner_from_latest_snapshot(event_id: str) -> str | None:
+    """Return the position-1 entrant of the most recent stored
+    snapshot, or ``None`` when nothing is recorded for the event yet.
+
+    Shared by the Sportradar-status path (where it's authoritative
+    because the schedule row reports finished) and the snapshot-
+    inference fallback (where it's a best-effort guess).
     """
     snap = await latest_tournament_leaderboard(event_id)
     if not snap:
@@ -196,6 +299,66 @@ async def _infer_winner_from_history(event_id: str) -> str | None:
     return best_name
 
 
+async def _resolve_actual_winner(
+    event_id: str, *, override: str | None,
+) -> tuple[str | None, str]:
+    """Pick the actual winner for ``event_id`` and tag it with the
+    source it came from.
+
+    Resolution order (task #708):
+
+    1. ``override`` — operator-supplied ``winner=`` query param wins
+       outright.  Useful when the orchestrator has out-of-band
+       knowledge (e.g. a manually-corrected DQ).
+    2. Kalshi outright market settlement — the matched ``predictions``
+       row whose outcome resolved YES carries the canonical entrant.
+    3. Sportradar finished-status schedule row — when the schedule
+       reports the event is closed/ended/complete/finished, the
+       latest leaderboard snapshot is the official final field.
+    4. Snapshot inference — last-resort position-1-of-latest-snapshot
+       heuristic.  Documented as "may be wrong if polling stopped
+       before the final whistle" and tagged accordingly so the
+       dashboard can flag it.
+
+    Returns ``(winner, source)``.  ``winner`` is ``None`` only when
+    every source came up empty; in that case ``source`` is
+    :data:`WINNER_SOURCE_UNKNOWN` so the persisted row reflects the
+    "no winner could be resolved" state explicitly.
+    """
+    if isinstance(override, str) and override.strip():
+        return override.strip(), WINNER_SOURCE_OVERRIDE
+
+    kalshi = await _winner_from_kalshi_settlement(event_id)
+    if kalshi:
+        return kalshi, WINNER_SOURCE_KALSHI
+
+    sportradar = await _winner_from_sportradar_summary(event_id)
+    if sportradar:
+        return sportradar, WINNER_SOURCE_SPORTRADAR
+
+    inferred = await _winner_from_latest_snapshot(event_id)
+    if inferred:
+        return inferred, WINNER_SOURCE_SNAPSHOT
+
+    return None, WINNER_SOURCE_UNKNOWN
+
+
+# Back-compat shim: external callers (and the existing test suite)
+# still import ``_infer_winner_from_history``.  Keep the name pointed
+# at the snapshot-inference helper so it continues to mean exactly
+# what it always did — the settlement-first layering happens in
+# :func:`_resolve_actual_winner` above.
+async def _infer_winner_from_history(event_id: str) -> str | None:
+    """Snapshot-inference fallback — kept for back-compat.
+
+    .. deprecated::
+        Prefer :func:`_resolve_actual_winner`, which prefers the
+        authoritative Kalshi / Sportradar settlement sources before
+        falling back to this heuristic.
+    """
+    return await _winner_from_latest_snapshot(event_id)
+
+
 async def replay_event(
     event_id: str,
     *,
@@ -206,11 +369,15 @@ async def replay_event(
     """Walk every persisted snapshot of ``event_id`` and grade the
     Plackett-Luce probabilities against the actual winner.
 
-    ``winner`` overrides the inferred-from-final-snapshot pick — useful
-    when the orchestrator has a more authoritative settlement source
-    (a Kalshi outright market, say).  ``since``/``until`` narrow the
-    replay window inclusively on ``fetched_at``; either may be
-    ``None`` for an open bound.
+    ``winner`` overrides the settlement-first lookup — useful when the
+    orchestrator has out-of-band knowledge (e.g. a manually-corrected
+    DQ) that beats every other source.  Without an override the
+    harness prefers a matched Kalshi outright settlement, then a
+    Sportradar finished-status schedule row, then the position-1-of-
+    latest-snapshot heuristic, and tags the result with the source it
+    actually used (task #708).  ``since``/``until`` narrow the replay
+    window inclusively on ``fetched_at``; either may be ``None`` for
+    an open bound.
 
     Returns a :class:`TournamentReplayResult` with ``n_snapshots == 0``
     (and zeroed metrics) when no snapshots exist for the event, so the
@@ -219,9 +386,8 @@ async def replay_event(
     """
     started = datetime.now(timezone.utc).isoformat()
     league, name = await _resolve_event_metadata(event_id)
-    actual_winner = (
-        winner.strip() if isinstance(winner, str) and winner.strip()
-        else await _infer_winner_from_history(event_id)
+    actual_winner, winner_source = await _resolve_actual_winner(
+        event_id, override=winner,
     )
 
     snapshots: list[SnapshotScore] = []
@@ -267,6 +433,7 @@ async def replay_event(
         snapshots=snapshots,
         started_at=started,
         completed_at=datetime.now(timezone.utc).isoformat(),
+        winner_source=winner_source,
     )
 
 
@@ -362,19 +529,20 @@ async def record_run(result: TournamentReplayResult) -> None:
         await db.execute(
             """
             INSERT INTO sportradar_tournament_replays (
-                event_id, league, event_name, winner,
+                event_id, league, event_name, winner, winner_source,
                 n_snapshots, accuracy, brier_score, log_loss,
                 started_at, completed_at
             ) VALUES (
-                $1, $2, $3, $4,
-                $5, $6, $7, $8,
-                COALESCE($9, now()), COALESCE($10, now())
+                $1, $2, $3, $4, $5,
+                $6, $7, $8, $9,
+                COALESCE($10, now()), COALESCE($11, now())
             )
             """,
             result.event_id,
             result.league,
             result.name,
             result.winner,
+            result.winner_source or WINNER_SOURCE_UNKNOWN,
             int(result.n_snapshots),
             float(result.accuracy),
             float(result.brier_score),
@@ -394,12 +562,18 @@ async def list_recent_runs(*, limit: int = 50) -> list[dict[str, Any]]:
     so the operator dashboard can render a "recent runs" table without
     a follow-up sort.  Returns an empty list when the table is missing
     (fresh dev DB) so the panel falls back gracefully.
+
+    ``winner_source`` (task #708) round-trips so the panel can flag
+    inferred-vs-confirmed winners.  Older databases without the
+    column degrade gracefully via ``COALESCE`` to ``unknown`` so a
+    fresh-from-bootstrap dev DB renders before the migration runs.
     """
     capped = max(1, min(int(limit), 500))
     try:
         rows = await db.fetch(
             """
             SELECT id, event_id, league, event_name, winner,
+                   COALESCE(winner_source, 'unknown') AS winner_source,
                    n_snapshots, accuracy, brier_score, log_loss,
                    started_at, completed_at
               FROM sportradar_tournament_replays
@@ -418,6 +592,7 @@ async def list_recent_runs(*, limit: int = 50) -> list[dict[str, Any]]:
             "league": r["league"] or "",
             "event_name": r["event_name"] or "",
             "winner": r["winner"],
+            "winner_source": r["winner_source"] or WINNER_SOURCE_UNKNOWN,
             "n_snapshots": int(r["n_snapshots"]),
             "accuracy": float(r["accuracy"]),
             "brier_score": float(r["brier_score"]),
@@ -563,6 +738,11 @@ async def auto_replay_finished_tournaments() -> dict[str, Any]:
 __all__ = [
     "SnapshotScore",
     "TournamentReplayResult",
+    "WINNER_SOURCE_OVERRIDE",
+    "WINNER_SOURCE_KALSHI",
+    "WINNER_SOURCE_SPORTRADAR",
+    "WINNER_SOURCE_SNAPSHOT",
+    "WINNER_SOURCE_UNKNOWN",
     "replay_event",
     "replay_events_in_range",
     "record_run",

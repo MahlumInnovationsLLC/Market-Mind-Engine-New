@@ -8,6 +8,7 @@ parses both the injuries and live-state payload shapes correctly.
 """
 from __future__ import annotations
 
+import asyncio as _asyncio
 import os
 from datetime import datetime, timezone
 
@@ -1507,3 +1508,148 @@ def test_normalize_combat_payload_skips_entries_without_grouping_id_safely():
     rows = _norm("UFC", payload)
     assert len(rows) == 1
     assert rows[0]["id"] == "sr:sport_event:loose-bout"
+
+
+# ---------------------------------------------------------------------------
+# Authoritative tournament-winner lookup (task #708)
+# ---------------------------------------------------------------------------
+
+
+def test_fetch_tournament_winner_from_summary_returns_position_one_when_finished(
+    monkeypatch,
+):
+    """Happy path: when the live PGA leaderboard payload reports
+    ``tournament.status == "closed"``, the helper returns the
+    position-1 entrant — the *authoritative* tournament winner — so
+    the backtest harness can label the run with confirmed-source
+    provenance instead of falling back to a snapshot inference.
+    """
+    monkeypatch.setenv("SPORTRADAR_PGA_KEY", "k")
+
+    async def fake_resolve(_eid):
+        return "PGA"
+
+    payload = {
+        "tournament": {"id": "sr:tournament:pga-1", "status": "closed"},
+        "leaderboard": [
+            {"position": 1, "player": {"first_name": "Rory", "last_name": "McIlroy"}},
+            {"position": 2, "player": {"first_name": "Jon", "last_name": "Rahm"}},
+        ],
+    }
+
+    async def fake_get_json(*_a, **_k):
+        return payload
+
+    monkeypatch.setattr(
+        sportradar, "_resolve_tournament_league", fake_resolve,
+    )
+    monkeypatch.setattr(sportradar, "_get_json", fake_get_json)
+
+    winner = _asyncio.run(
+        sportradar.fetch_tournament_winner_from_summary(
+            "sr:tournament:pga-1"
+        )
+    )
+    assert winner == "Rory McIlroy"
+
+
+def test_fetch_tournament_winner_from_summary_returns_none_when_inprogress(
+    monkeypatch,
+):
+    """Critical guard (task #708): when Sportradar's payload status
+    isn't in the finished set, the helper must return ``None`` —
+    *not* the position-1 entrant — so the caller falls through to the
+    snapshot-inference label rather than mislabeling a mid-event
+    leader as a confirmed summary winner.
+    """
+    monkeypatch.setenv("SPORTRADAR_PGA_KEY", "k")
+
+    async def fake_resolve(_eid):
+        return "PGA"
+
+    payload = {
+        "tournament": {"id": "sr:tournament:pga-1", "status": "inprogress"},
+        "leaderboard": [
+            {"position": 1, "player": {"first_name": "Rory", "last_name": "McIlroy"}},
+        ],
+    }
+
+    async def fake_get_json(*_a, **_k):
+        return payload
+
+    monkeypatch.setattr(
+        sportradar, "_resolve_tournament_league", fake_resolve,
+    )
+    monkeypatch.setattr(sportradar, "_get_json", fake_get_json)
+
+    winner = _asyncio.run(
+        sportradar.fetch_tournament_winner_from_summary(
+            "sr:tournament:pga-1"
+        )
+    )
+    assert winner is None
+
+
+def test_fetch_tournament_winner_from_summary_handles_f1_race_summary(
+    monkeypatch,
+):
+    """The F1 path uses ``sport_event_status.status`` instead of
+    ``tournament.status`` — the helper must check that location too,
+    and parse the position-1 competitor from the F1 race summary
+    envelope.
+    """
+    monkeypatch.setenv("SPORTRADAR_F1_KEY", "k")
+
+    async def fake_resolve(_eid):
+        return "F1"
+
+    payload = {
+        "sport_event": {"id": "sr:sport_event:f1-1"},
+        "sport_event_status": {
+            "status": "closed",
+            "competitors": [
+                {"id": "sr:competitor:1", "name": "Verstappen", "position": 1},
+                {"id": "sr:competitor:2", "name": "Leclerc", "position": 2},
+            ],
+        },
+    }
+
+    async def fake_get_json(*_a, **_k):
+        return payload
+
+    monkeypatch.setattr(
+        sportradar, "_resolve_tournament_league", fake_resolve,
+    )
+    monkeypatch.setattr(sportradar, "_get_json", fake_get_json)
+
+    winner = _asyncio.run(
+        sportradar.fetch_tournament_winner_from_summary(
+            "sr:sport_event:f1-1"
+        )
+    )
+    assert winner == "Verstappen"
+
+
+def test_fetch_tournament_winner_from_summary_returns_none_without_api_key(
+    monkeypatch,
+):
+    """Without an API key for the detected sport the helper short-
+    circuits — never raises — so a backtest run on an unconfigured
+    dev machine still falls cleanly through to snapshot inference.
+    """
+    monkeypatch.delenv("SPORTRADAR_PGA_KEY", raising=False)
+    monkeypatch.delenv("SPORTRADAR_API_KEY", raising=False)
+
+    async def fake_resolve(_eid):
+        return "PGA"
+
+    monkeypatch.setattr(
+        sportradar, "_resolve_tournament_league", fake_resolve,
+    )
+
+    winner = _asyncio.run(
+        sportradar.fetch_tournament_winner_from_summary(
+            "sr:tournament:pga-1"
+        )
+    )
+    assert winner is None

@@ -45,6 +45,28 @@ from app.sports import (
 from tests.conftest import TEST_CLERK_HOST
 
 
+def _patch_summary_fetch(monkeypatch, winner=None):
+    """Stub :func:`fetch_tournament_winner_from_summary` so tests can
+    isolate the Kalshi / snapshot-inference / override branches without
+    talking to the live Sportradar HTTP endpoint.
+
+    By default the stub returns ``None`` (no authoritative summary
+    winner found), which exercises the snapshot-inference fallback.
+    Pass ``winner="..."`` to simulate Sportradar reporting an
+    officially-finished tournament with that entrant in position 1.
+    The stub is wired into both :mod:`app.feeds.sportradar` (so the
+    helper itself is replaced) and :mod:`app.sports.tournament_backtest`
+    (so the already-imported reference inside the backtest module
+    points at the stub too).
+    """
+    async def _fake(*_a, **_k):
+        return winner
+    monkeypatch.setattr(sr, "fetch_tournament_winner_from_summary", _fake)
+    monkeypatch.setattr(
+        tournament_backtest, "fetch_tournament_winner_from_summary", _fake,
+    )
+
+
 def _run(coro):
     loop = asyncio.new_event_loop()
     try:
@@ -119,6 +141,7 @@ def test_replay_event_scores_each_snapshot_against_actual_winner(monkeypatch):
         return None
 
     monkeypatch.setattr(db_module, "fetchrow", fake_fetchrow)
+    _patch_summary_fetch(monkeypatch)
 
     result = _run(
         tournament_backtest.replay_event(event_id)
@@ -188,6 +211,7 @@ def test_replay_event_does_not_touch_live_ratings_cache(monkeypatch):
         return None
 
     monkeypatch.setattr(db_module, "fetchrow", fake_fetchrow)
+    _patch_summary_fetch(monkeypatch)
 
     result = _run(
         tournament_backtest.replay_event(event_id)
@@ -212,6 +236,7 @@ def test_replay_event_returns_zero_when_no_snapshots(monkeypatch):
     monkeypatch.setattr(
         sr, "latest_tournament_leaderboard", fake_latest,
     )
+    _patch_summary_fetch(monkeypatch)
 
     # Even the iter helper returns nothing.
     class _Conn:
@@ -259,6 +284,7 @@ def test_replay_event_explicit_winner_overrides_inferred(monkeypatch):
         return None
 
     monkeypatch.setattr(db_module, "fetchrow", fake_fetchrow)
+    _patch_summary_fetch(monkeypatch)
 
     result = _run(
         tournament_backtest.replay_event(
@@ -273,6 +299,223 @@ def test_replay_event_explicit_winner_overrides_inferred(monkeypatch):
     # Scheffler is position 2 in the snapshot, so yes_prob > 0 but
     # less than Rahm's.
     assert 0.0 < result.snapshots[0].yes_prob < 0.5
+
+
+def test_replay_event_prefers_kalshi_settlement_over_snapshot(monkeypatch):
+    """Settlement-first lookup (task #708): when a matched Kalshi
+    outright market has settled YES on a single entrant, that entrant
+    is the actual winner — even when the latest stored snapshot's
+    position-1 entrant disagrees (which can happen when polling
+    stopped before the final whistle or someone got DQ'd late).
+    """
+    ratings_mod.clear_cache()
+
+    ts = datetime(2026, 4, 26, 12, 0, tzinfo=timezone.utc)
+    event_id = "sr:tournament:pga-1"
+    canned_rows = [
+        # Latest snapshot has Rahm in pos 1 (would be the snapshot
+        # inference) — but the Kalshi outright market settled on
+        # Scheffler, so the harness must trust the settlement instead.
+        {"event_id": event_id, "position": 1, "name": "Rahm", "fetched_at": ts},
+        {"event_id": event_id, "position": 2, "name": "Scheffler", "fetched_at": ts},
+    ]
+
+    @asynccontextmanager
+    async def fake_acquire():
+        yield _make_snapshot_conn(canned_rows)()
+
+    monkeypatch.setattr(db_module, "acquire", fake_acquire)
+
+    seen_queries: list[str] = []
+
+    async def fake_fetchrow(query, *_args):
+        normalised = " ".join(query.split())
+        seen_queries.append(normalised)
+        # First call is the schedule-metadata lookup — return None so
+        # the test isolates the winner-source logic.
+        if "FROM sportradar_schedules WHERE game_id = $1 LIMIT 1" in normalised \
+                and "status" not in normalised:
+            return None
+        # Second call is the Kalshi settlement lookup — return the
+        # winning entrant.  Branch on the table name so the order of
+        # the schedule + predictions queries doesn't matter.
+        if "FROM predictions" in normalised:
+            return {"entrant": "Scheffler"}
+        # Third call is the Sportradar status lookup — should never
+        # be reached because the Kalshi lookup already returned a
+        # winner, but return None defensively.
+        return None
+
+    monkeypatch.setattr(db_module, "fetchrow", fake_fetchrow)
+    # Even though Sportradar would also report a winner, Kalshi must
+    # win the resolution race — assert that by stubbing the live
+    # summary fetch to a *different* name and verifying the result
+    # uses Scheffler from Kalshi rather than the Sportradar reply.
+    _patch_summary_fetch(monkeypatch, winner="McIlroy")
+
+    result = _run(tournament_backtest.replay_event(event_id))
+    assert result.winner == "Scheffler"
+    assert result.winner_source == tournament_backtest.WINNER_SOURCE_KALSHI
+    # Snapshot must have been scored against Scheffler, not Rahm.
+    assert result.snapshots[0].top_pick == "Rahm"
+    assert result.snapshots[0].top_pick_was_winner is False
+
+
+def test_replay_event_uses_sportradar_summary_when_finished(monkeypatch):
+    """Settlement-first lookup (task #708): when no Kalshi market is
+    matched, the harness fetches the live Sportradar summary endpoint
+    and trusts the winner only when the payload itself reports a
+    finished status.  When that returns a name, it's tagged as
+    ``sportradar_summary`` — not the generic snapshot-inference
+    fallback.
+
+    Critically, the snapshot's position-1 entrant intentionally
+    *disagrees* with the Sportradar summary winner: the test would
+    silently pass under the old "schedule status + snapshot" path,
+    but only the real summary fetch can produce the McIlroy answer
+    here.  That guards against accidentally regressing back to
+    snapshot inference disguised as a summary source.
+    """
+    ratings_mod.clear_cache()
+
+    ts = datetime(2026, 4, 26, 12, 0, tzinfo=timezone.utc)
+    event_id = "sr:tournament:pga-1"
+    canned_rows = [
+        # Snapshot says Rahm is leading — different name from the
+        # Sportradar summary's authoritative winner below.
+        {"event_id": event_id, "position": 1, "name": "Rahm", "fetched_at": ts},
+        {"event_id": event_id, "position": 2, "name": "McIlroy", "fetched_at": ts},
+    ]
+
+    @asynccontextmanager
+    async def fake_acquire():
+        yield _make_snapshot_conn(canned_rows)()
+
+    monkeypatch.setattr(db_module, "acquire", fake_acquire)
+
+    async def fake_fetchrow(query, *_args):
+        normalised = " ".join(query.split())
+        # Kalshi settlement lookup — no matched market.
+        if "FROM predictions" in normalised:
+            return None
+        # Schedule-metadata lookup — not relevant here.
+        return None
+
+    monkeypatch.setattr(db_module, "fetchrow", fake_fetchrow)
+    # Live Sportradar summary fetch returns McIlroy as the
+    # authoritative winner of a payload Sportradar itself reported
+    # as finished.
+    _patch_summary_fetch(monkeypatch, winner="McIlroy")
+
+    result = _run(tournament_backtest.replay_event(event_id))
+    assert result.winner == "McIlroy"
+    assert result.winner_source == tournament_backtest.WINNER_SOURCE_SPORTRADAR
+
+
+def test_replay_event_falls_back_to_snapshot_when_event_not_finished(monkeypatch):
+    """Settlement-first lookup (task #708): when neither Kalshi nor
+    the live Sportradar summary endpoint can produce an authoritative
+    winner — e.g. Sportradar still reports the event in-progress so
+    the summary fetch returns ``None`` — the harness falls back to
+    the snapshot-inference heuristic *and* tags the source as such.
+    The dashboard can then flag this run as "best-effort" rather
+    than mislabeling a snapshot guess as a confirmed Sportradar
+    summary winner.
+    """
+    ratings_mod.clear_cache()
+
+    ts = datetime(2026, 4, 26, 12, 0, tzinfo=timezone.utc)
+    event_id = "sr:tournament:pga-1"
+    canned_rows = [
+        {"event_id": event_id, "position": 1, "name": "Rahm", "fetched_at": ts},
+        {"event_id": event_id, "position": 2, "name": "Scheffler", "fetched_at": ts},
+    ]
+
+    @asynccontextmanager
+    async def fake_acquire():
+        yield _make_snapshot_conn(canned_rows)()
+
+    monkeypatch.setattr(db_module, "acquire", fake_acquire)
+
+    async def fake_fetchrow(*_a, **_k):
+        return None
+
+    monkeypatch.setattr(db_module, "fetchrow", fake_fetchrow)
+    # Live Sportradar summary fetch returns None (event isn't
+    # finished yet, or fetch failed) — caller must NOT use
+    # WINNER_SOURCE_SPORTRADAR for the fallback.
+    _patch_summary_fetch(monkeypatch, winner=None)
+
+    result = _run(tournament_backtest.replay_event(event_id))
+    assert result.winner == "Rahm"
+    assert result.winner_source == tournament_backtest.WINNER_SOURCE_SNAPSHOT
+
+
+def test_replay_event_explicit_winner_tags_override_source(monkeypatch):
+    """An explicit ``winner`` override (task #708) tags the source as
+    ``override`` so an operator-supplied winner can be distinguished
+    from any of the auto-resolved settlement sources in the
+    dashboard's recent-runs panel.
+    """
+    ratings_mod.clear_cache()
+
+    ts = datetime(2026, 4, 26, 12, 0, tzinfo=timezone.utc)
+    event_id = "sr:tournament:pga-1"
+    canned_rows = [
+        {"event_id": event_id, "position": 1, "name": "Rahm", "fetched_at": ts},
+        {"event_id": event_id, "position": 2, "name": "Scheffler", "fetched_at": ts},
+    ]
+
+    @asynccontextmanager
+    async def fake_acquire():
+        yield _make_snapshot_conn(canned_rows)()
+
+    monkeypatch.setattr(db_module, "acquire", fake_acquire)
+
+    async def fake_fetchrow(*_a, **_k):
+        return None
+
+    monkeypatch.setattr(db_module, "fetchrow", fake_fetchrow)
+    _patch_summary_fetch(monkeypatch)
+
+    result = _run(
+        tournament_backtest.replay_event(event_id, winner="Scheffler")
+    )
+    assert result.winner == "Scheffler"
+    assert result.winner_source == tournament_backtest.WINNER_SOURCE_OVERRIDE
+
+
+def test_replay_event_no_winner_tagged_unknown(monkeypatch):
+    """When no source — override, Kalshi, Sportradar, snapshot — can
+    produce a winner, the result's ``winner_source`` must be
+    ``unknown`` so the persisted row reflects that explicitly rather
+    than silently defaulting to "snapshot_inference".
+    """
+    async def fake_fetchrow(*_a, **_k):
+        return None
+
+    async def fake_latest(*_a, **_k):
+        return []
+
+    monkeypatch.setattr(db_module, "fetchrow", fake_fetchrow)
+    monkeypatch.setattr(sr, "latest_tournament_leaderboard", fake_latest)
+    _patch_summary_fetch(monkeypatch)
+
+    class _Conn:
+        async def fetch(self, *_a, **_k):
+            return []
+
+    @asynccontextmanager
+    async def fake_acquire():
+        yield _Conn()
+
+    monkeypatch.setattr(db_module, "acquire", fake_acquire)
+
+    result = _run(
+        tournament_backtest.replay_event("sr:tournament:does-not-exist")
+    )
+    assert result.winner is None
+    assert result.winner_source == tournament_backtest.WINNER_SOURCE_UNKNOWN
 
 
 def test_replay_events_in_range_walks_every_distinct_event(monkeypatch):
@@ -527,14 +770,19 @@ def test_record_run_persists_completed_replay(monkeypatch):
     assert len(captured) == 1
     query, args = captured[0]
     assert "INSERT INTO sportradar_tournament_replays" in query
+    assert "winner_source" in query
     assert args[0] == "sr:tournament:pga-1"
     assert args[1] == "PGA"
     assert args[2] == "The Masters"
     assert args[3] == "Rahm"
-    assert args[4] == 4
-    assert args[5] == pytest.approx(0.75)
-    assert args[6] == pytest.approx(0.2)
-    assert args[7] == pytest.approx(0.4)
+    # winner_source defaults to "unknown" when callers don't set it,
+    # so legacy results constructed without explicit provenance still
+    # persist with a deterministic label.
+    assert args[4] == tournament_backtest.WINNER_SOURCE_UNKNOWN
+    assert args[5] == 4
+    assert args[6] == pytest.approx(0.75)
+    assert args[7] == pytest.approx(0.2)
+    assert args[8] == pytest.approx(0.4)
 
 
 def test_list_recent_runs_returns_empty_on_missing_table(monkeypatch):
@@ -567,6 +815,7 @@ def test_list_recent_runs_normalises_persisted_rows(monkeypatch):
                 "league": "PGA",
                 "event_name": "The Masters",
                 "winner": "Rahm",
+                "winner_source": "kalshi_settlement",
                 "n_snapshots": 12,
                 "accuracy": 0.5,
                 "brier_score": 0.21,
@@ -585,6 +834,7 @@ def test_list_recent_runs_normalises_persisted_rows(monkeypatch):
             "league": "PGA",
             "event_name": "The Masters",
             "winner": "Rahm",
+            "winner_source": "kalshi_settlement",
             "n_snapshots": 12,
             "accuracy": 0.5,
             "brier_score": 0.21,
