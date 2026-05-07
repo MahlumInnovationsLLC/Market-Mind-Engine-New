@@ -10,6 +10,7 @@ import {
 import {
   EloUpdaterDisplay,
   computeEloNextRun,
+  mergeOperatorAlertRows,
   type EloUpdaterStatus,
   type EloUpdaterCycle,
 } from "./admin";
@@ -326,5 +327,55 @@ describe("EloUpdaterDisplay next-run countdown", () => {
       <EloUpdaterDisplay status={status} onRunNow={vi.fn()} running={false} />,
     );
     expect(screen.getByTestId("elo-updater-next-run").textContent).toBe("—");
+  });
+});
+
+describe("mergeOperatorAlertRows", () => {
+  it("renders a row for every configured recipient even when they have no override", () => {
+    const rows = mergeOperatorAlertRows(
+      ["Ops@example.com", "ceo@example.com"],
+      [],
+    );
+    expect(rows).toHaveLength(2);
+    const ops = rows.find((r) => r.email === "ops@example.com");
+    expect(ops).toMatchObject({
+      enabled: true,
+      override: false,
+      configured: true,
+      updated_at: null,
+    });
+  });
+
+  it("merges overrides into the configured roster and reflects effective state", () => {
+    const rows = mergeOperatorAlertRows(
+      ["ops@example.com", "ceo@example.com"],
+      [
+        {
+          email: "ops@example.com",
+          alert_type: "operator_trade_alert",
+          enabled: false,
+          updated_at: "2026-05-01T00:00:00Z",
+        },
+        {
+          email: "ex-employee@example.com",
+          alert_type: "operator_trade_alert",
+          enabled: false,
+          updated_at: "2026-04-01T00:00:00Z",
+        },
+      ],
+    );
+    expect(rows.map((r) => r.email)).toEqual([
+      "ceo@example.com",
+      "ops@example.com",
+      "ex-employee@example.com",
+    ]);
+    const ops = rows.find((r) => r.email === "ops@example.com");
+    expect(ops).toMatchObject({ enabled: false, override: true, configured: true });
+    const ex = rows.find((r) => r.email === "ex-employee@example.com");
+    expect(ex).toMatchObject({ enabled: false, override: true, configured: false });
+  });
+
+  it("handles empty input safely", () => {
+    expect(mergeOperatorAlertRows([], [])).toEqual([]);
   });
 });

@@ -2613,9 +2613,16 @@ async def admin_list_operator_alert_preferences(
     table on the operator notifications page.
     """
     from .notifications import alerts as _alerts
+    from .notifications import postmark as _postmark
     items = await _alerts.list_operator_preferences(alert_type=alert_type)
+    # Include the configured firehose roster so the admin UI can render
+    # a row for every operator who *would* receive the branded alert,
+    # not just those with an explicit override row in the table
+    # (default = opted-in). The UI merges the two by email.
+    configured = _postmark.alert_recipients()
     return {
         "items": items,
+        "configured_recipients": configured,
         "alert_type": alert_type,
         "default_when_missing": "enabled",
     }

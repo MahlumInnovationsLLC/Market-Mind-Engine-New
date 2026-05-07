@@ -6660,3 +6660,330 @@ export function EloUpdaterPanel() {
     />
   );
 }
+
+// ---------------------------------------------------------------------------
+// Operator alert preferences (task #721)
+//
+// Admins land on /system?tab=settings → "Branded trade alerts (operators)"
+// where each row in `operator_alert_preferences` is shown with a toggle
+// that flips the per-recipient mute via the existing
+// POST /api/admin/operator-alerts/preferences endpoint. New operators
+// don't appear in the list until they (or an admin) flip them at least
+// once — the panel includes an inline "Mute another operator" form for
+// that case. Default behavior is opted-in, surfaced in the banner so a
+// fresh recipient is not surprised when alerts start landing.
+// ---------------------------------------------------------------------------
+
+const OPERATOR_TRADE_ALERT_TYPE = "operator_trade_alert";
+
+interface OperatorAlertPreferenceRow {
+  email: string;
+  alert_type: string;
+  enabled: boolean;
+  updated_at: string | null;
+}
+
+interface OperatorAlertPreferencesResponse {
+  items: OperatorAlertPreferenceRow[];
+  configured_recipients?: string[];
+  alert_type: string | null;
+  default_when_missing: string;
+}
+
+interface OperatorAlertPrefRowView {
+  email: string;
+  enabled: boolean;
+  updated_at: string | null;
+  override: boolean;
+  configured: boolean;
+}
+
+export function mergeOperatorAlertRows(
+  configured: string[],
+  overrides: OperatorAlertPreferenceRow[],
+): OperatorAlertPrefRowView[] {
+  const byEmail = new Map<string, OperatorAlertPrefRowView>();
+  for (const raw of configured) {
+    const email = raw.trim().toLowerCase();
+    if (!email) continue;
+    byEmail.set(email, {
+      email,
+      enabled: true,
+      updated_at: null,
+      override: false,
+      configured: true,
+    });
+  }
+  for (const row of overrides) {
+    const email = (row.email ?? "").trim().toLowerCase();
+    if (!email) continue;
+    const prior = byEmail.get(email);
+    byEmail.set(email, {
+      email,
+      enabled: !!row.enabled,
+      updated_at: row.updated_at ?? null,
+      override: true,
+      configured: prior?.configured ?? false,
+    });
+  }
+  return Array.from(byEmail.values()).sort((a, b) => {
+    // Configured roster first, then alphabetical so the admin sees the
+    // canonical operator list at the top with ad-hoc overrides below.
+    if (a.configured !== b.configured) return a.configured ? -1 : 1;
+    return a.email.localeCompare(b.email);
+  });
+}
+
+function fmtPrefTimestamp(ts: string | null): string {
+  if (!ts) return "—";
+  const d = new Date(ts);
+  if (Number.isNaN(d.getTime())) return ts;
+  return d.toLocaleString();
+}
+
+export function OperatorAlertPreferencesPanel() {
+  const { getToken, isSignedIn } = useAuth();
+  const tokenFn = useMemo(
+    () => () => getToken().then((t) => t ?? null),
+    [getToken],
+  );
+  const qc = useQueryClient();
+  const queryKey = [
+    "admin",
+    "operator-alerts",
+    "preferences",
+    OPERATOR_TRADE_ALERT_TYPE,
+  ] as const;
+
+  const { data, isLoading, error } = useQuery<OperatorAlertPreferencesResponse>({
+    queryKey,
+    queryFn: () =>
+      apiFetch<OperatorAlertPreferencesResponse>(
+        `/api/admin/operator-alerts/preferences?alert_type=${OPERATOR_TRADE_ALERT_TYPE}`,
+        { getToken: tokenFn },
+      ),
+    enabled: !!isSignedIn,
+    refetchInterval: 60_000,
+    placeholderData: (prev) => prev,
+  });
+
+  const setPref = useMutation({
+    mutationFn: (vars: { email: string; enabled: boolean }) =>
+      apiFetch<OperatorAlertPreferenceRow>(
+        "/api/admin/operator-alerts/preferences",
+        {
+          method: "POST",
+          getToken: tokenFn,
+          body: {
+            email: vars.email,
+            alert_type: OPERATOR_TRADE_ALERT_TYPE,
+            enabled: vars.enabled,
+          },
+        },
+      ),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey });
+    },
+  });
+
+  const [newEmail, setNewEmail] = useState("");
+
+  const rows = useMemo(
+    () =>
+      mergeOperatorAlertRows(
+        data?.configured_recipients ?? [],
+        data?.items ?? [],
+      ),
+    [data],
+  );
+
+  const submitNew = (enabled: boolean) => {
+    const email = newEmail.trim().toLowerCase();
+    if (!email || !email.includes("@")) return;
+    setPref.mutate(
+      { email, enabled },
+      { onSuccess: () => setNewEmail("") },
+    );
+  };
+
+  return (
+    <div
+      className="space-y-4"
+      data-testid="panel-operator-alert-preferences"
+    >
+      <div
+        className="border border-accent-cyan/40 bg-accent-cyan/5 px-3 py-2 text-[11px] text-foreground"
+        data-testid="operator-alert-prefs-banner"
+      >
+        Default = opted in. Operators not listed here still receive the
+        branded HTML companion alongside the plain-text firehose. Toggle
+        an entry off to mute the branded email for that recipient — the
+        plain-text alert keeps flowing.
+      </div>
+
+      {isLoading && !data && (
+        <div
+          className="h-24 animate-pulse bg-muted/30"
+          data-testid="operator-alert-prefs-loading"
+        />
+      )}
+
+      {error && (
+        <div
+          className="text-loss text-xs"
+          data-testid="operator-alert-prefs-error"
+        >
+          Failed to load operator alert preferences.
+        </div>
+      )}
+
+      {data && (
+        <div className="overflow-hidden border border-border">
+          <table className="w-full text-xs">
+            <thead className="bg-muted/30 text-[10px] uppercase tracking-widest text-muted-foreground">
+              <tr>
+                <th className="px-3 py-2 text-left">Operator</th>
+                <th className="px-3 py-2 text-left">Branded HTML alert</th>
+                <th className="px-3 py-2 text-left">Last updated</th>
+                <th className="px-3 py-2 text-right">Action</th>
+              </tr>
+            </thead>
+            <tbody data-testid="operator-alert-prefs-rows">
+              {rows.length === 0 && (
+                <tr>
+                  <td
+                    colSpan={4}
+                    className="px-3 py-4 text-center text-muted-foreground"
+                    data-testid="operator-alert-prefs-empty"
+                  >
+                    No operators are configured to receive the branded
+                    alert and no overrides have been set.
+                  </td>
+                </tr>
+              )}
+              {rows.map((row) => {
+                const muted = !row.enabled;
+                const busy =
+                  setPref.isPending &&
+                  setPref.variables?.email === row.email;
+                const sourceLabel = row.configured
+                  ? row.override
+                    ? "Configured · override"
+                    : "Configured · default"
+                  : "Override only";
+                return (
+                  <tr
+                    key={row.email}
+                    className="border-t border-border"
+                    data-testid={`operator-alert-prefs-row-${row.email}`}
+                  >
+                    <td
+                      className="px-3 py-2 font-mono text-foreground break-all"
+                      data-testid={`operator-alert-prefs-email-${row.email}`}
+                    >
+                      {row.email}
+                      <div
+                        className="text-[10px] uppercase tracking-widest text-muted-foreground"
+                        data-testid={`operator-alert-prefs-source-${row.email}`}
+                      >
+                        {sourceLabel}
+                      </div>
+                    </td>
+                    <td className="px-3 py-2">
+                      <span
+                        className={`inline-block border px-2 py-0.5 text-[10px] uppercase tracking-widest ${
+                          muted
+                            ? "border-loss/60 text-loss"
+                            : "border-accent-cyan/40 text-accent-cyan"
+                        }`}
+                        data-testid={`operator-alert-prefs-status-${row.email}`}
+                      >
+                        {muted ? "Muted" : "Enabled"}
+                      </span>
+                    </td>
+                    <td
+                      className="px-3 py-2 text-muted-foreground"
+                      data-testid={`operator-alert-prefs-updated-${row.email}`}
+                    >
+                      {fmtPrefTimestamp(row.updated_at)}
+                    </td>
+                    <td className="px-3 py-2 text-right">
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setPref.mutate({
+                            email: row.email,
+                            enabled: muted,
+                          })
+                        }
+                        disabled={busy}
+                        className="border border-border bg-card px-3 py-1 text-[11px] uppercase tracking-widest hover:bg-muted/40 disabled:opacity-50"
+                        data-testid={`operator-alert-prefs-toggle-${row.email}`}
+                      >
+                        {busy
+                          ? "Saving…"
+                          : muted
+                            ? "Unmute"
+                            : "Mute"}
+                      </button>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      <div
+        className="flex flex-wrap items-end gap-2 border-t border-border pt-3"
+        data-testid="operator-alert-prefs-add"
+      >
+        <div className="flex-1 min-w-[16rem]">
+          <label
+            htmlFor="operator-alert-prefs-new-email"
+            className="block text-[10px] uppercase tracking-widest text-muted-foreground"
+          >
+            Mute / unmute another operator
+          </label>
+          <input
+            id="operator-alert-prefs-new-email"
+            type="email"
+            value={newEmail}
+            placeholder="ops@example.com"
+            onChange={(e) => setNewEmail(e.target.value)}
+            className="mt-1 w-full bg-input border border-border text-foreground rounded-md px-3 py-2 text-xs"
+            data-testid="operator-alert-prefs-new-email"
+          />
+        </div>
+        <button
+          type="button"
+          onClick={() => submitNew(false)}
+          disabled={setPref.isPending || !newEmail.trim().includes("@")}
+          className="border border-loss/60 text-loss px-3 py-2 text-[11px] uppercase tracking-widest hover:bg-loss/10 disabled:opacity-50"
+          data-testid="operator-alert-prefs-add-mute"
+        >
+          Mute
+        </button>
+        <button
+          type="button"
+          onClick={() => submitNew(true)}
+          disabled={setPref.isPending || !newEmail.trim().includes("@")}
+          className="border border-accent-cyan/40 text-accent-cyan px-3 py-2 text-[11px] uppercase tracking-widest hover:bg-accent-cyan/10 disabled:opacity-50"
+          data-testid="operator-alert-prefs-add-enable"
+        >
+          Enable
+        </button>
+      </div>
+
+      {setPref.isError && (
+        <div
+          className="text-loss text-xs"
+          data-testid="operator-alert-prefs-mutation-error"
+        >
+          {(setPref.error as Error)?.message ?? "Save failed."}
+        </div>
+      )}
+    </div>
+  );
+}

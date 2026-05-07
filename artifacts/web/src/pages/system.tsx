@@ -30,6 +30,7 @@ import {
   GithubMirrorPanel,
   LeadsPanel,
   ModelsPanel,
+  OperatorAlertPreferencesPanel,
   PersonasPanel,
   RcWebhookPanel,
   RiskKnobsPanel,
@@ -366,6 +367,14 @@ export default function SystemPage() {
             </div>
             <NotificationPrefsPanel />
           </GlassCard>
+          {isAdmin && (
+            <GlassCard tone="solid" padding="md">
+              <div className="mb-3 text-[11px] font-semibold uppercase tracking-[0.18em] text-accent-cyan/80">
+                Branded trade alerts (operators)
+              </div>
+              <OperatorAlertPreferencesPanel />
+            </GlassCard>
+          )}
         </div>
       )}
 
