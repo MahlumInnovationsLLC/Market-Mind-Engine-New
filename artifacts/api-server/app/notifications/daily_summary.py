@@ -93,7 +93,7 @@ async def _mark_sent(date_utc: str) -> bool:
         row = await db.fetchrow(
             """
             INSERT INTO notification_dedupe (key, date_utc)
-            VALUES ($1, $2::date)
+            VALUES ($1, $2::text::date)
             ON CONFLICT (key) DO UPDATE
               SET date_utc = EXCLUDED.date_utc,
                   sent_at  = now()
@@ -138,7 +138,7 @@ async def collect_summary(date_utc: str) -> dict[str, Any]:
               count(*)::int                         AS n
               FROM trades
              WHERE settled_at IS NOT NULL
-               AND date_trunc('day', settled_at AT TIME ZONE 'UTC') = $1::date
+               AND date_trunc('day', settled_at AT TIME ZONE 'UTC') = $1::text::date
             """,
             date_utc,
         )
@@ -168,7 +168,7 @@ async def collect_summary(date_utc: str) -> dict[str, Any]:
             """
             SELECT count(*)::int FROM order_lifecycle
              WHERE event_type = 'filled'
-               AND date_trunc('day', created_at AT TIME ZONE 'UTC') = $1::date
+               AND date_trunc('day', created_at AT TIME ZONE 'UTC') = $1::text::date
             """,
             date_utc,
         )
@@ -181,7 +181,7 @@ async def collect_summary(date_utc: str) -> dict[str, Any]:
             """
             SELECT count(*)::int FROM model_health_alerts
              WHERE alert_type = 'brier_drift'
-               AND date_trunc('day', created_at AT TIME ZONE 'UTC') = $1::date
+               AND date_trunc('day', created_at AT TIME ZONE 'UTC') = $1::text::date
             """,
             date_utc,
         )
@@ -197,7 +197,7 @@ async def collect_summary(date_utc: str) -> dict[str, Any]:
                    sum(quantity)::float     AS position
               FROM trades
              WHERE settled_at IS NOT NULL
-               AND date_trunc('day', settled_at AT TIME ZONE 'UTC') = $1::date
+               AND date_trunc('day', settled_at AT TIME ZONE 'UTC') = $1::text::date
              GROUP BY market_id
              ORDER BY abs(sum(realized_pnl)) DESC
              LIMIT 10
@@ -236,7 +236,7 @@ async def collect_summary(date_utc: str) -> dict[str, Any]:
                       LIMIT 1
                    )                                      AS brier
               FROM vertical_daily_pnl v
-             WHERE v.report_date = $1::date
+             WHERE v.report_date = $1::text::date
              ORDER BY v.vertical
             """,
             date_utc,
@@ -270,7 +270,7 @@ async def collect_summary(date_utc: str) -> dict[str, Any]:
             SELECT count(*)::int FROM order_lifecycle
              WHERE event_type = 'rejected'
                AND metadata->>'reason' = 'slippage_guard'
-               AND date_trunc('day', created_at AT TIME ZONE 'UTC') = $1::date
+               AND date_trunc('day', created_at AT TIME ZONE 'UTC') = $1::text::date
             """,
             date_utc,
         )

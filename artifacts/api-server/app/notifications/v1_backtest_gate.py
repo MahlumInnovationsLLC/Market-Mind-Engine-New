@@ -305,6 +305,9 @@ async def run_weekly_v1_backtest(
             leagues_filter=eff_leagues,
             load_calibrators=True,
             full_stack=False,
+            # Small batches ensure asyncio.sleep(0) fires frequently so the
+            # event loop stays responsive (healthz, feeds) during the replay.
+            batch_size=500,
         )
     except Exception as e:
         log.exception("v1_backtest_gate replay failed: %s", e)

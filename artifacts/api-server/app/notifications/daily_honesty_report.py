@@ -235,7 +235,7 @@ async def _mark_sent(date_utc: str) -> bool:
         row = await db.fetchrow(
             """
             INSERT INTO notification_dedupe (key, date_utc)
-            VALUES ($1, $2::date)
+            VALUES ($1, $2::text::date)
             ON CONFLICT (key) DO UPDATE
               SET date_utc = EXCLUDED.date_utc,
                   sent_at  = now()

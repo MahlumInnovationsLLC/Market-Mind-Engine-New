@@ -1090,12 +1090,16 @@ async def run(
         ):
             row_input_count += len(batch)
             await _process_batch(batch)
+            # Yield to the event loop after each CPU-bound batch so the
+            # server's healthz and other async tasks stay responsive.
+            await asyncio.sleep(0)
     else:
         source = "in-memory"
         row_input_count = len(rows)
         bs = max(1, int(batch_size))
         for start in range(0, len(rows), bs):
             await _process_batch(rows[start:start + bs])
+            await asyncio.sleep(0)
 
     scored = score_grouped(grouped)
     full_stack_scored: dict[str, Any] | None = None
