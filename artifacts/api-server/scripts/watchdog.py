@@ -540,7 +540,7 @@ def _parse_args(argv: list[str]) -> tuple[argparse.Namespace, list[str]]:
     )
     p.add_argument(
         "--probe-timeout", type=float,
-        default=float(os.environ.get("WATCHDOG_PROBE_TIMEOUT", "5")),
+        default=float(os.environ.get("WATCHDOG_PROBE_TIMEOUT", "30")),
     )
     p.add_argument(
         "--max-restarts", type=int,
