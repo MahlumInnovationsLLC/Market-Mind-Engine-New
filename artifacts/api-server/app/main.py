@@ -32,7 +32,6 @@ from . import (
     github_mirror,
     health,
     margin_regressor,
-    migrations as db_migrations,
     models_loader,
     predictor,
     rc_billing,
@@ -41,6 +40,9 @@ from . import (
     storage,
     surrogate_report,
 )
+# db_migrations (alembic) is imported lazily inside lifespan — keeping it
+# out of the module-level import chain saves ~25-40 s of disk-IO-bound
+# .so loading on the production container's cold filesystem.
 from .notifications import (
     alerts as notif_alerts,
     churn as notif_churn,
@@ -71,25 +73,14 @@ from .middleware import RequestIdMiddleware
 from .observability import configure_logging
 from .log_shipper import get_shipper_status
 from . import autoresearch
+# feed_registry and feed_scheduler are kept at module level because route
+# handlers reference them directly (e.g. /api/feeds/status).
 from .feeds import registry as feed_registry, scheduler as feed_scheduler
-from .feeds.odds_api import register_odds_feeds
-from .feeds.sportradar import register_sportradar_extra_feeds
-from .feeds.weather import register_weather_feeds
-from .feeds.crypto import register_crypto_feeds
-from .feeds.commodities import register_commodities_feeds
-from .feeds.espn_scoreboard import register_espn_scoreboard_feed
-from .feeds.kalshi_schedules import register_kalshi_schedules_feed
-from .feeds.kalshi_crypto_markets import (
-    register_kalshi_crypto_markets_feed,
-    register_kalshi_crypto_settlements_feed,
-)
-from .feeds.kalshi_sports_markets import register_kalshi_sports_markets_feed
-from .feeds.tech_evidence import register_tech_evidence_feeds
-from .feeds.election_polls import register_election_polls_feeds
-from .feeds.unusual_whales import register_unusual_whales_feeds
-from .feeds.public_betting import register_public_betting_feeds
-from .feeds.outlier_bet import register_outlier_bet_feed
-from .feeds.positive_ev import register_positive_ev_feed
+# Individual register_xxx_feed helpers and features.drift are imported
+# lazily inside lifespan — they pull in httpx, sklearn, xgboost, etc. that
+# are slow to load from disk on the production container's cold filesystem.
+# Moving them here would add 50-100 s to the module import phase and delay
+# uvicorn binding the port.
 from .features import drift as feature_drift, registry as feature_registry
 from .elo import scheduler as elo_scheduler
 from .orchestrator import pipeline_event_hub, run_cycle, scheduler as orchestrator_scheduler
@@ -167,6 +158,7 @@ async def lifespan(_: FastAPI):
     # against an IO-starved DB. When skipped, we still record the
     # current revision so the readyz panel and operator dashboard can
     # show what the running pod is at.
+    from . import migrations as db_migrations  # lazy — keeps alembic out of the module import chain
     skip_alembic = (os.environ.get("AXIOM_SKIP_ALEMBIC_AT_STARTUP") or "").strip() in ("1", "true", "True")
     if skip_alembic:
         try:
@@ -229,16 +221,28 @@ async def lifespan(_: FastAPI):
     # Register + start the external data feed pollers.  Feeds with missing
     # API keys register themselves as `enabled=false` so they show up in
     # /api/feeds/status with a clear skipped_reason but never poll.
+    # All register_xxx_feed imports are local (lazy) — see module header for why.
     try:
+        from .feeds.odds_api import register_odds_feeds
+        from .feeds.weather import register_weather_feeds
+        from .feeds.crypto import register_crypto_feeds
+        from .feeds.commodities import register_commodities_feeds
+        from .feeds.tech_evidence import register_tech_evidence_feeds
+        from .feeds.unusual_whales import register_unusual_whales_feeds
+        from .feeds.public_betting import register_public_betting_feeds
+        from .feeds.outlier_bet import register_outlier_bet_feed
+        from .feeds.positive_ev import register_positive_ev_feed
         register_odds_feeds()
         register_weather_feeds()
         register_crypto_feeds()
         register_commodities_feeds()
         try:
+            from .feeds.kalshi_crypto_markets import register_kalshi_crypto_markets_feed
             register_kalshi_crypto_markets_feed()
         except Exception as e:
             log.warning("kalshi_crypto_markets feed registration failed: %s", e)
         try:
+            from .feeds.kalshi_crypto_markets import register_kalshi_crypto_settlements_feed
             register_kalshi_crypto_settlements_feed()
         except Exception as e:
             log.warning(
@@ -249,6 +253,7 @@ async def lifespan(_: FastAPI):
             # this the orchestrator's _candidate_predictions returns
             # 0 rows for every sports vertical because nothing else
             # writes Kalshi-keyed rows under NFL/NBA/MLB/NHL/etc.
+            from .feeds.kalshi_sports_markets import register_kalshi_sports_markets_feed
             register_kalshi_sports_markets_feed()
         except Exception as e:
             log.warning(
@@ -256,6 +261,7 @@ async def lifespan(_: FastAPI):
             )
         register_tech_evidence_feeds()
         try:
+            from .feeds.election_polls import register_election_polls_feeds
             register_election_polls_feeds()
         except Exception as e:
             log.warning("election_polls feed registration failed: %s", e)
@@ -279,6 +285,7 @@ async def lifespan(_: FastAPI):
         except Exception as e:
             log.warning("weather_climatology bootstrap failed: %s", e)
         try:
+            from .feeds.sportradar import register_sportradar_extra_feeds
             register_sportradar_extra_feeds()
         except Exception as e:
             log.warning("sportradar extra feed registration failed: %s", e)
@@ -288,10 +295,12 @@ async def lifespan(_: FastAPI):
         # provider-prefixed game ids so they coexist with native
         # Sportradar rows without a primary-key fight.
         try:
+            from .feeds.espn_scoreboard import register_espn_scoreboard_feed
             register_espn_scoreboard_feed()
         except Exception as e:
             log.warning("espn_scoreboard feed registration failed: %s", e)
         try:
+            from .feeds.kalshi_schedules import register_kalshi_schedules_feed
             register_kalshi_schedules_feed()
         except Exception as e:
             log.warning("kalshi_schedules feed registration failed: %s", e)

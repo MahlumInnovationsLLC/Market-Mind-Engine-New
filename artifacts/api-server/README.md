@@ -361,3 +361,53 @@ server's filesystem.
    (it will short-circuit with `skipped=true` if the version is
    unchanged) and `POST /api/models/reload` to re-sync from Supabase as
    the source of truth.
+
+## §21 — Daily Honesty Report
+
+A single daily digest for operators that bundles four signals (shadow-vs-live divergence, calibrator drift, tail-risk concentration, gate trips) into an email + Telegram broadcast.
+
+### Artifacts written each day
+
+| Artifact | Path |
+|---|---|
+| PDF report | `artifacts/api-server/reports/daily_honesty_<date>.pdf` |
+| Tail-risk PNG chart | `artifacts/api-server/reports/tail_risk_tile_<date>.png` |
+
+Both files are also attached to the Postmark email and the PDF is pushed as a Telegram document to every opted-in chat.  The `<date>` token uses the **configured local TZ** (see below) so the filename matches the calendar day the operator reads the report.
+
+### Scheduling environment variables
+
+| Variable | Default | Notes |
+|---|---|---|
+| `DAILY_HONESTY_REPORT_TZ` | `America/New_York` | IANA timezone name. Controls the clock the scheduler compares against and the date key used for once-per-day dedupe. |
+| `DAILY_HONESTY_REPORT_HOUR` | *(derived)* | Local-TZ hour to send. When absent the scheduler converts `_HOUR_UTC` into the configured TZ for backcompat. |
+| `DAILY_HONESTY_REPORT_MINUTE` | *(derived)* | Local-TZ minute. Same backcompat logic as `_HOUR`. |
+| `DAILY_HONESTY_REPORT_HOUR_UTC` | `13` | Legacy. Still honoured when the new `_HOUR` / `_MINUTE` vars are absent. |
+| `DAILY_HONESTY_REPORT_MINUTE_UTC` | `0` | Legacy. Same. |
+| `DAILY_HONESTY_REPORT_RECIPIENTS` | *(none)* | Comma-separated extra Postmark recipients beyond the operator default. |
+| `DAILY_HONESTY_REPORT_ENABLED` | `true` | Set to `0` / `false` to suppress the scheduler entirely. |
+
+**DST note:** the scheduler reads `_send_hour()` / `_send_minute()` on every tick, so clock changes (spring-forward / fall-back) take effect at the next minute boundary without a restart.  Dedupe is keyed on the configured-TZ date, so a send at 23:50 ET won't re-fire after midnight UTC.
+
+### What red looks like
+
+| Signal | Red means | Action |
+|---|---|---|
+| Shadow-vs-live divergence | `\|Δ Brier\| > 0.05` for any league | Shadow predictor may be overfit; consider a shadow reset or a live model retrain. |
+| Calibrator drift (`tone=red`) | Brier worsened > 0.04 vs baseline **or** calibrator snapshot is > 48 h old | Re-run the calibrator training pipeline for that league. |
+| Tail-risk concentration | `pct_in_tail > 0.40` (tone=red) | More than 40 % of open max-loss is in the lowest-confidence bucket. Cut exposure on those markets or raise the `tail_risk_threshold_price` knob. |
+| Gate trips | Any `gate_uncalibrated_vertical` or `gate_max_loss` trip in 24 h | Check the feed that produced the uncalibrated candidate; confirm the risk knobs aren't set too tight for current volume. |
+| Uncalibrated raw-mode trades | Count > 0 | An operator opted a vertical out of the calibrator gate. Confirm the override is intentional and the live Brier is acceptable. |
+| Missing-league candidates | Count > 0 | An upstream feed is emitting markets without a league tag. `gate_uncalibrated_vertical` is fail-closed so no trade ships, but fix the feed to restore coverage. |
+
+### Manual fire-now
+
+```bash
+# Dry-run (renders body + artifacts, no email/Telegram send)
+curl -sS -X POST http://localhost:${PORT}/api/admin/honesty-report/fire-now?dry_run=1 | python -m json.tool
+
+# Live send
+curl -sS -X POST http://localhost:${PORT}/api/admin/honesty-report/fire-now | python -m json.tool
+```
+
+The response includes `artifacts.pdf_path` and `artifacts.chart_path` so you can inspect the rendered files on disk before the next scheduled send.
