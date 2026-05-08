@@ -442,8 +442,7 @@ async def _persist_model_yes_prob(
         await db.execute(
             """
             UPDATE predictions
-               SET model_yes_prob = $2,
-                   updated_at     = now()
+               SET model_yes_prob = $2
              WHERE kalshi_market_id = $1
                AND model_yes_prob IS NULL
             """,

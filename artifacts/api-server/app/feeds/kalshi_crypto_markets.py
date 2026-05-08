@@ -440,8 +440,7 @@ _SETTLE_UPDATE_SQL = """
 UPDATE predictions
    SET settled_at   = $2,
        outcome      = $3,
-       settle_price = $4,
-       updated_at   = now()
+       settle_price = $4
  WHERE kalshi_market_id = $1
    AND settled_at IS NULL
 """

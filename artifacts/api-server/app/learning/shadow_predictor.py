@@ -130,8 +130,8 @@ async def _fetch_active_predictions(limit: int) -> list[dict[str, Any]]:
              WHERE kalshi_market_id IS NOT NULL
                AND model_yes_prob IS NOT NULL
                AND settled_at IS NULL
-               AND updated_at > now() - interval '6 hours'
-             ORDER BY updated_at DESC
+               AND created_at > now() - interval '6 hours'
+             ORDER BY created_at DESC
              LIMIT $1
             """,
             limit,

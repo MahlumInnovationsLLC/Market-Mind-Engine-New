@@ -310,7 +310,7 @@ async def aggregate_persona_day(date_utc: str) -> list[dict[str, Any]]:
         SELECT id, outcome, analyst_verdicts
           FROM swarm_debates
          WHERE outcome IS NOT NULL
-           AND date_trunc('day', created_at AT TIME ZONE 'UTC') = $1::date
+           AND date_trunc('day', created_at AT TIME ZONE 'UTC') = $1::text::date
         """,
         date_utc,
     )
