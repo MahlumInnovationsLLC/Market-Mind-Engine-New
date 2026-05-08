@@ -44,14 +44,17 @@ class FeedScheduler:
 
     async def _run_feed(self, feed: Feed) -> None:
         # Stagger start so we don't burst every API at once on cold boot.
-        # Use up to 60 s of jitter (capped at the feed cadence) so that
-        # 30+ feeds don't all hammer the DB and external APIs within the
-        # same 5-second window — which saturates the event loop and causes
-        # the watchdog healthz probe to time out during startup.
+        # Use up to 300 s of jitter (capped at the feed cadence) so that
+        # 30+ feeds spread their first poll over 5 minutes rather than
+        # 60 s — previously this caused healthz to time out during startup
+        # because the event loop was saturated with concurrent outbound
+        # HTTP calls immediately after lifespan completion.
+        # WATCHDOG_STARTUP_GRACE_SEC is 600 s so all feeds will still
+        # fire their first poll before the grace window closes.
         try:
             await asyncio.wait_for(
                 self._stop.wait(),
-                timeout=random.uniform(0.0, min(60.0, feed.cadence_seconds)),
+                timeout=random.uniform(0.0, min(300.0, feed.cadence_seconds)),
             )
             return  # stopped before we started
         except asyncio.TimeoutError:
