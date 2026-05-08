@@ -33,6 +33,7 @@ which run produced the numbers the orchestrator acted on.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 from dataclasses import dataclass
@@ -673,7 +674,11 @@ async def _decode_hrrr_for_city(
         body = await _fetch_grib2_range(
             client, url, rec["byte_start"], rec.get("byte_len")
         )
-        kelvin = _decode_grib2_point_kelvin(body or b"", city.lat, city.lon)
+        # eccodes is a C library — offload to a thread so the asyncio
+        # event loop is not blocked while the GRIB2 grid is decoded.
+        kelvin = await asyncio.to_thread(
+            _decode_grib2_point_kelvin, body or b"", city.lat, city.lon
+        )
         f_value = _persist(fh, "TMP", kelvin)
         if fh == 0 and f_value is not None and t2m_f is None:
             t2m_f = f_value
@@ -687,8 +692,8 @@ async def _decode_hrrr_for_city(
         body = await _fetch_grib2_range(
             client, url, rec["byte_start"], rec.get("byte_len")
         )
-        f_value = _persist(fh, "TMAX", _decode_grib2_point_kelvin(
-            body or b"", city.lat, city.lon
+        f_value = _persist(fh, "TMAX", await asyncio.to_thread(
+            _decode_grib2_point_kelvin, body or b"", city.lat, city.lon
         ))
         if f_value is not None:
             tmax_values.append(f_value)
@@ -699,8 +704,8 @@ async def _decode_hrrr_for_city(
         body = await _fetch_grib2_range(
             client, url, rec["byte_start"], rec.get("byte_len")
         )
-        f_value = _persist(fh, "TMIN", _decode_grib2_point_kelvin(
-            body or b"", city.lat, city.lon
+        f_value = _persist(fh, "TMIN", await asyncio.to_thread(
+            _decode_grib2_point_kelvin, body or b"", city.lat, city.lon
         ))
         if f_value is not None:
             tmin_values.append(f_value)
@@ -728,7 +733,9 @@ async def _decode_hrrr_for_city(
         body = await _fetch_grib2_range(
             client, url, rec["byte_start"], rec.get("byte_len")
         )
-        mm = _decode_grib2_point_value(body or b"", city.lat, city.lon)
+        mm = await asyncio.to_thread(
+            _decode_grib2_point_value, body or b"", city.lat, city.lon
+        )
         if mm is None or mm < 0:
             continue
         samples.append({"fhour": fh, "var": "APCP", "mm": mm})

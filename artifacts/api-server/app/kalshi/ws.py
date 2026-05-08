@@ -117,7 +117,18 @@ class KalshiWebSocket:
                 while not self._stop.is_set():
                     raw = await ws.recv()
                     try:
-                        msg = json.loads(raw) if isinstance(raw, (str, bytes, bytearray)) else raw
+                        if isinstance(raw, (str, bytes, bytearray)):
+                            # Orderbook snapshots can be 1-4 MB; parse them
+                            # in a thread so the event loop stays responsive.
+                            # Small frames (fills, tickers, deltas) are parsed
+                            # inline — the asyncio.to_thread overhead (~50 µs)
+                            # would dominate for sub-16 KB payloads.
+                            if len(raw) > 16_384:
+                                msg = await asyncio.to_thread(json.loads, raw)
+                            else:
+                                msg = json.loads(raw)
+                        else:
+                            msg = raw
                     except json.JSONDecodeError:
                         log.warning("Kalshi WS non-JSON frame ignored")
                         continue

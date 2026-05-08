@@ -105,7 +105,15 @@ class PolymarketWebSocket:
                 while not self._stop.is_set():
                     raw = await ws.recv()
                     try:
-                        msg = json.loads(raw) if isinstance(raw, (str, bytes, bytearray)) else raw
+                        if isinstance(raw, (str, bytes, bytearray)):
+                            # Orderbook snapshots can be 1-4 MB; parse them
+                            # in a thread so the event loop stays responsive.
+                            if len(raw) > 16_384:
+                                msg = await asyncio.to_thread(json.loads, raw)
+                            else:
+                                msg = json.loads(raw)
+                        else:
+                            msg = raw
                     except json.JSONDecodeError:
                         log.warning("Polymarket WS non-JSON frame ignored")
                         continue
