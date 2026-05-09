@@ -120,6 +120,14 @@ configure_logging()
 log = logging.getLogger("axiom.api")
 
 
+async def _bg_best_effort(coro: Any, label: str) -> None:
+    """Wrap *coro* so background boot tasks don't propagate exceptions to the event loop."""
+    try:
+        await coro
+    except Exception as exc:  # noqa: BLE001
+        log.warning("[startup] background task %r failed: %s", label, exc)
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     log.info("axiom-predict api starting")
@@ -280,8 +288,25 @@ async def lifespan(_: FastAPI):
         try:
             from .feeds import weather_climatology as _wclim
 
-            await _wclim.backfill_climatology()
-            await _wclim.refresh_climatology_cache()
+            # Run both in the background so a slow first-time executemany
+            # (10k+ ON CONFLICT rows on a cold Supabase connection) doesn't
+            # add 60-120 s to the blocking lifespan startup path.
+            # refresh_climatology_cache falls back to the embedded baseline
+            # for any miss that occurs before the task completes.
+            asyncio.create_task(
+                _bg_best_effort(
+                    _wclim.backfill_climatology(),
+                    "weather_climatology.backfill",
+                ),
+                name="boot-wclim-backfill",
+            )
+            asyncio.create_task(
+                _bg_best_effort(
+                    _wclim.refresh_climatology_cache(),
+                    "weather_climatology.refresh_cache",
+                ),
+                name="boot-wclim-cache",
+            )
         except Exception as e:
             log.warning("weather_climatology bootstrap failed: %s", e)
         try:
@@ -676,20 +701,25 @@ async def lifespan(_: FastAPI):
     # `predict()` can apply them on the very first request. Best-effort
     # — `apply()` cleanly bypasses any league with no fitted artifact,
     # so a fresh install with no snapshots still trades on raw probs.
-    try:
-        await calibrators.load_all()
-    except Exception as e:
-        log.warning("per-league calibrator bootstrap failed: %s", e)
+    # Running as a background task removes 2-4 min from cold-start
+    # lifespan: the first-time Supabase fetch of binary calibrator blobs
+    # is slow on a cold connection; `apply()` falls back to raw probs
+    # until the task completes.
+    asyncio.create_task(
+        _bg_best_effort(calibrators.load_all(), "calibrators.load_all"),
+        name="boot-calibrators-load",
+    )
 
     # Load any previously-fitted per-league margin/total regressors so
     # spread/total markets immediately use fitted coefficients instead
     # of the cold-start textbook SDs.  Failures are non-fatal — the
     # registry simply stays empty until the next settlement-loop refit
-    # lands a fresh fit.
-    try:
-        await margin_regressor.load_all()
-    except Exception as e:
-        log.warning("margin regressor bootstrap failed: %s", e)
+    # lands a fresh fit.  Background for the same cold-start latency
+    # reason as calibrators above.
+    asyncio.create_task(
+        _bg_best_effort(margin_regressor.load_all(), "margin_regressor.load_all"),
+        name="boot-margin-regressor-load",
+    )
 
     # Hydrate the persisted KXRAIN EMOS coefficients (task #280) so a
     # restarted API picks the most-recent nightly refit back up

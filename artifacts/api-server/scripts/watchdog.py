@@ -561,7 +561,7 @@ def _parse_args(argv: list[str]) -> tuple[argparse.Namespace, list[str]]:
     )
     p.add_argument(
         "--startup-grace-sec", type=float,
-        default=float(os.environ.get("WATCHDOG_STARTUP_GRACE_SEC", "600")),
+        default=float(os.environ.get("WATCHDOG_STARTUP_GRACE_SEC", "1200")),
         help="seconds after each child start during which probe failures don't trigger restarts",
     )
     p.add_argument(
