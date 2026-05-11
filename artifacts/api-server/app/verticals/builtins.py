@@ -260,6 +260,41 @@ REGISTRY.register(VerticalSpec(
 ))
 
 
+# WNBA player props (task #823).  Player-level binary markets — the
+# first vertical in the system to price *individual player* outcomes
+# rather than team / event outcomes.  Ships `enabled=False` because:
+#   * no fitted calibrator snapshot exists yet (WNBA was deliberately
+#     left out of `app.calibrators.SUPPORTED_LEAGUES` until we have
+#     ≥4 weeks of settled props), and
+#   * the player-prop discovery path on the orchestrator side is a
+#     follow-up — v1 surfaces tradable props through the dashboard
+#     endpoint for operator review.
+# Operators opt in via `AXIOM_ORCHESTRATOR_VERTICALS=...,wnba_player_props`
+# AND the explicit raw-mode override in `system_settings`
+# (`risk.uncalibrated_raw_mode_wnba_player_props=true`).  See §22 of
+# the runbook for the full enable / re-enable sequence.
+REGISTRY.register(VerticalSpec(
+    name="wnba_player_props",
+    leagues=("WNBA",),
+    ticker_prefixes=("KXWNBA",),
+    persona_profile="wnba_player_props",
+    predictor_hook="wnba_player_props",
+    kelly_multiplier=0.5,  # half-Kelly until calibration lands
+    default_allocation_pct=0.05,
+    enabled=False,
+    description=(
+        "WNBA player-prop binary markets (over/under on points, "
+        "rebounds, assists, threes, blocks, steals, turnovers, plus "
+        "PRA / PR / PA / RA composites).  Per-player baseline (rolling "
+        "mean + MAD-σ) is multiplied by a bounded pace + opp-allowed "
+        "adjustment, then optionally blended with the Kalshi mid and "
+        "passed through the per-league calibrator.  Ships disabled "
+        "until 4 weeks of settled props show Brier ≤ 0.27 and a fitted "
+        "calibrator snapshot is in place."
+    ),
+))
+
+
 REGISTRY.register(VerticalSpec(
     name="soccer",
     leagues=("EPL", "LALIGA", "SERIEA", "BUNDES", "LIGUE1", "MLS", "UCL"),

@@ -51,10 +51,14 @@ log = logging.getLogger("axiom.feeds.espn_scoreboard")
 # line change because the JSON shape is identical across sports.
 _ESPN_LEAGUES: dict[str, tuple[str, str]] = {
     # league_label : (sport_path, league_path)
-    "NFL": ("football", "nfl"),
-    "NBA": ("basketball", "nba"),
-    "MLB": ("baseball",  "mlb"),
-    "NHL": ("hockey",    "nhl"),
+    "NFL":  ("football",   "nfl"),
+    "NBA":  ("basketball", "nba"),
+    # WNBA — task #823.  Same JSON shape as NBA; backstops a missing
+    # SPORTRADAR_WNBA_KEY so the player-props vertical still has a
+    # schedule to fan its TheOddsAPI per-event poll across.
+    "WNBA": ("basketball", "wnba"),
+    "MLB":  ("baseball",   "mlb"),
+    "NHL":  ("hockey",     "nhl"),
 }
 
 _BASE_URL = "https://site.api.espn.com/apis/site/v2/sports"

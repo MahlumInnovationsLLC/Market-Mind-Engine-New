@@ -231,7 +231,7 @@ def test_twelve_gate_invariant_unchanged():
     # segment_throttler audit gates).  The point of this assertion is
     # still that *tech_ai* sub-checks fold into existing gates rather
     # than adding new entries.
-    assert len(GATES) == 20
+    assert len(GATES) == 21
 
 
 # ---------------------------------------------------------------------------

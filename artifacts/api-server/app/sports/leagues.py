@@ -179,6 +179,33 @@ LEAGUE_CONFIGS: dict[str, LeagueConfig] = {
             "more than season-long offensive rating."
         ),
     ),
+    # WNBA — task #823.  Player-prop vertical only on day one (the
+    # `wnba_player_props` VerticalSpec ships disabled).  The conservative
+    # allocation_pct + per_game_cap_pct keeps the league cap meaningful
+    # the moment the operator opts the vertical in.  Pre-kickoff
+    # blackout matches NBA because WNBA inactive lists publish on a
+    # similar schedule and rotation news is the dominant short-term
+    # mover.
+    "WNBA": LeagueConfig(
+        league="WNBA",
+        priority=8,
+        allocation_pct=0.05,
+        per_game_cap_pct=0.015,
+        pre_kickoff_blackout_minutes=30,
+        persona_context=(
+            "WNBA-SPECIFIC SIGNALS:\n"
+            "  * Roster news + minutes restrictions move player-prop lines "
+            "more than spread/total in this league — the rotation is "
+            "shorter so a starter-out is a much larger share of available "
+            "minutes than in the NBA.\n"
+            "  * Pace varies widely game-to-game; opponent pace is the "
+            "single biggest single-game adjustment to a player's "
+            "rolling-mean projection.\n"
+            "  * Sample sizes are small — a 21-2 opening-weekend run is "
+            "almost certainly noise.  Anchor on the calibration panel, "
+            "not on early-season hit-rate."
+        ),
+    ),
     "MLB": LeagueConfig(
         league="MLB",
         priority=6,

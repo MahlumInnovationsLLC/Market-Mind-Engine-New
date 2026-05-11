@@ -1100,6 +1100,54 @@ async def _predict_for_entertainment_binary(cand: dict[str, Any]) -> dict[str, A
     return payload
 
 
+async def _predict_for_wnba_player_props(
+    cand: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Route a WNBA player-prop candidate through the dedicated
+    predictor (task #823).
+
+    The candidate must carry ``player`` (str), ``stat`` (one of the
+    supported PROP_MARKETS) and ``line`` (float).  Optional:
+    ``side`` (default 'over'), ``opponent_team``, ``pace_estimate``,
+    ``kalshi_mid``.  Returns ``None`` when any required field is
+    missing OR when the per-player baseline sample is below the
+    configured minimum — in either case the orchestrator falls back
+    to the generic meta-model so the cycle isn't blocked.
+    """
+    player = cand.get("player")
+    stat = cand.get("stat") or cand.get("market")
+    line = cand.get("line")
+    if not (player and stat and line is not None):
+        return None
+    try:
+        from ..wnba.predictor import predict_wnba_player_prop
+    except Exception as e:  # pragma: no cover — should never hit
+        log.debug("wnba predictor import failed: %s", e)
+        return None
+    try:
+        prediction = await predict_wnba_player_prop(
+            player=str(player),
+            stat=str(stat),
+            line=float(line),
+            side=str(cand.get("side") or "over"),
+            opponent_team=cand.get("opponent_team"),
+            pace_estimate=cand.get("pace_estimate"),
+            kalshi_mid=cand.get("kalshi_mid"),
+        )
+    except Exception as e:
+        log.debug("wnba predictor call failed for %s: %s", player, e)
+        return None
+    if prediction is None:
+        return None
+    payload = prediction.as_dict()
+    payload["feature_inputs"] = {
+        "player": player, "stat": stat, "line": line,
+        "side": cand.get("side") or "over",
+        "opponent_team": cand.get("opponent_team"),
+    }
+    return payload
+
+
 async def _predict_for_candidate(
     cand: dict[str, Any],
     *,
@@ -1140,6 +1188,15 @@ async def _predict_for_candidate(
         return await _predict_for_events_econ_binary(cand)
     if spec is not None and spec.predictor_hook == "entertainment_hybrid":
         return await _predict_for_entertainment_binary(cand)
+    if spec is not None and spec.predictor_hook == "wnba_player_props":
+        wnba_payload = await _predict_for_wnba_player_props(cand)
+        # Fall through to the meta-model when the candidate doesn't
+        # carry the player/stat/line trio (e.g. the operator opted the
+        # vertical on but the discovery feed hasn't yet been wired —
+        # task #824).  The generic meta-model is a strict downgrade
+        # but it keeps the cycle moving instead of returning None.
+        if wnba_payload is not None:
+            return wnba_payload
     if spec is not None and spec.predictor_hook == "weather_temp_gru_emos":
         weather_payload = await _predict_for_temperature_binary(cand)
         if weather_payload is not None:

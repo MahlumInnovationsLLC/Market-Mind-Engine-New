@@ -1827,6 +1827,144 @@ async def gate_duplicate_trade(ctx: RiskContext) -> GateResult:
 
 # Ordered registry — kill-switch and cheap checks first, DB queries last.
 GateFn = Callable[[RiskContext], Awaitable[GateResult]]
+_PLAYER_PROP_OVERRIDE_KEY = "_player_prop_meta"
+
+
+async def gate_player_props(ctx: RiskContext) -> GateResult:
+    """Player-level pre-trade gate (task #823).
+
+    No-op (PASS) for any candidate that doesn't carry a
+    ``ctx.operator_overrides[_player_prop_meta]`` block — i.e. every
+    non-player-prop vertical, plus player-prop candidates whose
+    discovery path forgot to populate it (which is itself logged as a
+    PASS so the operator can see the count of unmetered tickets in
+    the daily honesty report).
+
+    When the meta block IS present, rejects the candidate if any of
+    the following are true:
+
+    * ``status`` is in :data:`~app.player_props.injuries._DEFAULT_BLOCKING`
+      — the player is OUT / DOUBTFUL / QUESTIONABLE / GTD.
+    * ``sample_count`` is below the configured ``min_sample`` (default
+      from ``AXIOM_WNBA_PROPS_MIN_SAMPLE``) — the per-player baseline
+      is too thin to trust.
+    * ``line_move_bps`` exceeds ``AXIOM_WNBA_PROPS_LINE_MOVE_BPS``
+      (default 300) — the prop line has moved enough since the
+      candidate was built that we'd be chasing.
+    * ``matchup_bounded`` is True — the pace × opp-allowed adjustment
+      hit the ±25% combined cap, which is a quality signal that the
+      adjustment is being driven by a noisy early-season sample.
+
+    Operator-side knobs:
+
+    * ``risk.player_props_min_sample_<vertical>`` — per-vertical
+      override of the default minimum sample.
+    * ``risk.player_props_line_move_bps_<vertical>`` — per-vertical
+      line-move threshold.
+    * ``risk.player_props_allow_questionable_<vertical>`` — when
+      truthy, downgrades QUESTIONABLE / GTD to a PASS so the operator
+      can ship props on probable starters once they trust the league
+      handles GTDs honestly.
+
+    The gate **never** does its own DB lookup — every input arrives on
+    ``ctx`` so the gate stays cheap and deterministic in tests.
+    """
+    import os as _os
+    meta = ctx.operator_overrides.get(_PLAYER_PROP_OVERRIDE_KEY)
+    if not isinstance(meta, dict) or not meta:
+        return GateResult(
+            "player_props", True, "", {"player_prop_meta": False},
+        )
+
+    vertical = (ctx.vertical or "").strip().lower()
+    overrides = ctx.operator_overrides
+    details: dict[str, Any] = {
+        "vertical": vertical,
+        "player": meta.get("player"),
+        "stat": meta.get("stat"),
+    }
+
+    # 1. Player availability ------------------------------------------------
+    status = (meta.get("status") or "").strip().upper()
+    if status:
+        details["status"] = status
+        try:
+            from ..player_props.injuries import is_blocking_status
+        except Exception:  # pragma: no cover — defensive
+            is_blocking_status = lambda s: False  # noqa: E731
+        allow_questionable = bool(
+            overrides.get(f"player_props_allow_questionable_{vertical}")
+        )
+        blocking = is_blocking_status(status)
+        if blocking and allow_questionable and status in {
+            "QUESTIONABLE", "GAME TIME DECISION", "GTD",
+        }:
+            blocking = False
+            details["allow_questionable"] = True
+        if blocking:
+            return GateResult(
+                "player_props", False,
+                f"player status {status} blocks the prop",
+                details,
+            )
+
+    # 2. Per-player sample size --------------------------------------------
+    try:
+        from ..player_props.baseline import DEFAULT_MIN_SAMPLE
+    except Exception:  # pragma: no cover — defensive
+        DEFAULT_MIN_SAMPLE = 5
+    min_sample = int(
+        overrides.get(f"player_props_min_sample_{vertical}")
+        or DEFAULT_MIN_SAMPLE
+    )
+    sample_count = meta.get("sample_count")
+    if sample_count is not None:
+        try:
+            sample_count_int = int(sample_count)
+        except (TypeError, ValueError):
+            sample_count_int = 0
+        details["sample_count"] = sample_count_int
+        details["min_sample"] = min_sample
+        if sample_count_int < min_sample:
+            return GateResult(
+                "player_props", False,
+                f"baseline sample {sample_count_int} < min {min_sample}",
+                details,
+            )
+
+    # 3. Line-move guard ----------------------------------------------------
+    line_move_bps = meta.get("line_move_bps")
+    if line_move_bps is not None:
+        try:
+            line_move_v = abs(float(line_move_bps))
+        except (TypeError, ValueError):
+            line_move_v = 0.0
+        max_line_move = float(
+            overrides.get(f"player_props_line_move_bps_{vertical}")
+            or _os.environ.get("AXIOM_WNBA_PROPS_LINE_MOVE_BPS", "300")
+        )
+        details["line_move_bps"] = line_move_v
+        details["line_move_bps_threshold"] = max_line_move
+        if line_move_v > max_line_move:
+            return GateResult(
+                "player_props", False,
+                f"line moved {line_move_v:.0f}bps > {max_line_move:.0f}",
+                details,
+            )
+
+    # 4. Matchup adjustment hit the bound ----------------------------------
+    if meta.get("matchup_bounded"):
+        details["matchup_bounded"] = True
+        details["matchup_factor"] = meta.get("matchup_factor")
+        return GateResult(
+            "player_props", False,
+            "matchup adjustment hit configured bound — refusing prop",
+            details,
+        )
+
+    return GateResult("player_props", True, "", details)
+
+
 GATES: tuple[tuple[str, GateFn], ...] = (
     ("kill_switch", gate_kill_switch),
     ("daily_loss", gate_daily_loss),
@@ -1839,6 +1977,13 @@ GATES: tuple[tuple[str, GateFn], ...] = (
     # *every* downstream sizing decision — no point doing more work
     # on a candidate we wouldn't ship even if it cleared agreement.
     ("uncalibrated_vertical", gate_uncalibrated_vertical),
+    # Player-prop gate (task #823).  No-op for non-player verticals —
+    # only fires when ctx.operator_overrides carries a `_player_prop`
+    # block populated by the player-props candidate-discovery path.
+    # Sits before market_cooldown / swarm_approval so a stale player
+    # status / sub-min baseline / line-move trip doesn't burn a debate
+    # round-trip on a candidate we'd reject anyway.
+    ("player_props", gate_player_props),
     ("market_cooldown", gate_market_cooldown),
     ("swarm_approval", gate_swarm_approval),
     ("min_edge", gate_min_edge),
@@ -1870,11 +2015,11 @@ GATES: tuple[tuple[str, GateFn], ...] = (
     ("max_concurrent_positions", gate_max_concurrent_positions),
     ("duplicate_trade", gate_duplicate_trade),
 )
-assert len(GATES) == 20, (
-    "20 gates: 12 original + daily_loss (task #268) + vertical_halted "
+assert len(GATES) == 21, (
+    "21 gates: 12 original + daily_loss (task #268) + vertical_halted "
     "(task #271) + sharpe_ratio + ruin_monte_carlo + segment_throttler "
     "(task #730) + tail_price_size_cap + jumbo_quantity_cap (task #743) "
-    "+ uncalibrated_vertical (task #767)"
+    "+ uncalibrated_vertical (task #767) + player_props (task #823)"
 )
 
 

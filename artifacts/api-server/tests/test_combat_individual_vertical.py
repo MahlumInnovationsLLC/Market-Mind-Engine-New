@@ -840,7 +840,7 @@ def test_gates_tuple_still_twelve():
     grows only when a *new* gate is added (daily_loss → 13,
     vertical_halted → 14, sharpe_ratio + ruin_monte_carlo +
     segment_throttler → 17 in task #730)."""
-    assert len(GATES) == 20
+    assert len(GATES) == 21
 
 
 # ---------------------------------------------------------------------------

@@ -367,6 +367,20 @@ async def lifespan(_: FastAPI):
             register_nfl_backfill_feed()
         except Exception as e:
             log.warning("nfl_backfill feed registration failed: %s", e)
+        try:
+            # WNBA player-props poller (task #823).  Skips cleanly
+            # without `THE_ODDS_API_KEY`; once configured it walks
+            # today's cached WNBA events from the shared `the_odds_api`
+            # sweep and persists per-player per-stat per-book quotes
+            # into `player_props_quotes`.
+            from .feeds.wnba_player_props import (
+                register_wnba_player_props_feed,
+            )
+            register_wnba_player_props_feed()
+        except Exception as e:
+            log.warning(
+                "wnba_player_props feed registration failed: %s", e,
+            )
         await feed_scheduler.start()
     except Exception as e:
         log.error("feed scheduler start failed: %s", e)
@@ -2883,6 +2897,21 @@ async def admin_tech_ai_promote_kelly(
 # ---------------------------------------------------------------------------
 # Elections vertical (task #201) — dashboard arb panel + Kelly auto-promote
 # ---------------------------------------------------------------------------
+
+
+@app.get("/api/dashboard/wnba/props/today")
+async def dashboard_wnba_props_today(
+    include_rejected: bool = False,
+    _: object = Depends(require_approved_user),
+) -> dict[str, object]:
+    """Operator preview of today's tradable WNBA player props.
+
+    Surfaces the WNBA player-props vertical's output for human review
+    even while the vertical itself ships disabled.  See §22 of the
+    runbook for the enable / re-enable sequence.
+    """
+    from .wnba.dashboard import build_dashboard_payload
+    return await build_dashboard_payload(include_rejected=bool(include_rejected))
 
 
 @app.get("/api/dashboard/elections/markets/{ticker}/arb")

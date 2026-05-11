@@ -795,6 +795,7 @@ async def collect_report(date_utc: str) -> dict[str, Any]:
     raw_t = asyncio.create_task(collect_uncalibrated_trades_24h())
     miss_t = asyncio.create_task(collect_missing_league_24h())
     deck_t = asyncio.create_task(collect_latest_investor_deck())
+    wnba_t = asyncio.create_task(collect_wnba_player_props_summary())
     (
         divergence,
         drift_status,
@@ -803,8 +804,9 @@ async def collect_report(date_utc: str) -> dict[str, Any]:
         uncalibrated_raw,
         missing_league,
         investor_deck,
+        wnba_props,
     ) = await asyncio.gather(
-        div_t, drift_t, tail_t, gate_t, raw_t, miss_t, deck_t
+        div_t, drift_t, tail_t, gate_t, raw_t, miss_t, deck_t, wnba_t
     )
     return {
         "date_utc": date_utc,
@@ -815,7 +817,60 @@ async def collect_report(date_utc: str) -> dict[str, Any]:
         "uncalibrated_raw": uncalibrated_raw,
         "missing_league": missing_league,
         "investor_deck": investor_deck,
+        "wnba_player_props": wnba_props,
     }
+
+
+async def collect_wnba_player_props_summary() -> dict[str, Any]:
+    """24h summary panel for the WNBA player-props vertical (task #823).
+
+    Counts player-prop quote rows ingested in the last day plus the
+    `gate_player_props` trip count from the last 24h so the operator
+    can audit whether the disabled-by-default vertical is silently
+    picking up traffic and which gate trips are firing.
+
+    Best-effort: returns an ``error`` field rather than raising when
+    the underlying tables don't exist yet (fresh deploy before the
+    0050 migration runs).
+    """
+    summary: dict[str, Any] = {
+        "vertical": "wnba_player_props",
+        "enabled": False,
+        "quotes_ingested_24h": 0,
+        "distinct_players_24h": 0,
+        "gate_trips_24h": 0,
+        "error": None,
+    }
+    try:
+        row = await db.fetchrow(
+            """
+            SELECT count(*)::int AS n,
+                   count(DISTINCT player)::int AS players
+              FROM player_props_quotes
+             WHERE league = 'WNBA'
+               AND "timestamp" > now() - interval '24 hours'
+            """
+        )
+        if row is not None:
+            summary["quotes_ingested_24h"] = int(row["n"] or 0)
+            summary["distinct_players_24h"] = int(row["players"] or 0)
+    except Exception as e:
+        summary["error"] = f"player_props_quotes read failed: {e}"
+    try:
+        n = await db.fetchval(
+            """
+            SELECT count(*)::int
+              FROM risk_gate_trips
+             WHERE gate_name = 'player_props'
+               AND created_at > now() - interval '24 hours'
+            """
+        )
+        summary["gate_trips_24h"] = int(n or 0)
+    except Exception as e:
+        # Don't overwrite a more meaningful upstream error.
+        if not summary["error"]:
+            summary["error"] = f"risk_gate_trips read failed: {e}"
+    return summary
 
 
 def _fmt_usd(v: Any) -> str:
@@ -1668,6 +1723,33 @@ def render_text(payload: dict[str, Any]) -> tuple[str, str]:
             "produce one on the next run."
         )
 
+    # Section 7 — WNBA player props (Task #823)
+    wnba = payload.get("wnba_player_props") or {}
+    lines.append("")
+    lines.append("== 7. WNBA player props (last 24h) ==")
+    if wnba.get("error"):
+        lines.append(f"  ERROR: {wnba['error']}")
+    elif int(wnba.get("quotes_ingested_24h") or 0) == 0:
+        lines.append(
+            "  [GREEN] vertical disabled and no props ingested — "
+            "as expected on opt-out deploys"
+        )
+    else:
+        marker = (
+            "[YELLOW]" if not wnba.get("enabled") and wnba.get("gate_trips_24h", 0)
+            else "[GREEN]"
+        )
+        lines.append(
+            f"  {marker} ingested {wnba.get('quotes_ingested_24h')} prop "
+            f"quotes across {wnba.get('distinct_players_24h')} players; "
+            f"player_props gate trips: {wnba.get('gate_trips_24h')}"
+        )
+        if not wnba.get("enabled"):
+            lines.append(
+                "    (vertical ships disabled; see runbook §22 for the "
+                "enable sequence)"
+            )
+
     lines.append("")
     lines.append(
         "Read the runbook section 21 for what each red signal means."
@@ -1932,6 +2014,21 @@ def render_html(payload: dict[str, Any]) -> str:
         "<p style=\"color:#666;font-size:12px;margin-top:24px;\">"
         "Read the runbook section 21 for what each red signal means.</p>"
     )
+    # WNBA player-props summary (task #823)
+    wnba = payload.get("wnba_player_props") or {}
+    if wnba:
+        _section_h("WNBA player props (last 24h)")
+        if not _err(wnba):
+            tone = "#080" if wnba.get("quotes_ingested_24h", 0) == 0 else "#a60"
+            parts.append(
+                f"<p style=\"color:{tone};\">"
+                f"vertical_enabled={html.escape(str(bool(wnba.get('enabled'))))}; "
+                f"quotes_ingested_24h={int(wnba.get('quotes_ingested_24h') or 0)}; "
+                f"distinct_players_24h={int(wnba.get('distinct_players_24h') or 0)}; "
+                f"gate_trips_24h={int(wnba.get('gate_trips_24h') or 0)}"
+                f"</p>"
+            )
+
     parts.append("</body></html>")
     return "".join(parts)
 

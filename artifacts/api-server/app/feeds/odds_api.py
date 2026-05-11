@@ -35,7 +35,7 @@ DEFAULT_ODDS_SPORTS = os.environ.get(
     # 3-way h2h markets (home/draw/away) which the persistor branches
     # on via LeagueConfig.three_way_market.
     "basketball_nba,baseball_mlb,icehockey_nhl,basketball_ncaab,"
-    "americanfootball_nfl,soccer_epl,soccer_spain_la_liga,"
+    "americanfootball_nfl,basketball_wnba,soccer_epl,soccer_spain_la_liga,"
     "soccer_italy_serie_a,soccer_germany_bundesliga,"
     "soccer_france_ligue_one,soccer_usa_mls,soccer_uefa_champs_league",
 ).split(",")
@@ -223,6 +223,10 @@ async def _persist_odds_payload(sport: str, games: list[dict[str, Any]]) -> int:
 _SPORTRADAR_SCHEDULE_PATHS = {
     # Per-sport schedule endpoint templates (year/month/day are filled in at call time).
     "nba":   "https://api.sportradar.us/nba/trial/v8/en/games/{y}/{m:02d}/{d:02d}/schedule.json",
+    # WNBA — task #823.  Same shape as the NBA endpoint.  Optional
+    # alongside the ESPN public scoreboard backstop; `SPORTRADAR_WNBA_KEY`
+    # gates registration just like every other Sportradar pollers.
+    "wnba":  "https://api.sportradar.us/wnba/trial/v8/en/games/{y}/{m:02d}/{d:02d}/schedule.json",
     "nhl":   "https://api.sportradar.us/nhl/trial/v7/en/games/{y}/{m:02d}/{d:02d}/schedule.json",
     "mlb":   "https://api.sportradar.us/mlb/trial/v7/en/games/{y}/{m:02d}/{d:02d}/schedule.json",
     "ncaab": "https://api.sportradar.us/ncaamb/trial/v8/en/games/{y}/{m:02d}/{d:02d}/schedule.json",
@@ -253,6 +257,7 @@ _SPORTRADAR_SCHEDULE_PATHS = {
 }
 _SPORTRADAR_LEAGUE = {
     "nba": "NBA",
+    "wnba": "WNBA",
     "nhl": "NHL",
     "mlb": "MLB",
     "ncaab": "NCAAB",
