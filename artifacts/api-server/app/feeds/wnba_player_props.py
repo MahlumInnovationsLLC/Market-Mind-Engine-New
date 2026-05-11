@@ -21,6 +21,7 @@ The feed registers itself with ``enabled=False`` when neither
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 from datetime import datetime, timezone
@@ -35,6 +36,98 @@ from .scheduler import RateLimited
 
 
 log = logging.getLogger("axiom.feeds.wnba_player_props")
+
+
+# `player_props_quotes`, `player_stat_history`, and `player_injury_status`
+# all live in alembic migration 0050_wnba_player_props. Production runs
+# with AXIOM_SKIP_ALEMBIC_AT_STARTUP=1, so a freshly-shipped vertical
+# whose table is only present in alembic will spam
+# ``relation "player_props_quotes" does not exist`` warnings forever.
+# Mirror the nfl_snap_counts pattern: ship an idempotent CREATE TABLE
+# IF NOT EXISTS bootstrap that the persist path always runs through.
+_SCHEMA_LOCK = asyncio.Lock()
+_SCHEMA_READY = False
+
+_SCHEMA_SQL = """
+CREATE TABLE IF NOT EXISTS player_props_quotes (
+    id              bigserial PRIMARY KEY,
+    league          text NOT NULL,
+    sport           text NOT NULL,
+    game_id         text NOT NULL,
+    player          text NOT NULL,
+    team            text,
+    market          text NOT NULL,
+    book            text NOT NULL,
+    outcome         text NOT NULL,
+    line            double precision,
+    price_decimal   double precision,
+    price_american  integer,
+    "timestamp"     timestamptz NOT NULL DEFAULT now(),
+    raw             jsonb
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_player_props_quotes_uq
+  ON player_props_quotes (game_id, player, market, book, outcome, "timestamp");
+CREATE INDEX IF NOT EXISTS idx_player_props_quotes_lookup
+  ON player_props_quotes (league, game_id, player, market, "timestamp" DESC);
+CREATE TABLE IF NOT EXISTS player_stat_history (
+    id              bigserial PRIMARY KEY,
+    league          text NOT NULL,
+    player          text NOT NULL,
+    team            text,
+    opponent        text,
+    game_id         text,
+    played_at       timestamptz NOT NULL,
+    minutes         double precision,
+    points          double precision,
+    rebounds        double precision,
+    assists         double precision,
+    threes          double precision,
+    blocks          double precision,
+    steals          double precision,
+    turnovers       double precision,
+    is_starter      boolean,
+    home_or_away    text,
+    pace_estimate   double precision,
+    source          text
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_player_stat_history_uq
+  ON player_stat_history (league, player, game_id);
+CREATE INDEX IF NOT EXISTS idx_player_stat_history_player_recent
+  ON player_stat_history (league, player, played_at DESC);
+CREATE TABLE IF NOT EXISTS player_injury_status (
+    id           bigserial PRIMARY KEY,
+    league       text NOT NULL,
+    player       text NOT NULL,
+    team         text,
+    status       text NOT NULL,
+    description  text,
+    fetched_at   timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_player_injury_status_lookup
+  ON player_injury_status (league, player, fetched_at DESC);
+"""
+
+
+async def ensure_schema() -> None:
+    """Idempotently create the WNBA-player-props tables if missing.
+
+    Production sets ``AXIOM_SKIP_ALEMBIC_AT_STARTUP=1`` so freshly-shipped
+    verticals must self-bootstrap their schema or they'd require an
+    out-of-band alembic run before they could persist anything.
+    """
+    global _SCHEMA_READY
+    if _SCHEMA_READY:
+        return
+    async with _SCHEMA_LOCK:
+        if _SCHEMA_READY:
+            return
+        try:
+            async with db.acquire() as conn:
+                await conn.execute(_SCHEMA_SQL)
+            _SCHEMA_READY = True
+            log.info("wnba_player_props schema ready")
+        except Exception as e:
+            log.warning("wnba_player_props schema bootstrap failed: %s", e)
 
 
 _SPORT_KEY = "basketball_wnba"
@@ -212,6 +305,7 @@ def _flatten_quotes(
 async def _persist_quotes(rows: list[tuple]) -> int:
     if not rows:
         return 0
+    await ensure_schema()
     import json as _json
 
     sql_rows = []

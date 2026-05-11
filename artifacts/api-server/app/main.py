@@ -154,634 +154,696 @@ async def lifespan(_: FastAPI):
     except Exception as e:
         log.error("Postgres pool init failed: %s", e)
 
-    # Apply Alembic migrations BEFORE any request handler can land. The
-    # baseline migration owns the schema that used to be created by
-    # lazy ALTERs at request time. Run on a worker thread so the sync
-    # psycopg engine doesn't block the event loop.
-    #
-    # Set ``AXIOM_SKIP_ALEMBIC_AT_STARTUP=1`` to skip this in environments
-    # where the schema is managed out-of-band (e.g. Supabase migrations
-    # applied by a release pipeline) and a fresh container should not
-    # block its `/api/healthz` bind on a slow `alembic upgrade head`
-    # against an IO-starved DB. When skipped, we still record the
-    # current revision so the readyz panel and operator dashboard can
-    # show what the running pod is at.
-    from . import migrations as db_migrations  # lazy — keeps alembic out of the module import chain
-    skip_alembic = (os.environ.get("AXIOM_SKIP_ALEMBIC_AT_STARTUP") or "").strip() in ("1", "true", "True")
-    if skip_alembic:
-        try:
-            rev = await asyncio.to_thread(db_migrations.current_revision)
-            ready_gate.mark_check(
-                "migrations",
-                ok=True,
-                detail=f"skipped_at_startup head={rev}",
-            )
-            log.info("alembic upgrade skipped at startup (AXIOM_SKIP_ALEMBIC_AT_STARTUP=1, head=%s)", rev)
-        except Exception as e:
-            log.warning("alembic revision lookup failed (skip mode): %s", e)
-            ready_gate.mark_check(
-                "migrations",
-                ok=True,
-                detail=f"skipped_at_startup revision_lookup_failed={type(e).__name__}",
-            )
-    else:
-        try:
-            await asyncio.to_thread(db_migrations.run_migrations_sync)
-            ready_gate.mark_check(
-                "migrations",
-                ok=True,
-                detail=f"head={db_migrations.current_revision()}",
-            )
-        except Exception as e:
-            log.error("alembic migrations failed: %s", e)
-            ready_gate.mark_check("migrations", ok=False, detail=f"{type(e).__name__}: {e}")
-    # Auto-arm the four tail-risk knob defaults in `system_settings`
-    # (Task #750).  The gates already fall back to the same values via
-    # in-code defaults, so behaviour is unchanged either way — this
-    # just makes the armed configuration visible on the operator
-    # dashboard and routable through the per-vertical override panel.
-    # Idempotent: existing operator overrides are NEVER overwritten.
-    try:
-        from . import runtime_settings as _rt_settings
+    # Task handles populated by the background boot sequence below.
+    # Cleanup tolerates None for any handle whose owner never ran.
+    fill_task: asyncio.Task | None = None
+    polymarket_fill_task: asyncio.Task | None = None
+    settlement_tap_task: asyncio.Task | None = None
+    models_task: asyncio.Task | None = None
+    ready_watcher_task: asyncio.Task | None = None
 
-        await _rt_settings.ensure_tail_risk_defaults_armed()
-    except Exception as e:
-        log.warning("tail-risk auto-arm at startup failed: %s", e)
+    async def _do_boot() -> None:
+        """Run the rest of the boot sequence in the background.
 
-    # Hydrate the in-process promoted-feature set from
-    # ``autoresearch_features``. Promoted UW candidates are opted back
-    # into the live feature vector so a freshly retrained model with
-    # the expanded column layout actually sees them. Best-effort: if
-    # the DB read fails we serve the built-in 32-column layout.
-    try:
-        from .autoresearch import feature_bridge as _ar_bridge
-        from .autoresearch import store as _ar_store
-        from .features import vector as _features_vector
-        promoted_rows = await _ar_store.list_candidates(status="production")
-        registered = _ar_bridge.register_candidates(promoted_rows)
-        _features_vector.set_promoted_names(registered)
-        log.info(
-            "feature registry promoted set hydrated: %d names",
-            len(registered),
-        )
-    except Exception as e:
-        log.warning("promoted feature hydration failed: %s", e)
-    # Register + start the external data feed pollers.  Feeds with missing
-    # API keys register themselves as `enabled=false` so they show up in
-    # /api/feeds/status with a clear skipped_reason but never poll.
-    # All register_xxx_feed imports are local (lazy) — see module header for why.
-    try:
-        from .feeds.odds_api import register_odds_feeds
-        from .feeds.weather import register_weather_feeds
-        from .feeds.crypto import register_crypto_feeds
-        from .feeds.commodities import register_commodities_feeds
-        from .feeds.tech_evidence import register_tech_evidence_feeds
-        from .feeds.unusual_whales import register_unusual_whales_feeds
-        from .feeds.public_betting import register_public_betting_feeds
-        from .feeds.outlier_bet import register_outlier_bet_feed
-        from .feeds.positive_ev import register_positive_ev_feed
-        register_odds_feeds()
-        register_weather_feeds()
-        register_crypto_feeds()
-        register_commodities_feeds()
-        try:
-            from .feeds.kalshi_crypto_markets import register_kalshi_crypto_markets_feed
-            register_kalshi_crypto_markets_feed()
-        except Exception as e:
-            log.warning("kalshi_crypto_markets feed registration failed: %s", e)
-        try:
-            from .feeds.kalshi_crypto_markets import register_kalshi_crypto_settlements_feed
-            register_kalshi_crypto_settlements_feed()
-        except Exception as e:
-            log.warning(
-                "kalshi_crypto_settlements feed registration failed: %s", e,
-            )
-        try:
-            # Sports analog of the crypto markets producer.  Without
-            # this the orchestrator's _candidate_predictions returns
-            # 0 rows for every sports vertical because nothing else
-            # writes Kalshi-keyed rows under NFL/NBA/MLB/NHL/etc.
-            from .feeds.kalshi_sports_markets import register_kalshi_sports_markets_feed
-            register_kalshi_sports_markets_feed()
-        except Exception as e:
-            log.warning(
-                "kalshi_sports_markets feed registration failed: %s", e,
-            )
-        register_tech_evidence_feeds()
-        try:
-            from .feeds.election_polls import register_election_polls_feeds
-            register_election_polls_feeds()
-        except Exception as e:
-            log.warning("election_polls feed registration failed: %s", e)
-        try:
-            from .feeds.econ_calendar import register_econ_calendar_feeds
-            register_econ_calendar_feeds()
-        except Exception as e:
-            log.warning("econ_calendar feed registration failed: %s", e)
-        try:
-            from .feeds.entertainment_signals import (
-                register_entertainment_signal_feeds,
-            )
-            register_entertainment_signal_feeds()
-        except Exception as e:
-            log.warning("entertainment_signals feed registration failed: %s", e)
-        try:
-            from .feeds import weather_climatology as _wclim
-
-            # Run both in the background so a slow first-time executemany
-            # (10k+ ON CONFLICT rows on a cold Supabase connection) doesn't
-            # add 60-120 s to the blocking lifespan startup path.
-            # refresh_climatology_cache falls back to the embedded baseline
-            # for any miss that occurs before the task completes.
-            asyncio.create_task(
-                _bg_best_effort(
-                    _wclim.backfill_climatology(),
-                    "weather_climatology.backfill",
-                ),
-                name="boot-wclim-backfill",
-            )
-            asyncio.create_task(
-                _bg_best_effort(
-                    _wclim.refresh_climatology_cache(),
-                    "weather_climatology.refresh_cache",
-                ),
-                name="boot-wclim-cache",
-            )
-        except Exception as e:
-            log.warning("weather_climatology bootstrap failed: %s", e)
-        try:
-            from .feeds.sportradar import register_sportradar_extra_feeds
-            register_sportradar_extra_feeds()
-        except Exception as e:
-            log.warning("sportradar extra feed registration failed: %s", e)
-        # ESPN + Kalshi schedule backstops: keep the Today's Games
-        # lookahead alive after the Sportradar trial expires.  Both
-        # write into the same ``sportradar_schedules`` table with
-        # provider-prefixed game ids so they coexist with native
-        # Sportradar rows without a primary-key fight.
-        try:
-            from .feeds.espn_scoreboard import register_espn_scoreboard_feed
-            register_espn_scoreboard_feed()
-        except Exception as e:
-            log.warning("espn_scoreboard feed registration failed: %s", e)
-        try:
-            from .feeds.kalshi_schedules import register_kalshi_schedules_feed
-            register_kalshi_schedules_feed()
-        except Exception as e:
-            log.warning("kalshi_schedules feed registration failed: %s", e)
-        try:
-            from .feeds.nfl_snap_counts import (
-                ensure_schema as _ensure_nfl_snap_schema,
-                register_nfl_snap_counts_feed,
-            )
-            await _ensure_nfl_snap_schema()
-            register_nfl_snap_counts_feed()
-        except Exception as e:
-            log.warning("nfl_snap_counts feed registration failed: %s", e)
-        try:
-            from .feeds.team_elo_seed import register_team_elo_seed_feed
-            register_team_elo_seed_feed()
-        except Exception as e:
-            log.warning("team_elo_seed feed registration failed: %s", e)
-        try:
-            register_unusual_whales_feeds()
-        except Exception as e:
-            log.warning("unusual_whales feed registration failed: %s", e)
-        try:
-            register_public_betting_feeds()
-        except Exception as e:
-            log.warning("public_betting feed registration failed: %s", e)
-        try:
-            register_outlier_bet_feed()
-        except Exception as e:
-            log.warning("outlier_bet feed registration failed: %s", e)
-        try:
-            # In-process positive-EV substitute for outlier.bet (which has
-            # been CloudFront-blocked since late Apr 2026).  Derives the
-            # same intangibles_reports rows from The Odds API.
-            register_positive_ev_feed()
-        except Exception as e:
-            log.warning("positive_ev feed registration failed: %s", e)
-        try:
-            from .feeds.nfl_backfill import register_nfl_backfill_feed
-            register_nfl_backfill_feed()
-        except Exception as e:
-            log.warning("nfl_backfill feed registration failed: %s", e)
-        try:
-            # WNBA player-props poller (task #823).  Skips cleanly
-            # without `THE_ODDS_API_KEY`; once configured it walks
-            # today's cached WNBA events from the shared `the_odds_api`
-            # sweep and persists per-player per-stat per-book quotes
-            # into `player_props_quotes`.
-            from .feeds.wnba_player_props import (
-                register_wnba_player_props_feed,
-            )
-            register_wnba_player_props_feed()
-        except Exception as e:
-            log.warning(
-                "wnba_player_props feed registration failed: %s", e,
-            )
-        await feed_scheduler.start()
-    except Exception as e:
-        log.error("feed scheduler start failed: %s", e)
-    # Bootstrap persona weights from swarm_analyst_metrics so the swarm
-    # is ready to vote with calibrated weights on the very first request.
-    try:
-        n = await refresh_persona_weights()
-        log.info("swarm persona weights bootstrapped from %d rows", n)
-    except Exception as e:
-        log.warning("swarm persona weight bootstrap failed: %s", e)
-
-    # Validate Kalshi credentials at startup (non-fatal — degraded mode allowed).
-    cred = kalshi_auth.validate_credentials(
-        settings.kalshi_api_key_id, settings.kalshi_private_key
-    )
-    if cred.get("ok"):
-        log.info("Kalshi credentials OK (key fingerprint=%s, env=%s, mode=%s)",
-                 cred.get("key_fingerprint"), settings.kalshi_env, settings.trading_mode)
-    else:
-        log.warning("Kalshi credentials NOT validated: %s", cred.get("error"))
-
-    # Cluster auto-detect: sign a real authenticated call against the
-    # configured Kalshi cluster so a wrong-environment mistake (prod
-    # creds pointed at demo, or vice versa) is loud at boot instead of
-    # silently 401'ing the WS reconnect loop and balance/position polls.
-    # See `app.kalshi.client.cluster_probe` for the policy.  We then
-    # start a slow background loop (default every 10 minutes) so a
-    # mid-session credential rotation or KALSHI_ENV flip is also
-    # caught — the boot result alone went stale the moment anything
-    # changed underneath us.
-    try:
-        cluster_check = await kalshi_client_mod.cluster_probe(force=True)
-        if cluster_check.get("ok"):
-            log.info(
-                "Kalshi cluster auth probe OK (env=%s, key_belongs_to=%s)",
-                cluster_check.get("configured_env"),
-                cluster_check.get("key_belongs_to"),
-            )
+        Everything below used to block the lifespan (and therefore the
+        uvicorn port bind) for 2-3 minutes on cold prod boots, which
+        produced the watchdog "Connection refused, child in startup
+        grace" pattern even though uvicorn itself was healthy. Moving
+        the body off the lifespan critical path lets /api/healthz
+        return 200 within seconds; per-subsystem readiness is still
+        tracked via ``ready_gate`` and surfaced on /api/readyz, and
+        every step is wrapped in try/except so a single sick
+        dependency cannot stall the rest of boot.
+        """
+        nonlocal fill_task, polymarket_fill_task, settlement_tap_task
+        nonlocal models_task, ready_watcher_task
+        # Apply Alembic migrations BEFORE any request handler can land. The
+        # baseline migration owns the schema that used to be created by
+        # lazy ALTERs at request time. Run on a worker thread so the sync
+        # psycopg engine doesn't block the event loop.
+        #
+        # Set ``AXIOM_SKIP_ALEMBIC_AT_STARTUP=1`` to skip this in environments
+        # where the schema is managed out-of-band (e.g. Supabase migrations
+        # applied by a release pipeline) and a fresh container should not
+        # block its `/api/healthz` bind on a slow `alembic upgrade head`
+        # against an IO-starved DB. When skipped, we still record the
+        # current revision so the readyz panel and operator dashboard can
+        # show what the running pod is at.
+        from . import migrations as db_migrations  # lazy — keeps alembic out of the module import chain
+        skip_alembic = (os.environ.get("AXIOM_SKIP_ALEMBIC_AT_STARTUP") or "").strip() in ("1", "true", "True")
+        if skip_alembic:
+            try:
+                rev = await asyncio.to_thread(db_migrations.current_revision)
+                ready_gate.mark_check(
+                    "migrations",
+                    ok=True,
+                    detail=f"skipped_at_startup head={rev}",
+                )
+                log.info("alembic upgrade skipped at startup (AXIOM_SKIP_ALEMBIC_AT_STARTUP=1, head=%s)", rev)
+            except Exception as e:
+                log.warning("alembic revision lookup failed (skip mode): %s", e)
+                ready_gate.mark_check(
+                    "migrations",
+                    ok=True,
+                    detail=f"skipped_at_startup revision_lookup_failed={type(e).__name__}",
+                )
         else:
-            log.error(
-                "Kalshi cluster auth probe FAILED: %s", cluster_check.get("error")
+            try:
+                await asyncio.to_thread(db_migrations.run_migrations_sync)
+                ready_gate.mark_check(
+                    "migrations",
+                    ok=True,
+                    detail=f"head={db_migrations.current_revision()}",
+                )
+            except Exception as e:
+                log.error("alembic migrations failed: %s", e)
+                ready_gate.mark_check("migrations", ok=False, detail=f"{type(e).__name__}: {e}")
+        # Auto-arm the four tail-risk knob defaults in `system_settings`
+        # (Task #750).  The gates already fall back to the same values via
+        # in-code defaults, so behaviour is unchanged either way — this
+        # just makes the armed configuration visible on the operator
+        # dashboard and routable through the per-vertical override panel.
+        # Idempotent: existing operator overrides are NEVER overwritten.
+        try:
+            from . import runtime_settings as _rt_settings
+
+            await _rt_settings.ensure_tail_risk_defaults_armed()
+        except Exception as e:
+            log.warning("tail-risk auto-arm at startup failed: %s", e)
+
+        # Hydrate the in-process promoted-feature set from
+        # ``autoresearch_features``. Promoted UW candidates are opted back
+        # into the live feature vector so a freshly retrained model with
+        # the expanded column layout actually sees them. Best-effort: if
+        # the DB read fails we serve the built-in 32-column layout.
+        try:
+            from .autoresearch import feature_bridge as _ar_bridge
+            from .autoresearch import store as _ar_store
+            from .features import vector as _features_vector
+            promoted_rows = await _ar_store.list_candidates(status="production")
+            registered = _ar_bridge.register_candidates(promoted_rows)
+            _features_vector.set_promoted_names(registered)
+            log.info(
+                "feature registry promoted set hydrated: %d names",
+                len(registered),
             )
-    except Exception as e:
-        log.warning("Kalshi cluster auth probe raised: %s", e)
-    try:
-        await kalshi_client_mod.start_cluster_probe_loop()
-    except Exception as e:
-        log.warning("Kalshi cluster re-probe loop start failed: %s", e)
+        except Exception as e:
+            log.warning("promoted feature hydration failed: %s", e)
+        # Register + start the external data feed pollers.  Feeds with missing
+        # API keys register themselves as `enabled=false` so they show up in
+        # /api/feeds/status with a clear skipped_reason but never poll.
+        # All register_xxx_feed imports are local (lazy) — see module header for why.
+        try:
+            from .feeds.odds_api import register_odds_feeds
+            from .feeds.weather import register_weather_feeds
+            from .feeds.crypto import register_crypto_feeds
+            from .feeds.commodities import register_commodities_feeds
+            from .feeds.tech_evidence import register_tech_evidence_feeds
+            from .feeds.unusual_whales import register_unusual_whales_feeds
+            from .feeds.public_betting import register_public_betting_feeds
+            from .feeds.outlier_bet import register_outlier_bet_feed
+            from .feeds.positive_ev import register_positive_ev_feed
+            register_odds_feeds()
+            register_weather_feeds()
+            register_crypto_feeds()
+            register_commodities_feeds()
+            try:
+                from .feeds.kalshi_crypto_markets import register_kalshi_crypto_markets_feed
+                register_kalshi_crypto_markets_feed()
+            except Exception as e:
+                log.warning("kalshi_crypto_markets feed registration failed: %s", e)
+            try:
+                from .feeds.kalshi_crypto_markets import register_kalshi_crypto_settlements_feed
+                register_kalshi_crypto_settlements_feed()
+            except Exception as e:
+                log.warning(
+                    "kalshi_crypto_settlements feed registration failed: %s", e,
+                )
+            try:
+                # Sports analog of the crypto markets producer.  Without
+                # this the orchestrator's _candidate_predictions returns
+                # 0 rows for every sports vertical because nothing else
+                # writes Kalshi-keyed rows under NFL/NBA/MLB/NHL/etc.
+                from .feeds.kalshi_sports_markets import register_kalshi_sports_markets_feed
+                register_kalshi_sports_markets_feed()
+            except Exception as e:
+                log.warning(
+                    "kalshi_sports_markets feed registration failed: %s", e,
+                )
+            register_tech_evidence_feeds()
+            try:
+                from .feeds.election_polls import register_election_polls_feeds
+                register_election_polls_feeds()
+            except Exception as e:
+                log.warning("election_polls feed registration failed: %s", e)
+            try:
+                from .feeds.econ_calendar import register_econ_calendar_feeds
+                register_econ_calendar_feeds()
+            except Exception as e:
+                log.warning("econ_calendar feed registration failed: %s", e)
+            try:
+                from .feeds.entertainment_signals import (
+                    register_entertainment_signal_feeds,
+                )
+                register_entertainment_signal_feeds()
+            except Exception as e:
+                log.warning("entertainment_signals feed registration failed: %s", e)
+            try:
+                from .feeds import weather_climatology as _wclim
 
-    # Start WS subscriber + bus->lifecycle bridge if creds are present.
-    fill_task = None
-    try:
-        await kalshi_ws.maybe_start_ws()
-        fill_task = await kalshi_lifecycle.attach_ws_fill_handler()
-        from .kalshi import orderbook as kalshi_orderbook
-        await kalshi_orderbook.start_orderbook_consumer()
-    except Exception as e:
-        log.warning("Kalshi WS startup skipped: %s", e)
+                # Run both in the background so a slow first-time executemany
+                # (10k+ ON CONFLICT rows on a cold Supabase connection) doesn't
+                # add 60-120 s to the blocking lifespan startup path.
+                # refresh_climatology_cache falls back to the embedded baseline
+                # for any miss that occurs before the task completes.
+                asyncio.create_task(
+                    _bg_best_effort(
+                        _wclim.backfill_climatology(),
+                        "weather_climatology.backfill",
+                    ),
+                    name="boot-wclim-backfill",
+                )
+                asyncio.create_task(
+                    _bg_best_effort(
+                        _wclim.refresh_climatology_cache(),
+                        "weather_climatology.refresh_cache",
+                    ),
+                    name="boot-wclim-cache",
+                )
+            except Exception as e:
+                log.warning("weather_climatology bootstrap failed: %s", e)
+            try:
+                from .feeds.sportradar import register_sportradar_extra_feeds
+                register_sportradar_extra_feeds()
+            except Exception as e:
+                log.warning("sportradar extra feed registration failed: %s", e)
+            # ESPN + Kalshi schedule backstops: keep the Today's Games
+            # lookahead alive after the Sportradar trial expires.  Both
+            # write into the same ``sportradar_schedules`` table with
+            # provider-prefixed game ids so they coexist with native
+            # Sportradar rows without a primary-key fight.
+            try:
+                from .feeds.espn_scoreboard import register_espn_scoreboard_feed
+                register_espn_scoreboard_feed()
+            except Exception as e:
+                log.warning("espn_scoreboard feed registration failed: %s", e)
+            try:
+                from .feeds.kalshi_schedules import register_kalshi_schedules_feed
+                register_kalshi_schedules_feed()
+            except Exception as e:
+                log.warning("kalshi_schedules feed registration failed: %s", e)
+            try:
+                from .feeds.nfl_snap_counts import (
+                    ensure_schema as _ensure_nfl_snap_schema,
+                    register_nfl_snap_counts_feed,
+                )
+                await _ensure_nfl_snap_schema()
+                register_nfl_snap_counts_feed()
+            except Exception as e:
+                log.warning("nfl_snap_counts feed registration failed: %s", e)
+            try:
+                from .feeds.team_elo_seed import register_team_elo_seed_feed
+                register_team_elo_seed_feed()
+            except Exception as e:
+                log.warning("team_elo_seed feed registration failed: %s", e)
+            try:
+                register_unusual_whales_feeds()
+            except Exception as e:
+                log.warning("unusual_whales feed registration failed: %s", e)
+            try:
+                register_public_betting_feeds()
+            except Exception as e:
+                log.warning("public_betting feed registration failed: %s", e)
+            try:
+                register_outlier_bet_feed()
+            except Exception as e:
+                log.warning("outlier_bet feed registration failed: %s", e)
+            try:
+                # In-process positive-EV substitute for outlier.bet (which has
+                # been CloudFront-blocked since late Apr 2026).  Derives the
+                # same intangibles_reports rows from The Odds API.
+                register_positive_ev_feed()
+            except Exception as e:
+                log.warning("positive_ev feed registration failed: %s", e)
+            try:
+                from .feeds.nfl_backfill import register_nfl_backfill_feed
+                register_nfl_backfill_feed()
+            except Exception as e:
+                log.warning("nfl_backfill feed registration failed: %s", e)
+            try:
+                # WNBA player-props poller (task #823).  Skips cleanly
+                # without `THE_ODDS_API_KEY`; once configured it walks
+                # today's cached WNBA events from the shared `the_odds_api`
+                # sweep and persists per-player per-stat per-book quotes
+                # into `player_props_quotes`.
+                from .feeds.wnba_player_props import (
+                    ensure_schema as _ensure_wnba_props_schema,
+                    register_wnba_player_props_feed,
+                )
+                await _ensure_wnba_props_schema()
+                register_wnba_player_props_feed()
+            except Exception as e:
+                log.warning(
+                    "wnba_player_props feed registration failed: %s", e,
+                )
+            await feed_scheduler.start()
+        except Exception as e:
+            log.error("feed scheduler start failed: %s", e)
+        # Bootstrap persona weights from swarm_analyst_metrics so the swarm
+        # is ready to vote with calibrated weights on the very first request.
+        try:
+            n = await refresh_persona_weights()
+            log.info("swarm persona weights bootstrapped from %d rows", n)
+        except Exception as e:
+            log.warning("swarm persona weight bootstrap failed: %s", e)
 
-    # Validate Polymarket credentials at startup (non-fatal — degraded mode allowed).
-    pcred = polymarket_auth.validate_credentials(
-        settings.polymarket_api_key,
-        settings.polymarket_api_secret,
-        settings.polymarket_api_passphrase,
-        settings.polymarket_wallet_address,
-    )
-    if pcred.get("ok"):
-        log.info("Polymarket credentials OK (key fingerprint=%s, mode=%s)",
-                 pcred.get("key_fingerprint"), settings.trading_mode)
-    else:
-        log.warning("Polymarket credentials NOT validated: %s", pcred.get("error"))
-
-    # Drain the Polymarket bus into the lifecycle so user-channel `trade`
-    # / `order` updates flip resting orders to `filled`. Mirrors the
-    # Kalshi fill router above; non-fatal so a missing WS doesn't take
-    # down the API.
-    polymarket_fill_task = None
-    try:
-        polymarket_fill_task = await polymarket_lifecycle.attach_ws_fill_handler()
-    except Exception as e:
-        log.warning("Polymarket fill router start failed: %s", e)
-
-    # Start the trading orchestrator scheduler.  Honors
-    # AXIOM_ORCHESTRATOR_ENABLED + AXIOM_TRADING_MODE.  Cycle failures
-    # are caught inside the loop so a sick DB doesn't stop the process.
-    try:
-        await orchestrator_scheduler.start()
-    except Exception as e:
-        log.warning("orchestrator scheduler start failed: %s", e)
-
-    # Settlement loop: closes finalized markets, writes post-mortems,
-    # updates persona Brier, accumulates daily PnL, raises drift alerts.
-    # Runs independent of trading-mode halts so feedback never stalls.
-    try:
-        await settlement_scheduler.start()
-    except Exception as e:
-        log.warning("settlement scheduler start failed: %s", e)
-
-    # Background tap on the settlement event hub: caches the most recent
-    # market_settle_complete events in-process so the dashboard panel can
-    # render history immediately on first paint (the WS only delivers
-    # events that occur while a client is connected).
-    settlement_tap_task = asyncio.create_task(
-        _settlement_recent_tap(), name="settlement-recent-tap"
-    )
-
-    # System-health collector + daily P&L summary scheduler.  Both are
-    # background tasks that touch in-memory state only on success and
-    # use try/except internally so a sick dep can't take down the process.
-    try:
-        await health.start()
-    except Exception as e:
-        log.warning("health collector start failed: %s", e)
-    try:
-        await daily_summary.start()
-    except Exception as e:
-        log.warning("daily summary scheduler start failed: %s", e)
-    try:
-        await daily_honesty_report.start()
-    except Exception as e:
-        log.warning("daily honesty report scheduler start failed: %s", e)
-    try:
-        await notif_v1_backtest_gate.start()
-    except Exception as e:
-        log.warning("v1 backtest gate scheduler start failed: %s", e)
-    try:
-        await notif_weekly_roundup.start()
-    except Exception as e:
-        log.warning("weekly roundup scheduler start failed: %s", e)
-    # Per-persona daily Brier degradation watcher (task #305).  Polls
-    # every ~10m, computes today's per-persona Brier via the same
-    # `aggregate_persona_day` helper the daily summary uses, and pages
-    # an operator alert when any persona's score crosses the configured
-    # absolute / jump threshold.
-    try:
-        await notif_persona_brier_alerts.start()
-    except Exception as e:
-        log.warning("persona brier alerts scheduler start failed: %s", e)
-    # Soccer-settlement drift watcher (task #611). Polls every ~10m for
-    # soccer Kalshi markets whose linked Sportradar match has been final
-    # for >2h while trades on the market are still un-settled — surfaces
-    # stale `swarm_debates` -> `game_id` links the settlement cycle is
-    # silently skipping.
-    try:
-        await notif_soccer_settlement_drift.start()
-    except Exception as e:
-        log.warning(
-            "soccer settlement drift scheduler start failed: %s", e
+        # Validate Kalshi credentials at startup (non-fatal — degraded mode allowed).
+        cred = kalshi_auth.validate_credentials(
+            settings.kalshi_api_key_id, settings.kalshi_private_key
         )
-    # RevenueCat webhook silence detector — fires an operator alert
-    # when the mobile-IAP webhook stops delivering during business hours
-    # (catches dashboard pause/resume + upstream outages). Per task #252.
-    try:
-        await rc_billing.start()
-    except Exception as e:
-        log.warning("rc webhook silence loop start failed: %s", e)
-    # Per-provider LLM fallback-rate spike monitor (task #145). Reads
-    # `fallback_used` / `primary_provider` from `llm_predictions.metadata`
-    # and pages when either provider's fallback rate exceeds the
-    # configured threshold over the trailing window.
-    try:
-        from .swarm import fallback_monitor as _fallback_monitor
-        await _fallback_monitor.start()
-    except Exception as e:
-        log.warning("LLM fallback monitor start failed: %s", e)
-    try:
-        await notif_churn.start()
-    except Exception as e:
-        log.warning("churn digest scheduler start failed: %s", e)
-    # Telegram concierge bot (per task #111). No-op when
-    # TELEGRAM_BOT_TOKEN is unset (the dev / CI default).
-    try:
-        await telegram_bot.start()
-    except Exception as e:
-        log.warning("telegram bot start failed: %s", e)
+        if cred.get("ok"):
+            log.info("Kalshi credentials OK (key fingerprint=%s, env=%s, mode=%s)",
+                     cred.get("key_fingerprint"), settings.kalshi_env, settings.trading_mode)
+        else:
+            log.warning("Kalshi credentials NOT validated: %s", cred.get("error"))
 
-    # Periodic feature-drift snapshot logger.  Pure in-process — no DB
-    # dependency, so it's safe to start before the ready gate clears.
-    try:
-        await feature_drift.scheduler.start()
-    except Exception as e:
-        log.warning("feature drift scheduler start failed: %s", e)
+        # Cluster auto-detect: sign a real authenticated call against the
+        # configured Kalshi cluster so a wrong-environment mistake (prod
+        # creds pointed at demo, or vice versa) is loud at boot instead of
+        # silently 401'ing the WS reconnect loop and balance/position polls.
+        # See `app.kalshi.client.cluster_probe` for the policy.  We then
+        # start a slow background loop (default every 10 minutes) so a
+        # mid-session credential rotation or KALSHI_ENV flip is also
+        # caught — the boot result alone went stale the moment anything
+        # changed underneath us.
+        try:
+            cluster_check = await kalshi_client_mod.cluster_probe(force=True)
+            if cluster_check.get("ok"):
+                log.info(
+                    "Kalshi cluster auth probe OK (env=%s, key_belongs_to=%s)",
+                    cluster_check.get("configured_env"),
+                    cluster_check.get("key_belongs_to"),
+                )
+            else:
+                log.error(
+                    "Kalshi cluster auth probe FAILED: %s", cluster_check.get("error")
+                )
+        except Exception as e:
+            log.warning("Kalshi cluster auth probe raised: %s", e)
+        try:
+            await kalshi_client_mod.start_cluster_probe_loop()
+        except Exception as e:
+            log.warning("Kalshi cluster re-probe loop start failed: %s", e)
 
-    # Elo updater: scans the `games` table for newly-finished matchups
-    # and feeds them into `record_game()` so per-team Elo ratings stay
-    # current.  Idempotent at both the SQL and engine layers.
-    try:
-        await elo_scheduler.scheduler.start()
-    except Exception as e:
-        log.warning("elo updater scheduler start failed: %s", e)
+        # Start WS subscriber + bus->lifecycle bridge if creds are present.
+        fill_task = None
+        try:
+            await kalshi_ws.maybe_start_ws()
+            fill_task = await kalshi_lifecycle.attach_ws_fill_handler()
+            from .kalshi import orderbook as kalshi_orderbook
+            await kalshi_orderbook.start_orderbook_consumer()
+        except Exception as e:
+            log.warning("Kalshi WS startup skipped: %s", e)
 
-    # Continuous Kalshi balance -> bankroll_events sync. Polls every 60s
-    # and writes a delta row whenever the live balance moves so the
-    # bankroll-floor risk gate and equity curve always reflect reality.
-    try:
-        from . import bankroll_sync as _bankroll_sync
-        await _bankroll_sync.start()
-    except Exception as e:
-        log.warning("bankroll sync start failed: %s", e)
+        # Validate Polymarket credentials at startup (non-fatal — degraded mode allowed).
+        pcred = polymarket_auth.validate_credentials(
+            settings.polymarket_api_key,
+            settings.polymarket_api_secret,
+            settings.polymarket_api_passphrase,
+            settings.polymarket_wallet_address,
+        )
+        if pcred.get("ok"):
+            log.info("Polymarket credentials OK (key fingerprint=%s, mode=%s)",
+                     pcred.get("key_fingerprint"), settings.trading_mode)
+        else:
+            log.warning("Polymarket credentials NOT validated: %s", pcred.get("error"))
 
-    # `order_fills` dedupe-table retention sweep. The table only needs
-    # rows around long enough to suppress WS-replay duplicates on
-    # reconnect (a few hours); without this loop it grows unboundedly.
-    # Per task #154.
-    try:
-        from . import order_fills_retention as _order_fills_retention
-        await _order_fills_retention.start()
-    except Exception as e:
-        log.warning("order_fills retention start failed: %s", e)
+        # Drain the Polymarket bus into the lifecycle so user-channel `trade`
+        # / `order` updates flip resting orders to `filled`. Mirrors the
+        # Kalshi fill router above; non-fatal so a missing WS doesn't take
+        # down the API.
+        polymarket_fill_task = None
+        try:
+            polymarket_fill_task = await polymarket_lifecycle.attach_ws_fill_handler()
+        except Exception as e:
+            log.warning("Polymarket fill router start failed: %s", e)
 
-    # `free_tier_market_views` quota-table retention sweep. The free-tier
-    # quota check only ever reads today's UTC partition, so anything older
-    # than ~30 days is dead weight and would otherwise grow linearly with
-    # active free users. Per task #165.
-    try:
-        from . import free_tier_views_retention as _free_tier_views_retention
-        await _free_tier_views_retention.start()
-    except Exception as e:
-        log.warning("free_tier_views retention start failed: %s", e)
+        # Start the trading orchestrator scheduler.  Honors
+        # AXIOM_ORCHESTRATOR_ENABLED + AXIOM_TRADING_MODE.  Cycle failures
+        # are caught inside the loop so a sick DB doesn't stop the process.
+        try:
+            await orchestrator_scheduler.start()
+        except Exception as e:
+            log.warning("orchestrator scheduler start failed: %s", e)
 
-    # `crypto_ohlcv` bar-table retention sweep. The poller is
-    # append-with-upsert with no TTL, so without this loop the table
-    # grows unboundedly (~1M rows/year per symbol at 1m). Per task #175.
-    try:
-        from . import crypto_ohlcv_retention as _crypto_ohlcv_retention
-        await _crypto_ohlcv_retention.start()
-    except Exception as e:
-        log.warning("crypto_ohlcv retention start failed: %s", e)
+        # Settlement loop: closes finalized markets, writes post-mortems,
+        # updates persona Brier, accumulates daily PnL, raises drift alerts.
+        # Runs independent of trading-mode halts so feedback never stalls.
+        try:
+            await settlement_scheduler.start()
+        except Exception as e:
+            log.warning("settlement scheduler start failed: %s", e)
 
-    # Kalshi market-tick cache refresh loop. Tops up the
-    # ``market_price_ticks`` cache for recently-traded markets so the
-    # /trade/:ref chart serves out of Postgres on revisit instead of
-    # round-tripping the Kalshi candlesticks endpoint live. Per task #359.
-    try:
-        from .kalshi import tick_cache_refresh as _tick_cache_refresh
-        await _tick_cache_refresh.start()
-    except Exception as e:
-        log.warning("kalshi tick cache refresh start failed: %s", e)
-
-    # Continuous Kalshi position + fill reconciler. Periodically pulls
-    # /portfolio/positions and /portfolio/fills, diffs against our local
-    # DB, raises model_health_alerts on drift > tolerance, and back-fills
-    # any fills the WS missed. Disabled in paper mode and when Kalshi
-    # creds are absent. Per cutover task #266.
-    try:
-        from .kalshi import reconciler as _kalshi_reconciler
-        await _kalshi_reconciler.start()
-    except Exception as e:
-        log.warning("kalshi reconciler start failed: %s", e)
-
-    # Dead-letter sweeper (task #710): promotes long-failing rows in
-    # ``order_recovery_attempts`` into the operator dead-letter queue
-    # and pages once per coid. Internally skips in paper mode and
-    # absorbs DB blips.
-    try:
-        from .kalshi import dead_letter_sweeper as _dl_sweeper
-        _dl_sweeper.start()
-    except Exception as e:
-        log.warning("dead-letter sweeper start failed: %s", e)
-
-    # AutoResearch — nightly UW-signal mining job. Discovered candidates
-    # land in `autoresearch_features` with status='shadow' for an admin
-    # to promote (see /api/admin/autoresearch/*). Disabled by setting
-    # AXIOM_AUTORESEARCH_DISABLED=1.
-    try:
-        await autoresearch.scheduler.start()
-    except Exception as e:
-        log.warning("autoresearch scheduler start failed: %s", e)
-
-    # Scheduled crypto-binary backtests (task #421). Runs `run_backtest`
-    # on every supported (symbol, timeframe) pair on a regular cadence,
-    # persists each result to `crypto_backtest_runs` so the dashboard
-    # can chart a trend, and pages the operator when Brier / log-loss
-    # crosses the configured absolute threshold or jumps versus the
-    # rolling baseline.
-    try:
-        from .crypto import backtest_scheduler as _crypto_backtest_scheduler
-        await _crypto_backtest_scheduler.start()
-    except Exception as e:
-        log.warning("crypto backtest scheduler start failed: %s", e)
-
-    # Per-vertical halt scheduler + TTL sweeper (task #713). Single tick
-    # task that auto-resumes TTL halts and applies recurring schedule
-    # rules. Failures inside the loop are caught so a bad cron row
-    # never stalls the rest of the system.
-    try:
-        from . import vertical_halt_scheduler as _vertical_halt_scheduler
-        await _vertical_halt_scheduler.start()
-    except Exception as e:
-        log.warning("vertical halt scheduler start failed: %s", e)
-
-    # `crypto_backtest_runs` trend-table retention sweep. Both the
-    # admin endpoint and the scheduled backtest loop append rows
-    # without a TTL, so without this loop the table grows unboundedly.
-    # Per task #582.
-    try:
-        from . import crypto_backtest_retention as _crypto_backtest_retention
-        await _crypto_backtest_retention.start()
-    except Exception as e:
-        log.warning("crypto backtest retention start failed: %s", e)
-
-    # `sportradar_tournament_leaderboards` history-table retention
-    # sweep. Task #623 wired the leaderboard poller to append one row
-    # per entrant per poll without a TTL, so without this loop the
-    # table grows unboundedly across PGA / F1 seasons. Per task #649.
-    try:
-        from . import sportradar_leaderboards_retention as _sr_leaderboards_retention
-        await _sr_leaderboards_retention.start()
-    except Exception as e:
-        log.warning(
-            "sportradar leaderboards retention start failed: %s", e
+        # Background tap on the settlement event hub: caches the most recent
+        # market_settle_complete events in-process so the dashboard panel can
+        # render history immediately on first paint (the WS only delivers
+        # events that occur while a client is connected).
+        settlement_tap_task = asyncio.create_task(
+            _settlement_recent_tap(), name="settlement-recent-tap"
         )
 
-    # Supabase growth retention loops (task #757). Two tiers:
-    # archive-then-delete for ML / training tables (90-day default),
-    # and delete-only for operational / audit logs (30-day default).
-    # All loops default DISABLED — operator opts each one in via
-    # AXIOM_<PREFIX>_RETENTION_ENABLED=1 after reviewing the dry-run
-    # output from ``scripts/archive_and_prune_backlog.py``.
-    try:
-        from . import retention_loops_v757 as _retention_loops_v757
-        await _retention_loops_v757.start_all()
-    except Exception as e:
-        log.warning("task #757 retention loops start failed: %s", e)
+        # System-health collector + daily P&L summary scheduler.  Both are
+        # background tasks that touch in-memory state only on success and
+        # use try/except internally so a sick dep can't take down the process.
+        try:
+            await health.start()
+        except Exception as e:
+            log.warning("health collector start failed: %s", e)
+        try:
+            await daily_summary.start()
+        except Exception as e:
+            log.warning("daily summary scheduler start failed: %s", e)
+        try:
+            await daily_honesty_report.start()
+        except Exception as e:
+            log.warning("daily honesty report scheduler start failed: %s", e)
+        try:
+            await notif_v1_backtest_gate.start()
+        except Exception as e:
+            log.warning("v1 backtest gate scheduler start failed: %s", e)
+        try:
+            await notif_weekly_roundup.start()
+        except Exception as e:
+            log.warning("weekly roundup scheduler start failed: %s", e)
+        # Per-persona daily Brier degradation watcher (task #305).  Polls
+        # every ~10m, computes today's per-persona Brier via the same
+        # `aggregate_persona_day` helper the daily summary uses, and pages
+        # an operator alert when any persona's score crosses the configured
+        # absolute / jump threshold.
+        try:
+            await notif_persona_brier_alerts.start()
+        except Exception as e:
+            log.warning("persona brier alerts scheduler start failed: %s", e)
+        # Soccer-settlement drift watcher (task #611). Polls every ~10m for
+        # soccer Kalshi markets whose linked Sportradar match has been final
+        # for >2h while trades on the market are still un-settled — surfaces
+        # stale `swarm_debates` -> `game_id` links the settlement cycle is
+        # silently skipping.
+        try:
+            await notif_soccer_settlement_drift.start()
+        except Exception as e:
+            log.warning(
+                "soccer settlement drift scheduler start failed: %s", e
+            )
+        # RevenueCat webhook silence detector — fires an operator alert
+        # when the mobile-IAP webhook stops delivering during business hours
+        # (catches dashboard pause/resume + upstream outages). Per task #252.
+        try:
+            await rc_billing.start()
+        except Exception as e:
+            log.warning("rc webhook silence loop start failed: %s", e)
+        # Per-provider LLM fallback-rate spike monitor (task #145). Reads
+        # `fallback_used` / `primary_provider` from `llm_predictions.metadata`
+        # and pages when either provider's fallback rate exceeds the
+        # configured threshold over the trailing window.
+        try:
+            from .swarm import fallback_monitor as _fallback_monitor
+            await _fallback_monitor.start()
+        except Exception as e:
+            log.warning("LLM fallback monitor start failed: %s", e)
+        try:
+            await notif_churn.start()
+        except Exception as e:
+            log.warning("churn digest scheduler start failed: %s", e)
+        # Telegram concierge bot (per task #111). No-op when
+        # TELEGRAM_BOT_TOKEN is unset (the dev / CI default).
+        try:
+            await telegram_bot.start()
+        except Exception as e:
+            log.warning("telegram bot start failed: %s", e)
 
-    # Kick off model artifact reassembly in the background so a cold cache
-    # (~240 MiB download) doesn't block the HTTP server from accepting
-    # traffic. Health endpoints surface progress while it warms up.
-    models_task = asyncio.create_task(models_loader.ensure_artifacts())
+        # Periodic feature-drift snapshot logger.  Pure in-process — no DB
+        # dependency, so it's safe to start before the ready gate clears.
+        try:
+            await feature_drift.scheduler.start()
+        except Exception as e:
+            log.warning("feature drift scheduler start failed: %s", e)
 
-    # Load any previously-fitted per-league probability calibrators so
-    # `predict()` can apply them on the very first request. Best-effort
-    # — `apply()` cleanly bypasses any league with no fitted artifact,
-    # so a fresh install with no snapshots still trades on raw probs.
-    # Running as a background task removes 2-4 min from cold-start
-    # lifespan: the first-time Supabase fetch of binary calibrator blobs
-    # is slow on a cold connection; `apply()` falls back to raw probs
-    # until the task completes.
-    asyncio.create_task(
-        _bg_best_effort(calibrators.load_all(), "calibrators.load_all"),
-        name="boot-calibrators-load",
-    )
+        # Elo updater: scans the `games` table for newly-finished matchups
+        # and feeds them into `record_game()` so per-team Elo ratings stay
+        # current.  Idempotent at both the SQL and engine layers.
+        try:
+            await elo_scheduler.scheduler.start()
+        except Exception as e:
+            log.warning("elo updater scheduler start failed: %s", e)
 
-    # Load any previously-fitted per-league margin/total regressors so
-    # spread/total markets immediately use fitted coefficients instead
-    # of the cold-start textbook SDs.  Failures are non-fatal — the
-    # registry simply stays empty until the next settlement-loop refit
-    # lands a fresh fit.  Background for the same cold-start latency
-    # reason as calibrators above.
-    asyncio.create_task(
-        _bg_best_effort(margin_regressor.load_all(), "margin_regressor.load_all"),
-        name="boot-margin-regressor-load",
-    )
+        # Continuous Kalshi balance -> bankroll_events sync. Polls every 60s
+        # and writes a delta row whenever the live balance moves so the
+        # bankroll-floor risk gate and equity curve always reflect reality.
+        try:
+            from . import bankroll_sync as _bankroll_sync
+            await _bankroll_sync.start()
+        except Exception as e:
+            log.warning("bankroll sync start failed: %s", e)
 
-    # Hydrate the persisted KXRAIN EMOS coefficients (task #280) so a
-    # restarted API picks the most-recent nightly refit back up
-    # instead of dropping to the shipped defaults until the next
-    # retrain cycle lands. Best-effort — a missing settings row just
-    # leaves the env / default coefficients in place.
-    try:
-        from .settlement import retrain as _retrain
-        await _retrain.load_persisted_precip_emos_coefficients()
-    except Exception as e:
-        log.warning("precip EMOS coefficient bootstrap failed: %s", e)
+        # `order_fills` dedupe-table retention sweep. The table only needs
+        # rows around long enough to suppress WS-replay duplicates on
+        # reconnect (a few hours); without this loop it grows unboundedly.
+        # Per task #154.
+        try:
+            from . import order_fills_retention as _order_fills_retention
+            await _order_fills_retention.start()
+        except Exception as e:
+            log.warning("order_fills retention start failed: %s", e)
 
-    # Per-vertical retrained calibrator listener (task #88).  The
-    # online-learning worker writes fresh isotonic snapshots tagged
-    # `drift_status.status='retrained'`; this listener invalidates
-    # the in-process cache on every `retrain_complete` event so the
-    # next trading cycle picks up the freshly-promoted calibrator.
-    try:
-        from .models import live_calibrator as _live_calibrator
-        _live_calibrator.start_invalidation_listener()
-    except Exception as e:
-        log.warning("live calibrator listener start failed: %s", e)
+        # `free_tier_market_views` quota-table retention sweep. The free-tier
+        # quota check only ever reads today's UTC partition, so anything older
+        # than ~30 days is dead weight and would otherwise grow linearly with
+        # active free users. Per task #165.
+        try:
+            from . import free_tier_views_retention as _free_tier_views_retention
+            await _free_tier_views_retention.start()
+        except Exception as e:
+            log.warning("free_tier_views retention start failed: %s", e)
 
-    # Restore the operator-set active-predictor override (if any) so the
-    # next /predict call honours the last "make active" choice without
-    # waiting for an admin POST. Best-effort: a missing setting just
-    # leaves the static priority chain in place.
-    try:
-        active_name = await db.fetchval(
-            "SELECT value FROM system_settings WHERE key = 'predictor.active_name'"
+        # `crypto_ohlcv` bar-table retention sweep. The poller is
+        # append-with-upsert with no TTL, so without this loop the table
+        # grows unboundedly (~1M rows/year per symbol at 1m). Per task #175.
+        try:
+            from . import crypto_ohlcv_retention as _crypto_ohlcv_retention
+            await _crypto_ohlcv_retention.start()
+        except Exception as e:
+            log.warning("crypto_ohlcv retention start failed: %s", e)
+
+        # Kalshi market-tick cache refresh loop. Tops up the
+        # ``market_price_ticks`` cache for recently-traded markets so the
+        # /trade/:ref chart serves out of Postgres on revisit instead of
+        # round-tripping the Kalshi candlesticks endpoint live. Per task #359.
+        try:
+            from .kalshi import tick_cache_refresh as _tick_cache_refresh
+            await _tick_cache_refresh.start()
+        except Exception as e:
+            log.warning("kalshi tick cache refresh start failed: %s", e)
+
+        # Continuous Kalshi position + fill reconciler. Periodically pulls
+        # /portfolio/positions and /portfolio/fills, diffs against our local
+        # DB, raises model_health_alerts on drift > tolerance, and back-fills
+        # any fills the WS missed. Disabled in paper mode and when Kalshi
+        # creds are absent. Per cutover task #266.
+        try:
+            from .kalshi import reconciler as _kalshi_reconciler
+            await _kalshi_reconciler.start()
+        except Exception as e:
+            log.warning("kalshi reconciler start failed: %s", e)
+
+        # Dead-letter sweeper (task #710): promotes long-failing rows in
+        # ``order_recovery_attempts`` into the operator dead-letter queue
+        # and pages once per coid. Internally skips in paper mode and
+        # absorbs DB blips.
+        try:
+            from .kalshi import dead_letter_sweeper as _dl_sweeper
+            _dl_sweeper.start()
+        except Exception as e:
+            log.warning("dead-letter sweeper start failed: %s", e)
+
+        # AutoResearch — nightly UW-signal mining job. Discovered candidates
+        # land in `autoresearch_features` with status='shadow' for an admin
+        # to promote (see /api/admin/autoresearch/*). Disabled by setting
+        # AXIOM_AUTORESEARCH_DISABLED=1.
+        try:
+            await autoresearch.scheduler.start()
+        except Exception as e:
+            log.warning("autoresearch scheduler start failed: %s", e)
+
+        # Scheduled crypto-binary backtests (task #421). Runs `run_backtest`
+        # on every supported (symbol, timeframe) pair on a regular cadence,
+        # persists each result to `crypto_backtest_runs` so the dashboard
+        # can chart a trend, and pages the operator when Brier / log-loss
+        # crosses the configured absolute threshold or jumps versus the
+        # rolling baseline.
+        try:
+            from .crypto import backtest_scheduler as _crypto_backtest_scheduler
+            await _crypto_backtest_scheduler.start()
+        except Exception as e:
+            log.warning("crypto backtest scheduler start failed: %s", e)
+
+        # Per-vertical halt scheduler + TTL sweeper (task #713). Single tick
+        # task that auto-resumes TTL halts and applies recurring schedule
+        # rules. Failures inside the loop are caught so a bad cron row
+        # never stalls the rest of the system.
+        try:
+            from . import vertical_halt_scheduler as _vertical_halt_scheduler
+            await _vertical_halt_scheduler.start()
+        except Exception as e:
+            log.warning("vertical halt scheduler start failed: %s", e)
+
+        # `crypto_backtest_runs` trend-table retention sweep. Both the
+        # admin endpoint and the scheduled backtest loop append rows
+        # without a TTL, so without this loop the table grows unboundedly.
+        # Per task #582.
+        try:
+            from . import crypto_backtest_retention as _crypto_backtest_retention
+            await _crypto_backtest_retention.start()
+        except Exception as e:
+            log.warning("crypto backtest retention start failed: %s", e)
+
+        # `sportradar_tournament_leaderboards` history-table retention
+        # sweep. Task #623 wired the leaderboard poller to append one row
+        # per entrant per poll without a TTL, so without this loop the
+        # table grows unboundedly across PGA / F1 seasons. Per task #649.
+        try:
+            from . import sportradar_leaderboards_retention as _sr_leaderboards_retention
+            await _sr_leaderboards_retention.start()
+        except Exception as e:
+            log.warning(
+                "sportradar leaderboards retention start failed: %s", e
+            )
+
+        # Supabase growth retention loops (task #757). Two tiers:
+        # archive-then-delete for ML / training tables (90-day default),
+        # and delete-only for operational / audit logs (30-day default).
+        # All loops default DISABLED — operator opts each one in via
+        # AXIOM_<PREFIX>_RETENTION_ENABLED=1 after reviewing the dry-run
+        # output from ``scripts/archive_and_prune_backlog.py``.
+        try:
+            from . import retention_loops_v757 as _retention_loops_v757
+            await _retention_loops_v757.start_all()
+        except Exception as e:
+            log.warning("task #757 retention loops start failed: %s", e)
+
+        # Kick off model artifact reassembly in the background so a cold cache
+        # (~240 MiB download) doesn't block the HTTP server from accepting
+        # traffic. Health endpoints surface progress while it warms up.
+        models_task = asyncio.create_task(models_loader.ensure_artifacts())
+
+        # Load any previously-fitted per-league probability calibrators so
+        # `predict()` can apply them on the very first request. Best-effort
+        # — `apply()` cleanly bypasses any league with no fitted artifact,
+        # so a fresh install with no snapshots still trades on raw probs.
+        # Running as a background task removes 2-4 min from cold-start
+        # lifespan: the first-time Supabase fetch of binary calibrator blobs
+        # is slow on a cold connection; `apply()` falls back to raw probs
+        # until the task completes.
+        asyncio.create_task(
+            _bg_best_effort(calibrators.load_all(), "calibrators.load_all"),
+            name="boot-calibrators-load",
         )
-        if active_name:
-            predictor.set_active_override(str(active_name))
-            log.info("[predictor] restored active override -> %s", active_name)
-    except Exception as e:
-        log.debug("predictor active override restore skipped: %s", e)
 
-    # READY-Gate watcher: stays parked here while the rest of the boot
-    # sequence does its async work, then flips the gate so the
-    # orchestrator (which is parked in `_loop`) can start firing
-    # cycles. Surfaced via /api/health/ready.
-    ready_watcher_task = asyncio.create_task(
-        _ready_gate_watcher(models_task), name="ready-gate-watcher"
-    )
+        # Load any previously-fitted per-league margin/total regressors so
+        # spread/total markets immediately use fitted coefficients instead
+        # of the cold-start textbook SDs.  Failures are non-fatal — the
+        # registry simply stays empty until the next settlement-loop refit
+        # lands a fresh fit.  Background for the same cold-start latency
+        # reason as calibrators above.
+        asyncio.create_task(
+            _bg_best_effort(margin_regressor.load_all(), "margin_regressor.load_all"),
+            name="boot-margin-regressor-load",
+        )
+
+        # Hydrate the persisted KXRAIN EMOS coefficients (task #280) so a
+        # restarted API picks the most-recent nightly refit back up
+        # instead of dropping to the shipped defaults until the next
+        # retrain cycle lands. Best-effort — a missing settings row just
+        # leaves the env / default coefficients in place.
+        try:
+            from .settlement import retrain as _retrain
+            await _retrain.load_persisted_precip_emos_coefficients()
+        except Exception as e:
+            log.warning("precip EMOS coefficient bootstrap failed: %s", e)
+
+        # Per-vertical retrained calibrator listener (task #88).  The
+        # online-learning worker writes fresh isotonic snapshots tagged
+        # `drift_status.status='retrained'`; this listener invalidates
+        # the in-process cache on every `retrain_complete` event so the
+        # next trading cycle picks up the freshly-promoted calibrator.
+        try:
+            from .models import live_calibrator as _live_calibrator
+            _live_calibrator.start_invalidation_listener()
+        except Exception as e:
+            log.warning("live calibrator listener start failed: %s", e)
+
+        # Restore the operator-set active-predictor override (if any) so the
+        # next /predict call honours the last "make active" choice without
+        # waiting for an admin POST. Best-effort: a missing setting just
+        # leaves the static priority chain in place.
+        try:
+            active_name = await db.fetchval(
+                "SELECT value FROM system_settings WHERE key = 'predictor.active_name'"
+            )
+            if active_name:
+                predictor.set_active_override(str(active_name))
+                log.info("[predictor] restored active override -> %s", active_name)
+        except Exception as e:
+            log.debug("predictor active override restore skipped: %s", e)
+
+        # READY-Gate watcher: stays parked here while the rest of the boot
+        # sequence does its async work, then flips the gate so the
+        # orchestrator (which is parked in `_loop`) can start firing
+        # cycles. Surfaced via /api/health/ready.
+        ready_watcher_task = asyncio.create_task(
+            _ready_gate_watcher(models_task), name="ready-gate-watcher"
+        )
+
+    boot_task = asyncio.create_task(_do_boot(), name="lifespan-boot")
+
+    def _on_boot_done(t: asyncio.Task) -> None:
+        # Detached boot tasks would otherwise swallow their traceback
+        # silently (Python only logs them at GC time). Surface fatal
+        # boot failures immediately so on-call sees a real stack
+        # instead of a process that binds the port and then sits
+        # forever with readiness never flipping. CancelledError comes
+        # from the shutdown path below and is expected.
+        if t.cancelled():
+            return
+        exc = t.exception()
+        if exc is not None:
+            log.error(
+                "lifespan background boot task FAILED: %s", exc,
+                exc_info=exc,
+            )
+
+    boot_task.add_done_callback(_on_boot_done)
 
     try:
         yield
     finally:
+        # Stop the background boot first so we don't race a half-started
+        # scheduler with its own .stop() below. Cancel if still running;
+        # the schedulers it owns either never started (cleanup is a
+        # no-op via the try/except shells) or already started and will
+        # be stopped by the matching .stop() calls further down.
+        if not boot_task.done():
+            boot_task.cancel()
+        try:
+            await boot_task
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:
+            # Non-cancel boot exceptions were already logged via the
+            # done-callback above, but include a shutdown-context
+            # breadcrumb so the timeline is unambiguous in the log
+            # tail used for post-mortems.
+            log.warning("lifespan boot task ended with exception: %s", e)
         try:
             await daily_summary.stop()
         except Exception as e:
@@ -873,14 +935,15 @@ async def lifespan(_: FastAPI):
             await health.stop()
         except Exception as e:
             log.warning("health collector stop error: %s", e)
-        try:
-            settlement_tap_task.cancel()
+        if settlement_tap_task is not None:
             try:
-                await settlement_tap_task
-            except (asyncio.CancelledError, Exception):
-                pass
-        except Exception as e:
-            log.warning("settlement tap stop error: %s", e)
+                settlement_tap_task.cancel()
+                try:
+                    await settlement_tap_task
+                except (asyncio.CancelledError, Exception):
+                    pass
+            except Exception as e:
+                log.warning("settlement tap stop error: %s", e)
         try:
             await settlement_scheduler.stop()
         except Exception as e:
@@ -923,13 +986,13 @@ async def lifespan(_: FastAPI):
             await feed_scheduler.stop()
         except Exception as e:
             log.warning("feed scheduler stop error: %s", e)
-        if not models_task.done():
+        if models_task is not None and not models_task.done():
             models_task.cancel()
             try:
                 await models_task
             except (asyncio.CancelledError, Exception):
                 pass
-        if not ready_watcher_task.done():
+        if ready_watcher_task is not None and not ready_watcher_task.done():
             ready_watcher_task.cancel()
             try:
                 await ready_watcher_task

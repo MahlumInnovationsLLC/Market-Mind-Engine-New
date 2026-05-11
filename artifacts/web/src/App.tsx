@@ -6,6 +6,8 @@ import {
   Router as WouterRouter,
 } from "wouter";
 import { hasClerkSession } from "@/lib/clerk-session";
+import { Spinner } from "@/components/ui/spinner";
+import { ErrorBoundary } from "@/components/error-boundary";
 
 // MarketingPage is the only thing first-time signed-out visitors see,
 // so we code-split it into its own chunk and serve it OUTSIDE the
@@ -21,15 +23,19 @@ const ClerkApp = lazy(() => import("@/ClerkApp"));
 const basePath = import.meta.env.BASE_URL.replace(/\/$/, "");
 
 function MarketingFallback() {
-  // Tiny, dependency-free skeleton that paints instantly while the
-  // marketing chunk is fetched. Keeps the screen from flashing blank.
+  // Visible centered spinner shown while a lazy chunk (the marketing
+  // page or the ClerkApp bundle that owns sign-in) is being fetched.
+  // Previously this rendered only an `sr-only` "Loading…" string, so
+  // a slow Clerk chunk on /sign-in looked like a black screen and was
+  // indistinguishable from a crash.
   return (
     <div
-      className="min-h-[100dvh] bg-background text-foreground flex items-center justify-center font-mono"
+      className="min-h-[100dvh] bg-background text-foreground flex flex-col items-center justify-center gap-3 font-mono"
       aria-busy="true"
       aria-live="polite"
     >
-      <span className="sr-only">Loading…</span>
+      <Spinner className="size-8 text-primary" />
+      <span className="text-sm text-muted-foreground">Loading…</span>
     </div>
   );
 }
@@ -59,9 +65,15 @@ function App() {
         {/* Everything else (sign-in, pricing, leaderboard, the authed
             console, etc.) is gated by Clerk and lives in a lazy chunk. */}
         <Route>
-          <Suspense fallback={<MarketingFallback />}>
-            <ClerkApp />
-          </Suspense>
+          {/* ErrorBoundary catches both a chunk-load failure and the
+              "Missing VITE_CLERK_PUBLISHABLE_KEY in env" throw at the
+              top of ClerkApp.tsx, so a misconfigured deploy renders a
+              real error card instead of a silent black screen. */}
+          <ErrorBoundary label="ClerkApp">
+            <Suspense fallback={<MarketingFallback />}>
+              <ClerkApp />
+            </Suspense>
+          </ErrorBoundary>
         </Route>
       </Switch>
     </WouterRouter>
