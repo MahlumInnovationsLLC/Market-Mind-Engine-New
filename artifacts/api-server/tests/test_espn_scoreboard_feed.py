@@ -354,5 +354,10 @@ def test_poll_isolated_per_league_failure(monkeypatch):
     n = asyncio.run(esp.poll_espn_scoreboard())
     leagues = {r[0] for r in captured}
     assert "NHL" not in leagues
+    # NFL/NBA/MLB always poll; WNBA was added by task #823 and may also
+    # be present in the configured set, so assert via subset rather
+    # than exact membership.
     assert {"NFL", "NBA", "MLB"}.issubset(leagues)
-    assert n == 3
+    # n is the number of successful league pulls (configured leagues
+    # minus the failing NHL).
+    assert n == len(leagues)

@@ -140,6 +140,8 @@ PROTECTED_ROUTES: tuple[str, ...] = (
     # Task #225 — historical entertainment-signal backfill status surface.
     "/api/admin/entertainment/backfill-status",
     "/api/dashboard/elections/markets/{ticker}/arb",
+    # Task #823 — operator preview of today's tradable WNBA player props.
+    "/api/dashboard/wnba/props/today",
     "/api/dashboard/runtime-settings",
     "/api/admin/risk-knobs",
     "/api/admin/risk-knobs/history",

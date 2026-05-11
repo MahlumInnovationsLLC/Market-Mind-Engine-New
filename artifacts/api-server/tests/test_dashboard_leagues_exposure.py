@@ -165,15 +165,21 @@ def test_get_leagues_exposure_handles_no_bankroll(monkeypatch):
 def test_get_leagues_exposure_surfaces_unconfigured_league(monkeypatch):
     """A league with open positions but no LEAGUE_CONFIGS entry should
     still show up — with cap_pct / cap_usd as None — so operators can
-    see exposure they would otherwise miss."""
+    see exposure they would otherwise miss.
+
+    Uses ``VOLLEYBALL`` as a stand-in for any league that may appear on
+    legacy rows but has never been promoted into ``LEAGUE_CONFIGS``.
+    (WNBA was the historical placeholder here but became a configured
+    league in task #823.)
+    """
     from app import dashboard
     from app.orchestrator import cycle as cycle_mod
 
     async def _fake_aggregates(*, trading_mode="live"):
         return (
             1, 25.0, {"sports": 25.0},
-            {"WNBA": 25.0},        # no LEAGUE_CONFIGS entry
-            {"WNBA:LV@NY": 25.0},
+            {"VOLLEYBALL": 25.0},        # no LEAGUE_CONFIGS entry
+            {"VOLLEYBALL:LV@NY": 25.0},
             {},
             {},
         )
@@ -185,12 +191,14 @@ def test_get_leagues_exposure_surfaces_unconfigured_league(monkeypatch):
     monkeypatch.setattr(cycle_mod, "_latest_bankroll", _fake_bankroll)
 
     res = asyncio.run(dashboard.get_leagues_exposure())
-    wnba = next((e for e in res["leagues"] if e["league"] == "WNBA"), None)
-    assert wnba is not None
-    assert wnba["per_league"]["open_usd"] == 25.0
-    assert wnba["per_league"]["cap_pct"] is None
-    assert wnba["per_league"]["cap_usd"] is None
-    assert wnba["per_league"]["warn"] is False
+    entry = next(
+        (e for e in res["leagues"] if e["league"] == "VOLLEYBALL"), None,
+    )
+    assert entry is not None
+    assert entry["per_league"]["open_usd"] == 25.0
+    assert entry["per_league"]["cap_pct"] is None
+    assert entry["per_league"]["cap_usd"] is None
+    assert entry["per_league"]["warn"] is False
     # Per-matchup carries open exposure but no cap either.
-    assert [m["matchup"] for m in wnba["per_matchup"]] == ["LV@NY"]
-    assert wnba["per_matchup"][0]["cap_pct"] is None
+    assert [m["matchup"] for m in entry["per_matchup"]] == ["LV@NY"]
+    assert entry["per_matchup"][0]["cap_pct"] is None

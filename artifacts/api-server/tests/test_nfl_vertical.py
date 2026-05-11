@@ -260,12 +260,19 @@ def test_gate_per_vertical_cap_passes_with_no_league_overflow():
 
 
 def test_gate_per_vertical_cap_unknown_league_skips_sub_checks():
-    """A league with no LeagueConfig (e.g. legacy MLB rows w/ different
-    naming) must fall through to the default per-vertical check only."""
+    """A league with no LeagueConfig (e.g. legacy rows with a sport
+    we have not yet promoted) must fall through to the default
+    per-vertical check only.
+
+    ``VOLLEYBALL`` is used as a stable stand-in for any sport that
+    could appear in legacy data but isn't in ``LEAGUE_CONFIGS``.
+    (WNBA used to be that placeholder but became configured in
+    task #823.)
+    """
     ctx = _ctx(
-        league="WNBA",
+        league="VOLLEYBALL",
         intended_notional_usd=20.0,
-        open_positions_per_league_usd={"WNBA": 999_999.0},  # huge but no cfg
+        open_positions_per_league_usd={"VOLLEYBALL": 999_999.0},
     )
     res = asyncio.run(gate_per_vertical_cap(ctx))
     assert res.passed is True
