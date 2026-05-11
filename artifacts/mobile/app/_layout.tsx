@@ -12,6 +12,7 @@ import * as Notifications from "expo-notifications";
 import { Slot, useRouter } from "expo-router";
 import * as SplashScreen from "expo-splash-screen";
 import React, { useEffect, useRef } from "react";
+import { ActivityIndicator, Text, View } from "react-native";
 import { GestureHandlerRootView } from "react-native-gesture-handler";
 import { KeyboardProvider } from "react-native-keyboard-controller";
 import { SafeAreaProvider } from "react-native-safe-area-context";
@@ -111,10 +112,25 @@ export default function RootLayout() {
     }
   }, [fontsLoaded, fontError]);
 
-  if (!fontsLoaded && !fontError) return null;
+  if (!fontsLoaded && !fontError) {
+    return (
+      <View style={{ flex: 1, backgroundColor: "#0a0a12", alignItems: "center", justifyContent: "center" }}>
+        <ActivityIndicator color="#22d3ee" size="large" />
+      </View>
+    );
+  }
 
   if (!publishableKey) {
-    return null;
+    return (
+      <View style={{ flex: 1, backgroundColor: "#0a0a12", alignItems: "center", justifyContent: "center", padding: 24 }}>
+        <Text style={{ color: "#ef4444", fontWeight: "700", fontSize: 14, letterSpacing: 1.5, textAlign: "center" }}>
+          CONFIGURATION ERROR
+        </Text>
+        <Text style={{ color: "#6b7280", fontSize: 13, marginTop: 8, textAlign: "center" }}>
+          Auth key not set. Contact the operator.
+        </Text>
+      </View>
+    );
   }
 
   return (

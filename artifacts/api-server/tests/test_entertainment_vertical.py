@@ -670,9 +670,43 @@ def test_promotion_eligible_when_thresholds_met():
 
 def test_kalshi_mid_blend_pulls_probability_toward_market():
     from app.entertainment import predictor as ent_pred
+    from app.entertainment.signals import SignalRow as _SR
 
-    upcoming = _row(value=None, settled=False, days_ago=-2.0)
-    history = [_row(value=100.0 + i * 5.0, days_ago=30 + i) for i in range(15)]
+    # Build history with *explicit* event_at dates anchored in July 2024
+    # so the "25MAR" release-window filter (which looks for %b == "MAR")
+    # never fires and selects a date-dependent subset whose members might
+    # all land above or below the threshold depending on the current date.
+    # Values straddle the $150M ABOVE150 threshold (geometric mean ≈ $148M)
+    # producing a date-stable baseline of ~0.45–0.55 regardless of when
+    # the test runs, which is the range where both Kalshi-blend directions
+    # can be distinguished.
+    _BASE = datetime(2024, 7, 15, tzinfo=timezone.utc)
+    _VALS = [80, 95, 110, 125, 135, 145, 150, 155, 165, 175, 190, 210, 230, 260, 300]
+    upcoming = _SR(
+        source="box_office_mojo_rss",
+        signal_id="test/upcoming",
+        signal_type="BOX",
+        title="AVATAR3",
+        event_at=datetime.now(timezone.utc) + timedelta(days=2),
+        value=None,
+        settled=False,
+        outcome=None,
+        payload={},
+    )
+    history = [
+        _SR(
+            source="box_office_mojo_rss",
+            signal_id=f"test/hist/{i}",
+            signal_type="BOX",
+            title="AVATAR3",
+            event_at=_BASE - timedelta(days=i * 30),
+            value=float(v),
+            settled=True,
+            outcome=None,
+            payload={},
+        )
+        for i, v in enumerate(_VALS)
+    ]
 
     async def _fake_resolve(ticker, *, lookback_days=1825):
         return [upcoming, *history]

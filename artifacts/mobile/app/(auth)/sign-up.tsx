@@ -14,7 +14,7 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useColors } from "@/hooks/useColors";
 
 export default function SignUpScreen() {
-  const { signUp, errors, fetchStatus } = useSignUp();
+  const { isLoaded, signUp, setActive } = useSignUp();
   const router = useRouter();
   const colors = useColors();
   const insets = useSafeAreaInsets();
@@ -22,62 +22,109 @@ export default function SignUpScreen() {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [code, setCode] = useState("");
+  const [error, setError] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [pendingVerification, setPendingVerification] = useState(false);
 
   const submit = async () => {
-    const { error } = await signUp.password({ emailAddress: email, password });
-    if (error) return;
-    await signUp.verifications.sendEmailCode();
-  };
-
-  const verify = async () => {
-    await signUp.verifications.verifyEmailCode({ code });
-    if (signUp.status === "complete") {
-      await signUp.finalize({
-        navigate: ({ decorateUrl }) => {
-          const url = decorateUrl("/(tabs)");
-          router.replace(url as Href);
-        },
-      });
+    if (!isLoaded || !signUp) return;
+    setLoading(true);
+    setError("");
+    try {
+      await signUp.create({ emailAddress: email, password });
+      await signUp.prepareEmailAddressVerification({ strategy: "email_code" });
+      setPendingVerification(true);
+    } catch (err: unknown) {
+      const clerkErr = err as { errors?: { longMessage?: string; message?: string }[] };
+      setError(
+        clerkErr.errors?.[0]?.longMessage ??
+          clerkErr.errors?.[0]?.message ??
+          "Sign up failed.",
+      );
+    } finally {
+      setLoading(false);
     }
   };
 
-  const loading = fetchStatus === "fetching";
+  const verify = async () => {
+    if (!isLoaded || !signUp) return;
+    setLoading(true);
+    setError("");
+    try {
+      const result = await signUp.attemptEmailAddressVerification({ code });
+      if (result.status === "complete") {
+        await setActive({ session: result.createdSessionId });
+        router.replace("/(tabs)" as Href);
+      }
+    } catch (err: unknown) {
+      const clerkErr = err as { errors?: { longMessage?: string; message?: string }[] };
+      setError(
+        clerkErr.errors?.[0]?.longMessage ??
+          clerkErr.errors?.[0]?.message ??
+          "Verification failed.",
+      );
+    } finally {
+      setLoading(false);
+    }
+  };
 
-  const verifyMode =
-    signUp.status === "missing_requirements" &&
-    signUp.unverifiedFields?.includes("email_address") &&
-    signUp.missingFields.length === 0;
+  const resendCode = async () => {
+    if (!isLoaded || !signUp) return;
+    try {
+      await signUp.prepareEmailAddressVerification({ strategy: "email_code" });
+    } catch {
+      /* ignore */
+    }
+  };
 
   return (
-    <View style={[styles.container, { backgroundColor: colors.background, paddingTop: insets.top + 40 }]}>
+    <View
+      style={[
+        styles.container,
+        { backgroundColor: colors.background, paddingTop: insets.top + 40 },
+      ]}
+    >
       <View style={styles.head}>
-        <Text style={[styles.eyebrow, { color: colors.mutedForeground }]}>AXIOM_PREDICT</Text>
+        <Text style={[styles.eyebrow, { color: colors.mutedForeground }]}>
+          AXIOM_PREDICT
+        </Text>
         <Text style={[styles.title, { color: colors.primary }]}>
-          {verifyMode ? "VERIFY EMAIL" : "REQUEST ACCESS"}
+          {pendingVerification ? "VERIFY EMAIL" : "REQUEST ACCESS"}
         </Text>
         <Text style={[styles.sub, { color: colors.mutedForeground }]}>
-          {verifyMode
+          {pendingVerification
             ? "Enter the 6-digit code sent to your email"
             : "Operator approval required after sign-up"}
         </Text>
       </View>
 
-      {verifyMode ? (
+      {pendingVerification ? (
         <View style={styles.form}>
-          <Text style={[styles.label, { color: colors.mutedForeground }]}>VERIFICATION CODE</Text>
+          <Text style={[styles.label, { color: colors.mutedForeground }]}>
+            VERIFICATION CODE
+          </Text>
           <TextInput
-            style={[styles.input, { color: colors.foreground, backgroundColor: colors.input, borderColor: colors.border }]}
+            style={[
+              styles.input,
+              {
+                color: colors.foreground,
+                backgroundColor: colors.input,
+                borderColor: colors.border,
+              },
+            ]}
             keyboardType="number-pad"
             placeholder="000000"
             placeholderTextColor={colors.mutedForeground}
             value={code}
             onChangeText={setCode}
           />
-          {errors.fields.code && (
+
+          {!!error && (
             <Text style={[styles.error, { color: colors.destructive }]}>
-              {errors.fields.code.message}
+              {error}
             </Text>
           )}
+
           <Pressable
             onPress={verify}
             disabled={!code || loading}
@@ -92,18 +139,34 @@ export default function SignUpScreen() {
             {loading ? (
               <ActivityIndicator color={colors.primaryForeground} />
             ) : (
-              <Text style={[styles.buttonText, { color: colors.primaryForeground }]}>VERIFY</Text>
+              <Text
+                style={[styles.buttonText, { color: colors.primaryForeground }]}
+              >
+                VERIFY
+              </Text>
             )}
           </Pressable>
-          <Pressable onPress={() => signUp.verifications.sendEmailCode()} style={styles.linkRow}>
-            <Text style={{ color: colors.primary, fontSize: 12 }}>Resend code</Text>
+
+          <Pressable onPress={resendCode} style={styles.linkRow}>
+            <Text style={{ color: colors.primary, fontSize: 12 }}>
+              Resend code
+            </Text>
           </Pressable>
         </View>
       ) : (
         <View style={styles.form}>
-          <Text style={[styles.label, { color: colors.mutedForeground }]}>EMAIL</Text>
+          <Text style={[styles.label, { color: colors.mutedForeground }]}>
+            EMAIL
+          </Text>
           <TextInput
-            style={[styles.input, { color: colors.foreground, backgroundColor: colors.input, borderColor: colors.border }]}
+            style={[
+              styles.input,
+              {
+                color: colors.foreground,
+                backgroundColor: colors.input,
+                borderColor: colors.border,
+              },
+            ]}
             autoCapitalize="none"
             autoComplete="email"
             keyboardType="email-address"
@@ -112,49 +175,78 @@ export default function SignUpScreen() {
             value={email}
             onChangeText={setEmail}
           />
-          {errors.fields.emailAddress && (
-            <Text style={[styles.error, { color: colors.destructive }]}>
-              {errors.fields.emailAddress.message}
-            </Text>
-          )}
 
-          <Text style={[styles.label, { color: colors.mutedForeground, marginTop: 16 }]}>PASSWORD</Text>
+          <Text
+            style={[
+              styles.label,
+              { color: colors.mutedForeground, marginTop: 16 },
+            ]}
+          >
+            PASSWORD
+          </Text>
           <TextInput
-            style={[styles.input, { color: colors.foreground, backgroundColor: colors.input, borderColor: colors.border }]}
+            style={[
+              styles.input,
+              {
+                color: colors.foreground,
+                backgroundColor: colors.input,
+                borderColor: colors.border,
+              },
+            ]}
             secureTextEntry
             placeholder="At least 8 characters"
             placeholderTextColor={colors.mutedForeground}
             value={password}
             onChangeText={setPassword}
           />
-          {errors.fields.password && (
+
+          {!!error && (
             <Text style={[styles.error, { color: colors.destructive }]}>
-              {errors.fields.password.message}
+              {error}
             </Text>
           )}
 
           <Pressable
             onPress={submit}
-            disabled={!email || !password || loading}
+            disabled={!email || !password || loading || !isLoaded}
             style={({ pressed }) => [
               styles.button,
               {
                 backgroundColor: colors.primary,
-                opacity: !email || !password || loading ? 0.5 : pressed ? 0.85 : 1,
+                opacity:
+                  !email || !password || loading || !isLoaded
+                    ? 0.5
+                    : pressed
+                      ? 0.85
+                      : 1,
               },
             ]}
           >
             {loading ? (
               <ActivityIndicator color={colors.primaryForeground} />
             ) : (
-              <Text style={[styles.buttonText, { color: colors.primaryForeground }]}>CREATE ACCOUNT</Text>
+              <Text
+                style={[styles.buttonText, { color: colors.primaryForeground }]}
+              >
+                CREATE ACCOUNT
+              </Text>
             )}
           </Pressable>
 
           <View style={styles.linkRow}>
-            <Text style={{ color: colors.mutedForeground, fontSize: 12 }}>Already approved? </Text>
+            <Text style={{ color: colors.mutedForeground, fontSize: 12 }}>
+              Already approved?{" "}
+            </Text>
             <Link href="/(auth)/sign-in">
-              <Text style={{ color: colors.primary, fontSize: 12, fontWeight: "600" }}>Sign in</Text>
+              <Text
+                style={{
+                  color: colors.primary,
+                  fontSize: 12,
+                  fontWeight: "600",
+                }}
+              >
+                Sign in
+              </Text>
             </Link>
           </View>
 
@@ -200,7 +292,7 @@ const styles = StyleSheet.create({
   },
   error: {
     fontSize: 12,
-    marginTop: 6,
+    marginTop: 8,
     fontFamily: "Inter_400Regular",
   },
   button: {

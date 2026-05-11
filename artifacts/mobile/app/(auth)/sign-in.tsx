@@ -14,43 +14,70 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useColors } from "@/hooks/useColors";
 
 export default function SignInScreen() {
-  const { signIn, errors, fetchStatus } = useSignIn();
+  const { isLoaded, signIn, setActive } = useSignIn();
   const router = useRouter();
   const colors = useColors();
   const insets = useSafeAreaInsets();
 
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
+  const [error, setError] = useState("");
+  const [loading, setLoading] = useState(false);
 
   const submit = async () => {
-    const { error } = await signIn.password({ emailAddress: email, password });
-    if (error) return;
-    if (signIn.status === "complete") {
-      await signIn.finalize({
-        navigate: ({ decorateUrl }) => {
-          const url = decorateUrl("/(tabs)");
-          router.replace(url as Href);
-        },
-      });
+    if (!isLoaded || !signIn) return;
+    setLoading(true);
+    setError("");
+    try {
+      const result = await signIn.create({ identifier: email, password });
+      if (result.status === "complete") {
+        await setActive({ session: result.createdSessionId });
+        router.replace("/(tabs)" as Href);
+      }
+    } catch (err: unknown) {
+      const clerkErr = err as { errors?: { longMessage?: string; message?: string }[] };
+      setError(
+        clerkErr.errors?.[0]?.longMessage ??
+          clerkErr.errors?.[0]?.message ??
+          "Sign in failed. Check your credentials.",
+      );
+    } finally {
+      setLoading(false);
     }
   };
 
-  const loading = fetchStatus === "fetching";
-
   return (
-    <View style={[styles.container, { backgroundColor: colors.background, paddingTop: insets.top + 40 }]}>
+    <View
+      style={[
+        styles.container,
+        { backgroundColor: colors.background, paddingTop: insets.top + 40 },
+      ]}
+    >
       <View style={styles.head}>
-        <Text style={[styles.eyebrow, { color: colors.mutedForeground }]}>AXIOM_PREDICT</Text>
-        <Text style={[styles.title, { color: colors.primary }]}>OPERATOR SIGN-IN</Text>
+        <Text style={[styles.eyebrow, { color: colors.mutedForeground }]}>
+          AXIOM_PREDICT
+        </Text>
+        <Text style={[styles.title, { color: colors.primary }]}>
+          OPERATOR SIGN-IN
+        </Text>
         <Text style={[styles.sub, { color: colors.mutedForeground }]}>
           Authenticate to access live telemetry
         </Text>
       </View>
 
       <View style={styles.form}>
-        <Text style={[styles.label, { color: colors.mutedForeground }]}>EMAIL</Text>
+        <Text style={[styles.label, { color: colors.mutedForeground }]}>
+          EMAIL
+        </Text>
         <TextInput
-          style={[styles.input, { color: colors.foreground, backgroundColor: colors.input, borderColor: colors.border }]}
+          style={[
+            styles.input,
+            {
+              color: colors.foreground,
+              backgroundColor: colors.input,
+              borderColor: colors.border,
+            },
+          ]}
           autoCapitalize="none"
           autoComplete="email"
           keyboardType="email-address"
@@ -59,42 +86,59 @@ export default function SignInScreen() {
           value={email}
           onChangeText={setEmail}
         />
-        {errors.fields.identifier && (
-          <Text style={[styles.error, { color: colors.destructive }]}>
-            {errors.fields.identifier.message}
-          </Text>
-        )}
 
-        <Text style={[styles.label, { color: colors.mutedForeground, marginTop: 16 }]}>PASSWORD</Text>
+        <Text
+          style={[
+            styles.label,
+            { color: colors.mutedForeground, marginTop: 16 },
+          ]}
+        >
+          PASSWORD
+        </Text>
         <TextInput
-          style={[styles.input, { color: colors.foreground, backgroundColor: colors.input, borderColor: colors.border }]}
+          style={[
+            styles.input,
+            {
+              color: colors.foreground,
+              backgroundColor: colors.input,
+              borderColor: colors.border,
+            },
+          ]}
           secureTextEntry
           placeholder="••••••••"
           placeholderTextColor={colors.mutedForeground}
           value={password}
           onChangeText={setPassword}
         />
-        {errors.fields.password && (
+
+        {!!error && (
           <Text style={[styles.error, { color: colors.destructive }]}>
-            {errors.fields.password.message}
+            {error}
           </Text>
         )}
 
         <Pressable
           onPress={submit}
-          disabled={!email || !password || loading}
+          disabled={!email || !password || loading || !isLoaded}
           style={({ pressed }) => [
             styles.button,
             {
               backgroundColor: colors.primary,
-              opacity: !email || !password || loading ? 0.5 : pressed ? 0.85 : 1,
+              opacity:
+                !email || !password || loading || !isLoaded
+                  ? 0.5
+                  : pressed
+                    ? 0.85
+                    : 1,
             },
           ]}
         >
           {loading ? (
             <ActivityIndicator color={colors.primaryForeground} />
           ) : (
-            <Text style={[styles.buttonText, { color: colors.primaryForeground }]}>SIGN IN</Text>
+            <Text style={[styles.buttonText, { color: colors.primaryForeground }]}>
+              SIGN IN
+            </Text>
           )}
         </Pressable>
 
@@ -103,7 +147,9 @@ export default function SignInScreen() {
             Need access?{" "}
           </Text>
           <Link href="/(auth)/sign-up">
-            <Text style={{ color: colors.primary, fontSize: 12, fontWeight: "600" }}>
+            <Text
+              style={{ color: colors.primary, fontSize: 12, fontWeight: "600" }}
+            >
               Request operator account
             </Text>
           </Link>
@@ -152,7 +198,7 @@ const styles = StyleSheet.create({
   },
   error: {
     fontSize: 12,
-    marginTop: 6,
+    marginTop: 8,
     fontFamily: "Inter_400Regular",
   },
   button: {
