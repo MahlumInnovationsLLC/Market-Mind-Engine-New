@@ -89,7 +89,16 @@ class FeedScheduler:
                 await self._registry.record_failure(feed.name, started, rl)
             except Exception as e:  # noqa: BLE001 — fault isolation is the whole point
                 await self._registry.record_failure(feed.name, started, e)
-                log.warning("feed %s failed: %s", feed.name, e)
+                # Many production exceptions (httpx ConnectError, ReadTimeout,
+                # asyncpg ConnectionDoesNotExistError) stringify to "" which
+                # produced the useless "feed X failed: " logs that hid the
+                # real root cause for weeks. Always include the exception
+                # class name; fall back to repr when str(e) is empty so
+                # on-call sees *something* actionable.
+                msg = str(e) or repr(e)
+                log.warning(
+                    "feed %s failed: %s: %s", feed.name, type(e).__name__, msg,
+                )
 
             try:
                 await asyncio.wait_for(self._stop.wait(), timeout=feed.cadence_seconds)

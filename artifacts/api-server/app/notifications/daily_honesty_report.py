@@ -231,11 +231,22 @@ async def _get_last_sent_date() -> str | None:
 
 async def _mark_sent(date_utc: str) -> bool:
     """Atomically claim today.  True ⇒ this caller should send."""
+    # asyncpg looks up the column type for $2 (DATE) and then tries to
+    # call ``.toordinal()`` on the bound value to encode it. Passing a
+    # plain string blew up production with:
+    #   "invalid input for query argument $2: '2026-05-16'
+    #    ('str' object has no attribute 'toordinal')"
+    # Bind a real ``date`` object instead of relying on ``$2::text::date``.
+    try:
+        d = date.fromisoformat(date_utc) if isinstance(date_utc, str) else date_utc
+    except ValueError as e:
+        log.warning("honesty-report dedupe bad date %r: %s", date_utc, e)
+        return True
     try:
         row = await db.fetchrow(
             """
             INSERT INTO notification_dedupe (key, date_utc)
-            VALUES ($1, $2::text::date)
+            VALUES ($1, $2)
             ON CONFLICT (key) DO UPDATE
               SET date_utc = EXCLUDED.date_utc,
                   sent_at  = now()
@@ -243,11 +254,14 @@ async def _mark_sent(date_utc: str) -> bool:
             RETURNING 1 AS ok
             """,
             _DEDUPE_KEY,
-            date_utc,
+            d,
         )
         return bool(row)
     except Exception as e:
-        log.warning("honesty-report dedupe claim failed: %s", e)
+        log.warning(
+            "honesty-report dedupe claim failed: %s: %s",
+            type(e).__name__, str(e) or repr(e),
+        )
         # Fail open — better to risk a duplicate than silently skip.
         return True
 

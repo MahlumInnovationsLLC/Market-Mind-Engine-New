@@ -149,13 +149,15 @@ async def lifespan(_: FastAPI):
         if is_prod:
             raise RuntimeError(msg)
         log.warning(msg)
-    try:
-        await db.get_pool()
-    except Exception as e:
-        log.error("Postgres pool init failed: %s", e)
-
-    # Task handles populated by the background boot sequence below.
-    # Cleanup tolerates None for any handle whose owner never ran.
+    # NOTE: db.get_pool() used to be awaited HERE on the lifespan
+    # critical path, but asyncpg.create_pool opens TLS handshakes to
+    # Supabase eagerly and Supabase cold-boot/IPv4-degradation can
+    # stall that handshake for the entire watchdog grace window —
+    # producing the exact "Connection refused, child in startup
+    # grace (586s of 600s)" pattern we just saw in production. The
+    # pool is already lazily initialized by every db.acquire() call
+    # (get_pool is idempotent with a lock), so we move the eager
+    # init into _do_boot below and serve /api/healthz immediately.
     fill_task: asyncio.Task | None = None
     polymarket_fill_task: asyncio.Task | None = None
     settlement_tap_task: asyncio.Task | None = None
@@ -177,6 +179,15 @@ async def lifespan(_: FastAPI):
         """
         nonlocal fill_task, polymarket_fill_task, settlement_tap_task
         nonlocal models_task, ready_watcher_task
+        # Initialise the asyncpg pool here (used to be on the lifespan
+        # critical path, which let a single stalled Supabase TLS
+        # handshake hold the port unbound for the whole watchdog grace
+        # window). Failures are non-fatal: every db.acquire() retries
+        # via get_pool() so transient network issues self-heal.
+        try:
+            await db.get_pool()
+        except Exception as e:
+            log.error("Postgres pool init failed (will retry lazily): %s", e)
         # Apply Alembic migrations BEFORE any request handler can land. The
         # baseline migration owns the schema that used to be created by
         # lazy ALTERs at request time. Run on a worker thread so the sync
@@ -823,6 +834,15 @@ async def lifespan(_: FastAPI):
             )
 
     boot_task.add_done_callback(_on_boot_done)
+
+    # Distinctive marker so we can confirm in deployment logs that the
+    # async-boot fix is actually live (vs. an older commit that still
+    # awaits the full boot before yielding).
+    log.info(
+        "lifespan yielding — port bind imminent; "
+        "background boot continues as task=%s",
+        boot_task.get_name(),
+    )
 
     try:
         yield
