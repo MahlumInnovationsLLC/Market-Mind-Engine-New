@@ -1787,6 +1787,8 @@ async def run_cycle(vertical: str = "sports") -> CycleResult:
             open_positions_per_vertical_usd=per_vertical,
             operator_overrides=overrides,
             market_cooldown_until=cooldown_until,
+            home_team=cand.get("home_team"),
+            away_team=cand.get("away_team"),
             open_positions_per_league_usd=per_league,
             open_positions_per_matchup_usd=per_matchup,
             open_positions_sunday_window_usd=per_sunday_window,
@@ -1890,7 +1892,15 @@ async def run_cycle(vertical: str = "sports") -> CycleResult:
                 (gr.details.get("kelly") for gr in gate_results if gr.name == "kelly_fraction"),
                 None,
             )
-            venues = route_for_candidate(cand, side=ctx.side)
+            # Honor best-line gate's reroute hint (task #828) — when
+            # gate_best_line discovered Polymarket has a meaningfully
+            # better price than Kalshi for the same sports market it
+            # sets ctx.venue_override, which overrides the default
+            # venue_router pick for THIS candidate only.
+            if ctx.venue_override:
+                venues = list(ctx.venue_override)
+            else:
+                venues = route_for_candidate(cand, side=ctx.side)
             placements: list[dict[str, Any]] = []
             placement_errors: list[str] = []
             league_key = (cand.get("league") or "").upper()

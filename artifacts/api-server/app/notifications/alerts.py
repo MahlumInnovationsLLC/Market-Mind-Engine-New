@@ -66,6 +66,7 @@ _TAG_TO_USER_PREF: dict[str, str] = {
     "tail-risk-gate-trip":         "email_drift",
     "tail-risk-burst":             "email_drift",
     "drift-queue-backlog":         "email_drift",
+    "best-line-alert":             "email_drift",
 }
 
 
@@ -276,6 +277,11 @@ USER_VISIBLE_ALERTS: dict[str, dict[str, Any]] = {
     },
     "tail_risk_burst": {
         "label": "Tail-risk gate burst",
+        "scope": "broadcast",
+        "channels": [("email", "email_drift")],
+    },
+    "best_line_alert": {
+        "label": "Best-line cross-book alert",
         "scope": "broadcast",
         "channels": [("email", "email_drift")],
     },
@@ -2289,6 +2295,94 @@ def tail_risk_burst(
             _tg_notify.broadcast_in_background(f"{subject}\n\n{body}")
         except Exception as e:  # pragma: no cover — broadcast must not break alerting
             log.warning("tail-risk-burst telegram broadcast failed: %s", e)
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Best-line cross-book alert (task #828).
+#
+# Fired by ``gate_best_line`` when a non-Kalshi book is offering a
+# meaningfully better implied price than our chosen venue. Two flavors:
+#
+#   * ``block_traditional`` — DraftKings / FanDuel / etc. has the
+#     better line. The Kalshi trade was blocked; operator manually
+#     places the bet on the named book.
+#   * ``reroute_polymarket`` — Polymarket has the better line; the
+#     candidate was auto-rerouted to Polymarket execution.
+#
+# Info-severity broadcast — no halt, no push, no SMS. Telegram
+# broadcast follows the tail-risk pattern: best-effort, swallowed
+# failures.
+# ---------------------------------------------------------------------------
+
+
+def best_line_alert(
+    *,
+    kind: str,
+    market_id: str,
+    league: str | None,
+    matchup: str | None,
+    market_type: str | None,
+    side: str | None,
+    details: dict[str, Any],
+    dry_run: bool = False,
+) -> dict[str, Any]:
+    """Email + Telegram broadcast for one best-line cross-book event.
+
+    ``kind`` is one of ``block_traditional`` or ``reroute_polymarket``;
+    every other field is surfaced verbatim in the body so the operator
+    can act on a single email without opening the dashboard.
+    """
+    kind_norm = (kind or "").strip()
+    if kind_norm == "reroute_polymarket":
+        tag_suffix = "REROUTE"
+        headline = "rerouted to Polymarket"
+    else:
+        tag_suffix = "BLOCK"
+        headline = "blocked — better line elsewhere"
+    subject = (
+        f"[axiom][BEST-LINE][{tag_suffix}] "
+        f"{(league or '?').upper()} "
+        f"{(market_type or '?')} {matchup or market_id} :: {headline}"
+    )
+    rows: list[tuple[str, Any]] = [
+        ("kind", kind_norm or "(unknown)"),
+        ("league", (league or "(unknown)").upper()),
+        ("market_type", market_type or "(unknown)"),
+        ("matchup", matchup or "(unknown)"),
+        ("side", side or "(unknown)"),
+        ("market_id", market_id),
+    ]
+    for k in (
+        "our_implied", "best_book", "best_implied",
+        "polymarket_implied", "delta_bps", "threshold_bps",
+        "books_seen",
+    ):
+        if k in details:
+            rows.append((k, details[k]))
+    rows.append(("at", _utc_now_iso()))
+    body = (
+        "Cross-book line-shopping fired.\n\n"
+        + (
+            "Operator action: place this bet manually on the named "
+            "book if you want the better line. The Kalshi candidate "
+            "was NOT placed.\n\n"
+            if kind_norm == "block_traditional"
+            else "The candidate was automatically rerouted to "
+                 "Polymarket execution.\n\n"
+        )
+        + _format_lines(rows)
+        + "\n"
+    )
+    result = _dispatch(
+        subject, body, tag="best-line-alert", dry_run=dry_run
+    )
+    if not dry_run:
+        try:
+            from ..telegram import notify as _tg_notify
+            _tg_notify.broadcast_in_background(f"{subject}\n\n{body}")
+        except Exception as e:  # pragma: no cover
+            log.warning("best-line telegram broadcast failed: %s", e)
     return result
 
 

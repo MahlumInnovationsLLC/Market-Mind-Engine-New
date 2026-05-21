@@ -810,6 +810,7 @@ async def collect_report(date_utc: str) -> dict[str, Any]:
     miss_t = asyncio.create_task(collect_missing_league_24h())
     deck_t = asyncio.create_task(collect_latest_investor_deck())
     wnba_t = asyncio.create_task(collect_wnba_player_props_summary())
+    best_line_t = asyncio.create_task(collect_best_line_router_stats())
     (
         divergence,
         drift_status,
@@ -819,8 +820,10 @@ async def collect_report(date_utc: str) -> dict[str, Any]:
         missing_league,
         investor_deck,
         wnba_props,
+        best_line,
     ) = await asyncio.gather(
-        div_t, drift_t, tail_t, gate_t, raw_t, miss_t, deck_t, wnba_t
+        div_t, drift_t, tail_t, gate_t, raw_t, miss_t, deck_t, wnba_t,
+        best_line_t,
     )
     return {
         "date_utc": date_utc,
@@ -832,7 +835,82 @@ async def collect_report(date_utc: str) -> dict[str, Any]:
         "missing_league": missing_league,
         "investor_deck": investor_deck,
         "wnba_player_props": wnba_props,
+        "best_line_router": best_line,
     }
+
+
+async def collect_best_line_router_stats() -> dict[str, Any]:
+    """Cross-book line-shopping router summary (task #828).
+
+    Three 24h counters + a 7d implied-EV-preserved estimate, derived
+    from the ``notification_dedupe`` rows the gate emits with the
+    ``best_line_alert:`` prefix and the ``risk_gate_trips`` rows it
+    persists.
+
+    Best-effort: returns the structure with zeros + an ``error`` field
+    when a query fails so a missing migration never blacks out the
+    daily report.
+    """
+    out: dict[str, Any] = {
+        "blocked_traditional_24h": 0,
+        "rerouted_polymarket_24h": 0,
+        "best_line_alerts_24h": 0,
+        "implied_ev_preserved_usd_7d": None,
+        "error": None,
+    }
+    try:
+        row = await db.fetchrow(
+            """
+            SELECT
+              count(*) FILTER (
+                WHERE starts_with(key, 'best_line_alert:block_traditional|')
+              )::int AS blocked_traditional,
+              count(*) FILTER (
+                WHERE starts_with(key, 'best_line_alert:reroute_polymarket|')
+              )::int AS rerouted_polymarket,
+              count(*) FILTER (
+                WHERE starts_with(key, 'best_line_alert:')
+              )::int AS total_alerts
+              FROM notification_dedupe
+             WHERE sent_at IS NOT NULL
+               AND sent_at > now() - interval '24 hours'
+            """
+        )
+        if row:
+            out["blocked_traditional_24h"] = int(row["blocked_traditional"] or 0)
+            out["rerouted_polymarket_24h"] = int(row["rerouted_polymarket"] or 0)
+            out["best_line_alerts_24h"] = int(row["total_alerts"] or 0)
+    except Exception as e:
+        log.warning("best_line_router 24h counters failed: %s", e)
+        out["error"] = f"{type(e).__name__}: {e}"[:240]
+        return out
+    # 7d implied-EV-preserved: sum delta_bps * 1bp-of-intended-notional
+    # over best_line gate trips. risk_gate_trips persists every
+    # blocked candidate with the gate details JSON (incl. delta_bps
+    # and intended_notional_usd if the context populated it).
+    try:
+        ev_row = await db.fetchrow(
+            """
+            SELECT COALESCE(
+                SUM(
+                  (details->>'delta_bps')::float / 10000.0
+                  * COALESCE((details->>'intended_notional_usd')::float, 0)
+                ), 0
+            )::float AS ev_preserved
+              FROM risk_gate_trips
+             WHERE gate_name = 'best_line'
+               AND created_at > now() - interval '7 days'
+               AND details ? 'delta_bps'
+            """
+        )
+        if ev_row and ev_row["ev_preserved"] is not None:
+            out["implied_ev_preserved_usd_7d"] = round(
+                float(ev_row["ev_preserved"]), 2
+            )
+    except Exception as e:
+        log.warning("best_line_router 7d EV-preserved failed: %s", e)
+        # Keep the counters above; don't blank the section.
+    return out
 
 
 async def collect_wnba_player_props_summary() -> dict[str, Any]:

@@ -283,6 +283,21 @@ class RiskContext:
     # candidate as a pre-event entry against an active event.  Defaults
     # False so legacy candidates are unaffected.
     event_in_progress: bool = False
+    # Home/away team names (task #828) — populated by the orchestrator
+    # from the candidate dict and consumed by gate_best_line to fuzzy-
+    # match the candidate against the latest `line_snapshots` rows
+    # (Sportradar game ids and odds_api game ids live in different
+    # namespaces).  Optional; gate_best_line passes when either is
+    # missing.
+    home_team: str | None = None
+    away_team: str | None = None
+    # Cross-book line-shopping reroute hint (task #828).  When
+    # gate_best_line discovers Polymarket has a meaningfully better
+    # price than Kalshi for the same market, it passes the gate but
+    # sets this field; the orchestrator honors it instead of the
+    # default venue_router pick.  Defaults None (router behaves as
+    # before).  Single list, ordered.
+    venue_override: list[str] | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -1965,6 +1980,245 @@ async def gate_player_props(ctx: RiskContext) -> GateResult:
     return GateResult("player_props", True, "", details)
 
 
+_BEST_LINE_DEFAULT_THRESHOLD_BPS: int = 200  # 2.00% implied
+
+
+async def gate_best_line(ctx: RiskContext) -> GateResult:
+    """Cross-book line-shopping gate (task #828).
+
+    For sports ML/SPREAD/TOTAL candidates, compare the chosen-venue
+    implied price against the latest `line_snapshots` snapshot for
+    every quoting book.  Three outcomes:
+
+      * **PASS** — our chosen venue is equal-or-better, or we have no
+        recent data (fail-open).
+      * **FAIL (block + alert)** — a traditional sportsbook is offering
+        a meaningfully better implied price than our Kalshi quote.
+        Operator gets a `best_line_alert` and places the bet manually.
+      * **PASS w/ venue_override=['polymarket']** — Polymarket is
+        offering a meaningfully better price than Kalshi for the same
+        market; the candidate ships but to Polymarket instead.
+
+    Threshold default: 200 bps (2.00% implied).  Per-league override:
+    ``best_line_threshold_bps_<LEAGUE_LOWER>`` in
+    ``system_settings.risk_knob_overrides``.
+
+    Fail-open on every error path — feed outages must not silently
+    halt sports trading.
+    """
+    # Scope: sports only, ML/SPREAD/TOTAL only.
+    if (ctx.vertical or "").strip().lower() != "sports":
+        return GateResult("best_line", True, "", {"scoped_out": "non-sports"})
+    try:
+        from .best_line_lookup import (
+            normalize_market_kind, lookup_best_line, implied_delta_bps,
+        )
+    except Exception as e:  # pragma: no cover — defensive import guard
+        log.warning("gate_best_line import failed: %s", e)
+        return GateResult("best_line", True, "", {"error": "import_failed"})
+
+    kind = normalize_market_kind(ctx.market_type)
+    if kind not in ("h2h", "spreads", "totals"):
+        return GateResult(
+            "best_line", True, "",
+            {"scoped_out": "unsupported_market_type", "market_type": ctx.market_type},
+        )
+    # Outcome / leg matching for spreads + totals (line_value and
+    # over/under) is not implemented yet — without it we'd compare
+    # against the wrong leg of the market and produce false blocks.
+    # Scope those out conservatively until per-leg matching lands.
+    if kind in ("spreads", "totals"):
+        return GateResult(
+            "best_line", True, "",
+            {"scoped_out": "leg_matching_pending", "market_type": ctx.market_type},
+        )
+    # Side-aware comparison for h2h. Today the lookup returns the
+    # min-implied across both outcomes, which is only directionally
+    # correct when our trade side is YES on the canonical YES leg.
+    # Scope NO trades out rather than risk wrong-direction blocks.
+    if (ctx.side or "").strip().upper() != "YES":
+        return GateResult(
+            "best_line", True, "",
+            {"scoped_out": "side_not_supported_yet", "side": ctx.side},
+        )
+
+    our_implied = ctx.current_price
+    if our_implied is None:
+        return GateResult("best_line", True, "", {"reason": "no_current_price"})
+
+    league = (ctx.league or "").strip().upper()
+    overrides = ctx.operator_overrides or {}
+    try:
+        threshold_bps = int(
+            overrides.get(f"best_line_threshold_bps_{league.lower()}")
+            or overrides.get("best_line_threshold_bps")
+            or _BEST_LINE_DEFAULT_THRESHOLD_BPS
+        )
+    except (TypeError, ValueError):
+        threshold_bps = _BEST_LINE_DEFAULT_THRESHOLD_BPS
+
+    # Latency guard — 50ms p95 budget per task spec.
+    import asyncio as _asyncio
+    try:
+        result = await _asyncio.wait_for(
+            lookup_best_line(
+                league=ctx.league,
+                market_type=ctx.market_type,
+                home_team=ctx.home_team,
+                away_team=ctx.away_team,
+            ),
+            timeout=0.050,
+        )
+    except _asyncio.TimeoutError:
+        log.warning(
+            "gate_best_line: lookup exceeded 50ms budget (league=%s mt=%s) — fail-open",
+            ctx.league, ctx.market_type,
+        )
+        return GateResult(
+            "best_line", True, "",
+            {"fail_open": "lookup_timeout", "threshold_bps": threshold_bps},
+        )
+    except Exception as e:
+        log.warning("gate_best_line lookup raised — fail-open: %s", e)
+        return GateResult(
+            "best_line", True, "",
+            {"fail_open": "lookup_exception", "error": str(e)[:200]},
+        )
+
+    if result.error:
+        return GateResult(
+            "best_line", True, "",
+            {"fail_open": "lookup_error", "error": result.error},
+        )
+    if not result.quotes:
+        return GateResult(
+            "best_line", True, "",
+            {"fail_open": "no_recent_quotes", "threshold_bps": threshold_bps},
+        )
+
+    # We want to BUY at the lowest implied probability. Improvement vs
+    # our current price = our_implied - other_implied (positive when
+    # other side offers a cheaper entry).
+    base_details: dict[str, Any] = {
+        "league": league,
+        "market_type": ctx.market_type,
+        "matchup": ctx.matchup,
+        "our_implied": round(float(our_implied), 6),
+        "threshold_bps": threshold_bps,
+        "books_seen": [q.book for q in result.quotes],
+        # Persisted into risk_gate_trips.details so the daily honesty
+        # report can compute 7d implied-EV-preserved = delta_bps/10000
+        # * intended_notional_usd across all best_line trips.
+        "intended_notional_usd": (
+            float(ctx.intended_notional_usd)
+            if ctx.intended_notional_usd is not None
+            else None
+        ),
+    }
+
+    # 1. Polymarket reroute first — venue change, no operator action.
+    if result.polymarket_implied is not None:
+        poly_imp = result.polymarket_implied
+        if poly_imp < float(our_implied):
+            delta = implied_delta_bps(our_implied, poly_imp)
+            if delta >= threshold_bps:
+                # Pass the gate but flag the reroute to the orchestrator.
+                ctx.venue_override = ["polymarket"]
+                details = {
+                    **base_details,
+                    "decision": "reroute_polymarket",
+                    "polymarket_implied": round(poly_imp, 6),
+                    "delta_bps": delta,
+                }
+                # Best-effort persistence + alert — never raise.
+                try:
+                    from ..notifications import alerts as _alerts
+                    _asyncio.create_task(_emit_best_line_alert(
+                        kind="reroute_polymarket",
+                        ctx=ctx,
+                        details=details,
+                    ))
+                except Exception as e:  # pragma: no cover
+                    log.warning("best-line reroute alert dispatch failed: %s", e)
+                return GateResult("best_line", True, "polymarket reroute", details)
+
+    # 2. Traditional sportsbook better than us → block + alert.
+    if result.best_traditional_implied is not None:
+        trad_imp = result.best_traditional_implied
+        if trad_imp < float(our_implied):
+            delta = implied_delta_bps(our_implied, trad_imp)
+            if delta >= threshold_bps:
+                details = {
+                    **base_details,
+                    "decision": "block_traditional_better",
+                    "best_book": result.best_traditional_book,
+                    "best_implied": round(trad_imp, 6),
+                    "delta_bps": delta,
+                }
+                try:
+                    _asyncio.create_task(_emit_best_line_alert(
+                        kind="block_traditional",
+                        ctx=ctx,
+                        details=details,
+                    ))
+                except Exception as e:  # pragma: no cover
+                    log.warning("best-line block alert dispatch failed: %s", e)
+                return GateResult(
+                    "best_line", False,
+                    f"{result.best_traditional_book} offers {delta} bps better line",
+                    details,
+                )
+
+    return GateResult(
+        "best_line", True, "",
+        {**base_details, "decision": "pass", "best_book": result.best_book,
+         "best_implied": (round(result.best_implied, 6) if result.best_implied is not None else None)},
+    )
+
+
+async def _emit_best_line_alert(
+    *,
+    kind: str,
+    ctx: RiskContext,
+    details: dict[str, Any],
+) -> None:
+    """Background dispatch for `best_line_alert`.  Persisted via
+    the `notification_dedupe` table (claim-or-skip), then routed
+    to email + telegram via `notifications.alerts.best_line_alert`.
+    Fully swallowed on error so the gate decision is never blocked.
+    """
+    try:
+        from ..notifications import alerts as _alerts
+        # Stable dedupe key per (matchup, market_type, kind) bucketed
+        # to 1-minute windows so a burst of cycles on the same market
+        # collapses to one operator-visible alert.
+        import time as _t
+        bucket = int(_t.time() // 60)
+        dkey = "|".join([
+            kind,
+            (ctx.league or "").upper(),
+            (ctx.market_type or "").lower(),
+            (ctx.matchup or ctx.market_id or "")[:120],
+            str(bucket),
+        ])
+        claimed = await _alerts.dedupe_or_skip(
+            "best_line_alert", dkey, ttl_seconds=300,
+        )
+        if not claimed:
+            return
+        _alerts.best_line_alert(
+            kind=kind,
+            market_id=ctx.market_id,
+            league=ctx.league,
+            matchup=ctx.matchup,
+            market_type=ctx.market_type,
+            side=ctx.side,
+            details=details,
+        )
+    except Exception as e:  # pragma: no cover
+        log.warning("_emit_best_line_alert failed: %s", e)
+
+
 GATES: tuple[tuple[str, GateFn], ...] = (
     ("kill_switch", gate_kill_switch),
     ("daily_loss", gate_daily_loss),
@@ -1989,6 +2243,12 @@ GATES: tuple[tuple[str, GateFn], ...] = (
     ("min_edge", gate_min_edge),
     ("drift", gate_drift),
     ("agreement", gate_agreement),
+    # Cross-book line-shopping (task #828). Runs AFTER min_edge so we
+    # don't burn an odds_api lookup on a candidate that already failed
+    # EV, and BEFORE the tail-risk / sizing gates so a reroute or
+    # alert-block decision short-circuits the bankroll/Kelly DB reads.
+    # Sports-only / ML-SPREAD-TOTAL-only — no-op on every other path.
+    ("best_line", gate_best_line),
     # Tail-risk policy gates (task #743 — May 2026 forensic audit).
     # Cheap, no-DB caps that reject deep-OTM and jumbo-sized
     # candidates BEFORE the round-2 audit gates spend DB round-trips on
@@ -2015,11 +2275,12 @@ GATES: tuple[tuple[str, GateFn], ...] = (
     ("max_concurrent_positions", gate_max_concurrent_positions),
     ("duplicate_trade", gate_duplicate_trade),
 )
-assert len(GATES) == 21, (
-    "21 gates: 12 original + daily_loss (task #268) + vertical_halted "
+assert len(GATES) == 22, (
+    "22 gates: 12 original + daily_loss (task #268) + vertical_halted "
     "(task #271) + sharpe_ratio + ruin_monte_carlo + segment_throttler "
     "(task #730) + tail_price_size_cap + jumbo_quantity_cap (task #743) "
-    "+ uncalibrated_vertical (task #767) + player_props (task #823)"
+    "+ uncalibrated_vertical (task #767) + player_props (task #823) "
+    "+ best_line (task #828)"
 )
 
 

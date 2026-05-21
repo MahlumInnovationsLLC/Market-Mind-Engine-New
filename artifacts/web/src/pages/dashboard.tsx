@@ -24,6 +24,7 @@ import { PlacedByProvider } from "@/components/dashboard/placed-by-context";
 import { PlacedByToggle } from "@/components/dashboard/placed-by-toggle";
 import PipelineTracker from "@/components/dashboard/pipeline-tracker";
 import TailRiskExposurePanel from "@/components/dashboard/tail-risk-exposure-panel";
+import BestLineAlertsPanel from "@/components/dashboard/best-line-alerts-panel";
 import TelegramConcierge from "@/components/dashboard/telegram-concierge";
 import TournamentLeaderboardsPanel from "@/components/dashboard/tournament-leaderboards-panel";
 import TournamentReplaysPanel from "@/components/dashboard/tournament-replays-panel";
@@ -81,6 +82,8 @@ export default function Dashboard() {
         <KpiSummaryBar />
 
         <TailRiskExposurePanel />
+
+        <BestLineAlertsPanel />
 
         <VerticalPicker isAdmin={isAdmin} />
 

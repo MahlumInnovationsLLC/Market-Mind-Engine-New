@@ -1292,6 +1292,146 @@ async def public_equity_curve(
     }
 
 
+@app.get("/api/public/best-line-alerts")
+async def public_best_line_alerts(
+    hours: int = 24,
+    limit: int = 100,
+) -> dict[str, object]:
+    """List recent ``best_line_alert`` rows for the operator tile (task #828).
+
+    Joins ``notification_dedupe`` (the source of truth for "an alert
+    was claimed/dispatched") with ``best_line_alert_actions`` (the
+    operator's manual-placed toggle). Public read endpoint mirroring
+    ``/api/public/tail-risk-exposure`` — the dashboard tile renders
+    this without admin auth so the operator can act on the alert at a
+    glance.
+    """
+    clamped_hours = max(1, min(int(hours or 24), 168))
+    clamped_limit = max(1, min(int(limit or 100), 500))
+    try:
+        rows = await db.fetch(
+            """
+            SELECT d.key,
+                   d.sent_at,
+                   a.action,
+                   a.operator_email,
+                   a.placed_book,
+                   a.placed_amount_usd,
+                   a.note,
+                   a.created_at AS action_at
+              FROM notification_dedupe d
+              LEFT JOIN best_line_alert_actions a
+                ON a.dedupe_key = d.key
+             WHERE starts_with(d.key, 'best_line_alert:')
+               AND d.sent_at IS NOT NULL
+               AND d.sent_at > now() - make_interval(hours => $1)
+             ORDER BY d.sent_at DESC
+             LIMIT $2
+            """,
+            clamped_hours,
+            clamped_limit,
+        )
+    except Exception as e:
+        log.warning("best-line-alerts query failed: %s", e)
+        return {"items": [], "hours": clamped_hours, "error": str(e)[:240]}
+    items: list[dict[str, object]] = []
+    for r in rows or []:
+        key = str(r.get("key") or "")
+        body = key[len("best_line_alert:"):] if key.startswith("best_line_alert:") else key
+        parts = body.split("|")
+        kind = parts[0] if parts else ""
+        league = parts[1] if len(parts) > 1 else ""
+        market_type = parts[2] if len(parts) > 2 else ""
+        matchup = parts[3] if len(parts) > 3 else ""
+        sent_at_v = r.get("sent_at")
+        action_at_v = r.get("action_at")
+        try:
+            sent_iso = sent_at_v.isoformat() if sent_at_v else None
+        except Exception:
+            sent_iso = str(sent_at_v) if sent_at_v else None
+        try:
+            action_iso = action_at_v.isoformat() if action_at_v else None
+        except Exception:
+            action_iso = str(action_at_v) if action_at_v else None
+        items.append({
+            "dedupe_key": key,
+            "kind": kind,
+            "league": league,
+            "market_type": market_type,
+            "matchup": matchup,
+            "sent_at": sent_iso,
+            "action": r.get("action"),
+            "operator_email": r.get("operator_email"),
+            "placed_book": r.get("placed_book"),
+            "placed_amount_usd": r.get("placed_amount_usd"),
+            "note": r.get("note"),
+            "action_at": action_iso,
+            "placed_manually": bool(r.get("action") == "placed_manually"),
+        })
+    return {"items": items, "hours": clamped_hours, "count": len(items)}
+
+
+class BestLineMarkPlacedRequest(BaseModel):
+    dedupe_key: str
+    placed: bool = True
+    placed_book: str | None = None
+    placed_amount_usd: float | None = None
+    note: str | None = None
+
+
+@app.post("/api/admin/best-line-alerts/mark-placed")
+async def admin_best_line_mark_placed(
+    body: BestLineMarkPlacedRequest,
+    actor: AuthedUser = Depends(require_admin),
+) -> dict[str, object]:
+    """Record (or clear) an operator's manual-placement of a best-line alert.
+
+    Idempotent — re-calling with the same key overwrites the row. Pass
+    ``placed=false`` to clear the marker (e.g. operator changed their
+    mind before placing the bet).
+    """
+    if not body.dedupe_key or not body.dedupe_key.startswith("best_line_alert:"):
+        raise HTTPException(status_code=400, detail="dedupe_key must start with 'best_line_alert:'")
+    if body.placed:
+        action = "placed_manually"
+        try:
+            await db.execute(
+                """
+                INSERT INTO best_line_alert_actions
+                  (dedupe_key, action, operator_email,
+                   placed_book, placed_amount_usd, note)
+                VALUES ($1, $2, $3, $4, $5, $6)
+                ON CONFLICT (dedupe_key) DO UPDATE
+                  SET action = EXCLUDED.action,
+                      operator_email = EXCLUDED.operator_email,
+                      placed_book = EXCLUDED.placed_book,
+                      placed_amount_usd = EXCLUDED.placed_amount_usd,
+                      note = EXCLUDED.note,
+                      created_at = now()
+                """,
+                body.dedupe_key,
+                action,
+                getattr(actor, "email", None),
+                body.placed_book,
+                body.placed_amount_usd,
+                body.note,
+            )
+        except Exception as e:
+            log.warning("best-line mark-placed write failed: %s", e)
+            raise HTTPException(status_code=500, detail=f"persist failed: {e}") from e
+    else:
+        try:
+            await db.execute(
+                "DELETE FROM best_line_alert_actions WHERE dedupe_key = $1",
+                body.dedupe_key,
+            )
+        except Exception as e:
+            log.warning("best-line mark-placed delete failed: %s", e)
+            raise HTTPException(status_code=500, detail=f"delete failed: {e}") from e
+        action = "cleared"
+    return {"ok": True, "dedupe_key": body.dedupe_key, "action": action}
+
+
 @app.get("/api/public/tail-risk-exposure")
 async def public_tail_risk_exposure(
     days: int = 30,
