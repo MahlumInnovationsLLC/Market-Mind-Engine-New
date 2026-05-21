@@ -13,7 +13,7 @@ Covers:
 * registry: WNBA appears in `LEAGUE_CONFIGS`; `wnba_player_props`
   vertical is registered, ships disabled, and is ordered after
   `entertainment`,
-* ``len(GATES) == 21`` and ``player_props`` lives in the ordered
+* ``len(GATES) == 22`` and ``player_props`` lives in the ordered
   registry (regression for the count assertion).
 """
 from __future__ import annotations
@@ -363,7 +363,7 @@ class TestRegistries:
     def test_player_props_gate_in_registry(self) -> None:
         names = [n for n, _ in GATES]
         assert "player_props" in names
-        assert len(GATES) == 21
+        assert len(GATES) == 22
         # player_props sits AFTER uncalibrated_vertical (so calibrator
         # blocks take precedence) and BEFORE market_cooldown.
         i = names.index("player_props")

@@ -1842,6 +1842,27 @@ def render_text(payload: dict[str, Any]) -> tuple[str, str]:
                 "enable sequence)"
             )
 
+    # Section 8 — Best-line router (Task #828)
+    bl = payload.get("best_line_router") or {}
+    lines.append("")
+    lines.append("== 8. Best-line cross-book router (last 24h / 7d EV) ==")
+    if bl.get("error"):
+        lines.append(f"  ERROR: {bl['error']}")
+    else:
+        blocked = int(bl.get("blocked_traditional_24h") or 0)
+        rerouted = int(bl.get("rerouted_polymarket_24h") or 0)
+        total = int(bl.get("best_line_alerts_24h") or 0)
+        ev = bl.get("implied_ev_preserved_usd_7d")
+        marker = "[GREEN]" if total == 0 else "[YELLOW]"
+        lines.append(
+            f"  {marker} blocked-traditional={blocked}; "
+            f"rerouted-polymarket={rerouted}; total-alerts={total}"
+        )
+        lines.append(
+            f"    7d implied-EV-preserved (USD): "
+            f"{ev if ev is not None else '(n/a — no notional captured)'}"
+        )
+
     lines.append("")
     lines.append(
         "Read the runbook section 21 for what each red signal means."
@@ -2118,6 +2139,28 @@ def render_html(payload: dict[str, Any]) -> str:
                 f"quotes_ingested_24h={int(wnba.get('quotes_ingested_24h') or 0)}; "
                 f"distinct_players_24h={int(wnba.get('distinct_players_24h') or 0)}; "
                 f"gate_trips_24h={int(wnba.get('gate_trips_24h') or 0)}"
+                f"</p>"
+            )
+
+    # Best-line router (task #828)
+    bl = payload.get("best_line_router") or {}
+    if bl:
+        _section_h("Best-line cross-book router (last 24h / 7d EV)")
+        if _err(bl):
+            pass
+        else:
+            blocked = int(bl.get("blocked_traditional_24h") or 0)
+            rerouted = int(bl.get("rerouted_polymarket_24h") or 0)
+            total = int(bl.get("best_line_alerts_24h") or 0)
+            ev = bl.get("implied_ev_preserved_usd_7d")
+            tone = "#080" if total == 0 else "#a60"
+            ev_disp = "(n/a)" if ev is None else f"${ev:,.2f}"
+            parts.append(
+                f"<p style=\"color:{tone};\">"
+                f"blocked_traditional_24h={blocked}; "
+                f"rerouted_polymarket_24h={rerouted}; "
+                f"best_line_alerts_24h={total}; "
+                f"implied_ev_preserved_usd_7d={html.escape(ev_disp)}"
                 f"</p>"
             )
 

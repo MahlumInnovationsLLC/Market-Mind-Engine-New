@@ -302,6 +302,9 @@ PROTECTED_MUTATING_ENDPOINTS: tuple[tuple[str, str], ...] = (
     # resolve endpoint that routes the chosen 3-way result back through
     # ``settle_market`` after writing an admin_audit_log row.
     ("POST", "/api/admin/soccer-settlement-review/{review_id}/resolve"),
+    # Task #828 — best-line cross-book router operator endpoints.
+    ("GET",  "/api/admin/best-line-alerts/full"),
+    ("POST", "/api/admin/best-line-alerts/mark-placed"),
 )
 
 # Path-only view of the mutating-endpoint inventory, used by the
@@ -329,6 +332,10 @@ OTHER_PUBLIC_ROUTES: tuple[str, ...] = (
     "/api/billing/revenuecat-webhook",
     "/api/public/equity-curve",
     "/api/public/tail-risk-exposure",
+    # Task #828 — public best-line alerts surface for the dashboard
+    # tile.  Returns redacted data (no operator_email, no notes, no
+    # amounts); full PII variant lives behind admin auth.
+    "/api/public/best-line-alerts",
     "/api/public/stats",
     "/api/public/recent-signals",
     "/api/public/leads",

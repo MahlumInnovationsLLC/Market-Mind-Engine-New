@@ -1353,6 +1353,10 @@ async def public_best_line_alerts(
             action_iso = action_at_v.isoformat() if action_at_v else None
         except Exception:
             action_iso = str(action_at_v) if action_at_v else None
+        # Public endpoint intentionally omits operator_email, note,
+        # and placed_amount_usd — those are PII / sensitive operator
+        # action metadata. The admin endpoint at
+        # ``/api/admin/best-line-alerts/full`` returns the full row.
         items.append({
             "dedupe_key": key,
             "kind": kind,
@@ -1361,12 +1365,71 @@ async def public_best_line_alerts(
             "matchup": matchup,
             "sent_at": sent_iso,
             "action": r.get("action"),
+            "placed_book": r.get("placed_book"),
+            "action_at": action_iso,
+            "placed_manually": bool(r.get("action") == "placed_manually"),
+        })
+    return {"items": items, "hours": clamped_hours, "count": len(items)}
+
+
+@app.get("/api/admin/best-line-alerts/full")
+async def admin_best_line_alerts_full(
+    hours: int = 24,
+    limit: int = 100,
+    actor: AuthedUser = Depends(require_admin),
+) -> dict[str, object]:
+    """Admin-only variant of ``/api/public/best-line-alerts`` that
+    includes operator PII (operator_email, note, placed_amount_usd).
+    """
+    clamped_hours = max(1, min(int(hours or 24), 168))
+    clamped_limit = max(1, min(int(limit or 100), 500))
+    try:
+        rows = await db.fetch(
+            """
+            SELECT d.key,
+                   d.sent_at,
+                   a.action,
+                   a.operator_email,
+                   a.placed_book,
+                   a.placed_amount_usd,
+                   a.note,
+                   a.created_at AS action_at
+              FROM notification_dedupe d
+              LEFT JOIN best_line_alert_actions a
+                ON a.dedupe_key = d.key
+             WHERE starts_with(d.key, 'best_line_alert:')
+               AND d.sent_at IS NOT NULL
+               AND d.sent_at > now() - make_interval(hours => $1)
+             ORDER BY d.sent_at DESC
+             LIMIT $2
+            """,
+            clamped_hours,
+            clamped_limit,
+        )
+    except Exception as e:
+        log.warning("best-line-alerts/full query failed: %s", e)
+        return {"items": [], "hours": clamped_hours, "error": str(e)[:240]}
+    items: list[dict[str, object]] = []
+    for r in rows or []:
+        sent_at_v = r.get("sent_at")
+        action_at_v = r.get("action_at")
+        try:
+            sent_iso = sent_at_v.isoformat() if sent_at_v else None
+        except Exception:
+            sent_iso = str(sent_at_v) if sent_at_v else None
+        try:
+            action_iso = action_at_v.isoformat() if action_at_v else None
+        except Exception:
+            action_iso = str(action_at_v) if action_at_v else None
+        items.append({
+            "dedupe_key": r.get("key"),
+            "sent_at": sent_iso,
+            "action": r.get("action"),
             "operator_email": r.get("operator_email"),
             "placed_book": r.get("placed_book"),
             "placed_amount_usd": r.get("placed_amount_usd"),
             "note": r.get("note"),
             "action_at": action_iso,
-            "placed_manually": bool(r.get("action") == "placed_manually"),
         })
     return {"items": items, "hours": clamped_hours, "count": len(items)}
 

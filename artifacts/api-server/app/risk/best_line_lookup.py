@@ -143,6 +143,7 @@ async def lookup_best_line(
     market_type: str | None,
     home_team: str | None,
     away_team: str | None,
+    outcome_team: str | None = None,
     max_age_seconds: int = 300,
     timeout_seconds: float = 0.05,
 ) -> BestLineResult:
@@ -171,10 +172,25 @@ async def lookup_best_line(
     if not home or not away:
         return empty
 
-    sql = """
+    # When the caller passes ``outcome_team`` we restrict snapshots to
+    # the matching leg of the market (e.g. only quotes where
+    # ``outcome ILIKE %Lakers%`` for an LAL moneyline bet).  Without
+    # this filter the gate would compare against the opposite team's
+    # implied probability for h2h markets and produce wrong-direction
+    # blocks/reroutes.  When the caller leaves it None we fall back to
+    # the matchup-level filter — strictly worse for h2h correctness,
+    # but kept as a soft-fail so the gate stays useful when the
+    # outcome team isn't known.
+    outcome_filter = ""
+    params: list[Any] = [sport, kind, int(max_age_seconds), f"%{home}%", f"%{away}%"]
+    if outcome_team and str(outcome_team).strip():
+        outcome_filter = " AND outcome ILIKE $6"
+        params.append(f"%{str(outcome_team).strip()}%")
+    sql = f"""
         SELECT DISTINCT ON (book)
                book,
                odds_value,
+               outcome,
                extract(epoch from (now() - "timestamp"))::float AS age_seconds
           FROM line_snapshots
          WHERE sport = $1
@@ -185,18 +201,12 @@ async def lookup_best_line(
               OR home_team ILIKE $5 OR away_team ILIKE $5
            )
            AND odds_value IS NOT NULL
+           {outcome_filter}
          ORDER BY book, "timestamp" DESC
     """
     try:
         rows = await asyncio.wait_for(
-            db.fetch(
-                sql,
-                sport,
-                kind,
-                int(max_age_seconds),
-                f"%{home}%",
-                f"%{away}%",
-            ),
+            db.fetch(sql, *params),
             timeout=float(timeout_seconds) * 4,  # generous outer cap; gate
                                                   # has its own 50ms guard
         )

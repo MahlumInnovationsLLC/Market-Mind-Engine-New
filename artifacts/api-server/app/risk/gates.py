@@ -2059,6 +2059,17 @@ async def gate_best_line(ctx: RiskContext) -> GateResult:
 
     # Latency guard — 50ms p95 budget per task spec.
     import asyncio as _asyncio
+    # Outcome-team hint: for YES-side h2h trades we assume the
+    # Axiom YES leg corresponds to the home team (the dominant
+    # Kalshi convention for "Will <home> beat <away>?" markets).
+    # Documented in docs/best_line_router_runbook.md. When the
+    # convention doesn't hold for a league, operators can flip the
+    # per-league override knob ``best_line_outcome_is_away_<lg>`` to
+    # use away instead.
+    outcome_team = ctx.home_team
+    if (overrides.get(f"best_line_outcome_is_away_{league.lower()}")
+            or overrides.get("best_line_outcome_is_away")):
+        outcome_team = ctx.away_team
     try:
         result = await _asyncio.wait_for(
             lookup_best_line(
@@ -2066,6 +2077,7 @@ async def gate_best_line(ctx: RiskContext) -> GateResult:
                 market_type=ctx.market_type,
                 home_team=ctx.home_team,
                 away_team=ctx.away_team,
+                outcome_team=outcome_team,
             ),
             timeout=0.050,
         )
