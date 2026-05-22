@@ -6165,6 +6165,47 @@ async def dashboard_bookmaker_metrics(
     return await dashboard.get_bookmaker_metrics(window=window)
 
 
+@app.get("/api/dashboard/live-now")
+async def dashboard_live_now(
+    _: object = Depends(require_approved_user),
+) -> dict[str, object]:
+    """Per-sport live-games-now tile.
+
+    Returns counts of in-progress games (from ``sportradar_live_state``)
+    and predictions flagged ``is_live=true``, plus the oldest feed
+    staleness in seconds and the per-sport freshness budget so the
+    frontend can tint the row yellow/red when the in-game loop falls
+    behind its budget.
+    """
+    payload = await dashboard.get_live_now_tile()
+    try:
+        from .risk.gates import (
+            LIVE_STATE_FRESHNESS_BUDGET_SECONDS,
+            DEFAULT_LIVE_STATE_FRESHNESS_BUDGET_SECONDS,
+        )
+        from .learning.in_game_loop import SPORT_LEAGUES as _SPORT_LEAGUES
+
+        per_sport = payload.get("per_sport") or {}
+        for sport, leagues in _SPORT_LEAGUES.items():
+            entry = per_sport.get(sport)
+            if not isinstance(entry, dict):
+                continue
+            budgets = [
+                LIVE_STATE_FRESHNESS_BUDGET_SECONDS.get(
+                    league, DEFAULT_LIVE_STATE_FRESHNESS_BUDGET_SECONDS
+                )
+                for league in leagues
+            ]
+            entry["staleness_budget_seconds"] = (
+                min(budgets) if budgets
+                else DEFAULT_LIVE_STATE_FRESHNESS_BUDGET_SECONDS
+            )
+    except Exception:
+        # Budgets are best-effort decoration; never fail the tile.
+        pass
+    return payload
+
+
 class _SnoozeRequest(BaseModel):
     hours: float = 1.0
     reason: str | None = None

@@ -23,6 +23,7 @@ import TopEdgesTile from "@/components/dashboard/top-edges-tile";
 import BookmakerMetricsTile from "@/components/dashboard/bookmaker-metrics-tile";
 import MacroReleaseSurprises from "@/components/dashboard/macro-release-surprises";
 import LeaguesExposurePanel from "@/components/dashboard/leagues-exposure-panel";
+import LiveNowTile from "@/components/dashboard/live-now-tile";
 import OperatorControls from "@/components/dashboard/operator-controls";
 import OverFilledOrdersBadge from "@/components/dashboard/over-filled-orders-badge";
 import CalibratorAb from "@/components/dashboard/calibrator-ab";
@@ -128,6 +129,8 @@ function DashboardBody({ isAdmin }: { isAdmin: boolean }) {
         ) : null}
 
         <TailRiskExposurePanel />
+
+        <LiveNowTile />
 
         <BestLineAlertsPanel />
 

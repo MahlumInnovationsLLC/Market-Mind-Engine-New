@@ -73,6 +73,7 @@ import type {
   ListModelHealthAlertsParams,
   LiveExecuteState,
   LiveExecuteToggleRequest,
+  LiveNowTileResponse,
   MarketTitle,
   ModelHealthAlertList,
   ModelsInventory,
@@ -1447,6 +1448,81 @@ export function useGetDashboardBookmakerMetrics<
     params,
     options,
   );
+
+  const query = useQuery(queryOptions) as UseQueryResult<TData, TError> & {
+    queryKey: QueryKey;
+  };
+
+  return { ...query, queryKey: queryOptions.queryKey };
+}
+
+/**
+ * @summary Per-sport live-games-now tile. Counts of in-progress games and is_live predictions, plus the oldest sportradar_live_state feed staleness in seconds and the per-sport freshness budget so the UI can tint a row yellow/red when the in-game loop falls behind.
+ */
+export const getGetDashboardLiveNowUrl = () => {
+  return `/api/dashboard/live-now`;
+};
+
+export const getDashboardLiveNow = async (
+  options?: RequestInit,
+): Promise<LiveNowTileResponse> => {
+  return customFetch<LiveNowTileResponse>(getGetDashboardLiveNowUrl(), {
+    ...options,
+    method: "GET",
+  });
+};
+
+export const getGetDashboardLiveNowQueryKey = () => {
+  return [`/api/dashboard/live-now`] as const;
+};
+
+export const getGetDashboardLiveNowQueryOptions = <
+  TData = Awaited<ReturnType<typeof getDashboardLiveNow>>,
+  TError = ErrorType<unknown>,
+>(options?: {
+  query?: UseQueryOptions<
+    Awaited<ReturnType<typeof getDashboardLiveNow>>,
+    TError,
+    TData
+  >;
+  request?: SecondParameter<typeof customFetch>;
+}) => {
+  const { query: queryOptions, request: requestOptions } = options ?? {};
+
+  const queryKey = queryOptions?.queryKey ?? getGetDashboardLiveNowQueryKey();
+
+  const queryFn: QueryFunction<
+    Awaited<ReturnType<typeof getDashboardLiveNow>>
+  > = ({ signal }) => getDashboardLiveNow({ signal, ...requestOptions });
+
+  return { queryKey, queryFn, ...queryOptions } as UseQueryOptions<
+    Awaited<ReturnType<typeof getDashboardLiveNow>>,
+    TError,
+    TData
+  > & { queryKey: QueryKey };
+};
+
+export type GetDashboardLiveNowQueryResult = NonNullable<
+  Awaited<ReturnType<typeof getDashboardLiveNow>>
+>;
+export type GetDashboardLiveNowQueryError = ErrorType<unknown>;
+
+/**
+ * @summary Per-sport live-games-now tile. Counts of in-progress games and is_live predictions, plus the oldest sportradar_live_state feed staleness in seconds and the per-sport freshness budget so the UI can tint a row yellow/red when the in-game loop falls behind.
+ */
+
+export function useGetDashboardLiveNow<
+  TData = Awaited<ReturnType<typeof getDashboardLiveNow>>,
+  TError = ErrorType<unknown>,
+>(options?: {
+  query?: UseQueryOptions<
+    Awaited<ReturnType<typeof getDashboardLiveNow>>,
+    TError,
+    TData
+  >;
+  request?: SecondParameter<typeof customFetch>;
+}): UseQueryResult<TData, TError> & { queryKey: QueryKey } {
+  const queryOptions = getGetDashboardLiveNowQueryOptions(options);
 
   const query = useQuery(queryOptions) as UseQueryResult<TData, TError> & {
     queryKey: QueryKey;

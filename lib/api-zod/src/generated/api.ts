@@ -634,6 +634,40 @@ export const GetDashboardBookmakerMetricsResponse = zod.object({
 });
 
 /**
+ * @summary Per-sport live-games-now tile. Counts of in-progress games and is_live predictions, plus the oldest sportradar_live_state feed staleness in seconds and the per-sport freshness budget so the UI can tint a row yellow/red when the in-game loop falls behind.
+ */
+export const GetDashboardLiveNowResponse = zod.object({
+  fetched_at: zod.string(),
+  totals: zod.object({
+    live_games: zod.number(),
+    is_live_predictions: zod.number(),
+  }),
+  per_sport: zod.record(
+    zod.string(),
+    zod.object({
+      live_games: zod.number().describe("In-progress games for this sport."),
+      is_live_predictions: zod
+        .number()
+        .describe("Open predictions tagged is_live=true."),
+      latest_fetched_at: zod.string().nullish(),
+      oldest_staleness_seconds: zod
+        .number()
+        .nullish()
+        .describe(
+          "Age (seconds) of the oldest sportradar_live_state row for this sport.",
+        ),
+      staleness_budget_seconds: zod
+        .number()
+        .optional()
+        .describe(
+          "Per-sport freshness budget (minimum across leagues) the in-game gate uses.",
+        ),
+      error: zod.string().nullish(),
+    }),
+  ),
+});
+
+/**
  * @summary Suppress a single pending candidate from the executor + tile for `hours` (default 1, cap 30 days).  Latest write wins.
  */
 export const SnoozeDashboardCandidateParams = zod.object({

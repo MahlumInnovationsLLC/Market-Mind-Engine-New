@@ -203,6 +203,32 @@ export interface BookmakerMetricsResponse {
   error?: string | null;
 }
 
+export interface LiveNowSportEntry {
+  /** In-progress games for this sport. */
+  live_games: number;
+  /** Open predictions tagged is_live=true. */
+  is_live_predictions: number;
+  latest_fetched_at?: string | null;
+  /** Age (seconds) of the oldest sportradar_live_state row for this sport. */
+  oldest_staleness_seconds?: number | null;
+  /** Per-sport freshness budget (minimum across leagues) the in-game gate uses. */
+  staleness_budget_seconds?: number;
+  error?: string | null;
+}
+
+export interface LiveNowTotals {
+  live_games: number;
+  is_live_predictions: number;
+}
+
+export type LiveNowTileResponsePerSport = { [key: string]: LiveNowSportEntry };
+
+export interface LiveNowTileResponse {
+  fetched_at: string;
+  totals: LiveNowTotals;
+  per_sport: LiveNowTileResponsePerSport;
+}
+
 export type EdgeTerminalInputModeResponseMode =
   (typeof EdgeTerminalInputModeResponseMode)[keyof typeof EdgeTerminalInputModeResponseMode];
 

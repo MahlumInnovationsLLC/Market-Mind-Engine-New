@@ -281,6 +281,22 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/BookmakerMetricsResponse" }
 
+  /dashboard/live-now:
+    get:
+      operationId: getDashboardLiveNow
+      tags: [dashboard]
+      summary: >-
+        Per-sport live-games-now tile. Counts of in-progress games and
+        is_live predictions, plus the oldest sportradar_live_state feed
+        staleness in seconds and the per-sport freshness budget so the
+        UI can tint a row yellow/red when the in-game loop falls behind.
+      responses:
+        "200":
+          description: Per-sport live-now snapshot
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/LiveNowTileResponse" }
+
   /dashboard/candidates/{prediction_id}/snooze:
     post:
       operationId: snoozeDashboardCandidate
@@ -1384,6 +1400,34 @@ components:
         picks_today: { $ref: "#/components/schemas/BookmakerPicksToday" }
         error: { type: string, nullable: true }
       required: [window, generated_at, unit_dollars, n_settled, picks_today]
+
+    LiveNowSportEntry:
+      type: object
+      properties:
+        live_games: { type: integer, description: "In-progress games for this sport." }
+        is_live_predictions: { type: integer, description: "Open predictions tagged is_live=true." }
+        latest_fetched_at: { type: string, nullable: true }
+        oldest_staleness_seconds: { type: number, nullable: true, description: "Age (seconds) of the oldest sportradar_live_state row for this sport." }
+        staleness_budget_seconds: { type: number, description: "Per-sport freshness budget (minimum across leagues) the in-game gate uses." }
+        error: { type: string, nullable: true }
+      required: [live_games, is_live_predictions]
+
+    LiveNowTotals:
+      type: object
+      properties:
+        live_games: { type: integer }
+        is_live_predictions: { type: integer }
+      required: [live_games, is_live_predictions]
+
+    LiveNowTileResponse:
+      type: object
+      properties:
+        fetched_at: { type: string }
+        totals: { $ref: "#/components/schemas/LiveNowTotals" }
+        per_sport:
+          type: object
+          additionalProperties: { $ref: "#/components/schemas/LiveNowSportEntry" }
+      required: [fetched_at, totals, per_sport]
 
     EdgeTerminalInputModeResponse:
       type: object

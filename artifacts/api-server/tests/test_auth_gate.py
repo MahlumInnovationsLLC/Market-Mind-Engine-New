@@ -205,6 +205,8 @@ PROTECTED_ROUTES: tuple[str, ...] = (
     # Task #832 — Top-Edges + bookmaker-grammar tiles (web + mobile).
     "/api/dashboard/top-edges",
     "/api/dashboard/bookmaker-metrics",
+    # Task #837 — per-sport Live-Games-Now tile on the operator dashboard.
+    "/api/dashboard/live-now",
     # Task #844 — Edge Terminal scraper input mode.
     "/api/edge-terminal/input-mode",
     "/api/edge-terminal/status",
