@@ -6212,6 +6212,14 @@ async def dashboard_edge_terminal_pnl(
     return await dashboard.get_edge_terminal_pnl()
 
 
+@app.get("/api/dashboard/open-payout")
+async def dashboard_open_payout(
+    _: object = Depends(require_approved_user),
+) -> dict[str, object]:
+    """Potential payout/profit aggregate for currently-open positions."""
+    return await dashboard.get_open_payout()
+
+
 @app.get("/api/dashboard/edge-terminal-signals")
 async def dashboard_edge_terminal_signals(
     limit: int = Query(default=25, ge=1, le=200),

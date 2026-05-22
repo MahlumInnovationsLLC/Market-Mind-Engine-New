@@ -20,10 +20,10 @@ import EquityCharts from "@/components/dashboard/equity-charts";
 import HighlightsPanel from "@/components/dashboard/highlights-panel";
 import KpiSummaryBar from "@/components/dashboard/kpi-summary-bar";
 import TopEdgesTile from "@/components/dashboard/top-edges-tile";
+import OpenPayoutTile from "@/components/dashboard/open-payout-tile";
 import BookmakerMetricsTile from "@/components/dashboard/bookmaker-metrics-tile";
 import MacroReleaseSurprises from "@/components/dashboard/macro-release-surprises";
 import LeaguesExposurePanel from "@/components/dashboard/leagues-exposure-panel";
-import LiveNowTile from "@/components/dashboard/live-now-tile";
 import OperatorControls from "@/components/dashboard/operator-controls";
 import OverFilledOrdersBadge from "@/components/dashboard/over-filled-orders-badge";
 import CalibratorAb from "@/components/dashboard/calibrator-ab";
@@ -33,8 +33,6 @@ import { PeriodProvider, PeriodStrip } from "@/components/dashboard/period-conte
 import { PlacedByProvider } from "@/components/dashboard/placed-by-context";
 import { PlacedByToggle } from "@/components/dashboard/placed-by-toggle";
 import PipelineTracker from "@/components/dashboard/pipeline-tracker";
-import TailRiskExposurePanel from "@/components/dashboard/tail-risk-exposure-panel";
-import BestLineAlertsPanel from "@/components/dashboard/best-line-alerts-panel";
 import TelegramConcierge from "@/components/dashboard/telegram-concierge";
 import TournamentLeaderboardsPanel from "@/components/dashboard/tournament-leaderboards-panel";
 import TournamentReplaysPanel from "@/components/dashboard/tournament-replays-panel";
@@ -109,6 +107,8 @@ function DashboardBody({ isAdmin }: { isAdmin: boolean }) {
           </div>
         </header>
 
+        <OpenPayoutTile />
+
         <KpiSummaryBar />
 
         {isEdgeTerminal ? (
@@ -127,12 +127,6 @@ function DashboardBody({ isAdmin }: { isAdmin: boolean }) {
             {!isEdgeTerminal ? <BookmakerMetricsTile /> : null}
           </div>
         ) : null}
-
-        <TailRiskExposurePanel />
-
-        <LiveNowTile />
-
-        <BestLineAlertsPanel />
 
         <VerticalPicker isAdmin={isAdmin} />
 

@@ -380,6 +380,41 @@ async def get_overview(
     }
 
 
+async def get_open_payout() -> dict[str, Any]:
+    """Aggregate potential payout across currently-open positions.
+
+    On Kalshi-style $1 binary contracts each share pays $1 (100¢) at
+    settlement, so the maximum payout for any open position is simply
+    ``SUM(quantity)`` dollars regardless of side. Cost basis is
+    ``SUM(quantity * avg_price / 100)`` and the headline number — the
+    potential profit if every open ticket wins — is payout minus basis.
+    """
+    row = await db.fetchrow(
+        """
+        SELECT
+          coalesce(count(*), 0)                          AS open_count,
+          coalesce(sum(quantity), 0)::float              AS total_quantity,
+          coalesce(sum(quantity * avg_price / 100.0), 0)::float AS total_basis
+        FROM positions
+        WHERE coalesce(status, 'open') = 'open'
+          AND quantity > 0
+        """
+    )
+    open_count = int(row["open_count"] or 0) if row else 0
+    qty = float(row["total_quantity"] or 0.0) if row else 0.0
+    basis = float(row["total_basis"] or 0.0) if row else 0.0
+    potential_payout = qty  # $1 per contract at max
+    potential_profit = potential_payout - basis
+    return {
+        "open_count": open_count,
+        "total_quantity": qty,
+        "cost_basis_usd": round(basis, 2),
+        "potential_payout_usd": round(potential_payout, 2),
+        "potential_profit_usd": round(potential_profit, 2),
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+
 async def get_recent_trades(
     limit: int = 25,
     placed_by: str | None = None,
