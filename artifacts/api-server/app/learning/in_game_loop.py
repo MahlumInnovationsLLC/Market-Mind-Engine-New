@@ -322,6 +322,11 @@ async def _fetch_live_eligible(
                    p.matchup            AS matchup,
                    p.home_team          AS home_team,
                    p.away_team          AS away_team,
+                   -- ``metadata`` is needed by the per-sport live
+                   -- predictors that want to read producer-side hints
+                   -- (e.g. soccer's ``leg_orientation`` set by the
+                   -- ``kalshi_sports_markets`` feed — task #880).
+                   p.metadata           AS metadata,
                    s.status             AS status,
                    s.home_score         AS home_score,
                    s.away_score         AS away_score,

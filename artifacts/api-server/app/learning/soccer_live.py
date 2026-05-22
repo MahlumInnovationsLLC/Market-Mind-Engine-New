@@ -43,6 +43,7 @@ within the 0.02 ship criterion (per the task brief).
 from __future__ import annotations
 
 import logging
+import math
 import re
 from typing import Any
 
@@ -82,6 +83,37 @@ _SCORE_GAP_KICKER_PP = 0.02
 _MAX_SCORE_GAP_KICKER_PP = 0.06
 
 
+# ---------------------------------------------------------------------------
+# Leg-aware Poisson / Dixon-Coles update (task #880)
+# ---------------------------------------------------------------------------
+#
+# Baseline scoring intensities for a full match (90 minutes), used to
+# compute the remaining-time goal distribution conditional on the
+# current score.  These are league-blended averages from public
+# sources (top-five European leagues + MLS, 2018-2024): home sides
+# average ~1.45 goals/match, away sides ~1.15.  The home/away split
+# is intentionally kept because a Poisson with equal lambdas would
+# bias DRAW upward beyond the empirical rate.  Per-league lambdas
+# would be a small refinement — left for a follow-up since the
+# blended values already narrow the Brier delta vs the leg-agnostic
+# baseline.
+_BASELINE_LAMBDA_HOME = 1.45
+_BASELINE_LAMBDA_AWAY = 1.15
+
+# Truncation cap for the remaining-time goal grid: P(8+ more goals
+# in either half of an in-progress match) is < 1e-6 at the baseline
+# lambdas, so an 8x8 grid converges to better than 4 decimal places
+# without dragging in scipy.
+_DC_MAX_REMAINING_GOALS = 8
+
+# Recognised leg labels.  Anything else collapses to "no leg
+# information" and the predictor takes the leg-agnostic branch.
+_LEG_HOME = "HOME"
+_LEG_DRAW = "DRAW"
+_LEG_AWAY = "AWAY"
+_VALID_LEGS = frozenset({_LEG_HOME, _LEG_DRAW, _LEG_AWAY})
+
+
 def is_soccer_league(league: str | None) -> bool:
     """Case-insensitive membership check used by the in-game loop
     dispatcher so callers don't have to upper-case + frozenset-test
@@ -98,6 +130,178 @@ def is_soccer_league(league: str | None) -> bool:
 
 
 _CLOCK_RE = re.compile(r"^\s*(\d{1,3})(?::(\d{1,2}))?\s*$")
+
+
+# Leg-orientation parsing fallback for rows whose ``metadata`` blob
+# didn't ship a producer-side ``leg_orientation`` (e.g. soccer rows
+# upserted before the kalshi_sports_markets feed started persisting
+# the label).  Kept in sync with the parser in
+# :mod:`app.feeds.kalshi_sports_markets` — duplicated rather than
+# imported so the live predictor stays import-cycle-clean.
+_DRAW_KEYWORDS = (
+    "draw", " tie", "tied", "ends level", "level after",
+    "stalemate", "share the points",
+)
+_WIN_SUBJECT_RE = re.compile(
+    r"^\s*(?:will\s+)?(?:the\s+)?(?P<subject>.+?)\s+"
+    r"(?:beat|beats|defeat|defeats|win|wins)\b",
+    re.IGNORECASE,
+)
+
+
+def _normalise_name(s: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "", s.lower()) if s else ""
+
+
+def _parse_leg_from_title(
+    title: str | None, home_team: str | None, away_team: str | None
+) -> str | None:
+    """Best-effort leg orientation from a Kalshi soccer market title.
+
+    Returns ``"HOME"`` / ``"DRAW"`` / ``"AWAY"`` or ``None``.  Used
+    as a fallback when the predictions row's ``metadata`` blob doesn't
+    already carry a ``leg_orientation`` — the producer
+    (``kalshi_sports_markets``) is the primary source of truth.
+    """
+    if not title:
+        return None
+    low = title.lower()
+    for kw in _DRAW_KEYWORDS:
+        if kw in low:
+            return _LEG_DRAW
+    m = _WIN_SUBJECT_RE.match(title)
+    if not m:
+        return None
+    subject = _normalise_name(m.group("subject"))
+    if not subject:
+        return None
+    home_n = _normalise_name(home_team or "")
+    away_n = _normalise_name(away_team or "")
+    if home_n and (subject in home_n or home_n in subject):
+        return _LEG_HOME
+    if away_n and (subject in away_n or away_n in subject):
+        return _LEG_AWAY
+    return None
+
+
+def _coerce_metadata(value: Any) -> dict[str, Any]:
+    """Coerce ``metadata`` (which asyncpg may hand back as either a
+    dict or a JSON string depending on the column oid registration)
+    into a dict.  Returns ``{}`` on anything unparseable."""
+    if value is None:
+        return {}
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, (bytes, bytearray)):
+        try:
+            value = value.decode("utf-8")
+        except Exception:
+            return {}
+    if isinstance(value, str):
+        import json as _json
+        try:
+            parsed = _json.loads(value)
+        except (ValueError, TypeError):
+            return {}
+        return parsed if isinstance(parsed, dict) else {}
+    return {}
+
+
+def _resolve_leg_orientation(row: dict[str, Any]) -> str | None:
+    """Pull leg orientation from the row's metadata blob, falling back
+    to title parsing.  Returns ``None`` when neither source yields a
+    recognised leg label."""
+    meta = _coerce_metadata(row.get("metadata"))
+    raw = meta.get("leg_orientation")
+    if isinstance(raw, str):
+        leg = raw.strip().upper()
+        if leg in _VALID_LEGS:
+            return leg
+    title = meta.get("title") if meta else None
+    return _parse_leg_from_title(title, row.get("home_team"), row.get("away_team"))
+
+
+# ---------------------------------------------------------------------------
+# Closed-form Poisson goal-grid probability for the remaining match time.
+# ---------------------------------------------------------------------------
+
+
+def _poisson_pmf(lam: float, k: int) -> float:
+    """Numerically stable Poisson PMF via log-space arithmetic.
+
+    Returns 0.0 for the impossible negative-lambda case and the
+    degenerate-but-defined ``lam == 0`` case (only k == 0 has mass).
+    """
+    if lam < 0.0:
+        return 0.0
+    if lam == 0.0:
+        return 1.0 if k == 0 else 0.0
+    return math.exp(-lam + k * math.log(lam) - math.lgamma(k + 1))
+
+
+def _dc_leg_probability(
+    leg: str, score_diff: int, minutes_elapsed: float
+) -> float | None:
+    """Closed-form leg probability conditional on the current score
+    and time elapsed, using independent Poisson scoring intensities
+    for the home and away sides over the remaining regulation time.
+
+    This is the "Dixon-Coles without the low-score correlation
+    correction" variant — DC's joint-zero / one-one tilt is small at
+    the baseline lambdas and adding it would require Skellam helpers
+    we don't otherwise need.  The leg-agnostic blend remains the
+    fallback whenever this function returns ``None``.
+
+    Arguments:
+      * ``leg`` — one of HOME / DRAW / AWAY.
+      * ``score_diff`` — current ``home_score - away_score``.
+      * ``minutes_elapsed`` — match minutes elapsed (0 at kickoff,
+        90 at full-time; values above 90 are clamped so a 95-minute
+        stoppage reading doesn't push remaining-time below zero).
+    """
+    if leg not in _VALID_LEGS:
+        return None
+    elapsed = max(0.0, min(_REGULATION_MINUTES, float(minutes_elapsed)))
+    remaining_frac = 1.0 - (elapsed / _REGULATION_MINUTES)
+    # At full-time the score is final → leg probability collapses to
+    # the indicator function of the current score diff.  Skip the
+    # grid and answer exactly.
+    if remaining_frac <= 0.0:
+        if leg == _LEG_HOME:
+            return 1.0 if score_diff > 0 else 0.0
+        if leg == _LEG_DRAW:
+            return 1.0 if score_diff == 0 else 0.0
+        return 1.0 if score_diff < 0 else 0.0
+    lam_h = _BASELINE_LAMBDA_HOME * remaining_frac
+    lam_a = _BASELINE_LAMBDA_AWAY * remaining_frac
+    p_home_pmf = [_poisson_pmf(lam_h, k) for k in range(_DC_MAX_REMAINING_GOALS + 1)]
+    p_away_pmf = [_poisson_pmf(lam_a, k) for k in range(_DC_MAX_REMAINING_GOALS + 1)]
+    p_home_win = 0.0
+    p_draw = 0.0
+    p_away_win = 0.0
+    base = int(score_diff)
+    for h, ph in enumerate(p_home_pmf):
+        if ph <= 0.0:
+            continue
+        for a, pa in enumerate(p_away_pmf):
+            if pa <= 0.0:
+                continue
+            joint = ph * pa
+            final_diff = base + h - a
+            if final_diff > 0:
+                p_home_win += joint
+            elif final_diff == 0:
+                p_draw += joint
+            else:
+                p_away_win += joint
+    total = p_home_win + p_draw + p_away_win
+    if total <= 0.0:
+        return None
+    if leg == _LEG_HOME:
+        return p_home_win / total
+    if leg == _LEG_DRAW:
+        return p_draw / total
+    return p_away_win / total
 
 # Period name → minutes already elapsed at the START of the period.
 # Anything we don't recognise falls through to 0 (the clock will then
@@ -214,11 +418,19 @@ def build_live_features(
     """
     pregame = _coerce_prob(row.get("model_yes_prob"))
     yes_price = _coerce_prob(row.get("kalshi_price"))
+    leg = _resolve_leg_orientation(row)
     feats: dict[str, float] = {
         "pregame_prob": pregame if pregame is not None else 0.5,
         "kalshi_price": yes_price if yes_price is not None else 0.5,
         "has_pregame": 1.0 if pregame is not None else 0.0,
         "has_market_price": 1.0 if yes_price is not None else 0.0,
+        # Leg-aware Poisson update encodings (task #880).  Defaulted
+        # to neutral / "unknown" so the downstream blender can branch
+        # on ``has_leg_orientation`` without a key-error.
+        "has_leg_orientation": 1.0 if leg is not None else 0.0,
+        "leg_is_home": 1.0 if leg == _LEG_HOME else 0.0,
+        "leg_is_draw": 1.0 if leg == _LEG_DRAW else 0.0,
+        "leg_is_away": 1.0 if leg == _LEG_AWAY else 0.0,
     }
     if not live_state:
         feats.update({
@@ -249,6 +461,18 @@ def build_live_features(
         "has_live_state": 1.0,
         "state_age_seconds": float(age) if age is not None else 0.0,
     })
+    # Leg-aware Dixon-Coles / Poisson posterior on THIS leg given the
+    # live score and remaining match time.  Only computed when we know
+    # which side YES is pricing; otherwise the leg-agnostic blend
+    # (pregame ↔ market + score-gap kicker) carries the cycle.
+    leg = _resolve_leg_orientation(row)
+    if leg is not None:
+        dc = _dc_leg_probability(leg, int(hs - as_), float(minutes))
+        if dc is not None:
+            feats["leg_dc_prob"] = float(dc)
+            feats["has_leg_dc"] = 1.0
+    feats.setdefault("leg_dc_prob", 0.0)
+    feats.setdefault("has_leg_dc", 0.0)
     return feats
 
 
@@ -334,6 +558,24 @@ def _raw_live_probability(features: dict[str, float]) -> float | None:
         # before kickoff state is confirmed).
         return pregame
     fraction = features.get("minutes_fraction", 0.0)
+    if features.get("has_leg_dc", 0.0) > 0.5:
+        # Leg-aware branch (task #880).  When we know which side YES
+        # is pricing we replace the leg-agnostic score-gap kicker with
+        # a proper Dixon-Coles / Poisson posterior on THIS leg.  The
+        # "core" estimate smoothly migrates from the pre-game prior
+        # at kickoff to the live DC posterior at full-time, and the
+        # market layer rides on top with the same time-grown weight
+        # the leg-agnostic branch uses.  Net effect: the live score
+        # actually moves the prediction toward the right leg outcome
+        # (the score-gap kicker could only nudge it toward the
+        # already-leg-aware market mid).
+        dc_prob = features.get("leg_dc_prob", pregame)
+        core = (1.0 - fraction) * pregame + fraction * dc_prob
+        w_market = max(
+            0.0, min(_MAX_MARKET_WEIGHT, fraction * _MAX_MARKET_WEIGHT),
+        )
+        blended = (1.0 - w_market) * core + w_market * market
+        return max(0.0, min(1.0, blended))
     blended = _blend(pregame, market, fraction)
     blended += _score_gap_kicker(
         features.get("score_diff", 0.0), market, fraction,
@@ -376,6 +618,12 @@ async def predict_live_yes(
         cal_info = {"applied": False, "reason": f"error: {type(e).__name__}"}
     meta["raw_probability"] = float(raw)
     meta["calibration"] = cal_info
+    # Surface the leg label (when known) so the daily honesty report's
+    # Section 9 can split the in-game Brier by leg orientation and
+    # confirm the leg-aware branch is the actual source of the delta.
+    leg = _resolve_leg_orientation(row)
+    if leg is not None:
+        meta["leg_orientation"] = leg
     return float(cal_prob), meta
 
 

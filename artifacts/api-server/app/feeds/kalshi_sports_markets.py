@@ -44,6 +44,7 @@ from __future__ import annotations
 import json as _json
 import logging
 import os
+import re
 from typing import Any, Iterable
 
 from .. import db
@@ -190,6 +191,87 @@ def _mid_price_dollars(market: dict[str, Any]) -> float | None:
 
 
 # ---------------------------------------------------------------------------
+# Soccer 3-way leg orientation parsing (task #880)
+# ---------------------------------------------------------------------------
+#
+# Kalshi soccer game markets are 3-way: a single event splits into a
+# HOME-win, DRAW, and AWAY-win market, each its own ticker.  The
+# binary YES on those tickers means "this leg occurred".  The live
+# in-game predictor (:mod:`app.learning.soccer_live`) can use the
+# leg label to apply a closed-form Dixon-Coles / Poisson update
+# against the live score — but only if it knows which leg YES is
+# pricing.  We parse the leg out of the Kalshi title here (the
+# producer) and stash it in ``metadata.leg_orientation`` so the live
+# predictor doesn't have to re-parse on every cycle.
+
+_DRAW_KEYWORDS = (
+    "draw", " tie", "tied", "ends level", "level after",
+    "stalemate", "share the points",
+)
+# "Will Manchester City beat Arsenal?", "Manchester City beats Arsenal",
+# "Manchester City defeats Arsenal", "Will Manchester City win?"
+_WIN_SUBJECT_RE = re.compile(
+    r"^\s*(?:will\s+)?(?:the\s+)?(?P<subject>.+?)\s+"
+    r"(?:beat|beats|defeat|defeats|win|wins)\b",
+    re.IGNORECASE,
+)
+
+
+def _normalise_name(s: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "", s.lower()) if s else ""
+
+
+def _parse_leg_orientation(
+    title: str | None,
+    home_team: str | None,
+    away_team: str | None,
+) -> str | None:
+    """Return ``"HOME"`` / ``"DRAW"`` / ``"AWAY"`` for a Kalshi soccer
+    game-market title when we can identify which 3-way leg the YES
+    side is pricing; ``None`` when the title isn't a recognised
+    moneyline / draw template.
+
+    The match against home/away is normalised (lowercased, alphanum
+    only) so "Man. City" matches "Manchester City" loosely — false
+    positives are unlikely because the producer already knows the
+    canonical names for the event.
+    """
+    if not title:
+        return None
+    low = title.lower()
+    for kw in _DRAW_KEYWORDS:
+        if kw in low:
+            return "DRAW"
+    m = _WIN_SUBJECT_RE.match(title)
+    if not m:
+        return None
+    subject = _normalise_name(m.group("subject"))
+    if not subject:
+        return None
+    home_n = _normalise_name(home_team or "")
+    away_n = _normalise_name(away_team or "")
+    # Substring match either direction so "City" matches "Manchester City"
+    # and vice versa.  Home checked first because Kalshi titles are
+    # marginally more likely to phrase a home-side YES.
+    if home_n and (subject in home_n or home_n in subject):
+        return "HOME"
+    if away_n and (subject in away_n or away_n in subject):
+        return "AWAY"
+    return None
+
+
+# Series tickers that price soccer 3-way leagues — leg orientation
+# parsing is only meaningful for these.  Other sports (NFL/NBA/...)
+# are 2-way moneylines whose YES is always the home/away side per the
+# title parser; the live predictor for those sports lands in a later
+# task and does not consume ``leg_orientation``.
+_SOCCER_SERIES: frozenset[str] = frozenset({
+    "KXMLSGAME", "KXEPLGAME", "KXLALIGAGAME", "KXSERIEAGAME",
+    "KXBUNDESGAME", "KXLIGUE1GAME", "KXUCLGAME",
+})
+
+
+# ---------------------------------------------------------------------------
 # Candidate construction
 # ---------------------------------------------------------------------------
 
@@ -230,6 +312,19 @@ def _candidate_from_market(
     close_time = _parse_close_time(market.get("close_time"))
     price = _mid_price_dollars(market)
 
+    # Leg orientation is only meaningful for the soccer 3-way series —
+    # see ``_SOCCER_SERIES``.  Stored on the candidate's metadata blob
+    # so the live in-game soccer predictor (task #880) can pick THIS
+    # leg's Dixon-Coles posterior without re-parsing the title every
+    # cycle.  ``None`` for non-soccer markets and for soccer titles we
+    # can't confidently classify (the live predictor falls back to its
+    # leg-agnostic blend in that case).
+    leg_orientation: str | None = None
+    if series in _SOCCER_SERIES:
+        leg_orientation = _parse_leg_orientation(
+            market.get("title"), home, away,
+        )
+
     return {
         "game_id": game_id,
         "league": league,
@@ -266,6 +361,7 @@ def _candidate_from_market(
             "last_price_dollars": market.get("last_price_dollars"),
             "home_team": home,
             "away_team": away,
+            "leg_orientation": leg_orientation,
             "source": "kalshi_sports_markets",
         },
     }

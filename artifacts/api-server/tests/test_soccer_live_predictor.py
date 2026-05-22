@@ -129,6 +129,131 @@ def test_raw_probability_no_signal_returns_none():
     assert _sl._raw_live_probability(feats) is None
 
 
+def test_leg_orientation_parsed_from_metadata_label():
+    feats = _sl.build_live_features(
+        row={
+            "model_yes_prob": 0.5, "kalshi_price": 0.4, "league": "EPL",
+            "home_team": "Manchester City", "away_team": "Arsenal",
+            "metadata": {"leg_orientation": "HOME"},
+        },
+        live_state={
+            "home_score": 1, "away_score": 0,
+            "period": "2nd_half", "clock": "30:00",
+            "state_age_seconds": 5.0,
+        },
+    )
+    assert feats["has_leg_orientation"] == 1.0
+    assert feats["leg_is_home"] == 1.0
+    assert feats["has_leg_dc"] == 1.0
+    # Leading 1-0 in the 75th minute on a HOME leg should make the DC
+    # posterior comfortably > 50%.
+    assert feats["leg_dc_prob"] > 0.65
+
+
+def test_leg_orientation_parsed_from_title_fallback():
+    # Producer didn't set leg_orientation but the title is parseable.
+    feats = _sl.build_live_features(
+        row={
+            "model_yes_prob": 0.5, "kalshi_price": 0.4, "league": "EPL",
+            "home_team": "Manchester City", "away_team": "Arsenal",
+            "metadata": {"title": "Will Arsenal beat Manchester City?"},
+        },
+        live_state={
+            "home_score": 1, "away_score": 0,
+            "period": "2nd_half", "clock": "30:00",
+            "state_age_seconds": 5.0,
+        },
+    )
+    assert feats["leg_is_away"] == 1.0
+    # Arsenal trails 0-1 in the 75th minute — AWAY leg DC posterior
+    # should be quite low.
+    assert feats["leg_dc_prob"] < 0.20
+
+
+def test_leg_orientation_draw_keyword():
+    feats = _sl.build_live_features(
+        row={
+            "model_yes_prob": 0.3, "kalshi_price": 0.3, "league": "EPL",
+            "home_team": "Manchester City", "away_team": "Arsenal",
+            "metadata": {"title": "Manchester City vs Arsenal - Draw"},
+        },
+        live_state={
+            "home_score": 0, "away_score": 0,
+            "period": "2nd_half", "clock": "30:00",
+            "state_age_seconds": 5.0,
+        },
+    )
+    assert feats["leg_is_draw"] == 1.0
+    # 0-0 in the 75th minute → draw posterior should be the dominant
+    # outcome (well above the league-average ~25% draw share).
+    assert feats["leg_dc_prob"] > 0.45
+
+
+def test_leg_aware_branch_uses_dc_not_score_kicker():
+    # HOME leg, 2-0 lead at minute 80 — leg-aware branch should pull
+    # the posterior toward the HIGH DC probability even though the
+    # market mid is low (e.g. an under-reactive book).
+    row = {
+        "model_yes_prob": 0.5, "kalshi_price": 0.30, "league": "EPL",
+        "home_team": "Manchester City", "away_team": "Arsenal",
+        "metadata": {"leg_orientation": "HOME"},
+    }
+    feats = _sl.build_live_features(
+        row=row,
+        live_state={
+            "home_score": 2, "away_score": 0,
+            "period": "2nd_half", "clock": "35:00",
+            "state_age_seconds": 5.0,
+        },
+    )
+    leg_aware = _sl._raw_live_probability(feats)
+    # Leg-agnostic counterpart: same row with the leg dropped.
+    row_no_leg = dict(row)
+    row_no_leg["metadata"] = {}
+    feats_no_leg = _sl.build_live_features(
+        row=row_no_leg,
+        live_state={
+            "home_score": 2, "away_score": 0,
+            "period": "2nd_half", "clock": "35:00",
+            "state_age_seconds": 5.0,
+        },
+    )
+    leg_agnostic = _sl._raw_live_probability(feats_no_leg)
+    # The leg-aware branch should produce a meaningfully higher
+    # posterior because it knows the live 2-0 scoreline makes the
+    # HOME leg very likely, where the leg-agnostic blend can only
+    # drift toward the (low) market mid.
+    assert leg_aware > leg_agnostic + 0.05
+    # Leg-aware posterior should sit above the (low) market mid because
+    # the leg-aware core estimate knows a 2-0 HOME lead at minute 80 is
+    # overwhelmingly likely to hold, dragging the blended result back up
+    # past where the market alone would settle it.
+    assert leg_aware > 0.40
+
+
+def test_dc_full_time_collapses_to_indicator():
+    # At minute 90 (or beyond) the DC posterior should reflect the
+    # final score exactly: HOME wins 1-0 → P(HOME)=1, P(DRAW)=0,
+    # P(AWAY)=0.
+    assert _sl._dc_leg_probability("HOME", 1, 90.0) == 1.0
+    assert _sl._dc_leg_probability("DRAW", 1, 90.0) == 0.0
+    assert _sl._dc_leg_probability("AWAY", 1, 90.0) == 0.0
+    assert _sl._dc_leg_probability("DRAW", 0, 95.0) == 1.0
+
+
+def test_dc_kickoff_returns_full_match_prior():
+    # At minute 0 the DC posterior reduces to the unconditional prior
+    # for the configured baseline lambdas.  HOME advantage > AWAY, and
+    # both should each exceed the DRAW share.
+    p_home = _sl._dc_leg_probability("HOME", 0, 0.0)
+    p_draw = _sl._dc_leg_probability("DRAW", 0, 0.0)
+    p_away = _sl._dc_leg_probability("AWAY", 0, 0.0)
+    assert abs((p_home + p_draw + p_away) - 1.0) < 1e-6
+    assert p_home > p_away > 0.0
+    # League-average ~25% draw rate for top-five leagues — wide check.
+    assert 0.20 < p_draw < 0.32
+
+
 def test_parse_clock_minutes_robust_to_garbage():
     assert _sl._parse_clock_minutes(None) == 0.0
     assert _sl._parse_clock_minutes("") == 0.0
