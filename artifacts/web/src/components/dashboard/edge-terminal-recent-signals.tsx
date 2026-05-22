@@ -22,6 +22,21 @@ function fmtPickType(s: string | null | undefined): string {
   return s.replace(/_/g, " ").toUpperCase();
 }
 
+function kalshiMarketUrl(
+  ticker: string | null | undefined,
+  marketId: string | null | undefined,
+): string | null {
+  const raw = (ticker ?? marketId ?? "").trim();
+  if (!raw) return null;
+  const parts = raw.split("-");
+  const series = (parts[0] ?? "").toLowerCase();
+  if (!series) return null;
+  if (parts.length >= 2 && parts[1]) {
+    return `https://kalshi.com/markets/${series}/${parts[1].toLowerCase()}`;
+  }
+  return `https://kalshi.com/markets/${series}`;
+}
+
 function safeHttpUrl(s: string | null | undefined): string | null {
   if (!s || typeof s !== "string") return null;
   try {
@@ -164,7 +179,26 @@ export default function EdgeTerminalRecentSignalsTile() {
                       {fmtEvPct(s.ev_pct)}
                     </td>
                     <td className="py-1.5 pr-3 text-muted-foreground">
-                      {s.ticker ?? "—"}
+                      {(() => {
+                        const href = kalshiMarketUrl(
+                          s.ticker,
+                          s.kalshi_market_id,
+                        );
+                        const label = s.ticker ?? "—";
+                        return href ? (
+                          <a
+                            data-testid={`edge-terminal-ticker-link-${s.id}`}
+                            href={href}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="text-accent-cyan hover:underline"
+                          >
+                            {label}
+                          </a>
+                        ) : (
+                          <span>{label}</span>
+                        );
+                      })()}
                       {s.kalshi_market_id ? (
                         <span
                           data-testid={`edge-terminal-market-id-${s.id}`}

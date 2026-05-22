@@ -72,6 +72,45 @@ describe("EdgeTerminalRecentSignalsTile", () => {
     expect(marketBadge.getAttribute("title")).toBe(
       "00000000-0000-0000-0000-0000000000ab",
     );
+
+    const tickerLink = within(row).getByTestId(
+      "edge-terminal-ticker-link-42",
+    ) as HTMLAnchorElement;
+    expect(tickerLink.getAttribute("href")).toBe(
+      "https://kalshi.com/markets/kxnba/2026",
+    );
+    expect(tickerLink.getAttribute("target")).toBe("_blank");
+    expect(tickerLink.getAttribute("rel")).toBe("noopener noreferrer");
+    expect(tickerLink.textContent).toContain(
+      "KXNBA-2026-OKC-SAS-SPREAD-THU2",
+    );
+  });
+
+  it("does not render a ticker link when ticker and kalshi_market_id are missing", () => {
+    signalsState.data = {
+      limit: 25,
+      generated_at: "2026-05-22T11:30:00Z",
+      items: [
+        {
+          id: 13,
+          signal_date: "2026-05-22",
+          vertical: "nba",
+          matchup: "OKC @ SAS",
+          selection: "Thunder +2",
+          ticker: null,
+          disposition: "pending",
+          scraped_at: null,
+          pick_type: "spread",
+          avg_odds: -110,
+          ev_pct: 1.2,
+          source_screenshot_url: null,
+          kalshi_market_id: null,
+        },
+      ],
+    };
+
+    render(<EdgeTerminalRecentSignalsTile />);
+    expect(screen.queryByTestId("edge-terminal-ticker-link-13")).toBeNull();
   });
 
   it("colors negative EV% red and shows em dash when fields are missing", () => {
