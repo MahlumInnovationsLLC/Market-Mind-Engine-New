@@ -254,5 +254,21 @@ async def _extract_tile(handle: Any) -> dict[str, Any] | None:
         "market_price": _maybe_float(await _attr("market-price")),
         "kalshi_ticker": await _attr("kalshi-ticker"),
         "market_title": await _attr("market-title"),
+        # Task #845: richer signal fields.  ``pick_type`` is the
+        # operator-visible category from the tile (e.g. "moneyline",
+        # "spread", "total", "player_prop"); ``avg_odds`` is the
+        # consensus odds the source quoted (American or decimal —
+        # stored as numeric, the UI formats); ``ev_pct`` is the
+        # source's own expected-value % so we can sanity-check our
+        # derived edge%; ``source_screenshot_url`` is an optional
+        # link the operator can click to see the original tile;
+        # ``kalshi_market_id`` is the Kalshi market UUID (distinct
+        # from the human-readable ``kalshi_ticker``) when the tile
+        # already maps the pick to a Kalshi market.
+        "pick_type": await _attr("pick-type"),
+        "avg_odds": _maybe_float(await _attr("avg-odds")),
+        "ev_pct": _maybe_float(await _attr("ev")),
+        "source_screenshot_url": await _attr("screenshot-url"),
+        "kalshi_market_id": await _attr("kalshi-market-id"),
         "raw": {},  # filled by poller with the source tile text if needed
     }

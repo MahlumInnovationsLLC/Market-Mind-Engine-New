@@ -37,7 +37,9 @@ async def drain_pending(limit: int = 50) -> dict[str, int]:
         """
         SELECT id, vertical, matchup, selection, signal_date,
                edge_pct, model_prob, market_price,
-               kalshi_ticker, market_title, side
+               kalshi_ticker, market_title, side,
+               pick_type, avg_odds, ev_pct,
+               source_screenshot_url, kalshi_market_id
         FROM edge_terminal_signals
         WHERE status = 'pending'
         ORDER BY id ASC

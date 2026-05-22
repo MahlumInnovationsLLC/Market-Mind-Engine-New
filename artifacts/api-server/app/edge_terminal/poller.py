@@ -188,11 +188,15 @@ async def _insert_signal(sig: dict[str, Any]) -> int | None:
         INSERT INTO edge_terminal_signals (
             vertical, matchup, selection, signal_date,
             edge_pct, model_prob, market_price,
-            kalshi_ticker, market_title, raw, status, side
+            kalshi_ticker, market_title, raw, status, side,
+            pick_type, avg_odds, ev_pct,
+            source_screenshot_url, kalshi_market_id
         ) VALUES (
             $1, $2, $3, $4::date,
             $5, $6, $7,
-            $8, $9, $10::jsonb, 'pending', $11
+            $8, $9, $10::jsonb, 'pending', $11,
+            $12, $13, $14,
+            $15, $16
         )
         ON CONFLICT (vertical, matchup, selection, signal_date) DO NOTHING
         RETURNING id
@@ -208,6 +212,11 @@ async def _insert_signal(sig: dict[str, Any]) -> int | None:
         sig.get("market_title"),
         json.dumps(raw),
         side,
+        sig.get("pick_type"),
+        sig.get("avg_odds"),
+        sig.get("ev_pct"),
+        sig.get("source_screenshot_url"),
+        sig.get("kalshi_market_id"),
     )
     return int(new_id) if new_id is not None else None
 

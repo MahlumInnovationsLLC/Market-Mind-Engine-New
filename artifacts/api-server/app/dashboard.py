@@ -7162,6 +7162,8 @@ async def get_edge_terminal_recent_signals(limit: int = 25) -> dict[str, Any]:
             SELECT id, seen_at, vertical, matchup, selection,
                    signal_date, edge_pct, model_prob, market_price,
                    kalshi_ticker, market_title,
+                   pick_type, avg_odds, ev_pct,
+                   source_screenshot_url, kalshi_market_id,
                    status, status_reason, trades_id, placed_at
             FROM edge_terminal_signals
             ORDER BY id DESC
@@ -7179,6 +7181,17 @@ async def get_edge_terminal_recent_signals(limit: int = 25) -> dict[str, Any]:
             sd = d.get("signal_date")
             if hasattr(sd, "isoformat"):
                 d["signal_date"] = sd.isoformat()
+            # Task #845: numeric columns come back as Decimal from
+            # asyncpg's NUMERIC mapping; cast to float so JSON
+            # serialization doesn't blow up and the UI gets a number
+            # rather than a string.
+            for k in ("avg_odds", "ev_pct"):
+                v = d.get(k)
+                if v is not None:
+                    try:
+                        d[k] = float(v)
+                    except (TypeError, ValueError):
+                        d[k] = None
             # Surface OpenAPI-canonical aliases alongside back-compat keys.
             d["ticker"] = d.get("kalshi_ticker")
             d["disposition"] = d.get("status")

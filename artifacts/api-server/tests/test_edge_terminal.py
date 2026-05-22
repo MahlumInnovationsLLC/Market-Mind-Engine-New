@@ -520,6 +520,107 @@ def test_signal_side_roundtrips_db_to_executor(monkeypatch):
     )
 
 
+def test_signal_enrichment_fields_roundtrip_db(monkeypatch):
+    """Task #845: ``pick_type``, ``avg_odds``, ``ev_pct``,
+    ``source_screenshot_url`` and ``kalshi_market_id`` must survive
+    the INSERT → SELECT round trip through ``edge_terminal_signals``
+    so the operator dashboard can show pick type and screenshot
+    evidence."""
+    from app.edge_terminal import poller
+
+    table: dict[int, dict[str, Any]] = {}
+    next_id = {"n": 1}
+
+    async def _fetchval(q: str, *args):
+        if "INSERT INTO edge_terminal_signals" in q:
+            row = {
+                "id": next_id["n"],
+                "vertical": args[0],
+                "matchup": args[1],
+                "selection": args[2],
+                "signal_date": args[3],
+                "edge_pct": args[4],
+                "model_prob": args[5],
+                "market_price": args[6],
+                "kalshi_ticker": args[7],
+                "market_title": args[8],
+                "raw": args[9],
+                "side": args[10],
+                "pick_type": args[11],
+                "avg_odds": args[12],
+                "ev_pct": args[13],
+                "source_screenshot_url": args[14],
+                "kalshi_market_id": args[15],
+                "status": "pending",
+            }
+            table[next_id["n"]] = row
+            next_id["n"] += 1
+            return row["id"]
+        return None
+
+    monkeypatch.setattr(poller.db, "fetchval", _fetchval)
+
+    _run(poller._insert_signal({
+        "vertical": "sports",
+        "matchup": "LAL @ BOS",
+        "selection": "Lakers ML",
+        "signal_date": "2026-05-22",
+        "side": "YES",
+        "edge_pct": 8.5,
+        "model_prob": 0.58,
+        "market_price": 0.50,
+        "kalshi_ticker": "KX-NBA-LAL-BOS",
+        "market_title": "Lakers vs Celtics",
+        "pick_type": "moneyline",
+        "avg_odds": -110.0,
+        "ev_pct": 7.2,
+        "source_screenshot_url": "https://example.com/tile.png",
+        "kalshi_market_id": "00000000-0000-0000-0000-000000000abc",
+        "raw": {},
+    }))
+
+    row = table[1]
+    assert row["pick_type"] == "moneyline"
+    assert row["avg_odds"] == -110.0
+    assert row["ev_pct"] == 7.2
+    assert row["source_screenshot_url"] == "https://example.com/tile.png"
+    assert row["kalshi_market_id"] == "00000000-0000-0000-0000-000000000abc"
+
+
+def test_signal_enrichment_fields_default_to_null_when_missing(monkeypatch):
+    """The scraper leaves the new task #845 fields out when the source
+    tile doesn't expose them; the poller must still INSERT cleanly."""
+    from app.edge_terminal import poller
+
+    captured: list[tuple[Any, ...]] = []
+
+    async def _fetchval(q: str, *args):
+        if "INSERT INTO edge_terminal_signals" in q:
+            captured.append(args)
+            return 1
+        return None
+
+    monkeypatch.setattr(poller.db, "fetchval", _fetchval)
+
+    _run(poller._insert_signal({
+        "vertical": "sports",
+        "matchup": "LAL @ BOS",
+        "selection": "Lakers",
+        "signal_date": "2026-05-22",
+        "raw": {},
+    }))
+
+    assert captured, "poller must have called the INSERT"
+    args = captured[0]
+    # Indices 11..15 correspond to the new pick_type / avg_odds /
+    # ev_pct / source_screenshot_url / kalshi_market_id columns.
+    assert args[11] is None
+    assert args[12] is None
+    assert args[13] is None
+    assert args[14] is None
+    assert args[15] is None
+
+
 def test_fire_one_no_ticker_returns_none(monkeypatch):
     from app.edge_terminal import executor
 
