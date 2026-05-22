@@ -1,5 +1,5 @@
 import { describe, it, expect, afterEach, vi } from "vitest";
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 
 const { state } = vi.hoisted(() => ({
   state: {
@@ -223,5 +223,160 @@ describe("SupabaseGrowthRetentionPanel", () => {
         "supabase-growth-retention-archive-error-ml_signals_archive",
       ),
     ).toBeNull();
+  });
+
+  it("expands an archive loop row on click and reveals the detail grid with an anchor to the last uploaded object", () => {
+    state.data = {
+      archive: [
+        {
+          name: "ml_signals_archive",
+          flavor: "archive",
+          table: "ml_signals",
+          health: "ok",
+          last_tick_at: 1_700_000_000,
+          seconds_since_last_tick: 12,
+          last_deleted: 42,
+          total_deleted: 4_242,
+          last_archived_rows: 1_500,
+          last_bytes_compressed: 2_048,
+          total_archived_rows: 12_345,
+          total_bytes_compressed: 1_048_576,
+          chunk_size: 500,
+          max_rows_per_run: 10_000,
+          retention_days: 7,
+          interval_seconds: 3_600,
+          ts_column: "created_at",
+          started_at: 1_699_900_000,
+          last_object_key: "ml_signals/2024-01-01/chunk-0001.jsonl.gz",
+          last_object_url:
+            "https://supabase.example/storage/ml_signals/2024-01-01/chunk-0001.jsonl.gz",
+          last_error: null,
+        },
+      ],
+      delete_only: [],
+      counts: { ok: 1, stale: 0, error: 0, disabled: 0 },
+      total: 1,
+    };
+
+    render(<SupabaseGrowthRetentionPanel />);
+
+    // Detail row is hidden until the operator expands the row.
+    expect(
+      screen.queryByTestId(
+        "supabase-growth-retention-archive-details-ml_signals_archive",
+      ),
+    ).toBeNull();
+
+    const toggle = screen.getByTestId(
+      "supabase-growth-retention-archive-toggle-ml_signals_archive",
+    );
+    expect(toggle.getAttribute("aria-expanded")).toBe("false");
+    fireEvent.click(toggle);
+    expect(toggle.getAttribute("aria-expanded")).toBe("true");
+
+    const details = screen.getByTestId(
+      "supabase-growth-retention-archive-details-ml_signals_archive",
+    );
+    const text = details.textContent ?? "";
+    // Archive-only detail fields.
+    expect(text).toMatch(/Chunk size/);
+    expect(text).toMatch(/500/);
+    expect(text).toMatch(/Max rows \/ run/);
+    expect(text).toMatch(/10,000/);
+    expect(text).toMatch(/Total archived rows/);
+    expect(text).toMatch(/12,345/);
+    expect(text).toMatch(/Total bytes compressed/);
+    expect(text).toMatch(/1\.0 MiB/);
+    // Shared detail fields.
+    expect(text).toMatch(/Retention horizon/);
+    expect(text).toMatch(/7 days/);
+    expect(text).toMatch(/Sweep cadence/);
+    expect(text).toMatch(/60\.0m/);
+    expect(text).toMatch(/Timestamp column/);
+    expect(text).toMatch(/created_at/);
+
+    // last_object_key renders as an anchor pointing at last_object_url.
+    const link = screen.getByTestId(
+      "supabase-growth-retention-archive-object-link-ml_signals_archive",
+    ) as HTMLAnchorElement;
+    expect(link.tagName).toBe("A");
+    expect(link.getAttribute("href")).toBe(
+      "https://supabase.example/storage/ml_signals/2024-01-01/chunk-0001.jsonl.gz",
+    );
+    expect(link.textContent).toMatch(
+      /ml_signals\/2024-01-01\/chunk-0001\.jsonl\.gz/,
+    );
+    expect(
+      screen.queryByTestId(
+        "supabase-growth-retention-archive-object-key-ml_signals_archive",
+      ),
+    ).toBeNull();
+
+    // Clicking the toggle again collapses the detail row.
+    fireEvent.click(toggle);
+    expect(
+      screen.queryByTestId(
+        "supabase-growth-retention-archive-details-ml_signals_archive",
+      ),
+    ).toBeNull();
+  });
+
+  it("renders the last_object_key as plain text when no object url is available", () => {
+    state.data = {
+      archive: [
+        {
+          name: "ml_features_archive",
+          flavor: "archive",
+          table: "ml_features",
+          health: "ok",
+          last_tick_at: 1_700_000_000,
+          seconds_since_last_tick: 12,
+          last_deleted: 0,
+          total_deleted: 0,
+          last_archived_rows: 100,
+          last_bytes_compressed: 1_024,
+          total_archived_rows: 100,
+          total_bytes_compressed: 1_024,
+          chunk_size: 100,
+          max_rows_per_run: null,
+          retention_days: 1,
+          interval_seconds: 60,
+          ts_column: "ts",
+          started_at: 1_699_900_000,
+          last_object_key: "ml_features/legacy/chunk-0000.jsonl.gz",
+          last_object_url: null,
+          last_error: null,
+        },
+      ],
+      delete_only: [],
+      counts: { ok: 1, stale: 0, error: 0, disabled: 0 },
+      total: 1,
+    };
+
+    render(<SupabaseGrowthRetentionPanel />);
+    fireEvent.click(
+      screen.getByTestId(
+        "supabase-growth-retention-archive-row-ml_features_archive",
+      ),
+    );
+
+    const keyNode = screen.getByTestId(
+      "supabase-growth-retention-archive-object-key-ml_features_archive",
+    );
+    expect(keyNode.tagName).toBe("SPAN");
+    expect(keyNode.textContent).toMatch(
+      /ml_features\/legacy\/chunk-0000\.jsonl\.gz/,
+    );
+    expect(
+      screen.queryByTestId(
+        "supabase-growth-retention-archive-object-link-ml_features_archive",
+      ),
+    ).toBeNull();
+
+    // max_rows_per_run = null surfaces as "unlimited".
+    const details = screen.getByTestId(
+      "supabase-growth-retention-archive-details-ml_features_archive",
+    );
+    expect(details.textContent).toMatch(/unlimited/);
   });
 });
