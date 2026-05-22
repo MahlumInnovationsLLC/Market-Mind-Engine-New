@@ -164,6 +164,7 @@ async def archive_table(
     uploader: Uploader | None = None,
     manifest_writer: Uploader | None = None,
     now: Callable[[], datetime] | None = None,
+    progress_callback: Callable[["ArchiveRunSummary"], None] | None = None,
 ) -> ArchiveRunSummary:
     """Archive then delete rows older than ``cutoff`` from ``table``.
 
@@ -273,6 +274,14 @@ async def archive_table(
             summary.bytes_uncompressed += uncompressed
             summary.object_keys.append(object_key)
             summary.last_object_key = object_key
+
+            if progress_callback is not None:
+                try:
+                    progress_callback(summary)
+                except Exception as cb_err:  # noqa: BLE001 — observability hook
+                    log.warning(
+                        "archive_helper: progress callback raised: %s", cb_err,
+                    )
 
             if remaining_budget is not None:
                 remaining_budget -= len(rows)

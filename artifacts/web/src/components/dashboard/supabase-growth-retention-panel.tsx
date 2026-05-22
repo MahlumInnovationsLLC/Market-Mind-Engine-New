@@ -7,7 +7,13 @@ import {
   getGetSupabaseGrowthRetentionStatusQueryKey,
   useGetSupabaseGrowthRetentionStatus,
 } from "@workspace/api-client-react";
-import { ChevronDown, ChevronRight, ExternalLink, HardDrive } from "lucide-react";
+import {
+  ChevronDown,
+  ChevronRight,
+  ExternalLink,
+  HardDrive,
+  Loader2,
+} from "lucide-react";
 import { Fragment, useState } from "react";
 import { GlassCard } from "@/components/ui/glass-card";
 import { SectionHeader } from "@/components/ui/section-header";
@@ -233,6 +239,7 @@ function RetentionLoopRow({
 }) {
   const [expanded, setExpanded] = useState(false);
   const tone = HEALTH_PILL[loop.health];
+  const inProgress = loop.flavor === "archive" && loop.in_progress === true;
   const archivedSummary =
     loop.flavor === "archive"
       ? `${fmtNumber(loop.last_archived_rows)} rows · ${fmtBytes(
@@ -272,17 +279,33 @@ function RetentionLoopRow({
           ) : null}
         </td>
         <td className="py-1 pr-3">
-          <span
-            className={`inline-block px-1.5 py-0.5 text-[10px] uppercase tracking-widest ${tone.pill}`}
-            data-testid={`${groupTestId}-health-${loop.name}`}
-          >
-            {tone.label}
-          </span>
+          <div className="flex flex-wrap items-center gap-1">
+            <span
+              className={`inline-block px-1.5 py-0.5 text-[10px] uppercase tracking-widest ${tone.pill}`}
+              data-testid={`${groupTestId}-health-${loop.name}`}
+            >
+              {tone.label}
+            </span>
+            {inProgress ? (
+              <span
+                className="inline-flex items-center gap-1 border border-accent/60 bg-accent/10 px-1.5 py-0.5 text-[10px] uppercase tracking-widest text-accent"
+                data-testid={`${groupTestId}-in-progress-${loop.name}`}
+                title="A sweep is currently uploading chunks to Supabase Storage"
+              >
+                <Loader2 className="h-3 w-3 animate-spin" aria-hidden />
+                in progress
+              </span>
+            ) : null}
+          </div>
         </td>
         <td className="py-1 pr-3 text-right tabular-nums">
           <div className="font-mono">{fmtUnix(loop.last_tick_at)}</div>
           <div className="text-[10px] text-muted-foreground">
-            {fmtDuration(loop.seconds_since_last_tick)}
+            {inProgress
+              ? `${fmtNumber(loop.progress_chunks)} chunk${
+                  loop.progress_chunks === 1 ? "" : "s"
+                } · ${fmtBytes(loop.progress_bytes_compressed)}`
+              : fmtDuration(loop.seconds_since_last_tick)}
           </div>
         </td>
         <td className="py-1 pr-3 text-right tabular-nums">
@@ -324,6 +347,7 @@ function RetentionLoopDetails({
   const isArchive = loop.flavor === "archive";
   const objectKey = loop.last_object_key ?? null;
   const objectUrl = loop.last_object_url ?? null;
+  const inProgress = isArchive && loop.in_progress === true;
   return (
     <tr
       className="border-t border-border/30 bg-muted/5"
@@ -369,6 +393,35 @@ function RetentionLoopDetails({
                 label="Total bytes compressed"
                 value={fmtBytes(loop.total_bytes_compressed)}
               />
+              {inProgress ? (
+                <div
+                  className="col-span-full mt-1 border border-accent/40 bg-accent/5 p-2"
+                  data-testid={`${groupTestId}-progress-${loop.name}`}
+                >
+                  <div className="mb-1 flex items-center gap-1.5 text-[10px] uppercase tracking-widest text-accent">
+                    <Loader2 className="h-3 w-3 animate-spin" aria-hidden />
+                    sweep in progress
+                  </div>
+                  <dl className="grid grid-cols-2 gap-x-6 gap-y-1 text-[11px] sm:grid-cols-3 lg:grid-cols-4">
+                    <DetailItem
+                      label="Chunks uploaded"
+                      value={fmtNumber(loop.progress_chunks)}
+                    />
+                    <DetailItem
+                      label="Rows archived"
+                      value={fmtNumber(loop.progress_rows)}
+                    />
+                    <DetailItem
+                      label="Bytes pushed"
+                      value={fmtBytes(loop.progress_bytes_compressed)}
+                    />
+                    <DetailItem
+                      label="Sweep started at"
+                      value={fmtUnixFull(loop.progress_started_at)}
+                    />
+                  </dl>
+                </div>
+              ) : null}
               <div className="col-span-full">
                 <dt className="text-[10px] uppercase tracking-widest text-muted-foreground">
                   Last object key

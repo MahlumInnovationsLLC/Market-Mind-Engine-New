@@ -289,6 +289,15 @@ class ArchiveThenDeleteRetention(_BaseRetention):
         self._total_bytes_compressed: int = 0
         self._last_object_key: str | None = None
 
+        # Per-sweep progress published while ``cleanup_once`` is running so
+        # the operator dashboard can distinguish "stuck" from "still
+        # working" without tailing the API server logs (task #816).
+        self._in_progress: bool = False
+        self._progress_started_at: float | None = None
+        self._progress_chunks: int = 0
+        self._progress_rows: int = 0
+        self._progress_bytes_compressed: int = 0
+
     def state(self) -> dict[str, Any]:
         base = self.base_state()
         base.update(
@@ -301,12 +310,32 @@ class ArchiveThenDeleteRetention(_BaseRetention):
                 "last_bytes_compressed": self._last_bytes_compressed,
                 "total_bytes_compressed": self._total_bytes_compressed,
                 "last_object_key": self._last_object_key,
+                "in_progress": self._in_progress,
+                "progress_started_at": self._progress_started_at,
+                "progress_chunks": self._progress_chunks,
+                "progress_rows": self._progress_rows,
+                "progress_bytes_compressed": self._progress_bytes_compressed,
             }
         )
         return base
 
+    def _on_chunk_progress(
+        self, summary: "archive_helper.ArchiveRunSummary"
+    ) -> None:
+        """Mirror the running ``ArchiveRunSummary`` totals into ``state()``
+        so a dashboard poll mid-sweep sees the bytes / chunks / rows
+        already pushed to Supabase Storage (task #816)."""
+        self._progress_chunks = summary.chunks
+        self._progress_rows = summary.rows
+        self._progress_bytes_compressed = summary.bytes_compressed
+
     async def cleanup_once(self) -> int:
         cutoff = self.cutoff()
+        self._in_progress = True
+        self._progress_started_at = time.time()
+        self._progress_chunks = 0
+        self._progress_rows = 0
+        self._progress_bytes_compressed = 0
         try:
             summary = await archive_helper.archive_table(
                 table=self.table,
@@ -315,6 +344,7 @@ class ArchiveThenDeleteRetention(_BaseRetention):
                 pk_columns=self.pk_columns,
                 chunk_size=self.chunk_size,
                 max_rows=self.max_rows_per_run,
+                progress_callback=self._on_chunk_progress,
             )
             if summary.error:
                 self._last_error = summary.error
@@ -350,6 +380,8 @@ class ArchiveThenDeleteRetention(_BaseRetention):
             return 0
         finally:
             self._last_tick_at = time.time()
+            self._in_progress = False
+            self._progress_started_at = None
 
     def _reset_state_for_tests(self) -> None:
         super()._reset_state_for_tests()
@@ -358,3 +390,8 @@ class ArchiveThenDeleteRetention(_BaseRetention):
         self._last_bytes_compressed = 0
         self._total_bytes_compressed = 0
         self._last_object_key = None
+        self._in_progress = False
+        self._progress_started_at = None
+        self._progress_chunks = 0
+        self._progress_rows = 0
+        self._progress_bytes_compressed = 0

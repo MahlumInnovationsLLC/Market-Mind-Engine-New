@@ -62,6 +62,16 @@ export interface SupabaseGrowthRetentionLoop {
   chunk_size?: number;
   /** (archive flavor) Per-sweep cap on rows processed. */
   max_rows_per_run?: number | null;
+  /** (archive flavor) True while a sweep is currently uploading chunks to Supabase Storage. Lets operators tell a stuck loop from one that's still working without tailing API server logs. */
+  in_progress?: boolean;
+  /** (archive flavor) Unix seconds the in-flight sweep started; null when no sweep is running. */
+  progress_started_at?: number | null;
+  /** (archive flavor) Chunks uploaded so far in the in-flight sweep. Resets at the start of every sweep and increments as each chunk hits Supabase Storage. */
+  progress_chunks?: number;
+  /** (archive flavor) Rows archived so far in the in-flight sweep. */
+  progress_rows?: number;
+  /** (archive flavor) Compressed bytes pushed to Supabase Storage so far in the in-flight sweep. */
+  progress_bytes_compressed?: number;
   /** (archive flavor) Primary-key columns used to identify archived rows. */
   pk_columns?: string[];
   /** Rolled-up verdict for the row pill:

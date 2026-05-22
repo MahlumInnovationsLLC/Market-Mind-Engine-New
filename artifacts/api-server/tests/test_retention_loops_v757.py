@@ -180,6 +180,101 @@ def test_archive_cleanup_once_uploads_then_deletes(monkeypatch):
     assert s["last_error"] is None
 
 
+def test_archive_state_reports_idle_progress_at_rest():
+    """Before any sweep runs the archive loop's `state()` must
+    advertise progress counters at zero / not-in-progress so the
+    dashboard can rely on the field shape (task #816)."""
+    s = predictions_retention.state()
+    assert s["in_progress"] is False
+    assert s["progress_started_at"] is None
+    assert s["progress_chunks"] == 0
+    assert s["progress_rows"] == 0
+    assert s["progress_bytes_compressed"] == 0
+
+
+def test_archive_cleanup_once_publishes_mid_sweep_progress(monkeypatch):
+    """While `cleanup_once` is uploading chunks, a concurrent
+    `state()` poll from the dashboard must see the running totals
+    (chunks / rows / bytes) so operators can distinguish a stuck
+    sweep from one that's still working (task #816)."""
+    observed: list[dict[str, Any]] = []
+
+    async def fake_archive_table(**kwargs):
+        cb = kwargs.get("progress_callback")
+        assert cb is not None, "loop must wire a progress callback"
+        summary = archive_helper.ArchiveRunSummary(
+            table="predictions",
+            cutoff=kwargs["cutoff"].isoformat(),
+        )
+        # Simulate two chunks finishing one after another. After each
+        # call into the callback we snapshot the loop's state so the
+        # assertion below sees what a dashboard poll would have seen.
+        summary.rows = 10
+        summary.chunks = 1
+        summary.bytes_compressed = 1_000
+        cb(summary)
+        observed.append(predictions_retention.state())
+
+        summary.rows = 25
+        summary.chunks = 2
+        summary.bytes_compressed = 2_500
+        cb(summary)
+        observed.append(predictions_retention.state())
+
+        summary.last_object_key = (
+            "archives/predictions/dt=2026-05-22/part-0001.jsonl.gz"
+        )
+        return summary
+
+    monkeypatch.setattr(
+        "app.retention_base.archive_helper.archive_table",
+        fake_archive_table,
+    )
+
+    asyncio.run(predictions_retention.cleanup_once())
+
+    assert len(observed) == 2
+    first, second = observed
+    assert first["in_progress"] is True
+    assert first["progress_chunks"] == 1
+    assert first["progress_rows"] == 10
+    assert first["progress_bytes_compressed"] == 1_000
+    assert isinstance(first["progress_started_at"], float)
+
+    assert second["in_progress"] is True
+    assert second["progress_chunks"] == 2
+    assert second["progress_rows"] == 25
+    assert second["progress_bytes_compressed"] == 2_500
+
+    # When the sweep returns, the in-progress flag is cleared but the
+    # most recent chunk counts roll over into the `last_*` accumulators.
+    after = predictions_retention.state()
+    assert after["in_progress"] is False
+    assert after["progress_started_at"] is None
+    assert after["progress_chunks"] == 2  # last published value retained
+    assert after["last_archived_rows"] == 25
+
+
+def test_archive_cleanup_once_clears_in_progress_on_helper_error(monkeypatch):
+    """A crashing sweep must still drop the in-progress flag so the
+    dashboard doesn't show a permanently spinning loader."""
+    async def fake_archive_table(**kwargs):
+        cb = kwargs.get("progress_callback")
+        assert cb is not None
+        raise RuntimeError("upload exploded")
+
+    monkeypatch.setattr(
+        "app.retention_base.archive_helper.archive_table",
+        fake_archive_table,
+    )
+
+    asyncio.run(predictions_retention.cleanup_once())
+    s = predictions_retention.state()
+    assert s["in_progress"] is False
+    assert s["progress_started_at"] is None
+    assert "upload exploded" in (s["last_error"] or "")
+
+
 def test_archive_cleanup_once_surfaces_helper_error(monkeypatch):
     async def fake_archive_table(**kwargs):
         return archive_helper.ArchiveRunSummary(

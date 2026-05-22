@@ -1655,6 +1655,36 @@ export const GetSupabaseGrowthRetentionStatusResponse = zod
               .number()
               .nullish()
               .describe("(archive flavor) Per-sweep cap on rows processed."),
+            in_progress: zod
+              .boolean()
+              .optional()
+              .describe(
+                "(archive flavor) True while a sweep is currently uploading chunks to Supabase Storage. Lets operators tell a stuck loop from one that's still working without tailing API server logs.",
+              ),
+            progress_started_at: zod
+              .number()
+              .nullish()
+              .describe(
+                "(archive flavor) Unix seconds the in-flight sweep started; null when no sweep is running.",
+              ),
+            progress_chunks: zod
+              .number()
+              .optional()
+              .describe(
+                "(archive flavor) Chunks uploaded so far in the in-flight sweep. Resets at the start of every sweep and increments as each chunk hits Supabase Storage.",
+              ),
+            progress_rows: zod
+              .number()
+              .optional()
+              .describe(
+                "(archive flavor) Rows archived so far in the in-flight sweep.",
+              ),
+            progress_bytes_compressed: zod
+              .number()
+              .optional()
+              .describe(
+                "(archive flavor) Compressed bytes pushed to Supabase Storage so far in the in-flight sweep.",
+              ),
             pk_columns: zod
               .array(zod.string())
               .optional()
@@ -1775,6 +1805,36 @@ export const GetSupabaseGrowthRetentionStatusResponse = zod
               .number()
               .nullish()
               .describe("(archive flavor) Per-sweep cap on rows processed."),
+            in_progress: zod
+              .boolean()
+              .optional()
+              .describe(
+                "(archive flavor) True while a sweep is currently uploading chunks to Supabase Storage. Lets operators tell a stuck loop from one that's still working without tailing API server logs.",
+              ),
+            progress_started_at: zod
+              .number()
+              .nullish()
+              .describe(
+                "(archive flavor) Unix seconds the in-flight sweep started; null when no sweep is running.",
+              ),
+            progress_chunks: zod
+              .number()
+              .optional()
+              .describe(
+                "(archive flavor) Chunks uploaded so far in the in-flight sweep. Resets at the start of every sweep and increments as each chunk hits Supabase Storage.",
+              ),
+            progress_rows: zod
+              .number()
+              .optional()
+              .describe(
+                "(archive flavor) Rows archived so far in the in-flight sweep.",
+              ),
+            progress_bytes_compressed: zod
+              .number()
+              .optional()
+              .describe(
+                "(archive flavor) Compressed bytes pushed to Supabase Storage so far in the in-flight sweep.",
+              ),
             pk_columns: zod
               .array(zod.string())
               .optional()

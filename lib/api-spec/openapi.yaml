@@ -2229,6 +2229,22 @@ components:
         last_object_url: { type: string, nullable: true, description: "(archive flavor) Fully-qualified Supabase Storage URL for `last_object_key`, or null if the loop has never uploaded a chunk." }
         chunk_size: { type: integer, description: "(archive flavor) Rows per upload chunk." }
         max_rows_per_run: { type: integer, nullable: true, description: "(archive flavor) Per-sweep cap on rows processed." }
+        in_progress:
+          type: boolean
+          description: "(archive flavor) True while a sweep is currently uploading chunks to Supabase Storage. Lets operators tell a stuck loop from one that's still working without tailing API server logs."
+        progress_started_at:
+          type: number
+          nullable: true
+          description: "(archive flavor) Unix seconds the in-flight sweep started; null when no sweep is running."
+        progress_chunks:
+          type: integer
+          description: "(archive flavor) Chunks uploaded so far in the in-flight sweep. Resets at the start of every sweep and increments as each chunk hits Supabase Storage."
+        progress_rows:
+          type: integer
+          description: "(archive flavor) Rows archived so far in the in-flight sweep."
+        progress_bytes_compressed:
+          type: integer
+          description: "(archive flavor) Compressed bytes pushed to Supabase Storage so far in the in-flight sweep."
         pk_columns:
           type: array
           items: { type: string }
