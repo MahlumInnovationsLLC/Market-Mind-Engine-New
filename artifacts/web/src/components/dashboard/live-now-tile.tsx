@@ -1,3 +1,4 @@
+import { useLocation } from "wouter";
 import {
   getGetDashboardLiveNowQueryKey,
   useGetDashboardLiveNow,
@@ -74,6 +75,7 @@ const TONE_CLASS: Record<
 };
 
 export default function LiveNowTile() {
+  const [, setLocation] = useLocation();
   const queryKey = getGetDashboardLiveNowQueryKey();
   const { data, isLoading, error } = useGetDashboardLiveNow({
     query: { queryKey, refetchInterval: 10_000, staleTime: 8_000 },
@@ -132,14 +134,28 @@ export default function LiveNowTile() {
                   e.staleness_budget_seconds ?? null,
                 );
                 const cls = TONE_CLASS[tone];
+                const go = () =>
+                  setLocation(
+                    `/live-games?league=${encodeURIComponent(sport)}`,
+                  );
                 return (
                   <tr
                     key={sport}
                     data-testid={`live-now-row-${sport}`}
                     data-tone={tone}
-                    className={`border-b ${cls.row}`}
+                    role="link"
+                    tabIndex={0}
+                    onClick={go}
+                    onKeyDown={(ev) => {
+                      if (ev.key === "Enter" || ev.key === " ") {
+                        ev.preventDefault();
+                        go();
+                      }
+                    }}
+                    title={`Show live ${sport.toUpperCase()} games`}
+                    className={`cursor-pointer border-b transition-colors hover:bg-accent-cyan/5 focus:bg-accent-cyan/10 focus:outline-none ${cls.row}`}
                   >
-                    <td className="py-1.5 pr-3 font-semibold uppercase text-foreground">
+                    <td className="py-1.5 pr-3 font-semibold uppercase text-accent-cyan underline-offset-2 hover:underline">
                       {sport}
                     </td>
                     <td className="py-1.5 pr-3 text-right font-mono tabular-nums">

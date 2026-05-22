@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { useLocation, useSearch } from "wouter";
 import { useAuth } from "@clerk/react";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { GlassCard } from "@/components/ui/glass-card";
@@ -155,6 +156,28 @@ export default function LiveGamesPage() {
     [getToken],
   );
 
+  // Deep-link filter: when the dashboard's Live-Now tile links here with
+  // `?league=nba`, pre-filter both the live and upcoming lists to that
+  // sport so operators land in context. Case-insensitive — the tile emits
+  // lowercase ("nba") but the live-games payload may use uppercase leagues.
+  const search = useSearch();
+  const [, setLocation] = useLocation();
+  const initialLeague = useMemo(
+    () => new URLSearchParams(search).get("league") ?? "",
+    // Only seed once on mount; further URL changes shouldn't clobber a
+    // user-driven selection.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [],
+  );
+  const [leagueFilter, setLeagueFilter] = useState<string>(initialLeague);
+  const clearLeagueFilter = useCallback(() => {
+    setLeagueFilter("");
+    const next = new URLSearchParams(search);
+    next.delete("league");
+    const qs = next.toString();
+    setLocation(qs ? `/live-games?${qs}` : "/live-games", { replace: true });
+  }, [search, setLocation]);
+
   const { data, isLoading, error, refetch, isFetching } = useQuery<LiveGamesResponse>({
     queryKey: ["live-games", "list"],
     queryFn: () =>
@@ -255,26 +278,35 @@ export default function LiveGamesPage() {
   const items = data?.items ?? [];
   const liveNowCount = data?.is_live_now_count ?? 0;
 
+  const normalizedFilter = leagueFilter.trim().toLowerCase();
+  const matchesLeague = useCallback(
+    (league: string) =>
+      !normalizedFilter || league.toLowerCase() === normalizedFilter,
+    [normalizedFilter],
+  );
+
   const grouped = useMemo(() => {
     const m = new Map<string, LiveGameItem[]>();
     for (const it of items) {
+      if (!matchesLeague(it.league)) continue;
       const arr = m.get(it.league) ?? [];
       arr.push(it);
       m.set(it.league, arr);
     }
     return [...m.entries()].sort(([a], [b]) => a.localeCompare(b));
-  }, [items]);
+  }, [items, matchesLeague]);
 
   const upcomingItems = upcomingData?.items ?? [];
   const upcomingGrouped = useMemo(() => {
     const m = new Map<string, UpcomingGameItem[]>();
     for (const it of upcomingItems) {
+      if (!matchesLeague(it.league)) continue;
       const arr = m.get(it.league) ?? [];
       arr.push(it);
       m.set(it.league, arr);
     }
     return [...m.entries()].sort(([a], [b]) => a.localeCompare(b));
-  }, [upcomingItems]);
+  }, [upcomingItems, matchesLeague]);
 
   return (
     <div className="space-y-5 font-mono" data-testid="page-live-games">
@@ -292,6 +324,23 @@ export default function LiveGamesPage() {
                 ? `${liveNowCount} market${liveNowCount === 1 ? "" : "s"} live right now · auto-refreshes every 10s`
                 : "No markets currently live · showing recent in-game activity (last 6h)"}
             </p>
+            {leagueFilter ? (
+              <div
+                data-testid="live-games-league-filter"
+                className="mt-2 inline-flex items-center gap-2 self-start rounded-full border border-accent-cyan/40 bg-accent-cyan/10 px-3 py-1 text-[11px] uppercase tracking-wider text-accent-cyan"
+              >
+                <span>Filtered: {leagueFilter}</span>
+                <button
+                  type="button"
+                  onClick={clearLeagueFilter}
+                  data-testid="live-games-clear-league-filter"
+                  className="rounded text-accent-cyan hover:text-foreground focus:outline-none"
+                  aria-label="Clear league filter"
+                >
+                  ✕
+                </button>
+              </div>
+            ) : null}
           </div>
           <div className="flex items-center gap-2 text-xs text-muted-foreground">
             <span data-testid="live-games-fetched-at">

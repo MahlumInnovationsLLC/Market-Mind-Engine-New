@@ -1,5 +1,5 @@
 import { describe, it, expect, afterEach, vi } from "vitest";
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 
 const { state } = vi.hoisted(() => ({
   state: { data: undefined as unknown, isLoading: false, error: null as unknown },
@@ -83,5 +83,19 @@ describe("LiveNowTile", () => {
     state.error = new Error("boom");
     render(<LiveNowTile />);
     expect(screen.getByTestId("live-now-error")).toBeTruthy();
+  });
+
+  it("navigates to /live-games filtered by sport when a row is clicked", () => {
+    state.data = baseData;
+    const initial = `${window.location.pathname}${window.location.search}`;
+    render(<LiveNowTile />);
+    const row = screen.getByTestId("live-now-row-nba");
+    expect(row.getAttribute("role")).toBe("link");
+    fireEvent.click(row);
+    expect(window.location.pathname + window.location.search).toBe(
+      "/live-games?league=nba",
+    );
+    // Restore for the next test so wouter's window-based location is clean.
+    window.history.replaceState(null, "", initial || "/");
   });
 });
