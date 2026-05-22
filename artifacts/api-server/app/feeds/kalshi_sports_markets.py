@@ -204,60 +204,12 @@ def _mid_price_dollars(market: dict[str, Any]) -> float | None:
 # producer) and stash it in ``metadata.leg_orientation`` so the live
 # predictor doesn't have to re-parse on every cycle.
 
-_DRAW_KEYWORDS = (
-    "draw", " tie", "tied", "ends level", "level after",
-    "stalemate", "share the points",
-)
-# "Will Manchester City beat Arsenal?", "Manchester City beats Arsenal",
-# "Manchester City defeats Arsenal", "Will Manchester City win?"
-_WIN_SUBJECT_RE = re.compile(
-    r"^\s*(?:will\s+)?(?:the\s+)?(?P<subject>.+?)\s+"
-    r"(?:beat|beats|defeat|defeats|win|wins)\b",
-    re.IGNORECASE,
-)
-
-
-def _normalise_name(s: str) -> str:
-    return re.sub(r"[^a-z0-9]+", "", s.lower()) if s else ""
-
-
-def _parse_leg_orientation(
-    title: str | None,
-    home_team: str | None,
-    away_team: str | None,
-) -> str | None:
-    """Return ``"HOME"`` / ``"DRAW"`` / ``"AWAY"`` for a Kalshi soccer
-    game-market title when we can identify which 3-way leg the YES
-    side is pricing; ``None`` when the title isn't a recognised
-    moneyline / draw template.
-
-    The match against home/away is normalised (lowercased, alphanum
-    only) so "Man. City" matches "Manchester City" loosely — false
-    positives are unlikely because the producer already knows the
-    canonical names for the event.
-    """
-    if not title:
-        return None
-    low = title.lower()
-    for kw in _DRAW_KEYWORDS:
-        if kw in low:
-            return "DRAW"
-    m = _WIN_SUBJECT_RE.match(title)
-    if not m:
-        return None
-    subject = _normalise_name(m.group("subject"))
-    if not subject:
-        return None
-    home_n = _normalise_name(home_team or "")
-    away_n = _normalise_name(away_team or "")
-    # Substring match either direction so "City" matches "Manchester City"
-    # and vice versa.  Home checked first because Kalshi titles are
-    # marginally more likely to phrase a home-side YES.
-    if home_n and (subject in home_n or home_n in subject):
-        return "HOME"
-    if away_n and (subject in away_n or away_n in subject):
-        return "AWAY"
-    return None
+# Leg-orientation parsing lives in :mod:`app.sports.soccer_leg_parser`
+# so the live in-game predictor (:mod:`app.learning.soccer_live`)
+# uses the exact same regex/keyword logic for its title fallback.
+# See task #899 — keeping the parser in one place avoids the drift
+# risk task #892 was about.
+from ..sports.soccer_leg_parser import parse_leg_orientation as _parse_leg_orientation
 
 
 # Series tickers that price soccer 3-way leagues — leg orientation

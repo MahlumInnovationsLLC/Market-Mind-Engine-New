@@ -367,10 +367,16 @@ async def refresh_dc_rho_overrides() -> dict[str, float]:
 
 # Recognised leg labels.  Anything else collapses to "no leg
 # information" and the predictor takes the leg-agnostic branch.
-_LEG_HOME = "HOME"
-_LEG_DRAW = "DRAW"
-_LEG_AWAY = "AWAY"
-_VALID_LEGS = frozenset({_LEG_HOME, _LEG_DRAW, _LEG_AWAY})
+# Constants live in :mod:`app.sports.soccer_leg_parser` alongside the
+# title-parsing fallback so the producer and the live predictor share
+# one definition (task #899).
+from ..sports.soccer_leg_parser import (
+    LEG_AWAY as _LEG_AWAY,
+    LEG_DRAW as _LEG_DRAW,
+    LEG_HOME as _LEG_HOME,
+    VALID_LEGS as _VALID_LEGS,
+    parse_leg_orientation as _parse_leg_from_title,
+)
 
 
 def is_soccer_league(league: str | None) -> bool:
@@ -394,53 +400,9 @@ _CLOCK_RE = re.compile(r"^\s*(\d{1,3})(?::(\d{1,2}))?\s*$")
 # Leg-orientation parsing fallback for rows whose ``metadata`` blob
 # didn't ship a producer-side ``leg_orientation`` (e.g. soccer rows
 # upserted before the kalshi_sports_markets feed started persisting
-# the label).  Kept in sync with the parser in
-# :mod:`app.feeds.kalshi_sports_markets` — duplicated rather than
-# imported so the live predictor stays import-cycle-clean.
-_DRAW_KEYWORDS = (
-    "draw", " tie", "tied", "ends level", "level after",
-    "stalemate", "share the points",
-)
-_WIN_SUBJECT_RE = re.compile(
-    r"^\s*(?:will\s+)?(?:the\s+)?(?P<subject>.+?)\s+"
-    r"(?:beat|beats|defeat|defeats|win|wins)\b",
-    re.IGNORECASE,
-)
-
-
-def _normalise_name(s: str) -> str:
-    return re.sub(r"[^a-z0-9]+", "", s.lower()) if s else ""
-
-
-def _parse_leg_from_title(
-    title: str | None, home_team: str | None, away_team: str | None
-) -> str | None:
-    """Best-effort leg orientation from a Kalshi soccer market title.
-
-    Returns ``"HOME"`` / ``"DRAW"`` / ``"AWAY"`` or ``None``.  Used
-    as a fallback when the predictions row's ``metadata`` blob doesn't
-    already carry a ``leg_orientation`` — the producer
-    (``kalshi_sports_markets``) is the primary source of truth.
-    """
-    if not title:
-        return None
-    low = title.lower()
-    for kw in _DRAW_KEYWORDS:
-        if kw in low:
-            return _LEG_DRAW
-    m = _WIN_SUBJECT_RE.match(title)
-    if not m:
-        return None
-    subject = _normalise_name(m.group("subject"))
-    if not subject:
-        return None
-    home_n = _normalise_name(home_team or "")
-    away_n = _normalise_name(away_team or "")
-    if home_n and (subject in home_n or home_n in subject):
-        return _LEG_HOME
-    if away_n and (subject in away_n or away_n in subject):
-        return _LEG_AWAY
-    return None
+# the label) is imported above from :mod:`app.sports.soccer_leg_parser`
+# — the same module the producer uses, so the two stay guaranteed-
+# identical (task #899).
 
 
 def _coerce_metadata(value: Any) -> dict[str, Any]:
