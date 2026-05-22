@@ -1236,7 +1236,7 @@ components:
         market_price: { type: number, nullable: true, description: "Kalshi yes-price snapshot used to compute edge." }
         edge_pct: { type: number, nullable: true, description: "EV edge expressed as a percentage (edge * 100)." }
         confidence: { type: number, nullable: true }
-        planned_stake: { type: number, nullable: true, description: "Reserved for executor-side enrichment; currently always null." }
+        planned_stake: { type: number, nullable: true, description: "Indicative planned stake in USD; quarter-Kelly fraction of latest bankroll based on edge and market price. Null when bankroll is unknown or price is degenerate." }
         kalshi_market_id: { type: string, nullable: true }
       required: [prediction_id, matchup, vertical, vertical_halted]
 

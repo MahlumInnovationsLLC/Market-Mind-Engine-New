@@ -6660,6 +6660,15 @@ async def get_top_edges_today(
     }
     halted = await _halted_verticals_lower()
     out["halted_verticals"] = sorted(halted)
+    # Bankroll snapshot for the indicative planned-stake column.  Falls
+    # back to None silently if the bankroll-events table is unreachable
+    # in a test sandbox; the tile renders "—" in that case.
+    bankroll_usd: float | None = None
+    try:
+        from .orchestrator.cycle import _latest_bankroll
+        bankroll_usd = await _latest_bankroll(trading_mode="live")
+    except Exception as e:  # pragma: no cover — defensive
+        log.debug("top_edges bankroll lookup failed: %s", e)
     try:
         rows = await db.fetch(
             """
@@ -6684,7 +6693,7 @@ async def get_top_edges_today(
                AND (p.settled_at IS NULL)
                AND (p.game_time IS NULL OR p.game_time > now())
                AND s.prediction_id IS NULL
-             ORDER BY abs(p.edge) DESC NULLS LAST
+             ORDER BY p.edge DESC NULLS LAST
              LIMIT $1
             """,
             limit,
@@ -6719,6 +6728,33 @@ async def get_top_edges_today(
         if not matchup:
             matchup = str(market_id) if market_id else f"prediction#{r['id']}"
         edge = r.get("edge")
+        model_prob = (
+            float(r["model_prob"]) if r.get("model_prob") is not None
+            else (float(r["home_win_prob"])
+                  if r.get("home_win_prob") is not None else None)
+        )
+        market_price = (
+            float(r["market_price"]) if r.get("market_price") is not None
+            else None
+        )
+        # Indicative planned stake = quarter-Kelly fraction of bankroll
+        # (`f* = edge / (1 - price)`, clamped to [0, 0.25]).  Matches
+        # the conservative sizing the executor's `gate_kelly_fraction`
+        # gate enforces.  Falls back to None when we can't compute
+        # bankroll or price is degenerate.
+        planned_stake: float | None = None
+        if (
+            bankroll_usd is not None
+            and edge is not None and float(edge) > 0
+            and market_price is not None
+            and 0.0 < market_price < 1.0
+        ):
+            try:
+                kelly_full = float(edge) / max(1e-6, 1.0 - market_price)
+                kelly_qtr = max(0.0, min(0.25, kelly_full)) * 0.25
+                planned_stake = round(float(bankroll_usd) * kelly_qtr, 2)
+            except Exception:  # pragma: no cover — defensive
+                planned_stake = None
         items.append(
             {
                 "prediction_id": int(r["id"]),
@@ -6726,20 +6762,8 @@ async def get_top_edges_today(
                 "league": league,
                 "vertical": vertical,
                 "vertical_halted": vertical in halted,
-                "model_prob": (
-                    float(r["model_prob"])
-                    if r.get("model_prob") is not None
-                    else (
-                        float(r["home_win_prob"])
-                        if r.get("home_win_prob") is not None
-                        else None
-                    )
-                ),
-                "market_price": (
-                    float(r["market_price"])
-                    if r.get("market_price") is not None
-                    else None
-                ),
+                "model_prob": model_prob,
+                "market_price": market_price,
                 "edge_pct": (
                     round(float(edge) * 100.0, 4)
                     if edge is not None
@@ -6750,11 +6774,7 @@ async def get_top_edges_today(
                     if r.get("confidence") is not None
                     else None
                 ),
-                # Planned stake is owned by the executor; surface a
-                # null placeholder so the tile contract has a stable
-                # column and the executor-side enrichment can land
-                # later without a schema change.
-                "planned_stake": None,
+                "planned_stake": planned_stake,
                 "kalshi_market_id": (
                     str(market_id) if market_id is not None else None
                 ),
@@ -6838,16 +6858,27 @@ async def get_bookmaker_metrics(
             out["win_rate"] = round(n_wins / n_settled, 6)
 
     # --- Pending-pool headline numbers (today only) ------------------------
+    # Constrain to the SAME candidate universe as the Top-Edges tile:
+    # pending (no settlement yet), tradable (kalshi_market_id set), game
+    # not started, and not snoozed.  Without these filters yesterday's
+    # already-settled rows or operator-snoozed rows pollute "top
+    # confidence today / highest edge today / picks today".
     try:
         prow = await db.fetchrow(
             """
             SELECT
-              max(coalesce(model_yes_prob, home_win_prob))::float    AS top_conf,
-              max(abs(edge))::float                                  AS top_edge,
-              count(*)::int                                          AS n_today
-              FROM predictions
-             WHERE created_at >= date_trunc('day', now())
-               AND kalshi_market_id IS NOT NULL
+              max(coalesce(p.model_yes_prob, p.home_win_prob))::float AS top_conf,
+              max(p.edge)::float                                      AS top_edge,
+              count(*)::int                                           AS n_today
+              FROM predictions p
+              LEFT JOIN prediction_snoozes s
+                     ON s.prediction_id = p.id
+                    AND s.snoozed_until > now()
+             WHERE p.created_at >= date_trunc('day', now())
+               AND p.kalshi_market_id IS NOT NULL
+               AND p.settled_at IS NULL
+               AND (p.game_time IS NULL OR p.game_time > now())
+               AND s.prediction_id IS NULL
             """
         )
     except Exception as e:
@@ -6864,15 +6895,23 @@ async def get_bookmaker_metrics(
         out["picks_today"]["total"] = int(prow.get("n_today") or 0)
 
     # --- Picks-today per-vertical split ------------------------------------
+    # Same pending-cleared filter as the headline numbers above so the
+    # per-vertical histogram reflects the actual fireable pool.
     try:
         by_v_rows = await db.fetch(
             """
-            SELECT upper(coalesce(league, ''))  AS league,
-                   count(*)::int                AS n
-              FROM predictions
-             WHERE created_at >= date_trunc('day', now())
-               AND kalshi_market_id IS NOT NULL
-             GROUP BY league
+            SELECT upper(coalesce(p.league, ''))  AS league,
+                   count(*)::int                  AS n
+              FROM predictions p
+              LEFT JOIN prediction_snoozes s
+                     ON s.prediction_id = p.id
+                    AND s.snoozed_until > now()
+             WHERE p.created_at >= date_trunc('day', now())
+               AND p.kalshi_market_id IS NOT NULL
+               AND p.settled_at IS NULL
+               AND (p.game_time IS NULL OR p.game_time > now())
+               AND s.prediction_id IS NULL
+             GROUP BY p.league
             """
         )
     except Exception as e:

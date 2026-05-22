@@ -29,6 +29,29 @@ function fmtTime(s: string | null | undefined): string {
     return s;
   }
 }
+function fmtUsd(n: number | null | undefined): string {
+  if (n === null || n === undefined || Number.isNaN(n)) return "—";
+  return `$${Number(n).toLocaleString(undefined, { maximumFractionDigits: 0 })}`;
+}
+
+const HELP_EDGE =
+  "EV edge expressed as a percentage of stake. Rows are sorted by this column (descending), highest expected value first.";
+const HELP_STAKE =
+  "Indicative planned stake — quarter-Kelly fraction of bankroll computed from edge and market price. Final stake is decided by the executor's gate pipeline.";
+
+function InfoTip({ help, testID }: { help: string; testID?: string }) {
+  return (
+    <button
+      type="button"
+      data-testid={testID}
+      aria-label={help}
+      title={help}
+      className="ml-1 inline-flex h-4 w-4 items-center justify-center rounded-full border border-border text-[9px] leading-none text-muted-foreground hover:bg-muted"
+    >
+      ?
+    </button>
+  );
+}
 
 export default function TopEdgesTile() {
   const qc = useQueryClient();
@@ -97,7 +120,14 @@ export default function TopEdgesTile() {
                 <th className="py-1 pr-2">Vertical</th>
                 <th className="py-1 pr-2" title="Calibrated model probability of YES">Model</th>
                 <th className="py-1 pr-2" title="Last Kalshi YES price snapshot">Market</th>
-                <th className="py-1 pr-2" title="EV edge expressed as a percentage; sorted descending">Edge%</th>
+                <th className="py-1 pr-2">
+                  Edge%
+                  <InfoTip help={HELP_EDGE} testID="top-edges-help-edge" />
+                </th>
+                <th className="py-1 pr-2">
+                  Stake
+                  <InfoTip help={HELP_STAKE} testID="top-edges-help-stake" />
+                </th>
                 <th className="py-1 pr-2">Actions</th>
               </tr>
             </thead>
@@ -105,7 +135,7 @@ export default function TopEdgesTile() {
               {(data?.items ?? []).length === 0 ? (
                 <tr>
                   <td
-                    colSpan={6}
+                    colSpan={7}
                     className="py-3 text-center text-muted-foreground"
                     data-testid="top-edges-empty"
                   >
@@ -147,6 +177,12 @@ export default function TopEdgesTile() {
                     <td className="py-1 pr-2 tabular-nums">{fmtPrice(row.market_price)}</td>
                     <td className="py-1 pr-2 tabular-nums font-semibold">
                       {fmtPct(row.edge_pct)}
+                    </td>
+                    <td
+                      className="py-1 pr-2 tabular-nums"
+                      data-testid={`top-edge-stake-${row.prediction_id}`}
+                    >
+                      {fmtUsd(row.planned_stake)}
                     </td>
                     <td className="py-1 pr-2">
                       <button

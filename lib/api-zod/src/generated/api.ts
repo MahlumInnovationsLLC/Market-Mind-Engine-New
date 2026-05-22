@@ -434,7 +434,7 @@ export const GetDashboardTopEdgesResponse = zod.object({
           .number()
           .nullish()
           .describe(
-            "Reserved for executor-side enrichment; currently always null.",
+            "Indicative planned stake in USD; quarter-Kelly fraction of latest bankroll based on edge and market price. Null when bankroll is unknown or price is degenerate.",
           ),
         kalshi_market_id: zod.string().nullish(),
       })

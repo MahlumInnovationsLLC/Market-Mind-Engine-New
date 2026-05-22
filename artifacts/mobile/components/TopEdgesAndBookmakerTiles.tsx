@@ -74,6 +74,69 @@ function fmtUnits(n: number | null | undefined): string {
   const v = Number(n);
   return `${v >= 0 ? "+" : ""}${v.toFixed(2)}u`;
 }
+function fmtUsd(n: number | null | undefined): string {
+  if (n === null || n === undefined || Number.isNaN(n)) return "—";
+  return `$${Math.round(Number(n)).toLocaleString()}`;
+}
+function fmtPrice(n: number | null | undefined): string {
+  if (n === null || n === undefined || Number.isNaN(n)) return "—";
+  return Number(n).toFixed(2);
+}
+
+const HELP = {
+  edge:
+    "EV edge expressed as a percentage of stake. Rows are sorted by this column (descending), highest expected value first.",
+  stake:
+    "Indicative planned stake — quarter-Kelly fraction of bankroll computed from edge and market price. Final stake is decided by the executor's gate pipeline.",
+  pf:
+    "Sum of winning P&L divided by sum of losing P&L on settled trades only. Open positions are excluded, so the number reflects fully-resolved bets in this window.",
+  unit:
+    "Net P&L normalised to a flat $100 reference stake (1u = $100). Our live sizing is fractional Kelly, so this restated number is what an industry-standard flat-stake bettor would have earned.",
+  hit:
+    "Share of settled trades in this window that closed in profit. The denominator is shown as n=… next to the label.",
+  topConf:
+    "The highest calibrated model probability across today's pending, gate-cleared candidates. It is the most confident pick the swarm is currently offering.",
+  hiEdge:
+    "The largest EV edge percentage across today's pending, gate-cleared candidates. Same candidate pool used by the Top Edges tile above.",
+  picks:
+    "Count of today's pending, gate-cleared candidates broken out by vertical. These are the bets that would fire if all gates approve.",
+};
+
+function InfoTip({ help, testID }: { help: string; testID?: string }) {
+  const colors = useColors();
+  const [open, setOpen] = useState(false);
+  return (
+    <View style={{ position: "relative" }}>
+      <Pressable
+        testID={testID}
+        accessibilityLabel={help}
+        accessibilityHint={help}
+        onPress={() => setOpen((v) => !v)}
+        hitSlop={6}
+        style={[
+          styles.infoBtn,
+          { borderColor: colors.border },
+        ]}
+      >
+        <Text style={[styles.infoBtnTxt, { color: colors.mutedForeground }]}>
+          ?
+        </Text>
+      </Pressable>
+      {open ? (
+        <View
+          style={[
+            styles.tipBubble,
+            { borderColor: colors.border, backgroundColor: colors.card },
+          ]}
+        >
+          <Text style={[styles.tipBubbleTxt, { color: colors.foreground }]}>
+            {help}
+          </Text>
+        </View>
+      ) : null}
+    </View>
+  );
+}
 
 export function TopEdgesTile() {
   const colors = useColors();
@@ -105,9 +168,13 @@ export function TopEdgesTile() {
   const data = q.data;
   return (
     <Card testID="card-top-edges">
-      <SectionHeader>
-        TOP EDGES TODAY · {data?.items?.length ?? 0}
-      </SectionHeader>
+      <View style={styles.hdrRow}>
+        <SectionHeader>
+          TOP EDGES TODAY · {data?.items?.length ?? 0}
+        </SectionHeader>
+        <InfoTip help={HELP.edge} testID="top-edges-help-edge" />
+        <InfoTip help={HELP.stake} testID="top-edges-help-stake" />
+      </View>
       <Text style={[styles.subtle, { color: colors.mutedForeground }]}>
         Computed {fmtTime(data?.generated_at)} · cap {data?.limit ?? 25}
       </Text>
@@ -152,6 +219,19 @@ export function TopEdgesTile() {
                 {row.vertical.toUpperCase()}
                 {row.league ? ` · ${row.league}` : ""}
                 {halted ? " · HALTED" : ""}
+              </Text>
+              <Text
+                style={[styles.meta, { color: colors.mutedForeground }]}
+                testID={`top-edge-pricing-${row.prediction_id}`}
+              >
+                model {fmtProb(row.model_prob)} · mkt {fmtPrice(row.market_price)}
+                {" · stake "}
+                <Text
+                  style={{ color: colors.foreground }}
+                  testID={`top-edge-stake-${row.prediction_id}`}
+                >
+                  {fmtUsd(row.planned_stake)}
+                </Text>
               </Text>
             </View>
             <Text
@@ -250,22 +330,28 @@ export function BookmakerMetricsTile() {
         </Text>
       ) : null}
       <View style={styles.grid}>
-        <Cell label="PROFIT FACTOR" value={
-          data?.profit_factor == null ? "—" : data.profit_factor.toFixed(2)
-        } testID="bm-profit-factor" />
+        <Cell label="PROFIT FACTOR"
+              help={HELP.pf} helpTestID="bm-help-profit-factor"
+              value={data?.profit_factor == null ? "—" : data.profit_factor.toFixed(2)}
+              testID="bm-profit-factor" />
         <Cell label={`EQUIV UNIT P&L (1u=$${data?.unit_dollars ?? 100})`}
+              help={HELP.unit} helpTestID="bm-help-unit-pnl"
               value={fmtUnits(data?.equivalent_unit_pnl)}
               testID="bm-unit-pnl" />
         <Cell label={`HIT RATE (n=${data?.n_settled ?? 0})`}
+              help={HELP.hit} helpTestID="bm-help-hit-rate"
               value={fmtProb(data?.win_rate)}
               testID="bm-hit-rate" />
         <Cell label="TOP CONFIDENCE (TODAY)"
+              help={HELP.topConf} helpTestID="bm-help-top-confidence"
               value={fmtProb(data?.top_confidence_today)}
               testID="bm-top-confidence" />
         <Cell label="HIGHEST EDGE (TODAY)"
+              help={HELP.hiEdge} helpTestID="bm-help-highest-edge"
               value={fmtPct(data?.highest_edge_today)}
               testID="bm-highest-edge" />
         <Cell label="PICKS TODAY"
+              help={HELP.picks} helpTestID="bm-help-picks-today"
               value={String(data?.picks_today?.total ?? 0)}
               hint={
                 (data?.picks_today?.by_vertical ?? [])
@@ -277,13 +363,19 @@ export function BookmakerMetricsTile() {
   );
 }
 
-function Cell({ label, value, hint, testID }: {
+function Cell({ label, value, hint, testID, help, helpTestID }: {
   label: string; value: string; hint?: string; testID?: string;
+  help?: string; helpTestID?: string;
 }) {
   const colors = useColors();
   return (
     <View style={styles.cell} testID={testID}>
-      <Text style={[styles.cellLbl, { color: colors.mutedForeground }]}>{label}</Text>
+      <View style={styles.cellLblRow}>
+        <Text style={[styles.cellLbl, { color: colors.mutedForeground }]}>
+          {label}
+        </Text>
+        {help ? <InfoTip help={help} testID={helpTestID} /> : null}
+      </View>
       <Text style={[styles.cellVal, { color: colors.foreground }]}>{value}</Text>
       {hint ? (
         <Text style={[styles.cellHint, { color: colors.mutedForeground }]}>{hint}</Text>
@@ -313,7 +405,19 @@ const styles = StyleSheet.create({
   windowLbl: { fontSize: 10, letterSpacing: 1.5, fontFamily: "Inter_600SemiBold" },
   grid: { flexDirection: "row", flexWrap: "wrap", gap: 8, marginTop: 6 },
   cell: { minWidth: 130, flexGrow: 1 },
+  cellLblRow: { flexDirection: "row", alignItems: "center", gap: 4 },
   cellLbl: { fontSize: 9, letterSpacing: 1, fontFamily: "Inter_500Medium" },
   cellVal: { fontSize: 18, fontFamily: "Inter_700Bold", marginTop: 2 },
   cellHint: { fontSize: 10, fontFamily: "Inter_400Regular" },
+  hdrRow: { flexDirection: "row", alignItems: "center", gap: 6 },
+  infoBtn: {
+    width: 16, height: 16, borderRadius: 8, borderWidth: 1,
+    alignItems: "center", justifyContent: "center",
+  },
+  infoBtnTxt: { fontSize: 10, fontFamily: "Inter_600SemiBold", lineHeight: 12 },
+  tipBubble: {
+    position: "absolute", top: 20, right: 0, zIndex: 20,
+    minWidth: 180, maxWidth: 260, padding: 6, borderRadius: 4, borderWidth: 1,
+  },
+  tipBubbleTxt: { fontSize: 10, fontFamily: "Inter_400Regular", lineHeight: 14 },
 });

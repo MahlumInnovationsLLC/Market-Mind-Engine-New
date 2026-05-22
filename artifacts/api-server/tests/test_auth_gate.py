@@ -202,6 +202,9 @@ PROTECTED_ROUTES: tuple[str, ...] = (
     # disagreements and primary-stale + secondary-down enqueues.
     "/api/admin/soccer-settlement-review",
     "/api/dashboard/soccer-settlement-review",
+    # Task #832 — Top-Edges + bookmaker-grammar tiles (web + mobile).
+    "/api/dashboard/top-edges",
+    "/api/dashboard/bookmaker-metrics",
 )
 
 # Mutating endpoints — auth-protected, accept POST / PUT / DELETE.  These
@@ -310,6 +313,9 @@ PROTECTED_MUTATING_ENDPOINTS: tuple[tuple[str, str], ...] = (
     # Task #828 — best-line cross-book router operator endpoints.
     ("GET",  "/api/admin/best-line-alerts/full"),
     ("POST", "/api/admin/best-line-alerts/mark-placed"),
+    # Task #832 — Top-Edges tile operator actions (snooze / fire).
+    ("POST", "/api/dashboard/candidates/{prediction_id}/snooze"),
+    ("POST", "/api/dashboard/candidates/{prediction_id}/fire"),
 )
 
 # Path-only view of the mutating-endpoint inventory, used by the

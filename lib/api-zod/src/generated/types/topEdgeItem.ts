@@ -25,7 +25,7 @@ export interface TopEdgeItem {
   /** EV edge expressed as a percentage (edge * 100). */
   edge_pct?: number | null;
   confidence?: number | null;
-  /** Reserved for executor-side enrichment; currently always null. */
+  /** Indicative planned stake in USD; quarter-Kelly fraction of latest bankroll based on edge and market price. Null when bankroll is unknown or price is degenerate. */
   planned_stake?: number | null;
   kalshi_market_id?: string | null;
 }

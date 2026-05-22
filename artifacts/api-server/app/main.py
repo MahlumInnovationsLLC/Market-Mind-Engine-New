@@ -6120,22 +6120,40 @@ async def dashboard_candidate_fire(
     prediction_id: int,
     user: AuthedUser = Depends(require_approved_user),
 ) -> dict[str, object]:
-    """Clear any active snooze on a candidate so the next executor
-    cycle is free to fire it.
+    """Clear any active snooze on the candidate AND trigger an
+    orchestrator cycle for its vertical so the next pass picks it up.
 
-    Per the task scope this is intentionally *not* a synchronous
-    execute — the orchestrator's per-cycle gates remain the single
-    chokepoint.  Setting ``snoozed_until = now()`` immediately marks
-    the snooze row as expired, which both un-greys the tile entry and
-    drops the candidate back into the executor's candidate pool.
+    The orchestrator's 12-gate pipeline remains the single execute
+    chokepoint — we do not bypass it.  The cycle is scheduled as a
+    fire-and-forget background task so the operator gets immediate
+    feedback in the UI; ``triggered_cycle`` reports which vertical
+    was kicked (``None`` when we couldn't resolve a league).
     """
-    return await dashboard.snooze_prediction(
+    snooze_result = await dashboard.snooze_prediction(
         prediction_id=prediction_id,
         hours=0.0,
         by_user=str(getattr(user, "id", None) or "") or None,
         by_email=getattr(user, "email", None),
         reason="cleared via fire button",
     )
+    triggered: str | None = None
+    try:
+        row = await db.fetchrow(
+            "SELECT league FROM predictions WHERE id = $1",
+            int(prediction_id),
+        )
+        league = (row.get("league") if row else None) or None
+        vertical = dashboard._vertical_for_league(league)
+        from .orchestrator.cycle import run_cycle as _run_cycle
+        # Fire-and-forget: caller does not block on the cycle's LLM /
+        # exchange round trips.  Errors are surfaced via the
+        # orchestrator's own logging / alerting paths.
+        asyncio.create_task(_run_cycle(vertical=vertical))
+        triggered = vertical
+    except Exception as e:  # pragma: no cover — defensive
+        log.warning("fire-button cycle kick failed: %s", e)
+    snooze_result["triggered_cycle"] = triggered
+    return snooze_result
 
 
 @app.get("/api/dashboard/swarm-fallbacks-today")
