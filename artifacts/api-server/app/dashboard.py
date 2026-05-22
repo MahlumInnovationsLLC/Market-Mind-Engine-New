@@ -5457,6 +5457,14 @@ async def get_live_games(
         except Exception as e:
             log.warning("get_live_games tick join failed: %s", e)
 
+    # Canonical sport key per row — the dashboard Live-Now tile links
+    # to ``/live-games?league=<sport>`` (lowercase canonical sport key),
+    # and the frontend filter matches on this ``sport`` field rather
+    # than the raw ``league`` so case / prefix differences (``"NBA"``
+    # vs ``"nba"`` vs ``"basketball_nba"``) never strand the user on
+    # an empty list (task #874).
+    from .learning.in_game_loop import sport_for_league as _sport_for_league
+
     is_live_now_count = 0
     for r in rows:
         mid = r.get("market_id") or ""
@@ -5474,10 +5482,12 @@ async def get_live_games(
             ).strftime("%Y-%m-%dT%H:%M:%SZ") if created is not None else None
         except (OverflowError, OSError, ValueError):
             created_iso = None
+        league_raw = r.get("league") or "OTHER"
         items.append({
             "market_id": mid,
             "game_id": _market_id_to_game_id(mid),
-            "league": r.get("league") or "OTHER",
+            "league": league_raw,
+            "sport": _sport_for_league(league_raw),
             "is_live": is_live,
             "action": r.get("action"),
             "home_score": r.get("home_score"),

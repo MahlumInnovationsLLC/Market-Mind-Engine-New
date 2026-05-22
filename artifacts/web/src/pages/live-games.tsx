@@ -10,6 +10,11 @@ type LiveGameItem = {
   market_id: string;
   game_id: string;
   league: string;
+  // Canonical sport key ("nba", "soccer", …) computed server-side by
+  // the shared sport-key normalizer (task #874).  Used by the deep-link
+  // filter so a row whose raw league code is e.g. "NBA" or "EPL" still
+  // matches "/live-games?league=nba" / "?league=soccer".
+  sport?: string | null;
   is_live: boolean;
   action: string | null;
   home_score: number | null;
@@ -314,16 +319,29 @@ export default function LiveGamesPage() {
   const liveNowCount = data?.is_live_now_count ?? 0;
 
   const normalizedFilter = leagueFilter.trim().toLowerCase();
+  // The dashboard Live-Now tile links to /live-games?league=<sport>
+  // using the canonical lowercase sport key (e.g. "nba", "soccer").
+  // Each live-games item carries the same canonical key in `sport`
+  // (computed server-side by the shared sport-key normalizer in
+  // task #874).  Match on `sport` so deep links always land on a
+  // populated list regardless of how the raw `league` was spelled
+  // (e.g. "NBA", "EPL", "basketball_nba").  Fall back to the raw
+  // league code so an unrecognized league is still filterable by its
+  // own name.
   const matchesLeague = useCallback(
-    (league: string) =>
-      !normalizedFilter || league.toLowerCase() === normalizedFilter,
+    (league: string, sport?: string | null) => {
+      if (!normalizedFilter) return true;
+      const sportKey = (sport ?? "").toLowerCase();
+      if (sportKey && sportKey === normalizedFilter) return true;
+      return league.toLowerCase() === normalizedFilter;
+    },
     [normalizedFilter],
   );
 
   const grouped = useMemo(() => {
     const m = new Map<string, LiveGameItem[]>();
     for (const it of items) {
-      if (!matchesLeague(it.league)) continue;
+      if (!matchesLeague(it.league, it.sport)) continue;
       const arr = m.get(it.league) ?? [];
       arr.push(it);
       m.set(it.league, arr);

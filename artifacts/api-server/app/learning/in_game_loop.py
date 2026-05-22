@@ -301,6 +301,78 @@ def _normalize_sport(sport: str) -> str:
     return (sport or "").strip().lower()
 
 
+# Reverse index built from :data:`SPORT_LEAGUES` so any league string the
+# database / feed ever writes (``"NBA"``, ``"nba"``, ``"EPL"`` …) can
+# be mapped back to its canonical sport key.  Built lazily and cached.
+#
+# This is the *single source of truth* the dashboard tile and the
+# ``get_live_games`` payload share (task #874): the tile groups
+# ``predictions.is_live`` rollups by sport key and links to
+# ``/live-games?league=<sport>``; the live-games payload must tag each
+# item with the same canonical key so the frontend's filter — which is
+# matching a sport key, not a raw league code — always lands on a
+# populated list.
+_LEAGUE_TO_SPORT: dict[str, str] | None = None
+
+
+def _league_to_sport_index() -> dict[str, str]:
+    global _LEAGUE_TO_SPORT
+    idx = _LEAGUE_TO_SPORT
+    if idx is None:
+        idx = {}
+        for _sport, _leagues in SPORT_LEAGUES.items():
+            # Map both the canonical sport key and every configured
+            # league spelling (case-insensitive) back to the sport.
+            idx[_sport.lower()] = _sport
+            for _lg in _leagues:
+                idx[_lg.lower()] = _sport
+        _LEAGUE_TO_SPORT = idx
+    return idx
+
+
+def sport_for_league(league: str | None) -> str | None:
+    """Return the canonical sport key (e.g. ``"nba"``, ``"soccer"``)
+    for any league/sport spelling the feed writes.
+
+    Handles:
+      * Exact canonical sport keys (``"nba"`` → ``"nba"``).
+      * Any case of a configured league (``"NBA"``, ``"epl"``).
+      * The-odds-api style prefixes (``"basketball_nba"`` → ``"nba"``,
+        ``"soccer_epl"`` → ``"soccer"``).
+
+    Returns ``None`` when the input is empty or doesn't map to any
+    sport in :data:`SPORT_LEAGUES`.
+    """
+    if not league:
+        return None
+    raw = league.strip().lower()
+    if not raw:
+        return None
+    idx = _league_to_sport_index()
+    # Exact match first (handles canonical sport keys and configured
+    # league codes regardless of case).
+    hit = idx.get(raw)
+    if hit:
+        return hit
+    # the-odds-api style: "<sport>_<league>" — split on '_' and try
+    # each token from longest suffix to shortest so "basketball_nba"
+    # resolves via "nba" but "soccer_epl" resolves via "epl".
+    if "_" in raw:
+        parts = raw.split("_")
+        # Try the trailing league code first (the more specific bit).
+        for i in range(len(parts) - 1, -1, -1):
+            cand = "_".join(parts[i:])
+            hit = idx.get(cand)
+            if hit:
+                return hit
+            # Single-token check too, in case the prefix itself is the
+            # canonical sport (``soccer_epl`` → ``soccer``).
+            hit = idx.get(parts[i])
+            if hit:
+                return hit
+    return None
+
+
 async def _runtime_value(key: str) -> str | None:
     try:
         row = await db.fetchrow(
