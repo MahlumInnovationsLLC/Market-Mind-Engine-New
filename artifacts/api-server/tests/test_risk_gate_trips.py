@@ -434,4 +434,4 @@ def test_gates_registry_includes_uncalibrated_vertical() -> None:
     names = [n for n, _ in _gates.GATES]
     assert "uncalibrated_vertical" in names
     assert names.index("uncalibrated_vertical") == names.index("vertical_halted") + 1
-    assert len(_gates.GATES) == 22
+    assert len(_gates.GATES) == 24  # task #830: +stale_live_state +live_kelly_multiplier

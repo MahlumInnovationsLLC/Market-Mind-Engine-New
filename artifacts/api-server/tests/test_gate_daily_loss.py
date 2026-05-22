@@ -452,7 +452,7 @@ def test_gates_registry_includes_daily_loss():
     # gates).  daily_loss must still be #2 so an EOD halt aborts the
     # cycle before we burn DB round-trips on the per-vertical /
     # per-market reads.
-    assert len(_gates.GATES) == 22
+    assert len(_gates.GATES) == 24  # task #830: +stale_live_state +live_kelly_multiplier
 
 
 def test_snapshot_green_day_reports_zero_loss(monkeypatch):

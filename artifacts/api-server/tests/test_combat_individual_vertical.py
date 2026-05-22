@@ -839,8 +839,9 @@ def test_gates_tuple_still_twelve():
     fold into existing gates rather than adding new entries.  The count
     grows only when a *new* gate is added (daily_loss → 13,
     vertical_halted → 14, sharpe_ratio + ruin_monte_carlo +
-    segment_throttler → 17 in task #730)."""
-    assert len(GATES) == 22
+    segment_throttler → 17 in task #730; stale_live_state +
+    live_kelly_multiplier → 24 in task #830)."""
+    assert len(GATES) == 24
 
 
 # ---------------------------------------------------------------------------

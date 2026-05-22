@@ -363,7 +363,7 @@ class TestRegistries:
     def test_player_props_gate_in_registry(self) -> None:
         names = [n for n, _ in GATES]
         assert "player_props" in names
-        assert len(GATES) == 22
+        assert len(GATES) == 24  # task #830: +stale_live_state +live_kelly_multiplier
         # player_props sits AFTER uncalibrated_vertical (so calibrator
         # blocks take precedence) and BEFORE market_cooldown.
         i = names.index("player_props")

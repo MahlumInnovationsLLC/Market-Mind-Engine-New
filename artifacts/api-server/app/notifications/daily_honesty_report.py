@@ -856,18 +856,25 @@ async def collect_pre_vs_in_game_brier(
 
     by_league: dict[str, dict[str, list]] = {}
     for r in rows:
-        league = (r["league"] or "").strip().upper()
+        # Use .get() so a fake DB or a row shape that pre-dates the
+        # is_live column (e.g. a downgraded migration in test) doesn't
+        # KeyError the whole report — treat missing as pre-game.
+        league = (r.get("league") or "").strip().upper()
         if not league:
             continue
         bucket = by_league.setdefault(
             league, {"pre_p": [], "pre_y": [], "in_p": [], "in_y": []}
         )
-        if bool(r["is_live"]):
-            bucket["in_p"].append(float(r["predicted_prob"]))
-            bucket["in_y"].append(int(r["actual_outcome"]))
+        prob = r.get("predicted_prob")
+        outc = r.get("actual_outcome")
+        if prob is None or outc is None:
+            continue
+        if bool(r.get("is_live", False)):
+            bucket["in_p"].append(float(prob))
+            bucket["in_y"].append(int(outc))
         else:
-            bucket["pre_p"].append(float(r["predicted_prob"]))
-            bucket["pre_y"].append(int(r["actual_outcome"]))
+            bucket["pre_p"].append(float(prob))
+            bucket["pre_y"].append(int(outc))
 
     items: list[dict[str, Any]] = []
     too_small: list[dict[str, Any]] = []
