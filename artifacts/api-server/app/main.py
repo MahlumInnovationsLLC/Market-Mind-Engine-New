@@ -1256,6 +1256,15 @@ app = FastAPI(
 )
 
 _settings = get_settings()
+
+# Clerk Frontend API proxy. Registers only when CLERK_SECRET_KEY is set
+# (present in both dev and prod deployments; the production-only piece
+# is the client passing VITE_CLERK_PROXY_URL, which is empty in dev so
+# the SDK talks to Clerk's CDN directly and never hits this route).
+from .clerk_proxy import register_clerk_proxy as _register_clerk_proxy
+
+_register_clerk_proxy(app)
+
 app.add_middleware(RequestIdMiddleware)
 app.add_middleware(
     CORSMiddleware,
