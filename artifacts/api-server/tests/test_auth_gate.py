@@ -206,6 +206,8 @@ PROTECTED_ROUTES: tuple[str, ...] = (
     # disagreements and primary-stale + secondary-down enqueues.
     "/api/admin/soccer-settlement-review",
     "/api/dashboard/soccer-settlement-review",
+    # Task #879 — soccer in-game shadow-predictor forensics view.
+    "/api/admin/soccer-live-predictions",
     # Task #832 — Top-Edges + bookmaker-grammar tiles (web + mobile).
     "/api/dashboard/top-edges",
     "/api/dashboard/bookmaker-metrics",

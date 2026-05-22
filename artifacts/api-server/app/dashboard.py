@@ -7250,3 +7250,213 @@ async def get_edge_terminal_recent_signals(limit: int = 25) -> dict[str, Any]:
         log.warning("edge_terminal_recent_signals query failed: %s", e)
         out["error"] = f"{type(e).__name__}: {e}"[:240]
     return out
+
+
+# ---------------------------------------------------------------------------
+# Soccer live-prediction operator view (Task #879)
+# ---------------------------------------------------------------------------
+#
+# The in-game loop (``app.learning.in_game_loop``) overwrites
+# ``predictions.model_yes_prob`` with the soccer shadow-predictor's
+# posterior and stashes the feature blob + calibration info under
+# ``predictions.metadata->'live_prediction'``.  Until
+# ``risk.live_loop_enabled_soccer`` is flipped the loop ships in shadow
+# mode, so operators need a forensics view that surfaces the delta
+# between the pre-game prior (stored inside the blob's ``features``)
+# and the current posterior + Kalshi mid before they flip the live
+# trading flag.
+
+async def get_soccer_live_predictions(limit: int = 100) -> dict[str, Any]:
+    """List open soccer markets carrying a persisted live-prediction blob.
+
+    Returns ``{"items": [...], "count": N, "leagues": [...],
+    "fetched_at": "..."}``.  Each item exposes the comparison the
+    operator needs to evaluate the shadow predictor:
+
+      * ``pregame_prob``      — the pre-game prior the loop blended FROM
+        (recovered from ``metadata.live_prediction.features.pregame_prob``)
+      * ``live_prob``         — the current ``model_yes_prob`` the loop
+        overwrote the row with (the in-game posterior)
+      * ``kalshi_price``      — the live Kalshi mid the loop blended TOWARD
+      * ``delta_vs_pregame``  / ``delta_vs_market`` — signed differences
+        so the row can be sorted / color-coded
+      * ``home_score`` / ``away_score`` / ``minutes_elapsed`` — score
+        state recorded at the most recent loop tick
+      * ``live_prediction``   — the raw metadata blob the loop persisted,
+        so each row can drill into features + calibration for forensics
+
+    Only soccer rows are returned — the filter mirrors
+    :data:`app.learning.soccer_live.SOCCER_LEAGUES` so adding a league
+    there automatically shows up here.  Settled rows are excluded.
+    """
+    from .learning.soccer_live import SOCCER_LEAGUES
+
+    leagues = sorted(SOCCER_LEAGUES)
+    lim = max(1, min(500, int(limit)))
+    out: dict[str, Any] = {
+        "items": [],
+        "count": 0,
+        "leagues": leagues,
+        "fetched_at": datetime.now(timezone.utc).strftime(
+            "%Y-%m-%dT%H:%M:%SZ"
+        ),
+    }
+
+    try:
+        rows = await db.fetch(
+            """
+            SELECT p.id,
+                   p.kalshi_market_id,
+                   p.game_id,
+                   p.league,
+                   p.is_live,
+                   p.model_yes_prob::float                       AS model_yes_prob,
+                   p.kalshi_price::float                         AS kalshi_price,
+                   p.game_context,
+                   p.game_time,
+                   p.metadata->'live_prediction'                 AS live_prediction
+              FROM predictions p
+             WHERE upper(p.league) = ANY($1::text[])
+               AND p.settled_at IS NULL
+               AND p.metadata ? 'live_prediction'
+             ORDER BY ((p.metadata->'live_prediction'->'features'->>'minutes_elapsed')::float)
+                          DESC NULLS LAST,
+                      p.id DESC
+             LIMIT $2
+            """,
+            leagues,
+            lim,
+        )
+    except Exception as e:
+        log.warning("get_soccer_live_predictions query failed: %s", e)
+        out["error"] = f"{type(e).__name__}: {e}"[:240]
+        return out
+
+    def _decode_json(v: object) -> object:
+        if v is None or isinstance(v, (dict, list)):
+            return v
+        if isinstance(v, (str, bytes, bytearray)):
+            try:
+                return json.loads(v)
+            except (ValueError, TypeError):
+                return None
+        return v
+
+    def _coerce_float(v: object) -> float | None:
+        if v is None:
+            return None
+        try:
+            return float(v)
+        except (TypeError, ValueError):
+            return None
+
+    def _coerce_int(v: object) -> int | None:
+        if v is None:
+            return None
+        try:
+            return int(v)
+        except (TypeError, ValueError):
+            return None
+
+    items: list[dict[str, Any]] = []
+    for r in rows:
+        blob = _decode_json(r["live_prediction"])
+        features = (
+            blob.get("features") if isinstance(blob, dict) else None
+        ) or {}
+        pregame = _coerce_float(features.get("pregame_prob"))
+        live_prob = _coerce_float(r["model_yes_prob"])
+        kalshi = _coerce_float(r["kalshi_price"])
+
+        ctx = r.get("game_context") or {}
+        if isinstance(ctx, (str, bytes, bytearray)):
+            try:
+                ctx = json.loads(ctx)
+            except Exception:
+                ctx = {}
+        matchup = None
+        if isinstance(ctx, dict):
+            matchup = (
+                ctx.get("matchup")
+                or ctx.get("title")
+                or ctx.get("market_title")
+                or None
+            )
+        if not matchup:
+            matchup = (
+                str(r["kalshi_market_id"])
+                if r.get("kalshi_market_id")
+                else f"prediction#{r['id']}"
+            )
+
+        # Skip rows whose blob doesn't actually carry usable signal —
+        # the loop persists a metadata blob even on "skipped this
+        # cycle" paths, so without this guard an operator would see
+        # rows with no pregame_prob AND no live posterior to compare.
+        if pregame is None and live_prob is None and kalshi is None:
+            continue
+
+        delta_vs_pregame = (
+            (live_prob - pregame)
+            if (live_prob is not None and pregame is not None)
+            else None
+        )
+        delta_vs_market = (
+            (live_prob - kalshi)
+            if (live_prob is not None and kalshi is not None)
+            else None
+        )
+
+        items.append(
+            {
+                "prediction_id": int(r["id"]),
+                "market_id": (
+                    str(r["kalshi_market_id"])
+                    if r.get("kalshi_market_id") is not None
+                    else None
+                ),
+                "game_id": (
+                    str(r["game_id"]) if r.get("game_id") is not None else None
+                ),
+                "league": r.get("league"),
+                "matchup": matchup,
+                "is_live": bool(r.get("is_live")),
+                "pregame_prob": pregame,
+                "live_prob": live_prob,
+                "kalshi_price": kalshi,
+                "delta_vs_pregame": delta_vs_pregame,
+                "delta_vs_market": delta_vs_market,
+                "home_score": _coerce_int(features.get("home_score")),
+                "away_score": _coerce_int(features.get("away_score")),
+                "minutes_elapsed": _coerce_float(features.get("minutes_elapsed")),
+                "minutes_fraction": _coerce_float(features.get("minutes_fraction")),
+                "has_live_state": _coerce_float(features.get("has_live_state")),
+                "state_age_seconds": _coerce_float(
+                    features.get("state_age_seconds")
+                ),
+                "source": (
+                    blob.get("source") if isinstance(blob, dict) else None
+                ),
+                "skipped_reason": (
+                    blob.get("skipped_reason")
+                    if isinstance(blob, dict)
+                    else None
+                ),
+                "calibration": (
+                    blob.get("calibration") if isinstance(blob, dict) else None
+                ),
+                "raw_probability": (
+                    _coerce_float(blob.get("raw_probability"))
+                    if isinstance(blob, dict)
+                    else None
+                ),
+                # The full forensics blob — UI shows this in an
+                # expand/details pane so operators can read every
+                # feature + calibration field without a second round trip.
+                "live_prediction": blob if isinstance(blob, dict) else None,
+            }
+        )
+
+    out["items"] = items
+    out["count"] = len(items)
+    return out

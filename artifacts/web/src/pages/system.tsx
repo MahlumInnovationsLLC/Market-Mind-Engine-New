@@ -35,6 +35,7 @@ import {
   RcWebhookPanel,
   RiskKnobsPanel,
   RuntimePanel,
+  SoccerLivePredictionsPanel,
   TechAiPromotionPanel,
   TriggerCyclePanel,
   UserManagementPanel,
@@ -48,7 +49,7 @@ import EmergencyStop from "@/components/telemetry/emergency-stop";
 import AccessRequests from "@/components/telemetry/access-requests";
 import AutoResearchPanel from "@/components/intelligence/autoresearch-panel";
 
-const ALL_TABS = ["health", "controls", "risk", "swarm-tuning", "reconciler", "stuck-orders", "settings", "research", "audit", "users", "leads"] as const;
+const ALL_TABS = ["health", "controls", "risk", "swarm-tuning", "reconciler", "stuck-orders", "soccer-live", "settings", "research", "audit", "users", "leads"] as const;
 type TabKey = (typeof ALL_TABS)[number];
 
 const TAB_DEFS: Record<TabKey, TabDef<TabKey> & { adminOnly: boolean; subtitle: string }> = {
@@ -87,6 +88,12 @@ const TAB_DEFS: Record<TabKey, TabDef<TabKey> & { adminOnly: boolean; subtitle: 
     label: "Stuck orders",
     adminOnly: true,
     subtitle: "Order-submit dead-letter queue · mark-cancelled, force-retry, or claim-filled.",
+  },
+  "soccer-live": {
+    key: "soccer-live",
+    label: "Soccer live",
+    adminOnly: true,
+    subtitle: "Shadow-predictor delta — pre-game prior vs in-game posterior vs Kalshi mid for open soccer markets.",
   },
   settings: {
     key: "settings",
@@ -349,6 +356,17 @@ export default function SystemPage() {
         <div data-testid="panel-system-stuck-orders">
           <GlassCard tone="solid" padding="md">
             <StuckOrdersPanel />
+          </GlassCard>
+        </div>
+      )}
+
+      {tab === "soccer-live" && isAdmin && (
+        <div data-testid="panel-system-soccer-live">
+          <GlassCard tone="solid" padding="md">
+            <div className="mb-3 text-[11px] font-semibold uppercase tracking-[0.18em] text-accent-cyan/80">
+              Soccer in-game shadow predictor
+            </div>
+            <SoccerLivePredictionsPanel />
           </GlassCard>
         </div>
       )}

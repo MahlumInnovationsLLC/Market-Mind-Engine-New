@@ -6548,6 +6548,24 @@ async def dashboard_v1_backtest_gate(
     return await dashboard.get_v1_backtest_gate(history_limit=int(history_limit))
 
 
+@app.get("/api/admin/soccer-live-predictions")
+async def admin_get_soccer_live_predictions(
+    limit: int = 100,
+    actor: AuthedUser = Depends(require_admin),
+) -> dict[str, object]:
+    """Operator forensics view for the soccer in-game shadow predictor
+    (Task #879).
+
+    Lists open soccer markets whose ``predictions.metadata.live_prediction``
+    blob was populated by the in-game loop, surfacing pre-game prior vs
+    current posterior vs Kalshi mid alongside the score state.  Used to
+    sanity-check the shadow predictor before flipping
+    ``risk.live_loop_enabled_soccer``; each row carries the full blob
+    for drill-down forensics.
+    """
+    return await dashboard.get_soccer_live_predictions(limit=int(limit))
+
+
 @app.get("/api/dashboard/soccer-settlement-review")
 async def dashboard_soccer_settlement_review(
     _: object = Depends(require_approved_user),

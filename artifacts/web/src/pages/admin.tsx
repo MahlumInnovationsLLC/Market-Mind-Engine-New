@@ -6987,3 +6987,271 @@ export function OperatorAlertPreferencesPanel() {
     </div>
   );
 }
+
+// ---------------------------------------------------------------------------
+// Soccer live predictions panel (Task #879)
+//
+// Surfaces the delta between the pre-game prior, the in-game shadow
+// posterior (predictions.model_yes_prob), and the Kalshi mid for every
+// open soccer market the in-game loop has scored.  Operators read this
+// before flipping `risk.live_loop_enabled_soccer` so they can see the
+// shadow predictor is moving sensibly relative to the market.
+// ---------------------------------------------------------------------------
+
+type SoccerLivePredictionItem = {
+  prediction_id: number;
+  market_id: string | null;
+  game_id: string | null;
+  league: string | null;
+  matchup: string | null;
+  is_live: boolean;
+  pregame_prob: number | null;
+  live_prob: number | null;
+  kalshi_price: number | null;
+  delta_vs_pregame: number | null;
+  delta_vs_market: number | null;
+  home_score: number | null;
+  away_score: number | null;
+  minutes_elapsed: number | null;
+  minutes_fraction: number | null;
+  has_live_state: number | null;
+  state_age_seconds: number | null;
+  source: string | null;
+  skipped_reason: string | null;
+  calibration: Record<string, unknown> | null;
+  raw_probability: number | null;
+  live_prediction: Record<string, unknown> | null;
+};
+
+type SoccerLivePredictionsResponse = {
+  items: SoccerLivePredictionItem[];
+  count: number;
+  leagues: string[];
+  fetched_at: string;
+  error?: string;
+};
+
+function fmtProb(v: number | null | undefined, digits = 1): string {
+  if (v === null || v === undefined || Number.isNaN(v)) return "—";
+  return `${(v * 100).toFixed(digits)}%`;
+}
+
+function fmtDelta(v: number | null | undefined): string {
+  if (v === null || v === undefined || Number.isNaN(v)) return "—";
+  const pp = v * 100;
+  const sign = pp > 0 ? "+" : "";
+  return `${sign}${pp.toFixed(1)}pp`;
+}
+
+function deltaTone(v: number | null | undefined): string {
+  if (v === null || v === undefined || Number.isNaN(v)) {
+    return "text-muted-foreground";
+  }
+  if (Math.abs(v) < 0.01) return "text-muted-foreground";
+  return v > 0 ? "text-accent-cyan" : "text-loss";
+}
+
+export function SoccerLivePredictionsPanel() {
+  const { getToken } = useAuth();
+  const tokenFn = useMemo(
+    () => () => getToken().then((t) => t ?? null),
+    [getToken],
+  );
+  const [openId, setOpenId] = useState<number | null>(null);
+
+  const { data, isLoading, error, isFetching, refetch } =
+    useQuery<SoccerLivePredictionsResponse>({
+      queryKey: ["admin", "soccer-live-predictions"],
+      queryFn: () =>
+        apiFetch<SoccerLivePredictionsResponse>(
+          "/api/admin/soccer-live-predictions?limit=200",
+          { getToken: tokenFn },
+        ),
+      refetchInterval: 15_000,
+    });
+
+  const items = data?.items ?? [];
+
+  return (
+    <div
+      className="space-y-3"
+      data-testid="panel-soccer-live-predictions"
+    >
+      <div className="flex flex-wrap items-end justify-between gap-2">
+        <div>
+          <p className="text-xs text-muted-foreground">
+            Pre-game prior vs in-game posterior vs Kalshi mid for every open
+            soccer market the shadow predictor has scored. Use this before
+            flipping <code className="text-accent-cyan">risk.live_loop_enabled_soccer</code>.
+          </p>
+          <p className="mt-1 text-[10px] uppercase tracking-widest text-muted-foreground">
+            Leagues: {data?.leagues?.join(" · ") ?? "—"}
+          </p>
+        </div>
+        <div className="flex items-center gap-3 text-[11px] text-muted-foreground">
+          <span data-testid="soccer-live-predictions-count">
+            {items.length} row{items.length === 1 ? "" : "s"}
+          </span>
+          {isFetching && <span className="text-accent-cyan">↻</span>}
+          <button
+            type="button"
+            onClick={() => refetch()}
+            className="border border-border px-2 py-1 text-[10px] uppercase tracking-widest hover:bg-background/60"
+            data-testid="soccer-live-predictions-refresh"
+          >
+            Refresh
+          </button>
+        </div>
+      </div>
+
+      {error && (
+        <div
+          className="border border-loss/60 bg-loss/10 p-2 text-xs text-loss"
+          data-testid="soccer-live-predictions-error"
+        >
+          Failed to load: {(error as Error).message}
+        </div>
+      )}
+
+      {data?.error && (
+        <div
+          className="border border-loss/60 bg-loss/10 p-2 text-xs text-loss"
+          data-testid="soccer-live-predictions-server-error"
+        >
+          Server: {data.error}
+        </div>
+      )}
+
+      {isLoading && (
+        <div
+          className="text-xs text-muted-foreground"
+          data-testid="soccer-live-predictions-loading"
+        >
+          Loading…
+        </div>
+      )}
+
+      {!isLoading && items.length === 0 && !error && (
+        <div
+          className="border border-border bg-card p-4 text-xs text-muted-foreground"
+          data-testid="soccer-live-predictions-empty"
+        >
+          No open soccer markets carry a live-prediction blob yet. The in-game
+          loop writes one every cycle for any open soccer market whose game is
+          in <code>sportradar_live_state</code>; once a match is live this
+          table will populate within seconds.
+        </div>
+      )}
+
+      {items.length > 0 && (
+        <div className="overflow-x-auto border border-border bg-card">
+          <table className="w-full text-[11px]">
+            <thead className="bg-muted/20 uppercase tracking-widest text-muted-foreground">
+              <tr>
+                <th className="p-2 text-left">League</th>
+                <th className="p-2 text-left">Matchup</th>
+                <th className="p-2 text-right">Score</th>
+                <th className="p-2 text-right">Min</th>
+                <th className="p-2 text-right">Pre-game</th>
+                <th className="p-2 text-right">Live (posterior)</th>
+                <th className="p-2 text-right">Kalshi mid</th>
+                <th className="p-2 text-right">Δ vs pre</th>
+                <th className="p-2 text-right">Δ vs mkt</th>
+                <th className="p-2 text-left">Notes</th>
+                <th className="p-2 text-right">Forensics</th>
+              </tr>
+            </thead>
+            <tbody>
+              {items.map((it) => {
+                const open = openId === it.prediction_id;
+                return (
+                  <Fragment key={it.prediction_id}>
+                    <tr
+                      className="border-t border-border"
+                      data-testid={`soccer-live-row-${it.prediction_id}`}
+                    >
+                      <td className="p-2 font-mono">{it.league ?? "—"}</td>
+                      <td className="p-2">
+                        <div className="flex flex-col">
+                          <span className="text-foreground">{it.matchup}</span>
+                          <span className="text-[10px] text-muted-foreground">
+                            {it.market_id ?? "—"}
+                            {it.is_live ? " · LIVE" : ""}
+                          </span>
+                        </div>
+                      </td>
+                      <td className="p-2 text-right font-mono">
+                        {it.home_score ?? 0}–{it.away_score ?? 0}
+                      </td>
+                      <td className="p-2 text-right font-mono">
+                        {it.minutes_elapsed !== null
+                          ? `${Math.round(it.minutes_elapsed)}'`
+                          : "—"}
+                      </td>
+                      <td className="p-2 text-right font-mono">
+                        {fmtProb(it.pregame_prob)}
+                      </td>
+                      <td className="p-2 text-right font-mono text-foreground">
+                        {fmtProb(it.live_prob)}
+                      </td>
+                      <td className="p-2 text-right font-mono">
+                        {fmtProb(it.kalshi_price)}
+                      </td>
+                      <td
+                        className={`p-2 text-right font-mono ${deltaTone(it.delta_vs_pregame)}`}
+                        data-testid={`soccer-live-delta-pre-${it.prediction_id}`}
+                      >
+                        {fmtDelta(it.delta_vs_pregame)}
+                      </td>
+                      <td
+                        className={`p-2 text-right font-mono ${deltaTone(it.delta_vs_market)}`}
+                        data-testid={`soccer-live-delta-mkt-${it.prediction_id}`}
+                      >
+                        {fmtDelta(it.delta_vs_market)}
+                      </td>
+                      <td className="p-2 text-[10px] text-muted-foreground">
+                        {it.skipped_reason
+                          ? `skipped: ${it.skipped_reason}`
+                          : !it.has_live_state
+                            ? "no live state"
+                            : ""}
+                      </td>
+                      <td className="p-2 text-right">
+                        <button
+                          type="button"
+                          onClick={() =>
+                            setOpenId(open ? null : it.prediction_id)
+                          }
+                          className="border border-border px-2 py-0.5 text-[10px] uppercase tracking-widest hover:bg-background/60"
+                          data-testid={`soccer-live-toggle-${it.prediction_id}`}
+                        >
+                          {open ? "Hide" : "Blob"}
+                        </button>
+                      </td>
+                    </tr>
+                    {open && (
+                      <tr
+                        className="border-t border-border bg-background/40"
+                        data-testid={`soccer-live-blob-${it.prediction_id}`}
+                      >
+                        <td colSpan={11} className="p-3">
+                          <div className="mb-2 text-[10px] uppercase tracking-widest text-muted-foreground">
+                            metadata.live_prediction · prediction#{it.prediction_id}
+                            {it.game_id ? ` · game ${it.game_id}` : ""}
+                          </div>
+                          <pre className="overflow-x-auto whitespace-pre-wrap break-all rounded-sm bg-background/60 p-2 text-[10px] text-foreground">
+                            {JSON.stringify(it.live_prediction, null, 2)}
+                          </pre>
+                        </td>
+                      </tr>
+                    )}
+                  </Fragment>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  );
+}
