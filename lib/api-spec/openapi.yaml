@@ -1167,12 +1167,16 @@ components:
       required: false
       schema:
         type: string
-        enum: [manual, system, all]
+        enum: [manual, system, all, edge_terminal, pipeline]
         default: all
       description: >-
         Provenance bucket to scope trade-derived metrics by.  The
         web + mobile UIs surface this as a 3-segment toggle on
-        every P&L analytics surface.
+        every P&L analytics surface.  ``edge_terminal`` /
+        ``pipeline`` are the source-mode buckets driven by the
+        input-mode toggle (Edge Terminal scraper vs the legacy ML
+        pipeline) — every dashboard tile reuses this parameter to
+        filter to the currently active source.
 
   schemas:
     HealthStatus:
@@ -1295,7 +1299,7 @@ components:
         open_positions: { type: integer, nullable: true }
         placed_by:
           type: string
-          enum: [manual, system, all]
+          enum: [manual, system, all, edge_terminal, pipeline]
           description: >-
             Echo of the active provenance filter so the UI can
             reconstruct the toggle state without re-parsing the URL.
@@ -1422,6 +1426,25 @@ components:
         n_settled: { type: integer }
         cumulative_pnl: { type: number, nullable: true }
         win_rate: { type: number, nullable: true }
+        equivalent_units:
+          type: number
+          nullable: true
+          description: >-
+            Cumulative realised P&L expressed in 1u = $100
+            equivalent units (matches the bookmaker-grammar tile
+            convention so the two surfaces stay comparable).
+        by_vertical:
+          type: array
+          description: Per-vertical breakdown of Edge Terminal trades since the floor date.
+          items:
+            type: object
+            properties:
+              vertical: { type: string, nullable: true }
+              n: { type: integer }
+              n_settled: { type: integer }
+              pnl: { type: number }
+              equivalent_units: { type: number, description: "pnl / 100." }
+            required: [n, pnl]
         error: { type: string, nullable: true }
       required: [generated_at, since_date, n_trades, n_settled]
 

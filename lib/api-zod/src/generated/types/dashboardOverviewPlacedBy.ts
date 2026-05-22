@@ -16,4 +16,6 @@ export const DashboardOverviewPlacedBy = {
   manual: "manual",
   system: "system",
   all: "all",
+  edge_terminal: "edge_terminal",
+  pipeline: "pipeline",
 } as const;

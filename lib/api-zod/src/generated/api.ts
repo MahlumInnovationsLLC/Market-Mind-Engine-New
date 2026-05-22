@@ -120,10 +120,10 @@ export const getDashboardOverviewQueryPlacedByDefault = `all`;
 
 export const GetDashboardOverviewQueryParams = zod.object({
   placed_by: zod
-    .enum(["manual", "system", "all"])
+    .enum(["manual", "system", "all", "edge_terminal", "pipeline"])
     .default(getDashboardOverviewQueryPlacedByDefault)
     .describe(
-      "Provenance bucket to scope trade-derived metrics by.  The web + mobile UIs surface this as a 3-segment toggle on every P&L analytics surface.",
+      "Provenance bucket to scope trade-derived metrics by.  The web + mobile UIs surface this as a 3-segment toggle on every P&L analytics surface.  ``edge_terminal`` \/ ``pipeline`` are the source-mode buckets driven by the input-mode toggle (Edge Terminal scraper vs the legacy ML pipeline) — every dashboard tile reuses this parameter to filter to the currently active source.",
     ),
 });
 
@@ -142,7 +142,7 @@ export const GetDashboardOverviewResponse = zod.object({
   win_rate: zod.number().nullish(),
   open_positions: zod.number().nullish(),
   placed_by: zod
-    .enum(["manual", "system", "all"])
+    .enum(["manual", "system", "all", "edge_terminal", "pipeline"])
     .optional()
     .describe(
       "Echo of the active provenance filter so the UI can reconstruct the toggle state without re-parsing the URL.",
@@ -164,10 +164,10 @@ export const GetRecentTradesQueryParams = zod.object({
     .max(getRecentTradesQueryLimitMax)
     .default(getRecentTradesQueryLimitDefault),
   placed_by: zod
-    .enum(["manual", "system", "all"])
+    .enum(["manual", "system", "all", "edge_terminal", "pipeline"])
     .default(getRecentTradesQueryPlacedByDefault)
     .describe(
-      "Provenance bucket to scope trade-derived metrics by.  The web + mobile UIs surface this as a 3-segment toggle on every P&L analytics surface.",
+      "Provenance bucket to scope trade-derived metrics by.  The web + mobile UIs surface this as a 3-segment toggle on every P&L analytics surface.  ``edge_terminal`` \/ ``pipeline`` are the source-mode buckets driven by the input-mode toggle (Edge Terminal scraper vs the legacy ML pipeline) — every dashboard tile reuses this parameter to filter to the currently active source.",
     ),
 });
 
@@ -424,6 +424,26 @@ export const GetDashboardEdgeTerminalPnlResponse = zod.object({
   n_settled: zod.number(),
   cumulative_pnl: zod.number().nullish(),
   win_rate: zod.number().nullish(),
+  equivalent_units: zod
+    .number()
+    .nullish()
+    .describe(
+      "Cumulative realised P&L expressed in 1u = $100 equivalent units (matches the bookmaker-grammar tile convention so the two surfaces stay comparable).",
+    ),
+  by_vertical: zod
+    .array(
+      zod.object({
+        vertical: zod.string().nullish(),
+        n: zod.number(),
+        n_settled: zod.number().optional(),
+        pnl: zod.number(),
+        equivalent_units: zod.number().optional().describe("pnl \/ 100."),
+      }),
+    )
+    .optional()
+    .describe(
+      "Per-vertical breakdown of Edge Terminal trades since the floor date.",
+    ),
   error: zod.string().nullish(),
 });
 
@@ -1032,10 +1052,10 @@ export const GetVerticalPerformanceQueryParams = zod.object({
     .max(getVerticalPerformanceQueryDaysMax)
     .default(getVerticalPerformanceQueryDaysDefault),
   placed_by: zod
-    .enum(["manual", "system", "all"])
+    .enum(["manual", "system", "all", "edge_terminal", "pipeline"])
     .default(getVerticalPerformanceQueryPlacedByDefault)
     .describe(
-      "Provenance bucket to scope trade-derived metrics by.  The web + mobile UIs surface this as a 3-segment toggle on every P&L analytics surface.",
+      "Provenance bucket to scope trade-derived metrics by.  The web + mobile UIs surface this as a 3-segment toggle on every P&L analytics surface.  ``edge_terminal`` \/ ``pipeline`` are the source-mode buckets driven by the input-mode toggle (Edge Terminal scraper vs the legacy ML pipeline) — every dashboard tile reuses this parameter to filter to the currently active source.",
     ),
 });
 
@@ -1172,10 +1192,10 @@ export const GetPublicTailRiskExposureQueryParams = zod.object({
       "Trailing window length in days (clamped to [1, 365]). Driven by the dashboard's PeriodStrip selector.",
     ),
   placed_by: zod
-    .enum(["manual", "system", "all"])
+    .enum(["manual", "system", "all", "edge_terminal", "pipeline"])
     .default(getPublicTailRiskExposureQueryPlacedByDefault)
     .describe(
-      "Provenance bucket to scope trade-derived metrics by.  The web + mobile UIs surface this as a 3-segment toggle on every P&L analytics surface.",
+      "Provenance bucket to scope trade-derived metrics by.  The web + mobile UIs surface this as a 3-segment toggle on every P&L analytics surface.  ``edge_terminal`` \/ ``pipeline`` are the source-mode buckets driven by the input-mode toggle (Edge Terminal scraper vs the legacy ML pipeline) — every dashboard tile reuses this parameter to filter to the currently active source.",
     ),
   vertical: zod.coerce
     .string()
@@ -2602,10 +2622,10 @@ export const GetVerticalsOverviewQueryParams = zod.object({
     .max(getVerticalsOverviewQueryDaysMax)
     .default(getVerticalsOverviewQueryDaysDefault),
   placed_by: zod
-    .enum(["manual", "system", "all"])
+    .enum(["manual", "system", "all", "edge_terminal", "pipeline"])
     .default(getVerticalsOverviewQueryPlacedByDefault)
     .describe(
-      "Provenance bucket to scope trade-derived metrics by.  The web + mobile UIs surface this as a 3-segment toggle on every P&L analytics surface.",
+      "Provenance bucket to scope trade-derived metrics by.  The web + mobile UIs surface this as a 3-segment toggle on every P&L analytics surface.  ``edge_terminal`` \/ ``pipeline`` are the source-mode buckets driven by the input-mode toggle (Edge Terminal scraper vs the legacy ML pipeline) — every dashboard tile reuses this parameter to filter to the currently active source.",
     ),
 });
 

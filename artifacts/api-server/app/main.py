@@ -1284,7 +1284,7 @@ async def billing_pricing() -> dict[str, object]:
 @app.get("/api/public/equity-curve")
 async def public_equity_curve(
     days: int = 30,
-    placed_by: Literal["manual", "system", "all"] = "all",
+    placed_by: Literal["manual", "system", "all", "edge_terminal", "pipeline"] = "all",
     vertical: str | None = None,
 ) -> dict[str, object]:
     """Public — daily cumulative realized PnL.
@@ -1529,7 +1529,7 @@ async def admin_best_line_mark_placed(
 @app.get("/api/public/tail-risk-exposure")
 async def public_tail_risk_exposure(
     days: int = 30,
-    placed_by: Literal["manual", "system", "all"] = "all",
+    placed_by: Literal["manual", "system", "all", "edge_terminal", "pipeline"] = "all",
     vertical: str | None = None,
     trading_mode: Literal["paper", "live"] = "live",
 ) -> dict[str, object]:
@@ -5942,7 +5942,7 @@ async def _resolve_dashboard_trading_mode(
 
 @app.get("/api/dashboard/overview")
 async def dashboard_overview(
-    placed_by: Literal["manual", "system", "all"] = "all",
+    placed_by: Literal["manual", "system", "all", "edge_terminal", "pipeline"] = "all",
     trading_mode: str | None = None,
     user: AuthedUser = Depends(require_approved_user),
 ) -> dict[str, object]:
@@ -5981,7 +5981,7 @@ async def dashboard_overview(
 @app.get("/api/dashboard/recent-trades")
 async def dashboard_recent_trades(
     limit: int = 25,
-    placed_by: Literal["manual", "system", "all"] = "all",
+    placed_by: Literal["manual", "system", "all", "edge_terminal", "pipeline"] = "all",
     trading_mode: str | None = None,
     user: AuthedUser = Depends(require_approved_user),
 ) -> dict[str, object]:
@@ -6486,7 +6486,7 @@ async def dashboard_calibration_ab(
 @app.get("/api/dashboard/vertical-performance")
 async def dashboard_vertical_performance(
     days: int = 30,
-    placed_by: Literal["manual", "system", "all"] = "all",
+    placed_by: Literal["manual", "system", "all", "edge_terminal", "pipeline"] = "all",
     trading_mode: str | None = None,
     _: object = Depends(require_approved_user),
 ) -> dict[str, object]:
@@ -6537,7 +6537,7 @@ async def dashboard_crypto_accuracy(
 @app.get("/api/dashboard/verticals")
 async def dashboard_verticals_overview(
     days: int = 7,
-    placed_by: Literal["manual", "system", "all"] = "all",
+    placed_by: Literal["manual", "system", "all", "edge_terminal", "pipeline"] = "all",
     trading_mode: str | None = None,
     _: object = Depends(require_approved_user),
 ) -> dict[str, object]:

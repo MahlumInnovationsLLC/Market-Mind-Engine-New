@@ -29,6 +29,8 @@ vi.mock("@workspace/api-client-react", () => ({
   getGetVerticalsOverviewQueryKey: () => ["verticals-overview"],
   useGetMyAccess: () => state.access,
   getGetMyAccessQueryKey: () => ["my-access"],
+  useGetEdgeTerminalStatus: () => ({ data: undefined }),
+  getGetEdgeTerminalStatusQueryKey: () => ["edge-terminal-status"],
 }));
 
 vi.mock("@tanstack/react-query", () => ({

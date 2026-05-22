@@ -40,7 +40,7 @@ log = logging.getLogger(__name__)
 # bucket — they only show on the unfiltered ('all') view.
 # ---------------------------------------------------------------------------
 
-PlacedByFilter = Literal["manual", "system", "all"]
+PlacedByFilter = Literal["manual", "system", "all", "edge_terminal", "pipeline"]
 
 # `operator_recovery` is included in the system bucket because the
 # operator-claimed reconciliation flow is a system-side recovery path:
@@ -79,6 +79,18 @@ def _placed_by_predicate(filter_value: str | None, alias: str = "") -> str:
     if filter_value == "system":
         in_list = ",".join(f"'{v}'" for v in _PLACED_BY_SYSTEM_VALUES)
         return f"{col} IN ({in_list})"
+    if filter_value == "edge_terminal":
+        # Trades placed by the Edge Terminal scraper executor.  These
+        # rows are tagged ``placed_by='edge_terminal'`` by the scraper
+        # bypass since 2026-05-21.
+        return f"{col} = 'edge_terminal'"
+    if filter_value == "pipeline":
+        # Everything that is NOT Edge Terminal — the pre-Edge-Terminal
+        # ML pipeline output (orchestrator/autotrader/swarm/manual_ui
+        # /operator_recovery/rh_import/unknown/NULL).  ``IS DISTINCT
+        # FROM`` keeps NULL placed_by rows in the bucket so historical
+        # trades from before migration 0039 still aggregate.
+        return f"{col} IS DISTINCT FROM 'edge_terminal'"
     raise ValueError(f"unknown placed_by filter: {filter_value!r}")
 
 
@@ -7130,6 +7142,7 @@ async def get_edge_terminal_pnl() -> dict[str, Any]:
             """
             SELECT vertical,
                    COUNT(*)::int                AS n,
+                   COUNT(*) FILTER (WHERE pnl IS NOT NULL)::int AS n_settled,
                    COALESCE(SUM(pnl), 0)::float AS pnl
             FROM trades
             WHERE placed_by = 'edge_terminal'
@@ -7140,7 +7153,17 @@ async def get_edge_terminal_pnl() -> dict[str, Any]:
             """,
             EDGE_TERMINAL_PNL_FLOOR_ISO,
         )
-        out["by_vertical"] = [dict(r) for r in bv]
+        # 1 equivalent unit = $100 of realised P&L (matches the
+        # bookmaker-grammar tile convention so the two surfaces stay
+        # comparable).  Surfaced both per-vertical and at the top level.
+        UNIT_USD = 100.0
+        by_vertical: list[dict[str, Any]] = []
+        for r in bv:
+            d = dict(r)
+            d["equivalent_units"] = float(d.get("pnl") or 0.0) / UNIT_USD
+            by_vertical.append(d)
+        out["by_vertical"] = by_vertical
+        out["equivalent_units"] = float(out.get("cumulative_pnl") or 0.0) / UNIT_USD
     except Exception as e:
         log.warning("edge_terminal_pnl query failed: %s", e)
         out["error"] = f"{type(e).__name__}: {e}"[:240]

@@ -12,6 +12,8 @@ const { state } = vi.hoisted(() => ({
 vi.mock("@workspace/api-client-react", () => ({
   getGetRecentTradesQueryKey: () => ["recent-trades"],
   useGetRecentTrades: () => state,
+  useGetEdgeTerminalStatus: () => ({ data: undefined }),
+  getGetEdgeTerminalStatusQueryKey: () => ["edge-terminal-status"],
 }));
 
 vi.mock("@/hooks/use-selected-verticals", () => ({

@@ -7,7 +7,8 @@ import {
 } from "@workspace/api-client-react";
 import { GlassCard } from "@/components/ui/glass-card";
 import { SectionHeader } from "@/components/ui/section-header";
-import { usePlacedBy } from "./placed-by-context";
+import { useEffectivePlacedBy } from "./source-filter-context";
+import { TileStaleBadge, useTileStaleClass } from "./tile-stale-badge";
 
 function fmtCurrency(n: number | null | undefined): string {
   if (n === null || n === undefined || Number.isNaN(n)) return "—";
@@ -36,7 +37,8 @@ export default function HighlightsPanel() {
   // Trade-provenance filter (T004).  "Best win" / "biggest miss" are
   // pure P&L so they belong in the toggle's blast radius; the debate
   // feed below is upstream of any fill and stays unfiltered.
-  const { placedBy } = usePlacedBy();
+  const placedBy = useEffectivePlacedBy();
+  const staleClass = useTileStaleClass();
   const tradeParams = { limit: 100, placed_by: placedBy };
   const debateParams = { limit: 25 };
   const tradesQ = useGetRecentTrades(tradeParams, {
@@ -80,7 +82,13 @@ export default function HighlightsPanel() {
   const isLoading = tradesQ.isLoading || debatesQ.isLoading;
 
   return (
-    <GlassCard tone="solid" padding="md" data-testid="highlights-panel">
+    <GlassCard
+      tone="solid"
+      padding="md"
+      data-testid="highlights-panel"
+      className={staleClass}
+    >
+      <TileStaleBadge testId="highlights-panel-stale-badge" />
       <SectionHeader
         eyebrow="OPS"
         title="Highlights"

@@ -38,6 +38,8 @@ vi.mock("@workspace/api-client-react", () => ({
   useGetVerticalsOverview: () => state.verticals,
   useGetMyAccess: () => ({ data: { is_admin: false } }),
   useGetVerticalVisibility: () => ({ data: { hidden: [], pinned: [] } }),
+  useGetEdgeTerminalStatus: () => ({ data: undefined }),
+  getGetEdgeTerminalStatusQueryKey: () => ["edge-terminal-status"],
 }));
 
 vi.mock("@tanstack/react-query", () => ({

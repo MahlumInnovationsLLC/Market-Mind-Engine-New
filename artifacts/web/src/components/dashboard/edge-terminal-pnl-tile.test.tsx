@@ -8,9 +8,21 @@ const { pnlState, statusState } = vi.hoisted(() => ({
 
 vi.mock("@workspace/api-client-react", () => ({
   getGetDashboardEdgeTerminalPnlQueryKey: () => ["edge-terminal-pnl"],
-  getGetEdgeTerminalStatusQueryKey: () => ["edge-terminal-status"],
   useGetDashboardEdgeTerminalPnl: () => pnlState,
-  useGetEdgeTerminalStatus: () => statusState,
+}));
+
+// EdgeTerminalPnlTile now reads the shared `useEdgeTerminalSourceStale`
+// hook from the source-filter context (task #846).  We stub the
+// context module so the tile renders without `<SourceFilterProvider>`
+// and the test can drive the stale-badge branch directly.
+vi.mock("./source-filter-context", () => ({
+  useEdgeTerminalSourceStale: () => ({
+    stale: !!(statusState.data as { stale?: boolean } | undefined)?.stale,
+    ageSeconds:
+      (statusState.data as { age_seconds?: number } | undefined)
+        ?.age_seconds ?? null,
+    appliesToActiveSource: true,
+  }),
 }));
 
 import EdgeTerminalPnlTile from "./edge-terminal-pnl-tile";

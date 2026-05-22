@@ -7,7 +7,8 @@ import { GlassCard } from "@/components/ui/glass-card";
 import { SectionHeader } from "@/components/ui/section-header";
 import { useVerticalFilter } from "@/hooks/use-selected-verticals";
 import { usePeriod } from "./period-context";
-import { usePlacedBy } from "./placed-by-context";
+import { useEffectivePlacedBy } from "./source-filter-context";
+import { TileStaleBadge, useTileStaleClass } from "./tile-stale-badge";
 
 // See replit.md "Tail-risk exposure tile".
 
@@ -114,7 +115,8 @@ const TONE_LABEL: Record<TailRiskExposure["tail_concentration"]["tone"], string>
 const DEFAULT_TAIL_THRESHOLD = 0.2;
 
 export default function TailRiskExposurePanel() {
-  const { placedBy } = usePlacedBy();
+  const placedBy = useEffectivePlacedBy();
+  const tileStaleClass = useTileStaleClass();
   const { effectiveVerticals } = useVerticalFilter();
   const { period, days } = usePeriod();
   const [, setLocation] = useLocation();
@@ -170,7 +172,9 @@ export default function TailRiskExposurePanel() {
       tone="solid"
       padding="md"
       data-testid="card-tail-risk-exposure"
+      className={tileStaleClass}
     >
+      <TileStaleBadge testId="tail-risk-stale-badge" />
       <SectionHeader
         eyebrow={`RISK · ${periodLabel}`}
         title="Tail-risk exposure"

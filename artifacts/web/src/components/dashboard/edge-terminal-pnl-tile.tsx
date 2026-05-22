@@ -1,11 +1,11 @@
 import {
   getGetDashboardEdgeTerminalPnlQueryKey,
-  getGetEdgeTerminalStatusQueryKey,
   useGetDashboardEdgeTerminalPnl,
-  useGetEdgeTerminalStatus,
 } from "@workspace/api-client-react";
 import { GlassCard } from "@/components/ui/glass-card";
 import { SectionHeader } from "@/components/ui/section-header";
+import { TileStaleBadge, useTileStaleClass } from "./tile-stale-badge";
+import { useEdgeTerminalSourceStale } from "./source-filter-context";
 
 function fmtUSD(n: number | null | undefined): string {
   if (n === null || n === undefined || Number.isNaN(n)) return "—";
@@ -20,19 +20,24 @@ function fmtTime(s: string | null | undefined): string {
   if (!s) return "—";
   try { return new Date(s).toLocaleTimeString(); } catch { return s; }
 }
+function fmtUnits(n: number | null | undefined): string {
+  if (n === null || n === undefined || Number.isNaN(n)) return "—";
+  const v = Number(n);
+  return `${v >= 0 ? "+" : ""}${v.toFixed(2)}u`;
+}
 
 export default function EdgeTerminalPnlTile() {
   const pnlKey = getGetDashboardEdgeTerminalPnlQueryKey();
   const { data, isLoading, error } = useGetDashboardEdgeTerminalPnl({
     query: { queryKey: pnlKey, refetchInterval: 30_000, staleTime: 25_000 },
   });
-  const statusKey = getGetEdgeTerminalStatusQueryKey();
-  const { data: status } = useGetEdgeTerminalStatus({
-    query: { queryKey: statusKey, refetchInterval: 30_000, staleTime: 25_000 },
-  });
-
-  const stale = !!status?.stale;
+  // Migrated to the shared poller hook so every dashboard tile shows
+  // the identical stale indicator instead of this tile keeping its
+  // bespoke "Stale poller" badge (task #846 code review).
+  const { stale, ageSeconds } = useEdgeTerminalSourceStale();
+  const staleClass = useTileStaleClass();
   const pnl = data?.cumulative_pnl ?? null;
+  const byVertical = data?.by_vertical ?? [];
   const pnlColor =
     pnl === null || pnl === undefined
       ? "text-foreground"
@@ -45,7 +50,7 @@ export default function EdgeTerminalPnlTile() {
       tone="solid"
       padding="md"
       data-testid="card-edge-terminal-pnl"
-      className={stale ? "opacity-60" : undefined}
+      className={staleClass}
     >
       <SectionHeader
         eyebrow="EDGE TERMINAL"
@@ -56,17 +61,7 @@ export default function EdgeTerminalPnlTile() {
             : "Cumulative P&L on Edge Terminal scraper trades."
         }
       />
-      {stale ? (
-        <div
-          data-testid="edge-terminal-stale-badge"
-          className="mb-2 inline-flex items-center gap-1 rounded border border-amber-500/40 bg-amber-500/10 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wider text-amber-300"
-        >
-          Stale poller
-          {typeof status?.age_seconds === "number"
-            ? ` · ${Math.round(status.age_seconds)}s`
-            : ""}
-        </div>
-      ) : null}
+      <TileStaleBadge testId="edge-terminal-stale-badge" />
       {isLoading ? (
         <div className="text-xs text-muted-foreground">Loading…</div>
       ) : error ? (
@@ -84,29 +79,101 @@ export default function EdgeTerminalPnlTile() {
           {data.error}
         </div>
       ) : (
-        <div className="grid grid-cols-2 gap-3">
-          <div>
-            <div className="text-[10px] uppercase tracking-wider text-muted-foreground">
-              Cumulative P&L
+        <div className="space-y-3">
+          <div className="grid grid-cols-3 gap-3">
+            <div>
+              <div className="text-[10px] uppercase tracking-wider text-muted-foreground">
+                Cumulative P&L
+              </div>
+              <div
+                data-testid="edge-terminal-pnl-cumulative"
+                className={`text-2xl font-bold ${pnlColor}`}
+              >
+                {fmtUSD(pnl)}
+              </div>
+              <div
+                data-testid="edge-terminal-pnl-units"
+                className={`mt-0.5 text-[11px] tabular-nums ${pnlColor}`}
+              >
+                {fmtUnits(data?.equivalent_units)}
+              </div>
             </div>
+            <div>
+              <div className="text-[10px] uppercase tracking-wider text-muted-foreground">
+                Hit rate
+              </div>
+              <div className="text-2xl font-bold text-foreground">
+                {fmtPct(data?.win_rate)}
+              </div>
+              <div className="mt-1 text-[10px] text-muted-foreground">
+                {data?.n_settled ?? 0} settled · {data?.n_trades ?? 0} placed
+              </div>
+            </div>
+            <div>
+              <div className="text-[10px] uppercase tracking-wider text-muted-foreground">
+                Equivalent units
+              </div>
+              <div
+                className={`text-2xl font-bold ${pnlColor}`}
+                data-testid="edge-terminal-pnl-units-headline"
+              >
+                {fmtUnits(data?.equivalent_units)}
+              </div>
+              <div className="mt-1 text-[10px] text-muted-foreground">
+                1u = $100 flat
+              </div>
+            </div>
+          </div>
+          {byVertical.length > 0 ? (
             <div
-              data-testid="edge-terminal-pnl-cumulative"
-              className={`text-2xl font-bold ${pnlColor}`}
+              className="border-t border-border pt-2"
+              data-testid="edge-terminal-pnl-by-vertical"
             >
-              {fmtUSD(pnl)}
+              <div className="mb-1 text-[10px] uppercase tracking-wider text-muted-foreground">
+                By vertical
+              </div>
+              <div className="grid grid-cols-1 gap-1 text-[11px]">
+                {byVertical.map((row, i) => {
+                  const label = row.vertical || "—";
+                  const rowPnl = Number(row.pnl ?? 0);
+                  const rowColor =
+                    rowPnl > 0
+                      ? "text-emerald-400"
+                      : rowPnl < 0
+                        ? "text-rose-400"
+                        : "text-foreground";
+                  return (
+                    <div
+                      key={`${label}-${i}`}
+                      className="flex items-center justify-between gap-3 border border-border/40 bg-card/40 px-2 py-1"
+                      data-testid={`edge-terminal-pnl-vertical-${label}`}
+                    >
+                      <div className="flex min-w-0 items-center gap-2">
+                        <span className="truncate font-semibold uppercase tracking-wider text-foreground">
+                          {label}
+                        </span>
+                        <span className="text-[10px] text-muted-foreground">
+                          n={row.n}
+                          {typeof row.n_settled === "number"
+                            ? ` · ${row.n_settled} settled`
+                            : ""}
+                        </span>
+                      </div>
+                      <div className="flex items-center gap-3 tabular-nums">
+                        <span className={rowColor}>{fmtUSD(rowPnl)}</span>
+                        <span
+                          className={`text-[10px] ${rowColor}`}
+                          data-testid={`edge-terminal-pnl-vertical-${label}-units`}
+                        >
+                          {fmtUnits(row.equivalent_units ?? rowPnl / 100)}
+                        </span>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
             </div>
-          </div>
-          <div>
-            <div className="text-[10px] uppercase tracking-wider text-muted-foreground">
-              Hit rate
-            </div>
-            <div className="text-2xl font-bold text-foreground">
-              {fmtPct(data?.win_rate)}
-            </div>
-            <div className="mt-1 text-[10px] text-muted-foreground">
-              {data?.n_settled ?? 0} settled · {data?.n_trades ?? 0} placed
-            </div>
-          </div>
+          ) : null}
         </div>
       )}
     </GlassCard>

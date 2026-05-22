@@ -114,6 +114,8 @@ export const DashboardOverviewPlacedBy = {
   manual: "manual",
   system: "system",
   all: "all",
+  edge_terminal: "edge_terminal",
+  pipeline: "pipeline",
 } as const;
 
 export interface DashboardOverview {
@@ -249,6 +251,15 @@ export interface EdgeTerminalStatusResponse {
   running: boolean;
 }
 
+export type EdgeTerminalPnlResponseByVerticalItem = {
+  vertical?: string | null;
+  n: number;
+  n_settled?: number;
+  pnl: number;
+  /** pnl / 100. */
+  equivalent_units?: number;
+};
+
 export interface EdgeTerminalPnlResponse {
   generated_at: string;
   /** ISO date floor (2026-05-21). */
@@ -257,6 +268,10 @@ export interface EdgeTerminalPnlResponse {
   n_settled: number;
   cumulative_pnl?: number | null;
   win_rate?: number | null;
+  /** Cumulative realised P&L expressed in 1u = $100 equivalent units (matches the bookmaker-grammar tile convention so the two surfaces stay comparable). */
+  equivalent_units?: number | null;
+  /** Per-vertical breakdown of Edge Terminal trades since the floor date. */
+  by_vertical?: EdgeTerminalPnlResponseByVerticalItem[];
   error?: string | null;
 }
 
@@ -2067,11 +2082,13 @@ export const PlacedByParamParameter = {
   manual: "manual",
   system: "system",
   all: "all",
+  edge_terminal: "edge_terminal",
+  pipeline: "pipeline",
 } as const;
 
 export type GetDashboardOverviewParams = {
   /**
-   * Provenance bucket to scope trade-derived metrics by.  The web + mobile UIs surface this as a 3-segment toggle on every P&L analytics surface.
+   * Provenance bucket to scope trade-derived metrics by.  The web + mobile UIs surface this as a 3-segment toggle on every P&L analytics surface.  ``edge_terminal`` / ``pipeline`` are the source-mode buckets driven by the input-mode toggle (Edge Terminal scraper vs the legacy ML pipeline) — every dashboard tile reuses this parameter to filter to the currently active source.
    */
   placed_by?: PlacedByParamParameter;
 };
@@ -2083,7 +2100,7 @@ export type GetRecentTradesParams = {
    */
   limit?: number;
   /**
-   * Provenance bucket to scope trade-derived metrics by.  The web + mobile UIs surface this as a 3-segment toggle on every P&L analytics surface.
+   * Provenance bucket to scope trade-derived metrics by.  The web + mobile UIs surface this as a 3-segment toggle on every P&L analytics surface.  ``edge_terminal`` / ``pipeline`` are the source-mode buckets driven by the input-mode toggle (Edge Terminal scraper vs the legacy ML pipeline) — every dashboard tile reuses this parameter to filter to the currently active source.
    */
   placed_by?: PlacedByParamParameter;
 };
@@ -2164,7 +2181,7 @@ export type GetVerticalPerformanceParams = {
    */
   days?: number;
   /**
-   * Provenance bucket to scope trade-derived metrics by.  The web + mobile UIs surface this as a 3-segment toggle on every P&L analytics surface.
+   * Provenance bucket to scope trade-derived metrics by.  The web + mobile UIs surface this as a 3-segment toggle on every P&L analytics surface.  ``edge_terminal`` / ``pipeline`` are the source-mode buckets driven by the input-mode toggle (Edge Terminal scraper vs the legacy ML pipeline) — every dashboard tile reuses this parameter to filter to the currently active source.
    */
   placed_by?: PlacedByParamParameter;
 };
@@ -2185,7 +2202,7 @@ export type GetPublicTailRiskExposureParams = {
    */
   days?: number;
   /**
-   * Provenance bucket to scope trade-derived metrics by.  The web + mobile UIs surface this as a 3-segment toggle on every P&L analytics surface.
+   * Provenance bucket to scope trade-derived metrics by.  The web + mobile UIs surface this as a 3-segment toggle on every P&L analytics surface.  ``edge_terminal`` / ``pipeline`` are the source-mode buckets driven by the input-mode toggle (Edge Terminal scraper vs the legacy ML pipeline) — every dashboard tile reuses this parameter to filter to the currently active source.
    */
   placed_by?: PlacedByParamParameter;
   /**
@@ -2281,7 +2298,7 @@ export type GetVerticalsOverviewParams = {
    */
   days?: number;
   /**
-   * Provenance bucket to scope trade-derived metrics by.  The web + mobile UIs surface this as a 3-segment toggle on every P&L analytics surface.
+   * Provenance bucket to scope trade-derived metrics by.  The web + mobile UIs surface this as a 3-segment toggle on every P&L analytics surface.  ``edge_terminal`` / ``pipeline`` are the source-mode buckets driven by the input-mode toggle (Edge Terminal scraper vs the legacy ML pipeline) — every dashboard tile reuses this parameter to filter to the currently active source.
    */
   placed_by?: PlacedByParamParameter;
 };

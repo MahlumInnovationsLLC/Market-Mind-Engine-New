@@ -18,7 +18,8 @@ import { GlassCard } from "@/components/ui/glass-card";
 import { SectionHeader } from "@/components/ui/section-header";
 import { useVerticalFilter } from "@/hooks/use-selected-verticals";
 import { usePeriod } from "./period-context";
-import { usePlacedBy } from "./placed-by-context";
+import { useEffectivePlacedBy } from "./source-filter-context";
+import { TileStaleBadge, useTileStaleClass } from "./tile-stale-badge";
 
 type EquityPoint = {
   date: string;
@@ -72,7 +73,10 @@ export default function EquityCharts() {
   // of the React-Query key so flipping the toggle invalidates cleanly
   // instead of returning a stale cached series.  `all` produces no
   // server-side filter, identical to the marketing-landing behaviour.
-  const { placedBy } = usePlacedBy();
+  // Source-aware placed_by (task #846): falls through to Manual /
+  // System / Both unless the input-mode toggle is forcing one source.
+  const placedBy = useEffectivePlacedBy();
+  const staleClass = useTileStaleClass();
   // Mirror the operator's vertical-strip selection so the equity chart
   // narrows whenever they click SPORTS / CRYPTO / etc.  An empty
   // selection means "show all", same as omitting the param entirely —
@@ -112,9 +116,11 @@ export default function EquityCharts() {
 
   return (
     <div
-      className="grid grid-cols-1 gap-4 xl:grid-cols-3"
+      className={"space-y-2" + (staleClass ? ` ${staleClass}` : "")}
       data-testid="equity-charts"
     >
+    <TileStaleBadge testId="equity-charts-stale-badge" />
+    <div className="grid grid-cols-1 gap-4 xl:grid-cols-3">
       <GlassCard tone="solid" padding="md" className="xl:col-span-2">
         <SectionHeader
           eyebrow={`PNL · ${periodLabel}`}
@@ -257,6 +263,7 @@ export default function EquityCharts() {
           )}
         </div>
       </GlassCard>
+    </div>
     </div>
   );
 }

@@ -11,7 +11,8 @@ import { resolveApiUrl } from "@/lib/api";
 import { GlassCard } from "@/components/ui/glass-card";
 import { useVerticalFilter } from "@/hooks/use-selected-verticals";
 import { usePeriod } from "./period-context";
-import { usePlacedBy } from "./placed-by-context";
+import { useEffectivePlacedBy } from "./source-filter-context";
+import { TileStaleBadge, useTileStaleClass } from "./tile-stale-badge";
 
 /**
  * 6-tile KPI strip from §6.1 of FRONTEND_UI_REPORT:
@@ -117,7 +118,13 @@ export default function KpiSummaryBar() {
   // it from the authed dashboard doesn't break the anonymous one.
   // Open-positions stays unscoped — it describes the live book
   // (currently-held contracts) which is provenance-agnostic.
-  const { placedBy } = usePlacedBy();
+  // Threads the source-aware effective `placed_by` so the strip
+  // narrows automatically to Edge Terminal or Pipeline trades when the
+  // input-mode toggle is flipped (task #846).  Falls back to the
+  // operator's Manual / System / Both selection when both sources are
+  // visible.
+  const placedBy = useEffectivePlacedBy();
+  const staleClass = useTileStaleClass();
   // Mirror the operator's vertical-strip selection so every equity-
   // derived tile (P&L Today, ROI, Volume, Sharpe) narrows in lock-step
   // with the equity charts and the per-vertical panels lower on the
@@ -256,9 +263,13 @@ export default function KpiSummaryBar() {
 
   return (
     <div
-      className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6"
+      className={
+        "space-y-2" + (staleClass ? ` ${staleClass}` : "")
+      }
       data-testid="kpi-summary-bar"
     >
+    <TileStaleBadge testId="kpi-summary-stale-badge" />
+    <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
       <KpiTile
         loading={equityQ.isLoading}
         label="P&L TODAY"
@@ -308,6 +319,7 @@ export default function KpiSummaryBar() {
         valueClassName={pnlClass(sharpe)}
         testId="kpi-sharpe"
       />
+    </div>
     </div>
   );
 }

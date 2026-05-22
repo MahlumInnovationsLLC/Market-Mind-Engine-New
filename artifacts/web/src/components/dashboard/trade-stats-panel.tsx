@@ -7,7 +7,8 @@ import { GlassCard } from "@/components/ui/glass-card";
 import { SectionHeader } from "@/components/ui/section-header";
 import { useVerticalFilter } from "@/hooks/use-selected-verticals";
 import { usePeriod } from "./period-context";
-import { usePlacedBy } from "./placed-by-context";
+import { useEffectivePlacedBy } from "./source-filter-context";
+import { TileStaleBadge, useTileStaleClass } from "./tile-stale-badge";
 
 function fmtUsd(n: number | null | undefined, digits = 0): string {
   if (n === null || n === undefined || Number.isNaN(n)) return "—";
@@ -39,7 +40,9 @@ export default function TradeStatsPanel() {
   // Trade-provenance filter (T004).  We delegate filtering to the API
   // — server-side WHERE keeps the 200-row recent slice meaningful even
   // when only a small minority of fills match the chosen segment.
-  const { placedBy } = usePlacedBy();
+  // Source-aware placed_by (task #846).
+  const placedBy = useEffectivePlacedBy();
+  const staleClass = useTileStaleClass();
   const params = { limit: 200, placed_by: placedBy };
   const { data, isLoading } = useGetRecentTrades(params, {
     query: {
@@ -104,7 +107,13 @@ export default function TradeStatsPanel() {
   }, [data, days, matches]);
 
   return (
-    <GlassCard tone="solid" padding="md" data-testid="trade-stats-panel">
+    <GlassCard
+      tone="solid"
+      padding="md"
+      data-testid="trade-stats-panel"
+      className={staleClass}
+    >
+      <TileStaleBadge testId="trade-stats-stale-badge" />
       <SectionHeader
         eyebrow={`STATS · ${period.toUpperCase()}`}
         title="Trade stats"

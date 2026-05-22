@@ -5,6 +5,7 @@
  * Axiom-Predict API — backend for the prediction-market trading platform.
  * OpenAPI spec version: 0.1.0
  */
+import type { EdgeTerminalPnlResponseByVerticalItem } from "./edgeTerminalPnlResponseByVerticalItem";
 
 export interface EdgeTerminalPnlResponse {
   generated_at: string;
@@ -14,5 +15,9 @@ export interface EdgeTerminalPnlResponse {
   n_settled: number;
   cumulative_pnl?: number | null;
   win_rate?: number | null;
+  /** Cumulative realised P&L expressed in 1u = $100 equivalent units (matches the bookmaker-grammar tile convention so the two surfaces stay comparable). */
+  equivalent_units?: number | null;
+  /** Per-vertical breakdown of Edge Terminal trades since the floor date. */
+  by_vertical?: EdgeTerminalPnlResponseByVerticalItem[];
   error?: string | null;
 }

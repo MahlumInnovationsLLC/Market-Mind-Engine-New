@@ -1,4 +1,3 @@
-import { useState } from "react";
 import {
   getGetMyAccessQueryKey,
   useGetMyAccess,
@@ -6,7 +5,11 @@ import {
 import { useFocusFromQuery } from "@/hooks/use-focus-from-query";
 import EdgeTerminalPnlTile from "@/components/dashboard/edge-terminal-pnl-tile";
 import EdgeTerminalRecentSignalsTile from "@/components/dashboard/edge-terminal-recent-signals";
-import InputModeToggle, { useInputMode } from "@/components/dashboard/input-mode-toggle";
+import InputModeToggle from "@/components/dashboard/input-mode-toggle";
+import {
+  SourceFilterProvider,
+  useSourceFilter,
+} from "@/components/dashboard/source-filter-context";
 import ActivePositions from "@/components/dashboard/active-positions";
 import BankrollPanel from "@/components/dashboard/bankroll-panel";
 import CryptoBacktestRetentionPanel from "@/components/dashboard/crypto-backtest-retention-panel";
@@ -60,13 +63,22 @@ export default function Dashboard() {
   const isAdmin = !!access?.is_admin;
 
   useFocusFromQuery();
-  const { isEdgeTerminal } = useInputMode();
-  const [showPipelineData, setShowPipelineData] = useState(false);
-  const pipelineVisible = !isEdgeTerminal || showPipelineData;
 
   return (
     <PeriodProvider>
      <PlacedByProvider>
+      <SourceFilterProvider>
+       <DashboardBody isAdmin={isAdmin} />
+      </SourceFilterProvider>
+     </PlacedByProvider>
+    </PeriodProvider>
+  );
+}
+
+function DashboardBody({ isAdmin }: { isAdmin: boolean }) {
+  const { isEdgeTerminal, showPipelineData, setShowPipelineData, pipelineVisible } =
+    useSourceFilter();
+  return (
       <div className="space-y-5 font-mono">
         <header className="flex flex-col gap-3 lg:flex-row lg:items-end lg:justify-between">
           <div className="min-w-0">
@@ -87,6 +99,10 @@ export default function Dashboard() {
               showPipelineData={showPipelineData}
               onTogglePipelineData={setShowPipelineData}
             />
+            {/* `isEdgeTerminal` / `pipelineVisible` drive the tile
+                visibility below; they're sourced from
+                <SourceFilterProvider> so every tile reads the same
+                value the toggle just flipped. */}
             <PlacedByToggle />
             <PeriodStrip />
           </div>
@@ -253,7 +269,5 @@ export default function Dashboard() {
 
         <OperatorControls isAdmin={isAdmin} />
       </div>
-     </PlacedByProvider>
-    </PeriodProvider>
   );
 }
