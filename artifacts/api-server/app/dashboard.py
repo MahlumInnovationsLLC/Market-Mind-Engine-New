@@ -5454,6 +5454,100 @@ async def get_live_games(
     }
 
 
+async def get_live_now_tile() -> dict[str, Any]:
+    """Live-game-now dashboard tile (task #830).
+
+    Read-only roll-up the operator console can drop next to
+    ``get_live_games`` without a new route:
+
+      * Per-sport count of currently in-progress games (from
+        ``sportradar_live_state`` rows whose status is live-ish).
+      * Per-sport count of open predictions tagged ``is_live=true``
+        (predictions the in-game loop has touched in the current pass).
+      * Per-sport latest ``fetched_at`` and oldest staleness in
+        seconds — the staleness number is what the
+        ``stale_live_state`` risk gate compares to its per-league
+        budget, so surfacing it here lets the operator eyeball
+        whether the feed is keeping up before a trade is even
+        considered.
+
+    Fail-soft: any per-sport query failure is captured in
+    ``per_sport[<sport>].error`` so a missing migration / table
+    never blacks out the tile.
+    """
+    from .learning.in_game_loop import (
+        SPORT_LEAGUES as _SPORT_LEAGUES,
+        _LIVE_STATUSES as _LIVE,
+    )
+
+    fetched_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    per_sport: dict[str, dict[str, Any]] = {}
+    totals = {"live_games": 0, "is_live_predictions": 0}
+
+    for sport, leagues in _SPORT_LEAGUES.items():
+        entry: dict[str, Any] = {
+            "live_games": 0,
+            "is_live_predictions": 0,
+            "latest_fetched_at": None,
+            "oldest_staleness_seconds": None,
+            "error": None,
+        }
+        try:
+            row = await db.fetchrow(
+                """
+                SELECT count(*)::int                                AS n,
+                       to_char(max(fetched_at),
+                               'YYYY-MM-DD"T"HH24:MI:SSZ')          AS latest,
+                       extract(
+                           epoch from (now() - min(fetched_at))
+                       )::float                                     AS oldest_age
+                  FROM sportradar_live_state
+                 WHERE upper(league) = ANY($1::text[])
+                   AND lower(status) = ANY($2::text[])
+                """,
+                list(leagues),
+                list(_LIVE),
+            )
+            if row:
+                entry["live_games"] = int(row["n"] or 0)
+                entry["latest_fetched_at"] = row["latest"]
+                if row["oldest_age"] is not None:
+                    entry["oldest_staleness_seconds"] = round(
+                        float(row["oldest_age"]), 1
+                    )
+        except Exception as e:
+            entry["error"] = f"sportradar_live_state read failed: {e}"[:240]
+
+        try:
+            n = await db.fetchval(
+                """
+                SELECT count(*)::int
+                  FROM predictions
+                 WHERE upper(league) = ANY($1::text[])
+                   AND is_live = true
+                   AND settled_at IS NULL
+                """,
+                list(leagues),
+            )
+            entry["is_live_predictions"] = int(n or 0)
+        except Exception as e:
+            # Don't clobber an earlier error — append.
+            msg = f"predictions is_live read failed: {e}"[:240]
+            entry["error"] = (
+                f"{entry['error']}; {msg}" if entry["error"] else msg
+            )
+
+        totals["live_games"] += entry["live_games"]
+        totals["is_live_predictions"] += entry["is_live_predictions"]
+        per_sport[sport] = entry
+
+    return {
+        "fetched_at": fetched_at,
+        "totals": totals,
+        "per_sport": per_sport,
+    }
+
+
 async def get_live_game_context(market_id: str, *, history_limit: int = 12) -> dict[str, Any]:
     """Build a context bundle for the chatbot answering questions about
     a single live market.  Pulls the latest N midgame_updates (timeline),

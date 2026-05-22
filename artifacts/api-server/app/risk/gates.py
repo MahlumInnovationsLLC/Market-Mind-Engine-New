@@ -298,11 +298,233 @@ class RiskContext:
     # default venue_router pick.  Defaults None (router behaves as
     # before).  Single list, ordered.
     venue_override: list[str] | None = None
+    # In-game live prediction loop tag (task #830).  Set to True by
+    # ``app.learning.in_game_loop`` when re-evaluating a candidate whose
+    # underlying game is currently in-progress.  Two gates branch on
+    # this flag:
+    #
+    #   * ``gate_stale_live_state`` REJECTS the candidate when the most
+    #     recent ``sportradar_live_state`` row for the game is older
+    #     than the per-sport freshness budget.
+    #   * ``gate_live_kelly_multiplier`` halves intended_quantity and
+    #     intended_notional_usd in-place (default 0.5x; overridable
+    #     via ``risk.live_kelly_multiplier`` runtime setting) so the
+    #     downstream ``gate_kelly_fraction`` caps the *halved* size.
+    #
+    # Defaults False so every existing call site (pre-game cycle, all
+    # tests that build a RiskContext) behaves identically until the
+    # in-game loop is explicitly enabled per-sport.
+    is_live: bool = False
+    # Sportradar game id (when known) so gate_stale_live_state can
+    # look up the freshness of the live-state feed for THIS game
+    # without re-deriving it from the matchup string.  Optional —
+    # when None the gate falls back to home_team/away_team matching.
+    sportradar_game_id: str | None = None
 
 
 # ---------------------------------------------------------------------------
 # Gate implementations.  All async to allow gates that touch the DB.
 # ---------------------------------------------------------------------------
+
+
+# Per-sport live-state freshness budgets (seconds).  Sourced from the
+# task #830 brief and biased toward the cadence of each league's
+# Sportradar feed — NBA/NHL stream play-by-play at ~10s intervals so
+# we expect a row within 60s; MLB ticks once per pitch (~30s); NFL
+# updates per-snap (~25s but with longer between-drive gaps); soccer
+# has the tightest feed; NCAAB matches NBA.
+LIVE_STATE_FRESHNESS_BUDGET_SECONDS: dict[str, float] = {
+    "NBA": 60.0,
+    "NHL": 60.0,
+    "MLB": 90.0,
+    "NFL": 120.0,
+    "NCAAB": 60.0,
+    "NCAAF": 120.0,
+    "EPL": 30.0,
+    "LALIGA": 30.0,
+    "BUNDESLIGA": 30.0,
+    "SERIE_A": 30.0,
+    "LIGUE_1": 30.0,
+    "MLS": 30.0,
+    "UCL": 30.0,
+}
+DEFAULT_LIVE_STATE_FRESHNESS_BUDGET_SECONDS = 90.0
+
+
+async def gate_stale_live_state(ctx: RiskContext) -> GateResult:
+    """Reject in-game candidates whose live-state feed is stale (task #830).
+
+    Only applies when ``ctx.is_live`` is True.  Pre-game candidates
+    short-circuit through this gate unchanged.
+
+    Looks up the freshest ``sportradar_live_state`` row for the
+    candidate's game and rejects if ``fetched_at`` is older than the
+    per-league freshness budget (60s NBA/NHL/NCAAB, 90s MLB, 120s
+    NFL/NCAAF, 30s soccer).  Operator override:
+    ``risk.live_state_freshness_budget_secs.<league>`` (per-league)
+    or ``risk.live_state_freshness_budget_secs`` (global default).
+
+    Fail-closed: when ``is_live=True`` but we cannot resolve a
+    sportradar row at all (no game_id mapping, query error) we still
+    REJECT — pricing live off a stale or absent ground truth is the
+    exact failure mode this gate exists to prevent.
+    """
+    if not ctx.is_live:
+        return GateResult(
+            "stale_live_state", True, "candidate not flagged is_live", {}
+        )
+    league = (ctx.league or "").strip().upper()
+    # Per-league override key, then global override, then table default.
+    override = ctx.operator_overrides.get(
+        f"live_state_freshness_budget_secs.{league.lower()}"
+    )
+    if override is None:
+        override = ctx.operator_overrides.get("live_state_freshness_budget_secs")
+    try:
+        budget = (
+            float(override)
+            if override is not None
+            else LIVE_STATE_FRESHNESS_BUDGET_SECONDS.get(
+                league, DEFAULT_LIVE_STATE_FRESHNESS_BUDGET_SECONDS
+            )
+        )
+    except (TypeError, ValueError):
+        budget = LIVE_STATE_FRESHNESS_BUDGET_SECONDS.get(
+            league, DEFAULT_LIVE_STATE_FRESHNESS_BUDGET_SECONDS
+        )
+
+    details: dict[str, Any] = {
+        "league": league or None,
+        "budget_seconds": budget,
+        "sportradar_game_id": ctx.sportradar_game_id,
+    }
+
+    # Fail-closed: a live candidate that arrives without a resolved
+    # sportradar_game_id cannot be safely matched to a specific game's
+    # freshness row.  An earlier draft of this gate fell back to a
+    # league-wide "most recent fetch" query — but that lets a live
+    # trade ship on the back of ANY fresh game in the same league,
+    # which is exactly the failure mode this gate exists to prevent.
+    # The orchestrator MUST populate ``ctx.sportradar_game_id`` for
+    # any live candidate; if it didn't, reject.
+    if not ctx.sportradar_game_id:
+        return GateResult(
+            "stale_live_state",
+            False,
+            "live candidate missing sportradar_game_id "
+            "(cannot verify live-state freshness for the specific game)",
+            details,
+        )
+    try:
+        row = await db.fetchrow(
+            """
+            SELECT extract(epoch from (now() - fetched_at))::float AS age_seconds,
+                   status
+              FROM sportradar_live_state
+             WHERE game_id = $1
+             ORDER BY fetched_at DESC
+             LIMIT 1
+            """,
+            ctx.sportradar_game_id,
+        )
+    except Exception as e:  # pragma: no cover — defensive
+        log.warning("stale_live_state lookup failed: %s", e)
+        return GateResult(
+            "stale_live_state",
+            False,
+            f"sportradar_live_state lookup failed: {e}",
+            details,
+        )
+
+    if row is None:
+        return GateResult(
+            "stale_live_state",
+            False,
+            "no sportradar_live_state row for live candidate",
+            details,
+        )
+
+    age = float(row["age_seconds"] or 0.0)
+    details["age_seconds"] = age
+    details["status"] = row["status"]
+    if age > budget:
+        return GateResult(
+            "stale_live_state",
+            False,
+            f"live-state stale: age {age:.1f}s > budget {budget:.1f}s",
+            details,
+        )
+    return GateResult("stale_live_state", True, "", details)
+
+
+# Default live-Kelly multiplier (task #830).  Pricing live carries more
+# variance per cycle than pre-game (rapid line moves between snap/
+# pitch/possession), so we deliberately halve the Kelly cap for any
+# candidate flagged ``is_live`` until per-sport shadow Brier shows we
+# can trust live edges as much as pre-game ones.  Override via
+# ``risk.live_kelly_multiplier`` (global) or
+# ``risk.live_kelly_multiplier.<league>`` (per-league).
+DEFAULT_LIVE_KELLY_MULTIPLIER = 0.5
+
+
+async def gate_live_kelly_multiplier(ctx: RiskContext) -> GateResult:
+    """Halve Kelly sizing for in-game candidates (task #830).
+
+    Only applies when ``ctx.is_live`` is True.  Mutates
+    ``ctx.intended_quantity`` and ``ctx.intended_notional_usd`` in
+    place so the downstream ``gate_kelly_fraction`` caps the
+    already-halved size against the operator's Kelly fraction cap.
+    Always passes — sizing adjustment is the entire job of the gate.
+
+    Per-league override:
+      ``risk.live_kelly_multiplier.<league>``  (operator_overrides key)
+    Global override:
+      ``risk.live_kelly_multiplier``           (operator_overrides key)
+    Default: 0.5
+    """
+    if not ctx.is_live:
+        return GateResult(
+            "live_kelly_multiplier", True, "candidate not flagged is_live", {}
+        )
+    league = (ctx.league or "").strip().lower()
+    raw: Any = ctx.operator_overrides.get(
+        f"live_kelly_multiplier.{league}"
+    ) if league else None
+    if raw is None:
+        raw = ctx.operator_overrides.get("live_kelly_multiplier")
+    try:
+        multiplier = (
+            float(raw) if raw is not None else DEFAULT_LIVE_KELLY_MULTIPLIER
+        )
+    except (TypeError, ValueError):
+        multiplier = DEFAULT_LIVE_KELLY_MULTIPLIER
+    # Sanity-clip: never UP-size live, never go negative.
+    if multiplier < 0.0:
+        multiplier = 0.0
+    if multiplier > 1.0:
+        multiplier = 1.0
+
+    before_qty = int(ctx.intended_quantity or 0)
+    before_notional = float(ctx.intended_notional_usd or 0.0)
+    new_qty = max(0, int(round(before_qty * multiplier)))
+    new_notional = before_notional * multiplier
+    # Mutate in place — the kelly_fraction gate runs AFTER us in the
+    # chain and reads these fields directly.
+    ctx.intended_quantity = new_qty
+    ctx.intended_notional_usd = new_notional
+    return GateResult(
+        "live_kelly_multiplier",
+        True,
+        "",
+        {
+            "league": league or None,
+            "multiplier": multiplier,
+            "intended_quantity_before": before_qty,
+            "intended_quantity_after": new_qty,
+            "intended_notional_before": before_notional,
+            "intended_notional_after": new_notional,
+        },
+    )
 
 
 async def gate_vertical_halted(ctx: RiskContext) -> GateResult:
@@ -2303,6 +2525,15 @@ GATES: tuple[tuple[str, GateFn], ...] = (
     ("sharpe_ratio", gate_sharpe_ratio),
     ("ruin_monte_carlo", gate_ruin_monte_carlo),
     ("segment_throttler", gate_segment_throttler),
+    # In-game live prediction loop gates (task #830).  Both no-op
+    # when ``ctx.is_live`` is False so pre-game cycles behave
+    # identically to before.  ``stale_live_state`` sits next to the
+    # other cheap policy gates so a stale-feed candidate short-circuits
+    # before we spend DB round-trips on bankroll / Kelly aggregates.
+    # ``live_kelly_multiplier`` MUST run BEFORE ``kelly_fraction`` so
+    # the Kelly cap applies to the halved size, not the original.
+    ("stale_live_state", gate_stale_live_state),
+    ("live_kelly_multiplier", gate_live_kelly_multiplier),
     ("kelly_fraction", gate_kelly_fraction),
     ("bankroll_floor", gate_bankroll_floor),
     ("global_exposure_cap", gate_global_exposure_cap),
@@ -2310,12 +2541,13 @@ GATES: tuple[tuple[str, GateFn], ...] = (
     ("max_concurrent_positions", gate_max_concurrent_positions),
     ("duplicate_trade", gate_duplicate_trade),
 )
-assert len(GATES) == 22, (
-    "22 gates: 12 original + daily_loss (task #268) + vertical_halted "
+assert len(GATES) == 24, (
+    "24 gates: 12 original + daily_loss (task #268) + vertical_halted "
     "(task #271) + sharpe_ratio + ruin_monte_carlo + segment_throttler "
     "(task #730) + tail_price_size_cap + jumbo_quantity_cap (task #743) "
     "+ uncalibrated_vertical (task #767) + player_props (task #823) "
-    "+ best_line (task #828)"
+    "+ best_line (task #828) + stale_live_state + live_kelly_multiplier "
+    "(task #830)"
 )
 
 

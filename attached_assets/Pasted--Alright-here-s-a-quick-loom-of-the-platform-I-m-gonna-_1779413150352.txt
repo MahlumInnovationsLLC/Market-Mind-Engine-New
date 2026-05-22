@@ -1,0 +1,62 @@
+
+Alright, here's a quick loom of the platform. I'm gonna refresh it. And, uhm, let me explain to you how to use it once you log in.
+0:11
+So, once you log in to the platform, now I'm on the terminal, the model is live. So, it is updating every 3 to 60 seconds in real time.
+0:21
+Above, you're gonna see all the sports. So, NBA, NHL, Soccer, Tennis, and there's more to come. And, from here, the example is, you can see the win rate of the players.
+0:32
+So, here we see how many games, 64% win rate, up 40 units for the last 7 days. Uhm, I use this every single day.
+0:42
+So, I'm betting every single day. And, here's where you could put in the amount of units that you're using. So, example.
+0:48
+Last 24 hours, on all the games, if you chose all our signals, uhm, you'd be up, you know, on $100 per bet, you'd be up $670 in one day.
+1:01
+So, from there, you'll see the model performance Thank These are the last 10 picks that are graded. These are picks that were recorded.
+1:09
+So, if you looked at all yesterday's signals, these are all the signals that were from there. Now, once you go here, you could choose your sport, or you could just scroll down.
+1:22
+Now, here are all the NBA picks for today. NBA's in the playoffs, so there's not many games tonight. And this is how you could understand the platform.
+1:32
+So, we got the matchups on the left the time they're playing. If it's a money line, if it's a total, if it's a spread, how it is.
+1:42
+The odds. Now, the odds are pulling, um, from Pinnacle, from DraftKings. So, sometimes you'll see two odds, sometimes you'll just see one.
+1:50
+And then the pick. So, example, Clash Cleveland vs. Raptors. The pick of the day is the Raptors, which they are underdog.
+1:59
+We're predicting through our LLM and our AI that there's an 83% chance that they're winning this game, and the EV that they're expected value is over 100%.
+2:14
+So from here, you're going to see that there's all the picks of the day. So there's the over, there's the under, and what picks are we taking?
+2:23
+This is the most important part. We're taking the picks that are signaled. So if you see, example, Cleveland versus Toronto, and there's a signal, we're taking it and we're recording it in our history right here as a one-unit play.
+2:39
+So, we'd be putting one unit. As you see, the games that don't have signals, they're not recorded, meaning we're not taking them.
+2:48
+And sometimes you'll see, example, a game right here where we're predicting there's a 62% chance that this comes in. But, with the low EV and our LLM, we're not taking this as a BIC.
+3:04
+We're taking everything above, and if you see, it just jumped in real time, there was shifts in EV and LLM.
+3:12
+So, that being said, if you're using the model properly, and you want to make a profit, you should be looking right away in the day, early morning, about all the signals and pics.
+3:28
+But keep in mind, during the day, there's, you know, injuries, there's trades, there's people who are going to be benched, depending on the sport, might not play, and this changes the lines, this changes the EV.
+3:42
+So, from here, you could go down to and you can see all the other games. If you just want to choose certain areas to look, you could click, for example, NHL.
+3:53
+Last 7 days, we're up 10 units. This is amazing, we're in the playoffs. We go down, and here is a great example.
+4:00
+We have all the games for tonight, and here are some signals. So, Tampa vs. Montreal, the signal is Lightning, Tampa, Moneyline, so minus 1-1-1 is the average odds right now.
+4:15
+It's probably pinnable. You could check throughout all the sportsbooks, it'll probably be between, you know, minus 1-10 and minus 1-20.
+4:24
+Sportsbooks are very close. We're predicting 63% chance with a 20% expected value. So this is a good pick. And then you can see there's other picks for the games like the Over, we're not picking it as a signal.
+4:39
+Still a 59% chance with expected value. But then if you look down, example, you know, this one, it's juicy. It's a minus 260, 81% chance that it hits with our model.
+4:54
+And, uh, and then you can see all the plays that we're saying are really, really bad. Super simple to use, you follow the system, you do it every single day.
+5:05
+This is a long-term game. Yes, in 24 hours, you're up 6 units. You could have put 2,000 a unit, you make 13,000.
+5:13
+But the goal is to do this every day and to make money every day. You know, not every day is up 6 units.
+5:20
+Some days are up 2 units, but then we have days where we're up 20 units. And, uh, the platform works.
+5:27
+And our language model works really well.

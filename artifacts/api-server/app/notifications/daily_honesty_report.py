@@ -799,6 +799,129 @@ async def collect_latest_investor_deck() -> dict[str, Any]:
     return {"investor_deck_path": None, "built_at": None}
 
 
+async def collect_pre_vs_in_game_brier(
+    *, days: int | None = None, min_samples: int | None = None
+) -> dict[str, Any]:
+    """Per-league Brier split between pre-game and in-game predictions
+    (task #830).
+
+    Joins ``online_learning_buffer`` (settled live predictions) with
+    ``predictions`` on ``market_id`` to attach the ``is_live`` tag
+    written by :mod:`app.learning.in_game_loop`.  For each league we
+    compute Brier on the pre-game subset (``is_live=false``) and the
+    in-game subset (``is_live=true``) plus the absolute delta so the
+    operator can see whether the in-game loop is staying within the
+    0.02 of-pre-game-Brier ship criterion.
+
+    Returns ``{days, min_samples_per_side, items[], samples_too_small[],
+    error}``.  Items shape::
+
+        {league, n_pre, n_in, brier_pre, brier_in, abs_delta}
+
+    Best-effort: a missing ``predictions.is_live`` column (fresh deploy
+    before migration 0052 runs) is reported via the ``error`` field
+    rather than blacking out the whole digest.
+    """
+    days = days if days is not None else _divergence_days()
+    min_samples = (
+        min_samples if min_samples is not None else _min_samples_per_side()
+    )
+    out: dict[str, Any] = {
+        "days": int(days),
+        "min_samples_per_side": int(min_samples),
+        "items": [],
+        "samples_too_small": [],
+        "error": None,
+    }
+    try:
+        rows = await db.fetch(
+            """
+            SELECT coalesce(upper(o.league), '')   AS league,
+                   coalesce(p.is_live, false)      AS is_live,
+                   o.predicted_prob::float         AS predicted_prob,
+                   o.actual_outcome::int           AS actual_outcome
+              FROM online_learning_buffer o
+              LEFT JOIN predictions p
+                ON p.kalshi_market_id = o.market_id
+             WHERE o.actual_outcome IS NOT NULL
+               AND o.predicted_prob IS NOT NULL
+               AND o.created_at > (now() - ($1::int || ' days')::interval)
+            """,
+            int(days),
+        )
+    except Exception as e:
+        log.warning("pre_vs_in_game_brier query failed: %s", e)
+        out["error"] = f"{type(e).__name__}: {e}"[:240]
+        return out
+
+    by_league: dict[str, dict[str, list]] = {}
+    for r in rows:
+        league = (r["league"] or "").strip().upper()
+        if not league:
+            continue
+        bucket = by_league.setdefault(
+            league, {"pre_p": [], "pre_y": [], "in_p": [], "in_y": []}
+        )
+        if bool(r["is_live"]):
+            bucket["in_p"].append(float(r["predicted_prob"]))
+            bucket["in_y"].append(int(r["actual_outcome"]))
+        else:
+            bucket["pre_p"].append(float(r["predicted_prob"]))
+            bucket["pre_y"].append(int(r["actual_outcome"]))
+
+    items: list[dict[str, Any]] = []
+    too_small: list[dict[str, Any]] = []
+    for league in sorted(by_league):
+        buck = by_league[league]
+        n_pre = len(buck["pre_p"])
+        n_in = len(buck["in_p"])
+        if n_in < min_samples:
+            # Pre-game-only leagues are expected (in-game loop ships
+            # disabled per-sport); only surface them as "too small"
+            # when they have ANY in-game rows so the operator can see
+            # the loop is producing data even before it crosses the
+            # min-samples bar.
+            if n_in > 0:
+                too_small.append(
+                    {
+                        "league": league,
+                        "n_pre": n_pre,
+                        "n_in": n_in,
+                        "min_samples_per_side": int(min_samples),
+                    }
+                )
+            continue
+        if n_pre < min_samples:
+            too_small.append(
+                {
+                    "league": league,
+                    "n_pre": n_pre,
+                    "n_in": n_in,
+                    "min_samples_per_side": int(min_samples),
+                }
+            )
+            continue
+        b_pre = _brier(buck["pre_p"], buck["pre_y"])
+        b_in = _brier(buck["in_p"], buck["in_y"])
+        if b_pre is None or b_in is None:
+            continue
+        delta = abs(b_in - b_pre)
+        items.append(
+            {
+                "league": league,
+                "n_pre": n_pre,
+                "n_in": n_in,
+                "brier_pre": round(b_pre, 6),
+                "brier_in": round(b_in, 6),
+                "abs_delta": round(delta, 6),
+            }
+        )
+    items.sort(key=lambda it: it["abs_delta"], reverse=True)
+    out["items"] = items
+    out["samples_too_small"] = too_small
+    return out
+
+
 async def collect_report(date_utc: str) -> dict[str, Any]:
     """Build the four-section payload.  Sections that fail are marked
     with an ``error`` field but never raise."""
@@ -823,6 +946,7 @@ async def collect_report(date_utc: str) -> dict[str, Any]:
         collect_player_props_summary("nfl_player_props", "NFL")
     )
     best_line_t = asyncio.create_task(collect_best_line_router_stats())
+    pre_vs_in_t = asyncio.create_task(collect_pre_vs_in_game_brier())
     (
         divergence,
         drift_status,
@@ -837,10 +961,11 @@ async def collect_report(date_utc: str) -> dict[str, Any]:
         mlb_props,
         nfl_props,
         best_line,
+        pre_vs_in_game,
     ) = await asyncio.gather(
         div_t, drift_t, tail_t, gate_t, raw_t, miss_t, deck_t, wnba_t,
         nba_props_t, nhl_props_t, mlb_props_t, nfl_props_t,
-        best_line_t,
+        best_line_t, pre_vs_in_t,
     )
     return {
         "date_utc": date_utc,
@@ -857,6 +982,7 @@ async def collect_report(date_utc: str) -> dict[str, Any]:
         "mlb_player_props": mlb_props,
         "nfl_player_props": nfl_props,
         "best_line_router": best_line,
+        "pre_vs_in_game_brier": pre_vs_in_game,
     }
 
 
@@ -1973,6 +2099,41 @@ def render_text(payload: dict[str, Any]) -> tuple[str, str]:
             f"{ev if ev is not None else '(n/a — no notional captured)'}"
         )
 
+    # Section 9 — Pre-vs-in-game Brier split (Task #830)
+    pi = payload.get("pre_vs_in_game_brier") or {}
+    lines.append("")
+    lines.append(
+        "== 9. Pre-game vs in-game Brier split "
+        f"(last {pi.get('days', '?')}d, per league) =="
+    )
+    if pi.get("error"):
+        lines.append(f"  ERROR: {pi['error']}")
+    elif not pi.get("items") and not pi.get("samples_too_small"):
+        lines.append(
+            "  [GREEN] no in-game predictions settled yet "
+            "(in-game loop ships per-league disabled)"
+        )
+    else:
+        for it in pi.get("items") or []:
+            # Ship criterion is |Δ| <= 0.02; anything above that
+            # warns the operator the in-game loop drifted past the
+            # threshold for that league.
+            marker = (
+                "[GREEN]" if it["abs_delta"] <= 0.02 else "[YELLOW]"
+            )
+            lines.append(
+                f"  {marker} {it['league']:>8s}  "
+                f"Δ={it['abs_delta']:.4f}  "
+                f"pre={it['brier_pre']:.4f} (n={it['n_pre']})  "
+                f"in={it['brier_in']:.4f} (n={it['n_in']})"
+            )
+        for it in pi.get("samples_too_small") or []:
+            lines.append(
+                f"  {it['league']:>8s}  insufficient samples "
+                f"(pre={it['n_pre']}, in={it['n_in']}, "
+                f"min={it['min_samples_per_side']})"
+            )
+
     lines.append("")
     lines.append(
         "Read the runbook section 21 for what each red signal means."
@@ -2303,6 +2464,52 @@ def render_html(payload: dict[str, Any]) -> str:
                 f"implied_ev_preserved_usd_7d={html.escape(ev_disp)}"
                 f"</p>"
             )
+
+    # Pre-vs-in-game Brier split (task #830)
+    pi = payload.get("pre_vs_in_game_brier") or {}
+    if pi:
+        _section_h(
+            f"Pre-game vs in-game Brier split (last {pi.get('days', '?')}d)"
+        )
+        if not _err(pi):
+            items = pi.get("items") or []
+            ts = pi.get("samples_too_small") or []
+            if not items and not ts:
+                parts.append(
+                    "<p style=\"color:#080;\">no in-game predictions "
+                    "settled yet (in-game loop ships per-league "
+                    "disabled)</p>"
+                )
+            if items:
+                parts.append(
+                    "<table cellpadding=4 style=\"border-collapse:collapse;"
+                    "font-family:ui-monospace,SFMono-Regular,Menlo,monospace;"
+                    "font-size:12px;\">"
+                )
+                parts.append(
+                    "<tr style=\"background:#f0f0f0;\">"
+                    "<th>League</th><th>|Δ|</th>"
+                    "<th>Brier (pre)</th><th>n pre</th>"
+                    "<th>Brier (in)</th><th>n in</th></tr>"
+                )
+                for it in items:
+                    color = "#080" if it["abs_delta"] <= 0.02 else "#a60"
+                    parts.append(
+                        f"<tr><td>{html.escape(it['league'])}</td>"
+                        f"<td style=\"color:{color};font-weight:600;\">"
+                        f"{it['abs_delta']:.4f}</td>"
+                        f"<td>{it['brier_pre']:.4f}</td>"
+                        f"<td>{it['n_pre']}</td>"
+                        f"<td>{it['brier_in']:.4f}</td>"
+                        f"<td>{it['n_in']}</td></tr>"
+                    )
+                parts.append("</table>")
+            if ts:
+                parts.append(
+                    "<p><i>Insufficient samples (skipped):</i> "
+                    f"{html.escape(', '.join(it['league'] for it in ts))}"
+                    "</p>"
+                )
 
     parts.append("</body></html>")
     return "".join(parts)
