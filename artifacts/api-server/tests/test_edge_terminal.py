@@ -621,6 +621,38 @@ def test_signal_enrichment_fields_default_to_null_when_missing(monkeypatch):
     assert args[15] is None
 
 
+def test_next_interval_is_within_jitter_window():
+    """Sleep interval must be uniformly random in [MIN, MAX]."""
+    from app.edge_terminal import poller
+    samples = [poller._next_interval_seconds() for _ in range(200)]
+    assert all(poller.POLL_INTERVAL_MIN_SECONDS <= s <= poller.POLL_INTERVAL_MAX_SECONDS
+               for s in samples)
+    # And not constant — vanishingly small chance of all 200 equal.
+    assert len(set(round(s, 3) for s in samples)) > 5
+
+
+def test_active_window_includes_mountain_4am_to_10pm(monkeypatch):
+    """4:00 MT inclusive → active; 22:00 MT exclusive → inactive."""
+    from datetime import datetime, timezone
+    from app.edge_terminal import poller
+
+    # Build naive local-MT datetimes and convert to UTC for the check.
+    def mt(hour: int, minute: int = 0) -> datetime:
+        # America/Denver: -07:00 in summer (MDT), -06:00 in winter (MST).
+        # Use a fixed DST-stable summer date so the offset is predictable;
+        # _in_active_window does its own zone conversion anyway.
+        local = datetime(2026, 7, 15, hour, minute, tzinfo=poller.ACTIVE_TZ)
+        return local.astimezone(timezone.utc)
+
+    assert poller._in_active_window(mt(4, 0)) is True       # boundary open
+    assert poller._in_active_window(mt(12, 0)) is True
+    assert poller._in_active_window(mt(21, 59)) is True
+    assert poller._in_active_window(mt(22, 0)) is False     # boundary close
+    assert poller._in_active_window(mt(3, 59)) is False
+    assert poller._in_active_window(mt(0, 0)) is False
+    assert poller._in_active_window(mt(23, 30)) is False
+
+
 def test_fire_one_no_ticker_returns_none(monkeypatch):
     from app.edge_terminal import executor
 

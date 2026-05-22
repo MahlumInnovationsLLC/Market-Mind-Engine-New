@@ -21,8 +21,11 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
+import random
 from datetime import datetime, timezone
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from .. import db
 from . import control, executor, scraper
@@ -31,8 +34,39 @@ from . import control, executor, scraper
 log = logging.getLogger(__name__)
 
 
-POLL_INTERVAL_SECONDS = 60
-STALE_THRESHOLD_SECONDS = 120
+# Poll cadence is jittered each tick so we don't pound the upstream
+# scraper at a predictable 60s drumbeat — the random spread between
+# MIN and MAX makes the request pattern look human and stretches the
+# stale-threshold cushion (we wait up to MAX before declaring stale).
+POLL_INTERVAL_MIN_SECONDS = 40
+POLL_INTERVAL_MAX_SECONDS = 60
+# Stale threshold is 2× the max so a single missed cycle doesn't
+# light up the dashboard.
+STALE_THRESHOLD_SECONDS = POLL_INTERVAL_MAX_SECONDS * 2
+
+# Active-hours window: only scrape between 04:00 and 22:00 Mountain
+# Time.  Edge Terminal doesn't publish overnight, and we'd rather idle
+# than burn login attempts on an empty board.  Honours DST via
+# America/Denver (zoneinfo).  Overridable for tests / non-US operators
+# via AXIOM_EDGE_TERMINAL_TZ / _ACTIVE_HOUR_START / _END.
+ACTIVE_TZ = ZoneInfo(os.environ.get("AXIOM_EDGE_TERMINAL_TZ", "America/Denver"))
+ACTIVE_HOUR_START = int(os.environ.get("AXIOM_EDGE_TERMINAL_ACTIVE_HOUR_START", "4"))
+ACTIVE_HOUR_END = int(os.environ.get("AXIOM_EDGE_TERMINAL_ACTIVE_HOUR_END", "22"))
+
+
+def _next_interval_seconds() -> float:
+    """Pick the next sleep interval — random jitter inside the
+    configured min/max window so consecutive polls are not predictable."""
+    if POLL_INTERVAL_MAX_SECONDS <= POLL_INTERVAL_MIN_SECONDS:
+        return float(POLL_INTERVAL_MAX_SECONDS)
+    return random.uniform(POLL_INTERVAL_MIN_SECONDS, POLL_INTERVAL_MAX_SECONDS)
+
+
+def _in_active_window(now: datetime | None = None) -> bool:
+    """True iff the current local hour in ACTIVE_TZ is inside
+    [ACTIVE_HOUR_START, ACTIVE_HOUR_END).  4-22 = 4am-10pm."""
+    local = (now or _now()).astimezone(ACTIVE_TZ)
+    return ACTIVE_HOUR_START <= local.hour < ACTIVE_HOUR_END
 
 _task: asyncio.Task[Any] | None = None
 _stop = asyncio.Event()
@@ -64,6 +98,12 @@ async def get_status() -> dict[str, Any]:
         if mode == control.INPUT_MODE_EDGE_TERMINAL
         else False
     )
+    active = _in_active_window()
+    # When we're outside the configured active window the poller
+    # idles by design — surface that so the dashboard doesn't
+    # mis-report it as a fault.
+    if not active:
+        stale = False
     return {
         "input_mode": mode,
         "running": _task is not None and not _task.done(),
@@ -74,7 +114,14 @@ async def get_status() -> dict[str, Any]:
         "age_seconds": age_seconds,
         "stale": stale,
         "stale_threshold_seconds": STALE_THRESHOLD_SECONDS,
-        "poll_interval_seconds": POLL_INTERVAL_SECONDS,
+        "poll_interval_min_seconds": POLL_INTERVAL_MIN_SECONDS,
+        "poll_interval_max_seconds": POLL_INTERVAL_MAX_SECONDS,
+        "active_window": {
+            "tz": str(ACTIVE_TZ),
+            "start_hour": ACTIVE_HOUR_START,
+            "end_hour": ACTIVE_HOUR_END,
+            "currently_active": active,
+        },
     }
 
 
@@ -96,7 +143,14 @@ async def start() -> None:
         return
     _stop.clear()
     _task = asyncio.create_task(_loop(), name="edge-terminal-poller")
-    log.info("edge_terminal poller started (interval=%ss)", POLL_INTERVAL_SECONDS)
+    log.info(
+        "edge_terminal poller started (interval=%s-%ss, active=%02d-%02d %s)",
+        POLL_INTERVAL_MIN_SECONDS,
+        POLL_INTERVAL_MAX_SECONDS,
+        ACTIVE_HOUR_START,
+        ACTIVE_HOUR_END,
+        ACTIVE_TZ,
+    )
 
 
 async def stop() -> None:
@@ -121,19 +175,29 @@ async def _loop() -> None:
     while not _stop.is_set():
         try:
             current_mode = await control.get_input_mode()
-            if current_mode == control.INPUT_MODE_EDGE_TERMINAL:
-                await _one_tick()
-            else:
+            if current_mode != control.INPUT_MODE_EDGE_TERMINAL:
                 log.debug(
                     "edge_terminal poller idle (input_mode=%s)", current_mode
                 )
+            elif not _in_active_window():
+                # Outside the 4am-10pm MT window — idle quietly.  We
+                # still re-check on the next tick so we wake up when
+                # the window opens.
+                log.debug(
+                    "edge_terminal poller idle (outside active window %02d-%02d %s)",
+                    ACTIVE_HOUR_START,
+                    ACTIVE_HOUR_END,
+                    ACTIVE_TZ,
+                )
+            else:
+                await _one_tick()
         except asyncio.CancelledError:
             raise
         except Exception as e:
             log.exception("edge_terminal poll tick failed: %s", e)
             await _record_status(error=str(e), signal_count=0)
         try:
-            await asyncio.wait_for(_stop.wait(), timeout=POLL_INTERVAL_SECONDS)
+            await asyncio.wait_for(_stop.wait(), timeout=_next_interval_seconds())
         except asyncio.TimeoutError:
             pass
         else:
