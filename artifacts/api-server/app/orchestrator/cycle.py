@@ -1902,6 +1902,24 @@ async def run_cycle(vertical: str = "sports") -> CycleResult:
 
         # All 12 gates passed → place paper trade.
         try:
+            # Edge Terminal input-mode exclusivity (task #844): when the
+            # operator has selected `edge_terminal` as the input source,
+            # the LLM pipeline must NOT place trades — only the scraper
+            # executor fires.  We still run gates above so analytics /
+            # candidate dashboards keep flowing.
+            try:
+                from ..edge_terminal import control as _et_control
+                _input_mode = await _et_control.get_input_mode()
+            except Exception:  # pragma: no cover — defensive
+                _input_mode = "pipeline"
+            if _input_mode == "edge_terminal":
+                results_out.append({
+                    "market_id": ctx.market_id,
+                    "side": ctx.side,
+                    "decision": "skipped_input_mode_edge_terminal",
+                    "gates": [gr.to_dict() for gr in gate_results],
+                })
+                continue
             kelly = next(
                 (gr.details.get("kelly") for gr in gate_results if gr.name == "kelly_fraction"),
                 None,
