@@ -62,6 +62,16 @@ Axiom Predict is a prediction-market trading platform designed for advanced trad
   (n=165, iso, 0.123), PGA (n=52, iso, 0.068), EVENTS_ECON (n=19, Platt) and
   COMMODITIES (n=10, Platt) — replacing the placeholder `market_prior` rows.
   Re-run with `python -m scripts.import_v1_history --table {trade_analyses|weather_observations|llm_predictions|line_snapshots|all}`.
+  For the 4.7M-row `line_snapshots` reload (or any other large dump),
+  pass `--detach` to fork the import into a background process that
+  survives the runner's 120s foreground budget — previously this
+  required ~10 manual re-invocations of the same command to walk through
+  all chunks. The detached child writes its log to
+  `/tmp/v1_dumps/<table>.detached.log` and per-chunk progress to
+  `/tmp/v1_dumps/<table>.progress.json`; inspect either directly or run
+  `python -m scripts.import_v1_history --status --table <table>` for a
+  structured snapshot (chunks completed, rows loaded, detached PID
+  liveness).
 
 **Supabase Growth Retention (task #757):**
 - Per-table retention loops in `app/<table>_retention.py` keep high-growth Supabase tables bounded. Two tiers: archive-then-delete for ML/training tables (90-day default — predictions, market_price_ticks, autoresearch_features, tech_evidence, line_snapshots, sportradar_tournament_replays, precip_emos_observations) and delete-only for operational/audit logs (30-day default — pipeline_events, settlement_events, mobile_notification_log, bankroll_events, rc_events, stripe_events, rc_webhook_deliveries, billing_churn_events, admin_audit_log, position_drift_resolutions, order_recovery_attempts, stale_cancel_observations, vertical_halt_history, gatekeeper_setting_history, model_rollback_log).

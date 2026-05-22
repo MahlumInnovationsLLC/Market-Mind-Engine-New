@@ -38,11 +38,15 @@ from __future__ import annotations
 import argparse
 import asyncio
 import gzip
+import json
 import os
 import shutil
+import signal
 import subprocess
 import sys
+import time
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 
 # Allow running as both ``python scripts/import_v1_history.py`` (from
@@ -59,6 +63,42 @@ WORK_DIR = Path("/tmp/v1_dumps")
 
 
 DEFAULT_CHUNK_ROWS = 500_000
+
+
+def _progress_path(table: str) -> Path:
+    return WORK_DIR / f"{table}.progress.json"
+
+
+def _detach_log_path(table: str) -> Path:
+    return WORK_DIR / f"{table}.detached.log"
+
+
+def _detach_pid_path(table: str) -> Path:
+    return WORK_DIR / f"{table}.detached.pid"
+
+
+def _write_progress(table: str, **fields) -> None:
+    """Atomically append/update a per-table progress JSON.
+
+    Used by ``_chunked_load`` to record per-chunk progress to disk so a
+    detached run can be inspected after the fact (and so we can see how
+    far the prior session got after a crash).  Writes are atomic via
+    ``os.replace`` so a concurrent reader never sees a half-written
+    file.
+    """
+    WORK_DIR.mkdir(parents=True, exist_ok=True)
+    path = _progress_path(table)
+    existing: dict = {}
+    if path.exists():
+        try:
+            existing = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            existing = {}
+    existing.update(fields)
+    existing["updated_at"] = datetime.now(timezone.utc).isoformat()
+    tmp = path.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(existing, indent=2, sort_keys=True), encoding="utf-8")
+    os.replace(tmp, path)
 
 
 @dataclass(frozen=True)
@@ -435,6 +475,18 @@ def _chunked_load(
     pre_count = int(_run_psql(
         f"SELECT count(*) FROM v1_archive.{spec.name}", dsn
     ))
+    _write_progress(
+        spec.name,
+        table=spec.name,
+        pid=os.getpid(),
+        started_at=datetime.now(timezone.utc).isoformat(),
+        expected_rows=spec.expected_rows,
+        chunk_rows=chunk_rows,
+        pre_count=pre_count,
+        rows_loaded=pre_count,
+        chunks_completed=0,
+        done=False,
+    )
     # Resume optimisation: each chunk commits atomically, so a partial
     # prior run leaves ``pre_count`` equal to ``completed_chunks *
     # chunk_rows``.  The dump's COPY block is in deterministic line
@@ -491,6 +543,19 @@ def _chunked_load(
                 f"prior chunks remain committed (re-run to resume)"
             )
         _log(f"  chunk {idx} loaded ({len(rows_buffer):,} rows)")
+        try:
+            post_count = int(_run_psql(
+                f"SELECT count(*) FROM v1_archive.{spec.name}", dsn
+            ))
+        except subprocess.CalledProcessError:
+            post_count = None
+        _write_progress(
+            spec.name,
+            chunks_completed=idx + 1,
+            last_chunk_rows=len(rows_buffer),
+            rows_loaded=post_count if post_count is not None else
+                ((idx + 1) * chunk_rows),
+        )
 
     rows_buffer: list[bytes] = []
     seen = 0
@@ -521,10 +586,119 @@ def _chunked_load(
         f"chunked load OK: {total:,} rows (expected ~{spec.expected_rows:,}, "
         f"diff {diff_pct:.4f}%)"
     )
+    _write_progress(
+        spec.name,
+        rows_loaded=total,
+        diff_pct=diff_pct,
+        finished_at=datetime.now(timezone.utc).isoformat(),
+        done=True,
+    )
     return {
         "table": spec.name, "total": total, "diff_pct": diff_pct,
         "dry_run": False, "chunked": True,
     }
+
+
+def _spawn_detached(table: str, passthrough_argv: list[str]) -> dict:
+    """Re-launch this script as a detached background process.
+
+    The Replit task runner kills foreground commands at a 120s wall-clock
+    budget, which was forcing operators to run ``import_v1_history.py``
+    ~10 times in a row to finish the 4.7M-row ``line_snapshots`` load.
+    Detached mode forks the same script (minus the ``--detach`` flag)
+    into a new session via ``start_new_session=True`` so it survives the
+    parent shell's SIGHUP, redirects stdout+stderr to a per-table log
+    file, and exits the foreground immediately with the child PID + log
+    path so operators can tail progress.
+
+    Idempotency: if a prior detached run is still alive (PID file
+    exists and ``kill -0`` succeeds) we refuse to fork a second one.
+    """
+    WORK_DIR.mkdir(parents=True, exist_ok=True)
+    pid_path = _detach_pid_path(table)
+    if pid_path.exists():
+        try:
+            prior_pid = int(pid_path.read_text().strip())
+            os.kill(prior_pid, 0)
+            raise SystemExit(
+                f"detached run already in flight for {table} "
+                f"(pid {prior_pid}; pid file {pid_path}). "
+                f"Use --status to inspect, or remove the pid file to override."
+            )
+        except (ValueError, ProcessLookupError, PermissionError):
+            # Stale PID file from a crashed prior run — replace it.
+            pid_path.unlink(missing_ok=True)
+        except OSError:
+            pid_path.unlink(missing_ok=True)
+
+    log_path = _detach_log_path(table)
+    # Truncate the log so each detached invocation starts clean.
+    log_fh = open(log_path, "wb", buffering=0)
+    log_fh.write(
+        f"[import_v1_history] detached run starting at "
+        f"{datetime.now(timezone.utc).isoformat()} (table={table})\n".encode()
+    )
+
+    cmd = [sys.executable, "-m", "scripts.import_v1_history", *passthrough_argv]
+    env = os.environ.copy()
+    env["PYTHONUNBUFFERED"] = "1"
+    proc = subprocess.Popen(
+        cmd,
+        stdout=log_fh,
+        stderr=subprocess.STDOUT,
+        stdin=subprocess.DEVNULL,
+        cwd=str(_API_SERVER_ROOT),
+        env=env,
+        start_new_session=True,
+        close_fds=True,
+    )
+    log_fh.close()
+    pid_path.write_text(f"{proc.pid}\n")
+    _log(
+        f"detached pid={proc.pid} table={table} log={log_path} "
+        f"pidfile={pid_path}"
+    )
+    _log(
+        f"tail -F {log_path}   # to follow progress; "
+        f"--status --table {table} for a structured snapshot"
+    )
+    return {"pid": proc.pid, "log": str(log_path), "pid_file": str(pid_path)}
+
+
+def _print_status(table: str) -> int:
+    """Dump the per-table progress file + detached-process liveness."""
+    snapshot: dict = {"table": table}
+    prog = _progress_path(table)
+    if prog.exists():
+        try:
+            snapshot["progress"] = json.loads(prog.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            snapshot["progress_error"] = str(exc)
+    else:
+        snapshot["progress"] = None
+
+    pid_path = _detach_pid_path(table)
+    if pid_path.exists():
+        try:
+            pid = int(pid_path.read_text().strip())
+            snapshot["detached_pid"] = pid
+            try:
+                os.kill(pid, 0)
+                snapshot["detached_alive"] = True
+            except (ProcessLookupError, PermissionError):
+                snapshot["detached_alive"] = False
+        except (ValueError, OSError) as exc:
+            snapshot["pid_file_error"] = str(exc)
+    else:
+        snapshot["detached_pid"] = None
+
+    log_path = _detach_log_path(table)
+    if log_path.exists():
+        snapshot["log"] = str(log_path)
+        snapshot["log_size_bytes"] = log_path.stat().st_size
+
+    print(json.dumps(snapshot, indent=2, sort_keys=True))
+    return 0
 
 
 async def _import_one(spec: DumpSpec, args: argparse.Namespace, dsn: str) -> dict:
@@ -598,7 +772,47 @@ async def _amain() -> int:
         help="Force the chunked-load path for tables that would "
              "otherwise use the atomic single-transaction path.",
     )
+    parser.add_argument(
+        "--detach",
+        action="store_true",
+        help="Fork the import into a detached background process that "
+             "survives the runner's 120s foreground budget. Returns "
+             "the child PID and log path, then exits immediately.",
+    )
+    parser.add_argument(
+        "--status",
+        action="store_true",
+        help="Print the per-table progress snapshot (chunks completed, "
+             "rows loaded, detached PID liveness) as JSON and exit.",
+    )
     args = parser.parse_args()
+
+    if args.status:
+        targets = PHASE_ORDER if args.table == "all" else [args.table]
+        for name in targets:
+            _print_status(name)
+        return 0
+
+    if args.detach:
+        # Strip --detach from the re-exec argv so the child runs the
+        # actual import path. Everything else (--table, --chunk-rows,
+        # --force-download, etc.) is forwarded verbatim.
+        #
+        # For ``--table all`` we deliberately spawn a SINGLE detached
+        # child that runs every phase sequentially (using the existing
+        # in-process ``--table all`` loop) rather than forking one
+        # child per phase.  Per-phase forking would have four full
+        # imports racing in parallel — including concurrent TRUNCATE +
+        # reload of the non-chunked tables — which is both unsafe and
+        # defeats the dependency ordering in ``PHASE_ORDER``.  The
+        # progress / pid / log files are keyed under the literal table
+        # name ``all`` for that case so ``--status --table all`` can
+        # report the orchestrator's liveness; individual phases still
+        # write their own per-table progress JSON from within
+        # ``_chunked_load`` / ``_atomic_load``.
+        passthrough = [a for a in sys.argv[1:] if a != "--detach"]
+        _spawn_detached(args.table, passthrough)
+        return 0
 
     dsn = _build_psql_dsn()
     _log(f"target DSN host: {dsn.split('@')[-1].split('/')[0]}")
