@@ -254,6 +254,47 @@ def test_dc_kickoff_returns_full_match_prior():
     assert 0.20 < p_draw < 0.32
 
 
+def test_baseline_lambdas_per_league_canonical_values():
+    # Each canonical league has its own hand-set (home, away) pair.
+    # Pin them down so an accidental edit to the table is caught.
+    expected = {
+        "EPL":    (1.55, 1.25),
+        "LALIGA": (1.40, 1.10),
+        "SERIEA": (1.50, 1.20),
+        "BUNDES": (1.70, 1.45),
+        "LIGUE1": (1.35, 1.05),
+        "MLS":    (1.55, 1.30),
+        "UCL":    (1.65, 1.40),
+    }
+    for league, pair in expected.items():
+        assert _sl._baseline_lambdas_for_league(league) == pair
+        # Case-insensitive: the resolver upper-cases before lookup.
+        assert _sl._baseline_lambdas_for_league(league.lower()) == pair
+
+
+def test_baseline_lambdas_unknown_league_falls_back_to_blend():
+    blended = (_sl._BASELINE_LAMBDA_HOME, _sl._BASELINE_LAMBDA_AWAY)
+    # None / empty / unrecognised labels all degrade to the blended
+    # baseline rather than raising — the predictor must keep working
+    # on rows missing a canonical league.
+    assert _sl._baseline_lambdas_for_league(None) == blended
+    assert _sl._baseline_lambdas_for_league("") == blended
+    assert _sl._baseline_lambdas_for_league("NBA") == blended
+    assert _sl._baseline_lambdas_for_league("  not-a-league  ") == blended
+
+
+def test_dc_home_leg_higher_for_bundes_than_ligue1_at_0_0_min_70():
+    # A 0-0 at minute 70 leaves ~20 minutes of remaining scoring.
+    # BUNDES baselines (1.70 / 1.45) are materially higher than
+    # LIGUE1 (1.35 / 1.05) so the HOME leg's posterior should be
+    # measurably larger under BUNDES — if the per-league lookup
+    # ever regresses to the blended baseline this gap disappears.
+    p_home_bundes = _sl._dc_leg_probability("HOME", 0, 70.0, league="BUNDES")
+    p_home_ligue1 = _sl._dc_leg_probability("HOME", 0, 70.0, league="LIGUE1")
+    assert p_home_bundes is not None and p_home_ligue1 is not None
+    assert p_home_bundes > p_home_ligue1 + 0.01
+
+
 def test_parse_clock_minutes_robust_to_garbage():
     assert _sl._parse_clock_minutes(None) == 0.0
     assert _sl._parse_clock_minutes("") == 0.0
