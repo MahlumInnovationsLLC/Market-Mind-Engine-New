@@ -12,6 +12,7 @@ import time
 from typing import Any
 
 from .. import calibrators, margin_regressor
+from ..learning import dc_rho_fitter
 from ..config import get_settings
 from .pipeline import run_cycle, _calibration_and_drift_shadow
 from .retrain import run_retrain_cycle
@@ -192,6 +193,27 @@ class _SettlementScheduler:
                 except Exception as e:
                     log.exception("margin regressor refit failed: %s", e)
                     mr_summary = {"error": f"{type(e).__name__}: {e}"}
+                # Daily Dixon-Coles rho refit (task #900). Gated on a
+                # 24h cadence internally so this is a cheap no-op on
+                # every other settlement tick.
+                try:
+                    dc_cr = await dc_rho_fitter.maybe_refit()
+                    if dc_cr is None:
+                        dc_rho_summary: dict[str, Any] = {"skipped": "cadence"}
+                    else:
+                        dc_rho_summary = {
+                            "started_at": dc_cr.started_at,
+                            "completed_at": dc_cr.completed_at,
+                            "duration_seconds": dc_cr.duration_seconds,
+                            "leagues_examined": dc_cr.leagues_examined,
+                            "leagues_fitted": dc_cr.leagues_fitted,
+                            "leagues_skipped": dc_cr.leagues_skipped,
+                            "persisted": dc_cr.persisted,
+                            "errors": dc_cr.errors,
+                        }
+                except Exception as e:
+                    log.exception("dc_rho_fitter cycle failed: %s", e)
+                    dc_rho_summary = {"error": f"{type(e).__name__}: {e}"}
                 # Hourly shadow loop (task #753).  Snapshots calibrated
                 # YES probabilities for every active Kalshi market, then
                 # settles those whose underlying market resolved on the
@@ -218,6 +240,7 @@ class _SettlementScheduler:
                     "retrain": retrain_summary,
                     "calibrators": calib_summary,
                     "margin_regressor": mr_summary,
+                    "dc_rho_fitter": dc_rho_summary,
                     "shadow": shadow_summary or self._last.get("shadow"),
                 }
                 backoff = 0.0

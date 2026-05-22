@@ -170,6 +170,78 @@ _DC_RHO_BY_LEAGUE: dict[str, float] = {
 }
 _DC_RHO_DEFAULT = -0.10
 
+# DB-backed override for the per-league rho vector, refreshed by
+# :mod:`app.learning.dc_rho_fitter` after each successful MLE pass
+# (task #900).  Empty until the fitter loads the persisted value; the
+# resolver falls through to ``_DC_RHO_BY_LEAGUE`` when a league has
+# no override yet, so a cold start (or a league we don't have enough
+# historical samples to fit) keeps the hand-set default.
+_DC_RHO_OVERRIDES: dict[str, float] = {}
+
+
+def set_dc_rho_overrides(overrides: dict[str, float] | None) -> None:
+    """Replace the in-memory per-league rho override cache.
+
+    Called by :mod:`app.learning.dc_rho_fitter` after a successful
+    fit (and on startup from the persisted ``runtime_settings`` row)
+    so the live predictor sees the fresh vector without a restart.
+    Pass ``None`` or ``{}`` to clear and fall back to the hand-set
+    defaults — useful for tests and the operator "revert to defaults"
+    path.
+    """
+    global _DC_RHO_OVERRIDES
+    if not overrides:
+        _DC_RHO_OVERRIDES = {}
+        return
+    cleaned: dict[str, float] = {}
+    for k, v in overrides.items():
+        if not k:
+            continue
+        try:
+            cleaned[str(k).strip().upper()] = float(v)
+        except (TypeError, ValueError):
+            continue
+    _DC_RHO_OVERRIDES = cleaned
+
+
+def get_dc_rho_overrides() -> dict[str, float]:
+    """Return a copy of the current in-memory override map (debug /
+    operator-panel introspection)."""
+    return dict(_DC_RHO_OVERRIDES)
+
+
+async def refresh_dc_rho_overrides() -> dict[str, float]:
+    """Load the persisted per-league rho vector from
+    ``runtime_settings`` into the in-memory cache.
+
+    Best-effort — a DB hiccup leaves the cache untouched so the
+    predictor falls back to whatever was last loaded (or the hand-
+    set defaults on a cold start).  Returns the loaded vector for
+    callers that want to log / inspect what was read.
+    """
+    from .. import db
+
+    try:
+        raw = await db.fetchval(
+            "SELECT value FROM runtime_settings WHERE key = $1",
+            "learning.dc_rho_by_league",
+        )
+    except Exception as e:
+        log.debug("refresh_dc_rho_overrides read failed: %s", e)
+        return dict(_DC_RHO_OVERRIDES)
+    if not raw:
+        set_dc_rho_overrides({})
+        return {}
+    import json as _json
+    try:
+        parsed = _json.loads(raw)
+    except Exception:
+        return dict(_DC_RHO_OVERRIDES)
+    if not isinstance(parsed, dict):
+        return dict(_DC_RHO_OVERRIDES)
+    set_dc_rho_overrides(parsed)
+    return dict(_DC_RHO_OVERRIDES)
+
 # Recognised leg labels.  Anything else collapses to "no leg
 # information" and the predictor takes the leg-agnostic branch.
 _LEG_HOME = "HOME"
@@ -334,11 +406,21 @@ def _dc_tau(h: int, a: int, lam_h: float, lam_a: float, rho: float) -> float:
 
 
 def _resolve_dc_rho(league: str | None) -> float:
-    """Per-league Dixon-Coles rho, falling back to the blended default
-    for unrecognised league labels."""
+    """Per-league Dixon-Coles rho.
+
+    Resolution order:
+      1. Fitted DB-backed override (populated by
+         :mod:`app.learning.dc_rho_fitter` and refreshed into
+         :data:`_DC_RHO_OVERRIDES`).
+      2. Hand-set per-league default in :data:`_DC_RHO_BY_LEAGUE`.
+      3. Blended default for unrecognised league labels.
+    """
     if not league:
         return _DC_RHO_DEFAULT
-    return _DC_RHO_BY_LEAGUE.get(str(league).strip().upper(), _DC_RHO_DEFAULT)
+    key = str(league).strip().upper()
+    if key in _DC_RHO_OVERRIDES:
+        return _DC_RHO_OVERRIDES[key]
+    return _DC_RHO_BY_LEAGUE.get(key, _DC_RHO_DEFAULT)
 
 
 def _dc_leg_probability(
