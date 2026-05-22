@@ -136,14 +136,42 @@ async function startMetro(expoPublicDomain, expoPublicReplId) {
 
   console.log("Starting Metro...");
   console.log(`Setting EXPO_PUBLIC_DOMAIN=${expoPublicDomain}`);
+
+  // Forward Clerk credentials into the Expo bundle. Canonical wiring
+  // per the clerk-auth skill (references/setup-and-customization.md
+  // "Configure Environment Variables in build.js"). Without these:
+  //   * EXPO_PUBLIC_CLERK_PUBLISHABLE_KEY missing -> mobile bundle has
+  //     no Clerk key, ClerkProvider never initialises, app stays on a
+  //     black screen behind <ClerkLoaded>.
+  //   * EXPO_PUBLIC_CLERK_PROXY_URL missing in prod -> SDK tries to
+  //     hit Clerk's FAPI host directly (which requires a CNAME the
+  //     deployment doesn't have), fails, same black screen.
+  // CLERK_PROXY_URL is auto-provisioned in production deploys and
+  // empty in dev; the conditional matches the skill template.
+  const clerkProxyUrl = process.env.CLERK_PROXY_URL
+    ? `https://${expoPublicDomain}${process.env.CLERK_PROXY_URL}`
+    : "";
+
   const env = {
     ...process.env,
     EXPO_PUBLIC_DOMAIN: expoPublicDomain,
     EXPO_PUBLIC_REPL_ID: expoPublicReplId,
+    EXPO_PUBLIC_CLERK_PUBLISHABLE_KEY: process.env.CLERK_PUBLISHABLE_KEY || "",
+    EXPO_PUBLIC_CLERK_PROXY_URL: clerkProxyUrl,
   };
 
   if (expoPublicReplId) {
     console.log(`Setting EXPO_PUBLIC_REPL_ID=${expoPublicReplId}`);
+  }
+  if (env.EXPO_PUBLIC_CLERK_PUBLISHABLE_KEY) {
+    console.log("Setting EXPO_PUBLIC_CLERK_PUBLISHABLE_KEY=<redacted>");
+  } else {
+    console.warn(
+      "WARN: CLERK_PUBLISHABLE_KEY not set in build env -- Clerk will not initialise in the production bundle",
+    );
+  }
+  if (clerkProxyUrl) {
+    console.log(`Setting EXPO_PUBLIC_CLERK_PROXY_URL=${clerkProxyUrl}`);
   }
 
   metroProcess = spawn(
