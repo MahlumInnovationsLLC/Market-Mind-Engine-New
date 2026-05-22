@@ -48,7 +48,18 @@ except ImportError:  # pragma: no cover — stdlib in py3.9+
 
 from .. import db
 from ..health import error_log
+from ..learning.soccer_live import (
+    SOCCER_LEAGUES as _SOCCER_LEAGUES,
+    _coerce_metadata as _soccer_coerce_metadata,
+)
 from . import alerts
+
+
+# Recognised leg labels for the soccer per-leg sub-breakdown shown
+# under each soccer league in Section 9.  Mirrors the leg vocabulary
+# the live soccer predictor (``app.learning.soccer_live``) writes
+# into ``predictions.metadata.leg_orientation``.
+_SOCCER_LEGS: tuple[str, ...] = ("HOME", "DRAW", "AWAY")
 
 
 log = logging.getLogger("axiom.notifications.daily_honesty_report")
@@ -839,7 +850,8 @@ async def collect_pre_vs_in_game_brier(
             SELECT coalesce(upper(o.league), '')   AS league,
                    coalesce(p.is_live, false)      AS is_live,
                    o.predicted_prob::float         AS predicted_prob,
-                   o.actual_outcome::int           AS actual_outcome
+                   o.actual_outcome::int           AS actual_outcome,
+                   p.metadata                      AS metadata
               FROM online_learning_buffer o
               LEFT JOIN predictions p
                 ON p.kalshi_market_id = o.market_id
@@ -855,6 +867,14 @@ async def collect_pre_vs_in_game_brier(
         return out
 
     by_league: dict[str, dict[str, list]] = {}
+    # Soccer-only sub-buckets keyed by (league, leg) so Section 9 can
+    # show the per-league Brier delta narrowing across HOME / DRAW /
+    # AWAY (task #901) — not just the DRAW leg the Dixon-Coles tau
+    # correction lifts the most.  The per-league baseline lambdas
+    # (``_BASELINE_LAMBDAS_BY_LEAGUE`` in soccer_live) should tighten
+    # the home / away legs too, and the per-leg sub-rows are how the
+    # operator verifies that on real settled rows.
+    soccer_by_leg: dict[tuple[str, str], dict[str, list]] = {}
     for r in rows:
         # Use .get() so a fake DB or a row shape that pre-dates the
         # is_live column (e.g. a downgraded migration in test) doesn't
@@ -869,12 +889,33 @@ async def collect_pre_vs_in_game_brier(
         outc = r.get("actual_outcome")
         if prob is None or outc is None:
             continue
-        if bool(r.get("is_live", False)):
+        is_live = bool(r.get("is_live", False))
+        if is_live:
             bucket["in_p"].append(float(prob))
             bucket["in_y"].append(int(outc))
         else:
             bucket["pre_p"].append(float(prob))
             bucket["pre_y"].append(int(outc))
+        # Per-leg sub-breakdown for soccer leagues.  Pulled from the
+        # producer-written ``predictions.metadata.leg_orientation``
+        # (same convention the live predictor reads); rows without a
+        # recognised leg label simply don't contribute to the sub-rows.
+        if league in _SOCCER_LEAGUES:
+            meta = _soccer_coerce_metadata(r.get("metadata"))
+            raw_leg = meta.get("leg_orientation") if meta else None
+            if isinstance(raw_leg, str):
+                leg = raw_leg.strip().upper()
+                if leg in _SOCCER_LEGS:
+                    leg_bucket = soccer_by_leg.setdefault(
+                        (league, leg),
+                        {"pre_p": [], "pre_y": [], "in_p": [], "in_y": []},
+                    )
+                    if is_live:
+                        leg_bucket["in_p"].append(float(prob))
+                        leg_bucket["in_y"].append(int(outc))
+                    else:
+                        leg_bucket["pre_p"].append(float(prob))
+                        leg_bucket["pre_y"].append(int(outc))
 
     items: list[dict[str, Any]] = []
     too_small: list[dict[str, Any]] = []
@@ -913,16 +954,45 @@ async def collect_pre_vs_in_game_brier(
         if b_pre is None or b_in is None:
             continue
         delta = abs(b_in - b_pre)
-        items.append(
-            {
-                "league": league,
-                "n_pre": n_pre,
-                "n_in": n_in,
-                "brier_pre": round(b_pre, 6),
-                "brier_in": round(b_in, 6),
-                "abs_delta": round(delta, 6),
-            }
-        )
+        item: dict[str, Any] = {
+            "league": league,
+            "n_pre": n_pre,
+            "n_in": n_in,
+            "brier_pre": round(b_pre, 6),
+            "brier_in": round(b_in, 6),
+            "abs_delta": round(delta, 6),
+        }
+        # Attach the per-leg sub-rows for soccer leagues so the
+        # operator can verify the per-league baseline lambdas (task
+        # #890) + per-league rho (task #891) narrow the Brier delta
+        # across multiple legs, not just DRAW.  Same min-samples
+        # bar per side as the league-level row; a leg with too few
+        # samples on either side is simply omitted.
+        if league in _SOCCER_LEAGUES:
+            leg_items: list[dict[str, Any]] = []
+            for leg in _SOCCER_LEGS:
+                lb = soccer_by_leg.get((league, leg))
+                if not lb:
+                    continue
+                lp = len(lb["pre_p"])
+                li = len(lb["in_p"])
+                if lp < min_samples or li < min_samples:
+                    continue
+                lb_pre = _brier(lb["pre_p"], lb["pre_y"])
+                lb_in = _brier(lb["in_p"], lb["in_y"])
+                if lb_pre is None or lb_in is None:
+                    continue
+                leg_items.append({
+                    "leg": leg,
+                    "n_pre": lp,
+                    "n_in": li,
+                    "brier_pre": round(lb_pre, 6),
+                    "brier_in": round(lb_in, 6),
+                    "abs_delta": round(abs(lb_in - lb_pre), 6),
+                })
+            if leg_items:
+                item["legs"] = leg_items
+        items.append(item)
     items.sort(key=lambda it: it["abs_delta"], reverse=True)
     out["items"] = items
     out["samples_too_small"] = too_small
@@ -2240,6 +2310,20 @@ def render_text(payload: dict[str, Any]) -> tuple[str, str]:
                 f"pre={it['brier_pre']:.4f} (n={it['n_pre']})  "
                 f"in={it['brier_in']:.4f} (n={it['n_in']})"
             )
+            # Per-leg sub-rows for soccer leagues (task #901).  Shows
+            # the per-league baseline lambdas + per-league rho narrow
+            # the Brier delta across HOME / DRAW / AWAY, not only the
+            # DRAW leg the Dixon-Coles tau correction lifts the most.
+            for leg in it.get("legs") or []:
+                leg_marker = (
+                    "[GREEN]" if leg["abs_delta"] <= 0.02 else "[YELLOW]"
+                )
+                lines.append(
+                    f"      {leg_marker} {leg['leg']:>4s}  "
+                    f"Δ={leg['abs_delta']:.4f}  "
+                    f"pre={leg['brier_pre']:.4f} (n={leg['n_pre']})  "
+                    f"in={leg['brier_in']:.4f} (n={leg['n_in']})"
+                )
         for it in pi.get("samples_too_small") or []:
             lines.append(
                 f"  {it['league']:>8s}  insufficient samples "
@@ -2644,6 +2728,26 @@ def render_html(payload: dict[str, Any]) -> str:
                         f"<td>{it['brier_in']:.4f}</td>"
                         f"<td>{it['n_in']}</td></tr>"
                     )
+                    # Soccer per-leg sub-rows (task #901): one row per
+                    # HOME / DRAW / AWAY indented under the league row
+                    # so the operator can see the per-league baseline
+                    # lambdas tighten the Brier delta across multiple
+                    # legs, not only DRAW.
+                    for leg in it.get("legs") or []:
+                        lcolor = (
+                            "#080" if leg["abs_delta"] <= 0.02 else "#a60"
+                        )
+                        parts.append(
+                            "<tr style=\"color:#555;\">"
+                            f"<td style=\"padding-left:18px;\">"
+                            f"↳ {html.escape(leg['leg'])}</td>"
+                            f"<td style=\"color:{lcolor};\">"
+                            f"{leg['abs_delta']:.4f}</td>"
+                            f"<td>{leg['brier_pre']:.4f}</td>"
+                            f"<td>{leg['n_pre']}</td>"
+                            f"<td>{leg['brier_in']:.4f}</td>"
+                            f"<td>{leg['n_in']}</td></tr>"
+                        )
                 parts.append("</table>")
             if ts:
                 parts.append(

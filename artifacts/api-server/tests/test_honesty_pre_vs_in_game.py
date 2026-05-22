@@ -33,10 +33,12 @@ class _FakeDB:
         return []
 
 
-def _samples(league: str, is_live: bool, p: float, y: int, n: int):
+def _samples(league: str, is_live: bool, p: float, y: int, n: int,
+             leg: str | None = None):
+    meta = {"leg_orientation": leg} if leg else None
     return [
         {"league": league, "is_live": is_live, "predicted_prob": p,
-         "actual_outcome": y}
+         "actual_outcome": y, "metadata": meta}
         for _ in range(n)
     ]
 
@@ -114,6 +116,95 @@ def test_render_text_includes_section_9_header():
     # 0.04 is outside → yellow.
     assert "[GREEN]" in body
     assert "[YELLOW]" in body
+
+
+def test_soccer_items_include_per_leg_breakdown(monkeypatch):
+    # EPL: balanced pre + in-game samples per leg so each leg clears
+    # the min_samples bar and gets a sub-row.  Each leg has a slightly
+    # different (pre, in) Brier so the per-league row + each per-leg
+    # row can be asserted on independently.
+    rows: list[dict[str, Any]] = []
+    # HOME: pre-perfect, in-game off by 0.1 → b_pre=0, b_in=0.01
+    rows += _samples("EPL", False, 1.0, 1, 15, leg="HOME")
+    rows += _samples("EPL", True, 0.9, 1, 15, leg="HOME")
+    # DRAW: pre-perfect, in-game off by 0.2 → b_pre=0, b_in=0.04
+    rows += _samples("EPL", False, 1.0, 1, 15, leg="DRAW")
+    rows += _samples("EPL", True, 0.8, 1, 15, leg="DRAW")
+    # AWAY: pre-perfect, in-game off by 0.3 → b_pre=0, b_in=0.09
+    rows += _samples("EPL", False, 1.0, 1, 15, leg="AWAY")
+    rows += _samples("EPL", True, 0.7, 1, 15, leg="AWAY")
+    monkeypatch.setattr(dhr, "db", _FakeDB(rows))
+
+    out = _run(dhr.collect_pre_vs_in_game_brier(days=30, min_samples=10))
+    assert out["error"] is None
+    assert len(out["items"]) == 1
+    it = out["items"][0]
+    assert it["league"] == "EPL"
+    legs = it.get("legs") or []
+    by_leg = {row["leg"]: row for row in legs}
+    assert set(by_leg) == {"HOME", "DRAW", "AWAY"}
+    assert by_leg["HOME"]["abs_delta"] == pytest.approx(0.01, abs=1e-6)
+    assert by_leg["DRAW"]["abs_delta"] == pytest.approx(0.04, abs=1e-6)
+    assert by_leg["AWAY"]["abs_delta"] == pytest.approx(0.09, abs=1e-6)
+    assert by_leg["HOME"]["n_pre"] == 15 and by_leg["HOME"]["n_in"] == 15
+
+
+def test_non_soccer_items_have_no_per_leg_breakdown(monkeypatch):
+    # NBA rows don't carry leg_orientation and aren't a soccer league;
+    # the per-league row must not grow a `legs` field.
+    rows = _samples("NBA", False, 1.0, 1, 50) + _samples(
+        "NBA", True, 0.9, 1, 50,
+    )
+    monkeypatch.setattr(dhr, "db", _FakeDB(rows))
+    out = _run(dhr.collect_pre_vs_in_game_brier(days=30, min_samples=10))
+    assert len(out["items"]) == 1
+    assert "legs" not in out["items"][0]
+
+
+def test_soccer_leg_with_too_few_samples_is_omitted(monkeypatch):
+    # EPL: HOME clears the bar but DRAW has only 3 in-game rows.
+    # The league row should still appear and carry the HOME sub-row,
+    # but DRAW must be omitted from `legs`.
+    rows: list[dict[str, Any]] = []
+    rows += _samples("EPL", False, 1.0, 1, 30, leg="HOME")
+    rows += _samples("EPL", True, 0.9, 1, 30, leg="HOME")
+    rows += _samples("EPL", False, 1.0, 1, 30, leg="DRAW")
+    rows += _samples("EPL", True, 0.5, 1, 3, leg="DRAW")
+    monkeypatch.setattr(dhr, "db", _FakeDB(rows))
+    out = _run(dhr.collect_pre_vs_in_game_brier(days=30, min_samples=10))
+    legs = out["items"][0].get("legs") or []
+    assert [leg["leg"] for leg in legs] == ["HOME"]
+
+
+def test_render_text_includes_soccer_per_leg_rows():
+    payload = {
+        "date_utc": "2026-05-22",
+        "pre_vs_in_game_brier": {
+            "days": 30, "min_samples_per_side": 50,
+            "items": [
+                {"league": "EPL", "n_pre": 60, "n_in": 60,
+                 "brier_pre": 0.20, "brier_in": 0.21, "abs_delta": 0.01,
+                 "legs": [
+                     {"leg": "HOME", "n_pre": 20, "n_in": 20,
+                      "brier_pre": 0.18, "brier_in": 0.19,
+                      "abs_delta": 0.01},
+                     {"leg": "DRAW", "n_pre": 20, "n_in": 20,
+                      "brier_pre": 0.24, "brier_in": 0.245,
+                      "abs_delta": 0.005},
+                     {"leg": "AWAY", "n_pre": 20, "n_in": 20,
+                      "brier_pre": 0.20, "brier_in": 0.21,
+                      "abs_delta": 0.01},
+                 ]},
+            ],
+            "samples_too_small": [],
+            "error": None,
+        },
+    }
+    _subj, body = dhr.render_text(payload)
+    assert "HOME" in body and "DRAW" in body and "AWAY" in body
+    # Sub-rows render under the league row with the same green/yellow
+    # tone treatment.
+    assert body.count("[GREEN]") >= 4  # league row + 3 leg rows
 
 
 def test_render_html_includes_table_rows():
