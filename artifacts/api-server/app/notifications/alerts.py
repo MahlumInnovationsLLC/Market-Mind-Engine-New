@@ -67,6 +67,8 @@ _TAG_TO_USER_PREF: dict[str, str] = {
     "tail-risk-burst":             "email_drift",
     "drift-queue-backlog":         "email_drift",
     "best-line-alert":             "email_drift",
+    "live-state-stale":            "email_halt",
+    "live-state-recovered":        "email_halt",
 }
 
 
@@ -284,6 +286,16 @@ USER_VISIBLE_ALERTS: dict[str, dict[str, Any]] = {
         "label": "Best-line cross-book alert",
         "scope": "broadcast",
         "channels": [("email", "email_drift")],
+    },
+    "live_state_stale": {
+        "label": "Live-state feed stale",
+        "scope": "broadcast",
+        "channels": [("email", "email_halt")],
+    },
+    "live_state_recovered": {
+        "label": "Live-state feed recovered",
+        "scope": "broadcast",
+        "channels": [("email", "email_halt")],
     },
 }
 
@@ -2383,6 +2395,136 @@ def best_line_alert(
             _tg_notify.broadcast_in_background(f"{subject}\n\n{body}")
         except Exception as e:  # pragma: no cover
             log.warning("best-line telegram broadcast failed: %s", e)
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Live-state staleness alert (task #862).
+#
+# Fired by ``notifications.live_state_staleness.check_live_state_staleness``
+# when a sport's oldest ``sportradar_live_state`` row has exceeded 2× the
+# per-sport freshness budget for N consecutive background checks. Mirrors
+# the red coloring on the Live-Games-Now dashboard tile so a wedged feed
+# doesn't sit unnoticed overnight.
+#
+# Two helpers:
+#   * ``live_state_stale``     — paged when the sport crosses the
+#                                 consecutive-checks threshold.
+#   * ``live_state_recovered`` — auto-clears the page when freshness
+#                                 returns inside budget.
+#
+# Both ship through the same Postmark + Telegram fan-out the round-2
+# audit gates' alerts use; Telegram failures must not shadow the email
+# path.
+# ---------------------------------------------------------------------------
+
+
+def live_state_stale(
+    *,
+    sport: str,
+    oldest_staleness_seconds: float,
+    budget_seconds: float,
+    multiplier: float,
+    consecutive_checks: int,
+    threshold_checks: int,
+    live_games: int | None = None,
+    dashboard_url: str | None = None,
+    dry_run: bool = False,
+) -> dict[str, Any]:
+    """Operator page for a wedged sportradar live-state feed (task #862)."""
+    sport_label = (sport or "?").upper()
+    subject = (
+        f"[axiom][LIVE-STATE STALE] {sport_label} feed {oldest_staleness_seconds:.0f}s "
+        f"old (>{multiplier:g}× {budget_seconds:.0f}s budget) for "
+        f"{consecutive_checks} checks"
+    )
+    rows: list[tuple[str, Any]] = [
+        ("sport", sport_label),
+        ("oldest_staleness_seconds", f"{oldest_staleness_seconds:.1f}"),
+        ("budget_seconds", f"{budget_seconds:.1f}"),
+        ("multiplier", f"{multiplier:g}"),
+        ("consecutive_checks", consecutive_checks),
+        ("threshold_checks", threshold_checks),
+    ]
+    if live_games is not None:
+        rows.append(("live_games", live_games))
+    if dashboard_url:
+        rows.append(("dashboard", dashboard_url))
+    rows.append(("at", _utc_now_iso()))
+    body = (
+        f"The {sport_label} sportradar live-state feed has been older "
+        f"than {multiplier:g}× its per-sport freshness budget "
+        f"({budget_seconds:.0f}s) for {consecutive_checks} consecutive "
+        f"checks. The in-game prediction loop will not ship new live "
+        f"trades for this sport until the feed recovers (the "
+        f"`stale_live_state` risk gate fails closed). Check the "
+        f"sportradar ingester for this sport.\n\n"
+        + (f"  {dashboard_url}\n\n" if dashboard_url else "")
+        + _format_lines(rows)
+        + "\n"
+    )
+    result = _dispatch(
+        subject, body, tag="live-state-stale", dry_run=dry_run
+    )
+    if not dry_run:
+        try:
+            from ..telegram import notify as _tg_notify
+            _tg_notify.broadcast_in_background(f"{subject}\n\n{body}")
+        except Exception as e:  # pragma: no cover
+            log.warning("live-state-stale telegram broadcast failed: %s", e)
+    return result
+
+
+def live_state_recovered(
+    *,
+    sport: str,
+    oldest_staleness_seconds: float | None,
+    budget_seconds: float,
+    dashboard_url: str | None = None,
+    dry_run: bool = False,
+) -> dict[str, Any]:
+    """Operator notice that a previously-stale live-state feed recovered
+    (task #862). Pairs with :func:`live_state_stale` so a long-lived
+    incident has a clean close-out."""
+    sport_label = (sport or "?").upper()
+    age = (
+        f"{oldest_staleness_seconds:.0f}s"
+        if oldest_staleness_seconds is not None
+        else "idle"
+    )
+    subject = (
+        f"[axiom][LIVE-STATE OK] {sport_label} feed recovered "
+        f"(age {age}, budget {budget_seconds:.0f}s)"
+    )
+    rows: list[tuple[str, Any]] = [
+        ("sport", sport_label),
+        (
+            "oldest_staleness_seconds",
+            f"{oldest_staleness_seconds:.1f}"
+            if oldest_staleness_seconds is not None
+            else "(no live games)",
+        ),
+        ("budget_seconds", f"{budget_seconds:.1f}"),
+    ]
+    if dashboard_url:
+        rows.append(("dashboard", dashboard_url))
+    rows.append(("at", _utc_now_iso()))
+    body = (
+        f"The {sport_label} sportradar live-state feed is back inside "
+        f"its freshness budget. The `stale_live_state` risk gate will "
+        f"allow live trades for this sport again.\n\n"
+        + _format_lines(rows)
+        + "\n"
+    )
+    result = _dispatch(
+        subject, body, tag="live-state-recovered", dry_run=dry_run
+    )
+    if not dry_run:
+        try:
+            from ..telegram import notify as _tg_notify
+            _tg_notify.broadcast_in_background(f"{subject}\n\n{body}")
+        except Exception as e:  # pragma: no cover
+            log.warning("live-state-recovered telegram broadcast failed: %s", e)
     return result
 
 
