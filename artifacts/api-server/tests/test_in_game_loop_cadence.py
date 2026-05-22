@@ -131,19 +131,21 @@ def test_enabled_runs_then_cadence_skips_second_call(monkeypatch):
 
 
 def test_predict_live_for_market_returns_none_for_unwired_sport():
-    # Soccer is the first sport with a wired predictor on the generic
-    # dispatcher path (task #857).  NBA is wired on its own meta-model
-    # path via `_predict_live_for_market_nba` (task #855), so on the
-    # generic dispatcher it still returns (None, metadata) — same as
-    # NHL / MLB / NFL — so the loop only tags rows + drives the
-    # dashboard tile for them on this path.
+    # Soccer (task #857) is wired on the generic dispatcher path.
+    # NBA is wired BOTH on the generic dispatcher (task #878 via
+    # `nba_live`) and on its own meta-model path (task #855 via
+    # `_predict_live_for_market_nba`); the two paths coexist in
+    # `run_in_game_cycle` and are league-disjoint everywhere else.
+    # NHL / MLB / NFL still return (None, metadata) on the generic
+    # dispatcher — the loop only tags rows + drives the dashboard
+    # tile for them.
     prob, meta = _run(_loop._predict_live_for_market(
-        {"market_id": "KX-NBA-A", "league": "NBA"}
+        {"market_id": "KX-NHL-A", "league": "NHL"}
     ))
     assert prob is None
     assert isinstance(meta, dict)
     assert meta.get("source") is None
-    assert "NBA" in meta.get("reason", "")
+    assert "NHL" in meta.get("reason", "")
 
 
 def test_minute_bucket_idempotency_within_window(monkeypatch):

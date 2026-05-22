@@ -51,6 +51,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from .. import db
+from . import nba_live as _nba_live
 from . import nba_live_features
 from . import soccer_live as _soccer_live
 
@@ -489,6 +490,11 @@ async def _predict_live_for_market(
         loop's per-sport enable flag (``risk.live_loop_enabled_soccer``)
         is False by default so this code path is exercised by the
         operator-driven rollout, not by an automatic flip.
+      * NBA (task #878) — ``app.learning.nba_live``.  Same shadow-
+        mode rollout: ``risk.live_loop_enabled_nba`` ships False and
+        is flipped via the operator console once Section 9 of the
+        daily honesty report shows the NBA pre-vs-in-game Brier
+        delta is within 0.02 of the pre-game model.
       * Other sports — no wired predictor yet (per-sport in-game
         wiring lands as follow-up tasks once each sport's shadow
         Brier crosses the 0.02-of-pre-game criterion).
@@ -503,6 +509,15 @@ async def _predict_live_for_market(
                 row.get("market_id"), league, e,
             )
             return None, {"source": "soccer_live", "error": str(e)[:240]}
+    if _nba_live.is_nba_league(league):
+        try:
+            return await _nba_live.predict_live_yes(row)
+        except Exception as e:  # pragma: no cover — defensive
+            log.warning(
+                "nba_live predict failed for market=%s league=%s: %s",
+                row.get("market_id"), league, e,
+            )
+            return None, {"source": "nba_live", "error": str(e)[:240]}
     return None, {"source": None, "reason": f"no wired predictor for {league}"}
 
 
