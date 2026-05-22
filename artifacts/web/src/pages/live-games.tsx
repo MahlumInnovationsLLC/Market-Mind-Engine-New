@@ -170,13 +170,48 @@ export default function LiveGamesPage() {
     [],
   );
   const [leagueFilter, setLeagueFilter] = useState<string>(initialLeague);
+
+  // Status filter: "all" (default) shows both sections, "live" hides the
+  // upcoming strip, "upcoming" hides the live strip. Mirrored to `?status=`
+  // so the filter deep-links and survives refresh, and composes cleanly
+  // with `?league=`.
+  type StatusFilter = "all" | "live" | "upcoming";
+  const parseStatus = (raw: string | null): StatusFilter => {
+    const v = (raw ?? "").toLowerCase();
+    return v === "live" || v === "upcoming" ? v : "all";
+  };
+  const initialStatus = useMemo(
+    () => parseStatus(new URLSearchParams(search).get("status")),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [],
+  );
+  const [statusFilter, setStatusFilter] = useState<StatusFilter>(initialStatus);
+
+  const writeQuery = useCallback(
+    (mut: (p: URLSearchParams) => void) => {
+      const next = new URLSearchParams(search);
+      mut(next);
+      const qs = next.toString();
+      setLocation(qs ? `/live-games?${qs}` : "/live-games", { replace: true });
+    },
+    [search, setLocation],
+  );
+
   const clearLeagueFilter = useCallback(() => {
     setLeagueFilter("");
-    const next = new URLSearchParams(search);
-    next.delete("league");
-    const qs = next.toString();
-    setLocation(qs ? `/live-games?${qs}` : "/live-games", { replace: true });
-  }, [search, setLocation]);
+    writeQuery((p) => p.delete("league"));
+  }, [writeQuery]);
+
+  const changeStatusFilter = useCallback(
+    (next: StatusFilter) => {
+      setStatusFilter(next);
+      writeQuery((p) => {
+        if (next === "all") p.delete("status");
+        else p.set("status", next);
+      });
+    },
+    [writeQuery],
+  );
 
   const { data, isLoading, error, refetch, isFetching } = useQuery<LiveGamesResponse>({
     queryKey: ["live-games", "list"],
@@ -324,23 +359,57 @@ export default function LiveGamesPage() {
                 ? `${liveNowCount} market${liveNowCount === 1 ? "" : "s"} live right now · auto-refreshes every 10s`
                 : "No markets currently live · showing recent in-game activity (last 6h)"}
             </p>
-            {leagueFilter ? (
-              <div
-                data-testid="live-games-league-filter"
-                className="mt-2 inline-flex items-center gap-2 self-start rounded-full border border-accent-cyan/40 bg-accent-cyan/10 px-3 py-1 text-[11px] uppercase tracking-wider text-accent-cyan"
-              >
-                <span>Filtered: {leagueFilter}</span>
-                <button
-                  type="button"
-                  onClick={clearLeagueFilter}
-                  data-testid="live-games-clear-league-filter"
-                  className="rounded text-accent-cyan hover:text-foreground focus:outline-none"
-                  aria-label="Clear league filter"
+            <div className="mt-2 flex flex-wrap items-center gap-2">
+              {leagueFilter ? (
+                <div
+                  data-testid="live-games-league-filter"
+                  className="inline-flex items-center gap-2 self-start rounded-full border border-accent-cyan/40 bg-accent-cyan/10 px-3 py-1 text-[11px] uppercase tracking-wider text-accent-cyan"
                 >
-                  ✕
-                </button>
+                  <span>Filtered: {leagueFilter}</span>
+                  <button
+                    type="button"
+                    onClick={clearLeagueFilter}
+                    data-testid="live-games-clear-league-filter"
+                    className="rounded text-accent-cyan hover:text-foreground focus:outline-none"
+                    aria-label="Clear league filter"
+                  >
+                    ✕
+                  </button>
+                </div>
+              ) : null}
+              <div
+                role="group"
+                aria-label="Filter by status"
+                data-testid="live-games-status-filter"
+                className="inline-flex items-center gap-1 rounded-full border border-border bg-background/40 p-0.5 text-[11px] uppercase tracking-wider"
+              >
+                {(
+                  [
+                    { value: "all", label: "All" },
+                    { value: "live", label: "Live now" },
+                    { value: "upcoming", label: "Upcoming" },
+                  ] as { value: StatusFilter; label: string }[]
+                ).map((opt) => {
+                  const active = statusFilter === opt.value;
+                  return (
+                    <button
+                      key={opt.value}
+                      type="button"
+                      onClick={() => changeStatusFilter(opt.value)}
+                      data-testid={`live-games-status-filter-${opt.value}`}
+                      aria-pressed={active}
+                      className={`rounded-full px-3 py-1 transition ${
+                        active
+                          ? "bg-accent-cyan/15 text-accent-cyan"
+                          : "text-muted-foreground hover:text-foreground"
+                      }`}
+                    >
+                      {opt.label}
+                    </button>
+                  );
+                })}
               </div>
-            ) : null}
+            </div>
           </div>
           <div className="flex items-center gap-2 text-xs text-muted-foreground">
             <span data-testid="live-games-fetched-at">
@@ -453,6 +522,8 @@ export default function LiveGamesPage() {
         </div>
       </GlassCard>
 
+      {statusFilter !== "upcoming" && (
+      <>
       {error && (
         <GlassCard className="p-4" data-testid="live-games-error">
           <div className="text-sm text-destructive">
@@ -586,7 +657,11 @@ export default function LiveGamesPage() {
           </div>
         </GlassCard>
       ))}
+      </>
+      )}
 
+      {statusFilter !== "live" && (
+      <>
       <header className="flex flex-col gap-2 pt-2">
         <div className="flex flex-wrap items-end justify-between gap-3">
           <div>
@@ -717,6 +792,8 @@ export default function LiveGamesPage() {
           </div>
         </GlassCard>
       ))}
+      </>
+      )}
     </div>
   );
 }
