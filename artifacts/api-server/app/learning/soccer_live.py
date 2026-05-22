@@ -122,17 +122,140 @@ _BASELINE_LAMBDA_HOME = 1.45
 _BASELINE_LAMBDA_AWAY = 1.15
 
 
+# DB-backed override for the per-league baseline lambdas, refreshed by
+# :mod:`app.learning.soccer_baseline_fitter` after each successful
+# scoreline aggregation (task #896).  Empty until the fitter loads
+# the persisted vector; the resolver falls through to
+# ``_BASELINE_LAMBDAS_BY_LEAGUE`` when a league has no override yet,
+# so a cold start (or a league we don't have enough rolling history
+# to refit) keeps the hand-set default.
+_BASELINE_LAMBDA_OVERRIDES: dict[str, tuple[float, float]] = {}
+
+# ISO-8601 timestamp of the last successful baseline refresh that
+# wrote into the override cache.  Surfaced in Section 9 of the daily
+# honesty report so operators can see when the per-league baselines
+# were last recomputed from rolling history.
+_BASELINE_LAMBDAS_REFRESHED_AT: str | None = None
+
+
+def set_baseline_lambda_overrides(
+    overrides: dict[str, tuple[float, float] | list[float]] | None,
+    refreshed_at: str | None = None,
+) -> None:
+    """Replace the in-memory per-league baseline lambda override cache.
+
+    Called by :mod:`app.learning.soccer_baseline_fitter` after a
+    successful refresh (and on startup from the persisted
+    ``runtime_settings`` row) so the live predictor sees the fresh
+    vector without a restart.  Pass ``None`` or ``{}`` to clear and
+    fall back to the hand-set defaults — useful for tests and the
+    operator "revert to defaults" path.
+
+    ``refreshed_at`` is an ISO-8601 string recorded so Section 9 of
+    the daily honesty report can show when the override was last
+    written.  Passing ``None`` leaves the timestamp unchanged on a
+    no-op clear, and overwrites it on a real refresh.
+    """
+    global _BASELINE_LAMBDA_OVERRIDES, _BASELINE_LAMBDAS_REFRESHED_AT
+    if not overrides:
+        _BASELINE_LAMBDA_OVERRIDES = {}
+        if refreshed_at is not None:
+            _BASELINE_LAMBDAS_REFRESHED_AT = str(refreshed_at)
+        return
+    cleaned: dict[str, tuple[float, float]] = {}
+    for k, v in overrides.items():
+        if not k:
+            continue
+        try:
+            if isinstance(v, dict):
+                lam_h = float(v.get("home"))  # type: ignore[arg-type]
+                lam_a = float(v.get("away"))  # type: ignore[arg-type]
+            else:
+                seq = list(v)  # type: ignore[arg-type]
+                if len(seq) < 2:
+                    continue
+                lam_h = float(seq[0])
+                lam_a = float(seq[1])
+        except (TypeError, ValueError):
+            continue
+        if not (math.isfinite(lam_h) and math.isfinite(lam_a)):
+            continue
+        if lam_h <= 0.0 or lam_a <= 0.0:
+            continue
+        cleaned[str(k).strip().upper()] = (lam_h, lam_a)
+    _BASELINE_LAMBDA_OVERRIDES = cleaned
+    if refreshed_at is not None:
+        _BASELINE_LAMBDAS_REFRESHED_AT = str(refreshed_at)
+
+
+def get_baseline_lambda_overrides() -> dict[str, tuple[float, float]]:
+    """Return a copy of the current in-memory baseline override map
+    (debug / operator-panel introspection)."""
+    return dict(_BASELINE_LAMBDA_OVERRIDES)
+
+
+def get_baseline_lambdas_refreshed_at() -> str | None:
+    """Return the ISO-8601 timestamp the override cache was last
+    refreshed at, or ``None`` if no refresh has happened yet (the
+    predictor is running on the hand-set defaults)."""
+    return _BASELINE_LAMBDAS_REFRESHED_AT
+
+
+async def refresh_baseline_lambda_overrides() -> dict[str, tuple[float, float]]:
+    """Load the persisted per-league baseline vector from
+    ``runtime_settings`` into the in-memory cache.
+
+    Best-effort — a DB hiccup leaves the cache untouched so the
+    predictor falls back to whatever was last loaded (or the hand-
+    set defaults on a cold start).  Returns the loaded vector for
+    callers that want to log / inspect what was read.
+    """
+    from .. import db
+
+    try:
+        raw = await db.fetchval(
+            "SELECT value FROM runtime_settings WHERE key = $1",
+            "learning.baseline_lambdas_by_league",
+        )
+    except Exception as e:
+        log.debug("refresh_baseline_lambda_overrides read failed: %s", e)
+        return dict(_BASELINE_LAMBDA_OVERRIDES)
+    if not raw:
+        return dict(_BASELINE_LAMBDA_OVERRIDES)
+    import json as _json
+    try:
+        parsed = _json.loads(raw)
+    except Exception:
+        return dict(_BASELINE_LAMBDA_OVERRIDES)
+    if not isinstance(parsed, dict):
+        return dict(_BASELINE_LAMBDA_OVERRIDES)
+    lambdas = parsed.get("lambdas") if "lambdas" in parsed else parsed
+    refreshed_at = parsed.get("refreshed_at") if isinstance(parsed, dict) else None
+    if not isinstance(lambdas, dict):
+        return dict(_BASELINE_LAMBDA_OVERRIDES)
+    set_baseline_lambda_overrides(lambdas, refreshed_at=refreshed_at)
+    return dict(_BASELINE_LAMBDA_OVERRIDES)
+
+
 def _baseline_lambdas_for_league(
     league: str | None,
 ) -> tuple[float, float]:
     """Return (home, away) baseline goal intensities for a league.
 
-    Falls back to the blended average when the league label is None,
-    empty, or not one of the seven soccer leagues we trade.
+    Resolution order:
+      1. DB-backed override populated by
+         :mod:`app.learning.soccer_baseline_fitter` and refreshed
+         into :data:`_BASELINE_LAMBDA_OVERRIDES`.
+      2. Hand-set per-league default in
+         :data:`_BASELINE_LAMBDAS_BY_LEAGUE`.
+      3. Blended top-five-European-leagues + MLS average for
+         unrecognised league labels.
     """
     if not league:
         return (_BASELINE_LAMBDA_HOME, _BASELINE_LAMBDA_AWAY)
     key = str(league).strip().upper()
+    if key in _BASELINE_LAMBDA_OVERRIDES:
+        return _BASELINE_LAMBDA_OVERRIDES[key]
     return _BASELINE_LAMBDAS_BY_LEAGUE.get(
         key, (_BASELINE_LAMBDA_HOME, _BASELINE_LAMBDA_AWAY),
     )

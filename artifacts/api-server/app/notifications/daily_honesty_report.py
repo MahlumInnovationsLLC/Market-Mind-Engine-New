@@ -1102,6 +1102,51 @@ async def collect_niche_sports_performance(
     return out
 
 
+async def collect_soccer_baseline_refresh_status() -> dict[str, Any]:
+    """Tiny collector that exposes when the per-league soccer
+    baseline lambdas were last refreshed (task #896).
+
+    Reads the JSON blob persisted by
+    :mod:`app.learning.soccer_baseline_fitter` directly from
+    ``runtime_settings`` so the report doesn't depend on the
+    in-memory cache having been warmed yet (a fresh API worker has
+    not run the scheduler hook at all when the digest job starts).
+    Failures degrade to ``error`` so a missing row doesn't black
+    out Section 9.
+    """
+    out: dict[str, Any] = {
+        "refreshed_at": None,
+        "leagues": [],
+        "error": None,
+    }
+    try:
+        raw = await db.fetchval(
+            "SELECT value FROM runtime_settings WHERE key = $1",
+            "learning.baseline_lambdas_by_league",
+        )
+    except Exception as e:
+        out["error"] = f"{type(e).__name__}: {e}"[:240]
+        return out
+    if not raw:
+        return out
+    try:
+        import json as _json
+        parsed = _json.loads(raw)
+    except Exception as e:
+        out["error"] = f"{type(e).__name__}: {e}"[:240]
+        return out
+    if isinstance(parsed, dict):
+        ra = parsed.get("refreshed_at")
+        if isinstance(ra, str):
+            out["refreshed_at"] = ra
+        lambdas = parsed.get("lambdas") if "lambdas" in parsed else parsed
+        if isinstance(lambdas, dict):
+            out["leagues"] = sorted(
+                str(k).upper() for k in lambdas.keys() if k
+            )
+    return out
+
+
 async def collect_report(date_utc: str) -> dict[str, Any]:
     """Build the four-section payload.  Sections that fail are marked
     with an ``error`` field but never raise."""
@@ -1128,6 +1173,7 @@ async def collect_report(date_utc: str) -> dict[str, Any]:
     best_line_t = asyncio.create_task(collect_best_line_router_stats())
     pre_vs_in_t = asyncio.create_task(collect_pre_vs_in_game_brier())
     niche_t = asyncio.create_task(collect_niche_sports_performance())
+    soccer_baseline_t = asyncio.create_task(collect_soccer_baseline_refresh_status())
     (
         divergence,
         drift_status,
@@ -1144,10 +1190,11 @@ async def collect_report(date_utc: str) -> dict[str, Any]:
         best_line,
         pre_vs_in_game,
         niche_sports,
+        soccer_baseline,
     ) = await asyncio.gather(
         div_t, drift_t, tail_t, gate_t, raw_t, miss_t, deck_t, wnba_t,
         nba_props_t, nhl_props_t, mlb_props_t, nfl_props_t,
-        best_line_t, pre_vs_in_t, niche_t,
+        best_line_t, pre_vs_in_t, niche_t, soccer_baseline_t,
     )
     return {
         "date_utc": date_utc,
@@ -1166,6 +1213,7 @@ async def collect_report(date_utc: str) -> dict[str, Any]:
         "best_line_router": best_line,
         "pre_vs_in_game_brier": pre_vs_in_game,
         "niche_sports": niche_sports,
+        "soccer_baseline_refresh": soccer_baseline,
     }
 
 
@@ -2330,6 +2378,27 @@ def render_text(payload: dict[str, Any]) -> tuple[str, str]:
                 f"(pre={it['n_pre']}, in={it['n_in']}, "
                 f"min={it['min_samples_per_side']})"
             )
+    # Soccer baseline-lambda refresh note (task #896).  One-line
+    # footer at the end of Section 9 so operators can see when the
+    # per-league home/away goal baselines were last recomputed from
+    # rolling history — the dial that backs the Dixon-Coles posterior
+    # used for the per-league Brier delta above.
+    sbr = payload.get("soccer_baseline_refresh") or {}
+    if sbr.get("error"):
+        lines.append(
+            f"  baselines: ERROR reading refresh status: {sbr['error']}"
+        )
+    elif sbr.get("refreshed_at"):
+        leagues = sbr.get("leagues") or []
+        lines.append(
+            f"  baselines last refreshed: {sbr['refreshed_at']} "
+            f"(leagues={len(leagues)})"
+        )
+    else:
+        lines.append(
+            "  baselines last refreshed: (never — predictor on "
+            "hand-set defaults)"
+        )
 
     # Section 10 — Niche sports (Task #831)
     ns = payload.get("niche_sports") or {}
