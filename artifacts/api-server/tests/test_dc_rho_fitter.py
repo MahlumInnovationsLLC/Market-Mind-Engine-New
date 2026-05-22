@@ -243,6 +243,48 @@ def test_run_cycle_preserves_existing_override_for_skipped_league(monkeypatch):
     assert _sl.get_dc_rho_overrides().get("MLS") == pytest.approx(-0.07)
 
 
+def test_run_cycle_labels_fetch_failures(monkeypatch):
+    # task #904 — DB fetch errors must surface as
+    # `fetch_failed:<ExcType>` skip reasons so the operator panel
+    # distinguishes infra outages from genuine sample shortages.
+
+    class _FailingFetchDb:
+        def __init__(self) -> None:
+            self.persisted_value = None
+
+        async def fetch(self, *args, **kwargs):  # noqa: D401
+            raise ConnectionError("simulated DB outage")
+
+        async def fetchval(self, *args, **kwargs):  # noqa: D401
+            return None
+
+        def acquire(self):
+            raise AssertionError("acquire should not be called when no fits")
+
+    monkeypatch.setattr(_fitter, "db", _FailingFetchDb())
+    cr = _run(_fitter.run_cycle())
+    assert cr.leagues_fitted == 0
+    assert cr.leagues_skipped == len(_sl.SOCCER_LEAGUES)
+    for row in cr.per_league:
+        assert row.skipped_reason == "fetch_failed:ConnectionError", row
+
+
+def test_last_cycle_result_caches_per_league_summary(monkeypatch):
+    # task #904 — the operator dashboard reads
+    # `last_cycle_result()` to render per-league sample sizes and
+    # skipped reasons without re-running the fit on each page load.
+    assert _fitter.last_cycle_result() is None
+    stub = _StubDb({"MLS": [(1, 1)] * (_fitter.MIN_MATCHES_FOR_FIT - 1)})
+    monkeypatch.setattr(_fitter, "db", stub)
+
+    cr = _run(_fitter.run_cycle())
+    cached = _fitter.last_cycle_result()
+    assert cached is cr
+    by_league = {r.league: r for r in cached.per_league}
+    assert by_league["MLS"].matches == _fitter.MIN_MATCHES_FOR_FIT - 1
+    assert by_league["MLS"].skipped_reason == "insufficient_samples"
+
+
 def test_maybe_refit_respects_cadence(monkeypatch):
     stub = _StubDb({})  # all leagues empty → cycle runs but no fits
     monkeypatch.setattr(_fitter, "db", stub)

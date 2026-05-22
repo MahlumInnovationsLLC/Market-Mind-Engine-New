@@ -4371,6 +4371,107 @@ async def admin_elo_run_cycle(
     }
 
 
+@app.get("/api/admin/dc-rho/status")
+async def admin_dc_rho_status(
+    actor: AuthedUser = Depends(require_admin),
+) -> dict[str, object]:
+    """Per-league Dixon-Coles rho fitter status for the operator
+    dashboard (task #904).
+
+    Returns the persisted fitted overrides, the hand-set defaults
+    they're overriding, and the per-league sample sizes / skipped
+    reasons from the most recent completed cycle.  The cycle summary
+    is ``None`` until the fitter has run at least once in the current
+    process.
+    """
+    from .learning import dc_rho_fitter as _dc_rho
+    from .learning import soccer_live as _soccer
+
+    overrides = _soccer.get_dc_rho_overrides()
+    defaults: dict[str, float] = {
+        k: float(v) for k, v in _soccer._DC_RHO_BY_LEAGUE.items()
+    }
+    blended_default = float(_soccer._DC_RHO_DEFAULT)
+    leagues = sorted(_soccer.SOCCER_LEAGUES)
+
+    cr = _dc_rho.last_cycle_result()
+    per_league_summary: dict[str, dict[str, object]] = {}
+    if cr is not None:
+        for row in cr.per_league:
+            per_league_summary[row.league] = {
+                "matches": int(row.matches),
+                "rho_fitted": row.rho_fitted,
+                "rho_persisted": row.rho_persisted,
+                "log_likelihood": row.log_likelihood,
+                "skipped_reason": row.skipped_reason,
+            }
+
+    leagues_payload: list[dict[str, object]] = []
+    for lg in leagues:
+        default = defaults.get(lg, blended_default)
+        override = overrides.get(lg)
+        summary = per_league_summary.get(lg)
+        leagues_payload.append({
+            "league": lg,
+            "rho_default": default,
+            "rho_override": override,
+            "rho_effective": override if override is not None else default,
+            "matches": (summary or {}).get("matches"),
+            "skipped_reason": (summary or {}).get("skipped_reason"),
+            "log_likelihood": (summary or {}).get("log_likelihood"),
+            "rho_fitted_raw": (summary or {}).get("rho_fitted"),
+        })
+
+    last_cycle: dict[str, object] | None = None
+    if cr is not None:
+        last_cycle = {
+            "started_at": cr.started_at,
+            "completed_at": cr.completed_at,
+            "duration_seconds": cr.duration_seconds,
+            "leagues_examined": cr.leagues_examined,
+            "leagues_fitted": cr.leagues_fitted,
+            "leagues_skipped": cr.leagues_skipped,
+            "persisted": cr.persisted,
+            "errors": list(cr.errors),
+        }
+
+    return {
+        "refit_interval_seconds": _dc_rho.REFIT_INTERVAL_SECONDS,
+        "min_matches_for_fit": _dc_rho.MIN_MATCHES_FOR_FIT,
+        "rho_clip_min": _dc_rho.RHO_CLIP_MIN,
+        "rho_clip_max": _dc_rho.RHO_CLIP_MAX,
+        "blended_default": blended_default,
+        "leagues": leagues_payload,
+        "last_cycle": last_cycle,
+    }
+
+
+@app.post("/api/admin/dc-rho/run-cycle")
+async def admin_dc_rho_run_cycle(
+    actor: AuthedUser = Depends(require_admin),
+) -> dict[str, object]:
+    """Run one Dixon-Coles rho fit cycle out-of-band, bypassing the
+    24h cadence gate (task #904).  Returns the cycle summary so the
+    UI can render the result inline."""
+    from .learning import dc_rho_fitter as _dc_rho
+
+    try:
+        cr = await _dc_rho.run_cycle()
+    except Exception as e:
+        log.exception("manual dc_rho_fitter cycle failed")
+        raise HTTPException(status_code=502, detail=f"dc_rho fit error: {e}")
+    return {
+        "started_at": cr.started_at,
+        "completed_at": cr.completed_at,
+        "duration_seconds": cr.duration_seconds,
+        "leagues_examined": cr.leagues_examined,
+        "leagues_fitted": cr.leagues_fitted,
+        "leagues_skipped": cr.leagues_skipped,
+        "persisted": cr.persisted,
+        "errors": list(cr.errors),
+    }
+
+
 @app.post("/api/admin/orchestrator/run-cycle")
 async def admin_run_cycle(
     body: AdminRunCycleRequest,

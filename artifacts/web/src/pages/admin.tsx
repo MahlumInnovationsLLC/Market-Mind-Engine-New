@@ -6662,6 +6662,347 @@ export function EloUpdaterPanel() {
 }
 
 // ---------------------------------------------------------------------------
+// Dixon-Coles rho fitter (task #904)
+//
+// Surfaces the per-league fitted DC rho overrides produced by the daily
+// `dc_rho_fitter` cycle (task #900). Each league row shows the persisted
+// fitted value, the hand-set default it overrides, the sample size from
+// the last fit, and any skipped reason (insufficient samples, fetch
+// failure). "Run cycle now" bypasses the 24h cadence gate for on-demand
+// refits.
+// ---------------------------------------------------------------------------
+
+export type DcRhoLeagueRow = {
+  league: string;
+  rho_default: number;
+  rho_override: number | null;
+  rho_effective: number;
+  matches: number | null;
+  skipped_reason: string | null;
+  log_likelihood: number | null;
+  rho_fitted_raw: number | null;
+};
+
+export type DcRhoLastCycle = {
+  started_at: string | null;
+  completed_at: string | null;
+  duration_seconds: number;
+  leagues_examined: number;
+  leagues_fitted: number;
+  leagues_skipped: number;
+  persisted: boolean;
+  errors: string[];
+};
+
+export type DcRhoStatus = {
+  refit_interval_seconds: number;
+  min_matches_for_fit: number;
+  rho_clip_min: number;
+  rho_clip_max: number;
+  blended_default: number;
+  leagues: DcRhoLeagueRow[];
+  last_cycle: DcRhoLastCycle | null;
+};
+
+function fmtDcRhoTime(s: string | null | undefined): string {
+  if (!s) return "—";
+  try {
+    return new Date(s).toISOString().replace("T", " ").slice(0, 19);
+  } catch {
+    return String(s);
+  }
+}
+
+function fmtDcRho(v: number | null | undefined): string {
+  if (v == null || !Number.isFinite(v)) return "—";
+  return v.toFixed(4);
+}
+
+function fmtDcRhoReason(reason: string | null): string {
+  if (!reason) return "";
+  if (reason === "insufficient_samples") return "insufficient samples";
+  if (reason.startsWith("fetch_failed:")) {
+    return `fetch failed (${reason.slice("fetch_failed:".length)})`;
+  }
+  if (reason.startsWith("fit_failed:")) {
+    return `fit failed (${reason.slice("fit_failed:".length)})`;
+  }
+  return reason;
+}
+
+export function DcRhoFitterPanel() {
+  const { getToken, isSignedIn } = useAuth();
+  const tokenFn = useMemo(
+    () => () => getToken().then((t) => t ?? null),
+    [getToken],
+  );
+  const qc = useQueryClient();
+  const queryKey = ["admin", "dc-rho", "status"] as const;
+
+  const { data, isLoading, error } = useQuery<DcRhoStatus>({
+    queryKey,
+    queryFn: () =>
+      apiFetch<DcRhoStatus>("/api/admin/dc-rho/status", { getToken: tokenFn }),
+    enabled: !!isSignedIn,
+    refetchInterval: 60_000,
+  });
+
+  const runNow = useMutation({
+    mutationFn: () =>
+      apiFetch<DcRhoLastCycle>("/api/admin/dc-rho/run-cycle", {
+        method: "POST",
+        getToken: tokenFn,
+      }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey });
+    },
+  });
+
+  if (isLoading) {
+    return (
+      <div
+        className="h-24 animate-pulse bg-muted/30"
+        data-testid="dc-rho-loading"
+      />
+    );
+  }
+  if (error || !data) {
+    return (
+      <div className="text-loss text-xs" data-testid="dc-rho-error">
+        Failed to load Dixon-Coles fitter status.
+      </div>
+    );
+  }
+
+  const last = data.last_cycle;
+  const stateLabel = !last
+    ? "PENDING"
+    : last.errors.length > 0
+      ? "ERRORS"
+      : "OK";
+  const stateClass = !last
+    ? "border-accent-warning/60 text-accent-warning"
+    : stateLabel === "ERRORS"
+      ? "border-loss/60 bg-loss/10 text-loss"
+      : "border-accent-cyan/40 text-accent-cyan";
+
+  const runErr = runNow.isError
+    ? ((runNow.error as Error)?.message ?? "Run cycle failed.")
+    : null;
+  const runResult = runNow.isSuccess ? (runNow.data ?? null) : null;
+
+  return (
+    <div className="space-y-3" data-testid="panel-dc-rho-fitter">
+      <div className="flex flex-wrap items-start justify-between gap-2">
+        <p className="text-[11px] text-muted-foreground leading-snug normal-case tracking-normal">
+          Per-league Dixon-Coles <code>rho</code> re-estimated daily from
+          historical soccer scorelines and persisted to{" "}
+          <code>runtime_settings</code>. The live predictor uses the
+          fitted override when present and falls back to the hand-set
+          default below. Leagues with fewer than{" "}
+          {data.min_matches_for_fit.toLocaleString()} terminal samples
+          are skipped and keep their existing value.
+        </p>
+        <span
+          className={`text-[10px] uppercase border px-2 py-0.5 ${stateClass}`}
+          data-testid="dc-rho-state"
+        >
+          {stateLabel}
+        </span>
+      </div>
+
+      <div className="grid grid-cols-2 gap-3 text-[11px] md:grid-cols-4">
+        <div>
+          <div className="text-muted-foreground uppercase tracking-wider">
+            Last fit
+          </div>
+          <div
+            className="font-mono text-xs text-foreground"
+            data-testid="dc-rho-last-fit"
+          >
+            {last ? fmtDcRhoTime(last.completed_at ?? last.started_at) : "—"}
+          </div>
+          {last && (
+            <div className="text-[10px] text-muted-foreground">
+              took {last.duration_seconds.toFixed(2)}s
+            </div>
+          )}
+        </div>
+        <div>
+          <div className="text-muted-foreground uppercase tracking-wider">
+            Leagues fitted
+          </div>
+          <div
+            className="font-mono text-sm text-foreground"
+            data-testid="dc-rho-leagues-fitted"
+          >
+            {last ? `${last.leagues_fitted} / ${last.leagues_examined}` : "—"}
+          </div>
+          {last && (
+            <div className="text-[10px] text-muted-foreground">
+              skipped {last.leagues_skipped.toLocaleString()}
+            </div>
+          )}
+        </div>
+        <div>
+          <div className="text-muted-foreground uppercase tracking-wider">
+            Persisted
+          </div>
+          <div
+            className="font-mono text-sm text-foreground"
+            data-testid="dc-rho-persisted"
+          >
+            {last ? (last.persisted ? "yes" : "no") : "—"}
+          </div>
+        </div>
+        <div>
+          <div className="text-muted-foreground uppercase tracking-wider">
+            Cadence
+          </div>
+          <div
+            className="font-mono text-sm text-foreground"
+            data-testid="dc-rho-cadence"
+          >
+            {Math.round(data.refit_interval_seconds / 3600)}h
+          </div>
+          <div className="text-[10px] text-muted-foreground">
+            clip [{data.rho_clip_min.toFixed(2)},{" "}
+            {data.rho_clip_max.toFixed(2)}]
+          </div>
+        </div>
+      </div>
+
+      <div
+        className="overflow-x-auto border border-border"
+        data-testid="dc-rho-leagues-table"
+      >
+        <table className="w-full min-w-[520px] text-[11px]">
+          <thead className="bg-muted/30 text-muted-foreground">
+            <tr className="text-left">
+              <th className="px-2 py-1.5 uppercase tracking-wider">League</th>
+              <th className="px-2 py-1.5 uppercase tracking-wider">
+                Fitted rho
+              </th>
+              <th className="px-2 py-1.5 uppercase tracking-wider">Default</th>
+              <th className="px-2 py-1.5 uppercase tracking-wider">Samples</th>
+              <th className="px-2 py-1.5 uppercase tracking-wider">Status</th>
+            </tr>
+          </thead>
+          <tbody>
+            {data.leagues.map((row) => {
+              const reason = fmtDcRhoReason(row.skipped_reason);
+              return (
+                <tr
+                  key={row.league}
+                  className="border-t border-border"
+                  data-testid={`dc-rho-row-${row.league}`}
+                >
+                  <td className="px-2 py-1 font-mono text-foreground">
+                    {row.league}
+                  </td>
+                  <td
+                    className={`px-2 py-1 font-mono ${
+                      row.rho_override != null
+                        ? "text-accent-cyan"
+                        : "text-muted-foreground"
+                    }`}
+                    data-testid={`dc-rho-fitted-${row.league}`}
+                  >
+                    {row.rho_override != null
+                      ? fmtDcRho(row.rho_override)
+                      : "—"}
+                  </td>
+                  <td
+                    className="px-2 py-1 font-mono text-muted-foreground"
+                    data-testid={`dc-rho-default-${row.league}`}
+                  >
+                    {fmtDcRho(row.rho_default)}
+                  </td>
+                  <td
+                    className="px-2 py-1 font-mono text-foreground"
+                    data-testid={`dc-rho-matches-${row.league}`}
+                  >
+                    {row.matches != null
+                      ? row.matches.toLocaleString()
+                      : "—"}
+                  </td>
+                  <td
+                    className={`px-2 py-1 normal-case tracking-normal ${
+                      reason ? "text-accent-warning" : "text-muted-foreground"
+                    }`}
+                    data-testid={`dc-rho-status-${row.league}`}
+                  >
+                    {reason ||
+                      (row.rho_override != null ? "fitted" : "default")}
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+
+      {last && last.errors.length > 0 && (
+        <div
+          className="border border-loss/60 bg-loss/10 p-2 text-[11px] text-loss"
+          data-testid="dc-rho-errors"
+        >
+          <div className="mb-1 uppercase tracking-wider text-[10px]">
+            Last cycle errors ({last.errors.length})
+          </div>
+          <ul className="list-disc list-inside space-y-0.5 normal-case tracking-normal break-words">
+            {last.errors.slice(0, 5).map((e, i) => (
+              <li key={i} data-testid={`dc-rho-error-${i}`}>
+                {e}
+              </li>
+            ))}
+            {last.errors.length > 5 && (
+              <li className="text-muted-foreground">
+                …and {last.errors.length - 5} more
+              </li>
+            )}
+          </ul>
+        </div>
+      )}
+
+      <div className="flex flex-wrap items-center gap-3 border-t border-border pt-3">
+        <button
+          type="button"
+          disabled={runNow.isPending}
+          onClick={() => runNow.mutate()}
+          data-testid="button-dc-rho-run-now"
+          className="border border-border px-3 py-1.5 text-[10px] uppercase tracking-widest hover:text-primary hover:border-primary disabled:opacity-50 disabled:cursor-not-allowed"
+        >
+          {runNow.isPending ? "Fitting…" : "Fit now"}
+        </button>
+        {runErr && (
+          <span
+            className="text-loss text-[11px] normal-case tracking-normal"
+            data-testid="dc-rho-run-error"
+          >
+            {runErr}
+          </span>
+        )}
+        {!runErr && runResult && (
+          <span
+            className="text-[11px] normal-case tracking-normal text-accent-cyan"
+            data-testid="dc-rho-run-result"
+          >
+            Fitted {runResult.leagues_fitted} / {runResult.leagues_examined}{" "}
+            · skipped {runResult.leagues_skipped} ·{" "}
+            {runResult.duration_seconds.toFixed(2)}s
+            {runResult.persisted ? " · persisted" : ""}
+            {runResult.errors.length > 0
+              ? ` · ${runResult.errors.length} error(s)`
+              : ""}
+          </span>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Operator alert preferences (task #721)
 //
 // Admins land on /system?tab=settings → "Branded trade alerts (operators)"

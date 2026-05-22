@@ -118,6 +118,12 @@ _TERMINAL_STATUSES = ("closed", "ended", "complete", "finished")
 # ``REFIT_INTERVAL_SECONDS``.
 _last_fit_at: float | None = None
 
+# Most recent completed cycle result.  Cached so the operator
+# dashboard can render per-league sample sizes, skipped reasons, and
+# the last-fit timestamp without re-running the fit on each page
+# load (task #904).
+_last_cycle_result: "DcRhoFitCycleResult | None" = None
+
 
 @dataclass
 class LeagueFitResult:
@@ -272,23 +278,25 @@ async def _fetch_scorelines(league: str) -> list[tuple[int, int]]:
     the game has resolved.  Case-insensitive on both ``league`` and
     ``status`` since the producer normalises but historical rows from
     earlier ingest paths may differ.
+
+    DB failures are *propagated* (not swallowed) so the cycle can
+    label the league with the ``fetch_failed:<ExcType>`` skip reason
+    the operator panel surfaces.  Returning ``[]`` on error would
+    collapse fetch outages into the ``insufficient_samples`` bucket
+    and hide a real infra problem from operators (task #904).
     """
-    try:
-        rows = await db.fetch(
-            """
-            SELECT DISTINCT ON (game_id) home_score, away_score
-              FROM sportradar_live_state
-             WHERE upper(league) = upper($1)
-               AND lower(status) = ANY($2::text[])
-               AND home_score IS NOT NULL
-               AND away_score IS NOT NULL
-             ORDER BY game_id, fetched_at DESC
-            """,
-            league, list(_TERMINAL_STATUSES),
-        )
-    except Exception as e:
-        log.warning("[dc_rho_fitter] scoreline fetch failed for %s: %s", league, e)
-        return []
+    rows = await db.fetch(
+        """
+        SELECT DISTINCT ON (game_id) home_score, away_score
+          FROM sportradar_live_state
+         WHERE upper(league) = upper($1)
+           AND lower(status) = ANY($2::text[])
+           AND home_score IS NOT NULL
+           AND away_score IS NOT NULL
+         ORDER BY game_id, fetched_at DESC
+        """,
+        league, list(_TERMINAL_STATUSES),
+    )
     out: list[tuple[int, int]] = []
     for r in rows:
         try:
@@ -445,7 +453,19 @@ async def run_cycle() -> DcRhoFitCycleResult:
         cr.leagues_examined, cr.leagues_fitted, cr.leagues_skipped,
         cr.persisted, cr.duration_seconds,
     )
+    global _last_cycle_result
+    _last_cycle_result = cr
     return cr
+
+
+def last_cycle_result() -> DcRhoFitCycleResult | None:
+    """Return the most recent completed :func:`run_cycle` result, or
+    ``None`` if the fitter hasn't run since process start.
+
+    Operator dashboard reads this to render per-league sample sizes
+    and skipped reasons without re-running the fit.
+    """
+    return _last_cycle_result
 
 
 async def maybe_refit() -> DcRhoFitCycleResult | None:
@@ -463,5 +483,6 @@ async def maybe_refit() -> DcRhoFitCycleResult | None:
 def _reset_state_for_tests() -> None:
     """Test hook — clear the cadence gate so a unit test can drive
     :func:`maybe_refit` repeatedly without waiting 24 hours."""
-    global _last_fit_at
+    global _last_fit_at, _last_cycle_result
     _last_fit_at = None
+    _last_cycle_result = None
