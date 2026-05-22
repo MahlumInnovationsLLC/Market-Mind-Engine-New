@@ -44,6 +44,10 @@ def fake_db(monkeypatch):
         series_filter = set(args[0])
         last_id = args[1]
         limit = args[2]
+        # Mirror the two query variants the script ships: the default
+        # SELECT carries an explicit ``settled_at IS NULL`` clause,
+        # while ``--include-settled`` drops it.
+        respects_settled_filter = "settled_at IS NULL" in query
         out = []
         for r in rows:
             meta = r.get("metadata") or {}
@@ -54,7 +58,7 @@ def fake_db(monkeypatch):
             leg = (meta.get("leg_orientation") or "").upper()
             if leg in ("HOME", "DRAW", "AWAY"):
                 continue
-            if r["settled_at"] is not None:
+            if respects_settled_filter and r["settled_at"] is not None:
                 continue
             if r["kalshi_market_id"] is None:
                 continue
@@ -161,6 +165,37 @@ def test_dry_run_makes_progress_without_writes(fake_db):
     ])
     stats = _run(backfill.run(batch_size=1, dry_run=True))
     assert stats == {"scanned": 3, "updated": 3, "skipped": 0}
+    assert fake_db["updates"] == []
+
+
+def test_include_settled_backfills_settled_rows(fake_db):
+    # Open and settled soccer rows mixed together; default pass
+    # ignores the settled one, ``--include-settled`` stamps both.
+    fake_db["rows"].extend([
+        _row(1, title="Will Arsenal beat Chelsea?", home="Arsenal", away="Chelsea"),
+        _row(2, title="Will Chelsea win?", home="Arsenal", away="Chelsea", settled=True),
+    ])
+
+    stats_default = _run(backfill.run(batch_size=10, dry_run=False))
+    assert stats_default == {"scanned": 1, "updated": 1, "skipped": 0}
+    assert fake_db["updates"] == [("HOME", 1)]
+
+    stats_settled = _run(
+        backfill.run(batch_size=10, dry_run=False, include_settled=True)
+    )
+    assert stats_settled == {"scanned": 1, "updated": 1, "skipped": 0}
+    assert fake_db["updates"] == [("HOME", 1), ("AWAY", 2)]
+
+
+def test_include_settled_is_idempotent(fake_db):
+    fake_db["rows"].extend([
+        _row(1, title="Will Arsenal beat Chelsea?", home="Arsenal", away="Chelsea",
+             settled=True, leg="HOME"),
+        _row(2, title="Arsenal vs Chelsea ends in a draw", home="Arsenal", away="Chelsea",
+             settled=True),
+    ])
+    stats = _run(backfill.run(batch_size=10, dry_run=True, include_settled=True))
+    assert stats == {"scanned": 1, "updated": 1, "skipped": 0}
     assert fake_db["updates"] == []
 
 

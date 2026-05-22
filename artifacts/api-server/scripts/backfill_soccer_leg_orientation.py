@@ -1,4 +1,4 @@
-"""Backfill ``leg_orientation`` into ``predictions.metadata`` for open
+"""Backfill ``leg_orientation`` into ``predictions.metadata`` for
 soccer markets produced before the leg parser shipped (task #892).
 
 Background
@@ -12,8 +12,9 @@ not carry the label — every cycle the live predictor
 helper for those rows, doing extra work and exposing a small risk of
 producer/consumer drift if the two parsers ever diverge.
 
-This one-off script walks every OPEN soccer-series row whose metadata
-blob doesn't already carry a recognised ``leg_orientation`` and:
+By default this one-off script walks every OPEN soccer-series row
+whose metadata blob doesn't already carry a recognised
+``leg_orientation`` and:
 
   * Runs the same ``_parse_leg_orientation`` helper the producer uses,
     against ``metadata->>'title'`` + ``home_team`` + ``away_team``.
@@ -30,10 +31,17 @@ them, which is the same behavior they have today.
   * ``metadata->>'kalshi_series'`` is one of the soccer 3-way series in
     :data:`app.feeds.kalshi_sports_markets._SOCCER_SERIES`.
 
+``--include-settled`` (task #898) widens the scan to also touch
+already-settled soccer rows so historical per-leg Brier / calibration
+backtests can group by leg without an inline title-parsing fallback.
+The settled rows feed no live consumer; this is purely an analytics
+hygiene pass.
+
 Usage::
 
     python -m scripts.backfill_soccer_leg_orientation --dry-run
     python -m scripts.backfill_soccer_leg_orientation
+    python -m scripts.backfill_soccer_leg_orientation --include-settled
 
 The script is **idempotent** — the SELECT filters out rows that
 already carry a valid leg label, so re-running it is a no-op for
@@ -60,15 +68,18 @@ log = logging.getLogger("backfill_soccer_leg_orientation")
 _VALID_LEGS = ("HOME", "DRAW", "AWAY")
 
 
-_SELECT_SQL = """
+# Two query variants so the default (open-only) pass keeps the
+# ``settled_at IS NULL`` filter that matches the live predictor's
+# scope, while ``--include-settled`` drops it for the analytics pass.
+_SELECT_BASE = """
     SELECT p.id,
            p.kalshi_market_id,
            p.home_team,
            p.away_team,
            p.metadata
       FROM predictions p
-     WHERE p.settled_at IS NULL
-       AND p.kalshi_market_id IS NOT NULL
+     WHERE {settled_filter}
+           p.kalshi_market_id IS NOT NULL
        AND COALESCE(p.metadata->>'kalshi_series', '') = ANY($1::text[])
        -- Only revisit rows whose persisted leg label is missing or
        -- unrecognised.  Already-correct rows are skipped so re-runs
@@ -82,6 +93,12 @@ _SELECT_SQL = """
      ORDER BY p.id
      LIMIT $3
 """
+
+
+_SELECT_OPEN_SQL = _SELECT_BASE.format(
+    settled_filter="p.settled_at IS NULL\n       AND",
+)
+_SELECT_ALL_SQL = _SELECT_BASE.format(settled_filter="")
 
 
 _UPDATE_SQL = """
@@ -119,12 +136,18 @@ def _coerce_metadata(value):
     return {}
 
 
-async def run(*, batch_size: int, dry_run: bool) -> dict[str, int]:
+async def run(
+    *,
+    batch_size: int,
+    dry_run: bool,
+    include_settled: bool = False,
+) -> dict[str, int]:
     series = sorted(_SOCCER_SERIES)
     stats = {"scanned": 0, "updated": 0, "skipped": 0}
     last_id = 0
+    select_sql = _SELECT_ALL_SQL if include_settled else _SELECT_OPEN_SQL
     while True:
-        rows = await db.fetch(_SELECT_SQL, series, last_id, batch_size)
+        rows = await db.fetch(select_sql, series, last_id, batch_size)
         if not rows:
             break
         for r in rows:
@@ -173,6 +196,15 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--dry-run", action="store_true",
         help="Compute the leg for each row but skip the UPDATE",
     )
+    p.add_argument(
+        "--include-settled", action="store_true",
+        help=(
+            "Also stamp leg_orientation on already-settled soccer rows "
+            "so historical per-leg backtests don't need an inline "
+            "title-parsing fallback (task #898). Default scans only "
+            "open rows, matching the live predictor's scope."
+        ),
+    )
     p.add_argument("--verbose", "-v", action="store_true")
     return p.parse_args(argv)
 
@@ -183,7 +215,13 @@ def main(argv: list[str] | None = None) -> int:
         level=logging.DEBUG if args.verbose else logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
-    stats = asyncio.run(run(batch_size=args.batch_size, dry_run=args.dry_run))
+    stats = asyncio.run(
+        run(
+            batch_size=args.batch_size,
+            dry_run=args.dry_run,
+            include_settled=args.include_settled,
+        )
+    )
     print(json.dumps(stats, indent=2))
     return 0
 
