@@ -108,10 +108,13 @@ async def _fetch_active_predictions(limit: int) -> list[dict[str, Any]]:
         open on Kalshi; settled rows already have their outcome.
       * ``kalshi_market_id IS NOT NULL`` — anchors the row to a real
         Kalshi market the settler can resolve.
-      * ``updated_at > now() - interval '6 hours'`` — guards against
-        stale ghost rows: a market whose probability hasn't been
-        re-stamped in 6h is unlikely to settle cleanly and would
-        pollute the shadow training set.
+      * ``created_at > now() - interval '6 hours'`` — guards against
+        stale ghost rows: a market whose row hasn't been created in
+        the last 6h is unlikely to settle cleanly and would pollute
+        the shadow training set.  (We key off ``created_at`` rather
+        than ``updated_at`` because production DBs provisioned via
+        the lazy DDL path predate migration 0016 and may lack the
+        ``updated_at`` column entirely.)
 
     Wider window than the `1 hour` cycle cadence so a brief
     orchestrator outage doesn't drop the corresponding shadow rows.
