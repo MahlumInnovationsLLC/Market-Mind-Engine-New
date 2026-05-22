@@ -361,6 +361,16 @@ async def lifespan(_: FastAPI):
                 register_espn_scoreboard_feed()
             except Exception as e:
                 log.warning("espn_scoreboard feed registration failed: %s", e)
+            # Public-API live-state backstop (ESPN + MLB statsapi +
+            # NHL api-web).  Fills `sportradar_live_state` when the
+            # operator has no Sportradar contract so the Live-Now
+            # tile, /api/live-games, and the in-game prediction loop
+            # have data to read.
+            try:
+                from .feeds.public_live_state import register_public_live_state_feed
+                register_public_live_state_feed()
+            except Exception as e:
+                log.warning("public_live_state feed registration failed: %s", e)
             try:
                 from .feeds.kalshi_schedules import register_kalshi_schedules_feed
                 register_kalshi_schedules_feed()
