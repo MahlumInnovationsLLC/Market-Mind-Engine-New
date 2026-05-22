@@ -143,6 +143,33 @@ def _baseline_lambdas_for_league(
 # without dragging in scipy.
 _DC_MAX_REMAINING_GOALS = 8
 
+# Dixon-Coles low-score correlation parameter (rho), per league.
+# The independent-Poisson goal grid systematically under-counts 0-0 /
+# 1-1 outcomes and over-counts 1-0 / 0-1 outcomes vs the empirical
+# soccer record (the original Dixon-Coles 1997 finding).  Applying
+# the tau correction to the four low-score cells of the remaining-
+# time grid restores that mass — which matters most for the DRAW
+# leg (the hardest leg for the market to price), since the missing
+# probability is concentrated on score-line draws.
+#
+# Following the DC convention, rho is NEGATIVE (it lifts 0-0 / 1-1
+# and trims 1-0 / 0-1).  The per-league values below are blended
+# from public DC fits over 2018-2024 top-flight seasons; the
+# blended-default protects any league we don't have a fitted value
+# for.  Magnitudes sit in the canonical [-0.20, 0.0] band — wider
+# than that and the corrected cells can go negative at our
+# baseline lambdas, which the clipping below guards against.
+_DC_RHO_BY_LEAGUE: dict[str, float] = {
+    "EPL": -0.11,
+    "LALIGA": -0.13,
+    "SERIEA": -0.14,
+    "BUNDES": -0.08,
+    "LIGUE1": -0.12,
+    "MLS": -0.09,
+    "UCL": -0.10,
+}
+_DC_RHO_DEFAULT = -0.10
+
 # Recognised leg labels.  Anything else collapses to "no leg
 # information" and the predictor takes the leg-agnostic branch.
 _LEG_HOME = "HOME"
@@ -276,6 +303,44 @@ def _poisson_pmf(lam: float, k: int) -> float:
     return math.exp(-lam + k * math.log(lam) - math.lgamma(k + 1))
 
 
+def _dc_tau(h: int, a: int, lam_h: float, lam_a: float, rho: float) -> float:
+    """Dixon-Coles low-score correlation correction.
+
+    Multiplicative tilt applied to the four low-score cells of the
+    independent-Poisson joint goal grid: ``(0,0)``, ``(0,1)``,
+    ``(1,0)``, ``(1,1)``.  Returns ``1.0`` for every other cell so
+    callers can apply it uniformly across the grid.  Negative
+    ``rho`` (the empirically observed sign for soccer) lifts the
+    score-line draws (0-0, 1-1) and trims the one-goal-decided
+    low-score cells (0-1, 1-0), matching the Dixon-Coles 1997
+    finding that independent Poisson under-counts low draws.
+
+    The result is clipped to ``>= 0.0`` so an extreme rho on small
+    lambdas can't produce a negative cell weight — the four-cell
+    correction is then re-normalised by the caller along with the
+    rest of the grid.
+    """
+    if h == 0 and a == 0:
+        tau = 1.0 - lam_h * lam_a * rho
+    elif h == 0 and a == 1:
+        tau = 1.0 + lam_h * rho
+    elif h == 1 and a == 0:
+        tau = 1.0 + lam_a * rho
+    elif h == 1 and a == 1:
+        tau = 1.0 - rho
+    else:
+        return 1.0
+    return tau if tau > 0.0 else 0.0
+
+
+def _resolve_dc_rho(league: str | None) -> float:
+    """Per-league Dixon-Coles rho, falling back to the blended default
+    for unrecognised league labels."""
+    if not league:
+        return _DC_RHO_DEFAULT
+    return _DC_RHO_BY_LEAGUE.get(str(league).strip().upper(), _DC_RHO_DEFAULT)
+
+
 def _dc_leg_probability(
     leg: str,
     score_diff: int,
@@ -284,13 +349,14 @@ def _dc_leg_probability(
 ) -> float | None:
     """Closed-form leg probability conditional on the current score
     and time elapsed, using independent Poisson scoring intensities
-    for the home and away sides over the remaining regulation time.
+    for the home and away sides over the remaining regulation time,
+    plus the Dixon-Coles low-score correlation correction applied to
+    the four low-score cells (0-0, 1-1, 1-0, 0-1).
 
-    This is the "Dixon-Coles without the low-score correlation
-    correction" variant — DC's joint-zero / one-one tilt is small at
-    the baseline lambdas and adding it would require Skellam helpers
-    we don't otherwise need.  The leg-agnostic blend remains the
-    fallback whenever this function returns ``None``.
+    The DC tau is small at our baseline lambdas but concentrates its
+    lift on score-line draws — which is exactly the leg the market
+    struggles to price.  The leg-agnostic blend remains the fallback
+    whenever this function returns ``None``.
 
     Arguments:
       * ``leg`` — one of HOME / DRAW / AWAY.
@@ -298,6 +364,9 @@ def _dc_leg_probability(
       * ``minutes_elapsed`` — match minutes elapsed (0 at kickoff,
         90 at full-time; values above 90 are clamped so a 95-minute
         stoppage reading doesn't push remaining-time below zero).
+      * ``league`` — canonical league name used to look up the
+        per-league rho.  Defaults to the blended rho when omitted
+        or unrecognised.
     """
     if leg not in _VALID_LEGS:
         return None
@@ -315,6 +384,7 @@ def _dc_leg_probability(
     base_h, base_a = _baseline_lambdas_for_league(league)
     lam_h = base_h * remaining_frac
     lam_a = base_a * remaining_frac
+    rho = _resolve_dc_rho(league)
     p_home_pmf = [_poisson_pmf(lam_h, k) for k in range(_DC_MAX_REMAINING_GOALS + 1)]
     p_away_pmf = [_poisson_pmf(lam_a, k) for k in range(_DC_MAX_REMAINING_GOALS + 1)]
     p_home_win = 0.0
@@ -327,7 +397,7 @@ def _dc_leg_probability(
         for a, pa in enumerate(p_away_pmf):
             if pa <= 0.0:
                 continue
-            joint = ph * pa
+            joint = ph * pa * _dc_tau(h, a, lam_h, lam_a, rho)
             final_diff = base + h - a
             if final_diff > 0:
                 p_home_win += joint
