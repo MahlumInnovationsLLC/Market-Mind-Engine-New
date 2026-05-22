@@ -10,7 +10,7 @@ import json
 import logging
 from typing import Any, Literal
 
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 
 from . import db
 from .kalshi import client as kalshi_client
@@ -7085,6 +7085,11 @@ async def snooze_prediction(
 # this floor.  Pre-Edge-Terminal trades are excluded so the tile reflects
 # the new input source only.
 EDGE_TERMINAL_PNL_FLOOR_ISO = "2026-05-21"
+# asyncpg's DATE codec calls ``.toordinal()`` on the bound value, so a bare
+# string raises ``DataError: 'str' object has no attribute 'toordinal'`` even
+# though the SQL casts it via ``$1::date``.  Pre-parse the floor once so every
+# query below binds a real ``date`` object.
+EDGE_TERMINAL_PNL_FLOOR_DATE = date.fromisoformat(EDGE_TERMINAL_PNL_FLOOR_ISO)
 
 
 async def get_edge_terminal_pnl() -> dict[str, Any]:
@@ -7132,7 +7137,7 @@ async def get_edge_terminal_pnl() -> dict[str, Any]:
             WHERE placed_by = 'edge_terminal'
               AND executed_at >= $1::date
             """,
-            EDGE_TERMINAL_PNL_FLOOR_ISO,
+            EDGE_TERMINAL_PNL_FLOOR_DATE,
         )
         if row is not None:
             d = dict(row)
@@ -7171,7 +7176,7 @@ async def get_edge_terminal_pnl() -> dict[str, Any]:
             ORDER BY n DESC
             LIMIT 20
             """,
-            EDGE_TERMINAL_PNL_FLOOR_ISO,
+            EDGE_TERMINAL_PNL_FLOOR_DATE,
         )
         # 1 equivalent unit = $100 of realised P&L (matches the
         # bookmaker-grammar tile convention so the two surfaces stay
