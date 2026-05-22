@@ -285,7 +285,7 @@ def test_runner_attaches_nfl_game_context_to_prompt(monkeypatch):
     is hermetic."""
     from app.swarm import runner
 
-    async def fake_build_ctx(home, away):  # noqa: ANN001
+    async def fake_build_ctx(home, away, *, observed_at=None):  # noqa: ANN001
         return {
             "weather": {
                 "venue": "Lambeau Field",

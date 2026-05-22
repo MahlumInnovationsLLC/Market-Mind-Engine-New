@@ -34,6 +34,16 @@ from .soccer_context import (
     build_game_context as build_soccer_game_context,
     fetch_lineup_status as fetch_soccer_lineup_status,
 )
+from .mlb_context import (
+    build_game_context as build_mlb_game_context,
+    fetch_weather as fetch_mlb_weather,
+    resolve_ballpark as resolve_mlb_ballpark,
+)
+from .golf_context import (
+    build_game_context as build_golf_game_context,
+    fetch_weather as fetch_golf_weather,
+    resolve_course as resolve_golf_course,
+)
 
 __all__ = [
     "LeagueConfig",
@@ -56,4 +66,10 @@ __all__ = [
     "is_soccer_league",
     "build_soccer_game_context",
     "fetch_soccer_lineup_status",
+    "build_mlb_game_context",
+    "fetch_mlb_weather",
+    "resolve_mlb_ballpark",
+    "build_golf_game_context",
+    "fetch_golf_weather",
+    "resolve_golf_course",
 ]

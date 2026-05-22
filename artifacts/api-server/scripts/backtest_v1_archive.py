@@ -1174,7 +1174,32 @@ async def _amain(argv: list[str] | None = None) -> int:
                         help=f"Rows per DB batch (default {_DEFAULT_BATCH_SIZE}).")
     parser.add_argument("--json-out", type=Path, default=None,
                         help="Write the JSON report to this path.")
+    # ------------------------------------------------------------------
+    # LLM replay mode (task #818, Phase 2 wiring).
+    # ------------------------------------------------------------------
+    # The V1 archive carries a ``llm_predictions`` table populated by
+    # the legacy debate runner.  ``--llm-replay`` short-circuits the
+    # full V1 brier/calibrator backtest and instead aggregates that
+    # table by (provider, model, league, category) so we can compare
+    # historical model accuracy without re-running expensive LLM calls.
+    parser.add_argument("--llm-replay", action="store_true",
+                        help="Replay v1_archive.llm_predictions and "
+                             "report per-(provider,model,league,category) "
+                             "accuracy. Bypasses the brier/calibrator path.")
+    parser.add_argument("--llm-since", type=str, default=None,
+                        help="With --llm-replay: ISO timestamp lower bound "
+                             "(inclusive) on predicted_at.")
+    parser.add_argument("--llm-until", type=str, default=None,
+                        help="With --llm-replay: ISO timestamp upper bound "
+                             "(exclusive) on predicted_at.")
+    parser.add_argument("--llm-providers", type=str, default=None,
+                        help="With --llm-replay: comma-separated provider filter.")
+    parser.add_argument("--llm-models", type=str, default=None,
+                        help="With --llm-replay: comma-separated model filter.")
     args = parser.parse_args(argv)
+
+    if args.llm_replay:
+        return await _run_llm_replay(args)
 
     rows: list[dict[str, Any]] | None
     if args.inline_rows is not None:
@@ -1234,6 +1259,95 @@ async def _amain(argv: list[str] | None = None) -> int:
         args.json_out.write_text(json.dumps(report, indent=2, default=str))
         print(f"\n  JSON report written: {args.json_out}")
 
+    return 0
+
+
+async def _run_llm_replay(args: argparse.Namespace) -> int:
+    """``--llm-replay`` handler: aggregate v1_archive.llm_predictions."""
+    from datetime import datetime as _dt
+    from app.v1_archive import llm_backtest
+
+    def _parse_iso(s: str | None) -> _dt | None:
+        if not s:
+            return None
+        return _dt.fromisoformat(s.replace("Z", "+00:00"))
+
+    def _parse_csv(s: str | None) -> list[str] | None:
+        if not s:
+            return None
+        out = [x.strip() for x in s.split(",") if x.strip()]
+        return out or None
+
+    # ``llm_backtest.replay`` does not filter by model_id today (only
+    # provider).  We post-filter buckets when --llm-models is supplied so
+    # the CLI can still slice by model without changing the harness API.
+    model_filter = _parse_csv(args.llm_models)
+    result = await llm_backtest.replay(
+        since=_parse_iso(args.llm_since),
+        until=_parse_iso(args.llm_until),
+        providers=_parse_csv(args.llm_providers),
+        leagues=_parse_leagues(args.leagues),
+        limit=args.limit,
+    )
+
+    buckets = result.buckets
+    if model_filter:
+        wanted = {m.lower() for m in model_filter}
+        buckets = tuple(b for b in buckets if (b.model_id or "").lower() in wanted)
+
+    print("=" * 78)
+    print(f" V1 LLM replay — {result.total_rows} predictions, "
+          f"{len(buckets)} (provider,model,league,category) buckets")
+    overall_brier = (
+        f"{result.overall_brier:.4f}" if result.overall_brier is not None else "—"
+    )
+    print(f" overall: win_rate={result.overall_win_rate:.3f}  brier={overall_brier}")
+    print("=" * 78)
+    if not buckets:
+        print("  (no rows — check filters or that v1_archive.llm_predictions exists)")
+    else:
+        header = (
+            f"  {'provider':<14}{'model':<24}{'league':<10}"
+            f"{'category':<14}{'n':>6}{'win_rate':>10}{'brier':>9}"
+        )
+        print(header)
+        print("  " + "-" * (len(header) - 2))
+        for b in buckets:
+            brier = f"{b.brier:.4f}" if b.brier is not None else "—"
+            print(
+                f"  {(b.provider or '-')[:14]:<14}"
+                f"{(b.model_id or '-')[:24]:<24}"
+                f"{(b.league or '-')[:10]:<10}"
+                f"{(b.category or '-')[:14]:<14}"
+                f"{b.n:>6}{b.win_rate:>10.3f}{brier:>9}"
+            )
+
+    if args.json_out is not None:
+        payload = {
+            "mode": "llm_replay",
+            "total_rows": result.total_rows,
+            "overall_win_rate": result.overall_win_rate,
+            "overall_brier": result.overall_brier,
+            "overall_avg_confidence": result.overall_avg_confidence,
+            "filters": result.filters,
+            "buckets": [
+                {
+                    "provider": b.provider,
+                    "model_id": b.model_id,
+                    "league": b.league,
+                    "category": b.category,
+                    "n": b.n,
+                    "n_correct": b.n_correct,
+                    "win_rate": b.win_rate,
+                    "brier": b.brier,
+                    "avg_confidence": b.avg_confidence,
+                }
+                for b in buckets
+            ],
+        }
+        args.json_out.parent.mkdir(parents=True, exist_ok=True)
+        args.json_out.write_text(json.dumps(payload, indent=2, default=str))
+        print(f"\n  JSON report written: {args.json_out}")
     return 0
 
 

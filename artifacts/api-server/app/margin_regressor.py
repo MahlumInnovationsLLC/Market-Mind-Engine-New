@@ -1289,6 +1289,16 @@ async def attach_lines_to_candidate(candidate: dict[str, Any]) -> dict[str, Any]
         log.debug("attach_lines_to_candidate failed for %s: %s", game_id, e)
         return candidate
     if row is None or row["line_value"] is None:
+        # Live ``line_snapshots`` is sparse for V1-era games; fall back
+        # to the V1 archive so historical replays still get a line.
+        from .v1_archive import features as _v1
+        v1_row = await _v1.latest_line_for_game(str(game_id), market_keys)
+        if v1_row is None:
+            return candidate
+        field_name = "spread_line" if market_type == "Spread" else "total_line"
+        ctx[field_name] = v1_row["line_value"]
+        ctx[f"{field_name}_source"] = "v1_archive"
+        candidate["game_context"] = ctx
         return candidate
 
     field_name = "spread_line" if market_type == "Spread" else "total_line"

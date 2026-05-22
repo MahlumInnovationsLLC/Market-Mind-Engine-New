@@ -29,11 +29,13 @@ import asyncio
 import logging
 import os
 import time
+from datetime import datetime
 from typing import Any
 
 import httpx
 
 from .. import db
+from ..v1_archive import features as v1_features
 from .nfl_stadiums import Stadium, resolve_stadium
 
 
@@ -111,7 +113,11 @@ async def _fetch_open_meteo_current(
         return None
 
 
-async def fetch_weather(home_team: str | None) -> dict[str, Any] | None:
+async def fetch_weather(
+    home_team: str | None,
+    *,
+    observed_at: datetime | None = None,
+) -> dict[str, Any] | None:
     """Build the ``game_context.weather`` block for ``home_team``.
 
     Returns a dict with at least ``venue`` + ``venue_type`` keys.  For
@@ -134,6 +140,25 @@ async def fetch_weather(home_team: str | None) -> dict[str, Any] | None:
             "venue_type": "indoor",
             "weather_irrelevant": True,
         }
+
+    # V1-era backtest path: when the caller supplies ``observed_at``
+    # (the scheduled-start of a historical game), prefer a reading from
+    # ``v1_archive.weather_observations`` over a live Open-Meteo call so
+    # the persona sees the conditions that actually prevailed at game
+    # time.  Live cycles pass ``observed_at=None`` and skip this branch.
+    if observed_at is not None:
+        v1_block = await v1_features.weather_for_coords(
+            stadium.lat, stadium.lon, observed_at,
+        )
+        if v1_block is not None:
+            return {
+                "venue": stadium.name,
+                "venue_type": "outdoor",
+                "temperature_f": v1_block.get("temperature_f"),
+                "source": "v1_archive",
+                "v1_city_code": v1_block.get("city_code"),
+                "v1_observed_at": v1_block.get("observed_at"),
+            }
 
     cache_key = f"{stadium.lat:.3f},{stadium.lon:.3f}"
     now = time.monotonic()
@@ -307,7 +332,10 @@ async def fetch_player_status(
 
 
 async def build_game_context(
-    home_team: str | None, away_team: str | None
+    home_team: str | None,
+    away_team: str | None,
+    *,
+    observed_at: datetime | None = None,
 ) -> dict[str, Any]:
     """Build the structured ``game_context`` payload for an NFL debate.
 
@@ -318,7 +346,7 @@ async def build_game_context(
     """
     out: dict[str, Any] = {}
     weather, player_status = await asyncio.gather(
-        fetch_weather(home_team),
+        fetch_weather(home_team, observed_at=observed_at),
         fetch_player_status(home_team, away_team),
     )
     if weather is not None:

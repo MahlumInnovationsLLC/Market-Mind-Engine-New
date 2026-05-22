@@ -732,16 +732,56 @@ async def _run_debate_inner(
     # to think about them.  All sub-fetches are best-effort: a failure
     # in any of them collapses to "no data" for that sub-block, never
     # blocks the debate.
+    # ``game_time`` (a.k.a. scheduled_start) is carried onto the
+    # candidate by the orchestrator (see cycle.py).  Passing it through
+    # to the per-league builders lets ``fetch_weather`` consult the V1
+    # archive for historical replays instead of calling a live HTTP
+    # feed (or returning an empty block, for MLB / golf).
+    from datetime import datetime as _dt
+    _game_time = candidate.get("game_time")
+    _observed_at = _game_time if isinstance(_game_time, _dt) else None
+
     nfl_game_context: dict[str, Any] = {}
-    if (league or "").strip().upper() == "NFL":
+    mlb_game_context: dict[str, Any] = {}
+    golf_game_context: dict[str, Any] = {}
+    league_upper = (league or "").strip().upper()
+    if league_upper == "NFL":
         try:
             from ..sports import build_nfl_game_context as _build_nfl_ctx
             nfl_game_context = await _build_nfl_ctx(
-                candidate.get("home_team"), candidate.get("away_team")
+                candidate.get("home_team"),
+                candidate.get("away_team"),
+                observed_at=_observed_at,
             )
         except Exception as e:  # noqa: BLE001 — best-effort
             log.debug("NFL game_context build failed (best-effort): %s", e)
             nfl_game_context = {}
+    elif league_upper == "MLB":
+        try:
+            from ..sports import build_mlb_game_context as _build_mlb_ctx
+            mlb_game_context = await _build_mlb_ctx(
+                candidate.get("home_team"),
+                candidate.get("away_team"),
+                observed_at=_observed_at,
+            )
+        except Exception as e:  # noqa: BLE001 — best-effort
+            log.debug("MLB game_context build failed (best-effort): %s", e)
+            mlb_game_context = {}
+    elif league_upper in ("PGA", "GOLF", "LIV"):
+        try:
+            from ..sports import build_golf_game_context as _build_golf_ctx
+            # Golf uses ``venue`` (or ``tournament``) rather than home_team.
+            _venue = (
+                candidate.get("venue")
+                or candidate.get("tournament")
+                or matchup
+            )
+            golf_game_context = await _build_golf_ctx(
+                _venue, observed_at=_observed_at,
+            )
+        except Exception as e:  # noqa: BLE001 — best-effort
+            log.debug("golf game_context build failed (best-effort): %s", e)
+            golf_game_context = {}
 
     # Soccer game_context: pulls the cached sportradar_rosters +
     # sportradar_injuries (missing-players feed, task #211) so the
@@ -770,7 +810,13 @@ async def _run_debate_inner(
         from ..sports import persona_context_augment as _persona_aug
         league_aug = _persona_aug(
             league,
-            game_context=nfl_game_context or soccer_game_context or None,
+            game_context=(
+                nfl_game_context
+                or mlb_game_context
+                or golf_game_context
+                or soccer_game_context
+                or None
+            ),
         )
     except Exception:
         league_aug = ""
@@ -787,6 +833,12 @@ async def _run_debate_inner(
     if soccer_game_context:
         candidate = dict(candidate)
         candidate["soccer_context"] = soccer_game_context
+    if mlb_game_context:
+        candidate = dict(candidate)
+        candidate["mlb_context"] = mlb_game_context
+    if golf_game_context:
+        candidate = dict(candidate)
+        candidate["golf_context"] = golf_game_context
 
     await _publish(
         {
