@@ -379,6 +379,92 @@ export const GetTradeDetailResponse = zod.object({
 });
 
 /**
+ * @summary Return the persisted application input mode (`pipeline` = LLM-driven orchestrator; `edge_terminal` = Edge Terminal scraper bypass). Default on boot is `edge_terminal`.
+ */
+export const GetEdgeTerminalInputModeResponse = zod.object({
+  mode: zod.enum(["pipeline", "edge_terminal"]),
+  valid_modes: zod.array(zod.string()),
+});
+
+/**
+ * @summary Flip `app.input_mode`. Elite-tier only (same gate as the live- execute toggle, since this controls trade execution source). Starts/stops the Edge Terminal poller idempotently.
+ */
+export const SetEdgeTerminalInputModeBody = zod.object({
+  mode: zod.enum(["pipeline", "edge_terminal"]),
+});
+
+export const SetEdgeTerminalInputModeResponse = zod.object({
+  mode: zod.enum(["pipeline", "edge_terminal"]),
+});
+
+/**
+ * @summary Edge Terminal poller status — last_poll_at, last_ok_at, age in seconds, stale flag (true when last_ok_at is older than 120s). Used by the dashboard to grey tiles when the scraper is unhealthy.
+ */
+export const GetEdgeTerminalStatusResponse = zod.object({
+  last_poll_at: zod.string().nullish(),
+  last_ok_at: zod.string().nullish(),
+  last_error: zod.string().nullish(),
+  age_seconds: zod
+    .number()
+    .nullish()
+    .describe("Seconds since last_ok_at; null when never succeeded."),
+  stale: zod
+    .boolean()
+    .describe("True when age_seconds > 120 (or no successful poll yet)."),
+  running: zod.boolean(),
+});
+
+/**
+ * @summary Edge Terminal P&L card — cumulative P&L on trades placed by the scraper executor since 2026-05-21 (`placed_by = 'edge_terminal' AND executed_at >= '2026-05-21'`).
+ */
+export const GetDashboardEdgeTerminalPnlResponse = zod.object({
+  generated_at: zod.string(),
+  since_date: zod.string().describe("ISO date floor (2026-05-21)."),
+  n_trades: zod.number(),
+  n_settled: zod.number(),
+  cumulative_pnl: zod.number().nullish(),
+  win_rate: zod.number().nullish(),
+  error: zod.string().nullish(),
+});
+
+/**
+ * @summary Recent Edge Terminal signals with their executor disposition (placed / skipped_unresolved / skipped_gate / errored).
+ */
+export const getDashboardEdgeTerminalSignalsQueryLimitDefault = 25;
+export const getDashboardEdgeTerminalSignalsQueryLimitMax = 200;
+
+export const GetDashboardEdgeTerminalSignalsQueryParams = zod.object({
+  limit: zod.coerce
+    .number()
+    .min(1)
+    .max(getDashboardEdgeTerminalSignalsQueryLimitMax)
+    .default(getDashboardEdgeTerminalSignalsQueryLimitDefault),
+});
+
+export const GetDashboardEdgeTerminalSignalsResponse = zod.object({
+  limit: zod.number(),
+  generated_at: zod.string(),
+  items: zod.array(
+    zod.object({
+      id: zod.number(),
+      signal_date: zod.string(),
+      vertical: zod.string().nullish(),
+      matchup: zod.string().nullish(),
+      selection: zod.string().nullish(),
+      ticker: zod.string().nullish(),
+      disposition: zod
+        .string()
+        .nullish()
+        .describe(
+          "placed | skipped_unresolved | skipped_gate | errored | pending",
+        ),
+      scraped_at: zod.string().nullish(),
+    }),
+  ),
+  error: zod.string().nullish(),
+});
+
+/**
  * @summary Pending candidates ranked by EV edge% (cap 25 by default). Halted-vertical rows are returned with `vertical_halted=true` so the tile can grey them rather than hide them. Snoozed candidates (active `prediction_snoozes` row) are excluded.
  */
 export const getDashboardTopEdgesQueryLimitDefault = 25;

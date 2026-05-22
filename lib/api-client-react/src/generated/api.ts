@@ -45,11 +45,18 @@ import type {
   CryptoOhlcvRetentionStatus,
   DashboardOverview,
   DebateEntrantMarkets,
+  EdgeTerminalInputModeRequest,
+  EdgeTerminalInputModeResponse,
+  EdgeTerminalInputModeSetResponse,
+  EdgeTerminalPnlResponse,
+  EdgeTerminalSignalsResponse,
+  EdgeTerminalStatusResponse,
   EmergencyStopRequest,
   EmergencyStopResult,
   FullHealth,
   GetCalibratorAbParams,
   GetDashboardBookmakerMetricsParams,
+  GetDashboardEdgeTerminalSignalsParams,
   GetDashboardOverviewParams,
   GetDashboardTopEdgesParams,
   GetPublicTailRiskExposureParams,
@@ -794,6 +801,443 @@ export function useGetTradeDetail<
   },
 ): UseQueryResult<TData, TError> & { queryKey: QueryKey } {
   const queryOptions = getGetTradeDetailQueryOptions(tradeRef, options);
+
+  const query = useQuery(queryOptions) as UseQueryResult<TData, TError> & {
+    queryKey: QueryKey;
+  };
+
+  return { ...query, queryKey: queryOptions.queryKey };
+}
+
+/**
+ * @summary Return the persisted application input mode (`pipeline` = LLM-driven orchestrator; `edge_terminal` = Edge Terminal scraper bypass). Default on boot is `edge_terminal`.
+ */
+export const getGetEdgeTerminalInputModeUrl = () => {
+  return `/api/edge-terminal/input-mode`;
+};
+
+export const getEdgeTerminalInputMode = async (
+  options?: RequestInit,
+): Promise<EdgeTerminalInputModeResponse> => {
+  return customFetch<EdgeTerminalInputModeResponse>(
+    getGetEdgeTerminalInputModeUrl(),
+    {
+      ...options,
+      method: "GET",
+    },
+  );
+};
+
+export const getGetEdgeTerminalInputModeQueryKey = () => {
+  return [`/api/edge-terminal/input-mode`] as const;
+};
+
+export const getGetEdgeTerminalInputModeQueryOptions = <
+  TData = Awaited<ReturnType<typeof getEdgeTerminalInputMode>>,
+  TError = ErrorType<unknown>,
+>(options?: {
+  query?: UseQueryOptions<
+    Awaited<ReturnType<typeof getEdgeTerminalInputMode>>,
+    TError,
+    TData
+  >;
+  request?: SecondParameter<typeof customFetch>;
+}) => {
+  const { query: queryOptions, request: requestOptions } = options ?? {};
+
+  const queryKey =
+    queryOptions?.queryKey ?? getGetEdgeTerminalInputModeQueryKey();
+
+  const queryFn: QueryFunction<
+    Awaited<ReturnType<typeof getEdgeTerminalInputMode>>
+  > = ({ signal }) => getEdgeTerminalInputMode({ signal, ...requestOptions });
+
+  return { queryKey, queryFn, ...queryOptions } as UseQueryOptions<
+    Awaited<ReturnType<typeof getEdgeTerminalInputMode>>,
+    TError,
+    TData
+  > & { queryKey: QueryKey };
+};
+
+export type GetEdgeTerminalInputModeQueryResult = NonNullable<
+  Awaited<ReturnType<typeof getEdgeTerminalInputMode>>
+>;
+export type GetEdgeTerminalInputModeQueryError = ErrorType<unknown>;
+
+/**
+ * @summary Return the persisted application input mode (`pipeline` = LLM-driven orchestrator; `edge_terminal` = Edge Terminal scraper bypass). Default on boot is `edge_terminal`.
+ */
+
+export function useGetEdgeTerminalInputMode<
+  TData = Awaited<ReturnType<typeof getEdgeTerminalInputMode>>,
+  TError = ErrorType<unknown>,
+>(options?: {
+  query?: UseQueryOptions<
+    Awaited<ReturnType<typeof getEdgeTerminalInputMode>>,
+    TError,
+    TData
+  >;
+  request?: SecondParameter<typeof customFetch>;
+}): UseQueryResult<TData, TError> & { queryKey: QueryKey } {
+  const queryOptions = getGetEdgeTerminalInputModeQueryOptions(options);
+
+  const query = useQuery(queryOptions) as UseQueryResult<TData, TError> & {
+    queryKey: QueryKey;
+  };
+
+  return { ...query, queryKey: queryOptions.queryKey };
+}
+
+/**
+ * @summary Flip `app.input_mode`. Elite-tier only (same gate as the live- execute toggle, since this controls trade execution source). Starts/stops the Edge Terminal poller idempotently.
+ */
+export const getSetEdgeTerminalInputModeUrl = () => {
+  return `/api/edge-terminal/input-mode`;
+};
+
+export const setEdgeTerminalInputMode = async (
+  edgeTerminalInputModeRequest: EdgeTerminalInputModeRequest,
+  options?: RequestInit,
+): Promise<EdgeTerminalInputModeSetResponse> => {
+  return customFetch<EdgeTerminalInputModeSetResponse>(
+    getSetEdgeTerminalInputModeUrl(),
+    {
+      ...options,
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...options?.headers },
+      body: JSON.stringify(edgeTerminalInputModeRequest),
+    },
+  );
+};
+
+export const getSetEdgeTerminalInputModeMutationOptions = <
+  TError = ErrorType<unknown>,
+  TContext = unknown,
+>(options?: {
+  mutation?: UseMutationOptions<
+    Awaited<ReturnType<typeof setEdgeTerminalInputMode>>,
+    TError,
+    { data: BodyType<EdgeTerminalInputModeRequest> },
+    TContext
+  >;
+  request?: SecondParameter<typeof customFetch>;
+}): UseMutationOptions<
+  Awaited<ReturnType<typeof setEdgeTerminalInputMode>>,
+  TError,
+  { data: BodyType<EdgeTerminalInputModeRequest> },
+  TContext
+> => {
+  const mutationKey = ["setEdgeTerminalInputMode"];
+  const { mutation: mutationOptions, request: requestOptions } = options
+    ? options.mutation &&
+      "mutationKey" in options.mutation &&
+      options.mutation.mutationKey
+      ? options
+      : { ...options, mutation: { ...options.mutation, mutationKey } }
+    : { mutation: { mutationKey }, request: undefined };
+
+  const mutationFn: MutationFunction<
+    Awaited<ReturnType<typeof setEdgeTerminalInputMode>>,
+    { data: BodyType<EdgeTerminalInputModeRequest> }
+  > = (props) => {
+    const { data } = props ?? {};
+
+    return setEdgeTerminalInputMode(data, requestOptions);
+  };
+
+  return { mutationFn, ...mutationOptions };
+};
+
+export type SetEdgeTerminalInputModeMutationResult = NonNullable<
+  Awaited<ReturnType<typeof setEdgeTerminalInputMode>>
+>;
+export type SetEdgeTerminalInputModeMutationBody =
+  BodyType<EdgeTerminalInputModeRequest>;
+export type SetEdgeTerminalInputModeMutationError = ErrorType<unknown>;
+
+/**
+ * @summary Flip `app.input_mode`. Elite-tier only (same gate as the live- execute toggle, since this controls trade execution source). Starts/stops the Edge Terminal poller idempotently.
+ */
+export const useSetEdgeTerminalInputMode = <
+  TError = ErrorType<unknown>,
+  TContext = unknown,
+>(options?: {
+  mutation?: UseMutationOptions<
+    Awaited<ReturnType<typeof setEdgeTerminalInputMode>>,
+    TError,
+    { data: BodyType<EdgeTerminalInputModeRequest> },
+    TContext
+  >;
+  request?: SecondParameter<typeof customFetch>;
+}): UseMutationResult<
+  Awaited<ReturnType<typeof setEdgeTerminalInputMode>>,
+  TError,
+  { data: BodyType<EdgeTerminalInputModeRequest> },
+  TContext
+> => {
+  return useMutation(getSetEdgeTerminalInputModeMutationOptions(options));
+};
+
+/**
+ * @summary Edge Terminal poller status — last_poll_at, last_ok_at, age in seconds, stale flag (true when last_ok_at is older than 120s). Used by the dashboard to grey tiles when the scraper is unhealthy.
+ */
+export const getGetEdgeTerminalStatusUrl = () => {
+  return `/api/edge-terminal/status`;
+};
+
+export const getEdgeTerminalStatus = async (
+  options?: RequestInit,
+): Promise<EdgeTerminalStatusResponse> => {
+  return customFetch<EdgeTerminalStatusResponse>(
+    getGetEdgeTerminalStatusUrl(),
+    {
+      ...options,
+      method: "GET",
+    },
+  );
+};
+
+export const getGetEdgeTerminalStatusQueryKey = () => {
+  return [`/api/edge-terminal/status`] as const;
+};
+
+export const getGetEdgeTerminalStatusQueryOptions = <
+  TData = Awaited<ReturnType<typeof getEdgeTerminalStatus>>,
+  TError = ErrorType<unknown>,
+>(options?: {
+  query?: UseQueryOptions<
+    Awaited<ReturnType<typeof getEdgeTerminalStatus>>,
+    TError,
+    TData
+  >;
+  request?: SecondParameter<typeof customFetch>;
+}) => {
+  const { query: queryOptions, request: requestOptions } = options ?? {};
+
+  const queryKey = queryOptions?.queryKey ?? getGetEdgeTerminalStatusQueryKey();
+
+  const queryFn: QueryFunction<
+    Awaited<ReturnType<typeof getEdgeTerminalStatus>>
+  > = ({ signal }) => getEdgeTerminalStatus({ signal, ...requestOptions });
+
+  return { queryKey, queryFn, ...queryOptions } as UseQueryOptions<
+    Awaited<ReturnType<typeof getEdgeTerminalStatus>>,
+    TError,
+    TData
+  > & { queryKey: QueryKey };
+};
+
+export type GetEdgeTerminalStatusQueryResult = NonNullable<
+  Awaited<ReturnType<typeof getEdgeTerminalStatus>>
+>;
+export type GetEdgeTerminalStatusQueryError = ErrorType<unknown>;
+
+/**
+ * @summary Edge Terminal poller status — last_poll_at, last_ok_at, age in seconds, stale flag (true when last_ok_at is older than 120s). Used by the dashboard to grey tiles when the scraper is unhealthy.
+ */
+
+export function useGetEdgeTerminalStatus<
+  TData = Awaited<ReturnType<typeof getEdgeTerminalStatus>>,
+  TError = ErrorType<unknown>,
+>(options?: {
+  query?: UseQueryOptions<
+    Awaited<ReturnType<typeof getEdgeTerminalStatus>>,
+    TError,
+    TData
+  >;
+  request?: SecondParameter<typeof customFetch>;
+}): UseQueryResult<TData, TError> & { queryKey: QueryKey } {
+  const queryOptions = getGetEdgeTerminalStatusQueryOptions(options);
+
+  const query = useQuery(queryOptions) as UseQueryResult<TData, TError> & {
+    queryKey: QueryKey;
+  };
+
+  return { ...query, queryKey: queryOptions.queryKey };
+}
+
+/**
+ * @summary Edge Terminal P&L card — cumulative P&L on trades placed by the scraper executor since 2026-05-21 (`placed_by = 'edge_terminal' AND executed_at >= '2026-05-21'`).
+ */
+export const getGetDashboardEdgeTerminalPnlUrl = () => {
+  return `/api/dashboard/edge-terminal-pnl`;
+};
+
+export const getDashboardEdgeTerminalPnl = async (
+  options?: RequestInit,
+): Promise<EdgeTerminalPnlResponse> => {
+  return customFetch<EdgeTerminalPnlResponse>(
+    getGetDashboardEdgeTerminalPnlUrl(),
+    {
+      ...options,
+      method: "GET",
+    },
+  );
+};
+
+export const getGetDashboardEdgeTerminalPnlQueryKey = () => {
+  return [`/api/dashboard/edge-terminal-pnl`] as const;
+};
+
+export const getGetDashboardEdgeTerminalPnlQueryOptions = <
+  TData = Awaited<ReturnType<typeof getDashboardEdgeTerminalPnl>>,
+  TError = ErrorType<unknown>,
+>(options?: {
+  query?: UseQueryOptions<
+    Awaited<ReturnType<typeof getDashboardEdgeTerminalPnl>>,
+    TError,
+    TData
+  >;
+  request?: SecondParameter<typeof customFetch>;
+}) => {
+  const { query: queryOptions, request: requestOptions } = options ?? {};
+
+  const queryKey =
+    queryOptions?.queryKey ?? getGetDashboardEdgeTerminalPnlQueryKey();
+
+  const queryFn: QueryFunction<
+    Awaited<ReturnType<typeof getDashboardEdgeTerminalPnl>>
+  > = ({ signal }) =>
+    getDashboardEdgeTerminalPnl({ signal, ...requestOptions });
+
+  return { queryKey, queryFn, ...queryOptions } as UseQueryOptions<
+    Awaited<ReturnType<typeof getDashboardEdgeTerminalPnl>>,
+    TError,
+    TData
+  > & { queryKey: QueryKey };
+};
+
+export type GetDashboardEdgeTerminalPnlQueryResult = NonNullable<
+  Awaited<ReturnType<typeof getDashboardEdgeTerminalPnl>>
+>;
+export type GetDashboardEdgeTerminalPnlQueryError = ErrorType<unknown>;
+
+/**
+ * @summary Edge Terminal P&L card — cumulative P&L on trades placed by the scraper executor since 2026-05-21 (`placed_by = 'edge_terminal' AND executed_at >= '2026-05-21'`).
+ */
+
+export function useGetDashboardEdgeTerminalPnl<
+  TData = Awaited<ReturnType<typeof getDashboardEdgeTerminalPnl>>,
+  TError = ErrorType<unknown>,
+>(options?: {
+  query?: UseQueryOptions<
+    Awaited<ReturnType<typeof getDashboardEdgeTerminalPnl>>,
+    TError,
+    TData
+  >;
+  request?: SecondParameter<typeof customFetch>;
+}): UseQueryResult<TData, TError> & { queryKey: QueryKey } {
+  const queryOptions = getGetDashboardEdgeTerminalPnlQueryOptions(options);
+
+  const query = useQuery(queryOptions) as UseQueryResult<TData, TError> & {
+    queryKey: QueryKey;
+  };
+
+  return { ...query, queryKey: queryOptions.queryKey };
+}
+
+/**
+ * @summary Recent Edge Terminal signals with their executor disposition (placed / skipped_unresolved / skipped_gate / errored).
+ */
+export const getGetDashboardEdgeTerminalSignalsUrl = (
+  params?: GetDashboardEdgeTerminalSignalsParams,
+) => {
+  const normalizedParams = new URLSearchParams();
+
+  Object.entries(params || {}).forEach(([key, value]) => {
+    if (value !== undefined) {
+      normalizedParams.append(key, value === null ? "null" : value.toString());
+    }
+  });
+
+  const stringifiedParams = normalizedParams.toString();
+
+  return stringifiedParams.length > 0
+    ? `/api/dashboard/edge-terminal-signals?${stringifiedParams}`
+    : `/api/dashboard/edge-terminal-signals`;
+};
+
+export const getDashboardEdgeTerminalSignals = async (
+  params?: GetDashboardEdgeTerminalSignalsParams,
+  options?: RequestInit,
+): Promise<EdgeTerminalSignalsResponse> => {
+  return customFetch<EdgeTerminalSignalsResponse>(
+    getGetDashboardEdgeTerminalSignalsUrl(params),
+    {
+      ...options,
+      method: "GET",
+    },
+  );
+};
+
+export const getGetDashboardEdgeTerminalSignalsQueryKey = (
+  params?: GetDashboardEdgeTerminalSignalsParams,
+) => {
+  return [
+    `/api/dashboard/edge-terminal-signals`,
+    ...(params ? [params] : []),
+  ] as const;
+};
+
+export const getGetDashboardEdgeTerminalSignalsQueryOptions = <
+  TData = Awaited<ReturnType<typeof getDashboardEdgeTerminalSignals>>,
+  TError = ErrorType<unknown>,
+>(
+  params?: GetDashboardEdgeTerminalSignalsParams,
+  options?: {
+    query?: UseQueryOptions<
+      Awaited<ReturnType<typeof getDashboardEdgeTerminalSignals>>,
+      TError,
+      TData
+    >;
+    request?: SecondParameter<typeof customFetch>;
+  },
+) => {
+  const { query: queryOptions, request: requestOptions } = options ?? {};
+
+  const queryKey =
+    queryOptions?.queryKey ??
+    getGetDashboardEdgeTerminalSignalsQueryKey(params);
+
+  const queryFn: QueryFunction<
+    Awaited<ReturnType<typeof getDashboardEdgeTerminalSignals>>
+  > = ({ signal }) =>
+    getDashboardEdgeTerminalSignals(params, { signal, ...requestOptions });
+
+  return { queryKey, queryFn, ...queryOptions } as UseQueryOptions<
+    Awaited<ReturnType<typeof getDashboardEdgeTerminalSignals>>,
+    TError,
+    TData
+  > & { queryKey: QueryKey };
+};
+
+export type GetDashboardEdgeTerminalSignalsQueryResult = NonNullable<
+  Awaited<ReturnType<typeof getDashboardEdgeTerminalSignals>>
+>;
+export type GetDashboardEdgeTerminalSignalsQueryError = ErrorType<unknown>;
+
+/**
+ * @summary Recent Edge Terminal signals with their executor disposition (placed / skipped_unresolved / skipped_gate / errored).
+ */
+
+export function useGetDashboardEdgeTerminalSignals<
+  TData = Awaited<ReturnType<typeof getDashboardEdgeTerminalSignals>>,
+  TError = ErrorType<unknown>,
+>(
+  params?: GetDashboardEdgeTerminalSignalsParams,
+  options?: {
+    query?: UseQueryOptions<
+      Awaited<ReturnType<typeof getDashboardEdgeTerminalSignals>>,
+      TError,
+      TData
+    >;
+    request?: SecondParameter<typeof customFetch>;
+  },
+): UseQueryResult<TData, TError> & { queryKey: QueryKey } {
+  const queryOptions = getGetDashboardEdgeTerminalSignalsQueryOptions(
+    params,
+    options,
+  );
 
   const query = useQuery(queryOptions) as UseQueryResult<TData, TError> & {
     queryKey: QueryKey;

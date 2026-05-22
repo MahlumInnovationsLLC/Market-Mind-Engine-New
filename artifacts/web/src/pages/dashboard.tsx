@@ -1,8 +1,11 @@
+import { useState } from "react";
 import {
   getGetMyAccessQueryKey,
   useGetMyAccess,
 } from "@workspace/api-client-react";
 import { useFocusFromQuery } from "@/hooks/use-focus-from-query";
+import EdgeTerminalPnlTile from "@/components/dashboard/edge-terminal-pnl-tile";
+import InputModeToggle, { useInputMode } from "@/components/dashboard/input-mode-toggle";
 import ActivePositions from "@/components/dashboard/active-positions";
 import BankrollPanel from "@/components/dashboard/bankroll-panel";
 import CryptoBacktestRetentionPanel from "@/components/dashboard/crypto-backtest-retention-panel";
@@ -56,6 +59,9 @@ export default function Dashboard() {
   const isAdmin = !!access?.is_admin;
 
   useFocusFromQuery();
+  const { isEdgeTerminal } = useInputMode();
+  const [showPipelineData, setShowPipelineData] = useState(false);
+  const pipelineVisible = !isEdgeTerminal || showPipelineData;
 
   return (
     <PeriodProvider>
@@ -76,6 +82,10 @@ export default function Dashboard() {
           <div className="flex flex-wrap items-center gap-3">
             <ActiveModelBadge />
             <OverFilledOrdersBadge />
+            <InputModeToggle
+              showPipelineData={showPipelineData}
+              onTogglePipelineData={setShowPipelineData}
+            />
             <PlacedByToggle />
             <PeriodStrip />
           </div>
@@ -83,10 +93,19 @@ export default function Dashboard() {
 
         <KpiSummaryBar />
 
-        <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
-          <TopEdgesTile />
-          <BookmakerMetricsTile />
-        </div>
+        {isEdgeTerminal ? (
+          <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
+            <EdgeTerminalPnlTile />
+            {pipelineVisible ? <BookmakerMetricsTile /> : null}
+          </div>
+        ) : null}
+
+        {pipelineVisible ? (
+          <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
+            <TopEdgesTile />
+            {!isEdgeTerminal ? <BookmakerMetricsTile /> : null}
+          </div>
+        ) : null}
 
         <TailRiskExposurePanel />
 

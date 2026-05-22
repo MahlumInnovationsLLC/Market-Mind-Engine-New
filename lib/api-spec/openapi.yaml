@@ -155,6 +155,88 @@ paths:
         "404":
           description: No trade matched
 
+  /edge-terminal/input-mode:
+    get:
+      operationId: getEdgeTerminalInputMode
+      tags: [edge-terminal]
+      summary: >-
+        Return the persisted application input mode (`pipeline` =
+        LLM-driven orchestrator; `edge_terminal` = Edge Terminal
+        scraper bypass). Default on boot is `edge_terminal`.
+      responses:
+        "200":
+          description: Current input mode + the list of valid modes
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/EdgeTerminalInputModeResponse" }
+    post:
+      operationId: setEdgeTerminalInputMode
+      tags: [edge-terminal]
+      summary: >-
+        Flip `app.input_mode`. Elite-tier only (same gate as the live-
+        execute toggle, since this controls trade execution source).
+        Starts/stops the Edge Terminal poller idempotently.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/EdgeTerminalInputModeRequest" }
+      responses:
+        "200":
+          description: Mode persisted
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/EdgeTerminalInputModeSetResponse" }
+
+  /edge-terminal/status:
+    get:
+      operationId: getEdgeTerminalStatus
+      tags: [edge-terminal]
+      summary: >-
+        Edge Terminal poller status — last_poll_at, last_ok_at, age
+        in seconds, stale flag (true when last_ok_at is older than
+        120s). Used by the dashboard to grey tiles when the scraper
+        is unhealthy.
+      responses:
+        "200":
+          description: Poller status snapshot
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/EdgeTerminalStatusResponse" }
+
+  /dashboard/edge-terminal-pnl:
+    get:
+      operationId: getDashboardEdgeTerminalPnl
+      tags: [dashboard]
+      summary: >-
+        Edge Terminal P&L card — cumulative P&L on trades placed by
+        the scraper executor since 2026-05-21 (`placed_by =
+        'edge_terminal' AND executed_at >= '2026-05-21'`).
+      responses:
+        "200":
+          description: Edge Terminal P&L card payload
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/EdgeTerminalPnlResponse" }
+
+  /dashboard/edge-terminal-signals:
+    get:
+      operationId: getDashboardEdgeTerminalSignals
+      tags: [dashboard]
+      summary: >-
+        Recent Edge Terminal signals with their executor disposition
+        (placed / skipped_unresolved / skipped_gate / errored).
+      parameters:
+        - in: query
+          name: limit
+          schema: { type: integer, minimum: 1, maximum: 200, default: 25 }
+      responses:
+        "200":
+          description: Recent scraped signals
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/EdgeTerminalSignalsResponse" }
+
   /dashboard/top-edges:
     get:
       operationId: getDashboardTopEdges
@@ -1298,6 +1380,74 @@ components:
         picks_today: { $ref: "#/components/schemas/BookmakerPicksToday" }
         error: { type: string, nullable: true }
       required: [window, generated_at, unit_dollars, n_settled, picks_today]
+
+    EdgeTerminalInputModeResponse:
+      type: object
+      properties:
+        mode: { type: string, enum: [pipeline, edge_terminal] }
+        valid_modes:
+          type: array
+          items: { type: string }
+      required: [mode, valid_modes]
+
+    EdgeTerminalInputModeRequest:
+      type: object
+      properties:
+        mode: { type: string, enum: [pipeline, edge_terminal] }
+      required: [mode]
+
+    EdgeTerminalInputModeSetResponse:
+      type: object
+      properties:
+        mode: { type: string, enum: [pipeline, edge_terminal] }
+      required: [mode]
+
+    EdgeTerminalStatusResponse:
+      type: object
+      properties:
+        last_poll_at: { type: string, nullable: true }
+        last_ok_at: { type: string, nullable: true }
+        last_error: { type: string, nullable: true }
+        age_seconds: { type: number, nullable: true, description: "Seconds since last_ok_at; null when never succeeded." }
+        stale: { type: boolean, description: "True when age_seconds > 120 (or no successful poll yet)." }
+        running: { type: boolean }
+      required: [stale, running]
+
+    EdgeTerminalPnlResponse:
+      type: object
+      properties:
+        generated_at: { type: string }
+        since_date: { type: string, description: "ISO date floor (2026-05-21)." }
+        n_trades: { type: integer }
+        n_settled: { type: integer }
+        cumulative_pnl: { type: number, nullable: true }
+        win_rate: { type: number, nullable: true }
+        error: { type: string, nullable: true }
+      required: [generated_at, since_date, n_trades, n_settled]
+
+    EdgeTerminalSignalItem:
+      type: object
+      properties:
+        id: { type: integer }
+        signal_date: { type: string }
+        vertical: { type: string, nullable: true }
+        matchup: { type: string, nullable: true }
+        selection: { type: string, nullable: true }
+        ticker: { type: string, nullable: true }
+        disposition: { type: string, nullable: true, description: "placed | skipped_unresolved | skipped_gate | errored | pending" }
+        scraped_at: { type: string, nullable: true }
+      required: [id, signal_date]
+
+    EdgeTerminalSignalsResponse:
+      type: object
+      properties:
+        limit: { type: integer }
+        generated_at: { type: string }
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/EdgeTerminalSignalItem" }
+        error: { type: string, nullable: true }
+      required: [limit, generated_at, items]
 
     SnoozeCandidateRequest:
       type: object

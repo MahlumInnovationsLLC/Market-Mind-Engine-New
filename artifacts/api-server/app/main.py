@@ -28,6 +28,7 @@ from . import (
     calibrators,
     dashboard,
     db,
+    edge_terminal,
     free_tier,
     github_mirror,
     health,
@@ -525,6 +526,17 @@ async def lifespan(_: FastAPI):
             await orchestrator_scheduler.start()
         except Exception as e:
             log.warning("orchestrator scheduler start failed: %s", e)
+
+        # Edge Terminal scraper-input mode (task #844).  Defaults the
+        # app.input_mode setting to edge_terminal on a fresh install
+        # (migration 0055 seeds the row; ensure_seeded is the belt-
+        # and-braces backup), then spawns the 60s poller iff the
+        # current mode is edge_terminal.  The poller is idempotent
+        # and never raises into the lifespan.
+        try:
+            await edge_terminal.start()
+        except Exception as e:
+            log.warning("edge_terminal poller start failed: %s", e)
 
         # Settlement loop: closes finalized markets, writes post-mortems,
         # updates persona Brier, accumulates daily PnL, raises drift alerts.
@@ -6076,6 +6088,70 @@ async def dashboard_top_edges(
     candidates (active ``prediction_snoozes`` row) are excluded.
     """
     return await dashboard.get_top_edges_today(limit=limit)
+
+
+class _InputModeRequest(BaseModel):
+    mode: str
+
+
+@app.get("/api/edge-terminal/input-mode")
+async def edge_terminal_input_mode_get(
+    _: object = Depends(require_approved_user),
+) -> dict[str, object]:
+    """Return the persisted ``app.input_mode`` (pipeline | edge_terminal)."""
+    mode = await edge_terminal.get_input_mode()
+    return {"mode": mode, "valid_modes": list(edge_terminal.VALID_INPUT_MODES)}
+
+
+@app.post("/api/edge-terminal/input-mode")
+async def edge_terminal_input_mode_set(
+    body: _InputModeRequest,
+    sub: billing.UserSubscription = Depends(billing.require_tier(billing.TIER_ELITE)),
+) -> dict[str, object]:
+    """Flip ``app.input_mode``.  Elite-only — same tier the live-execute
+    toggle requires, since this controls trade execution source."""
+    try:
+        new_mode = await edge_terminal.set_input_mode(body.mode)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    # Start / stop the poller to match.  Both are idempotent.
+    try:
+        if new_mode == edge_terminal.INPUT_MODE_EDGE_TERMINAL:
+            await edge_terminal.start()
+        else:
+            await edge_terminal.stop()
+    except Exception as e:
+        log.warning("edge_terminal poller transition failed: %s", e)
+    log.info(
+        "input_mode flipped → %s by user=%s tier=%s",
+        new_mode, sub.user_id, sub.tier,
+    )
+    return {"mode": new_mode}
+
+
+@app.get("/api/edge-terminal/status")
+async def edge_terminal_status_route(
+    _: object = Depends(require_approved_user),
+) -> dict[str, object]:
+    """Poller status: last_poll_at / last_ok_at / age / stale flag."""
+    return await edge_terminal.get_status()
+
+
+@app.get("/api/dashboard/edge-terminal-pnl")
+async def dashboard_edge_terminal_pnl(
+    _: object = Depends(require_approved_user),
+) -> dict[str, object]:
+    """Edge Terminal cumulative P&L card (executed_at >= 2026-05-21)."""
+    return await dashboard.get_edge_terminal_pnl()
+
+
+@app.get("/api/dashboard/edge-terminal-signals")
+async def dashboard_edge_terminal_signals(
+    limit: int = Query(default=25, ge=1, le=200),
+    _: object = Depends(require_approved_user),
+) -> dict[str, object]:
+    """Recent scraped signals + their executor disposition."""
+    return await dashboard.get_edge_terminal_recent_signals(limit=limit)
 
 
 @app.get("/api/dashboard/bookmaker-metrics")

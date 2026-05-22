@@ -7043,3 +7043,149 @@ async def snooze_prediction(
     if row is not None:
         out["snoozed_until"] = row["snoozed_until"]
     return out
+
+
+# ---------------------------------------------------------------------------
+# Edge Terminal tile (task #844)
+# ---------------------------------------------------------------------------
+
+# All Edge Terminal P&L numbers aggregate trades whose ``executed_at >=``
+# this floor.  Pre-Edge-Terminal trades are excluded so the tile reflects
+# the new input source only.
+EDGE_TERMINAL_PNL_FLOOR_ISO = "2026-05-21"
+
+
+async def get_edge_terminal_pnl() -> dict[str, Any]:
+    """Edge Terminal P&L card: cumulative P&L, settled hit rate, open
+    exposure, today / 7d windows.  Filter: ``placed_by='edge_terminal'``
+    AND ``executed_at >= 2026-05-21``.
+    """
+    out: dict[str, Any] = {
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        # Canonical keys exposed by the OpenAPI contract (UI/clients):
+        "since_date": EDGE_TERMINAL_PNL_FLOOR_ISO,
+        "n_trades": 0,
+        "n_settled": 0,
+        "cumulative_pnl": 0.0,
+        "win_rate": None,
+        # Back-compat / extra detail keys kept for any internal consumer:
+        "floor_date": EDGE_TERMINAL_PNL_FLOOR_ISO,
+        "trades_total": 0,
+        "trades_today": 0,
+        "trades_7d": 0,
+        "realised_pnl": 0.0,
+        "realised_pnl_today": 0.0,
+        "realised_pnl_7d": 0.0,
+        "open_count": 0,
+        "open_notional": 0.0,
+        "hit_rate": None,
+        "by_vertical": [],
+        "error": None,
+    }
+    try:
+        row = await db.fetchrow(
+            """
+            SELECT
+              COUNT(*)                                    AS trades_total,
+              COUNT(*) FILTER (WHERE executed_at::date = (now() at time zone 'utc')::date) AS trades_today,
+              COUNT(*) FILTER (WHERE executed_at > now() - interval '7 days') AS trades_7d,
+              COALESCE(SUM(pnl), 0)::float                AS realised_pnl,
+              COALESCE(SUM(pnl) FILTER (WHERE executed_at::date = (now() at time zone 'utc')::date), 0)::float AS realised_pnl_today,
+              COALESCE(SUM(pnl) FILTER (WHERE executed_at > now() - interval '7 days'), 0)::float AS realised_pnl_7d,
+              COUNT(*) FILTER (WHERE pnl IS NOT NULL)     AS n_settled,
+              COUNT(*) FILTER (WHERE pnl IS NOT NULL AND pnl > 0) AS n_wins,
+              COUNT(*) FILTER (WHERE pnl IS NULL)         AS open_count,
+              COALESCE(SUM(quantity * price) FILTER (WHERE pnl IS NULL), 0)::float AS open_notional
+            FROM trades
+            WHERE placed_by = 'edge_terminal'
+              AND executed_at >= $1::date
+            """,
+            EDGE_TERMINAL_PNL_FLOOR_ISO,
+        )
+        if row is not None:
+            d = dict(row)
+            trades_total = int(d.get("trades_total") or 0)
+            realised_pnl = float(d.get("realised_pnl") or 0.0)
+            n_settled = int(d.get("n_settled") or 0)
+            n_wins = int(d.get("n_wins") or 0)
+            hit = (n_wins / n_settled) if n_settled > 0 else None
+            out.update({
+                # Canonical (OpenAPI) keys.
+                "n_trades": trades_total,
+                "n_settled": n_settled,
+                "cumulative_pnl": realised_pnl,
+                "win_rate": hit,
+                # Back-compat keys.
+                "trades_total": trades_total,
+                "trades_today": int(d.get("trades_today") or 0),
+                "trades_7d": int(d.get("trades_7d") or 0),
+                "realised_pnl": realised_pnl,
+                "realised_pnl_today": float(d.get("realised_pnl_today") or 0.0),
+                "realised_pnl_7d": float(d.get("realised_pnl_7d") or 0.0),
+                "open_count": int(d.get("open_count") or 0),
+                "open_notional": float(d.get("open_notional") or 0.0),
+                "hit_rate": hit,
+            })
+        bv = await db.fetch(
+            """
+            SELECT vertical,
+                   COUNT(*)::int                AS n,
+                   COALESCE(SUM(pnl), 0)::float AS pnl
+            FROM trades
+            WHERE placed_by = 'edge_terminal'
+              AND executed_at >= $1::date
+            GROUP BY vertical
+            ORDER BY n DESC
+            LIMIT 20
+            """,
+            EDGE_TERMINAL_PNL_FLOOR_ISO,
+        )
+        out["by_vertical"] = [dict(r) for r in bv]
+    except Exception as e:
+        log.warning("edge_terminal_pnl query failed: %s", e)
+        out["error"] = f"{type(e).__name__}: {e}"[:240]
+    return out
+
+
+async def get_edge_terminal_recent_signals(limit: int = 25) -> dict[str, Any]:
+    """Recent scraped signals (any status) for operator inspection."""
+    limit = max(1, min(200, int(limit)))
+    out: dict[str, Any] = {
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "limit": limit,
+        "items": [],
+        "error": None,
+    }
+    try:
+        rows = await db.fetch(
+            """
+            SELECT id, seen_at, vertical, matchup, selection,
+                   signal_date, edge_pct, model_prob, market_price,
+                   kalshi_ticker, market_title,
+                   status, status_reason, trades_id, placed_at
+            FROM edge_terminal_signals
+            ORDER BY id DESC
+            LIMIT $1
+            """,
+            limit,
+        )
+        items = []
+        for r in rows:
+            d = dict(r)
+            for k in ("seen_at", "placed_at"):
+                v = d.get(k)
+                if hasattr(v, "isoformat"):
+                    d[k] = v.isoformat()
+            sd = d.get("signal_date")
+            if hasattr(sd, "isoformat"):
+                d["signal_date"] = sd.isoformat()
+            # Surface OpenAPI-canonical aliases alongside back-compat keys.
+            d["ticker"] = d.get("kalshi_ticker")
+            d["disposition"] = d.get("status")
+            d["scraped_at"] = d.get("seen_at")
+            items.append(d)
+        out["items"] = items
+    except Exception as e:
+        log.warning("edge_terminal_recent_signals query failed: %s", e)
+        out["error"] = f"{type(e).__name__}: {e}"[:240]
+    return out

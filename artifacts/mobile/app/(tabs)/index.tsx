@@ -23,6 +23,11 @@ import {
   TopEdgesTile as TopEdgesTileMobile,
   BookmakerMetricsTile as BookmakerMetricsTileMobile,
 } from "@/components/TopEdgesAndBookmakerTiles";
+import {
+  EdgeTerminalPnlTile,
+  InputModeToggle,
+  useInputMode,
+} from "@/components/EdgeTerminalTiles";
 import { useColors } from "@/hooks/useColors";
 import { apiFetch } from "@/lib/api";
 import { usePlacedBy } from "@/lib/placed-by-filter";
@@ -102,6 +107,13 @@ export default function DashboardScreen() {
   // selection survives navigation between the dashboard / positions /
   // verticals tabs.  Threaded into every trade-derived query below.
   const { placedBy } = usePlacedBy();
+  // Task #844 — Edge Terminal input-mode toggle + "Show pipeline data"
+  // affordance. When in edge_terminal mode (the default on boot), the
+  // pipeline-derived tiles (Top Edges, Bookmaker Metrics) are hidden
+  // until the operator opts back in.
+  const { isEdgeTerminal } = useInputMode();
+  const [showPipelineData, setShowPipelineData] = useState(false);
+  const pipelineVisible = !isEdgeTerminal || showPipelineData;
 
   const overview = useQuery({
     queryKey: ["dashboard", "overview", placedBy],
@@ -340,8 +352,13 @@ export default function DashboardScreen() {
         />
       </View>
 
-      <TopEdgesTileMobile />
-      <BookmakerMetricsTileMobile />
+      <InputModeToggle
+        showPipelineData={showPipelineData}
+        onTogglePipelineData={setShowPipelineData}
+      />
+      {isEdgeTerminal ? <EdgeTerminalPnlTile /> : null}
+      {pipelineVisible ? <TopEdgesTileMobile /> : null}
+      {pipelineVisible ? <BookmakerMetricsTileMobile /> : null}
 
       <TailRiskExposure days={period} period={period} />
 

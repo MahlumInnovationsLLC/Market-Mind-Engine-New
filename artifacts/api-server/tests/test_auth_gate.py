@@ -205,6 +205,11 @@ PROTECTED_ROUTES: tuple[str, ...] = (
     # Task #832 — Top-Edges + bookmaker-grammar tiles (web + mobile).
     "/api/dashboard/top-edges",
     "/api/dashboard/bookmaker-metrics",
+    # Task #844 — Edge Terminal scraper input mode.
+    "/api/edge-terminal/input-mode",
+    "/api/edge-terminal/status",
+    "/api/dashboard/edge-terminal-pnl",
+    "/api/dashboard/edge-terminal-signals",
 )
 
 # Mutating endpoints — auth-protected, accept POST / PUT / DELETE.  These
@@ -316,6 +321,8 @@ PROTECTED_MUTATING_ENDPOINTS: tuple[tuple[str, str], ...] = (
     # Task #832 — Top-Edges tile operator actions (snooze / fire).
     ("POST", "/api/dashboard/candidates/{prediction_id}/snooze"),
     ("POST", "/api/dashboard/candidates/{prediction_id}/fire"),
+    # Task #844 — Edge Terminal input-mode toggle (Elite-only POST).
+    ("POST", "/api/edge-terminal/input-mode"),
 )
 
 # Path-only view of the mutating-endpoint inventory, used by the

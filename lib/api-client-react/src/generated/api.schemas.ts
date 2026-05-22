@@ -201,6 +201,84 @@ export interface BookmakerMetricsResponse {
   error?: string | null;
 }
 
+export type EdgeTerminalInputModeResponseMode =
+  (typeof EdgeTerminalInputModeResponseMode)[keyof typeof EdgeTerminalInputModeResponseMode];
+
+export const EdgeTerminalInputModeResponseMode = {
+  pipeline: "pipeline",
+  edge_terminal: "edge_terminal",
+} as const;
+
+export interface EdgeTerminalInputModeResponse {
+  mode: EdgeTerminalInputModeResponseMode;
+  valid_modes: string[];
+}
+
+export type EdgeTerminalInputModeRequestMode =
+  (typeof EdgeTerminalInputModeRequestMode)[keyof typeof EdgeTerminalInputModeRequestMode];
+
+export const EdgeTerminalInputModeRequestMode = {
+  pipeline: "pipeline",
+  edge_terminal: "edge_terminal",
+} as const;
+
+export interface EdgeTerminalInputModeRequest {
+  mode: EdgeTerminalInputModeRequestMode;
+}
+
+export type EdgeTerminalInputModeSetResponseMode =
+  (typeof EdgeTerminalInputModeSetResponseMode)[keyof typeof EdgeTerminalInputModeSetResponseMode];
+
+export const EdgeTerminalInputModeSetResponseMode = {
+  pipeline: "pipeline",
+  edge_terminal: "edge_terminal",
+} as const;
+
+export interface EdgeTerminalInputModeSetResponse {
+  mode: EdgeTerminalInputModeSetResponseMode;
+}
+
+export interface EdgeTerminalStatusResponse {
+  last_poll_at?: string | null;
+  last_ok_at?: string | null;
+  last_error?: string | null;
+  /** Seconds since last_ok_at; null when never succeeded. */
+  age_seconds?: number | null;
+  /** True when age_seconds > 120 (or no successful poll yet). */
+  stale: boolean;
+  running: boolean;
+}
+
+export interface EdgeTerminalPnlResponse {
+  generated_at: string;
+  /** ISO date floor (2026-05-21). */
+  since_date: string;
+  n_trades: number;
+  n_settled: number;
+  cumulative_pnl?: number | null;
+  win_rate?: number | null;
+  error?: string | null;
+}
+
+export interface EdgeTerminalSignalItem {
+  id: number;
+  signal_date: string;
+  vertical?: string | null;
+  matchup?: string | null;
+  selection?: string | null;
+  ticker?: string | null;
+  /** placed | skipped_unresolved | skipped_gate | errored | pending */
+  disposition?: string | null;
+  scraped_at?: string | null;
+}
+
+export interface EdgeTerminalSignalsResponse {
+  limit: number;
+  generated_at: string;
+  items: EdgeTerminalSignalItem[];
+  error?: string | null;
+}
+
 export interface SnoozeCandidateRequest {
   /**
    * Snooze duration in hours (cap 30 days).
@@ -2006,6 +2084,14 @@ export type GetSwarmPersonasTodayParams = {
    * @pattern ^\d{4}-\d{2}-\d{2}$
    */
   date_utc?: string;
+};
+
+export type GetDashboardEdgeTerminalSignalsParams = {
+  /**
+   * @minimum 1
+   * @maximum 200
+   */
+  limit?: number;
 };
 
 export type GetDashboardTopEdgesParams = {
