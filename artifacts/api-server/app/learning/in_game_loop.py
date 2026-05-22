@@ -85,16 +85,20 @@ _LIVE_STATUSES = frozenset(
 # runtime_setting key ``risk.live_loop_cadence_<sport>``.  Tighter
 # leagues (NBA, NHL, soccer) re-evaluate every 30s; slower leagues
 # (NFL between drives, MLB between innings) settle for 60-90s.
+# Defaults sourced from the task #830 brief and the per-league feed
+# tempo: NBA play-by-play ~10s so a 60s re-eval window is plenty;
+# NHL/NCAAB tick a bit slower → 90s; MLB/NFL have long between-play
+# gaps → 120s; soccer's tight feed re-evaluates at 60s.
 DEFAULT_CADENCE_SECONDS: dict[str, float] = {
-    "nba": 30.0,
-    "nhl": 30.0,
-    "mlb": 60.0,
-    "nfl": 60.0,
-    "ncaab": 30.0,
-    "ncaaf": 60.0,
-    "soccer": 30.0,
+    "nba": 60.0,
+    "nhl": 90.0,
+    "mlb": 120.0,
+    "nfl": 120.0,
+    "ncaab": 90.0,
+    "ncaaf": 120.0,
+    "soccer": 60.0,
 }
-DEFAULT_CADENCE_FALLBACK_SECONDS = 60.0
+DEFAULT_CADENCE_FALLBACK_SECONDS = 90.0
 
 
 # Per-sport batch cap so a runaway sportradar feed cannot make the
@@ -246,6 +250,12 @@ async def _fetch_live_eligible(
                 ON s.game_id = p.game_id
              WHERE upper(p.league) = ANY($1::text[])
                AND p.kalshi_market_id IS NOT NULL
+               -- Settled rows must NEVER get re-tagged as live: they
+               -- pollute the pre-vs-in-game Brier split in the daily
+               -- honesty report and confuse the dashboard tile count.
+               -- The is_live column is meant for OPEN markets whose
+               -- game is currently in progress.
+               AND p.settled_at IS NULL
                AND lower(s.status) = ANY($2::text[])
              ORDER BY s.fetched_at DESC
              LIMIT $3

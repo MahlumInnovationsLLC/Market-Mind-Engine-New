@@ -338,7 +338,10 @@ LIVE_STATE_FRESHNESS_BUDGET_SECONDS: dict[str, float] = {
     "NHL": 60.0,
     "MLB": 90.0,
     "NFL": 120.0,
-    "NCAAB": 60.0,
+    # Per task #830 brief: NCAAB/soccer share the tightest 30s
+    # freshness budget — the feeds tick frequently and a stale row
+    # past that window is a strong signal the feed is wedged.
+    "NCAAB": 30.0,
     "NCAAF": 120.0,
     "EPL": 30.0,
     "LALIGA": 30.0,
