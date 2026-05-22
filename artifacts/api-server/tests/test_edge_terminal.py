@@ -410,6 +410,116 @@ def test_fire_one_honors_no_side(monkeypatch):
     assert ctx.edge is not None and ctx.edge > 0
 
 
+def test_signal_side_roundtrips_db_to_executor(monkeypatch):
+    """Audit fix: side='NO' from the scraper must survive the round
+    trip through the edge_terminal_signals table and reach RiskContext.
+    Before the 0056 migration the column did not exist, so the poller
+    INSERT dropped ``side`` and ``drain_pending`` reloaded the row with
+    no side hint — every fired pick defaulted to YES, which is a
+    wrong-side trade for under/no selections."""
+    import json
+    from app.edge_terminal import executor, poller
+
+    # In-memory "row" that the poller will INSERT and the executor
+    # will SELECT.  Keyed by what column list each query asks for.
+    table: dict[int, dict[str, Any]] = {}
+    next_id = {"n": 1}
+
+    async def _fetchval(q: str, *args):
+        # poller INSERT
+        if "INSERT INTO edge_terminal_signals" in q:
+            row = {
+                "id": next_id["n"],
+                "vertical": args[0],
+                "matchup": args[1],
+                "selection": args[2],
+                "signal_date": args[3],
+                "edge_pct": args[4],
+                "model_prob": args[5],
+                "market_price": args[6],
+                "kalshi_ticker": args[7],
+                "market_title": args[8],
+                "raw": args[9],
+                "side": args[10],
+                "status": "pending",
+            }
+            table[next_id["n"]] = row
+            next_id["n"] += 1
+            return row["id"]
+        return None
+
+    async def _fetch(q: str, *args):
+        # executor.drain_pending SELECT
+        if "FROM edge_terminal_signals" in q and "status = 'pending'" in q:
+            return [
+                {
+                    "id": r["id"],
+                    "vertical": r["vertical"],
+                    "matchup": r["matchup"],
+                    "selection": r["selection"],
+                    "signal_date": r["signal_date"],
+                    "edge_pct": r["edge_pct"],
+                    "model_prob": r["model_prob"],
+                    "market_price": r["market_price"],
+                    "kalshi_ticker": r["kalshi_ticker"],
+                    "market_title": r["market_title"],
+                    "side": r["side"],
+                }
+                for r in table.values()
+                if r["status"] == "pending"
+            ]
+        return []
+
+    async def _execute(q: str, *args):
+        # _mark UPDATE — flip row status so we don't loop.
+        if "UPDATE edge_terminal_signals" in q:
+            sid = args[-1] if isinstance(args[-1], int) else None
+            if sid in table:
+                table[sid]["status"] = "placed"
+
+    monkeypatch.setattr(poller.db, "fetchval", _fetchval)
+    monkeypatch.setattr(executor.db, "fetch", _fetch)
+    monkeypatch.setattr(executor.db, "execute", _execute)
+
+    placed: list[dict[str, Any]] = []
+
+    async def _resolve(sig):
+        return "KX-NBA-OU-1"
+
+    async def _bankroll(trading_mode="paper"):
+        return 1000.0
+
+    async def _place_order(ctx, **kwargs):
+        placed.append({"ctx": ctx, "kwargs": kwargs})
+        return {"trades_id": 999, "status": "placed"}
+
+    monkeypatch.setattr(executor.market_resolver, "resolve", _resolve)
+    monkeypatch.setattr(executor.cycle_module, "_latest_bankroll", _bankroll)
+    monkeypatch.setattr(executor.paper_module, "place_order", _place_order)
+
+    _run(poller._insert_signal({
+        "vertical": "sports",
+        "matchup": "LAL @ BOS",
+        "selection": "Under 220.5",
+        "signal_date": "2026-05-22",
+        "side": "no",  # lower-case from scraper → normalized to "NO"
+        "edge_pct": 10.0,
+        "model_prob": 0.40,
+        "market_price": 0.50,
+        "kalshi_ticker": None,
+        "market_title": None,
+        "raw": {},
+    }))
+    assert table[1]["side"] == "NO", "poller must persist normalized side"
+
+    _run(executor.drain_pending())
+    assert len(placed) == 1, "executor must have fired the pending signal"
+    assert placed[0]["ctx"].side == "NO", (
+        "side='NO' was lost between DB INSERT and RiskContext — this is "
+        "the audit's wrong-side-trade bug"
+    )
+
+
 def test_fire_one_no_ticker_returns_none(monkeypatch):
     from app.edge_terminal import executor
 

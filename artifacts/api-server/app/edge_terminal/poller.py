@@ -177,16 +177,22 @@ async def _insert_signal(sig: dict[str, Any]) -> int | None:
     """Insert a signal row.  Returns the new id, or None on conflict
     (the unique index dropped a duplicate)."""
     raw = sig.get("raw") if isinstance(sig.get("raw"), dict) else {}
+    # Normalize side: scraper may give us YES/NO/yes/no/None.  Anything
+    # not explicitly NO (case-insensitive) is treated as YES so we
+    # preserve historic default behavior for sources that don't expose
+    # an explicit side hint.
+    side_raw = sig.get("side")
+    side = "NO" if isinstance(side_raw, str) and side_raw.strip().upper() == "NO" else "YES"
     new_id = await db.fetchval(
         """
         INSERT INTO edge_terminal_signals (
             vertical, matchup, selection, signal_date,
             edge_pct, model_prob, market_price,
-            kalshi_ticker, market_title, raw, status
+            kalshi_ticker, market_title, raw, status, side
         ) VALUES (
             $1, $2, $3, $4::date,
             $5, $6, $7,
-            $8, $9, $10::jsonb, 'pending'
+            $8, $9, $10::jsonb, 'pending', $11
         )
         ON CONFLICT (vertical, matchup, selection, signal_date) DO NOTHING
         RETURNING id
@@ -201,6 +207,7 @@ async def _insert_signal(sig: dict[str, Any]) -> int | None:
         sig.get("kalshi_ticker"),
         sig.get("market_title"),
         json.dumps(raw),
+        side,
     )
     return int(new_id) if new_id is not None else None
 
