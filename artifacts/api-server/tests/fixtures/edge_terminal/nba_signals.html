@@ -1,0 +1,53 @@
+<!--
+Fixture: a stripped-down NBA-section render of the Edge Terminal
+dashboard with three signal-badged tiles.  Only the markup the
+scraper cares about is preserved (signal badge class +
+data-attribute contract from app/edge_terminal/scraper.py).
+-->
+<html>
+  <body>
+    <section data-section="nba">
+      <h2>NBA — PICKS RANKED BY EDGE · 1 GAMES · 2 RECOMMENDED</h2>
+
+      <div
+        class="pick-tile signal-badge"
+        data-vertical="nba"
+        data-matchup="Oklahoma City Thunder @ San Antonio Spurs"
+        data-selection="Thunder +2"
+        data-side="YES"
+        data-pick-type="spread"
+        data-avg-odds="-103"
+        data-ev="27.9"
+        data-model-prob="0.64"
+        data-kalshi-ticker="KXNBA-2026-OKC-SAS-SPREAD-THU2"
+      >
+        NBA | OKC @ SAS | Thunder +2
+      </div>
+
+      <div
+        class="pick-tile signal-badge"
+        data-vertical="nba"
+        data-matchup="Oklahoma City Thunder @ San Antonio Spurs"
+        data-selection="Under 218"
+        data-side="NO"
+        data-pick-type="total"
+        data-avg-odds="-107"
+        data-ev="18.5"
+        data-model-prob="0.61"
+        data-kalshi-ticker="KXNBA-2026-OKC-SAS-TOTAL-U218"
+      >
+        NBA | OKC @ SAS | Under 218
+      </div>
+
+      <!-- Non-signal row (no signal-badge class) — should NOT be picked up. -->
+      <div
+        class="pick-tile"
+        data-vertical="nba"
+        data-matchup="Oklahoma City Thunder @ San Antonio Spurs"
+        data-selection="Over 218"
+      >
+        NBA | OKC @ SAS | Over 218
+      </div>
+    </section>
+  </body>
+</html>

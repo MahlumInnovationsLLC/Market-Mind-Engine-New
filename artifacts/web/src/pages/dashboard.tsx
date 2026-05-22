@@ -5,6 +5,7 @@ import {
 } from "@workspace/api-client-react";
 import { useFocusFromQuery } from "@/hooks/use-focus-from-query";
 import EdgeTerminalPnlTile from "@/components/dashboard/edge-terminal-pnl-tile";
+import EdgeTerminalRecentSignalsTile from "@/components/dashboard/edge-terminal-recent-signals";
 import InputModeToggle, { useInputMode } from "@/components/dashboard/input-mode-toggle";
 import ActivePositions from "@/components/dashboard/active-positions";
 import BankrollPanel from "@/components/dashboard/bankroll-panel";
@@ -94,10 +95,13 @@ export default function Dashboard() {
         <KpiSummaryBar />
 
         {isEdgeTerminal ? (
-          <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
-            <EdgeTerminalPnlTile />
-            {pipelineVisible ? <BookmakerMetricsTile /> : null}
-          </div>
+          <>
+            <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
+              <EdgeTerminalPnlTile />
+              {pipelineVisible ? <BookmakerMetricsTile /> : null}
+            </div>
+            <EdgeTerminalRecentSignalsTile />
+          </>
         ) : null}
 
         {pipelineVisible ? (

@@ -270,6 +270,16 @@ export interface EdgeTerminalSignalItem {
   /** placed | skipped_unresolved | skipped_gate | errored | pending */
   disposition?: string | null;
   scraped_at?: string | null;
+  /** Operator-visible category: moneyline | spread | total | player_prop | … */
+  pick_type?: string | null;
+  /** Consensus odds the source quoted (American format). */
+  avg_odds?: number | null;
+  /** Source's own expected-value % for sanity checking our derived edge. */
+  ev_pct?: number | null;
+  /** Optional link to the original Edge Terminal tile screenshot. */
+  source_screenshot_url?: string | null;
+  /** Kalshi market UUID when the source tile already mapped the pick. */
+  kalshi_market_id?: string | null;
 }
 
 export interface EdgeTerminalSignalsResponse {

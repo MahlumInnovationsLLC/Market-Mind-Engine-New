@@ -459,6 +459,34 @@ export const GetDashboardEdgeTerminalSignalsResponse = zod.object({
           "placed | skipped_unresolved | skipped_gate | errored | pending",
         ),
       scraped_at: zod.string().nullish(),
+      pick_type: zod
+        .string()
+        .nullish()
+        .describe(
+          "Operator-visible category: moneyline | spread | total | player_prop | …",
+        ),
+      avg_odds: zod
+        .number()
+        .nullish()
+        .describe("Consensus odds the source quoted (American format)."),
+      ev_pct: zod
+        .number()
+        .nullish()
+        .describe(
+          "Source's own expected-value % for sanity checking our derived edge.",
+        ),
+      source_screenshot_url: zod
+        .string()
+        .nullish()
+        .describe(
+          "Optional link to the original Edge Terminal tile screenshot.",
+        ),
+      kalshi_market_id: zod
+        .string()
+        .nullish()
+        .describe(
+          "Kalshi market UUID when the source tile already mapped the pick.",
+        ),
     }),
   ),
   error: zod.string().nullish(),

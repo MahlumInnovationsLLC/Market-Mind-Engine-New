@@ -1436,6 +1436,11 @@ components:
         ticker: { type: string, nullable: true }
         disposition: { type: string, nullable: true, description: "placed | skipped_unresolved | skipped_gate | errored | pending" }
         scraped_at: { type: string, nullable: true }
+        pick_type: { type: string, nullable: true, description: "Operator-visible category: moneyline | spread | total | player_prop | …" }
+        avg_odds: { type: number, nullable: true, description: "Consensus odds the source quoted (American format)." }
+        ev_pct: { type: number, nullable: true, description: "Source's own expected-value % for sanity checking our derived edge." }
+        source_screenshot_url: { type: string, nullable: true, description: "Optional link to the original Edge Terminal tile screenshot." }
+        kalshi_market_id: { type: string, nullable: true, description: "Kalshi market UUID when the source tile already mapped the pick." }
       required: [id, signal_date]
 
     EdgeTerminalSignalsResponse:
