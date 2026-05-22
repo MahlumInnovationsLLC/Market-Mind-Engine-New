@@ -157,6 +157,16 @@ class InGameCycleResult:
     candidates_live: int = 0
     candidates_tagged: int = 0
     candidates_skipped_duplicate: int = 0
+    # Task #835 — cross-book best-line re-checks fired against each
+    # in-progress market on every loop tick.  ``best_line_checks`` is
+    # the number of rows we ran the live-mode gate against;
+    # ``best_line_blocks`` and ``best_line_reroutes`` count the
+    # decisions the gate made so operators can see at a glance how
+    # often the live freshness window is producing actionable cross-
+    # book deltas.
+    best_line_checks: int = 0
+    best_line_blocks: int = 0
+    best_line_reroutes: int = 0
     errors: list[str] = field(default_factory=list)
 
     def as_dict(self) -> dict[str, Any]:
@@ -172,6 +182,9 @@ class InGameCycleResult:
             "candidates_live": self.candidates_live,
             "candidates_tagged": self.candidates_tagged,
             "candidates_skipped_duplicate": self.candidates_skipped_duplicate,
+            "best_line_checks": self.best_line_checks,
+            "best_line_blocks": self.best_line_blocks,
+            "best_line_reroutes": self.best_line_reroutes,
             "errors": list(self.errors),
         }
 
@@ -242,6 +255,9 @@ async def _fetch_live_eligible(
                    p.is_live            AS is_live,
                    p.model_yes_prob     AS model_yes_prob,
                    p.kalshi_price       AS kalshi_price,
+                   p.matchup            AS matchup,
+                   p.home_team          AS home_team,
+                   p.away_team          AS away_team,
                    s.status             AS status,
                    extract(epoch from (now() - s.fetched_at))::float
                                         AS state_age_seconds
@@ -312,6 +328,95 @@ def _gc_tagged_cache() -> None:
     _TAGGED_THIS_MINUTE.clear()
     for k, v in items[keep_from:]:
         _TAGGED_THIS_MINUTE[k] = v
+
+
+# Market-type heuristic for the in-game best-line check.  The
+# predictions table doesn't carry the canonical market_type column the
+# pre-game candidate dict ships with, so we default to ``moneyline``
+# (the only kind ``gate_best_line`` currently grades — spreads/totals
+# are scoped out pending per-leg matching).  Operators can override
+# per-market via runtime_settings if a particular league needs a
+# different default.
+_DEFAULT_LIVE_BEST_LINE_MARKET_TYPE = "moneyline"
+
+
+async def _evaluate_best_line_for_live_row(
+    row: dict[str, Any],
+) -> str | None:
+    """Run the cross-book best-line gate against one live-eligible row.
+
+    Task #835: every in-game re-score should get a fresh cross-book
+    check against the 30s ``line_snapshots`` window — that's the
+    whole point of the live-mode variant.  The per-sport predictor
+    chain that produces ``model_yes_prob`` is still stubbed
+    (:func:`_predict_live_for_market`), so we run the gate against
+    the latest persisted Kalshi price for the market, with
+    ``is_live=True`` so :func:`app.risk.gates.gate_best_line` uses
+    the tight freshness budget + the (market_id, kind) dedupe key.
+
+    Returns the gate's ``details['decision']`` string when the gate
+    ran, ``None`` when we skipped (missing data, gate import error).
+    All errors are swallowed — the loop's tagging path must never be
+    blocked by a feed-side failure.
+    """
+    market_id = row.get("market_id")
+    league = row.get("league")
+    home = row.get("home_team")
+    away = row.get("away_team")
+    price = row.get("kalshi_price")
+    if not (market_id and league and home and away and price is not None):
+        return None
+    try:
+        from ..risk.gates import RiskContext, gate_best_line
+    except Exception as e:  # pragma: no cover — defensive import guard
+        log.debug("in_game_loop best_line import failed: %s", e)
+        return None
+    try:
+        ctx = RiskContext(
+            market_id=str(market_id),
+            side="YES",
+            vertical="sports",
+            league=str(league),
+            market_type=_DEFAULT_LIVE_BEST_LINE_MARKET_TYPE,
+            matchup=row.get("matchup"),
+            current_price=float(price),
+            model_probability=(
+                float(row["model_yes_prob"])
+                if row.get("model_yes_prob") is not None
+                else None
+            ),
+            edge=None,
+            confidence_band_low=None,
+            confidence_band_high=None,
+            agreement_rate=None,
+            swarm_approved=True,
+            swarm_recommended_action=None,
+            debate_id=None,
+            intended_quantity=0,
+            intended_notional_usd=0.0,
+            bankroll_usd=None,
+            open_positions_count=0,
+            open_positions_notional_usd=0.0,
+            open_positions_per_vertical_usd={},
+            operator_overrides={},
+            market_cooldown_until=None,
+            home_team=str(home),
+            away_team=str(away),
+            is_live=True,
+            sportradar_game_id=(
+                str(row["game_id"]) if row.get("game_id") else None
+            ),
+        )
+        result = await gate_best_line(ctx)
+    except Exception as e:  # pragma: no cover — feed-side failures must not break loop
+        log.warning(
+            "in_game_loop best_line check failed market=%s: %s",
+            market_id,
+            e,
+        )
+        return None
+    decision = (result.details or {}).get("decision")
+    return str(decision) if decision else None
 
 
 async def _predict_live_for_market(row: dict[str, Any]) -> float | None:  # noqa: ARG001
@@ -386,11 +491,21 @@ async def run_in_game_cycle(
 
     bucket = _minute_bucket(now)
     to_tag: list[str] = []
+    rows_to_check: list[dict[str, Any]] = []
     for r in rows:
         mid = r.get("market_id")
         if not mid:
             continue
         result.candidates_live += 1
+        # Cross-book best-line evaluation MUST run on every re-score
+        # (task #835) — it is intentionally decoupled from the
+        # minute-bucket tagging dedupe below.  Tagging is suppressed
+        # for same-minute repeats because the dashboard tile would
+        # double-count an already-flipped row; the best-line gate has
+        # its own (kind, market_id) alert dedupe and its own fresh
+        # 30s line_snapshots window, so re-running it every cycle is
+        # both safe and the whole point of the live loop.
+        rows_to_check.append(r)
         key = (str(mid), bucket)
         if key in _TAGGED_THIS_MINUTE:
             result.candidates_skipped_duplicate += 1
@@ -402,6 +517,33 @@ async def run_in_game_cycle(
     flipped = await _tag_is_live(to_tag)
     result.candidates_tagged = flipped
     _gc_tagged_cache()
+
+    # Task #835 — fire the cross-book best-line gate against every
+    # market we just re-scored.  Runs on EVERY eligible row this tick
+    # (no minute-bucket suppression — see comment above) so a live
+    # market that re-evaluates every 30s actually gets a fresh cross-
+    # book check at the gate's tight 30s freshness window.  Operator-
+    # visible alert flooding is prevented at a different layer:
+    # _emit_best_line_alert dedupes on (kind, market_id) for 5 min.
+    # Wrapped in a top-level try so a gate-side regression cannot
+    # prevent the loop's tagging path from returning a clean result.
+    for r in rows_to_check:
+        try:
+            decision = await _evaluate_best_line_for_live_row(r)
+        except Exception as e:  # pragma: no cover — defensive
+            log.warning(
+                "in_game_loop best_line evaluation crashed market=%s: %s",
+                r.get("market_id"),
+                e,
+            )
+            continue
+        if decision is None:
+            continue
+        result.best_line_checks += 1
+        if decision == "block_traditional_better":
+            result.best_line_blocks += 1
+        elif decision == "reroute_polymarket":
+            result.best_line_reroutes += 1
 
     result.completed_at = datetime.now(timezone.utc).isoformat()
     result.duration_seconds = time.perf_counter() - started_perf

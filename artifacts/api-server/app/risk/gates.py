@@ -2230,6 +2230,26 @@ async def gate_player_props(ctx: RiskContext) -> GateResult:
 
 _BEST_LINE_DEFAULT_THRESHOLD_BPS: int = 200  # 2.00% implied
 
+# Cross-book line-shopping freshness budget (max age of the latest
+# ``line_snapshots`` row that the gate will consider).  Pre-game uses
+# the lookup default (300s / 5 min) because traditional sportsbook
+# lines drift slowly between markets opening and tip-off.  Live (in-
+# game) trades require a much tighter window — odds at every book
+# re-price on each possession/pitch/snap, so a 5-minute-old quote is
+# essentially noise.  Task #835 pins this to 30 seconds for any
+# candidate flagged ``is_live=True``.
+_BEST_LINE_PREGAME_MAX_AGE_SECONDS: int = 300
+_BEST_LINE_LIVE_MAX_AGE_SECONDS: int = 30
+
+# Operator-visible dedupe TTL for ``best_line_alert`` fan-out (email +
+# telegram).  Keeps a market that keeps tripping the gate every
+# re-score from spamming the operator's inbox while still letting a
+# fresh trip on a different market fire immediately.  Per task #835
+# the dedupe is keyed on ``(kind, market_id)`` so an in-game loop
+# re-scoring the same market every 30s collapses to one alert per
+# 5-minute window.
+_BEST_LINE_ALERT_DEDUPE_TTL_SECONDS: int = 300
+
 
 async def gate_best_line(ctx: RiskContext) -> GateResult:
     """Cross-book line-shopping gate (task #828).
@@ -2318,6 +2338,15 @@ async def gate_best_line(ctx: RiskContext) -> GateResult:
     if (overrides.get(f"best_line_outcome_is_away_{league.lower()}")
             or overrides.get("best_line_outcome_is_away")):
         outcome_team = ctx.away_team
+    # Task #835: tighter freshness window for in-game candidates.
+    # A 5-minute-old snapshot is useless when each book re-prices on
+    # every possession/snap/pitch — pin live lookups to 30s so the
+    # gate only fires on genuinely current cross-book deltas.
+    max_age_secs = (
+        _BEST_LINE_LIVE_MAX_AGE_SECONDS
+        if ctx.is_live
+        else _BEST_LINE_PREGAME_MAX_AGE_SECONDS
+    )
     try:
         result = await _asyncio.wait_for(
             lookup_best_line(
@@ -2326,6 +2355,7 @@ async def gate_best_line(ctx: RiskContext) -> GateResult:
                 home_team=ctx.home_team,
                 away_team=ctx.away_team,
                 outcome_team=outcome_team,
+                max_age_seconds=max_age_secs,
             ),
             timeout=0.050,
         )
@@ -2449,20 +2479,20 @@ async def _emit_best_line_alert(
     """
     try:
         from ..notifications import alerts as _alerts
-        # Stable dedupe key per (matchup, market_type, kind) bucketed
-        # to 1-minute windows so a burst of cycles on the same market
-        # collapses to one operator-visible alert.
-        import time as _t
-        bucket = int(_t.time() // 60)
+        # Task #835: dedupe on (kind, market_id) at a 5-minute TTL so
+        # the in-game loop's per-30s re-evaluations collapse to one
+        # operator-visible alert per market.  Previously the key
+        # bucketed to a 1-minute wall-clock window keyed on the
+        # matchup; that flooded operators when the in-game loop fired
+        # the same gate for the same market every cycle but with a
+        # rolling matchup-level key that re-rolled each minute.
         dkey = "|".join([
             kind,
-            (ctx.league or "").upper(),
-            (ctx.market_type or "").lower(),
-            (ctx.matchup or ctx.market_id or "")[:120],
-            str(bucket),
+            str(ctx.market_id or ctx.matchup or ""),
         ])
         claimed = await _alerts.dedupe_or_skip(
-            "best_line_alert", dkey, ttl_seconds=300,
+            "best_line_alert", dkey,
+            ttl_seconds=_BEST_LINE_ALERT_DEDUPE_TTL_SECONDS,
         )
         if not claimed:
             return
