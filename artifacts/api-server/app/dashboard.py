@@ -6458,3 +6458,103 @@ async def get_soccer_settlement_review_summary() -> dict[str, Any]:
         )
     out["items"] = items
     return out
+
+
+
+# ============================================================================
+# Niche sports tile (task #831)
+# ============================================================================
+
+_NICHE_SPORTS_LEAGUES: tuple[str, ...] = ("ATP", "WTA", "F1", "PGA", "UFC")
+
+
+async def get_niche_sports_tile(*, days: int = 30) -> dict[str, Any]:
+    """Per-niche-vertical tile: pick volume, Brier, settled count (task #831).
+
+    Read-only helper for the operator dashboard.  One row per
+    (ATP, WTA, F1, PGA, UFC) over the trailing ``days`` window,
+    sourced from ``online_learning_buffer`` (same source the
+    honesty-report niche-sports collector reads).
+
+    HTTP wiring deliberately deferred — this helper is the seam the
+    follow-up dashboard endpoint will call.
+
+    Shape::
+
+        {
+          days, generated_at,
+          items: [{league, n_settled, n_picks_total, brier, hit_rate}],
+          error: str | None,
+        }
+    """
+    out: dict[str, Any] = {
+        "days": int(days),
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "items": [],
+        "error": None,
+    }
+    try:
+        rows = await db.fetch(
+            """
+            SELECT upper(coalesce(league, ''))                  AS league,
+                   count(*)::int                                AS n_picks_total,
+                   count(*) FILTER (
+                       WHERE actual_outcome IS NOT NULL
+                   )::int                                       AS n_settled,
+                   avg(
+                       CASE
+                         WHEN actual_outcome IS NOT NULL
+                              AND predicted_prob IS NOT NULL
+                         THEN power(predicted_prob - actual_outcome, 2)
+                       END
+                   )::float                                     AS brier,
+                   avg(
+                       CASE
+                         WHEN actual_outcome IS NOT NULL
+                              AND predicted_prob IS NOT NULL
+                         THEN CASE
+                                WHEN (predicted_prob >= 0.5) =
+                                     (actual_outcome = 1) THEN 1.0
+                                ELSE 0.0
+                              END
+                       END
+                   )::float                                     AS hit_rate
+              FROM online_learning_buffer
+             WHERE created_at > (now() - ($1::int || ' days')::interval)
+               AND upper(coalesce(league, '')) = ANY($2::text[])
+             GROUP BY league
+            """,
+            int(days),
+            list(_NICHE_SPORTS_LEAGUES),
+        )
+    except Exception as e:
+        log.warning("niche_sports_tile query failed: %s", e)
+        out["error"] = f"{type(e).__name__}: {e}"[:240]
+        return out
+
+    by_league = {(r.get("league") or "").upper(): r for r in rows}
+    for league in _NICHE_SPORTS_LEAGUES:
+        r = by_league.get(league)
+        if r is None:
+            out["items"].append(
+                {
+                    "league": league,
+                    "n_settled": 0,
+                    "n_picks_total": 0,
+                    "brier": None,
+                    "hit_rate": None,
+                }
+            )
+            continue
+        brier = r.get("brier")
+        hit = r.get("hit_rate")
+        out["items"].append(
+            {
+                "league": league,
+                "n_settled": int(r.get("n_settled") or 0),
+                "n_picks_total": int(r.get("n_picks_total") or 0),
+                "brier": (round(float(brier), 6) if brier is not None else None),
+                "hit_rate": (round(float(hit), 6) if hit is not None else None),
+            }
+        )
+    return out

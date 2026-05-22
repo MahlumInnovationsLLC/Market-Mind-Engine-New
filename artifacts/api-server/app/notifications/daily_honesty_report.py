@@ -929,6 +929,109 @@ async def collect_pre_vs_in_game_brier(
     return out
 
 
+async def collect_niche_sports_performance(
+    *, days: int = 30, min_samples: int = 5
+) -> dict[str, Any]:
+    """Per-niche-vertical Brier + ECE + hit-rate over trailing ``days`` (task #831).
+
+    One row per (ATP, WTA, F1, PGA, UFC) computed against the same
+    ``online_learning_buffer`` settled-rows source the divergence
+    collector reads.  Verticals with fewer than ``min_samples``
+    settled rows are returned under ``insufficient_volume`` so the
+    operator can see "the vertical exists but nothing's shipped"
+    rather than silently dropping the row.
+
+    ECE is computed against 10 equi-width probability bins; with
+    typical niche-sport volumes (handful of picks per week) the bin
+    count is intentionally coarse.
+
+    Shape::
+
+        {
+          days, min_samples,
+          items: [{league, n, brier, ece, hit_rate}],
+          insufficient_volume: [{league, n, min_samples}],
+          error: str | None,
+        }
+    """
+    niche_leagues = ("ATP", "WTA", "F1", "PGA", "UFC")
+    out: dict[str, Any] = {
+        "days": int(days),
+        "min_samples": int(min_samples),
+        "items": [],
+        "insufficient_volume": [],
+        "error": None,
+    }
+    try:
+        rows = await db.fetch(
+            """
+            SELECT upper(coalesce(league, ''))  AS league,
+                   predicted_prob::float        AS predicted_prob,
+                   actual_outcome::int          AS actual_outcome
+              FROM online_learning_buffer
+             WHERE actual_outcome IS NOT NULL
+               AND predicted_prob IS NOT NULL
+               AND created_at > (now() - ($1::int || ' days')::interval)
+               AND upper(coalesce(league, '')) = ANY($2::text[])
+            """,
+            int(days),
+            list(niche_leagues),
+        )
+    except Exception as e:
+        log.warning("niche_sports_performance query failed: %s", e)
+        out["error"] = f"{type(e).__name__}: {e}"[:240]
+        return out
+
+    by_league: dict[str, list[tuple[float, int]]] = {lg: [] for lg in niche_leagues}
+    for r in rows:
+        league = (r.get("league") or "").strip().upper()
+        if league not in by_league:
+            continue
+        p = r.get("predicted_prob")
+        y = r.get("actual_outcome")
+        if p is None or y is None:
+            continue
+        by_league[league].append((float(p), int(y)))
+
+    for league in niche_leagues:
+        pairs = by_league[league]
+        n = len(pairs)
+        if n < min_samples:
+            out["insufficient_volume"].append(
+                {"league": league, "n": n, "min_samples": int(min_samples)}
+            )
+            continue
+        probs = [p for p, _ in pairs]
+        outcomes = [y for _, y in pairs]
+        b = _brier(probs, outcomes) or 0.0
+        # Hit-rate: pick is "correct" if argmax side matches outcome
+        # (p>=0.5 → predicted YES).
+        hits = sum(1 for p, y in pairs if (p >= 0.5) == (y == 1))
+        hit_rate = hits / n
+        # ECE over 10 equi-width bins.
+        bins: list[list[tuple[float, int]]] = [[] for _ in range(10)]
+        for p, y in pairs:
+            idx = min(9, int(p * 10))
+            bins[idx].append((p, y))
+        ece = 0.0
+        for bucket in bins:
+            if not bucket:
+                continue
+            avg_p = sum(p for p, _ in bucket) / len(bucket)
+            avg_y = sum(y for _, y in bucket) / len(bucket)
+            ece += (len(bucket) / n) * abs(avg_p - avg_y)
+        out["items"].append(
+            {
+                "league": league,
+                "n": n,
+                "brier": round(b, 6),
+                "ece": round(ece, 6),
+                "hit_rate": round(hit_rate, 6),
+            }
+        )
+    return out
+
+
 async def collect_report(date_utc: str) -> dict[str, Any]:
     """Build the four-section payload.  Sections that fail are marked
     with an ``error`` field but never raise."""
@@ -954,6 +1057,7 @@ async def collect_report(date_utc: str) -> dict[str, Any]:
     )
     best_line_t = asyncio.create_task(collect_best_line_router_stats())
     pre_vs_in_t = asyncio.create_task(collect_pre_vs_in_game_brier())
+    niche_t = asyncio.create_task(collect_niche_sports_performance())
     (
         divergence,
         drift_status,
@@ -969,10 +1073,11 @@ async def collect_report(date_utc: str) -> dict[str, Any]:
         nfl_props,
         best_line,
         pre_vs_in_game,
+        niche_sports,
     ) = await asyncio.gather(
         div_t, drift_t, tail_t, gate_t, raw_t, miss_t, deck_t, wnba_t,
         nba_props_t, nhl_props_t, mlb_props_t, nfl_props_t,
-        best_line_t, pre_vs_in_t,
+        best_line_t, pre_vs_in_t, niche_t,
     )
     return {
         "date_utc": date_utc,
@@ -990,6 +1095,7 @@ async def collect_report(date_utc: str) -> dict[str, Any]:
         "nfl_player_props": nfl_props,
         "best_line_router": best_line,
         "pre_vs_in_game_brier": pre_vs_in_game,
+        "niche_sports": niche_sports,
     }
 
 
@@ -2141,6 +2247,34 @@ def render_text(payload: dict[str, Any]) -> tuple[str, str]:
                 f"min={it['min_samples_per_side']})"
             )
 
+    # Section 10 — Niche sports (Task #831)
+    ns = payload.get("niche_sports") or {}
+    lines.append("")
+    lines.append(
+        "== 10. Niche sports performance "
+        f"(last {ns.get('days', '?')}d, per vertical) =="
+    )
+    if ns.get("error"):
+        lines.append(f"  ERROR: {ns['error']}")
+    elif not ns.get("items") and not ns.get("insufficient_volume"):
+        lines.append("  no settled rows for ATP/WTA/F1/PGA/UFC yet")
+    else:
+        for it in ns.get("items") or []:
+            # Tone matches the task brief: tennis/UFC bar = 0.260,
+            # F1/PGA bar = 0.300.
+            bar = 0.300 if it["league"] in ("F1", "PGA") else 0.260
+            marker = "[GREEN]" if it["brier"] <= bar else "[YELLOW]"
+            lines.append(
+                f"  {marker} {it['league']:>4s}  "
+                f"brier={it['brier']:.4f}  ece={it['ece']:.4f}  "
+                f"hit_rate={it['hit_rate']:.3f}  (n={it['n']})"
+            )
+        for it in ns.get("insufficient_volume") or []:
+            lines.append(
+                f"  {it['league']:>4s}  insufficient volume "
+                f"(n={it['n']}, min={it['min_samples']})"
+            )
+
     lines.append("")
     lines.append(
         "Read the runbook section 21 for what each red signal means."
@@ -2515,6 +2649,50 @@ def render_html(payload: dict[str, Any]) -> str:
                 parts.append(
                     "<p><i>Insufficient samples (skipped):</i> "
                     f"{html.escape(', '.join(it['league'] for it in ts))}"
+                    "</p>"
+                )
+
+    # Niche sports (task #831)
+    ns = payload.get("niche_sports") or {}
+    if ns:
+        _section_h(
+            f"Niche sports performance (last {ns.get('days', '?')}d)"
+        )
+        if not _err(ns):
+            items = ns.get("items") or []
+            iv = ns.get("insufficient_volume") or []
+            if not items and not iv:
+                parts.append(
+                    "<p style=\"color:#080;\">no settled rows for "
+                    "ATP/WTA/F1/PGA/UFC yet</p>"
+                )
+            if items:
+                parts.append(
+                    "<table cellpadding=4 style=\"border-collapse:collapse;"
+                    "font-family:ui-monospace,SFMono-Regular,Menlo,monospace;"
+                    "font-size:12px;\">"
+                )
+                parts.append(
+                    "<tr style=\"background:#f0f0f0;\">"
+                    "<th>League</th><th>Brier</th><th>ECE</th>"
+                    "<th>Hit rate</th><th>n</th></tr>"
+                )
+                for it in items:
+                    bar = 0.300 if it["league"] in ("F1", "PGA") else 0.260
+                    color = "#080" if it["brier"] <= bar else "#a60"
+                    parts.append(
+                        f"<tr><td>{html.escape(it['league'])}</td>"
+                        f"<td style=\"color:{color};font-weight:600;\">"
+                        f"{it['brier']:.4f}</td>"
+                        f"<td>{it['ece']:.4f}</td>"
+                        f"<td>{it['hit_rate']:.3f}</td>"
+                        f"<td>{it['n']}</td></tr>"
+                    )
+                parts.append("</table>")
+            if iv:
+                parts.append(
+                    "<p><i>Insufficient volume (skipped):</i> "
+                    f"{html.escape(', '.join(it['league'] for it in iv))}"
                     "</p>"
                 )
 
