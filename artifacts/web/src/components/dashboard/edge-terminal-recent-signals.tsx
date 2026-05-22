@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   getGetDashboardEdgeTerminalSignalsQueryKey,
   useGetDashboardEdgeTerminalSignals,
@@ -89,6 +89,61 @@ function matchesStatus(
 const SELECT_CLASS =
   "rounded border border-border bg-background px-2 py-1 text-xs text-foreground focus:outline-none focus:ring-1 focus:ring-accent-cyan";
 
+// localStorage key for persisting the operator's filter selections.
+// Bumping this key invalidates any old persisted shape if we ever
+// change the schema.
+const FILTERS_STORAGE_KEY = "axiom.edge-terminal-recent-signals-filters.v1";
+
+const STATUS_VALUES: readonly StatusFilter[] = [
+  "all",
+  "placed",
+  "pending",
+  "skipped",
+  "errored",
+];
+
+type PersistedFilters = {
+  status: StatusFilter;
+  vertical: string;
+  pickType: string;
+  search: string;
+};
+
+const DEFAULT_FILTERS: PersistedFilters = {
+  status: "all",
+  vertical: "all",
+  pickType: "all",
+  search: "",
+};
+
+function loadStoredFilters(): PersistedFilters {
+  if (typeof window === "undefined") return DEFAULT_FILTERS;
+  try {
+    const raw = window.localStorage.getItem(FILTERS_STORAGE_KEY);
+    if (!raw) return DEFAULT_FILTERS;
+    const parsed = JSON.parse(raw) as Partial<PersistedFilters> | null;
+    if (!parsed || typeof parsed !== "object") return DEFAULT_FILTERS;
+    const status =
+      typeof parsed.status === "string" &&
+      (STATUS_VALUES as readonly string[]).includes(parsed.status)
+        ? (parsed.status as StatusFilter)
+        : DEFAULT_FILTERS.status;
+    const vertical =
+      typeof parsed.vertical === "string"
+        ? parsed.vertical
+        : DEFAULT_FILTERS.vertical;
+    const pickType =
+      typeof parsed.pickType === "string"
+        ? parsed.pickType
+        : DEFAULT_FILTERS.pickType;
+    const search =
+      typeof parsed.search === "string" ? parsed.search : DEFAULT_FILTERS.search;
+    return { status, vertical, pickType, search };
+  } catch {
+    return DEFAULT_FILTERS;
+  }
+}
+
 export default function EdgeTerminalRecentSignalsTile() {
   const key = getGetDashboardEdgeTerminalSignalsQueryKey({ limit: 25 });
   const { data, isLoading, error } = useGetDashboardEdgeTerminalSignals(
@@ -100,10 +155,40 @@ export default function EdgeTerminalRecentSignalsTile() {
 
   const items = data?.items ?? [];
 
-  const [status, setStatus] = useState<StatusFilter>("all");
-  const [vertical, setVertical] = useState<string>("all");
-  const [pickType, setPickType] = useState<string>("all");
-  const [search, setSearch] = useState<string>("");
+  // Filters are hydrated synchronously from localStorage so an operator
+  // who always looks at e.g. "placed NBA spreads" doesn't have to
+  // re-apply the same selections on every refresh (task #853).
+  const initialFilters = useMemo(() => loadStoredFilters(), []);
+  const [status, setStatus] = useState<StatusFilter>(initialFilters.status);
+  const [vertical, setVertical] = useState<string>(initialFilters.vertical);
+  const [pickType, setPickType] = useState<string>(initialFilters.pickType);
+  const [search, setSearch] = useState<string>(initialFilters.search);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    try {
+      window.localStorage.setItem(
+        FILTERS_STORAGE_KEY,
+        JSON.stringify({ status, vertical, pickType, search }),
+      );
+    } catch {
+      // Quota exceeded / private mode — silently ignore; the
+      // selections still work for the current session.
+    }
+  }, [status, vertical, pickType, search]);
+
+  const filtersDirty =
+    status !== DEFAULT_FILTERS.status ||
+    vertical !== DEFAULT_FILTERS.vertical ||
+    pickType !== DEFAULT_FILTERS.pickType ||
+    search !== DEFAULT_FILTERS.search;
+
+  const resetFilters = () => {
+    setStatus(DEFAULT_FILTERS.status);
+    setVertical(DEFAULT_FILTERS.vertical);
+    setPickType(DEFAULT_FILTERS.pickType);
+    setSearch(DEFAULT_FILTERS.search);
+  };
 
   const verticalOptions = useMemo(() => {
     const set = new Set<string>();
@@ -226,6 +311,16 @@ export default function EdgeTerminalRecentSignalsTile() {
                 </option>
               ))}
             </select>
+            {filtersDirty ? (
+              <button
+                type="button"
+                onClick={resetFilters}
+                data-testid="edge-terminal-recent-signals-reset-filters"
+                className="rounded border border-border bg-muted/30 px-2 py-1 text-xs text-muted-foreground hover:text-foreground hover:border-accent-cyan/60"
+              >
+                Reset filters
+              </button>
+            ) : null}
           </div>
           {allFiltered ? (
             <div

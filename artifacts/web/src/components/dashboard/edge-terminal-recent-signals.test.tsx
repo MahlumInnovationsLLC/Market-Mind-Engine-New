@@ -23,7 +23,49 @@ afterEach(() => {
   signalsState.data = undefined;
   signalsState.isLoading = false;
   signalsState.error = null;
+  window.localStorage.clear();
 });
+
+const FILTERS_STORAGE_KEY = "axiom.edge-terminal-recent-signals-filters.v1";
+
+function makeTwoSignalDataset() {
+  return {
+    limit: 25,
+    generated_at: "2026-05-22T11:30:00Z",
+    items: [
+      {
+        id: 100,
+        signal_date: "2026-05-22",
+        vertical: "nba",
+        matchup: "OKC @ SAS",
+        selection: "Thunder +2",
+        ticker: "KXNBA-1",
+        disposition: "placed",
+        scraped_at: null,
+        pick_type: "spread",
+        avg_odds: -110,
+        ev_pct: 5,
+        source_screenshot_url: null,
+        kalshi_market_id: null,
+      },
+      {
+        id: 101,
+        signal_date: "2026-05-22",
+        vertical: "nhl",
+        matchup: "VGK @ COL",
+        selection: "Knights ML",
+        ticker: "KXNHL-2",
+        disposition: "skipped_gate",
+        scraped_at: null,
+        pick_type: "moneyline",
+        avg_odds: 120,
+        ev_pct: -3,
+        source_screenshot_url: null,
+        kalshi_market_id: null,
+      },
+    ],
+  };
+}
 
 describe("EdgeTerminalRecentSignalsTile", () => {
   it("renders pick type, average odds, EV%, market id and source screenshot link", () => {
@@ -337,6 +379,107 @@ describe("EdgeTerminalRecentSignalsTile", () => {
     );
     expect(screen.queryByTestId("edge-terminal-recent-signal-row-20")).toBeNull();
     expect(screen.getByTestId("edge-terminal-recent-signal-row-21")).toBeTruthy();
+  });
+
+  it("persists filter selections to localStorage and restores them on remount", () => {
+    signalsState.data = makeTwoSignalDataset();
+
+    const { unmount } = render(<EdgeTerminalRecentSignalsTile />);
+
+    // Both rows visible by default.
+    expect(screen.getByTestId("edge-terminal-recent-signal-row-100")).toBeTruthy();
+    expect(screen.getByTestId("edge-terminal-recent-signal-row-101")).toBeTruthy();
+
+    // Apply all four filter dimensions.
+    fireEvent.change(
+      screen.getByTestId("edge-terminal-recent-signals-status-filter"),
+      { target: { value: "placed" } },
+    );
+    fireEvent.change(
+      screen.getByTestId("edge-terminal-recent-signals-vertical-filter"),
+      { target: { value: "nba" } },
+    );
+    fireEvent.change(
+      screen.getByTestId("edge-terminal-recent-signals-pick-type-filter"),
+      { target: { value: "spread" } },
+    );
+    fireEvent.change(
+      screen.getByTestId("edge-terminal-recent-signals-search"),
+      { target: { value: "thunder" } },
+    );
+
+    // Selections landed in localStorage under the documented key.
+    const raw = window.localStorage.getItem(FILTERS_STORAGE_KEY);
+    expect(raw).not.toBeNull();
+    expect(JSON.parse(raw as string)).toEqual({
+      status: "placed",
+      vertical: "nba",
+      pickType: "spread",
+      search: "thunder",
+    });
+
+    // Remount and confirm the inputs hydrate from localStorage.
+    unmount();
+    render(<EdgeTerminalRecentSignalsTile />);
+
+    const statusSelect = screen.getByTestId(
+      "edge-terminal-recent-signals-status-filter",
+    ) as HTMLSelectElement;
+    const verticalSelect = screen.getByTestId(
+      "edge-terminal-recent-signals-vertical-filter",
+    ) as HTMLSelectElement;
+    const pickTypeSelect = screen.getByTestId(
+      "edge-terminal-recent-signals-pick-type-filter",
+    ) as HTMLSelectElement;
+    const searchInput = screen.getByTestId(
+      "edge-terminal-recent-signals-search",
+    ) as HTMLInputElement;
+
+    expect(statusSelect.value).toBe("placed");
+    expect(verticalSelect.value).toBe("nba");
+    expect(pickTypeSelect.value).toBe("spread");
+    expect(searchInput.value).toBe("thunder");
+
+    // Filtered view matches the restored selections.
+    expect(screen.getByTestId("edge-terminal-recent-signal-row-100")).toBeTruthy();
+    expect(screen.queryByTestId("edge-terminal-recent-signal-row-101")).toBeNull();
+
+    // Reset filters clears localStorage and brings back every row.
+    fireEvent.click(
+      screen.getByTestId("edge-terminal-recent-signals-reset-filters"),
+    );
+
+    expect(statusSelect.value).toBe("all");
+    expect(verticalSelect.value).toBe("all");
+    expect(pickTypeSelect.value).toBe("all");
+    expect(searchInput.value).toBe("");
+    expect(
+      screen.queryByTestId("edge-terminal-recent-signals-reset-filters"),
+    ).toBeNull();
+    expect(screen.getByTestId("edge-terminal-recent-signal-row-100")).toBeTruthy();
+    expect(screen.getByTestId("edge-terminal-recent-signal-row-101")).toBeTruthy();
+
+    const afterReset = window.localStorage.getItem(FILTERS_STORAGE_KEY);
+    expect(JSON.parse(afterReset as string)).toEqual({
+      status: "all",
+      vertical: "all",
+      pickType: "all",
+      search: "",
+    });
+  });
+
+  it("ignores corrupt persisted filter payloads and falls back to defaults", () => {
+    window.localStorage.setItem(FILTERS_STORAGE_KEY, "{not-json");
+    signalsState.data = makeTwoSignalDataset();
+
+    render(<EdgeTerminalRecentSignalsTile />);
+
+    const statusSelect = screen.getByTestId(
+      "edge-terminal-recent-signals-status-filter",
+    ) as HTMLSelectElement;
+    expect(statusSelect.value).toBe("all");
+    expect(screen.getByTestId("edge-terminal-recent-signal-row-100")).toBeTruthy();
+    expect(screen.getByTestId("edge-terminal-recent-signal-row-101")).toBeTruthy();
   });
 
   it("shows the empty-state message when there are no items", () => {
