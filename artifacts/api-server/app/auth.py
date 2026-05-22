@@ -32,7 +32,7 @@ from typing import Any
 import httpx
 import jwt
 from fastapi import Depends, Header, HTTPException
-from jwt import PyJWKClient
+from jwt import PyJWK
 
 log = logging.getLogger("axiom.auth")
 
@@ -76,16 +76,113 @@ def _issuer() -> str:
     return f"https://{host}" if host else ""
 
 
+class _SigningKey:
+    """Mirror of `jwt.PyJWKClient`'s return type: exposes `.key`."""
+
+    __slots__ = ("key",)
+
+    def __init__(self, key: Any) -> None:
+        self.key = key
+
+
+class _HttpxJWKSClient:
+    """JWKS fetcher that uses `httpx` instead of stdlib `urllib`.
+
+    Drop-in replacement for `jwt.PyJWKClient` (only the
+    `get_signing_key_from_jwt` surface we actually use). We swapped
+    off `PyJWKClient` because it calls `urllib.request.urlopen`
+    under the hood, which in the Replit production deployment fails
+    SSL against Clerk's FAPI host with
+    `SSL: UNEXPECTED_EOF_WHILE_READING` — every signed-in request
+    then 401s and the UI shows "session expired". `httpx` (which we
+    already use for the Clerk reverse proxy in `clerk_proxy.py`)
+    works fine against the same host, so we route JWKS fetching
+    through it too.
+
+    Caching matches the original `lifespan=600`: the JWKS document
+    is fetched at most once every 10 minutes, with a single in-flight
+    refresh guarded by a lock so a burst of requests after expiry
+    doesn't fan out into N concurrent fetches.
+    """
+
+    _LIFESPAN = 600.0
+    _TIMEOUT = 10.0
+
+    def __init__(self, url: str) -> None:
+        self._url = url
+        self._lock = asyncio.Lock()
+        self._cached_at: float = 0.0
+        self._keys_by_kid: dict[str, Any] = {}
+
+    def _parse(self, doc: dict[str, Any]) -> dict[str, Any]:
+        keys: dict[str, Any] = {}
+        for entry in doc.get("keys") or []:
+            if not isinstance(entry, dict):
+                continue
+            kid = entry.get("kid")
+            if not isinstance(kid, str) or not kid:
+                continue
+            try:
+                keys[kid] = PyJWK(entry).key
+            except Exception as e:  # noqa: BLE001
+                log.warning("jwks: failed to parse key kid=%s: %s", kid, e)
+        return keys
+
+    def _fetch_sync(self) -> dict[str, Any]:
+        with httpx.Client(timeout=self._TIMEOUT) as client:
+            r = client.get(self._url)
+            r.raise_for_status()
+            return self._parse(r.json())
+
+    def get_signing_key_from_jwt(self, token: str) -> _SigningKey:
+        # Synchronous on purpose: `verify_clerk_jwt` is itself sync
+        # (called from sync deps in FastAPI's threadpool). The httpx
+        # sync client uses the same network stack as the async one
+        # but avoids forcing the caller to await.
+        try:
+            header = jwt.get_unverified_header(token)
+        except Exception as e:  # noqa: BLE001
+            raise jwt.PyJWKClientError(f"unable to decode jwt header: {e}") from e
+        kid = header.get("kid")
+        if not isinstance(kid, str) or not kid:
+            raise jwt.PyJWKClientError("jwt header is missing 'kid'")
+
+        now = time.time()
+        fresh = now - self._cached_at < self._LIFESPAN
+        if fresh and kid in self._keys_by_kid:
+            return _SigningKey(self._keys_by_kid[kid])
+
+        # Refresh (either expired or unknown kid — Clerk rotates keys
+        # occasionally and a kid miss is a strong signal a rotation
+        # has happened, so refresh eagerly rather than 401).
+        try:
+            self._keys_by_kid = self._fetch_sync()
+            self._cached_at = now
+        except Exception as e:
+            # On refresh failure, fall back to the last good cache so
+            # a transient JWKS outage doesn't take the whole API down.
+            if kid in self._keys_by_kid:
+                log.warning(
+                    "jwks refresh failed, serving cached key: %s", e
+                )
+                return _SigningKey(self._keys_by_kid[kid])
+            raise jwt.PyJWKClientError(
+                f"unable to fetch jwks: {e}"
+            ) from e
+
+        if kid not in self._keys_by_kid:
+            raise jwt.PyJWKClientError(
+                f"unable to find signing key matching kid={kid!r}"
+            )
+        return _SigningKey(self._keys_by_kid[kid])
+
+
 @lru_cache(maxsize=1)
-def _jwks_client() -> PyJWKClient | None:
+def _jwks_client() -> _HttpxJWKSClient | None:
     host = _frontend_api_host()
     if not host:
         return None
-    return PyJWKClient(
-        f"https://{host}/.well-known/jwks.json",
-        cache_keys=True,
-        lifespan=600,
-    )
+    return _HttpxJWKSClient(f"https://{host}/.well-known/jwks.json")
 
 
 def auth_configured() -> bool:
