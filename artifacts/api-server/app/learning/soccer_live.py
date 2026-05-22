@@ -89,16 +89,53 @@ _MAX_SCORE_GAP_KICKER_PP = 0.06
 #
 # Baseline scoring intensities for a full match (90 minutes), used to
 # compute the remaining-time goal distribution conditional on the
-# current score.  These are league-blended averages from public
-# sources (top-five European leagues + MLS, 2018-2024): home sides
-# average ~1.45 goals/match, away sides ~1.15.  The home/away split
-# is intentionally kept because a Poisson with equal lambdas would
-# bias DRAW upward beyond the empirical rate.  Per-league lambdas
-# would be a small refinement — left for a follow-up since the
-# blended values already narrow the Brier delta vs the leg-agnostic
-# baseline.
+# current score.  Per-league values sourced from the last 2-3 seasons
+# of public goal data (transfermarkt / fbref aggregate, 2022/23 →
+# 2024/25): UCL and BUNDES skew highest, LIGUE1 lowest, the rest
+# clustered near the all-leagues mean of ~1.45 home / ~1.15 away.
+# The home/away split is intentionally kept on every league because
+# a Poisson with equal lambdas would bias DRAW upward beyond the
+# empirical rate.
+#
+# Picking the right pair per league (instead of the all-leagues
+# blend) lets the Dixon-Coles posterior actually reflect that a 0-0
+# scoreline at minute 70 means very different things in a Bundesliga
+# match vs a Ligue 1 match — and Section 9 of the daily honesty
+# report should show the per-league Brier delta narrow further than
+# the blended-baseline version did.
+_BASELINE_LAMBDAS_BY_LEAGUE: dict[str, tuple[float, float]] = {
+    # league: (home goals/match, away goals/match)
+    "EPL":    (1.55, 1.25),
+    "LALIGA": (1.40, 1.10),
+    "SERIEA": (1.50, 1.20),
+    "BUNDES": (1.70, 1.45),
+    "LIGUE1": (1.35, 1.05),
+    "MLS":    (1.55, 1.30),
+    "UCL":    (1.65, 1.40),
+}
+
+# Fallback for unrecognised / unknown leagues — the original blended
+# top-five-European-leagues + MLS average.  Kept so a row missing a
+# canonical league label still gets a defensible posterior instead
+# of degenerating to "no leg-aware update this cycle".
 _BASELINE_LAMBDA_HOME = 1.45
 _BASELINE_LAMBDA_AWAY = 1.15
+
+
+def _baseline_lambdas_for_league(
+    league: str | None,
+) -> tuple[float, float]:
+    """Return (home, away) baseline goal intensities for a league.
+
+    Falls back to the blended average when the league label is None,
+    empty, or not one of the seven soccer leagues we trade.
+    """
+    if not league:
+        return (_BASELINE_LAMBDA_HOME, _BASELINE_LAMBDA_AWAY)
+    key = str(league).strip().upper()
+    return _BASELINE_LAMBDAS_BY_LEAGUE.get(
+        key, (_BASELINE_LAMBDA_HOME, _BASELINE_LAMBDA_AWAY),
+    )
 
 # Truncation cap for the remaining-time goal grid: P(8+ more goals
 # in either half of an in-progress match) is < 1e-6 at the baseline
@@ -240,7 +277,10 @@ def _poisson_pmf(lam: float, k: int) -> float:
 
 
 def _dc_leg_probability(
-    leg: str, score_diff: int, minutes_elapsed: float
+    leg: str,
+    score_diff: int,
+    minutes_elapsed: float,
+    league: str | None = None,
 ) -> float | None:
     """Closed-form leg probability conditional on the current score
     and time elapsed, using independent Poisson scoring intensities
@@ -272,8 +312,9 @@ def _dc_leg_probability(
         if leg == _LEG_DRAW:
             return 1.0 if score_diff == 0 else 0.0
         return 1.0 if score_diff < 0 else 0.0
-    lam_h = _BASELINE_LAMBDA_HOME * remaining_frac
-    lam_a = _BASELINE_LAMBDA_AWAY * remaining_frac
+    base_h, base_a = _baseline_lambdas_for_league(league)
+    lam_h = base_h * remaining_frac
+    lam_a = base_a * remaining_frac
     p_home_pmf = [_poisson_pmf(lam_h, k) for k in range(_DC_MAX_REMAINING_GOALS + 1)]
     p_away_pmf = [_poisson_pmf(lam_a, k) for k in range(_DC_MAX_REMAINING_GOALS + 1)]
     p_home_win = 0.0
@@ -467,7 +508,9 @@ def build_live_features(
     # (pregame ↔ market + score-gap kicker) carries the cycle.
     leg = _resolve_leg_orientation(row)
     if leg is not None:
-        dc = _dc_leg_probability(leg, int(hs - as_), float(minutes))
+        dc = _dc_leg_probability(
+            leg, int(hs - as_), float(minutes), league=row.get("league"),
+        )
         if dc is not None:
             feats["leg_dc_prob"] = float(dc)
             feats["has_leg_dc"] = 1.0
