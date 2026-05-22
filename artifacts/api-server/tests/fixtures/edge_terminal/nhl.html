@@ -1,0 +1,36 @@
+<!doctype html>
+<html>
+<head><title>Edge Terminal — NHL dashboard</title></head>
+<body>
+  <div class="dashboard">
+    <!-- NHL pick using the text-fallback path: no data-vertical /
+         data-matchup / data-selection attributes, just the
+         "<vertical> | <matchup> | <selection>" substring the scraper
+         knows how to parse. -->
+    <div class="tile has-signal" data-axiom-signal="true">
+      <span class="body">NHL | Rangers @ Bruins | Rangers</span>
+    </div>
+
+    <!-- Second NHL pick with explicit data-side="NO" to verify
+         the side attribute survives. -->
+    <div
+      class="tile signal-badge"
+      data-axiom-signal="true"
+      data-vertical="NHL"
+      data-matchup="Maple Leafs @ Canadiens"
+      data-selection="No Goalie Pulled"
+      data-side="NO"
+      data-edge="3.1"
+      data-model-prob="0.45"
+      data-market-price="0.55">
+      <span class="selection">No Goalie Pulled</span>
+    </div>
+
+    <!-- Malformed tile (missing mandatory fields, no parsable text)
+         should be dropped silently by _extract_tile. -->
+    <div class="signal-badge" data-axiom-signal="true">
+      <span>broken tile, no fields</span>
+    </div>
+  </div>
+</body>
+</html>

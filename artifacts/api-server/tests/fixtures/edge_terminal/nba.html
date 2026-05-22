@@ -1,0 +1,49 @@
+<!doctype html>
+<html>
+<head><title>Edge Terminal — NBA dashboard</title></head>
+<body>
+  <div class="dashboard">
+    <h1>Dashboard</h1>
+
+    <!-- Two NBA picks badged as signals via data-axiom-signal="true".
+         Both expose the full data-* contract so the scraper hits the
+         attribute fast-path. -->
+    <div
+      class="tile signal-badge"
+      data-axiom-signal="true"
+      data-vertical="NBA"
+      data-matchup="Lakers @ Celtics"
+      data-selection="Lakers"
+      data-side="YES"
+      data-edge="7.5"
+      data-model-prob="0.58"
+      data-market-price="0.50"
+      data-kalshi-ticker="KX-NBA-LAL-BOS"
+      data-market-title="Lakers vs Celtics — Lakers win">
+      <span class="badge">SIGNAL</span>
+      <span class="vertical">NBA</span>
+      <span class="matchup">Lakers @ Celtics</span>
+      <span class="selection">Lakers</span>
+    </div>
+
+    <div
+      class="tile has-signal"
+      data-axiom-signal="true"
+      data-vertical="NBA"
+      data-matchup="Heat @ Nuggets"
+      data-selection="Under 220.5"
+      data-side="NO"
+      data-edge="4.2"
+      data-model-prob="0.40"
+      data-market-price="0.50">
+      <span class="badge">SIGNAL</span>
+      <span class="selection">Under 220.5</span>
+    </div>
+
+    <!-- A non-signal tile that the scraper must IGNORE. -->
+    <div class="tile" data-vertical="NBA" data-matchup="Bucks @ Knicks">
+      <span class="selection">Knicks</span>
+    </div>
+  </div>
+</body>
+</html>

@@ -1,0 +1,20 @@
+<!doctype html>
+<html>
+<head><title>Edge Terminal — quiet day</title></head>
+<body>
+  <div class="dashboard">
+    <h1>Dashboard</h1>
+    <p class="empty-state">No signals right now. Check back later.</p>
+
+    <!-- A handful of non-signal tiles so the page isn't literally empty —
+         the scraper must still return [] because none of these carry the
+         signal-badge / data-axiom-signal contract. -->
+    <div class="tile" data-vertical="NBA" data-matchup="Bucks @ Knicks">
+      <span class="selection">Knicks</span>
+    </div>
+    <div class="tile" data-vertical="NHL" data-matchup="Rangers @ Bruins">
+      <span class="selection">Rangers</span>
+    </div>
+  </div>
+</body>
+</html>
