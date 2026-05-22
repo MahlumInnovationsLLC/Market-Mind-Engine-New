@@ -418,6 +418,13 @@ OTHER_PUBLIC_ROUTES: tuple[str, ...] = (
     # ungated; under the TestClient `request.client.host == "testclient"`
     # so it returns 404 there too.
     "/api/_debug/health-snapshot",
+    # Clerk Frontend API reverse proxy (see app/clerk_proxy.py).  Public
+    # by design: the SDK fetches its JS bundle and FAPI calls through
+    # these paths in production, and Clerk performs its own auth on the
+    # upstream request — gating them with require_auth would break
+    # sign-in itself.
+    "/api/__clerk",
+    "/api/__clerk/{clerk_path:path}",
 )
 
 
