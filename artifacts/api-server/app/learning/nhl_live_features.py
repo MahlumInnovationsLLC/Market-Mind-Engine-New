@@ -1,4 +1,21 @@
-"""NHL live-feature builder for the in-game prediction loop (task #856).
+"""NHL live-feature builder for the in-game prediction loop.
+
+Provides two distinct APIs that coexist as the NHL live path evolves:
+
+* ``build_nhl_live`` (task #856) — vector-style builder used by the
+  legacy ``_predict_live_via_registry`` path in
+  :mod:`app.learning.in_game_loop`.  Returns ``(names, values)``
+  aligned to :data:`NHL_LIVE_FEATURE_NAMES`.
+* ``build_nhl_live_candidate`` (task #881) — meta-model candidate
+  builder mirroring :mod:`app.learning.nba_live_features`.  Returns a
+  candidate dict scored via ``predictor.predict(..., league="NHL")``
+  through ``_predict_live_for_market_meta``.
+
+Both paths run during a cycle but write through different persistence
+helpers so they do not double-stamp the same column on the same row.
+
+----------------------------------------------------------------------
+``build_nhl_live`` (task #856) — vector contract
 
 Per-sport live builders mirror the niche-sports builder contract in
 :mod:`app.niche_sports.features`:
@@ -85,7 +102,7 @@ def _clamp(value: float, lo: float, hi: float) -> float:
     return max(lo, min(hi, value))
 
 
-def _parse_period(raw: Any) -> tuple[int, bool, bool]:
+def _parse_period_vector(raw: Any) -> tuple[int, bool, bool]:
     """Return ``(period_index, is_overtime, is_shootout)``.
 
     Sportradar's NHL ``period`` field is a string — typically ``"1"``,
@@ -178,7 +195,7 @@ def build_nhl_live(cand: dict[str, Any]) -> tuple[list[str], list[float]]:
     away = _as_float(cand.get("away_score"), 0.0)
     diff = home - away
 
-    period_idx, is_ot, is_so = _parse_period(cand.get("period"))
+    period_idx, is_ot, is_so = _parse_period_vector(cand.get("period"))
     period_secs_left = _parse_clock_seconds_remaining(cand.get("clock"))
     reg_frac = _regulation_remaining_frac(period_idx, period_secs_left)
 
@@ -201,3 +218,133 @@ def build_nhl_live(cand: dict[str, Any]) -> tuple[list[str], list[float]]:
         age_secs,
     ]
     return list(NHL_LIVE_FEATURE_NAMES), values
+
+
+# ---------------------------------------------------------------------------
+# Meta-model candidate builder (task #881) — mirrors nba_live_features.
+# ---------------------------------------------------------------------------
+
+import math
+import re
+from typing import Mapping
+
+
+_LOGISTIC_SCALE = 1.5
+
+_PERIOD_WEIGHTS: dict[int, float] = {
+    1: 0.30,
+    2: 0.65,
+    3: 1.00,
+    4: 1.20,
+    5: 1.30,
+}
+
+_PERIOD_LOOKUP_RE = re.compile(r"(\d+)")
+
+
+def _parse_period(period: Any) -> int:
+    if period is None:
+        return 1
+    s = str(period).strip().lower()
+    if not s:
+        return 1
+    if "shootout" in s or "so" == s:
+        return 5
+    if "ot" in s or "overtime" in s:
+        return 4
+    m = _PERIOD_LOOKUP_RE.search(s)
+    if m:
+        try:
+            n = int(m.group(1))
+            return max(1, min(n, 5))
+        except ValueError:
+            pass
+    return 1
+
+
+def _score_diff_yes_prob(
+    *, score_diff: int, period_idx: int, pre_game_prob: float | None
+) -> float:
+    weight = _PERIOD_WEIGHTS.get(period_idx, 1.0)
+    z = (weight * float(score_diff)) / _LOGISTIC_SCALE
+    live_p = 1.0 / (1.0 + math.exp(-z))
+    if pre_game_prob is None:
+        anchor = live_p
+    else:
+        blend = max(0.0, min(weight, 1.0))
+        anchor = blend * live_p + (1.0 - blend) * float(pre_game_prob)
+    return max(0.01, min(0.99, anchor))
+
+
+def build_nhl_live_candidate(
+    row: Mapping[str, Any],
+    *,
+    live_state: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    league = (row.get("league") or "NHL").upper()
+    pre_game_prob = row.get("model_yes_prob")
+    try:
+        pre_p = float(pre_game_prob) if pre_game_prob is not None else None
+    except (TypeError, ValueError):
+        pre_p = None
+    kalshi_price = row.get("kalshi_price")
+    try:
+        kp = float(kalshi_price) if kalshi_price is not None else None
+    except (TypeError, ValueError):
+        kp = None
+
+    home_score = 0
+    away_score = 0
+    period_idx = 1
+    clock_str = ""
+    status = ""
+    if live_state:
+        try:
+            home_score = int(live_state.get("home_score") or 0)
+        except (TypeError, ValueError):
+            home_score = 0
+        try:
+            away_score = int(live_state.get("away_score") or 0)
+        except (TypeError, ValueError):
+            away_score = 0
+        period_idx = _parse_period(live_state.get("period"))
+        clock_str = str(live_state.get("clock") or "")
+        status = str(live_state.get("status") or "")
+
+    score_diff = home_score - away_score
+    live_anchor = _score_diff_yes_prob(
+        score_diff=score_diff,
+        period_idx=period_idx,
+        pre_game_prob=pre_p,
+    )
+
+    return {
+        "market_id": row.get("market_id"),
+        "kalshi_market_id": row.get("market_id"),
+        "league": league,
+        "market_type": "moneyline",
+        "side": "YES",
+        "recommended_action": "BUY_YES",
+        "consensus_probability": live_anchor,
+        "kalshi_price": kp,
+        "market_prob": kp,
+        "game_id": row.get("game_id"),
+        "game_time": row.get("game_time"),
+        "live_state": {
+            "home_score": home_score,
+            "away_score": away_score,
+            "score_diff": score_diff,
+            "period_idx": period_idx,
+            "clock": clock_str,
+            "status": status,
+            "pre_game_prob": pre_p,
+            "live_anchor": live_anchor,
+        },
+    }
+
+
+__all__ = [
+    "build_nhl_live_candidate",
+    "_parse_period",
+    "_score_diff_yes_prob",
+]

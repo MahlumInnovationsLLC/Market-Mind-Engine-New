@@ -133,7 +133,10 @@ class _FakePredictor:
 def test_predict_dispatches_to_nhl_builder_and_predictor(monkeypatch):
     fake_predictor = _FakePredictor(prob=0.72)
     import sys
-    sys.modules["app.predictor"] = fake_predictor  # type: ignore[assignment]
+    # Use monkeypatch.setitem so sys.modules is restored after the test —
+    # otherwise downstream tests (task #881 added per-sport predict tests
+    # that go through the real predictor module) see this fake instead.
+    monkeypatch.setitem(sys.modules, "app.predictor", fake_predictor)
     # Also satisfy the relative import inside _predict_live_via_registry.
     import app
     monkeypatch.setattr(app, "predictor", fake_predictor, raising=False)

@@ -61,21 +61,49 @@ from datetime import datetime, timezone
 from typing import Any
 
 from .. import db
+from . import (
+    mlb_live_features,
+    nba_live_features,
+    ncaab_live_features,
+    ncaaf_live_features,
+    nfl_live_features,
+    nhl_live_features,
+)
 from . import nba_live as _nba_live
-from . import nba_live_features
-from . import nhl_live_features as _nhl_features
 from . import soccer_live as _soccer_live
+
+# Alias retained for the vector-style NHL builder registry (task #856).
+_nhl_features = nhl_live_features
+
+
+# Per-league live-feature builder dispatch.  Each builder mirrors the
+# NBA template (``nba_live_features.build_nba_live_candidate``) — same
+# candidate dict shape so the meta-model schema scores every sport on
+# the same 32-feature vector.  Soccer keeps its own dispatcher path
+# (``soccer_live.predict_live_yes``) because its leg-agnostic blend
+# does not route through the meta-model + live gate chain.
+_LIVE_FEATURE_BUILDERS = {
+    "NBA": nba_live_features.build_nba_live_candidate,
+    "NHL": nhl_live_features.build_nhl_live_candidate,
+    "MLB": mlb_live_features.build_mlb_live_candidate,
+    "NFL": nfl_live_features.build_nfl_live_candidate,
+    "NCAAB": ncaab_live_features.build_ncaab_live_candidate,
+    "NCAAF": ncaaf_live_features.build_ncaaf_live_candidate,
+}
 
 
 log = logging.getLogger(__name__)
 
 
 # Sports for which the NBA-style predictor + gate-routed path is
-# wired up (task #855).  These go through
-# ``_predict_live_for_market_nba`` + the live-only gate chain and
+# wired up.  Task #855 launched NBA; task #881 extended the meta-model
+# dispatch to NHL/MLB/NFL/NCAAB/NCAAF.  These go through
+# ``_predict_live_for_market_meta`` + the live-only gate chain and
 # stamp the calibrated YES probability via the
 # ``model_yes_prob + is_live`` UPDATE.
-_PREDICT_LIVE_SUPPORTED_SPORTS: frozenset[str] = frozenset({"nba"})
+_PREDICT_LIVE_SUPPORTED_SPORTS: frozenset[str] = frozenset(
+    {"nba", "nhl", "mlb", "nfl", "ncaab", "ncaaf"}
+)
 
 
 # Per-sport live-prediction wiring registry (task #856 + follow-ups).
@@ -87,7 +115,13 @@ _PREDICT_LIVE_SUPPORTED_SPORTS: frozenset[str] = frozenset({"nba"})
 # task #836 brief stays strictly opt-in: a new league only goes live
 # once both its builder is registered here AND the operator flips
 # ``risk.live_loop_enabled_<sport>`` in runtime_settings.
-_LIVE_FEATURE_BUILDERS = {
+# Vector-style registry (task #856) used by the legacy
+# ``_predict_live_via_registry`` path.  Distinct from the meta-model
+# ``_LIVE_FEATURE_BUILDERS`` above (which returns candidate dicts
+# scored via the per-league calibrator).  Both paths run during a
+# cycle but write through different persistence helpers, so they
+# coexist without double-stamping the same column for the same row.
+_LIVE_VECTOR_BUILDERS = {
     "nhl": _nhl_features.build_nhl_live,
 }
 
@@ -225,6 +259,9 @@ class InGameCycleResult:
     # those whose ``predictions.model_yes_prob`` UPDATE flipped a row.
     candidates_predicted: int = 0
     candidates_prob_updated: int = 0
+    # Per-row exception strings caught during the prediction / persist
+    # paths.  Best-effort: a sick row must never abort the cycle.
+    errors: list[str] = field(default_factory=list)
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -603,32 +640,37 @@ async def _persist_live_model_prob(
 # ---------------------------------------------------------------------------
 
 
-async def _predict_live_for_market_nba(
+async def _predict_live_for_market_meta(
     row: dict[str, Any],
 ) -> dict[str, Any] | None:
-    """Score one live NBA in-game candidate through the predictor chain.
+    """Score one live in-game candidate through the meta-model chain.
 
-    Returns a dict::
+    Generalised dispatcher (task #881) — picks the league-appropriate
+    builder from :data:`_LIVE_FEATURE_BUILDERS` and routes the
+    resulting candidate through the same meta-model + per-league
+    calibrator path the NBA wiring (task #855) established.  Returns
+    ``None`` when the league isn't on the supported list, when the
+    predictor isn't loaded, or when the call errors out.
+
+    Output shape::
 
         {
             "probability": <calibrated YES prob 0..1>,
             "model_name": <active predictor name>,
             "model_version": <active predictor version>,
-            "feature_inputs": <NBA live feature snapshot>,
+            "feature_inputs": <league live feature snapshot>,
             "live_anchor": <live score-diff anchor probability>,
         }
 
-    or ``None`` when the league isn't NBA, when the predictor isn't
-    loaded, or when the call errors out (errors are swallowed and
-    surfaced to the loop's ``errors`` list rather than aborting).
-
-    Routes through the meta-model with ``league="NBA"`` so the per-
-    league calibrator the daily honesty report's Brier-split tracks
-    is the same one applied here — the comparison the operator gates
-    the per-sport flip on is apples-to-apples.
+    Routing through the meta-model with ``league=<LEAGUE>`` ensures
+    the per-league calibrator the daily honesty report's pre-vs-in-
+    game Brier split tracks is the same one applied here — the
+    comparison the operator gates the per-sport flip on stays apples-
+    to-apples across every sport.
     """
     league = (row.get("league") or "").upper().strip()
-    if league.lower() != "nba":
+    builder = _LIVE_FEATURE_BUILDERS.get(league)
+    if builder is None:
         return None
     try:
         from .. import predictor as _predictor
@@ -644,7 +686,7 @@ async def _predict_live_for_market_nba(
         "clock": row.get("clock"),
         "status": row.get("status"),
     }
-    cand = nba_live_features.build_nba_live_candidate(row, live_state=live_state)
+    cand = builder(row, live_state=live_state)
     try:
         fv = build_features(
             cand,
@@ -658,7 +700,7 @@ async def _predict_live_for_market_nba(
         return None
 
     try:
-        pred = await _predictor.predict(list(fv.values), league="NBA")
+        pred = await _predictor.predict(list(fv.values), league=league)
     except _predictor.PredictorUnavailable:
         # Cold cache — the loop just won't write a probability this
         # cycle, identical to the pre-wired stub behaviour.
@@ -707,7 +749,7 @@ async def _predict_live_via_registry(
             if league_in in {l.upper() for l in leagues}:
                 sp = cand_sport
                 break
-    builder = _LIVE_FEATURE_BUILDERS.get(sp)
+    builder = _LIVE_VECTOR_BUILDERS.get(sp)
     if builder is None:
         return None
     try:
@@ -742,6 +784,13 @@ async def _predict_live_via_registry(
     if prob < 0.0 or prob > 1.0:
         return None
     return prob
+
+
+# Backwards-compat alias retained because existing NBA tests
+# (``test_in_game_loop_nba_predict.py``) reach for the historical
+# name directly.  Same dispatcher under the hood — the league check
+# inside ``_predict_live_for_market_meta`` keeps the routing correct.
+_predict_live_for_market_nba = _predict_live_for_market_meta
 
 
 async def _persist_live_model_yes_prob(
@@ -996,7 +1045,7 @@ async def run_in_game_cycle(
     rows_to_check: list[dict[str, Any]] = []
     fresh_rows: list[dict[str, Any]] = []
     to_predict: list[dict[str, Any]] = []
-    has_builder = sp in _LIVE_FEATURE_BUILDERS
+    has_builder = sp in _LIVE_VECTOR_BUILDERS
     for r in rows:
         mid = r.get("market_id")
         if not mid:
@@ -1074,12 +1123,13 @@ async def run_in_game_cycle(
         if await _persist_live_model_prob(str(mid), prob, meta):
             result.live_predictions_persisted += 1
 
-    # NBA-specific predictor path (task #855: NBA goes first on the
-    # meta-model route).  Disjoint from the soccer dispatcher above
-    # by league check.  Scores each live row through
-    # ``predictor.predict(league="NBA")``, routes through the live-
-    # only gate chain (gate_stale_live_state +
-    # gate_live_kelly_multiplier), and stamps the calibrated YES
+    # Meta-model live predictor path (task #855 wired NBA first;
+    # task #881 extended to NHL / MLB / NFL / NCAAB / NCAAF via
+    # the per-sport builders in :data:`_LIVE_FEATURE_BUILDERS`).
+    # Disjoint from the soccer dispatcher above by league check.
+    # Scores each live row through ``predictor.predict(league=<LG>)``,
+    # routes through the live-only gate chain (gate_stale_live_state
+    # + gate_live_kelly_multiplier), and stamps the calibrated YES
     # probability via the model_yes_prob + is_live UPDATE so the
     # daily honesty report's pre-vs-in-game Brier split (Section 9)
     # scores the live prediction.
@@ -1089,7 +1139,7 @@ async def run_in_game_cycle(
             if not mid:
                 continue
             try:
-                pred = await _predict_live_for_market_nba(r)
+                pred = await _predict_live_for_market_meta(r)
             except Exception as e:
                 result.errors.append(
                     f"predict {mid}: {type(e).__name__}: {e}"

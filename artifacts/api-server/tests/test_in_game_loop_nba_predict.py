@@ -46,11 +46,13 @@ def _run(coro):
 
 
 def test_predict_returns_none_for_non_nba(monkeypatch):
-    # MLB / NFL etc. are not on the supported list yet — must short
-    # the predictor entirely so the loop doesn't accidentally score
-    # the row through a builder that wasn't sanity-checked for them.
+    # Task #881 expanded the meta-model dispatcher to NHL/MLB/NFL/
+    # NCAAB/NCAAF so this test now exercises a league that is still
+    # NOT on the supported list — the dispatcher must short-circuit
+    # to None so the loop doesn't accidentally score the row through
+    # a builder that wasn't sanity-checked for the league.
     result = _run(_loop._predict_live_for_market_nba(
-        {"market_id": "KX-MLB-A", "league": "MLB"}
+        {"market_id": "KX-WNBA-A", "league": "WNBA"}
     ))
     assert result is None
 
