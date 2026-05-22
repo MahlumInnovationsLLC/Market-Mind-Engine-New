@@ -130,14 +130,17 @@ def test_enabled_runs_then_cadence_skips_second_call(monkeypatch):
     assert r2.candidates_scanned == 0, "cadence skip must not refetch"
 
 
-def test_predict_live_for_market_is_a_stub():
-    # Per-sport live predictors land in follow-up tasks; until then
-    # the stub returns None so the loop only tags rows + drives the
-    # dashboard tile.
-    result = _run(_loop._predict_live_for_market(
+def test_predict_live_for_market_returns_none_for_unwired_sport():
+    # Soccer is the first sport with a wired predictor (task #857).
+    # NBA / NHL / MLB / NFL etc. still return (None, metadata) so the
+    # loop only tags rows + drives the dashboard tile for them.
+    prob, meta = _run(_loop._predict_live_for_market(
         {"market_id": "KX-NBA-A", "league": "NBA"}
     ))
-    assert result is None
+    assert prob is None
+    assert isinstance(meta, dict)
+    assert meta.get("source") is None
+    assert "NBA" in meta.get("reason", "")
 
 
 def test_minute_bucket_idempotency_within_window(monkeypatch):

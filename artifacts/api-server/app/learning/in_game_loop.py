@@ -43,6 +43,7 @@ new :mod:`app.risk.gates` ``stale_live_state`` and
 """
 from __future__ import annotations
 
+import json
 import logging
 import time
 from dataclasses import dataclass, field
@@ -50,6 +51,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from .. import db
+from . import soccer_live as _soccer_live
 
 
 log = logging.getLogger(__name__)
@@ -120,9 +122,13 @@ SPORT_LEAGUES: dict[str, tuple[str, ...]] = {
     "nfl": ("NFL",),
     "ncaab": ("NCAAB",),
     "ncaaf": ("NCAAF",),
+    # Canonical soccer league names (match ``predictions.league`` —
+    # see ``app.sports.soccer_context.SOCCER_LEAGUES`` and
+    # ``app.verticals.builtins`` for the source of truth).  Earlier
+    # drafts of this list used the longer spellings (BUNDESLIGA /
+    # SERIE_A / LIGUE_1) which never matched any row.
     "soccer": (
-        "EPL", "LALIGA", "BUNDESLIGA", "SERIE_A", "LIGUE_1",
-        "MLS", "UCL",
+        "EPL", "LALIGA", "SERIEA", "BUNDES", "LIGUE1", "MLS", "UCL",
     ),
 }
 
@@ -167,6 +173,12 @@ class InGameCycleResult:
     best_line_checks: int = 0
     best_line_blocks: int = 0
     best_line_reroutes: int = 0
+    # Per-sport live prediction wiring counters (task #857 — soccer
+    # is the first sport with a wired predictor).  Both default 0 so
+    # sports without a wired predictor produce a result indistinguishable
+    # from the original tag-only loop.
+    live_predictions_computed: int = 0
+    live_predictions_persisted: int = 0
     errors: list[str] = field(default_factory=list)
 
     def as_dict(self) -> dict[str, Any]:
@@ -185,6 +197,8 @@ class InGameCycleResult:
             "best_line_checks": self.best_line_checks,
             "best_line_blocks": self.best_line_blocks,
             "best_line_reroutes": self.best_line_reroutes,
+            "live_predictions_computed": self.live_predictions_computed,
+            "live_predictions_persisted": self.live_predictions_persisted,
             "errors": list(self.errors),
         }
 
@@ -419,15 +433,89 @@ async def _evaluate_best_line_for_live_row(
     return str(decision) if decision else None
 
 
-async def _predict_live_for_market(row: dict[str, Any]) -> float | None:  # noqa: ARG001
-    """Stub: per-sport live prediction wiring lands as follow-up tasks
-    (#831 niche-sport calibration; per-sport in-game predictors after
-    the calibrated shadow-Brier criterion is met).
+async def _predict_live_for_market(
+    row: dict[str, Any],
+) -> tuple[float | None, dict[str, Any]]:
+    """Dispatch a live prediction for ``row``.
 
-    Until then this returns None and the loop only tags rows + drives
-    dashboard counts so operators can see the schedule is live.
+    Returns ``(probability, metadata)``.  ``probability`` is None when
+    no per-sport predictor is wired for the row's league (the loop
+    treats that as "tag is_live, but no model update this cycle"),
+    or when the wired predictor itself returns None (insufficient
+    signal — see e.g. ``soccer_live.predict_live_yes``).
+
+    Per-sport routing:
+      * Soccer (task #857) — ``app.learning.soccer_live`` shared
+        across the seven mapped leagues (EPL / LALIGA / SERIEA /
+        BUNDES / LIGUE1 / MLS / UCL).  Ships in shadow mode: the
+        loop's per-sport enable flag (``risk.live_loop_enabled_soccer``)
+        is False by default so this code path is exercised by the
+        operator-driven rollout, not by an automatic flip.
+      * Other sports — no wired predictor yet (per-sport in-game
+        wiring lands as follow-up tasks once each sport's shadow
+        Brier crosses the 0.02-of-pre-game criterion).
     """
-    return None
+    league = (row.get("league") or "").strip().upper()
+    if _soccer_live.is_soccer_league(league):
+        try:
+            return await _soccer_live.predict_live_yes(row)
+        except Exception as e:  # pragma: no cover — defensive
+            log.warning(
+                "soccer_live predict failed for market=%s league=%s: %s",
+                row.get("market_id"), league, e,
+            )
+            return None, {"source": "soccer_live", "error": str(e)[:240]}
+    return None, {"source": None, "reason": f"no wired predictor for {league}"}
+
+
+async def _persist_live_model_prob(
+    market_id: str, probability: float, metadata: dict[str, Any]
+) -> bool:
+    """Update ``predictions.model_yes_prob`` with a freshly-computed
+    live probability.  Returns True when the row was updated.
+
+    The orchestrator's next cycle will pick this value up and build
+    its ``RiskContext`` with ``is_live=True`` (because the same row
+    carries the ``is_live`` tag this loop already sets), so the
+    ``gate_stale_live_state`` + ``gate_live_kelly_multiplier`` live
+    gates apply.
+
+    Best-effort: failures are logged at WARN and treated as a no-op
+    so a sick row can never abort the cycle.
+    """
+    if not market_id:
+        return False
+    try:
+        p = max(0.0, min(1.0, float(probability)))
+    except (TypeError, ValueError):
+        return False
+    try:
+        result = await db.execute(
+            """
+            UPDATE predictions
+               SET model_yes_prob = $2,
+                   metadata = coalesce(metadata, '{}'::jsonb)
+                              || jsonb_build_object('live_prediction', $3::jsonb)
+             WHERE kalshi_market_id = $1
+            """,
+            market_id,
+            p,
+            json.dumps(metadata or {}, default=str),
+        )
+        if isinstance(result, str):
+            parts = result.split()
+            if len(parts) == 2 and parts[0].upper() == "UPDATE":
+                try:
+                    return int(parts[1]) > 0
+                except ValueError:
+                    return False
+        return False
+    except Exception as e:  # pragma: no cover — defensive
+        log.warning(
+            "in_game_loop _persist_live_model_prob(%s) failed: %s",
+            market_id, e,
+        )
+        return False
 
 
 async def run_in_game_cycle(
@@ -492,6 +580,7 @@ async def run_in_game_cycle(
     bucket = _minute_bucket(now)
     to_tag: list[str] = []
     rows_to_check: list[dict[str, Any]] = []
+    fresh_rows: list[dict[str, Any]] = []
     for r in rows:
         mid = r.get("market_id")
         if not mid:
@@ -511,6 +600,7 @@ async def run_in_game_cycle(
             result.candidates_skipped_duplicate += 1
             continue
         _TAGGED_THIS_MINUTE[key] = monotonic
+        fresh_rows.append(r)
         if not r.get("is_live"):
             to_tag.append(str(mid))
 
@@ -544,6 +634,26 @@ async def run_in_game_cycle(
             result.best_line_blocks += 1
         elif decision == "reroute_polymarket":
             result.best_line_reroutes += 1
+
+    # Per-sport live prediction wiring.  Soccer (#857) is the first
+    # sport with a wired predictor; other sports' dispatchers return
+    # (None, _) so the loop only tags rows + drives dashboard counts.
+    # Failures on individual rows are captured per-row and never
+    # abort the cycle.
+    for r in fresh_rows:
+        mid = r.get("market_id")
+        try:
+            prob, meta = await _predict_live_for_market(r)
+        except Exception as e:  # pragma: no cover — defensive
+            result.errors.append(
+                f"predict_live {mid}: {type(e).__name__}: {e}"[:240]
+            )
+            continue
+        if prob is None:
+            continue
+        result.live_predictions_computed += 1
+        if await _persist_live_model_prob(str(mid), prob, meta):
+            result.live_predictions_persisted += 1
 
     result.completed_at = datetime.now(timezone.utc).isoformat()
     result.duration_seconds = time.perf_counter() - started_perf
