@@ -136,16 +136,18 @@ def test_predict_live_for_market_returns_none_for_unwired_sport():
     # `nba_live`) and on its own meta-model path (task #855 via
     # `_predict_live_for_market_nba`); the two paths coexist in
     # `run_in_game_cycle` and are league-disjoint everywhere else.
-    # NHL / MLB / NFL still return (None, metadata) on the generic
-    # dispatcher — the loop only tags rows + drives the dashboard
-    # tile for them.
+    # NHL is wired on the generic dispatcher (task #885 via
+    # `nhl_live`) AND on its own meta-model path (task #881 via
+    # `_predict_live_for_market_meta`).  MLB / NFL still return
+    # (None, metadata) on the generic dispatcher — the loop only
+    # tags rows + drives the dashboard tile for them.
     prob, meta = _run(_loop._predict_live_for_market(
-        {"market_id": "KX-NHL-A", "league": "NHL"}
+        {"market_id": "KX-MLB-A", "league": "MLB"}
     ))
     assert prob is None
     assert isinstance(meta, dict)
     assert meta.get("source") is None
-    assert "NHL" in meta.get("reason", "")
+    assert "MLB" in meta.get("reason", "")
 
 
 def test_minute_bucket_idempotency_within_window(monkeypatch):

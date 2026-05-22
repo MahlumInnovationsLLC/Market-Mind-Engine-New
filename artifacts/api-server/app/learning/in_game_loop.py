@@ -70,6 +70,7 @@ from . import (
     nhl_live_features,
 )
 from . import nba_live as _nba_live
+from . import nhl_live as _nhl_live
 from . import soccer_live as _soccer_live
 
 # Alias retained for the vector-style NHL builder registry (task #856).
@@ -551,6 +552,11 @@ async def _predict_live_for_market(
         is flipped via the operator console once Section 9 of the
         daily honesty report shows the NBA pre-vs-in-game Brier
         delta is within 0.02 of the pre-game model.
+      * NHL (task #885) — ``app.learning.nhl_live``.  Same shadow-
+        mode rollout: ``risk.live_loop_enabled_nhl`` ships False and
+        is flipped via the operator console once Section 9 of the
+        daily honesty report shows the NHL pre-vs-in-game Brier
+        delta is within 0.02 of the pre-game model.
       * Other sports — no wired predictor yet (per-sport in-game
         wiring lands as follow-up tasks once each sport's shadow
         Brier crosses the 0.02-of-pre-game criterion).
@@ -574,6 +580,15 @@ async def _predict_live_for_market(
                 row.get("market_id"), league, e,
             )
             return None, {"source": "nba_live", "error": str(e)[:240]}
+    if _nhl_live.is_nhl_league(league):
+        try:
+            return await _nhl_live.predict_live_yes(row)
+        except Exception as e:  # pragma: no cover — defensive
+            log.warning(
+                "nhl_live predict failed for market=%s league=%s: %s",
+                row.get("market_id"), league, e,
+            )
+            return None, {"source": "nhl_live", "error": str(e)[:240]}
     return None, {"source": None, "reason": f"no wired predictor for {league}"}
 
 

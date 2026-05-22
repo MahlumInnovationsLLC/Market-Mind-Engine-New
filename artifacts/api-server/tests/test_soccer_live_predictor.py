@@ -393,11 +393,12 @@ def test_cycle_persists_live_prediction_for_soccer(monkeypatch):
 
 
 def test_cycle_does_not_persist_for_unwired_sport(monkeypatch):
-    # NHL is the next unwired sport now that NBA is live (task #878);
-    # this exercises the "tag is_live but no model update" path.
+    # MLB is the next unwired sport on the generic dispatcher now that
+    # NBA (task #878) and NHL (task #885) are both live; this
+    # exercises the "tag is_live but no model update" path.
     fake = _CycleFakeDB(
         rows=[{
-            "market_id": "KX-NHL-A", "league": "NHL",
+            "market_id": "KX-MLB-A", "league": "MLB",
             "game_id": "g1", "game_time": None, "is_live": False,
             "model_yes_prob": 0.6, "kalshi_price": 0.5,
             "status": "inprogress", "state_age_seconds": 5.0,
@@ -408,7 +409,7 @@ def test_cycle_does_not_persist_for_unwired_sport(monkeypatch):
     monkeypatch.setattr(_loop, "db", fake)
     monkeypatch.setattr(_sl, "db", fake)
 
-    r = _run(_loop.run_in_game_cycle("nhl"))
+    r = _run(_loop.run_in_game_cycle("mlb"))
     assert r.candidates_tagged == 1
     assert r.live_predictions_computed == 0
     assert r.live_predictions_persisted == 0

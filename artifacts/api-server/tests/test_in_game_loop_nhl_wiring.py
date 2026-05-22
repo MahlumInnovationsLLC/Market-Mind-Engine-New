@@ -241,13 +241,17 @@ def test_nhl_cycle_invokes_predictor_and_persists(monkeypatch):
     assert r.candidates_live == 1
     assert r.candidates_predicted == 1
     assert r.candidates_prob_updated == 1
-    # Two writes: one to tag is_live, one to persist the live prob.
+    # Writes: one to tag is_live, then a persist from the generic
+    # dispatcher (task #885 wired NHL on the same generic path NBA
+    # uses) AND a persist from the registry path.  Both write the
+    # same column; the registry one carries the meta-model 0.81.
     kinds = [k for k, _ in fake_db.update_calls]
     assert kinds.count("tag") == 1
-    assert kinds.count("persist") == 1
-    persist_args = next(args for k, args in fake_db.update_calls if k == "persist")
-    assert persist_args[0] == "KX-NHL-A"
-    assert persist_args[1] == 0.81
+    assert kinds.count("persist") >= 1
+    persist_probs = [args[1] for k, args in fake_db.update_calls if k == "persist"]
+    assert 0.81 in persist_probs
+    persist_mids = {args[0] for k, args in fake_db.update_calls if k == "persist"}
+    assert persist_mids == {"KX-NHL-A"}
     # Predictor saw the NHL league for calibration.
     assert fake_predictor.calls[0][1] == "NHL"
 
@@ -300,4 +304,10 @@ def test_nhl_cycle_continues_when_predictor_returns_none(monkeypatch):
     assert r.candidates_prob_updated == 0
     # Tag still happened so the dashboard tile + risk gates see the row as live.
     assert any(k == "tag" for k, _ in fake_db.update_calls)
-    assert not any(k == "persist" for k, _ in fake_db.update_calls)
+    # The registry path didn't persist (meta-model predictor raised) — but
+    # the generic dispatcher (task #885 — closed-form blend of pre-game
+    # prior + market mid) is unaffected by the meta-model outage and still
+    # writes its own model_yes_prob refresh.  That's the whole point of
+    # carrying the generic path alongside the meta-model path.
+    persist_mids = {args[0] for k, args in fake_db.update_calls if k == "persist"}
+    assert persist_mids <= {"KX-NHL-B"}

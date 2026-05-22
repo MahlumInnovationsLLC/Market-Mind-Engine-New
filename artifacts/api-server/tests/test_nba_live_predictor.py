@@ -204,9 +204,10 @@ def test_dispatcher_skips_nba_when_no_signal(monkeypatch):
 
 
 def test_dispatcher_still_returns_none_for_unwired_league():
-    # Sanity: an unrelated league (e.g. NHL) keeps falling through.
+    # Sanity: an unrelated league (e.g. WNBA) keeps falling through.
+    # (NHL was wired in task #885 so it no longer falls through.)
     prob, meta = _run(_loop._predict_live_for_market({
-        "market_id": "KX-NHL-A", "league": "NHL", "game_id": "g1",
+        "market_id": "KX-WNBA-A", "league": "WNBA", "game_id": "g1",
         "model_yes_prob": 0.6, "kalshi_price": 0.55,
     }))
     assert prob is None
