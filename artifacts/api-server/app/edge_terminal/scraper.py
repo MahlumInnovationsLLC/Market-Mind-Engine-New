@@ -131,6 +131,20 @@ async def scrape_signals() -> list[dict[str, Any]]:
                 # Some flows land on `/` first.  Navigate manually.
                 await page.goto(EDGE_TERMINAL_URL, wait_until="domcontentloaded")
 
+            # Verify the login actually succeeded — if the page is
+            # still on the login URL (bad credentials, captcha, etc.)
+            # raise a clear error so the dashboard greys the tile with
+            # an actionable message instead of silently returning [].
+            try:
+                final_url = page.url or ""
+            except Exception:
+                final_url = ""
+            if "/login" in final_url.lower():
+                raise ScraperUnavailable(
+                    "edge terminal login failed — check EDGE_TERMINAL_EMAIL "
+                    "/ EDGE_TERMINAL_PASSWORD secrets"
+                )
+
             # ---- Scrape signal-badged tiles ----
             #
             # Superset selector: any element whose data-axiom-signal
@@ -208,10 +222,32 @@ async def _extract_tile(handle: Any) -> dict[str, Any] | None:
         except (TypeError, ValueError):
             return None
 
+    # Pick direction.  Prefer an explicit ``data-side`` attribute
+    # (``YES`` / ``NO``) when present; otherwise infer from the
+    # selection text — picks that say "Under", "No", "Below" trade
+    # the NO side of the Kalshi market; everything else (team names,
+    # "Over", "Yes", spreads) maps to YES.  Defaulting to YES on
+    # ambiguous picks is the historic behaviour the executor relied on
+    # before this fix; we now at least flip the obvious NO cases.
+    side = (await _attr("side") or "").upper().strip()
+    if side not in ("YES", "NO"):
+        s_lower = (selection or "").strip().lower()
+        if (
+            s_lower.startswith("under ")
+            or s_lower.startswith("no ")
+            or s_lower.startswith("below ")
+            or s_lower == "under"
+            or s_lower == "no"
+        ):
+            side = "NO"
+        else:
+            side = "YES"
+
     return {
         "vertical": vertical.lower(),
         "matchup": matchup,
         "selection": selection,
+        "side": side,
         "signal_date": _today_utc_iso(),
         "edge_pct": _maybe_float(await _attr("edge")),
         "model_prob": _maybe_float(await _attr("model-prob")),

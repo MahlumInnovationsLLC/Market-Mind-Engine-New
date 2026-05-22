@@ -16,12 +16,18 @@ Two-mode enum:
                          old view.
 
 Default on a fresh install is ``edge_terminal`` (migration 0055 seeds
-the row).  Boot calls :func:`ensure_seeded` which is a no-op when the
-row already exists, so an operator-flipped value survives restarts.
+the row).  :func:`ensure_seeded` is called on every boot and, by
+default, FORCES the input mode back to ``edge_terminal`` so a fresh
+redeploy can never accidentally leave the operator on the LLM
+pipeline.  Operators that want their runtime override (``pipeline``)
+to survive restarts can set ``AXIOM_FORCE_EDGE_TERMINAL_ON_BOOT=0``
+in the environment; in that mode :func:`ensure_seeded` only seeds a
+default when the row is missing.
 """
 from __future__ import annotations
 
 import logging
+import os
 from typing import Literal
 
 from .. import db
@@ -78,16 +84,46 @@ async def set_input_mode(mode: str) -> str:
     return s
 
 
-async def ensure_seeded() -> str:
-    """Boot-time enforcement that ``app.input_mode`` is
-    ``edge_terminal``.
+_FORCE_ON_BOOT_ENV = "AXIOM_FORCE_EDGE_TERMINAL_ON_BOOT"
 
-    Task #844 requires the app to default to Edge Terminal mode on
-    every boot/redeploy, regardless of any prior operator override.
-    Operators can still flip back to ``pipeline`` at runtime via the
-    POST /api/edge-terminal/input-mode endpoint; that change persists
-    only for the lifetime of the running process.
+
+def _force_on_boot() -> bool:
+    raw = (os.environ.get(_FORCE_ON_BOOT_ENV) or "1").strip().lower()
+    return raw in ("1", "true", "yes", "on")
+
+
+async def ensure_seeded() -> str:
+    """Boot-time seed for ``app.input_mode``.
+
+    Default behaviour (``AXIOM_FORCE_EDGE_TERMINAL_ON_BOOT`` unset or
+    truthy): always reset the row to ``edge_terminal`` so a redeploy
+    can never leave the operator on the LLM pipeline.
+
+    Opt-out behaviour (``AXIOM_FORCE_EDGE_TERMINAL_ON_BOOT=0``): only
+    seed when the row is missing; an operator-flipped ``pipeline``
+    value survives restarts.
+
+    Always returns the resulting mode (never raises — boot must not
+    fail because of a transient DB hiccup).
     """
+    if _force_on_boot():
+        try:
+            await set_input_mode(INPUT_MODE_EDGE_TERMINAL)
+        except Exception as e:  # pragma: no cover — defensive
+            log.warning("input_mode boot force-seed failed: %s", e)
+        return INPUT_MODE_EDGE_TERMINAL
+    # Preserve existing operator value if present.
+    try:
+        existing = await db.fetchval(
+            "SELECT value FROM system_settings WHERE key = $1",
+            _SETTING_KEY,
+        )
+    except Exception as e:  # pragma: no cover — defensive
+        log.warning("input_mode read on boot failed: %s", e)
+        existing = None
+    s = (existing or "").strip().lower()
+    if s in VALID_INPUT_MODES:
+        return s
     try:
         await set_input_mode(INPUT_MODE_EDGE_TERMINAL)
     except Exception as e:  # pragma: no cover — defensive

@@ -113,15 +113,20 @@ async def stop() -> None:
 
 
 async def _loop() -> None:
+    # Keep the task alive across runtime mode flips — only an explicit
+    # ``stop()`` (or process shutdown) ends the loop.  When the mode is
+    # ``pipeline`` we just skip the scrape/drain and re-check on the
+    # next tick so a DB-side flip back to ``edge_terminal`` resumes
+    # polling without needing a process restart.
     while not _stop.is_set():
         try:
             current_mode = await control.get_input_mode()
-            if current_mode != control.INPUT_MODE_EDGE_TERMINAL:
-                log.info(
-                    "edge_terminal poller exiting (input_mode=%s)", current_mode
+            if current_mode == control.INPUT_MODE_EDGE_TERMINAL:
+                await _one_tick()
+            else:
+                log.debug(
+                    "edge_terminal poller idle (input_mode=%s)", current_mode
                 )
-                return
-            await _one_tick()
         except asyncio.CancelledError:
             raise
         except Exception as e:

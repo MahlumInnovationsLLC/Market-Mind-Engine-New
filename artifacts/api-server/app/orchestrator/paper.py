@@ -236,6 +236,7 @@ async def place_order(
     kelly: float | None,
     exchange: str = "kalshi",
     cand: dict | None = None,
+    placed_by: str = "orchestrator",
 ) -> dict[str, Any]:
     """Place a paper (or live) trade routed to ``exchange``.
 
@@ -416,10 +417,14 @@ async def place_order(
             metadata_json,
             # The orchestrator path inserts trades on behalf of the
             # autotrader / cycle / swarm.  Tag every row with
-            # ``placed_by='orchestrator'`` so the analytics filter
-            # can split system trades from manual UI trades.  Migration
-            # 0039 added the column.
-            "orchestrator",
+            # ``placed_by`` (default ``orchestrator``) so the analytics
+            # filter can split system trades from manual UI trades.
+            # Callers may pass an explicit tag (e.g. ``edge_terminal``)
+            # so the trade row is correctly attributed AT INSERT TIME
+            # rather than via a follow-up UPDATE that races against
+            # any aggregator reading the row.  Migration 0039 added
+            # the column.
+            (placed_by or "orchestrator").strip().lower() or "orchestrator",
         )
     except Exception as e:
         log.error("trade insert failed: %s", e)

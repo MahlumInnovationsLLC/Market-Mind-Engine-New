@@ -77,7 +77,15 @@ async def _fire_one(sig: dict[str, Any]) -> dict[str, Any] | None:
 
     # Pricing — prefer scraped market_price, else assume a near-the-
     # money mid so the lifecycle's clamp keeps us in [0.01, 0.99].
-    price = float(sig.get("market_price") or 0.50)
+    # Use an explicit None check so a genuine 0.0 quote isn't silently
+    # coerced to 0.50 by Python's falsiness — a 0-priced quote is
+    # almost certainly a scrape glitch, but we want it to fail loudly
+    # downstream rather than be papered over.
+    raw_price = sig.get("market_price")
+    try:
+        price = float(raw_price) if raw_price is not None else 0.50
+    except (TypeError, ValueError):
+        price = 0.50
     price = max(0.01, min(0.99, price))
 
     model_prob = sig.get("model_prob")
@@ -88,6 +96,27 @@ async def _fire_one(sig: dict[str, Any]) -> dict[str, Any] | None:
         except (TypeError, ValueError):
             model_prob = None
 
+    # Side defaults to YES (historic behavior) but honors the scraper's
+    # explicit ``side`` field when present so "Under"/"No" picks trade
+    # the NO side of the Kalshi market.  Using the wrong side here
+    # would buy the opposite of the intended pick — the single most
+    # dangerous mis-trade this executor could make.
+    raw_side = (sig.get("side") or "YES")
+    side = "NO" if str(raw_side).strip().upper() == "NO" else "YES"
+
+    # Kelly is computed in the chosen side's coordinate system: NO at
+    # the YES-quoted price=p costs (1-p) per contract and wins 1 when
+    # the YES outcome doesn't occur (prob = 1-model_prob).
+    if side == "NO":
+        side_price = max(0.01, min(0.99, 1.0 - price))
+        side_prob = (
+            None if model_prob is None
+            else max(0.01, min(0.99, 1.0 - float(model_prob)))
+        )
+    else:
+        side_price = price
+        side_prob = model_prob
+
     # Match paper.place_order's effective-mode resolution so sizing
     # uses the live bankroll when the operator has flipped live mode.
     effective_mode = (get_settings().trading_mode or "paper").strip().lower()
@@ -96,18 +125,22 @@ async def _fire_one(sig: dict[str, Any]) -> dict[str, Any] | None:
     bankroll = await cycle_module._latest_bankroll(trading_mode=effective_mode) or 0.0
     quantity, kelly_fraction = _quarter_kelly_quantity(
         bankroll=bankroll,
-        model_prob=model_prob,
-        price=price,
+        model_prob=side_prob,
+        price=side_price,
     )
     if quantity < 1:
         return None
 
     edge_signed = None
     if model_prob is not None:
-        edge_signed = float(model_prob) - price
+        # Sign edge from the chosen side's perspective.
+        edge_signed = (
+            float(model_prob) - price if side == "YES"
+            else price - float(model_prob)
+        )
     ctx = RiskContext(
         market_id=ticker,
-        side="YES",
+        side=side,
         vertical=sig.get("vertical") or "sports",
         league=None,
         market_type=None,
@@ -134,7 +167,11 @@ async def _fire_one(sig: dict[str, Any]) -> dict[str, Any] | None:
         "kalshi_price": price,
         "source": "edge_terminal",
     }
-    result = await paper_module.place_order(
+    # Tag the trade as ``edge_terminal`` AT INSERT TIME by threading
+    # ``placed_by`` through paper.place_order — previously we did a
+    # follow-up UPDATE which raced against any aggregator reading the
+    # ``trades`` row in the gap between the INSERT and the UPDATE.
+    return await paper_module.place_order(
         ctx,
         debate_id=None,
         consensus=model_prob,
@@ -142,25 +179,8 @@ async def _fire_one(sig: dict[str, Any]) -> dict[str, Any] | None:
         kelly=kelly_fraction,
         exchange="kalshi",
         cand=cand,
+        placed_by="edge_terminal",
     )
-    # Re-tag the trade row as edge_terminal so the dashboard filter
-    # can separate sources.  paper.place_order hard-codes
-    # placed_by='orchestrator'; we patch via a follow-up UPDATE since
-    # threading a parameter through the entire dispatcher is invasive
-    # for a single use-case.
-    trades_id = result.get("trades_id")
-    if trades_id:
-        try:
-            await db.execute(
-                "UPDATE trades SET placed_by = 'edge_terminal' WHERE id = $1",
-                int(trades_id),
-            )
-        except Exception as e:  # pragma: no cover — defensive
-            log.warning(
-                "edge_terminal placed_by retag failed (trade_id=%s): %s",
-                trades_id, e,
-            )
-    return result
 
 
 def _quarter_kelly_quantity(

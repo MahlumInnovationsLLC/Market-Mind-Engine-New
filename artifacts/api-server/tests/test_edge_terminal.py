@@ -84,9 +84,10 @@ def test_control_set_invalid_raises(monkeypatch):
 
 
 def test_control_ensure_seeded_forces_edge_terminal_on_boot(monkeypatch):
-    """Task #844: every boot must reset to edge_terminal regardless
+    """Task #844 default: every boot resets to edge_terminal regardless
     of any prior operator-flipped value."""
     from app.edge_terminal import control
+    monkeypatch.delenv("AXIOM_FORCE_EDGE_TERMINAL_ON_BOOT", raising=False)
     fake = _FakeDB({"app.input_mode": "pipeline"})
     _patch_db(monkeypatch, fake)
     assert _run(control.ensure_seeded()) == "edge_terminal"
@@ -95,6 +96,27 @@ def test_control_ensure_seeded_forces_edge_terminal_on_boot(monkeypatch):
 
 def test_control_ensure_seeded_writes_default_when_missing(monkeypatch):
     from app.edge_terminal import control
+    monkeypatch.delenv("AXIOM_FORCE_EDGE_TERMINAL_ON_BOOT", raising=False)
+    fake = _FakeDB()
+    _patch_db(monkeypatch, fake)
+    assert _run(control.ensure_seeded()) == "edge_terminal"
+    assert fake.kv["app.input_mode"] == "edge_terminal"
+
+
+def test_control_ensure_seeded_preserves_existing_when_force_off(monkeypatch):
+    """Audit fix: AXIOM_FORCE_EDGE_TERMINAL_ON_BOOT=0 preserves the
+    operator-flipped value across restarts."""
+    from app.edge_terminal import control
+    monkeypatch.setenv("AXIOM_FORCE_EDGE_TERMINAL_ON_BOOT", "0")
+    fake = _FakeDB({"app.input_mode": "pipeline"})
+    _patch_db(monkeypatch, fake)
+    assert _run(control.ensure_seeded()) == "pipeline"
+    assert fake.kv["app.input_mode"] == "pipeline"
+
+
+def test_control_ensure_seeded_force_off_still_seeds_when_missing(monkeypatch):
+    from app.edge_terminal import control
+    monkeypatch.setenv("AXIOM_FORCE_EDGE_TERMINAL_ON_BOOT", "0")
     fake = _FakeDB()
     _patch_db(monkeypatch, fake)
     assert _run(control.ensure_seeded()) == "edge_terminal"
@@ -160,9 +182,59 @@ def test_resolver_direct_ticker_passthrough(monkeypatch):
     async def _explode(*a, **k):  # would only be called on fallback
         raise AssertionError("db.fetch should not be called")
 
+    async def _ticker_known(_q, *args, **kwargs):
+        return 1  # ticker exists in markets cache
+
     monkeypatch.setattr(market_resolver.db, "fetch", _explode)
+    monkeypatch.setattr(market_resolver.db, "fetchval", _ticker_known)
     out = _run(market_resolver.resolve({"kalshi_ticker": "KX-NBA-LAL-1"}))
     assert out == "KX-NBA-LAL-1"
+
+
+def test_resolver_unknown_direct_ticker_falls_through_to_title(monkeypatch):
+    """Audit fix: scraped tickers must be validated against the markets
+    cache; an unknown ticker falls through to the title-match path."""
+    from app.edge_terminal import market_resolver
+
+    async def _ticker_missing(_q, *args, **kwargs):
+        return None
+
+    async def _fake_fetch(_q, *args, **kwargs):
+        return [{"ticker": "KX-NBA-LAL-BOS", "title": "Lakers vs Celtics"}]
+
+    monkeypatch.setattr(market_resolver.db, "fetchval", _ticker_missing)
+    monkeypatch.setattr(market_resolver.db, "fetch", _fake_fetch)
+    out = _run(market_resolver.resolve({
+        "kalshi_ticker": "KX-STALE",
+        "matchup": "Lakers @ Celtics",
+        "selection": "Lakers",
+    }))
+    assert out == "KX-NBA-LAL-BOS"
+
+
+def test_resolver_anchors_on_longest_token(monkeypatch):
+    """Audit fix: ILIKE anchor must be the longest unique token, not
+    ``tokens[0]`` — otherwise short stopwords (vs/at/on) dump
+    unrelated markets into the scorer."""
+    from app.edge_terminal import market_resolver
+
+    captured: list[tuple[str, ...]] = []
+
+    async def _fake_fetch(_q, *args, **kwargs):
+        captured.append(args)
+        return []
+
+    async def _ticker_known(*a, **k):
+        return None
+
+    monkeypatch.setattr(market_resolver.db, "fetch", _fake_fetch)
+    monkeypatch.setattr(market_resolver.db, "fetchval", _ticker_known)
+    _run(market_resolver.resolve({
+        "matchup": "vs at on",  # 3 short stopwords
+        "selection": "Manchester",
+    }))
+    assert captured, "fetch should have been called"
+    assert "%manchester%" in captured[0][0].lower()
 
 
 def test_resolver_token_overlap_picks_best(monkeypatch):
@@ -176,7 +248,11 @@ def test_resolver_token_overlap_picks_best(monkeypatch):
     async def _fake_fetch(_q, *args, **kwargs):
         return rows
 
+    async def _ticker_known(*a, **k):
+        return None
+
     monkeypatch.setattr(market_resolver.db, "fetch", _fake_fetch)
+    monkeypatch.setattr(market_resolver.db, "fetchval", _ticker_known)
     out = _run(market_resolver.resolve({
         "matchup": "Lakers @ Celtics", "selection": "Lakers",
     }))
@@ -191,12 +267,37 @@ def test_resolver_returns_none_below_overlap_threshold(monkeypatch):
     async def _fake_fetch(_q, *args, **kwargs):
         return rows
 
+    async def _ticker_known(*a, **k):
+        return None
+
     monkeypatch.setattr(market_resolver.db, "fetch", _fake_fetch)
+    monkeypatch.setattr(market_resolver.db, "fetchval", _ticker_known)
     # Only "lakers" overlaps the title; "warriors" and "win" do not.
     out = _run(market_resolver.resolve({
         "matchup": "Warriors vs Suns", "selection": "Warriors win",
     }))
     assert out is None
+
+
+def test_resolver_single_token_signal_allows_one_overlap(monkeypatch):
+    """Audit fix: crypto/forex picks naturally produce <2 unique tokens
+    (e.g. "BTC"); requiring 2 overlaps would always skip them."""
+    from app.edge_terminal import market_resolver
+
+    rows = [{"ticker": "KX-BTC-100K", "title": "BTC closes above 100k"}]
+
+    async def _fake_fetch(_q, *args, **kwargs):
+        return rows
+
+    async def _ticker_known(*a, **k):
+        return None
+
+    monkeypatch.setattr(market_resolver.db, "fetch", _fake_fetch)
+    monkeypatch.setattr(market_resolver.db, "fetchval", _ticker_known)
+    out = _run(market_resolver.resolve({
+        "matchup": "BTC", "selection": "",
+    }))
+    assert out == "KX-BTC-100K"
 
 
 def test_resolver_db_error_returns_none(monkeypatch):
@@ -205,7 +306,11 @@ def test_resolver_db_error_returns_none(monkeypatch):
     async def _boom(*a, **k):
         raise RuntimeError("db down")
 
+    async def _ticker_known(*a, **k):
+        return None
+
     monkeypatch.setattr(market_resolver.db, "fetch", _boom)
+    monkeypatch.setattr(market_resolver.db, "fetchval", _ticker_known)
     out = _run(market_resolver.resolve({
         "matchup": "Lakers @ Celtics", "selection": "Lakers",
     }))
@@ -216,11 +321,13 @@ def test_resolver_db_error_returns_none(monkeypatch):
 # executor._fire_one — full flow with paper.place_order stubbed.
 # ---------------------------------------------------------------------
 
-def test_fire_one_resolves_ticker_sizes_and_retags(monkeypatch):
+def test_fire_one_resolves_ticker_sizes_and_tags_at_insert(monkeypatch):
+    """Audit fix: ``placed_by='edge_terminal'`` is threaded through
+    paper.place_order at insert time rather than via a racy follow-up
+    UPDATE."""
     from app.edge_terminal import executor
 
     placed: list[dict[str, Any]] = []
-    updates: list[tuple[str, tuple[Any, ...]]] = []
 
     async def _resolve(sig):
         return "KX-NBA-LAL-1"
@@ -233,7 +340,10 @@ def test_fire_one_resolves_ticker_sizes_and_retags(monkeypatch):
         return {"trades_id": 4242, "status": "placed"}
 
     async def _execute(q, *args):
-        updates.append((q, args))
+        raise AssertionError(
+            "executor must NOT issue a follow-up UPDATE — placed_by is "
+            "now threaded through paper.place_order at insert time"
+        )
 
     monkeypatch.setattr(executor.market_resolver, "resolve", _resolve)
     monkeypatch.setattr(executor.cycle_module, "_latest_bankroll", _bankroll)
@@ -252,16 +362,52 @@ def test_fire_one_resolves_ticker_sizes_and_retags(monkeypatch):
     out = _run(executor._fire_one(sig))
     assert out is not None
     assert out["trades_id"] == 4242
-    # ctx is RiskContext-shaped
     ctx = placed[0]["ctx"]
     assert ctx.market_id == "KX-NBA-LAL-1"
     assert ctx.side == "YES"
     assert ctx.intended_quantity in (99, 100)  # quarter-Kelly @ 0.50 (FP rounding)
-    # Re-tag UPDATE fired against trades table.
-    assert any(
-        "UPDATE trades" in q and "edge_terminal" in q and args == (4242,)
-        for q, args in updates
-    )
+    # placed_by was tagged at insert time.
+    assert placed[0]["kwargs"].get("placed_by") == "edge_terminal"
+
+
+def test_fire_one_honors_no_side(monkeypatch):
+    """Audit fix: a scraper-provided ``side='NO'`` must reach the
+    RiskContext rather than being silently flipped to YES."""
+    from app.edge_terminal import executor
+
+    placed: list[dict[str, Any]] = []
+
+    async def _resolve(sig):
+        return "KX-NBA-OU-1"
+
+    async def _bankroll(trading_mode="paper"):
+        return 1000.0
+
+    async def _place_order(ctx, **kwargs):
+        placed.append({"ctx": ctx, "kwargs": kwargs})
+        return {"trades_id": 7, "status": "placed"}
+
+    monkeypatch.setattr(executor.market_resolver, "resolve", _resolve)
+    monkeypatch.setattr(executor.cycle_module, "_latest_bankroll", _bankroll)
+    monkeypatch.setattr(executor.paper_module, "place_order", _place_order)
+
+    sig = {
+        "id": 1,
+        "vertical": "sports",
+        "matchup": "LAL @ BOS",
+        "selection": "Under 220.5",
+        "side": "NO",
+        # For NO side: kelly favourable when (1-p) > price, e.g.
+        # p=0.40, price=0.50 → NO has edge.
+        "model_prob": 0.40,
+        "market_price": 0.50,
+    }
+    out = _run(executor._fire_one(sig))
+    assert out is not None
+    ctx = placed[0]["ctx"]
+    assert ctx.side == "NO"
+    # Edge signed from the NO-side perspective: price - model_prob.
+    assert ctx.edge is not None and ctx.edge > 0
 
 
 def test_fire_one_no_ticker_returns_none(monkeypatch):

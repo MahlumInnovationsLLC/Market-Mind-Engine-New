@@ -1601,6 +1601,18 @@ async def run_cycle(vertical: str = "sports") -> CycleResult:
         except Exception as e:
             log.debug("line enrichment failed for %s: %s", cand.get("game_id"), e)
 
+    # Edge Terminal input-mode exclusivity (task #844): when the operator
+    # has selected ``edge_terminal`` as the input source, the LLM
+    # pipeline must NOT place trades — only the scraper executor fires.
+    # Short-circuit BEFORE the candidate loop so we don't waste CPU
+    # running 12 gates per candidate just to throw the result away.
+    try:
+        from ..edge_terminal import control as _et_control
+        _input_mode = await _et_control.get_input_mode()
+    except Exception:  # pragma: no cover — defensive
+        _input_mode = "pipeline"
+    _edge_terminal_active = _input_mode == "edge_terminal"
+
     # 3) Evaluate every candidate against the 12 gates.
     for cand in candidates:
         result.picks_evaluated += 1
@@ -1902,17 +1914,12 @@ async def run_cycle(vertical: str = "sports") -> CycleResult:
 
         # All 12 gates passed → place paper trade.
         try:
-            # Edge Terminal input-mode exclusivity (task #844): when the
-            # operator has selected `edge_terminal` as the input source,
-            # the LLM pipeline must NOT place trades — only the scraper
-            # executor fires.  We still run gates above so analytics /
-            # candidate dashboards keep flowing.
-            try:
-                from ..edge_terminal import control as _et_control
-                _input_mode = await _et_control.get_input_mode()
-            except Exception:  # pragma: no cover — defensive
-                _input_mode = "pipeline"
-            if _input_mode == "edge_terminal":
+            # Edge Terminal input-mode exclusivity (task #844): the
+            # input mode was sampled once at the top of the cycle into
+            # ``_edge_terminal_active`` so we don't re-query per
+            # candidate.  We still surface the decision per-candidate
+            # for the dashboard's "why didn't this fire?" view.
+            if _edge_terminal_active:
                 results_out.append({
                     "market_id": ctx.market_id,
                     "side": ctx.side,

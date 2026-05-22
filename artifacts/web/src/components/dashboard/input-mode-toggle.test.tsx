@@ -1,14 +1,16 @@
 import { describe, it, expect, afterEach, vi } from "vitest";
 import { cleanup, render, screen, fireEvent } from "@testing-library/react";
 
-const { state, setMutate } = vi.hoisted(() => ({
+const { state, sub, setMutate } = vi.hoisted(() => ({
   state: { data: undefined as unknown, isLoading: false },
+  sub: { data: { tier: "elite" } as { tier: string } | undefined },
   setMutate: vi.fn(async () => ({ mode: "pipeline" as const })),
 }));
 
 vi.mock("@workspace/api-client-react", () => ({
   getGetEdgeTerminalInputModeQueryKey: () => ["edge-terminal-input-mode"],
   useGetEdgeTerminalInputMode: () => state,
+  useGetMySubscription: () => sub,
   useSetEdgeTerminalInputMode: () => ({
     mutateAsync: setMutate,
     isPending: false,
@@ -23,6 +25,7 @@ import InputModeToggle from "./input-mode-toggle";
 afterEach(() => {
   cleanup();
   state.data = undefined;
+  sub.data = { tier: "elite" };
   setMutate.mockClear();
 });
 
@@ -61,5 +64,30 @@ describe("InputModeToggle", () => {
     );
     fireEvent.click(screen.getByTestId("input-mode-pipeline"));
     expect(setMutate).not.toHaveBeenCalled();
+  });
+
+  it("disables both buttons and shows tier hint for non-Elite users", () => {
+    state.data = { mode: "edge_terminal", valid_modes: ["pipeline", "edge_terminal"] };
+    sub.data = { tier: "pro" };
+    render(
+      <InputModeToggle showPipelineData={false} onTogglePipelineData={() => {}} />,
+    );
+    const pipeline = screen.getByTestId("input-mode-pipeline") as HTMLButtonElement;
+    const edge = screen.getByTestId("input-mode-edge-terminal") as HTMLButtonElement;
+    expect(pipeline.disabled).toBe(true);
+    expect(edge.disabled).toBe(true);
+    expect(screen.getByTestId("input-mode-tier-hint")).toBeTruthy();
+    fireEvent.click(pipeline);
+    expect(setMutate).not.toHaveBeenCalled();
+  });
+
+  it("allows founder tier to flip just like elite", () => {
+    state.data = { mode: "edge_terminal", valid_modes: ["pipeline", "edge_terminal"] };
+    sub.data = { tier: "founder" };
+    render(
+      <InputModeToggle showPipelineData={false} onTogglePipelineData={() => {}} />,
+    );
+    fireEvent.click(screen.getByTestId("input-mode-pipeline"));
+    expect(setMutate).toHaveBeenCalledWith({ data: { mode: "pipeline" } });
   });
 });
