@@ -6670,6 +6670,14 @@ async def get_top_edges_today(
     except Exception as e:  # pragma: no cover — defensive
         log.debug("top_edges bankroll lookup failed: %s", e)
     try:
+        # Universe = "gate-cleared, awaiting execution" candidates:
+        #   * has an approved swarm_debate within the executor's
+        #     ``_cached_debates`` lookback (60 min) — the same window
+        #     the cycle loop pulls from, so the tile mirrors what the
+        #     next cycle would actually try to fire.
+        #   * no trade today against the same Kalshi market (matches
+        #     the ``NOT EXISTS trades`` clause inside _cached_debates).
+        #   * pending settlement, tradable, future game, not snoozed.
         rows = await db.fetch(
             """
             SELECT p.id,
@@ -6693,6 +6701,18 @@ async def get_top_edges_today(
                AND (p.settled_at IS NULL)
                AND (p.game_time IS NULL OR p.game_time > now())
                AND s.prediction_id IS NULL
+               AND EXISTS (
+                   SELECT 1 FROM swarm_debates sd
+                    WHERE sd.game_id = p.game_id
+                      AND sd.approved = true
+                      AND sd.created_at > now() - interval '60 minutes'
+               )
+               AND NOT EXISTS (
+                   SELECT 1 FROM trades t
+                    WHERE t.executed_at::date = (now() at time zone 'utc')::date
+                      AND t.market_id IS NOT NULL
+                      AND t.market_id = p.kalshi_market_id
+               )
              ORDER BY p.edge DESC NULLS LAST
              LIMIT $1
             """,
@@ -6858,11 +6878,11 @@ async def get_bookmaker_metrics(
             out["win_rate"] = round(n_wins / n_settled, 6)
 
     # --- Pending-pool headline numbers (today only) ------------------------
-    # Constrain to the SAME candidate universe as the Top-Edges tile:
-    # pending (no settlement yet), tradable (kalshi_market_id set), game
-    # not started, and not snoozed.  Without these filters yesterday's
-    # already-settled rows or operator-snoozed rows pollute "top
-    # confidence today / highest edge today / picks today".
+    # Constrain to the SAME 12-gate-cleared candidate universe as the
+    # Top-Edges tile: pending + tradable + future game + not snoozed +
+    # has an approved recent swarm_debate + no trade today on the same
+    # market.  Without these filters the headline numbers diverge from
+    # the actual fireable inventory the operator is staring at.
     try:
         prow = await db.fetchrow(
             """
@@ -6879,6 +6899,18 @@ async def get_bookmaker_metrics(
                AND p.settled_at IS NULL
                AND (p.game_time IS NULL OR p.game_time > now())
                AND s.prediction_id IS NULL
+               AND EXISTS (
+                   SELECT 1 FROM swarm_debates sd
+                    WHERE sd.game_id = p.game_id
+                      AND sd.approved = true
+                      AND sd.created_at > now() - interval '60 minutes'
+               )
+               AND NOT EXISTS (
+                   SELECT 1 FROM trades t
+                    WHERE t.executed_at::date = (now() at time zone 'utc')::date
+                      AND t.market_id IS NOT NULL
+                      AND t.market_id = p.kalshi_market_id
+               )
             """
         )
     except Exception as e:
@@ -6895,7 +6927,7 @@ async def get_bookmaker_metrics(
         out["picks_today"]["total"] = int(prow.get("n_today") or 0)
 
     # --- Picks-today per-vertical split ------------------------------------
-    # Same pending-cleared filter as the headline numbers above so the
+    # Same gate-cleared filter as the headline numbers above so the
     # per-vertical histogram reflects the actual fireable pool.
     try:
         by_v_rows = await db.fetch(
@@ -6911,6 +6943,18 @@ async def get_bookmaker_metrics(
                AND p.settled_at IS NULL
                AND (p.game_time IS NULL OR p.game_time > now())
                AND s.prediction_id IS NULL
+               AND EXISTS (
+                   SELECT 1 FROM swarm_debates sd
+                    WHERE sd.game_id = p.game_id
+                      AND sd.approved = true
+                      AND sd.created_at > now() - interval '60 minutes'
+               )
+               AND NOT EXISTS (
+                   SELECT 1 FROM trades t
+                    WHERE t.executed_at::date = (now() at time zone 'utc')::date
+                      AND t.market_id IS NOT NULL
+                      AND t.market_id = p.kalshi_market_id
+               )
              GROUP BY p.league
             """
         )
@@ -6956,6 +7000,21 @@ async def snooze_prediction(
         "hours": h,
         "error": None,
     }
+    # Existence guard: refuse to write a snooze row pointing at a
+    # non-existent prediction so we don't accumulate orphan
+    # control-plane rows.  Best-effort — if the lookup itself errors
+    # we fall through and let the INSERT surface the real failure
+    # rather than silently swallowing it.
+    try:
+        exists = await db.fetchval(
+            "SELECT 1 FROM predictions WHERE id = $1",
+            int(prediction_id),
+        )
+        if not exists:
+            out["error"] = "prediction not found"
+            return out
+    except Exception as e:
+        log.debug("snooze existence check skipped: %s", e)
     try:
         row = await db.fetchrow(
             """

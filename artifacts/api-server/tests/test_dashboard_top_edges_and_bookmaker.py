@@ -138,11 +138,14 @@ def _patch_bookmaker(
     calls: list[str] = []
 
     async def _fake_fetchrow(q, *a, **kw):
-        if "FROM trades" in q:
-            calls.append("trades")
-            return trades_row
-        calls.append("predictions")
-        return pending_row
+        # Pending query is sourced from predictions (with NOT EXISTS
+        # over trades as a sub-filter), so discriminate on the main
+        # FROM clause rather than substring-matching "FROM trades".
+        if "FROM predictions" in q:
+            calls.append("predictions")
+            return pending_row
+        calls.append("trades")
+        return trades_row
 
     async def _fake_fetch(_q, *a, **kw):
         return by_vertical_rows or []
@@ -195,10 +198,10 @@ def test_bookmaker_metrics_window_mapping(monkeypatch):
 
     async def _fake_fetchrow(q, *a, **kw):
         seen_queries.append(q)
-        if "FROM trades" in q:
-            return {"gross_wins": 0.0, "gross_losses": 0.0,
-                    "net_pnl": 0.0, "n_settled": 0, "n_wins": 0}
-        return {"top_conf": None, "top_edge": None, "n_today": 0}
+        if "FROM predictions" in q:
+            return {"top_conf": None, "top_edge": None, "n_today": 0}
+        return {"gross_wins": 0.0, "gross_losses": 0.0,
+                "net_pnl": 0.0, "n_settled": 0, "n_wins": 0}
 
     async def _fake_fetch(_q, *a, **kw):
         return []
@@ -261,11 +264,15 @@ def test_snooze_prediction_writes_row(monkeypatch):
 
     captured: dict[str, Any] = {}
 
+    async def _fake_fetchval(q, *args, **kwargs):
+        return 1
+
     async def _fake_fetchrow(q, *args, **kwargs):
         captured["q"] = q
         captured["args"] = args
         return {"snoozed_until": "2026-05-22T13:00:00Z"}
 
+    monkeypatch.setattr(dash.db, "fetchval", _fake_fetchval)
     monkeypatch.setattr(dash.db, "fetchrow", _fake_fetchrow)
     out = _run(
         dash.snooze_prediction(
@@ -286,9 +293,13 @@ def test_snooze_prediction_writes_row(monkeypatch):
 def test_snooze_prediction_caps_hours(monkeypatch):
     from app import dashboard as dash
 
+    async def _fake_fetchval(q, *args, **kwargs):
+        return 1
+
     async def _fake_fetchrow(q, *args, **kwargs):
         return {"snoozed_until": "2026-06-22T13:00:00Z"}
 
+    monkeypatch.setattr(dash.db, "fetchval", _fake_fetchval)
     monkeypatch.setattr(dash.db, "fetchrow", _fake_fetchrow)
     out = _run(dash.snooze_prediction(prediction_id=1, hours=10000.0))
     # cap is 30 days = 720h
@@ -298,10 +309,35 @@ def test_snooze_prediction_caps_hours(monkeypatch):
 def test_snooze_prediction_error_passthrough(monkeypatch):
     from app import dashboard as dash
 
+    async def _fake_fetchval(q, *args, **kwargs):
+        return 1
+
     async def _boom(*a, **kw):
         raise RuntimeError("write blocked")
 
+    monkeypatch.setattr(dash.db, "fetchval", _fake_fetchval)
     monkeypatch.setattr(dash.db, "fetchrow", _boom)
     out = _run(dash.snooze_prediction(prediction_id=7, hours=1))
     assert out["snoozed_until"] is None
     assert "write blocked" in (out["error"] or "")
+
+
+def test_snooze_prediction_missing_returns_error(monkeypatch):
+    """Snoozing a non-existent prediction must not write a row."""
+    from app import dashboard as dash
+
+    insert_calls = {"n": 0}
+
+    async def _fake_fetchval(q, *args, **kwargs):
+        return None  # prediction not found
+
+    async def _fake_fetchrow(q, *args, **kwargs):
+        insert_calls["n"] += 1
+        return {"snoozed_until": "should-not-happen"}
+
+    monkeypatch.setattr(dash.db, "fetchval", _fake_fetchval)
+    monkeypatch.setattr(dash.db, "fetchrow", _fake_fetchrow)
+    out = _run(dash.snooze_prediction(prediction_id=9999, hours=1))
+    assert out["snoozed_until"] is None
+    assert "not found" in (out["error"] or "")
+    assert insert_calls["n"] == 0

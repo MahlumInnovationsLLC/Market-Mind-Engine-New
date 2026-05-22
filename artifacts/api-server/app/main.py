@@ -6129,6 +6129,18 @@ async def dashboard_candidate_fire(
     feedback in the UI; ``triggered_cycle`` reports which vertical
     was kicked (``None`` when we couldn't resolve a league).
     """
+    # Existence guard: return 404 before clearing snooze / kicking a
+    # cycle so a typo'd prediction_id can't spawn orchestrator work.
+    row = None
+    try:
+        row = await db.fetchrow(
+            "SELECT league FROM predictions WHERE id = $1",
+            int(prediction_id),
+        )
+    except Exception as e:  # pragma: no cover — defensive
+        log.warning("fire-button existence check failed: %s", e)
+    if row is None:
+        raise HTTPException(status_code=404, detail="prediction not found")
     snooze_result = await dashboard.snooze_prediction(
         prediction_id=prediction_id,
         hours=0.0,
@@ -6138,10 +6150,6 @@ async def dashboard_candidate_fire(
     )
     triggered: str | None = None
     try:
-        row = await db.fetchrow(
-            "SELECT league FROM predictions WHERE id = $1",
-            int(prediction_id),
-        )
         league = (row.get("league") if row else None) or None
         vertical = dashboard._vertical_for_league(league)
         from .orchestrator.cycle import run_cycle as _run_cycle
