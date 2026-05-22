@@ -83,13 +83,14 @@ def test_control_set_invalid_raises(monkeypatch):
         raise AssertionError("expected ValueError")
 
 
-def test_control_ensure_seeded_preserves_existing(monkeypatch):
+def test_control_ensure_seeded_forces_edge_terminal_on_boot(monkeypatch):
+    """Task #844: every boot must reset to edge_terminal regardless
+    of any prior operator-flipped value."""
     from app.edge_terminal import control
     fake = _FakeDB({"app.input_mode": "pipeline"})
     _patch_db(monkeypatch, fake)
-    assert _run(control.ensure_seeded()) == "pipeline"
-    # No INSERT should have happened — value was already set.
-    assert not any("INSERT" in q for q, _ in fake.exec_calls)
+    assert _run(control.ensure_seeded()) == "edge_terminal"
+    assert fake.kv["app.input_mode"] == "edge_terminal"
 
 
 def test_control_ensure_seeded_writes_default_when_missing(monkeypatch):

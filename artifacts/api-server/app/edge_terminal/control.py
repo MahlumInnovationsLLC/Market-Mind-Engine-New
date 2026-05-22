@@ -79,22 +79,17 @@ async def set_input_mode(mode: str) -> str:
 
 
 async def ensure_seeded() -> str:
-    """Boot-time guarantee that ``app.input_mode`` has a value.
+    """Boot-time enforcement that ``app.input_mode`` is
+    ``edge_terminal``.
 
-    Migration 0055 already seeds the row, but a deployment that ran
-    pre-0055 then upgraded would otherwise fall through to the
-    default-on-read branch and never persist a row.  Idempotent: an
-    existing value is preserved.
+    Task #844 requires the app to default to Edge Terminal mode on
+    every boot/redeploy, regardless of any prior operator override.
+    Operators can still flip back to ``pipeline`` at runtime via the
+    POST /api/edge-terminal/input-mode endpoint; that change persists
+    only for the lifetime of the running process.
     """
     try:
-        v = await db.fetchval(
-            "SELECT value FROM system_settings WHERE key = $1", _SETTING_KEY,
-        )
+        await set_input_mode(INPUT_MODE_EDGE_TERMINAL)
     except Exception as e:  # pragma: no cover — defensive
-        log.warning("input_mode seed read failed: %s", e)
-        return INPUT_MODE_EDGE_TERMINAL
-    s = (v or "").strip().lower()
-    if s in VALID_INPUT_MODES:
-        return s
-    await set_input_mode(INPUT_MODE_EDGE_TERMINAL)
+        log.warning("input_mode boot seed failed: %s", e)
     return INPUT_MODE_EDGE_TERMINAL
