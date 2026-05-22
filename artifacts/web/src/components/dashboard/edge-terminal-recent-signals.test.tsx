@@ -1,5 +1,5 @@
 import { describe, it, expect, afterEach, vi } from "vitest";
-import { cleanup, render, screen, within } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 
 const { signalsState } = vi.hoisted(() => ({
   signalsState: {
@@ -174,6 +174,169 @@ describe("EdgeTerminalRecentSignalsTile", () => {
 
     render(<EdgeTerminalRecentSignalsTile />);
     expect(screen.queryByTestId("edge-terminal-screenshot-99")).toBeNull();
+  });
+
+  it("filters rows by status and shows a filtered empty-state message", () => {
+    signalsState.data = {
+      limit: 25,
+      generated_at: "2026-05-22T11:30:00Z",
+      items: [
+        {
+          id: 1,
+          signal_date: "2026-05-22",
+          vertical: "nba",
+          matchup: "OKC @ SAS",
+          selection: "Thunder +2",
+          ticker: "KXNBA-1",
+          disposition: "placed",
+          scraped_at: null,
+          pick_type: "spread",
+          avg_odds: -110,
+          ev_pct: 5,
+          source_screenshot_url: null,
+          kalshi_market_id: null,
+        },
+        {
+          id: 2,
+          signal_date: "2026-05-22",
+          vertical: "nhl",
+          matchup: "VGK @ COL",
+          selection: "Knights ML",
+          ticker: "KXNHL-2",
+          disposition: "skipped_gate",
+          scraped_at: null,
+          pick_type: "moneyline",
+          avg_odds: 120,
+          ev_pct: -3,
+          source_screenshot_url: null,
+          kalshi_market_id: null,
+        },
+      ],
+    };
+
+    render(<EdgeTerminalRecentSignalsTile />);
+
+    expect(screen.getByTestId("edge-terminal-recent-signal-row-1")).toBeTruthy();
+    expect(screen.getByTestId("edge-terminal-recent-signal-row-2")).toBeTruthy();
+
+    fireEvent.change(
+      screen.getByTestId("edge-terminal-recent-signals-status-filter"),
+      { target: { value: "placed" } },
+    );
+
+    expect(screen.getByTestId("edge-terminal-recent-signal-row-1")).toBeTruthy();
+    expect(screen.queryByTestId("edge-terminal-recent-signal-row-2")).toBeNull();
+
+    fireEvent.change(
+      screen.getByTestId("edge-terminal-recent-signals-status-filter"),
+      { target: { value: "errored" } },
+    );
+
+    expect(screen.queryByTestId("edge-terminal-recent-signal-row-1")).toBeNull();
+    expect(screen.queryByTestId("edge-terminal-recent-signal-row-2")).toBeNull();
+    expect(
+      screen.getByTestId("edge-terminal-recent-signals-empty-filtered"),
+    ).toBeTruthy();
+  });
+
+  it("treats both skipped_unresolved and skipped_gate as 'skipped'", () => {
+    signalsState.data = {
+      limit: 25,
+      generated_at: "2026-05-22T11:30:00Z",
+      items: [
+        {
+          id: 10,
+          signal_date: "2026-05-22",
+          vertical: "nba",
+          matchup: "A @ B",
+          selection: "A",
+          ticker: null,
+          disposition: "skipped_unresolved",
+          scraped_at: null,
+          pick_type: "spread",
+          avg_odds: -110,
+          ev_pct: 1,
+          source_screenshot_url: null,
+          kalshi_market_id: null,
+        },
+        {
+          id: 11,
+          signal_date: "2026-05-22",
+          vertical: "nba",
+          matchup: "C @ D",
+          selection: "C",
+          ticker: null,
+          disposition: "placed",
+          scraped_at: null,
+          pick_type: "spread",
+          avg_odds: -110,
+          ev_pct: 1,
+          source_screenshot_url: null,
+          kalshi_market_id: null,
+        },
+      ],
+    };
+    render(<EdgeTerminalRecentSignalsTile />);
+    fireEvent.change(
+      screen.getByTestId("edge-terminal-recent-signals-status-filter"),
+      { target: { value: "skipped" } },
+    );
+    expect(screen.getByTestId("edge-terminal-recent-signal-row-10")).toBeTruthy();
+    expect(screen.queryByTestId("edge-terminal-recent-signal-row-11")).toBeNull();
+  });
+
+  it("combines search with dropdown filters using AND semantics", () => {
+    signalsState.data = {
+      limit: 25,
+      generated_at: "2026-05-22T11:30:00Z",
+      items: [
+        {
+          id: 20,
+          signal_date: "2026-05-22",
+          vertical: "nba",
+          matchup: "Lakers @ Warriors",
+          selection: "Lakers +4",
+          ticker: "KXNBA-LAL-GSW",
+          disposition: "placed",
+          scraped_at: null,
+          pick_type: "spread",
+          avg_odds: -105,
+          ev_pct: 4,
+          source_screenshot_url: null,
+          kalshi_market_id: null,
+        },
+        {
+          id: 21,
+          signal_date: "2026-05-22",
+          vertical: "nba",
+          matchup: "Lakers @ Warriors",
+          selection: "Over 224.5",
+          ticker: "KXNBA-LAL-GSW-TOT",
+          disposition: "placed",
+          pick_type: "total",
+          scraped_at: null,
+          avg_odds: -110,
+          ev_pct: 2,
+          source_screenshot_url: null,
+          kalshi_market_id: null,
+        },
+      ],
+    };
+    render(<EdgeTerminalRecentSignalsTile />);
+
+    fireEvent.change(
+      screen.getByTestId("edge-terminal-recent-signals-search"),
+      { target: { value: "lakers" } },
+    );
+    expect(screen.getByTestId("edge-terminal-recent-signal-row-20")).toBeTruthy();
+    expect(screen.getByTestId("edge-terminal-recent-signal-row-21")).toBeTruthy();
+
+    fireEvent.change(
+      screen.getByTestId("edge-terminal-recent-signals-pick-type-filter"),
+      { target: { value: "total" } },
+    );
+    expect(screen.queryByTestId("edge-terminal-recent-signal-row-20")).toBeNull();
+    expect(screen.getByTestId("edge-terminal-recent-signal-row-21")).toBeTruthy();
   });
 
   it("shows the empty-state message when there are no items", () => {
