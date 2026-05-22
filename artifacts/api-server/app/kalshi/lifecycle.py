@@ -22,11 +22,13 @@ WebSocket client sees real-time order events for both modes.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import uuid
 from dataclasses import dataclass, field, asdict
 from datetime import datetime, timezone
+from decimal import Decimal
 from typing import Any, Literal
 
 from .. import db
@@ -1408,6 +1410,22 @@ async def handle_ws_fill(message: dict[str, Any]) -> None:
         closed=False,
     )
 
+    # Persist a `trades` row for this accepted fill slice. Without
+    # this, live Kalshi fills never make it onto the dashboard
+    # "Recent fills" overview (or any settled-PnL report) — the
+    # rollup/audit-event/alert side-effects above touch every store
+    # EXCEPT the canonical `trades` table that the dashboard reads.
+    # See `_insert_live_trade_row` docstring for the full rationale
+    # (idempotency, units, placed_by provenance, settlement coupling).
+    await _insert_live_trade_row(
+        req=rec.request,
+        fill_id=str(fill_id),
+        exchange_order_id=rec.exchange_order_id,
+        accepted=int(accepted),
+        price_cents=int(price),
+        raw_fill=fill if isinstance(fill, dict) else {},
+    )
+
     await _record(rec.request, paper=False, state="filled", price=price,
                   extra={"exchange_order_id": rec.exchange_order_id, "fill": fill,
                          "accepted_count": accepted, "over_filled": rec.over_filled,
@@ -2048,6 +2066,133 @@ async def _check_slippage_guard(req: OrderRequest, *, settings) -> dict[str, Any
         ),
     })
     return common
+
+
+def _extract_fee_dollars(fill: dict[str, Any]) -> Decimal:
+    """Pick the exchange fee for one Kalshi WS fill payload, in dollars.
+
+    Kept in sync with `scripts/backfill_kalshi_fills.py::_fee_dollars`
+    so live and backfilled rows agree on units. Modern Kalshi pushes
+    `fee_cost` as a decimal-dollar string (e.g. ``'0.070000'``); older
+    payloads used integer cents (`fee`/`fee_cents`/`taker_fee`).
+    Heuristic for legacy numeric values: ``>= 100`` is treated as cents.
+    All failures collapse to ``Decimal('0')`` — a missing fee must not
+    drop the row.
+    """
+    if not isinstance(fill, dict):
+        return Decimal("0")
+    for key in ("fee_cost", "fee", "fee_cents", "taker_fee"):
+        raw = fill.get(key)
+        if raw is None:
+            continue
+        try:
+            d = Decimal(str(raw))
+        except Exception:
+            continue
+        if isinstance(raw, str):
+            return d  # API now returns dollar decimals as strings
+        if d >= 100:
+            return d / Decimal("100")
+        return d
+    return Decimal("0")
+
+
+async def _insert_live_trade_row(
+    *,
+    req: OrderRequest,
+    fill_id: str,
+    exchange_order_id: str | None,
+    accepted: int,
+    price_cents: int,
+    raw_fill: dict[str, Any],
+) -> None:
+    """Persist a `trades` row for a live Kalshi WS fill.
+
+    Why this exists: until this helper was added, `handle_ws_fill`
+    updated the position rollup and lifecycle audit trail but NEVER
+    wrote into the `trades` table. The dashboard "Recent fills" card
+    and every downstream report (settled-PnL, leaderboards, daily
+    honesty) read from `trades`, so the operator's live Kalshi
+    fills were invisible on the overview — even after they settled.
+
+    Schema mirrors the backfill script (see
+    `scripts/backfill_kalshi_fills.py`) so the live path and the
+    safety-net backfill are interchangeable. `ON CONFLICT (trade_id)
+    DO NOTHING` makes this idempotent: if the backfill already
+    inserted the same `trade_id`, or if a Kalshi WS reconnect causes
+    a partial fill to be re-delivered (the fill-event idempotency
+    gate higher up already filters those, but ON CONFLICT is the
+    second line of defence), the duplicate is silently dropped.
+
+    `trade_id` derivation matches the alert path: Kalshi's real
+    `trade_id`/`fill_id` when present, else the `raw:<hash>` synthetic
+    id computed upstream. Either way it's stable across replays.
+
+    PnL is intentionally left NULL — the settlement pipeline
+    (`app.settlement.pipeline._settle_one_trade`) computes and stamps
+    PnL when the market resolves. The row will appear on the
+    overview as a pending fill the moment Kalshi confirms it, and
+    flip to a settled fill (with PnL) on resolution — which is what
+    the operator expected when they reported "the live trade just
+    settled and it never showed up on the overview".
+    """
+    # Cents → dollars: the `trades` table stores quantity, price, and
+    # fees as `numeric` decimal dollars (0.0–1.0 for binary prices),
+    # NOT cents. The paper orchestrator and backfill both already
+    # write in this unit — keep the live path consistent so the
+    # dashboard math works on a mixed-source result set.
+    try:
+        price_dollars = (Decimal(int(price_cents)) / Decimal(100)) if price_cents else Decimal(0)
+        fees_dollars = _extract_fee_dollars(raw_fill)
+        ctx = req.context if isinstance(req.context, dict) else {}
+        # Honour an explicit placed_by tag from the submission context
+        # (the same one the orchestrator threads through to the paper
+        # path), falling back to "orchestrator" so the row is never
+        # tagged "unknown" — operator's "NO unknowns" directive.
+        placed_by_raw = ctx.get("placed_by") if isinstance(ctx, dict) else None
+        placed_by = (
+            str(placed_by_raw).strip().lower()
+            if isinstance(placed_by_raw, str) and placed_by_raw.strip()
+            else "orchestrator"
+        )
+        metadata = {
+            "source": "kalshi_ws_fill",
+            "order_id": exchange_order_id,
+            "client_order_id": req.client_order_id,
+            "fill_id": fill_id,
+            "accepted_count": int(accepted),
+            "raw_fill": raw_fill,
+        }
+        await db.execute(
+            """
+            INSERT INTO trades (
+                trade_id, market_id, market_title, vertical, side, action,
+                quantity, price, fees, pnl,
+                trading_mode, exchange, executed_at, metadata, placed_by
+            ) VALUES (
+                $1, $2, NULL, $3, $4, $5,
+                $6, $7, $8, NULL,
+                'live', 'kalshi', now(),
+                COALESCE($9::jsonb, '{}'::jsonb), $10
+            )
+            ON CONFLICT (trade_id) DO NOTHING
+            """,
+            str(fill_id),
+            req.market_ticker,
+            req.vertical or "sports",
+            req.side,
+            req.action,
+            Decimal(int(accepted)),
+            price_dollars,
+            fees_dollars,
+            json.dumps(metadata, default=str),
+            placed_by,
+        )
+    except Exception as e:  # pragma: no cover — never let this break fill handling
+        log.warning(
+            "live trades-row insert failed (order_id=%s fill_id=%s): %s",
+            exchange_order_id, fill_id, e,
+        )
 
 
 async def _record(

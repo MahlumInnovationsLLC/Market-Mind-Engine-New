@@ -468,6 +468,53 @@ async def backfill(
         )
         stats["crypto_rows"] = len(crypto_rows)
     if consolidated_rows:
+        # Live-row safeguard: since live Kalshi WS fills now write
+        # per-fill rows into `trades` (see
+        # `app.kalshi.lifecycle._insert_live_trade_row`), a
+        # consolidated row for the same (ticker, side, action, day)
+        # bucket would double-count quantity, fees, and PnL on the
+        # dashboard. Drop any consolidated bucket that already has
+        # at least one live per-fill row in the window. The live
+        # rows ARE the source of truth — they carry the real fill_id,
+        # order_id, and accurate per-slice PnL.
+        live_keys: set[tuple[str, str, str, str]] = set()
+        try:
+            live_rows = await db.fetch(
+                """
+                SELECT market_id, side, action,
+                       to_char((executed_at AT TIME ZONE 'UTC')::date, 'YYYY-MM-DD') AS day
+                  FROM trades
+                 WHERE exchange = 'kalshi'
+                   AND trading_mode = 'live'
+                   AND metadata->>'source' = 'kalshi_ws_fill'
+                   AND executed_at >= $1
+                """,
+                datetime.fromtimestamp(since_ts, tz=timezone.utc).replace(tzinfo=None),
+            )
+            for lr in live_rows:
+                live_keys.add((
+                    str(lr["market_id"]),
+                    str(lr["side"]),
+                    str(lr["action"]),
+                    str(lr["day"]),
+                ))
+        except Exception as e:
+            log.warning("live-row safeguard query failed; inserting all consolidated rows: %s", e)
+        if live_keys:
+            before = len(consolidated_rows)
+            consolidated_rows = [
+                r for r in consolidated_rows
+                # row tuple: (trade_id, ticker, _, vertical, side, action, qty, price, ...,
+                #             executed_at @ index 12)
+                if (str(r[1]), str(r[4]), str(r[5]),
+                    r[12].date().isoformat() if hasattr(r[12], "date") else "") not in live_keys
+            ]
+            stats["consolidated_dropped_live_overlap"] = before - len(consolidated_rows)
+            if stats["consolidated_dropped_live_overlap"]:
+                log.info(
+                    "skipped %d consolidated rows that overlap live WS per-fill rows",
+                    stats["consolidated_dropped_live_overlap"],
+                )
         consolidated_rows_tagged = [(*r, _tag_placed_by(r[6], r[7])) for r in consolidated_rows]
         await db.executemany(
             """
