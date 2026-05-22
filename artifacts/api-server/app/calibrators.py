@@ -118,6 +118,19 @@ SUPPORTED_LEAGUES: tuple[str, ...] = (
     # raw" via `risk.uncalibrated_raw_mode_weather` (audited + surfaced
     # as a red row in the daily honesty report).
     "WEATHER",
+    # Player-prop verticals (task #829) — each league rolls up its own
+    # per-stat models into a single calibrator bucket for v1.  Once
+    # ≥4 weeks of settled props accrue per (league, stat), the
+    # follow-up task carves the bucket into per-stat sub-keys
+    # (NBA_PROPS_PTS, NHL_PROPS_SOG, …) so each stat gets its own
+    # isotonic / Platt fit.  Ships uncalibrated — the new
+    # ``gate_uncalibrated_vertical`` blocks every candidate routed
+    # against these buckets until an operator opts into raw mode via
+    # ``risk.uncalibrated_raw_mode_<vertical>``.
+    "NBA_PROPS",
+    "NHL_PROPS",
+    "MLB_PROPS",
+    "NFL_PROPS",
 )
 
 # Below this sample count we fall back to Platt; below MIN_REFIT we

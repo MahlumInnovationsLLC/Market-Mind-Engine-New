@@ -142,6 +142,11 @@ PROTECTED_ROUTES: tuple[str, ...] = (
     "/api/dashboard/elections/markets/{ticker}/arb",
     # Task #823 — operator preview of today's tradable WNBA player props.
     "/api/dashboard/wnba/props/today",
+    # Task #829 — per-league player-prop dashboard previews.
+    "/api/dashboard/nba/props/today",
+    "/api/dashboard/nhl/props/today",
+    "/api/dashboard/mlb/props/today",
+    "/api/dashboard/nfl/props/today",
     "/api/dashboard/runtime-settings",
     "/api/admin/risk-knobs",
     "/api/admin/risk-knobs/history",

@@ -357,7 +357,7 @@ def test_gate_uncalibrated_vertical_blocks_unsupported_league(
     ctx = _make_ctx(vertical="weather", league="WEATHER")
     res = _run(_gates.gate_uncalibrated_vertical(ctx))
     assert res.passed is False
-    assert "calibrator missing for league" in res.reason
+    assert "calibrator missing for bucket" in res.reason
     assert res.details["supported"] is False
 
 

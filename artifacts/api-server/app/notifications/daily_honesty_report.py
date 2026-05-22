@@ -810,6 +810,18 @@ async def collect_report(date_utc: str) -> dict[str, Any]:
     miss_t = asyncio.create_task(collect_missing_league_24h())
     deck_t = asyncio.create_task(collect_latest_investor_deck())
     wnba_t = asyncio.create_task(collect_wnba_player_props_summary())
+    nba_props_t = asyncio.create_task(
+        collect_player_props_summary("nba_player_props", "NBA")
+    )
+    nhl_props_t = asyncio.create_task(
+        collect_player_props_summary("nhl_player_props", "NHL")
+    )
+    mlb_props_t = asyncio.create_task(
+        collect_player_props_summary("mlb_player_props", "MLB")
+    )
+    nfl_props_t = asyncio.create_task(
+        collect_player_props_summary("nfl_player_props", "NFL")
+    )
     best_line_t = asyncio.create_task(collect_best_line_router_stats())
     (
         divergence,
@@ -820,9 +832,14 @@ async def collect_report(date_utc: str) -> dict[str, Any]:
         missing_league,
         investor_deck,
         wnba_props,
+        nba_props,
+        nhl_props,
+        mlb_props,
+        nfl_props,
         best_line,
     ) = await asyncio.gather(
         div_t, drift_t, tail_t, gate_t, raw_t, miss_t, deck_t, wnba_t,
+        nba_props_t, nhl_props_t, mlb_props_t, nfl_props_t,
         best_line_t,
     )
     return {
@@ -835,8 +852,64 @@ async def collect_report(date_utc: str) -> dict[str, Any]:
         "missing_league": missing_league,
         "investor_deck": investor_deck,
         "wnba_player_props": wnba_props,
+        "nba_player_props": nba_props,
+        "nhl_player_props": nhl_props,
+        "mlb_player_props": mlb_props,
+        "nfl_player_props": nfl_props,
         "best_line_router": best_line,
     }
+
+
+async def collect_player_props_summary(
+    vertical: str, league: str,
+) -> dict[str, Any]:
+    """Generic per-league player-props 24h panel (task #829).
+
+    Same shape as :func:`collect_wnba_player_props_summary` but
+    parameterised by ``(vertical, league)`` so every per-league
+    rollout from task #829 (NBA / NHL / MLB / NFL) ships an honesty
+    row without copying the WNBA collector wholesale.
+    """
+    summary: dict[str, Any] = {
+        "vertical": vertical,
+        "enabled": False,
+        "quotes_ingested_24h": 0,
+        "distinct_players_24h": 0,
+        "gate_trips_24h": 0,
+        "error": None,
+    }
+    try:
+        row = await db.fetchrow(
+            """
+            SELECT count(*)::int AS n,
+                   count(DISTINCT player)::int AS players
+              FROM player_props_quotes
+             WHERE league = $1
+               AND "timestamp" > now() - interval '24 hours'
+            """,
+            league.upper(),
+        )
+        if row is not None:
+            summary["quotes_ingested_24h"] = int(row["n"] or 0)
+            summary["distinct_players_24h"] = int(row["players"] or 0)
+    except Exception as e:
+        summary["error"] = f"player_props_quotes read failed: {e}"
+    try:
+        n = await db.fetchval(
+            """
+            SELECT count(*)::int
+              FROM risk_gate_trips
+             WHERE gate_name = 'player_props'
+               AND created_at > now() - interval '24 hours'
+               AND COALESCE(details->>'vertical', '') = $1
+            """,
+            vertical,
+        )
+        summary["gate_trips_24h"] = int(n or 0)
+    except Exception as e:
+        if not summary["error"]:
+            summary["error"] = f"risk_gate_trips read failed: {e}"
+    return summary
 
 
 async def collect_best_line_router_stats() -> dict[str, Any]:
@@ -1842,6 +1915,43 @@ def render_text(payload: dict[str, Any]) -> tuple[str, str]:
                 "enable sequence)"
             )
 
+    # Section 7b — per-league player props (Task #829, NBA/NHL/MLB/NFL)
+    for _key, _label in (
+        ("nba_player_props", "NBA"),
+        ("nhl_player_props", "NHL"),
+        ("mlb_player_props", "MLB"),
+        ("nfl_player_props", "NFL"),
+    ):
+        _props = payload.get(_key) or {}
+        if not _props:
+            continue
+        lines.append("")
+        lines.append(f"== 7. {_label} player props (last 24h) ==")
+        if _props.get("error"):
+            lines.append(f"  ERROR: {_props['error']}")
+        elif int(_props.get("quotes_ingested_24h") or 0) == 0:
+            lines.append(
+                "  [GREEN] vertical disabled and no props ingested — "
+                "as expected on opt-out deploys"
+            )
+        else:
+            _marker = (
+                "[YELLOW]" if not _props.get("enabled") and
+                _props.get("gate_trips_24h", 0)
+                else "[GREEN]"
+            )
+            lines.append(
+                f"  {_marker} ingested {_props.get('quotes_ingested_24h')} "
+                f"prop quotes across "
+                f"{_props.get('distinct_players_24h')} players; "
+                f"player_props gate trips: "
+                f"{_props.get('gate_trips_24h')}"
+            )
+            if not _props.get("enabled"):
+                lines.append(
+                    "    (vertical ships disabled; see runbook §22)"
+                )
+
     # Section 8 — Best-line router (Task #828)
     bl = payload.get("best_line_router") or {}
     lines.append("")
@@ -2139,6 +2249,36 @@ def render_html(payload: dict[str, Any]) -> str:
                 f"quotes_ingested_24h={int(wnba.get('quotes_ingested_24h') or 0)}; "
                 f"distinct_players_24h={int(wnba.get('distinct_players_24h') or 0)}; "
                 f"gate_trips_24h={int(wnba.get('gate_trips_24h') or 0)}"
+                f"</p>"
+            )
+
+    # Per-league player-props summaries (task #829)
+    for _key, _label in (
+        ("nba_player_props", "NBA"),
+        ("nhl_player_props", "NHL"),
+        ("mlb_player_props", "MLB"),
+        ("nfl_player_props", "NFL"),
+    ):
+        _props = payload.get(_key) or {}
+        if not _props:
+            continue
+        _section_h(f"{_label} player props (last 24h)")
+        if not _err(_props):
+            _tone = (
+                "#080"
+                if _props.get("quotes_ingested_24h", 0) == 0
+                else "#a60"
+            )
+            parts.append(
+                f"<p style=\"color:{_tone};\">"
+                f"vertical_enabled="
+                f"{html.escape(str(bool(_props.get('enabled'))))}; "
+                f"quotes_ingested_24h="
+                f"{int(_props.get('quotes_ingested_24h') or 0)}; "
+                f"distinct_players_24h="
+                f"{int(_props.get('distinct_players_24h') or 0)}; "
+                f"gate_trips_24h="
+                f"{int(_props.get('gate_trips_24h') or 0)}"
                 f"</p>"
             )
 

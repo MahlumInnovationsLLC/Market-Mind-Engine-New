@@ -34,6 +34,7 @@ log = logging.getLogger(__name__)
 
 
 _BASE_STATS: tuple[str, ...] = (
+    # Basketball (WNBA / NBA)
     "points",
     "rebounds",
     "assists",
@@ -41,12 +42,32 @@ _BASE_STATS: tuple[str, ...] = (
     "blocks",
     "steals",
     "turnovers",
+    # NHL (task #829)
+    "shots_on_goal",
+    "goals",
+    "hockey_assists",
+    "hockey_points",
+    "saves",
+    # MLB (task #829)
+    "hits",
+    "total_bases",
+    "strikeouts",
+    "earned_runs",
+    "outs_recorded",
+    # NFL (task #829)
+    "passing_yards",
+    "rushing_yards",
+    "receiving_yards",
+    "receptions",
+    "touchdowns",
 )
 _COMPOSITE_STATS: dict[str, tuple[str, ...]] = {
     "points_rebounds_assists": ("points", "rebounds", "assists"),
     "points_rebounds": ("points", "rebounds"),
     "points_assists": ("points", "assists"),
     "rebounds_assists": ("rebounds", "assists"),
+    # NBA STL+BLK composite per task #829.
+    "steals_blocks": ("steals", "blocks"),
 }
 SUPPORTED_STATS: tuple[str, ...] = _BASE_STATS + tuple(_COMPOSITE_STATS.keys())
 
@@ -203,10 +224,13 @@ async def fetch_baseline(
     if stat not in SUPPORTED_STATS:
         return None
     try:
+        # SELECT * so newly-added per-league columns (NHL saves, MLB
+        # outs_recorded, NFL passing_yards …) are picked up without
+        # touching this query each time the schema grows.  The
+        # summariser is dict-driven and ignores unknown columns.
         rows = await db.fetch(
             """
-            SELECT played_at, points, rebounds, assists, threes,
-                   blocks, steals, turnovers, minutes
+            SELECT *
               FROM player_stat_history
              WHERE league = $1
                AND player ILIKE $2

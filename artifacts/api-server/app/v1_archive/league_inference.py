@@ -70,6 +70,17 @@ SUPPORTED_LEAGUES: frozenset[str] = frozenset({
     # ``app.calibrators.SUPPORTED_LEAGUES`` so the drift-guard test
     # in ``test_v1_archive_league_inference.py`` passes.
     "CRYPTO",
+    # Task #829: player-prop calibrator buckets joined the registry
+    # (one per league: NBA_PROPS / NHL_PROPS / MLB_PROPS / NFL_PROPS).
+    # The Kalshi prefix table below intentionally does NOT map these —
+    # the V1 archive holds no player-prop rows so there's nothing
+    # historical to bucket here.  Mirrored only to keep this module's
+    # drift-guard frozenset in sync with ``app.calibrators
+    # .SUPPORTED_LEAGUES``.
+    "NBA_PROPS",
+    "NHL_PROPS",
+    "MLB_PROPS",
+    "NFL_PROPS",
     # Task #767: ``WEATHER`` joined the calibrator registry so the
     # GRU+EMOS temperature stack and the precipitation predictor stop
     # silently bypassing the calibrator.  Mirrored here per the same

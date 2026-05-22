@@ -140,7 +140,65 @@ _COMBAT_INDIVIDUAL_PERSONA_CONTEXT = (
 )
 
 
+# Task #829: player-prop calibrator buckets are registered as
+# pseudo-leagues in ``app.calibrators.SUPPORTED_LEAGUES`` so the
+# calibration loader picks them up.  They share the operational
+# knobs (allocation_pct, blackout) of their parent league but use
+# the per-league player-prop persona context.  Per-game cap is
+# kept tight because v1 ships uncalibrated — see
+# ``app.verticals.builtins`` for the matching VerticalSpec entries.
+_PROPS_PERSONA = (
+    "PLAYER-PROPS SIGNALS (task #829):\n"
+    "  * Player props are inherently small-sample: rolling-mean + "
+    "MAD-σ is the floor, not a ceiling — never project off fewer "
+    "than the configured `min_sample` games.\n"
+    "  * Per-(league, stat) calibrator buckets ship UNCALIBRATED — "
+    "every candidate is blocked by ``gate_uncalibrated_vertical`` "
+    "until an operator opts into raw mode via the matching "
+    "``risk.uncalibrated_raw_mode_*`` toggle.\n"
+    "  * Player props are intentionally OUTSIDE the cross-book "
+    "best-line gate (which only fires for vertical='sports') "
+    "because per-player-per-stat lines fragment across books in "
+    "ways that the team-level gate is not parameterised for."
+)
+
+
 LEAGUE_CONFIGS: dict[str, LeagueConfig] = {
+    # Task #829 player-prop calibrator buckets.  Listed first so the
+    # invariant test (`test_league_configs_table_covers_every_supported
+    # _league`) sees them at the top of the table.
+    "NBA_PROPS": LeagueConfig(
+        league="NBA_PROPS",
+        priority=9,
+        allocation_pct=0.03,
+        per_game_cap_pct=0.01,
+        pre_kickoff_blackout_minutes=30,
+        persona_context=_PROPS_PERSONA,
+    ),
+    "NHL_PROPS": LeagueConfig(
+        league="NHL_PROPS",
+        priority=9,
+        allocation_pct=0.03,
+        per_game_cap_pct=0.01,
+        pre_kickoff_blackout_minutes=60,
+        persona_context=_PROPS_PERSONA,
+    ),
+    "MLB_PROPS": LeagueConfig(
+        league="MLB_PROPS",
+        priority=9,
+        allocation_pct=0.03,
+        per_game_cap_pct=0.01,
+        pre_kickoff_blackout_minutes=60,
+        persona_context=_PROPS_PERSONA,
+    ),
+    "NFL_PROPS": LeagueConfig(
+        league="NFL_PROPS",
+        priority=9,
+        allocation_pct=0.03,
+        per_game_cap_pct=0.01,
+        pre_kickoff_blackout_minutes=90,
+        persona_context=_PROPS_PERSONA,
+    ),
     "NFL": LeagueConfig(
         league="NFL",
         priority=5,

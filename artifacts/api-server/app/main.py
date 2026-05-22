@@ -417,6 +417,25 @@ async def lifespan(_: FastAPI):
                 log.warning(
                     "wnba_player_props feed registration failed: %s", e,
                 )
+            # Task #829 — NBA/NHL/MLB/NFL player-prop poller stubs.
+            # Each ships ``enabled=False`` at the vertical level; the
+            # feed scaffolds register so the schema bootstraps and the
+            # cadence/skipped_reason wiring is visible from /feeds.
+            for _mod, _register_name in (
+                ("nba_player_props", "register_nba_player_props_feed"),
+                ("nhl_player_props", "register_nhl_player_props_feed"),
+                ("mlb_player_props", "register_mlb_player_props_feed"),
+                ("nfl_player_props", "register_nfl_player_props_feed"),
+            ):
+                try:
+                    import importlib
+                    _m = importlib.import_module(f".feeds.{_mod}", "app")
+                    await _m.ensure_schema()
+                    getattr(_m, _register_name)()
+                except Exception as e:
+                    log.warning(
+                        "%s feed registration failed: %s", _mod, e,
+                    )
             await feed_scheduler.start()
         except Exception as e:
             log.error("feed scheduler start failed: %s", e)
@@ -3198,6 +3217,46 @@ async def dashboard_wnba_props_today(
     """
     from .wnba.dashboard import build_dashboard_payload
     return await build_dashboard_payload(include_rejected=bool(include_rejected))
+
+
+# Task #829 — per-league player-prop dashboard endpoints.  Mirror the
+# WNBA tile above for NBA / NHL / MLB / NFL.  Each vertical ships
+# disabled; these routes surface the per-league candidate list for
+# operator preview / runbook validation before opt-in.
+@app.get("/api/dashboard/nba/props/today")
+async def dashboard_nba_props_today(
+    include_rejected: bool = False,
+    _: object = Depends(require_approved_user),
+) -> dict[str, object]:
+    from .player_props.dashboard import build_dashboard_payload as _b
+    return await _b(league="NBA", include_rejected=bool(include_rejected))
+
+
+@app.get("/api/dashboard/nhl/props/today")
+async def dashboard_nhl_props_today(
+    include_rejected: bool = False,
+    _: object = Depends(require_approved_user),
+) -> dict[str, object]:
+    from .player_props.dashboard import build_dashboard_payload as _b
+    return await _b(league="NHL", include_rejected=bool(include_rejected))
+
+
+@app.get("/api/dashboard/mlb/props/today")
+async def dashboard_mlb_props_today(
+    include_rejected: bool = False,
+    _: object = Depends(require_approved_user),
+) -> dict[str, object]:
+    from .player_props.dashboard import build_dashboard_payload as _b
+    return await _b(league="MLB", include_rejected=bool(include_rejected))
+
+
+@app.get("/api/dashboard/nfl/props/today")
+async def dashboard_nfl_props_today(
+    include_rejected: bool = False,
+    _: object = Depends(require_approved_user),
+) -> dict[str, object]:
+    from .player_props.dashboard import build_dashboard_payload as _b
+    return await _b(league="NFL", include_rejected=bool(include_rejected))
 
 
 @app.get("/api/dashboard/elections/markets/{ticker}/arb")

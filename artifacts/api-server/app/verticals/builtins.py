@@ -295,6 +295,55 @@ REGISTRY.register(VerticalSpec(
 ))
 
 
+# Task #829 — per-league player-prop verticals.  Mirror the WNBA
+# template (above) for NBA / NHL / MLB / NFL.  All four ship
+# ``enabled=False`` and are gated by ``gate_uncalibrated_vertical``
+# against their per-league calibrator bucket
+# (``NBA_PROPS`` / ``NHL_PROPS`` / ``MLB_PROPS`` / ``NFL_PROPS``)
+# until an operator opts the vertical in via
+# ``AXIOM_ORCHESTRATOR_VERTICALS=...,<vertical>`` *and* the explicit
+# raw-mode override (``risk.uncalibrated_raw_mode_<vertical>=true``).
+# Cross-book best-line gate auto-excludes these — that gate only
+# fires for ``vertical='sports'``.
+for _spec_name, _league, _prefix, _markets_blurb in (
+    (
+        "nba_player_props", "NBA", "KXNBA",
+        "PTS, REB, AST, 3PM, PRA, STL+BLK",
+    ),
+    (
+        "nhl_player_props", "NHL", "KXNHL",
+        "SOG, Points, Goals, Assists, Saves",
+    ),
+    (
+        "mlb_player_props", "MLB", "KXMLB",
+        "Hits, TB, Ks, ER, Outs Recorded",
+    ),
+    (
+        "nfl_player_props", "NFL", "KXNFL",
+        "Pass/Rush/Rec yards, Receptions, TDs",
+    ),
+):
+    REGISTRY.register(VerticalSpec(
+        name=_spec_name,
+        leagues=(_league,),
+        ticker_prefixes=(_prefix,),
+        persona_profile=_spec_name,
+        predictor_hook=_spec_name,
+        kelly_multiplier=0.5,
+        default_allocation_pct=0.03,
+        enabled=False,
+        description=(
+            f"{_league} player-prop binary markets ({_markets_blurb}). "
+            f"Per-player baseline (rolling mean + MAD-σ) × bounded "
+            f"pace + opp-allowed adjustment, optionally blended with "
+            f"the Kalshi mid then passed through the per-league "
+            f"calibrator ({_league}_PROPS bucket).  Ships disabled "
+            f"until 4 weeks of settled props show Brier ≤ 0.245 and "
+            f"a fitted calibrator snapshot is in place."
+        ),
+    ))
+
+
 REGISTRY.register(VerticalSpec(
     name="soccer",
     leagues=("EPL", "LALIGA", "SERIEA", "BUNDES", "LIGUE1", "MLS", "UCL"),

@@ -377,23 +377,44 @@ async def gate_uncalibrated_vertical(ctx: RiskContext) -> GateResult:
     """
     league = (ctx.league or "").strip().upper()
     vertical = (ctx.vertical or "").strip().lower()
-    base_details: dict[str, Any] = {"vertical": vertical, "league": league or None}
+    # Task #829: player-prop verticals have their own per-league
+    # calibrator buckets (NBA_PROPS / NHL_PROPS / MLB_PROPS / NFL_PROPS)
+    # because their stack — rolling baseline × bounded matchup adj —
+    # is materially different from the team-ML/spread stack that
+    # populates the bare league calibrators.  Resolve the props bucket
+    # from the vertical so the gate looks up the right snapshot and
+    # cannot accidentally pass on a calibrated TEAM-level snapshot
+    # while the props bucket is still empty.
+    props_bucket: str | None = None
+    try:
+        from ..player_props import get_vertical_spec as _get_props_spec
+        _spec = _get_props_spec(vertical)
+        if _spec is not None:
+            props_bucket = _spec.calibrator_bucket
+    except Exception:
+        props_bucket = None
+    lookup_key = props_bucket or league
+    base_details: dict[str, Any] = {
+        "vertical": vertical,
+        "league": league or None,
+        "calibrator_bucket": lookup_key or None,
+    }
 
     # Resolve calibrator state up front; track the failure mode so the
     # raw-mode escape hatch below can persist it.
     supported = False
     snapshot = None
     state_error: str | None = None
-    if not league:
+    if not lookup_key:
         state_error = "missing league on candidate"
     elif not vertical:
         state_error = "missing vertical on candidate"
     else:
         try:
             from .. import calibrators as _cal
-            supported = league in getattr(_cal, "SUPPORTED_LEAGUES", ())
+            supported = lookup_key in getattr(_cal, "SUPPORTED_LEAGUES", ())
             try:
-                snapshot = _cal.get_state().champion(league)
+                snapshot = _cal.get_state().champion(lookup_key)
             except Exception as e:  # pragma: no cover — defensive
                 log.warning(
                     "uncalibrated_vertical: state.champion(%s) raised: %s",
@@ -433,9 +454,11 @@ async def gate_uncalibrated_vertical(ctx: RiskContext) -> GateResult:
     if state_error is not None:
         fail_reason = state_error
     elif not supported:
-        fail_reason = f"calibrator missing for league {league!r}"
+        fail_reason = f"calibrator missing for bucket {lookup_key!r}"
     else:
-        fail_reason = f"no fitted calibrator snapshot for league {league!r}"
+        fail_reason = (
+            f"no fitted calibrator snapshot for bucket {lookup_key!r}"
+        )
     details = {
         **base_details,
         "calibrator_loaded": False,
