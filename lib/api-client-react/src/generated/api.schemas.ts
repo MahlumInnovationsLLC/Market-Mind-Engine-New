@@ -2163,6 +2163,10 @@ export type GetDashboardTopEdgesParams = {
    * @maximum 200
    */
   limit?: number;
+  /**
+   * Provenance bucket to scope trade-derived metrics by.  The web + mobile UIs surface this as a 3-segment toggle on every P&L analytics surface.  ``edge_terminal`` / ``pipeline`` are the source-mode buckets driven by the input-mode toggle (Edge Terminal scraper vs the legacy ML pipeline) — every dashboard tile reuses this parameter to filter to the currently active source.
+   */
+  placed_by?: PlacedByParamParameter;
 };
 
 export type GetDashboardBookmakerMetricsParams = {
@@ -2275,6 +2279,10 @@ export type GetRecentDebatesParams = {
    * @maximum 100
    */
   limit?: number;
+  /**
+   * Provenance bucket to scope trade-derived metrics by.  The web + mobile UIs surface this as a 3-segment toggle on every P&L analytics surface.  ``edge_terminal`` / ``pipeline`` are the source-mode buckets driven by the input-mode toggle (Edge Terminal scraper vs the legacy ML pipeline) — every dashboard tile reuses this parameter to filter to the currently active source.
+   */
+  placed_by?: PlacedByParamParameter;
 };
 
 export type ListModelHealthAlertsParams = {

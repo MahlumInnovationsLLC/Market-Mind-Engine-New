@@ -6078,6 +6078,7 @@ async def dashboard_swarm_personas_today(
 @app.get("/api/dashboard/top-edges")
 async def dashboard_top_edges(
     limit: int = Query(default=25, ge=1, le=200),
+    placed_by: str | None = Query(default=None),
     _: object = Depends(require_approved_user),
 ) -> dict[str, object]:
     """Pending candidates ranked by EV edge%.
@@ -6086,8 +6087,15 @@ async def dashboard_top_edges(
     is currently halted are returned with ``vertical_halted=true`` so
     the UI can grey them out rather than hide them.  Snoozed
     candidates (active ``prediction_snoozes`` row) are excluded.
+
+    ``placed_by`` mirrors the dashboard-wide source filter (task #849):
+    the candidate universe here is pipeline-only (swarm-debated
+    predictions), so an ``edge_terminal`` selection yields an empty
+    list — Edge Terminal candidates surface in their own tile.
     """
-    return await dashboard.get_top_edges_today(limit=limit)
+    return await dashboard.get_top_edges_today(
+        limit=limit, placed_by=placed_by,
+    )
 
 
 class _InputModeRequest(BaseModel):
@@ -7858,6 +7866,7 @@ async def dashboard_bankroll_recent(
 @app.get("/api/dashboard/recent-debates")
 async def dashboard_recent_debates(
     limit: int = 10,
+    placed_by: str | None = None,
     user: AuthedUser = Depends(require_auth),
 ) -> dict[str, object]:
     """LLM swarm debates feed.
@@ -7868,9 +7877,17 @@ async def dashboard_recent_debates(
     403 here; the dashboard is meant to render *something* for every
     signed-in user, with an upsell rendered against ``redacted=true``
     items.
+
+    ``placed_by`` mirrors the dashboard-wide source filter (task #849):
+    swarm debates are pipeline-grammar only, so an ``edge_terminal``
+    selection returns an empty list.  ``manual`` / ``system`` / ``all``
+    / ``pipeline`` all return the full debate feed (debates aren't
+    tagged with a trader bucket — they're upstream of any fill).
     """
     limit = max(1, min(100, int(limit)))
-    items = await dashboard.get_recent_swarm_debates(limit)
+    items = await dashboard.get_recent_swarm_debates(
+        limit, placed_by=placed_by,
+    )
     sub = await billing.get_user_subscription(user)
     delayed = False
     if billing._TIER_RANK[sub.tier] < billing._TIER_RANK[billing.TIER_PRO]:

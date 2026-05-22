@@ -7,13 +7,23 @@ const { state, mutates } = vi.hoisted(() => ({
 }));
 
 vi.mock("@workspace/api-client-react", () => ({
-  getGetDashboardTopEdgesQueryKey: () => ["top-edges"],
+  getGetDashboardTopEdgesQueryKey: (params: unknown) => ["top-edges", params],
   useGetDashboardTopEdges: () => state,
   useSnoozeDashboardCandidate: () => ({ mutateAsync: mutates.snooze }),
   useFireDashboardCandidate: () => ({ mutateAsync: mutates.fire }),
 }));
 vi.mock("@tanstack/react-query", () => ({
   useQueryClient: () => ({ invalidateQueries: () => undefined }),
+}));
+// TopEdgesTile now reads the dashboard-wide source filter (task #849).
+// The dashboard tests already cover the provider wiring; here we
+// stub the hooks so the tile renders in isolation.
+vi.mock("./source-filter-context", () => ({
+  useEffectivePlacedBy: () => "all",
+}));
+vi.mock("./tile-stale-badge", () => ({
+  useTileStaleClass: () => undefined,
+  TileStaleBadge: () => null,
 }));
 
 import TopEdgesTile from "./top-edges-tile";

@@ -8,6 +8,8 @@ import {
 import { useQueryClient } from "@tanstack/react-query";
 import { GlassCard } from "@/components/ui/glass-card";
 import { SectionHeader } from "@/components/ui/section-header";
+import { useEffectivePlacedBy } from "./source-filter-context";
+import { TileStaleBadge, useTileStaleClass } from "./tile-stale-badge";
 
 function fmtPct(n: number | null | undefined, digits = 2): string {
   if (n === null || n === undefined || Number.isNaN(n)) return "—";
@@ -55,9 +57,16 @@ function InfoTip({ help, testID }: { help: string; testID?: string }) {
 
 export default function TopEdgesTile() {
   const qc = useQueryClient();
-  const queryKey = getGetDashboardTopEdgesQueryKey({ limit: 25 });
+  // Source-aware filter (task #849): the candidate universe here is
+  // pipeline-grammar, so passing `placed_by='edge_terminal'` returns
+  // an empty list from the API — matching the operator's "only
+  // candidates Edge Terminal surfaced" expectation in mixed mode.
+  const placedBy = useEffectivePlacedBy();
+  const staleClass = useTileStaleClass();
+  const params = { limit: 25, placed_by: placedBy };
+  const queryKey = getGetDashboardTopEdgesQueryKey(params);
   const { data, isLoading, error } = useGetDashboardTopEdges(
-    { limit: 25 },
+    params,
     { query: { queryKey, refetchInterval: 30_000, staleTime: 25_000 } },
   );
   const snooze = useSnoozeDashboardCandidate();
@@ -89,7 +98,13 @@ export default function TopEdgesTile() {
   };
 
   return (
-    <GlassCard tone="solid" padding="md" data-testid="card-top-edges">
+    <GlassCard
+      tone="solid"
+      padding="md"
+      data-testid="card-top-edges"
+      className={staleClass}
+    >
+      <TileStaleBadge testId="top-edges-stale-badge" />
       <SectionHeader
         eyebrow="EXECUTION"
         title="Top Edges Today"

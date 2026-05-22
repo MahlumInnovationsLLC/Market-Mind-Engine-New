@@ -518,12 +518,20 @@ export const GetDashboardEdgeTerminalSignalsResponse = zod.object({
 export const getDashboardTopEdgesQueryLimitDefault = 25;
 export const getDashboardTopEdgesQueryLimitMax = 200;
 
+export const getDashboardTopEdgesQueryPlacedByDefault = `all`;
+
 export const GetDashboardTopEdgesQueryParams = zod.object({
   limit: zod.coerce
     .number()
     .min(1)
     .max(getDashboardTopEdgesQueryLimitMax)
     .default(getDashboardTopEdgesQueryLimitDefault),
+  placed_by: zod
+    .enum(["manual", "system", "all", "edge_terminal", "pipeline"])
+    .default(getDashboardTopEdgesQueryPlacedByDefault)
+    .describe(
+      "Provenance bucket to scope trade-derived metrics by.  The web + mobile UIs surface this as a 3-segment toggle on every P&L analytics surface.  ``edge_terminal`` \/ ``pipeline`` are the source-mode buckets driven by the input-mode toggle (Edge Terminal scraper vs the legacy ML pipeline) — every dashboard tile reuses this parameter to filter to the currently active source.",
+    ),
 });
 
 export const GetDashboardTopEdgesResponse = zod.object({
@@ -1983,12 +1991,20 @@ export const GetRecentBankrollEventsResponse = zod.object({
 export const getRecentDebatesQueryLimitDefault = 10;
 export const getRecentDebatesQueryLimitMax = 100;
 
+export const getRecentDebatesQueryPlacedByDefault = `all`;
+
 export const GetRecentDebatesQueryParams = zod.object({
   limit: zod.coerce
     .number()
     .min(1)
     .max(getRecentDebatesQueryLimitMax)
     .default(getRecentDebatesQueryLimitDefault),
+  placed_by: zod
+    .enum(["manual", "system", "all", "edge_terminal", "pipeline"])
+    .default(getRecentDebatesQueryPlacedByDefault)
+    .describe(
+      "Provenance bucket to scope trade-derived metrics by.  The web + mobile UIs surface this as a 3-segment toggle on every P&L analytics surface.  ``edge_terminal`` \/ ``pipeline`` are the source-mode buckets driven by the input-mode toggle (Edge Terminal scraper vs the legacy ML pipeline) — every dashboard tile reuses this parameter to filter to the currently active source.",
+    ),
 });
 
 export const GetRecentDebatesResponse = zod.object({

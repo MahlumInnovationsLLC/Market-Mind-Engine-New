@@ -3247,14 +3247,25 @@ async def get_swarm_debate_by_id(debate_id: int) -> dict[str, Any] | None:
         return None
 
 
-async def get_recent_swarm_debates(limit: int = 10) -> list[dict[str, Any]]:
+async def get_recent_swarm_debates(
+    limit: int = 10, *, placed_by: str | None = None,
+) -> list[dict[str, Any]]:
     """Recent swarm-debate rows including the per-persona ``analyst_verdicts``
     and ``moderator_synthesis`` jsonb columns.
 
     The transcript columns are returned raw — the calling endpoint is
     responsible for redacting them for sub-Pro callers (see
     :func:`redact_swarm_debate_transcripts`).
+
+    ``placed_by`` is the dashboard-wide source filter (task #849).
+    Swarm debates are pipeline-grammar by construction (Edge Terminal
+    bypasses the swarm and writes directly to ``edge_terminal_signals``),
+    so an explicit ``edge_terminal`` selection returns an empty list.
+    Every other value (``manual`` / ``system`` / ``all`` / ``pipeline``
+    / None) returns the full debate feed unchanged.
     """
+    if placed_by == "edge_terminal":
+        return []
     try:
         rows = await db.fetch(
             """
@@ -6646,7 +6657,9 @@ def _vertical_for_league(league: str | None) -> str:
 
 
 async def get_top_edges_today(
-    *, limit: int = _TOP_EDGES_LIMIT_DEFAULT
+    *,
+    limit: int = _TOP_EDGES_LIMIT_DEFAULT,
+    placed_by: str | None = None,
 ) -> dict[str, Any]:
     """Pending candidates ranked by EV edge %, capped at ``limit``.
 
@@ -6672,6 +6685,13 @@ async def get_top_edges_today(
     }
     halted = await _halted_verticals_lower()
     out["halted_verticals"] = sorted(halted)
+    # Source-filter (task #849): the candidate universe here is
+    # pipeline-grammar (swarm-debated predictions); Edge Terminal
+    # surfaces its own pending picks via the EdgeTerminalRecentSignals
+    # tile.  Skip the DB roundtrip and return an empty list when the
+    # operator has narrowed the dashboard to edge_terminal-only.
+    if placed_by == "edge_terminal":
+        return out
     # Bankroll snapshot for the indicative planned-stake column.  Falls
     # back to None silently if the bankroll-events table is unreachable
     # in a test sandbox; the tile renders "—" in that case.

@@ -34,13 +34,16 @@ function fmtTime(s: string | null | undefined): string {
 }
 
 export default function HighlightsPanel() {
-  // Trade-provenance filter (T004).  "Best win" / "biggest miss" are
-  // pure P&L so they belong in the toggle's blast radius; the debate
-  // feed below is upstream of any fill and stays unfiltered.
+  // Trade-provenance filter (T004 / task #849).  "Best win" /
+  // "biggest miss" are pure P&L so they belong in the toggle's blast
+  // radius; the upstream debate feed is now also source-aware — Edge
+  // Terminal bypasses the swarm so an ``edge_terminal`` selection
+  // returns an empty TOP PICKS list, matching the operator's "only
+  // candidates Edge Terminal surfaced" expectation.
   const placedBy = useEffectivePlacedBy();
   const staleClass = useTileStaleClass();
   const tradeParams = { limit: 100, placed_by: placedBy };
-  const debateParams = { limit: 25 };
+  const debateParams = { limit: 25, placed_by: placedBy };
   const tradesQ = useGetRecentTrades(tradeParams, {
     query: {
       queryKey: getGetRecentTradesQueryKey(tradeParams),

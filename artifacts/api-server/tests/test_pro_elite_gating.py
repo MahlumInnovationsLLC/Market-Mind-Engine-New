@@ -107,7 +107,9 @@ _SAMPLE_DEBATE: dict[str, Any] = {
 @pytest.fixture
 def patch_recent_debates(monkeypatch):
     """Replace the DB-backed reader with a deterministic single row."""
-    async def _fake_recent(limit: int = 10) -> list[dict[str, Any]]:
+    async def _fake_recent(
+        limit: int = 10, *, placed_by: str | None = None,
+    ) -> list[dict[str, Any]]:
         return [dict(_SAMPLE_DEBATE)]
 
     monkeypatch.setattr(dashboard, "get_recent_swarm_debates", _fake_recent)
