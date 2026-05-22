@@ -131,9 +131,12 @@ def test_enabled_runs_then_cadence_skips_second_call(monkeypatch):
 
 
 def test_predict_live_for_market_returns_none_for_unwired_sport():
-    # Soccer is the first sport with a wired predictor (task #857).
-    # NBA / NHL / MLB / NFL etc. still return (None, metadata) so the
-    # loop only tags rows + drives the dashboard tile for them.
+    # Soccer is the first sport with a wired predictor on the generic
+    # dispatcher path (task #857).  NBA is wired on its own meta-model
+    # path via `_predict_live_for_market_nba` (task #855), so on the
+    # generic dispatcher it still returns (None, metadata) — same as
+    # NHL / MLB / NFL — so the loop only tags rows + drives the
+    # dashboard tile for them on this path.
     prob, meta = _run(_loop._predict_live_for_market(
         {"market_id": "KX-NBA-A", "league": "NBA"}
     ))

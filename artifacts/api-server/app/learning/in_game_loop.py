@@ -51,10 +51,20 @@ from datetime import datetime, timezone
 from typing import Any
 
 from .. import db
+from . import nba_live_features
 from . import soccer_live as _soccer_live
 
 
 log = logging.getLogger(__name__)
+
+
+# Sports for which `_predict_live_for_market` has a real live-feature
+# builder wired up.  Anything not in this set returns None and the
+# loop only tags rows + drives the dashboard tile (the per-sport
+# follow-up rollout sequence).  NBA goes first (task #855) because
+# its play-by-play cadence is the tightest and its in-game market
+# volume is the highest.
+_PREDICT_LIVE_SUPPORTED_SPORTS: frozenset[str] = frozenset({"nba"})
 
 
 # Sportradar live-state statuses that count as "game in-progress" for
@@ -164,6 +174,32 @@ class InGameCycleResult:
     candidates_tagged: int = 0
     candidates_skipped_duplicate: int = 0
     # Task #835 — cross-book best-line re-checks fired against each
+    # in-progress market on every loop tick.
+    best_line_checks: int = 0
+    best_line_blocks: int = 0
+    best_line_reroutes: int = 0
+    # Per-sport live prediction wiring counters (task #857 — soccer
+    # is the first sport with a wired predictor via the soccer_live
+    # dispatcher path).  Both default 0 so sports without a wired
+    # predictor produce a result indistinguishable from the original
+    # tag-only loop.
+    live_predictions_computed: int = 0
+    live_predictions_persisted: int = 0
+    # Task #855 — NBA-specific predictor path: scores each candidate
+    # via the meta-model with league="NBA", routes through the
+    # live-only gates (gate_stale_live_state +
+    # gate_live_kelly_multiplier), and stamps the calibrated YES
+    # probability via the model_yes_prob+is_live UPDATE.  Tracked
+    # separately from the soccer dispatcher counters so the dashboard
+    # can show per-rollout health independently.
+    predictions_made: int = 0
+    # Rejections from the live-only gate chain (stale_live_state).
+    # Counted separately from `errors` so the dashboard can render
+    # "loop is healthy but feed is stale" without conflating it with
+    # a raised exception.
+    gate_rejections: int = 0
+    predictions_persisted: int = 0
+    # Task #835 — cross-book best-line re-checks fired against each
     # in-progress market on every loop tick.  ``best_line_checks`` is
     # the number of rows we ran the live-mode gate against;
     # ``best_line_blocks`` and ``best_line_reroutes`` count the
@@ -173,12 +209,6 @@ class InGameCycleResult:
     best_line_checks: int = 0
     best_line_blocks: int = 0
     best_line_reroutes: int = 0
-    # Per-sport live prediction wiring counters (task #857 — soccer
-    # is the first sport with a wired predictor).  Both default 0 so
-    # sports without a wired predictor produce a result indistinguishable
-    # from the original tag-only loop.
-    live_predictions_computed: int = 0
-    live_predictions_persisted: int = 0
     errors: list[str] = field(default_factory=list)
 
     def as_dict(self) -> dict[str, Any]:
@@ -199,6 +229,12 @@ class InGameCycleResult:
             "best_line_reroutes": self.best_line_reroutes,
             "live_predictions_computed": self.live_predictions_computed,
             "live_predictions_persisted": self.live_predictions_persisted,
+            "predictions_made": self.predictions_made,
+            "gate_rejections": self.gate_rejections,
+            "predictions_persisted": self.predictions_persisted,
+            "best_line_checks": self.best_line_checks,
+            "best_line_blocks": self.best_line_blocks,
+            "best_line_reroutes": self.best_line_reroutes,
             "errors": list(self.errors),
         }
 
@@ -273,6 +309,10 @@ async def _fetch_live_eligible(
                    p.home_team          AS home_team,
                    p.away_team          AS away_team,
                    s.status             AS status,
+                   s.home_score         AS home_score,
+                   s.away_score         AS away_score,
+                   s.period             AS period,
+                   s.clock              AS clock,
                    extract(epoch from (now() - s.fetched_at))::float
                                         AS state_age_seconds
               FROM predictions p
@@ -361,12 +401,10 @@ async def _evaluate_best_line_for_live_row(
 
     Task #835: every in-game re-score should get a fresh cross-book
     check against the 30s ``line_snapshots`` window — that's the
-    whole point of the live-mode variant.  The per-sport predictor
-    chain that produces ``model_yes_prob`` is still stubbed
-    (:func:`_predict_live_for_market`), so we run the gate against
-    the latest persisted Kalshi price for the market, with
-    ``is_live=True`` so :func:`app.risk.gates.gate_best_line` uses
-    the tight freshness budget + the (market_id, kind) dedupe key.
+    whole point of the live-mode variant.  Runs against the latest
+    persisted Kalshi price for the market, with ``is_live=True`` so
+    :func:`app.risk.gates.gate_best_line` uses the tight freshness
+    budget + the (market_id, kind) dedupe key.
 
     Returns the gate's ``details['decision']`` string when the gate
     ran, ``None`` when we skipped (missing data, gate import error).
@@ -518,6 +556,231 @@ async def _persist_live_model_prob(
         return False
 
 
+# ---------------------------------------------------------------------------
+# NBA-specific live prediction path (task #855).
+#
+# Separate from the generic ``_predict_live_for_market`` soccer-dispatcher
+# above (task #857) because NBA goes through the meta-model
+# ``predictor.predict(league="NBA")`` chain and routes the result through
+# the live-only risk gates (``gate_stale_live_state`` +
+# ``gate_live_kelly_multiplier``) before persistence — the soccer path
+# stamps directly via the metadata jsonb column.  Both paths coexist in
+# ``run_in_game_cycle``; their league checks are disjoint so they never
+# double-process a row.
+# ---------------------------------------------------------------------------
+
+
+async def _predict_live_for_market_nba(
+    row: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Score one live NBA in-game candidate through the predictor chain.
+
+    Returns a dict::
+
+        {
+            "probability": <calibrated YES prob 0..1>,
+            "model_name": <active predictor name>,
+            "model_version": <active predictor version>,
+            "feature_inputs": <NBA live feature snapshot>,
+            "live_anchor": <live score-diff anchor probability>,
+        }
+
+    or ``None`` when the league isn't NBA, when the predictor isn't
+    loaded, or when the call errors out (errors are swallowed and
+    surfaced to the loop's ``errors`` list rather than aborting).
+
+    Routes through the meta-model with ``league="NBA"`` so the per-
+    league calibrator the daily honesty report's Brier-split tracks
+    is the same one applied here — the comparison the operator gates
+    the per-sport flip on is apples-to-apples.
+    """
+    league = (row.get("league") or "").upper().strip()
+    if league.lower() != "nba":
+        return None
+    try:
+        from .. import predictor as _predictor
+        from ..orchestrator.features import build_features
+    except Exception as e:  # pragma: no cover — defensive
+        log.debug("in_game_loop predictor import failed: %s", e)
+        return None
+
+    live_state = {
+        "home_score": row.get("home_score"),
+        "away_score": row.get("away_score"),
+        "period": row.get("period"),
+        "clock": row.get("clock"),
+        "status": row.get("status"),
+    }
+    cand = nba_live_features.build_nba_live_candidate(row, live_state=live_state)
+    try:
+        fv = build_features(
+            cand,
+            consensus=cand.get("consensus_probability"),
+            current_price=cand.get("kalshi_price"),
+            edge=None,
+        )
+    except Exception as e:
+        log.debug("in_game_loop build_features failed for %s: %s",
+                  row.get("market_id"), e)
+        return None
+
+    try:
+        pred = await _predictor.predict(list(fv.values), league="NBA")
+    except _predictor.PredictorUnavailable:
+        # Cold cache — the loop just won't write a probability this
+        # cycle, identical to the pre-wired stub behaviour.
+        return None
+    except Exception as e:
+        log.warning(
+            "in_game_loop predictor.predict failed for %s: %s",
+            row.get("market_id"), e,
+        )
+        return None
+
+    return {
+        "probability": float(pred.probability),
+        "model_name": pred.model_name,
+        "model_version": pred.model_version,
+        "feature_inputs": cand.get("live_state"),
+        "live_anchor": cand.get("live_state", {}).get("live_anchor"),
+    }
+
+
+async def _persist_live_model_yes_prob(
+    market_id: str, prob: float
+) -> bool:
+    """Stamp the in-game calibrated YES probability onto the matching
+    ``predictions`` row so the daily honesty report's pre-vs-in-game
+    Brier split (Section 9) scores against the live prediction.
+
+    Overwrites any prior value (the in-game loop is meant to refresh
+    the probability as the game progresses — unlike the orchestrator's
+    pre-game ``_persist_model_yes_prob`` which only stamps NULLs).
+    Returns True when the UPDATE flipped a row, False otherwise.
+    """
+    try:
+        result = await db.execute(
+            """
+            UPDATE predictions
+               SET model_yes_prob = $2,
+                   is_live = true
+             WHERE kalshi_market_id = $1
+               AND settled_at IS NULL
+            """,
+            market_id, float(prob),
+        )
+        if isinstance(result, str):
+            parts = result.split()
+            if len(parts) == 2 and parts[0].upper() == "UPDATE":
+                try:
+                    return int(parts[1]) > 0
+                except ValueError:
+                    return False
+        return False
+    except Exception as e:  # pragma: no cover — defensive
+        log.warning(
+            "in_game_loop persist model_yes_prob failed for %s: %s",
+            market_id, e,
+        )
+        return False
+
+
+def _build_live_risk_context(
+    row: dict[str, Any], live_prob: float
+) -> "Any":
+    """Construct the minimal :class:`RiskContext` the live-only gates
+    (``gate_stale_live_state``, ``gate_live_kelly_multiplier``)
+    actually read from.
+
+    Keeps the import lazy so unit tests that monkeypatch ``db`` away
+    don't have to also patch the risk module's transitive imports.
+    """
+    from ..risk.gates import RiskContext  # local import to avoid cycle
+
+    league = (row.get("league") or "").upper() or None
+    kalshi_price = row.get("kalshi_price")
+    try:
+        kp = float(kalshi_price) if kalshi_price is not None else None
+    except (TypeError, ValueError):
+        kp = None
+    edge: float | None = None
+    if kp is not None:
+        try:
+            edge = float(live_prob) - kp
+        except (TypeError, ValueError):
+            edge = None
+    return RiskContext(
+        market_id=str(row.get("market_id") or ""),
+        side="YES",
+        vertical="sports",
+        league=league,
+        market_type="moneyline",
+        matchup=None,
+        current_price=kp,
+        model_probability=float(live_prob),
+        edge=edge,
+        confidence_band_low=None,
+        confidence_band_high=None,
+        agreement_rate=None,
+        swarm_approved=True,
+        swarm_recommended_action="BUY_YES",
+        debate_id=None,
+        intended_quantity=0,
+        intended_notional_usd=0.0,
+        bankroll_usd=None,
+        open_positions_count=0,
+        open_positions_notional_usd=0.0,
+        open_positions_per_vertical_usd={},
+        operator_overrides={},
+        market_cooldown_until=None,
+        game_time=row.get("game_time"),
+        # The in-game routing path is the whole point of this gate
+        # chain — every candidate we send through here is, by
+        # definition, a live re-evaluation.
+        is_live=True,
+        sportradar_game_id=str(row.get("game_id") or "") or None,
+    )
+
+
+async def _route_live_prediction_through_gates(
+    row: dict[str, Any], live_prob: float
+) -> tuple[bool, str | None]:
+    """Run the in-game candidate through the two live-only gates
+    (``gate_stale_live_state`` then ``gate_live_kelly_multiplier``).
+
+    Returns ``(passed, reject_reason)``.  ``gate_live_kelly_multiplier``
+    halves the intended size in place and always passes, so the only
+    rejection path here is ``stale_live_state``.
+
+    Failure to construct/import the gates path is treated as a soft
+    pass: the loop's existing `errors` list captures the issue while
+    the prediction still gets persisted so the shadow-mode rollout
+    keeps producing data for the Brier-split.
+    """
+    try:
+        from ..risk import gates as _gates
+    except Exception as e:  # pragma: no cover — defensive
+        log.debug("in_game_loop gates import failed: %s", e)
+        return True, None
+    try:
+        ctx = _build_live_risk_context(row, live_prob)
+    except Exception as e:  # pragma: no cover — defensive
+        log.debug("in_game_loop ctx build failed: %s", e)
+        return True, None
+    try:
+        stale = await _gates.gate_stale_live_state(ctx)
+    except Exception as e:
+        log.warning("in_game_loop stale_live_state raised: %s", e)
+        return True, None
+    if not stale.passed:
+        return False, stale.reason or "stale_live_state"
+    try:
+        await _gates.gate_live_kelly_multiplier(ctx)
+    except Exception as e:  # pragma: no cover — defensive
+        log.debug("in_game_loop live_kelly_multiplier raised: %s", e)
+    return True, None
+
+
 async def run_in_game_cycle(
     sport: str, *, now: datetime | None = None
 ) -> InGameCycleResult:
@@ -635,11 +898,11 @@ async def run_in_game_cycle(
         elif decision == "reroute_polymarket":
             result.best_line_reroutes += 1
 
-    # Per-sport live prediction wiring.  Soccer (#857) is the first
-    # sport with a wired predictor; other sports' dispatchers return
-    # (None, _) so the loop only tags rows + drives dashboard counts.
-    # Failures on individual rows are captured per-row and never
-    # abort the cycle.
+    # Per-sport live prediction wiring — generic dispatcher path
+    # (task #857: soccer is the first sport with a wired predictor).
+    # Other sports' dispatchers return (None, _) so the loop only
+    # tags rows + drives dashboard counts.  Failures on individual
+    # rows are captured per-row and never abort the cycle.
     for r in fresh_rows:
         mid = r.get("market_id")
         try:
@@ -654,6 +917,49 @@ async def run_in_game_cycle(
         result.live_predictions_computed += 1
         if await _persist_live_model_prob(str(mid), prob, meta):
             result.live_predictions_persisted += 1
+
+    # NBA-specific predictor path (task #855: NBA goes first on the
+    # meta-model route).  Disjoint from the soccer dispatcher above
+    # by league check.  Scores each live row through
+    # ``predictor.predict(league="NBA")``, routes through the live-
+    # only gate chain (gate_stale_live_state +
+    # gate_live_kelly_multiplier), and stamps the calibrated YES
+    # probability via the model_yes_prob + is_live UPDATE so the
+    # daily honesty report's pre-vs-in-game Brier split (Section 9)
+    # scores the live prediction.
+    if sp in _PREDICT_LIVE_SUPPORTED_SPORTS:
+        for r in rows:
+            mid = r.get("market_id")
+            if not mid:
+                continue
+            try:
+                pred = await _predict_live_for_market_nba(r)
+            except Exception as e:
+                result.errors.append(
+                    f"predict {mid}: {type(e).__name__}: {e}"
+                )
+                continue
+            if pred is None:
+                continue
+            prob = pred.get("probability")
+            if prob is None:
+                continue
+            result.predictions_made += 1
+            passed, reason = await _route_live_prediction_through_gates(
+                r, float(prob)
+            )
+            if not passed:
+                result.gate_rejections += 1
+                log.info(
+                    "in_game_loop %s rejected by live gate: %s",
+                    mid, reason,
+                )
+                continue
+            persisted = await _persist_live_model_yes_prob(
+                str(mid), float(prob)
+            )
+            if persisted:
+                result.predictions_persisted += 1
 
     result.completed_at = datetime.now(timezone.utc).isoformat()
     result.duration_seconds = time.perf_counter() - started_perf
