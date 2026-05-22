@@ -43,6 +43,10 @@ PROTECTED_ROUTES: tuple[str, ...] = (
     # the operator dashboard, plus the underlying-JSON download.
     "/api/health/surrogate-backtest",
     "/api/health/surrogate-backtest/report.json",
+    # Task #814 — per-vertical safety-threshold tuner sweep + drift
+    # surfaced on the operator dashboard plus the underlying JSON.
+    "/api/health/safety-threshold-tuning",
+    "/api/health/safety-threshold-tuning/report.json",
     "/api/dashboard/overview",
     "/api/dashboard/recent-trades",
     "/api/dashboard/swarm-personas",

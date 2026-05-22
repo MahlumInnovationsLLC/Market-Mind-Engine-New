@@ -429,6 +429,8 @@ export function HealthPanel() {
 
         <SurrogateBacktestPanel token={token} />
 
+        <SafetyThresholdTuningPanel token={token} />
+
 
         <section className="space-y-3">
           <div className="flex items-baseline justify-between gap-3 flex-wrap">
@@ -2338,6 +2340,215 @@ export function SurrogateBacktestPanel({
           {data.row_kept_count !== null && data.row_input_count !== null && (
             <span className="ml-2 normal-case tracking-normal">
               · {data.row_kept_count}/{data.row_input_count} rows kept
+            </span>
+          )}
+        </div>
+      )}
+    </section>
+  );
+}
+
+type SafetyThresholdKnob = {
+  current: number | null;
+  prior: number | null;
+  delta: number | null;
+  changed: boolean;
+};
+
+type SafetyThresholdRow = {
+  vertical: string;
+  sample_count: number;
+  knobs: Record<string, SafetyThresholdKnob>;
+};
+
+type SafetyThresholdResponse = {
+  available: boolean;
+  reason: string | null;
+  report_path: string | null;
+  report_filename: string | null;
+  report_url: string | null;
+  prior_report_path: string | null;
+  prior_report_filename: string | null;
+  generated_at: string | null;
+  source: string | null;
+  rows: SafetyThresholdRow[];
+};
+
+const SAFETY_KNOB_ORDER: Array<{ key: string; label: string }> = [
+  { key: "sharpe_min_ratio", label: "sharpe min" },
+  { key: "ruin_max_probability", label: "max P(ruin)" },
+  { key: "segment_max_losses", label: "segment cap" },
+];
+
+function fmtKnobValue(v: number | null): string {
+  if (v === null || v === undefined || Number.isNaN(v)) return "—";
+  if (Number.isInteger(v)) return String(v);
+  return v.toFixed(3);
+}
+
+function fmtKnobDelta(v: number | null): string {
+  if (v === null || v === undefined || Number.isNaN(v)) return "";
+  if (v === 0) return "±0";
+  const sign = v > 0 ? "+" : "−";
+  const abs = Math.abs(v);
+  return `${sign}${Number.isInteger(abs) ? abs.toString() : abs.toFixed(3)}`;
+}
+
+export function SafetyThresholdTuningPanel({
+  token,
+}: {
+  token: () => Promise<string | null>;
+}) {
+  const [data, setData] = useState<SafetyThresholdResponse | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    async function load() {
+      try {
+        const res = await apiFetch<SafetyThresholdResponse>(
+          "/api/health/safety-threshold-tuning",
+          { getToken: token },
+        );
+        if (cancelled) return;
+        setData(res);
+        setError(null);
+      } catch (e: unknown) {
+        if (cancelled) return;
+        setError(
+          formatErrorMessage(
+            e,
+            e instanceof ApiError
+              ? `HTTP ${e.status} :: ${e.message}`
+              : undefined,
+          ),
+        );
+      }
+    }
+    load();
+    // The sweep only re-runs after a meta-model retrain or once per
+    // day from the in-process scheduler; poll every 5 minutes so we
+    // pick up a fresh report without hammering disk.
+    const id = setInterval(load, 5 * 60_000);
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+    };
+  }, [token]);
+
+  const rows = data?.rows ?? [];
+
+  return (
+    <section className="space-y-3" data-testid="panel-safety-threshold-tuning">
+      <div className="flex items-baseline justify-between gap-3 flex-wrap">
+        <h2 className="text-sm uppercase tracking-widest text-muted-foreground">
+          Safety-threshold tuning (per-vertical drift vs last sweep)
+        </h2>
+        <span className="text-[10px] uppercase tracking-widest text-muted-foreground/70">
+          source ::{" "}
+          {data?.report_filename ?? "scripts/reports/safety_threshold_tuning_*.json"}
+          {data?.generated_at ? ` · generated ${data.generated_at}` : ""}
+        </span>
+      </div>
+      {error && (
+        <div className="border border-destructive bg-destructive/10 text-destructive p-2 text-xs">
+          {error}
+        </div>
+      )}
+      {!error && data && !data.available && (
+        <div
+          className="border border-border bg-card p-3 text-xs text-muted-foreground"
+          data-testid="safety-threshold-empty"
+        >
+          {data.reason ?? "no safety-threshold tuning report on disk"}
+        </div>
+      )}
+      {data && data.available && rows.length > 0 && (
+        <div className="border border-border bg-card overflow-x-auto text-xs">
+          <table className="w-full">
+            <thead className="text-[10px] uppercase tracking-widest text-muted-foreground">
+              <tr className="border-b border-border">
+                <th className="text-left p-2">vertical</th>
+                <th className="text-right p-2">samples</th>
+                {SAFETY_KNOB_ORDER.map((k) => (
+                  <th key={k.key} className="text-right p-2">
+                    {k.label}
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((row) => (
+                <tr
+                  key={row.vertical}
+                  className="border-b border-border/40"
+                  data-testid={`safety-threshold-row-${row.vertical}`}
+                >
+                  <td className="p-2 font-bold">{row.vertical}</td>
+                  <td
+                    className="p-2 text-right tabular-nums"
+                    data-testid={`safety-threshold-samples-${row.vertical}`}
+                  >
+                    {row.sample_count}
+                  </td>
+                  {SAFETY_KNOB_ORDER.map((k) => {
+                    const knob = row.knobs?.[k.key];
+                    const deltaText = knob ? fmtKnobDelta(knob.delta) : "";
+                    const tone = knob?.changed
+                      ? "text-warning"
+                      : "text-foreground";
+                    return (
+                      <td
+                        key={k.key}
+                        className={`p-2 text-right tabular-nums ${tone}`}
+                        data-testid={`safety-threshold-${k.key}-${row.vertical}`}
+                      >
+                        {fmtKnobValue(knob?.current ?? null)}
+                        {deltaText && (
+                          <span
+                            className="ml-1 text-[10px] text-muted-foreground"
+                            data-testid={`safety-threshold-delta-${k.key}-${row.vertical}`}
+                          >
+                            ({deltaText})
+                          </span>
+                        )}
+                      </td>
+                    );
+                  })}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+      {data && data.available && (data.report_url || data.report_path) && (
+        <div className="text-[10px] text-muted-foreground/70 uppercase tracking-widest">
+          full report ::{" "}
+          {data.report_url ? (
+            <a
+              href={data.report_url}
+              target="_blank"
+              rel="noreferrer"
+              className="text-foreground underline normal-case tracking-normal break-all hover:text-primary"
+              data-testid="safety-threshold-report-link"
+              title={data.report_path ?? undefined}
+            >
+              {data.report_filename ?? data.report_url}
+            </a>
+          ) : (
+            <code
+              className="normal-case tracking-normal break-all"
+              data-testid="safety-threshold-report-path"
+            >
+              {data.report_path}
+            </code>
+          )}
+          {data.prior_report_filename && (
+            <span
+              className="ml-2 normal-case tracking-normal text-muted-foreground/60"
+              data-testid="safety-threshold-prior-hint"
+            >
+              (diff vs {data.prior_report_filename})
             </span>
           )}
         </div>

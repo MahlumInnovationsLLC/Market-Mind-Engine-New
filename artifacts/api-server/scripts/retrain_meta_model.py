@@ -219,6 +219,15 @@ def main(argv: list[str]) -> int:
         action="store_true",
         help="Print the expanded column list and exit without training.",
     )
+    ap.add_argument(
+        "--skip-safety-tune",
+        action="store_true",
+        help=(
+            "Skip the post-fit safety-threshold sweep (task #814). The "
+            "daily scheduler in app.notifications.safety_threshold_tuner "
+            "will still refresh the report on its own cadence."
+        ),
+    )
     args = ap.parse_args(argv)
 
     promoted = ar_store.list_promoted_names_sync(args.dsn)
@@ -260,7 +269,31 @@ def main(argv: list[str]) -> int:
     log.info("wrote %s", written["model"])
     log.info("wrote %s", written["sidecar"])
     log.info("metrics: %s", metrics)
-    print(json.dumps({"written": written, "metrics": metrics}, indent=2))
+
+    # Re-run the safety-threshold tuner now that the realised-return
+    # distribution has shifted (task #814).  Best-effort: a sweep
+    # failure is logged but does not fail the retrain — the daily
+    # cron in ``app.notifications.safety_threshold_tuner`` will pick
+    # the next refresh up on its own.
+    tune_summary: dict[str, object] | None = None
+    if not args.skip_safety_tune:
+        try:
+            import asyncio
+
+            from app.notifications import safety_threshold_tuner
+
+            tune_summary = asyncio.run(
+                safety_threshold_tuner.run_after_retrain(reason="retrain")
+            )
+            log.info("safety threshold sweep summary: %s", tune_summary)
+        except Exception as e:  # noqa: BLE001
+            log.warning("safety threshold sweep skipped: %s", e)
+            tune_summary = {"ok": False, "error": f"{type(e).__name__}: {e}"}
+
+    print(json.dumps(
+        {"written": written, "metrics": metrics, "safety_tune": tune_summary},
+        indent=2,
+    ))
     return 0
 
 

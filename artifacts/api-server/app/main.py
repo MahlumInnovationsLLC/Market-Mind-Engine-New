@@ -38,6 +38,7 @@ from . import (
     rc_billing,
     ready_gate,
     runtime_settings as runtime_settings_mod,
+    safety_threshold_report,
     storage,
     surrogate_report,
 )
@@ -56,6 +57,7 @@ from .notifications import (
     sms as notif_sms,
     soccer_settlement_drift as notif_soccer_settlement_drift,
     suppression as notif_suppression,
+    safety_threshold_tuner as notif_safety_threshold_tuner,
     v1_backtest_gate as notif_v1_backtest_gate,
     weekly_roundup as notif_weekly_roundup,
 )
@@ -573,6 +575,18 @@ async def lifespan(_: FastAPI):
             await notif_v1_backtest_gate.start()
         except Exception as e:
             log.warning("v1 backtest gate scheduler start failed: %s", e)
+        # Safety-threshold tuner (task #814).  Daily fallback that
+        # re-runs the historical sweep so the per-vertical defaults
+        # under ``runtime_settings.PER_VERTICAL_NEW_GATE_DEFAULTS``
+        # stay aligned with the live model.  The retrain pipeline
+        # also calls ``run_after_retrain`` directly so the report
+        # refreshes the moment a new ``meta_model.pkl`` lands.
+        try:
+            await notif_safety_threshold_tuner.start()
+        except Exception as e:
+            log.warning(
+                "safety threshold tuner scheduler start failed: %s", e
+            )
         try:
             await notif_weekly_roundup.start()
         except Exception as e:
@@ -907,6 +921,10 @@ async def lifespan(_: FastAPI):
             await notif_v1_backtest_gate.stop()
         except Exception as e:
             log.warning("v1 backtest gate stop error: %s", e)
+        try:
+            await notif_safety_threshold_tuner.stop()
+        except Exception as e:
+            log.warning("safety threshold tuner stop error: %s", e)
         try:
             await notif_weekly_roundup.stop()
         except Exception as e:
@@ -5216,6 +5234,47 @@ async def health_surrogate_backtest_report_json(
         raise HTTPException(
             status_code=404,
             detail="no surrogate backtest report on disk",
+        )
+    return FileResponse(
+        path=str(path),
+        media_type="application/json",
+        filename=path.name,
+    )
+
+
+@app.get("/api/health/safety-threshold-tuning")
+async def health_safety_threshold_tuning(
+    _: object = Depends(require_approved_user),
+) -> dict[str, object]:
+    """Latest per-vertical safety-threshold sweep recommendations + drift
+    vs the prior run (task #814).
+
+    The sweep is re-run by ``app.notifications.safety_threshold_tuner``
+    after every meta-model retrain and as a daily cron fallback.
+    Operators promote the picks into
+    ``runtime_settings.PER_VERTICAL_NEW_GATE_DEFAULTS`` after review
+    — see ``docs/safety_threshold_tuner_runbook.md``.
+    """
+    payload = safety_threshold_report.load_latest()
+    payload["report_url"] = (
+        "/api/health/safety-threshold-tuning/report.json"
+        if payload.get("available")
+        else None
+    )
+    return payload
+
+
+@app.get("/api/health/safety-threshold-tuning/report.json")
+async def health_safety_threshold_tuning_report_json(
+    _: object = Depends(require_approved_user),
+) -> Response:
+    """Stream the most recent safety-threshold tuning JSON report
+    straight from disk."""
+    path = safety_threshold_report.latest_report_path()
+    if path is None:
+        raise HTTPException(
+            status_code=404,
+            detail="no safety-threshold tuning report on disk",
         )
     return FileResponse(
         path=str(path),

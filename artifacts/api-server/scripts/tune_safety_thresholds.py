@@ -607,12 +607,25 @@ def _print_summary(sweeps: list[_VerticalSweep]) -> None:
         )
 
 
-async def _amain(args: argparse.Namespace) -> int:
-    if args.from_json:
-        trades = _load_trades_from_fixture(Path(args.from_json), args.vertical)
-        source_label = f"fixture:{args.from_json}"
+async def run_and_write_report(
+    *,
+    vertical: str | None = None,
+    report_path: str | Path | None = None,
+    from_json: str | Path | None = None,
+) -> dict[str, Any]:
+    """Run a full sweep and persist the JSON report to ``reports/``.
+
+    Used by the CLI and by the in-process scheduler that re-runs the
+    sweep after every meta-model retrain (task #814) so the tuned
+    defaults stay aligned with the live model.  Returns the parsed
+    report dict with an extra ``report_path`` key pointing at the
+    written file.
+    """
+    if from_json:
+        trades = _load_trades_from_fixture(Path(from_json), vertical)
+        source_label = f"fixture:{from_json}"
     else:
-        trades = await _load_trades(args.vertical)
+        trades = await _load_trades(vertical)
         source_label = "v1_archive.trade_analyses"
     by_vertical: dict[str, list[_Trade]] = {}
     for t in trades:
@@ -622,16 +635,32 @@ async def _amain(args: argparse.Namespace) -> int:
         sweeps.append(_sweep_for_vertical(name, by_vertical[name]))
     report = _format_report(sweeps, source_label)
     REPORTS_DIR.mkdir(parents=True, exist_ok=True)
-    if args.report:
-        report_path = Path(args.report)
+    if report_path is not None:
+        out_path = Path(report_path)
     else:
-        date_tag = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-        report_path = REPORTS_DIR / f"safety_threshold_tuning_{date_tag}.json"
-    report_path.write_text(json.dumps(report, indent=2, default=str))
-    print(f"[tune_safety_thresholds] wrote {report_path}")
+        # Timestamped (not just dated) so multiple retrain triggers in
+        # the same UTC day each keep their own report on disk for the
+        # "drift vs last run" comparison.
+        ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H%M%SZ")
+        out_path = REPORTS_DIR / f"safety_threshold_tuning_{ts}.json"
+    out_path.write_text(json.dumps(report, indent=2, default=str))
+    report["report_path"] = str(out_path)
+    report["_sweeps_internal"] = sweeps  # for the CLI summary
+    return report
+
+
+async def _amain(args: argparse.Namespace) -> int:
+    report = await run_and_write_report(
+        vertical=args.vertical,
+        report_path=args.report,
+        from_json=args.from_json,
+    )
+    sweeps: list[_VerticalSweep] = report.pop("_sweeps_internal")
+    print(f"[tune_safety_thresholds] wrote {report['report_path']}")
     _print_summary(sweeps)
+    trades_sampled = any(s.sample_count for s in sweeps)
     if args.apply:
-        if not trades:
+        if not trades_sampled:
             print(
                 "[tune_safety_thresholds] --apply skipped: no trades in tape "
                 "(would clobber tuned defaults with NULL)",
