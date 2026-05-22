@@ -213,6 +213,70 @@ def test_score_diff_anchor_blends_with_pre_game_prior():
     assert p_lo < 0.30
 
 
+def test_mlb_vector_builder_emits_fixed_width_vector():
+    names, values = _mlb.build_mlb_live(
+        {
+            "home_score": 5, "away_score": 3,
+            "period": "inning_7",
+            "model_yes_prob": 0.55, "kalshi_price": 0.60,
+            "state_age_seconds": 12.0,
+        }
+    )
+    assert tuple(names) == _mlb.MLB_LIVE_FEATURE_NAMES
+    assert len(values) == len(_mlb.MLB_LIVE_FEATURE_NAMES)
+    for v in values:
+        assert isinstance(v, float)
+        assert v == v  # not NaN
+        assert v not in (float("inf"), float("-inf"))
+    # score_diff = 2, abs = 2
+    assert values[0] == 2.0
+    assert values[1] == 2.0
+    # inning 7
+    assert values[2] == 7.0
+    # regulation remaining: 3 of 9 innings ahead
+    assert abs(values[3] - (3.0 / 9.0)) < 1e-6
+    # not extras
+    assert values[4] == 0.0
+    assert values[5] == 0.55
+    assert values[6] == 0.60
+    assert values[7] == 12.0
+
+
+def test_mlb_vector_builder_null_safe():
+    names, values = _mlb.build_mlb_live({})
+    assert len(names) == len(values)
+    for v in values:
+        assert v == v
+        assert v not in (float("inf"), float("-inf"))
+    # Defaults: 0 score, inning 1, full regulation remaining, 0.5 prob/price
+    assert values[0] == 0.0
+    assert values[2] == 1.0
+    assert abs(values[3] - 1.0) < 1e-6
+    assert values[4] == 0.0
+    assert values[5] == 0.5
+    assert values[6] == 0.5
+
+
+def test_mlb_vector_builder_extras_flag():
+    _, vals = _mlb.build_mlb_live({"period": "extras"})
+    assert vals[2] == 10.0
+    assert vals[3] == 0.0  # regulation done
+    assert vals[4] == 1.0
+
+
+def test_mlb_vector_builder_handles_garbage_period():
+    _, vals = _mlb.build_mlb_live({"period": "garbage"})
+    # Unparseable → defaults to inning 1, full regulation remaining.
+    assert vals[2] == 1.0
+    assert abs(vals[3] - 1.0) < 1e-6
+
+
+def test_mlb_vector_builder_registered_in_vector_dispatch():
+    # The vector-style builder must be wired into the registry the
+    # in_game_loop iterates over so MLB rows actually get scored.
+    assert _loop._LIVE_VECTOR_BUILDERS.get("mlb") is _mlb.build_mlb_live
+
+
 def test_build_mlb_live_candidate_carries_live_state():
     row = {
         "market_id": "KX-MLB-Z", "league": "MLB",

@@ -123,6 +123,7 @@ _PREDICT_LIVE_SUPPORTED_SPORTS: frozenset[str] = frozenset(
 # coexist without double-stamping the same column for the same row.
 _LIVE_VECTOR_BUILDERS = {
     "nhl": _nhl_features.build_nhl_live,
+    "mlb": mlb_live_features.build_mlb_live,
 }
 
 
