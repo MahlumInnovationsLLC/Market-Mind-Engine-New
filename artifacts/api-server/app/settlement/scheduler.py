@@ -12,8 +12,7 @@ import time
 from typing import Any
 
 from .. import calibrators, margin_regressor
-from ..learning import dc_rho_fitter
-from ..learning import soccer_baseline_fitter
+from ..learning import dc_rho_fitter, soccer_baseline_fitter, soccer_lambda_fitter
 from ..config import get_settings
 from .pipeline import run_cycle, _calibration_and_drift_shadow
 from .retrain import run_retrain_cycle
@@ -239,6 +238,32 @@ class _SettlementScheduler:
                 except Exception as e:
                     log.exception("soccer_baseline_fitter cycle failed: %s", e)
                     soccer_baseline_summary = {"error": f"{type(e).__name__}: {e}"}
+                # Weekly per-league soccer baseline-lambda refit
+                # (task #903).  Gated on a 7-day cadence internally so
+                # this is a cheap no-op on every other settlement tick.
+                # Co-exists with the daily ``soccer_baseline_fitter``
+                # above: both write into the predictor's in-memory
+                # override cache, and the weekly MLE fit's per-league
+                # values take precedence inside
+                # :func:`soccer_live.refresh_baseline_lambda_overrides`.
+                try:
+                    sl_cr = await soccer_lambda_fitter.maybe_refit()
+                    if sl_cr is None:
+                        soccer_lambda_summary: dict[str, Any] = {"skipped": "cadence"}
+                    else:
+                        soccer_lambda_summary = {
+                            "started_at": sl_cr.started_at,
+                            "completed_at": sl_cr.completed_at,
+                            "duration_seconds": sl_cr.duration_seconds,
+                            "leagues_examined": sl_cr.leagues_examined,
+                            "leagues_fitted": sl_cr.leagues_fitted,
+                            "leagues_skipped": sl_cr.leagues_skipped,
+                            "persisted": sl_cr.persisted,
+                            "errors": sl_cr.errors,
+                        }
+                except Exception as e:
+                    log.exception("soccer_lambda_fitter cycle failed: %s", e)
+                    soccer_lambda_summary = {"error": f"{type(e).__name__}: {e}"}
                 # Hourly shadow loop (task #753).  Snapshots calibrated
                 # YES probabilities for every active Kalshi market, then
                 # settles those whose underlying market resolved on the
@@ -267,6 +292,7 @@ class _SettlementScheduler:
                     "margin_regressor": mr_summary,
                     "dc_rho_fitter": dc_rho_summary,
                     "soccer_baseline_fitter": soccer_baseline_summary,
+                    "soccer_lambda_fitter": soccer_lambda_summary,
                     "shadow": shadow_summary or self._last.get("shadow"),
                 }
                 backoff = 0.0

@@ -123,12 +123,13 @@ _BASELINE_LAMBDA_AWAY = 1.15
 
 
 # DB-backed override for the per-league baseline lambdas, refreshed by
-# :mod:`app.learning.soccer_baseline_fitter` after each successful
-# scoreline aggregation (task #896).  Empty until the fitter loads
-# the persisted vector; the resolver falls through to
-# ``_BASELINE_LAMBDAS_BY_LEAGUE`` when a league has no override yet,
-# so a cold start (or a league we don't have enough rolling history
-# to refit) keeps the hand-set default.
+# :mod:`app.learning.soccer_baseline_fitter` (task #896, daily, persists
+# into ``runtime_settings``) and :mod:`app.learning.soccer_lambda_fitter`
+# (task #903, weekly, persists into the dedicated ``soccer_baseline_lambdas``
+# table).  Empty until a fitter loads its persisted vector; the resolver
+# falls through to ``_BASELINE_LAMBDAS_BY_LEAGUE`` when a league has no
+# override yet, so a cold start (or a league we don't have enough rolling
+# history to refit) keeps the hand-set default.
 _BASELINE_LAMBDA_OVERRIDES: dict[str, tuple[float, float]] = {}
 
 # ISO-8601 timestamp of the last successful baseline refresh that
@@ -139,17 +140,22 @@ _BASELINE_LAMBDAS_REFRESHED_AT: str | None = None
 
 
 def set_baseline_lambda_overrides(
-    overrides: dict[str, tuple[float, float] | list[float]] | None,
+    overrides: dict[str, tuple[float, float] | list[float] | dict[str, float]] | None,
     refreshed_at: str | None = None,
 ) -> None:
     """Replace the in-memory per-league baseline lambda override cache.
 
-    Called by :mod:`app.learning.soccer_baseline_fitter` after a
-    successful refresh (and on startup from the persisted
-    ``runtime_settings`` row) so the live predictor sees the fresh
-    vector without a restart.  Pass ``None`` or ``{}`` to clear and
-    fall back to the hand-set defaults — useful for tests and the
-    operator "revert to defaults" path.
+    Called by :mod:`app.learning.soccer_baseline_fitter` (task #896,
+    daily) and :mod:`app.learning.soccer_lambda_fitter` (task #903,
+    weekly) after a successful refresh / refit, and on startup from
+    the persisted store, so the live predictor sees the fresh vector
+    without a restart.  Pass ``None`` or ``{}`` to clear and fall
+    back to the hand-set defaults — useful for tests and the operator
+    "revert to defaults" path.
+
+    Accepts each league's value as either a ``(home, away)`` tuple/list
+    or a ``{"home": ..., "away": ...}`` dict so both fitters and any
+    manual ``runtime_settings`` edits can share the same setter.
 
     ``refreshed_at`` is an ISO-8601 string recorded so Section 9 of
     the daily honesty report can show when the override was last
@@ -202,38 +208,92 @@ def get_baseline_lambdas_refreshed_at() -> str | None:
 
 
 async def refresh_baseline_lambda_overrides() -> dict[str, tuple[float, float]]:
-    """Load the persisted per-league baseline vector from
-    ``runtime_settings`` into the in-memory cache.
+    """Load the persisted per-league baseline vector into the in-memory
+    cache.
 
-    Best-effort — a DB hiccup leaves the cache untouched so the
-    predictor falls back to whatever was last loaded (or the hand-
-    set defaults on a cold start).  Returns the loaded vector for
+    Reads from both backing stores so either fitter's output is picked
+    up:
+      * The dedicated ``soccer_baseline_lambdas`` table written by
+        :mod:`app.learning.soccer_lambda_fitter` (task #903, weekly).
+      * The ``runtime_settings`` row written by
+        :mod:`app.learning.soccer_baseline_fitter` (task #896, daily).
+
+    The dedicated table is preferred per-league when both stores carry
+    a value (the weekly MLE fit is the more rigorous estimate); the
+    daily ``runtime_settings`` blob fills in any league the weekly
+    fitter hasn't covered yet.
+
+    Best-effort — a DB hiccup (or a missing table on a database that
+    hasn't run migration 0059 yet) leaves the corresponding source
+    silent so the cache falls back to whatever was last loaded (or the
+    hand-set defaults on a cold start).  Returns the loaded vector for
     callers that want to log / inspect what was read.
     """
     from .. import db
 
+    merged: dict[str, tuple[float, float]] = {}
+    refreshed_at: str | None = None
+
+    # Source 1 (lower priority): runtime_settings JSON blob from #896.
     try:
         raw = await db.fetchval(
             "SELECT value FROM runtime_settings WHERE key = $1",
             "learning.baseline_lambdas_by_league",
         )
     except Exception as e:
-        log.debug("refresh_baseline_lambda_overrides read failed: %s", e)
-        return dict(_BASELINE_LAMBDA_OVERRIDES)
-    if not raw:
-        return dict(_BASELINE_LAMBDA_OVERRIDES)
-    import json as _json
+        log.debug("refresh_baseline_lambda_overrides runtime_settings read failed: %s", e)
+        raw = None
+    if raw:
+        import json as _json
+        try:
+            parsed = _json.loads(raw)
+        except Exception:
+            parsed = None
+        if isinstance(parsed, dict):
+            lambdas = parsed.get("lambdas") if "lambdas" in parsed else parsed
+            ra = parsed.get("refreshed_at") if isinstance(parsed, dict) else None
+            if isinstance(ra, str):
+                refreshed_at = ra
+            if isinstance(lambdas, dict):
+                for k, v in lambdas.items():
+                    if not k:
+                        continue
+                    try:
+                        if isinstance(v, dict):
+                            lam_h = float(v.get("home"))  # type: ignore[arg-type]
+                            lam_a = float(v.get("away"))  # type: ignore[arg-type]
+                        else:
+                            seq = list(v)
+                            if len(seq) < 2:
+                                continue
+                            lam_h = float(seq[0])
+                            lam_a = float(seq[1])
+                    except (TypeError, ValueError):
+                        continue
+                    merged[str(k).strip().upper()] = (lam_h, lam_a)
+
+    # Source 2 (higher priority): dedicated soccer_baseline_lambdas
+    # table from #903.  Overwrites any per-league value already pulled
+    # from the runtime_settings blob.
     try:
-        parsed = _json.loads(raw)
-    except Exception:
-        return dict(_BASELINE_LAMBDA_OVERRIDES)
-    if not isinstance(parsed, dict):
-        return dict(_BASELINE_LAMBDA_OVERRIDES)
-    lambdas = parsed.get("lambdas") if "lambdas" in parsed else parsed
-    refreshed_at = parsed.get("refreshed_at") if isinstance(parsed, dict) else None
-    if not isinstance(lambdas, dict):
-        return dict(_BASELINE_LAMBDA_OVERRIDES)
-    set_baseline_lambda_overrides(lambdas, refreshed_at=refreshed_at)
+        rows = await db.fetch(
+            "SELECT league, lambda_home, lambda_away "
+            "  FROM soccer_baseline_lambdas",
+        )
+    except Exception as e:
+        log.debug("refresh_baseline_lambda_overrides soccer_baseline_lambdas read failed: %s", e)
+        rows = None
+    for r in rows or []:
+        try:
+            league = str(r["league"]).strip().upper()
+            if not league:
+                continue
+            merged[league] = (float(r["lambda_home"]), float(r["lambda_away"]))
+        except (TypeError, ValueError, KeyError):
+            continue
+
+    if merged or refreshed_at is not None:
+        set_baseline_lambda_overrides(merged, refreshed_at=refreshed_at)
     return dict(_BASELINE_LAMBDA_OVERRIDES)
 
 
@@ -243,13 +303,14 @@ def _baseline_lambdas_for_league(
     """Return (home, away) baseline goal intensities for a league.
 
     Resolution order:
-      1. DB-backed override populated by
-         :mod:`app.learning.soccer_baseline_fitter` and refreshed
-         into :data:`_BASELINE_LAMBDA_OVERRIDES`.
+      1. Fitted DB-backed override (populated by
+         :mod:`app.learning.soccer_lambda_fitter` (weekly, task #903)
+         and :mod:`app.learning.soccer_baseline_fitter` (daily, task
+         #896), merged into :data:`_BASELINE_LAMBDA_OVERRIDES`).
       2. Hand-set per-league default in
          :data:`_BASELINE_LAMBDAS_BY_LEAGUE`.
       3. Blended top-five-European-leagues + MLS average for
-         unrecognised league labels.
+         unrecognised / unknown league labels.
     """
     if not league:
         return (_BASELINE_LAMBDA_HOME, _BASELINE_LAMBDA_AWAY)
