@@ -7495,3 +7495,80 @@ async def get_soccer_live_predictions(limit: int = 100) -> dict[str, Any]:
     out["items"] = items
     out["count"] = len(items)
     return out
+
+
+# ---------------------------------------------------------------------------
+# Soccer per-leg Brier roll-up (Task #902)
+# ---------------------------------------------------------------------------
+#
+# Section 9 of the daily honesty report already shows per-league Brier
+# broken out by HOME / DRAW / AWAY for soccer (task #901), but operators
+# only see that once a day in the digest.  This helper surfaces the same
+# rolling per-league × per-leg breakdown on the soccer operator forensics
+# console so a leg-specific drift between digests is visible in real
+# time.  Numbers reconcile with Section 9 because both call into
+# ``collect_pre_vs_in_game_brier`` with the same trailing window / min
+# samples knobs.
+
+
+async def get_soccer_per_leg_brier(
+    *, days: int | None = None, min_samples: int | None = None
+) -> dict[str, Any]:
+    """Per-league × per-leg Brier (pre / in / |Δ|) for soccer leagues.
+
+    Thin wrapper around
+    :func:`app.notifications.daily_honesty_report.collect_pre_vs_in_game_brier`
+    that filters down to soccer leagues and exposes the per-leg sub-rows
+    Section 9 of the daily honesty digest already renders.  Returns
+    ``{days, min_samples_per_side, items[], samples_too_small[], error,
+    fetched_at}`` where each item is::
+
+        {league, n_pre, n_in, brier_pre, brier_in, abs_delta,
+         legs: [{leg, n_pre, n_in, brier_pre, brier_in, abs_delta}, ...]}
+
+    ``samples_too_small`` is filtered to soccer leagues too so the
+    operator can see when a league has live rows but not yet enough to
+    surface a delta.
+    """
+    from .notifications.daily_honesty_report import (
+        collect_pre_vs_in_game_brier,
+    )
+    from .learning.soccer_live import SOCCER_LEAGUES
+
+    soccer = {lg.upper() for lg in SOCCER_LEAGUES}
+    fetched_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    try:
+        raw = await collect_pre_vs_in_game_brier(
+            days=days, min_samples=min_samples,
+        )
+    except Exception as e:  # pragma: no cover — defensive
+        log.warning("get_soccer_per_leg_brier failed: %s", e)
+        return {
+            "days": int(days) if days is not None else None,
+            "min_samples_per_side": (
+                int(min_samples) if min_samples is not None else None
+            ),
+            "items": [],
+            "samples_too_small": [],
+            "leagues": sorted(soccer),
+            "error": f"{type(e).__name__}: {e}"[:240],
+            "fetched_at": fetched_at,
+        }
+
+    items = [
+        it for it in (raw.get("items") or [])
+        if str(it.get("league") or "").upper() in soccer
+    ]
+    too_small = [
+        it for it in (raw.get("samples_too_small") or [])
+        if str(it.get("league") or "").upper() in soccer
+    ]
+    return {
+        "days": raw.get("days"),
+        "min_samples_per_side": raw.get("min_samples_per_side"),
+        "items": items,
+        "samples_too_small": too_small,
+        "leagues": sorted(soccer),
+        "error": raw.get("error"),
+        "fetched_at": fetched_at,
+    }

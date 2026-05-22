@@ -6584,6 +6584,26 @@ async def admin_get_soccer_live_predictions(
     return await dashboard.get_soccer_live_predictions(limit=int(limit))
 
 
+@app.get("/api/admin/soccer-per-leg-brier")
+async def admin_get_soccer_per_leg_brier(
+    days: int | None = None,
+    min_samples: int | None = None,
+    actor: AuthedUser = Depends(require_admin),
+) -> dict[str, object]:
+    """Per-league × per-leg Brier roll-up for soccer leagues (Task #902).
+
+    Surfaces the same per-league × per-leg pre-vs-in-game Brier split
+    Section 9 of the daily honesty digest renders, but on the soccer
+    operator forensics console so leg-specific drift is visible between
+    digests.  ``days`` / ``min_samples`` default to the digest's own
+    knobs (``DAILY_HONESTY_REPORT_DIVERGENCE_DAYS`` /
+    ``DAILY_HONESTY_REPORT_MIN_SAMPLES``) so the numbers reconcile.
+    """
+    return await dashboard.get_soccer_per_leg_brier(
+        days=days, min_samples=min_samples,
+    )
+
+
 @app.get("/api/dashboard/soccer-settlement-review")
 async def dashboard_soccer_settlement_review(
     _: object = Depends(require_approved_user),

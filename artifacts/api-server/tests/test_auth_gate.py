@@ -208,6 +208,12 @@ PROTECTED_ROUTES: tuple[str, ...] = (
     "/api/dashboard/soccer-settlement-review",
     # Task #879 — soccer in-game shadow-predictor forensics view.
     "/api/admin/soccer-live-predictions",
+    # Task #902 — per-league × per-leg Brier roll-up on the soccer
+    # operator forensics console (reconciles with Section 9 of the
+    # daily honesty digest).
+    "/api/admin/soccer-per-leg-brier",
+    # Potential payout/profit aggregate for currently-open positions.
+    "/api/dashboard/open-payout",
     # Task #832 — Top-Edges + bookmaker-grammar tiles (web + mobile).
     "/api/dashboard/top-edges",
     "/api/dashboard/bookmaker-metrics",

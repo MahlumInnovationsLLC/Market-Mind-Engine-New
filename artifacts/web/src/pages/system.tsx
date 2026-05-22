@@ -36,6 +36,7 @@ import {
   RiskKnobsPanel,
   RuntimePanel,
   SoccerLivePredictionsPanel,
+  SoccerPerLegBrierPanel,
   TechAiPromotionPanel,
   TriggerCyclePanel,
   UserManagementPanel,
@@ -367,6 +368,12 @@ export default function SystemPage() {
               Soccer in-game shadow predictor
             </div>
             <SoccerLivePredictionsPanel />
+          </GlassCard>
+          <GlassCard tone="solid" padding="md">
+            <div className="mb-3 text-[11px] font-semibold uppercase tracking-[0.18em] text-accent-cyan/80">
+              Per-leg Brier roll-up (pre vs in-game)
+            </div>
+            <SoccerPerLegBrierPanel />
           </GlassCard>
         </div>
       )}

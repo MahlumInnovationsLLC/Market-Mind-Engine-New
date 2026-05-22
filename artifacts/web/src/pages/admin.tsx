@@ -7051,6 +7051,238 @@ function deltaTone(v: number | null | undefined): string {
   return v > 0 ? "text-accent-cyan" : "text-loss";
 }
 
+type SoccerPerLegBrierLeg = {
+  leg: string;
+  n_pre: number;
+  n_in: number;
+  brier_pre: number;
+  brier_in: number;
+  abs_delta: number;
+};
+
+type SoccerPerLegBrierItem = {
+  league: string;
+  n_pre: number;
+  n_in: number;
+  brier_pre: number;
+  brier_in: number;
+  abs_delta: number;
+  legs?: SoccerPerLegBrierLeg[];
+};
+
+type SoccerPerLegBrierTooSmall = {
+  league: string;
+  n_pre: number;
+  n_in: number;
+  min_samples_per_side: number;
+};
+
+type SoccerPerLegBrierResponse = {
+  days: number | null;
+  min_samples_per_side: number | null;
+  items: SoccerPerLegBrierItem[];
+  samples_too_small: SoccerPerLegBrierTooSmall[];
+  leagues: string[];
+  fetched_at: string;
+  error?: string | null;
+};
+
+function fmtBrier(v: number | null | undefined): string {
+  if (v === null || v === undefined || Number.isNaN(v)) return "—";
+  return v.toFixed(4);
+}
+
+function brierDeltaTone(v: number | null | undefined): string {
+  if (v === null || v === undefined || Number.isNaN(v)) {
+    return "text-muted-foreground";
+  }
+  // Mirror Section 9's 0.02 ship criterion.
+  if (Math.abs(v) <= 0.02) return "text-accent-cyan";
+  if (Math.abs(v) <= 0.05) return "text-yellow-400";
+  return "text-loss";
+}
+
+export function SoccerPerLegBrierPanel() {
+  const { getToken } = useAuth();
+  const tokenFn = useMemo(
+    () => () => getToken().then((t) => t ?? null),
+    [getToken],
+  );
+
+  const { data, isLoading, error, isFetching, refetch } =
+    useQuery<SoccerPerLegBrierResponse>({
+      queryKey: ["admin", "soccer-per-leg-brier"],
+      queryFn: () =>
+        apiFetch<SoccerPerLegBrierResponse>(
+          "/api/admin/soccer-per-leg-brier",
+          { getToken: tokenFn },
+        ),
+      refetchInterval: 60_000,
+    });
+
+  const items = data?.items ?? [];
+  const tooSmall = data?.samples_too_small ?? [];
+
+  return (
+    <div
+      className="space-y-3"
+      data-testid="panel-soccer-per-leg-brier"
+    >
+      <div className="flex flex-wrap items-end justify-between gap-2">
+        <div>
+          <p className="text-xs text-muted-foreground">
+            Per-league × per-leg Brier (pre-game vs in-game) for soccer, over
+            the same trailing window the daily honesty digest (Section 9) uses.
+            Use this to spot leg-specific drift between digests.
+          </p>
+          <p className="mt-1 text-[10px] uppercase tracking-widest text-muted-foreground">
+            Window: {data?.days ?? "—"}d · Min samples/side:{" "}
+            {data?.min_samples_per_side ?? "—"}
+          </p>
+        </div>
+        <div className="flex items-center gap-3 text-[11px] text-muted-foreground">
+          <span data-testid="soccer-per-leg-brier-count">
+            {items.length} league{items.length === 1 ? "" : "s"}
+          </span>
+          {isFetching && <span className="text-accent-cyan">↻</span>}
+          <button
+            type="button"
+            onClick={() => refetch()}
+            className="border border-border px-2 py-1 text-[10px] uppercase tracking-widest hover:bg-background/60"
+            data-testid="soccer-per-leg-brier-refresh"
+          >
+            Refresh
+          </button>
+        </div>
+      </div>
+
+      {error && (
+        <div
+          className="border border-loss/60 bg-loss/10 p-2 text-xs text-loss"
+          data-testid="soccer-per-leg-brier-error"
+        >
+          Failed to load: {(error as Error).message}
+        </div>
+      )}
+
+      {data?.error && (
+        <div
+          className="border border-loss/60 bg-loss/10 p-2 text-xs text-loss"
+          data-testid="soccer-per-leg-brier-server-error"
+        >
+          Server: {data.error}
+        </div>
+      )}
+
+      {isLoading && (
+        <div
+          className="text-xs text-muted-foreground"
+          data-testid="soccer-per-leg-brier-loading"
+        >
+          Loading…
+        </div>
+      )}
+
+      {!isLoading && items.length === 0 && !error && (
+        <div
+          className="border border-border bg-card p-4 text-xs text-muted-foreground"
+          data-testid="soccer-per-leg-brier-empty"
+        >
+          No soccer league has enough settled pre-game + in-game samples yet to
+          surface a delta in this window. Once the in-game loop logs enough
+          settled rows per leg this table will populate.
+        </div>
+      )}
+
+      {items.length > 0 && (
+        <div className="overflow-x-auto border border-border bg-card">
+          <table className="w-full text-[11px]">
+            <thead className="bg-muted/20 uppercase tracking-widest text-muted-foreground">
+              <tr>
+                <th className="p-2 text-left">League / Leg</th>
+                <th className="p-2 text-right">N pre</th>
+                <th className="p-2 text-right">N in</th>
+                <th className="p-2 text-right">Brier pre</th>
+                <th className="p-2 text-right">Brier in</th>
+                <th className="p-2 text-right">|Δ|</th>
+              </tr>
+            </thead>
+            <tbody>
+              {items.map((it) => (
+                <Fragment key={it.league}>
+                  <tr
+                    className="border-t border-border"
+                    data-testid={`soccer-per-leg-brier-row-${it.league}`}
+                  >
+                    <td className="p-2 font-mono text-foreground">
+                      {it.league}
+                    </td>
+                    <td className="p-2 text-right font-mono">{it.n_pre}</td>
+                    <td className="p-2 text-right font-mono">{it.n_in}</td>
+                    <td className="p-2 text-right font-mono">
+                      {fmtBrier(it.brier_pre)}
+                    </td>
+                    <td className="p-2 text-right font-mono">
+                      {fmtBrier(it.brier_in)}
+                    </td>
+                    <td
+                      className={`p-2 text-right font-mono ${brierDeltaTone(it.abs_delta)}`}
+                      data-testid={`soccer-per-leg-brier-delta-${it.league}`}
+                    >
+                      {fmtBrier(it.abs_delta)}
+                    </td>
+                  </tr>
+                  {(it.legs ?? []).map((leg) => (
+                    <tr
+                      key={`${it.league}-${leg.leg}`}
+                      className="border-t border-border/50 bg-background/30"
+                      data-testid={`soccer-per-leg-brier-leg-${it.league}-${leg.leg}`}
+                    >
+                      <td className="p-2 pl-6 font-mono text-muted-foreground">
+                        ↳ {leg.leg}
+                      </td>
+                      <td className="p-2 text-right font-mono text-muted-foreground">
+                        {leg.n_pre}
+                      </td>
+                      <td className="p-2 text-right font-mono text-muted-foreground">
+                        {leg.n_in}
+                      </td>
+                      <td className="p-2 text-right font-mono text-muted-foreground">
+                        {fmtBrier(leg.brier_pre)}
+                      </td>
+                      <td className="p-2 text-right font-mono text-muted-foreground">
+                        {fmtBrier(leg.brier_in)}
+                      </td>
+                      <td
+                        className={`p-2 text-right font-mono ${brierDeltaTone(leg.abs_delta)}`}
+                        data-testid={`soccer-per-leg-brier-leg-delta-${it.league}-${leg.leg}`}
+                      >
+                        {fmtBrier(leg.abs_delta)}
+                      </td>
+                    </tr>
+                  ))}
+                </Fragment>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {tooSmall.length > 0 && (
+        <div
+          className="text-[10px] text-muted-foreground"
+          data-testid="soccer-per-leg-brier-too-small"
+        >
+          Below min-samples bar:{" "}
+          {tooSmall
+            .map((t) => `${t.league} (pre=${t.n_pre}, in=${t.n_in})`)
+            .join(" · ")}
+        </div>
+      )}
+    </div>
+  );
+}
+
 export function SoccerLivePredictionsPanel() {
   const { getToken } = useAuth();
   const tokenFn = useMemo(
