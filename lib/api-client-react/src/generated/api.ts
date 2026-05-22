@@ -37,6 +37,7 @@ import type {
   AutoResearchFeatureList,
   AutoResearchRunResult,
   BankrollRecent,
+  BookmakerMetricsResponse,
   CalibratorAb,
   CheckoutSessionRequest,
   CheckoutSessionResult,
@@ -48,7 +49,9 @@ import type {
   EmergencyStopResult,
   FullHealth,
   GetCalibratorAbParams,
+  GetDashboardBookmakerMetricsParams,
   GetDashboardOverviewParams,
+  GetDashboardTopEdgesParams,
   GetPublicTailRiskExposureParams,
   GetRecentBankrollEventsParams,
   GetRecentCyclesParams,
@@ -82,6 +85,8 @@ import type {
   SettlementCycleResult,
   SettlementStatus,
   SlippageGuardRejectList,
+  SnoozeCandidateRequest,
+  SnoozeCandidateResponse,
   SportradarLeaderboardsRetentionStatus,
   SupabaseGrowthRetentionStatus,
   SwarmDebateList,
@@ -90,6 +95,7 @@ import type {
   SwarmPersonaList,
   SwarmPersonaTodayList,
   TailRiskExposure,
+  TopEdgesResponse,
   TradeDetail,
   TradeList,
   TradingCycleList,
@@ -795,6 +801,393 @@ export function useGetTradeDetail<
 
   return { ...query, queryKey: queryOptions.queryKey };
 }
+
+/**
+ * @summary Pending candidates ranked by EV edge% (cap 25 by default). Halted-vertical rows are returned with `vertical_halted=true` so the tile can grey them rather than hide them. Snoozed candidates (active `prediction_snoozes` row) are excluded.
+ */
+export const getGetDashboardTopEdgesUrl = (
+  params?: GetDashboardTopEdgesParams,
+) => {
+  const normalizedParams = new URLSearchParams();
+
+  Object.entries(params || {}).forEach(([key, value]) => {
+    if (value !== undefined) {
+      normalizedParams.append(key, value === null ? "null" : value.toString());
+    }
+  });
+
+  const stringifiedParams = normalizedParams.toString();
+
+  return stringifiedParams.length > 0
+    ? `/api/dashboard/top-edges?${stringifiedParams}`
+    : `/api/dashboard/top-edges`;
+};
+
+export const getDashboardTopEdges = async (
+  params?: GetDashboardTopEdgesParams,
+  options?: RequestInit,
+): Promise<TopEdgesResponse> => {
+  return customFetch<TopEdgesResponse>(getGetDashboardTopEdgesUrl(params), {
+    ...options,
+    method: "GET",
+  });
+};
+
+export const getGetDashboardTopEdgesQueryKey = (
+  params?: GetDashboardTopEdgesParams,
+) => {
+  return [`/api/dashboard/top-edges`, ...(params ? [params] : [])] as const;
+};
+
+export const getGetDashboardTopEdgesQueryOptions = <
+  TData = Awaited<ReturnType<typeof getDashboardTopEdges>>,
+  TError = ErrorType<unknown>,
+>(
+  params?: GetDashboardTopEdgesParams,
+  options?: {
+    query?: UseQueryOptions<
+      Awaited<ReturnType<typeof getDashboardTopEdges>>,
+      TError,
+      TData
+    >;
+    request?: SecondParameter<typeof customFetch>;
+  },
+) => {
+  const { query: queryOptions, request: requestOptions } = options ?? {};
+
+  const queryKey =
+    queryOptions?.queryKey ?? getGetDashboardTopEdgesQueryKey(params);
+
+  const queryFn: QueryFunction<
+    Awaited<ReturnType<typeof getDashboardTopEdges>>
+  > = ({ signal }) =>
+    getDashboardTopEdges(params, { signal, ...requestOptions });
+
+  return { queryKey, queryFn, ...queryOptions } as UseQueryOptions<
+    Awaited<ReturnType<typeof getDashboardTopEdges>>,
+    TError,
+    TData
+  > & { queryKey: QueryKey };
+};
+
+export type GetDashboardTopEdgesQueryResult = NonNullable<
+  Awaited<ReturnType<typeof getDashboardTopEdges>>
+>;
+export type GetDashboardTopEdgesQueryError = ErrorType<unknown>;
+
+/**
+ * @summary Pending candidates ranked by EV edge% (cap 25 by default). Halted-vertical rows are returned with `vertical_halted=true` so the tile can grey them rather than hide them. Snoozed candidates (active `prediction_snoozes` row) are excluded.
+ */
+
+export function useGetDashboardTopEdges<
+  TData = Awaited<ReturnType<typeof getDashboardTopEdges>>,
+  TError = ErrorType<unknown>,
+>(
+  params?: GetDashboardTopEdgesParams,
+  options?: {
+    query?: UseQueryOptions<
+      Awaited<ReturnType<typeof getDashboardTopEdges>>,
+      TError,
+      TData
+    >;
+    request?: SecondParameter<typeof customFetch>;
+  },
+): UseQueryResult<TData, TError> & { queryKey: QueryKey } {
+  const queryOptions = getGetDashboardTopEdgesQueryOptions(params, options);
+
+  const query = useQuery(queryOptions) as UseQueryResult<TData, TError> & {
+    queryKey: QueryKey;
+  };
+
+  return { ...query, queryKey: queryOptions.queryKey };
+}
+
+/**
+ * @summary Sportsbook-grammar headline numbers (profit factor, equivalent- unit P&L, hit rate, today's top confidence/edge, picks-by- vertical) over 7d / 30d / YTD windows. Settled trades only for PF + unit P&L. "Equivalent units" because live sizing is fractional Kelly; 1u = $100 reference stake.
+ */
+export const getGetDashboardBookmakerMetricsUrl = (
+  params?: GetDashboardBookmakerMetricsParams,
+) => {
+  const normalizedParams = new URLSearchParams();
+
+  Object.entries(params || {}).forEach(([key, value]) => {
+    if (value !== undefined) {
+      normalizedParams.append(key, value === null ? "null" : value.toString());
+    }
+  });
+
+  const stringifiedParams = normalizedParams.toString();
+
+  return stringifiedParams.length > 0
+    ? `/api/dashboard/bookmaker-metrics?${stringifiedParams}`
+    : `/api/dashboard/bookmaker-metrics`;
+};
+
+export const getDashboardBookmakerMetrics = async (
+  params?: GetDashboardBookmakerMetricsParams,
+  options?: RequestInit,
+): Promise<BookmakerMetricsResponse> => {
+  return customFetch<BookmakerMetricsResponse>(
+    getGetDashboardBookmakerMetricsUrl(params),
+    {
+      ...options,
+      method: "GET",
+    },
+  );
+};
+
+export const getGetDashboardBookmakerMetricsQueryKey = (
+  params?: GetDashboardBookmakerMetricsParams,
+) => {
+  return [
+    `/api/dashboard/bookmaker-metrics`,
+    ...(params ? [params] : []),
+  ] as const;
+};
+
+export const getGetDashboardBookmakerMetricsQueryOptions = <
+  TData = Awaited<ReturnType<typeof getDashboardBookmakerMetrics>>,
+  TError = ErrorType<unknown>,
+>(
+  params?: GetDashboardBookmakerMetricsParams,
+  options?: {
+    query?: UseQueryOptions<
+      Awaited<ReturnType<typeof getDashboardBookmakerMetrics>>,
+      TError,
+      TData
+    >;
+    request?: SecondParameter<typeof customFetch>;
+  },
+) => {
+  const { query: queryOptions, request: requestOptions } = options ?? {};
+
+  const queryKey =
+    queryOptions?.queryKey ?? getGetDashboardBookmakerMetricsQueryKey(params);
+
+  const queryFn: QueryFunction<
+    Awaited<ReturnType<typeof getDashboardBookmakerMetrics>>
+  > = ({ signal }) =>
+    getDashboardBookmakerMetrics(params, { signal, ...requestOptions });
+
+  return { queryKey, queryFn, ...queryOptions } as UseQueryOptions<
+    Awaited<ReturnType<typeof getDashboardBookmakerMetrics>>,
+    TError,
+    TData
+  > & { queryKey: QueryKey };
+};
+
+export type GetDashboardBookmakerMetricsQueryResult = NonNullable<
+  Awaited<ReturnType<typeof getDashboardBookmakerMetrics>>
+>;
+export type GetDashboardBookmakerMetricsQueryError = ErrorType<unknown>;
+
+/**
+ * @summary Sportsbook-grammar headline numbers (profit factor, equivalent- unit P&L, hit rate, today's top confidence/edge, picks-by- vertical) over 7d / 30d / YTD windows. Settled trades only for PF + unit P&L. "Equivalent units" because live sizing is fractional Kelly; 1u = $100 reference stake.
+ */
+
+export function useGetDashboardBookmakerMetrics<
+  TData = Awaited<ReturnType<typeof getDashboardBookmakerMetrics>>,
+  TError = ErrorType<unknown>,
+>(
+  params?: GetDashboardBookmakerMetricsParams,
+  options?: {
+    query?: UseQueryOptions<
+      Awaited<ReturnType<typeof getDashboardBookmakerMetrics>>,
+      TError,
+      TData
+    >;
+    request?: SecondParameter<typeof customFetch>;
+  },
+): UseQueryResult<TData, TError> & { queryKey: QueryKey } {
+  const queryOptions = getGetDashboardBookmakerMetricsQueryOptions(
+    params,
+    options,
+  );
+
+  const query = useQuery(queryOptions) as UseQueryResult<TData, TError> & {
+    queryKey: QueryKey;
+  };
+
+  return { ...query, queryKey: queryOptions.queryKey };
+}
+
+/**
+ * @summary Suppress a single pending candidate from the executor + tile for `hours` (default 1, cap 30 days).  Latest write wins.
+ */
+export const getSnoozeDashboardCandidateUrl = (predictionId: number) => {
+  return `/api/dashboard/candidates/${predictionId}/snooze`;
+};
+
+export const snoozeDashboardCandidate = async (
+  predictionId: number,
+  snoozeCandidateRequest: SnoozeCandidateRequest,
+  options?: RequestInit,
+): Promise<SnoozeCandidateResponse> => {
+  return customFetch<SnoozeCandidateResponse>(
+    getSnoozeDashboardCandidateUrl(predictionId),
+    {
+      ...options,
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...options?.headers },
+      body: JSON.stringify(snoozeCandidateRequest),
+    },
+  );
+};
+
+export const getSnoozeDashboardCandidateMutationOptions = <
+  TError = ErrorType<unknown>,
+  TContext = unknown,
+>(options?: {
+  mutation?: UseMutationOptions<
+    Awaited<ReturnType<typeof snoozeDashboardCandidate>>,
+    TError,
+    { predictionId: number; data: BodyType<SnoozeCandidateRequest> },
+    TContext
+  >;
+  request?: SecondParameter<typeof customFetch>;
+}): UseMutationOptions<
+  Awaited<ReturnType<typeof snoozeDashboardCandidate>>,
+  TError,
+  { predictionId: number; data: BodyType<SnoozeCandidateRequest> },
+  TContext
+> => {
+  const mutationKey = ["snoozeDashboardCandidate"];
+  const { mutation: mutationOptions, request: requestOptions } = options
+    ? options.mutation &&
+      "mutationKey" in options.mutation &&
+      options.mutation.mutationKey
+      ? options
+      : { ...options, mutation: { ...options.mutation, mutationKey } }
+    : { mutation: { mutationKey }, request: undefined };
+
+  const mutationFn: MutationFunction<
+    Awaited<ReturnType<typeof snoozeDashboardCandidate>>,
+    { predictionId: number; data: BodyType<SnoozeCandidateRequest> }
+  > = (props) => {
+    const { predictionId, data } = props ?? {};
+
+    return snoozeDashboardCandidate(predictionId, data, requestOptions);
+  };
+
+  return { mutationFn, ...mutationOptions };
+};
+
+export type SnoozeDashboardCandidateMutationResult = NonNullable<
+  Awaited<ReturnType<typeof snoozeDashboardCandidate>>
+>;
+export type SnoozeDashboardCandidateMutationBody =
+  BodyType<SnoozeCandidateRequest>;
+export type SnoozeDashboardCandidateMutationError = ErrorType<unknown>;
+
+/**
+ * @summary Suppress a single pending candidate from the executor + tile for `hours` (default 1, cap 30 days).  Latest write wins.
+ */
+export const useSnoozeDashboardCandidate = <
+  TError = ErrorType<unknown>,
+  TContext = unknown,
+>(options?: {
+  mutation?: UseMutationOptions<
+    Awaited<ReturnType<typeof snoozeDashboardCandidate>>,
+    TError,
+    { predictionId: number; data: BodyType<SnoozeCandidateRequest> },
+    TContext
+  >;
+  request?: SecondParameter<typeof customFetch>;
+}): UseMutationResult<
+  Awaited<ReturnType<typeof snoozeDashboardCandidate>>,
+  TError,
+  { predictionId: number; data: BodyType<SnoozeCandidateRequest> },
+  TContext
+> => {
+  return useMutation(getSnoozeDashboardCandidateMutationOptions(options));
+};
+
+/**
+ * @summary Clear any active snooze on a candidate so the next executor cycle is free to fire it. Not a synchronous execute — the orchestrator's per-cycle gates remain the chokepoint.
+ */
+export const getFireDashboardCandidateUrl = (predictionId: number) => {
+  return `/api/dashboard/candidates/${predictionId}/fire`;
+};
+
+export const fireDashboardCandidate = async (
+  predictionId: number,
+  options?: RequestInit,
+): Promise<SnoozeCandidateResponse> => {
+  return customFetch<SnoozeCandidateResponse>(
+    getFireDashboardCandidateUrl(predictionId),
+    {
+      ...options,
+      method: "POST",
+    },
+  );
+};
+
+export const getFireDashboardCandidateMutationOptions = <
+  TError = ErrorType<unknown>,
+  TContext = unknown,
+>(options?: {
+  mutation?: UseMutationOptions<
+    Awaited<ReturnType<typeof fireDashboardCandidate>>,
+    TError,
+    { predictionId: number },
+    TContext
+  >;
+  request?: SecondParameter<typeof customFetch>;
+}): UseMutationOptions<
+  Awaited<ReturnType<typeof fireDashboardCandidate>>,
+  TError,
+  { predictionId: number },
+  TContext
+> => {
+  const mutationKey = ["fireDashboardCandidate"];
+  const { mutation: mutationOptions, request: requestOptions } = options
+    ? options.mutation &&
+      "mutationKey" in options.mutation &&
+      options.mutation.mutationKey
+      ? options
+      : { ...options, mutation: { ...options.mutation, mutationKey } }
+    : { mutation: { mutationKey }, request: undefined };
+
+  const mutationFn: MutationFunction<
+    Awaited<ReturnType<typeof fireDashboardCandidate>>,
+    { predictionId: number }
+  > = (props) => {
+    const { predictionId } = props ?? {};
+
+    return fireDashboardCandidate(predictionId, requestOptions);
+  };
+
+  return { mutationFn, ...mutationOptions };
+};
+
+export type FireDashboardCandidateMutationResult = NonNullable<
+  Awaited<ReturnType<typeof fireDashboardCandidate>>
+>;
+
+export type FireDashboardCandidateMutationError = ErrorType<unknown>;
+
+/**
+ * @summary Clear any active snooze on a candidate so the next executor cycle is free to fire it. Not a synchronous execute — the orchestrator's per-cycle gates remain the chokepoint.
+ */
+export const useFireDashboardCandidate = <
+  TError = ErrorType<unknown>,
+  TContext = unknown,
+>(options?: {
+  mutation?: UseMutationOptions<
+    Awaited<ReturnType<typeof fireDashboardCandidate>>,
+    TError,
+    { predictionId: number },
+    TContext
+  >;
+  request?: SecondParameter<typeof customFetch>;
+}): UseMutationResult<
+  Awaited<ReturnType<typeof fireDashboardCandidate>>,
+  TError,
+  { predictionId: number },
+  TContext
+> => {
+  return useMutation(getFireDashboardCandidateMutationOptions(options));
+};
 
 /**
  * @summary Global search across trades, debates, and cycles

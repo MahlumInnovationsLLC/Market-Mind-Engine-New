@@ -379,6 +379,179 @@ export const GetTradeDetailResponse = zod.object({
 });
 
 /**
+ * @summary Pending candidates ranked by EV edge% (cap 25 by default). Halted-vertical rows are returned with `vertical_halted=true` so the tile can grey them rather than hide them. Snoozed candidates (active `prediction_snoozes` row) are excluded.
+ */
+export const getDashboardTopEdgesQueryLimitDefault = 25;
+export const getDashboardTopEdgesQueryLimitMax = 200;
+
+export const GetDashboardTopEdgesQueryParams = zod.object({
+  limit: zod.coerce
+    .number()
+    .min(1)
+    .max(getDashboardTopEdgesQueryLimitMax)
+    .default(getDashboardTopEdgesQueryLimitDefault),
+});
+
+export const GetDashboardTopEdgesResponse = zod.object({
+  limit: zod.number(),
+  generated_at: zod
+    .string()
+    .describe("ISO-8601 UTC timestamp when the tile was computed."),
+  items: zod.array(
+    zod
+      .object({
+        prediction_id: zod.number(),
+        matchup: zod
+          .string()
+          .describe(
+            "Human-readable label (matchup, title, or fallback to market id).",
+          ),
+        league: zod.string().nullish(),
+        vertical: zod
+          .string()
+          .describe(
+            "Coarse vertical bucket (sports\/crypto\/elections\/tech_ai).",
+          ),
+        vertical_halted: zod
+          .boolean()
+          .describe(
+            "True when the operator has halted this vertical; the row is still listed (greyed) per the architectural constraint.",
+          ),
+        model_prob: zod
+          .number()
+          .nullish()
+          .describe("Calibrated model_yes_prob (falls back to home_win_prob)."),
+        market_price: zod
+          .number()
+          .nullish()
+          .describe("Kalshi yes-price snapshot used to compute edge."),
+        edge_pct: zod
+          .number()
+          .nullish()
+          .describe("EV edge expressed as a percentage (edge \* 100)."),
+        confidence: zod.number().nullish(),
+        planned_stake: zod
+          .number()
+          .nullish()
+          .describe(
+            "Reserved for executor-side enrichment; currently always null.",
+          ),
+        kalshi_market_id: zod.string().nullish(),
+      })
+      .describe("One pending candidate row in the Top-Edges-Today tile."),
+  ),
+  halted_verticals: zod
+    .array(zod.string())
+    .describe("Sorted list of currently-halted verticals at compute time."),
+  error: zod
+    .string()
+    .nullish()
+    .describe("Best-effort error string when the underlying read failed."),
+});
+
+/**
+ * @summary Sportsbook-grammar headline numbers (profit factor, equivalent- unit P&L, hit rate, today's top confidence/edge, picks-by- vertical) over 7d / 30d / YTD windows. Settled trades only for PF + unit P&L. "Equivalent units" because live sizing is fractional Kelly; 1u = $100 reference stake.
+ */
+export const getDashboardBookmakerMetricsQueryWindowDefault = `7d`;
+
+export const GetDashboardBookmakerMetricsQueryParams = zod.object({
+  window: zod
+    .enum(["7d", "30d", "ytd"])
+    .default(getDashboardBookmakerMetricsQueryWindowDefault),
+});
+
+export const GetDashboardBookmakerMetricsResponse = zod.object({
+  window: zod.enum(["7d", "30d", "ytd"]),
+  generated_at: zod.string(),
+  profit_factor: zod
+    .number()
+    .nullish()
+    .describe(
+      "gross_wins \/ gross_losses on settled trades; null when there are no losses to divide by.",
+    ),
+  equivalent_unit_pnl: zod
+    .number()
+    .nullish()
+    .describe(
+      'sum(pnl) \/ `unit_dollars`.  Labelled \"equivalent\" because live sizing is fractional Kelly — this normalises P&L to a flat 1u = $unit_dollars reference stake for industry comparability.',
+    ),
+  unit_dollars: zod
+    .number()
+    .describe(
+      "Reference stake denominator used to compute equivalent_unit_pnl.",
+    ),
+  win_rate: zod.number().nullish().describe("Settled-pick hit rate (0..1)."),
+  n_settled: zod.number().describe("Number of settled trades in the window."),
+  top_confidence_today: zod.number().nullish(),
+  highest_edge_today: zod
+    .number()
+    .nullish()
+    .describe("Max |edge| today, expressed as percent."),
+  picks_today: zod.object({
+    total: zod.number(),
+    by_vertical: zod.array(
+      zod.object({
+        vertical: zod.string(),
+        n: zod.number(),
+      }),
+    ),
+  }),
+  error: zod.string().nullish(),
+});
+
+/**
+ * @summary Suppress a single pending candidate from the executor + tile for `hours` (default 1, cap 30 days).  Latest write wins.
+ */
+export const SnoozeDashboardCandidateParams = zod.object({
+  prediction_id: zod.coerce.number(),
+});
+
+export const snoozeDashboardCandidateBodyHoursDefault = 1;
+export const snoozeDashboardCandidateBodyHoursMin = 0;
+export const snoozeDashboardCandidateBodyHoursMax = 720;
+
+export const SnoozeDashboardCandidateBody = zod.object({
+  hours: zod
+    .number()
+    .min(snoozeDashboardCandidateBodyHoursMin)
+    .max(snoozeDashboardCandidateBodyHoursMax)
+    .default(snoozeDashboardCandidateBodyHoursDefault)
+    .describe("Snooze duration in hours (cap 30 days)."),
+  reason: zod.string().nullish(),
+});
+
+export const SnoozeDashboardCandidateResponse = zod.object({
+  prediction_id: zod.number(),
+  snoozed_until: zod
+    .string()
+    .nullish()
+    .describe(
+      "ISO-8601 cutoff; null when the write failed (`error` populated).",
+    ),
+  hours: zod.number(),
+  error: zod.string().nullish(),
+});
+
+/**
+ * @summary Clear any active snooze on a candidate so the next executor cycle is free to fire it. Not a synchronous execute — the orchestrator's per-cycle gates remain the chokepoint.
+ */
+export const FireDashboardCandidateParams = zod.object({
+  prediction_id: zod.coerce.number(),
+});
+
+export const FireDashboardCandidateResponse = zod.object({
+  prediction_id: zod.number(),
+  snoozed_until: zod
+    .string()
+    .nullish()
+    .describe(
+      "ISO-8601 cutoff; null when the write failed (`error` populated).",
+    ),
+  hours: zod.number(),
+  error: zod.string().nullish(),
+});
+
+/**
  * @summary Global search across trades, debates, and cycles
  */
 export const searchAllQueryQMax = 200;

@@ -127,6 +127,98 @@ export interface DashboardOverview {
   placed_by?: DashboardOverviewPlacedBy;
 }
 
+/**
+ * One pending candidate row in the Top-Edges-Today tile.
+ */
+export interface TopEdgeItem {
+  prediction_id: number;
+  /** Human-readable label (matchup, title, or fallback to market id). */
+  matchup: string;
+  league?: string | null;
+  /** Coarse vertical bucket (sports/crypto/elections/tech_ai). */
+  vertical: string;
+  /** True when the operator has halted this vertical; the row is still listed (greyed) per the architectural constraint. */
+  vertical_halted: boolean;
+  /** Calibrated model_yes_prob (falls back to home_win_prob). */
+  model_prob?: number | null;
+  /** Kalshi yes-price snapshot used to compute edge. */
+  market_price?: number | null;
+  /** EV edge expressed as a percentage (edge * 100). */
+  edge_pct?: number | null;
+  confidence?: number | null;
+  /** Reserved for executor-side enrichment; currently always null. */
+  planned_stake?: number | null;
+  kalshi_market_id?: string | null;
+}
+
+export interface TopEdgesResponse {
+  limit: number;
+  /** ISO-8601 UTC timestamp when the tile was computed. */
+  generated_at: string;
+  items: TopEdgeItem[];
+  /** Sorted list of currently-halted verticals at compute time. */
+  halted_verticals: string[];
+  /** Best-effort error string when the underlying read failed. */
+  error?: string | null;
+}
+
+export type BookmakerPicksTodayByVerticalItem = {
+  vertical: string;
+  n: number;
+};
+
+export interface BookmakerPicksToday {
+  total: number;
+  by_vertical: BookmakerPicksTodayByVerticalItem[];
+}
+
+export type BookmakerMetricsResponseWindow =
+  (typeof BookmakerMetricsResponseWindow)[keyof typeof BookmakerMetricsResponseWindow];
+
+export const BookmakerMetricsResponseWindow = {
+  "7d": "7d",
+  "30d": "30d",
+  ytd: "ytd",
+} as const;
+
+export interface BookmakerMetricsResponse {
+  window: BookmakerMetricsResponseWindow;
+  generated_at: string;
+  /** gross_wins / gross_losses on settled trades; null when there are no losses to divide by. */
+  profit_factor?: number | null;
+  /** sum(pnl) / `unit_dollars`.  Labelled "equivalent" because live sizing is fractional Kelly — this normalises P&L to a flat 1u = $unit_dollars reference stake for industry comparability. */
+  equivalent_unit_pnl?: number | null;
+  /** Reference stake denominator used to compute equivalent_unit_pnl. */
+  unit_dollars: number;
+  /** Settled-pick hit rate (0..1). */
+  win_rate?: number | null;
+  /** Number of settled trades in the window. */
+  n_settled: number;
+  top_confidence_today?: number | null;
+  /** Max |edge| today, expressed as percent. */
+  highest_edge_today?: number | null;
+  picks_today: BookmakerPicksToday;
+  error?: string | null;
+}
+
+export interface SnoozeCandidateRequest {
+  /**
+   * Snooze duration in hours (cap 30 days).
+   * @minimum 0
+   * @maximum 720
+   */
+  hours?: number;
+  reason?: string | null;
+}
+
+export interface SnoozeCandidateResponse {
+  prediction_id: number;
+  /** ISO-8601 cutoff; null when the write failed (`error` populated). */
+  snoozed_until?: string | null;
+  hours: number;
+  error?: string | null;
+}
+
 export interface Trade {
   id: number;
   trade_id?: string | null;
@@ -1915,6 +2007,27 @@ export type GetSwarmPersonasTodayParams = {
    */
   date_utc?: string;
 };
+
+export type GetDashboardTopEdgesParams = {
+  /**
+   * @minimum 1
+   * @maximum 200
+   */
+  limit?: number;
+};
+
+export type GetDashboardBookmakerMetricsParams = {
+  window?: GetDashboardBookmakerMetricsWindow;
+};
+
+export type GetDashboardBookmakerMetricsWindow =
+  (typeof GetDashboardBookmakerMetricsWindow)[keyof typeof GetDashboardBookmakerMetricsWindow];
+
+export const GetDashboardBookmakerMetricsWindow = {
+  "7d": "7d",
+  "30d": "30d",
+  ytd: "ytd",
+} as const;
 
 export type SearchAllParams = {
   /**

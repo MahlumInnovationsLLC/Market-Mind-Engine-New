@@ -6059,6 +6059,85 @@ async def dashboard_swarm_personas_today(
     return await dashboard.get_swarm_personas_today()
 
 
+# ----------------------------------------------------------------------
+# Top Edges + bookmaker-grammar tiles (task #832).
+# ----------------------------------------------------------------------
+
+@app.get("/api/dashboard/top-edges")
+async def dashboard_top_edges(
+    limit: int = Query(default=25, ge=1, le=200),
+    _: object = Depends(require_approved_user),
+) -> dict[str, object]:
+    """Pending candidates ranked by EV edge%.
+
+    Reads the existing ``predictions`` table only; rows whose vertical
+    is currently halted are returned with ``vertical_halted=true`` so
+    the UI can grey them out rather than hide them.  Snoozed
+    candidates (active ``prediction_snoozes`` row) are excluded.
+    """
+    return await dashboard.get_top_edges_today(limit=limit)
+
+
+@app.get("/api/dashboard/bookmaker-metrics")
+async def dashboard_bookmaker_metrics(
+    window: Literal["7d", "30d", "ytd"] = "7d",
+    _: object = Depends(require_approved_user),
+) -> dict[str, object]:
+    """Sportsbook-grammar headline numbers (profit factor, equivalent-
+    unit P&L, hit rate, today's top confidence / highest edge / picks
+    by vertical).  Settled trades only for PF / unit P&L."""
+    return await dashboard.get_bookmaker_metrics(window=window)
+
+
+class _SnoozeRequest(BaseModel):
+    hours: float = 1.0
+    reason: str | None = None
+
+
+@app.post("/api/dashboard/candidates/{prediction_id}/snooze")
+async def dashboard_candidate_snooze(
+    prediction_id: int,
+    body: _SnoozeRequest,
+    user: AuthedUser = Depends(require_approved_user),
+) -> dict[str, object]:
+    """Suppress a single pending candidate from the executor + Top-
+    Edges tile for ``hours`` (default 1, capped at 30 days).
+
+    Latest write wins so the operator can extend or shorten an
+    existing snooze idempotently.
+    """
+    return await dashboard.snooze_prediction(
+        prediction_id=prediction_id,
+        hours=body.hours,
+        by_user=str(getattr(user, "id", None) or "") or None,
+        by_email=getattr(user, "email", None),
+        reason=body.reason,
+    )
+
+
+@app.post("/api/dashboard/candidates/{prediction_id}/fire")
+async def dashboard_candidate_fire(
+    prediction_id: int,
+    user: AuthedUser = Depends(require_approved_user),
+) -> dict[str, object]:
+    """Clear any active snooze on a candidate so the next executor
+    cycle is free to fire it.
+
+    Per the task scope this is intentionally *not* a synchronous
+    execute — the orchestrator's per-cycle gates remain the single
+    chokepoint.  Setting ``snoozed_until = now()`` immediately marks
+    the snooze row as expired, which both un-greys the tile entry and
+    drops the candidate back into the executor's candidate pool.
+    """
+    return await dashboard.snooze_prediction(
+        prediction_id=prediction_id,
+        hours=0.0,
+        by_user=str(getattr(user, "id", None) or "") or None,
+        by_email=getattr(user, "email", None),
+        reason="cleared via fire button",
+    )
+
+
 @app.get("/api/dashboard/swarm-fallbacks-today")
 async def dashboard_swarm_fallbacks_today(
     _: object = Depends(require_approved_user),

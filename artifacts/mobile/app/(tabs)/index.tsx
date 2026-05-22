@@ -19,6 +19,10 @@ import DelayedSignalsBanner from "@/components/DelayedSignalsBanner";
 import PerLeagueCalibration from "@/components/PerLeagueCalibration";
 import { PlacedByToggle } from "@/components/PlacedByToggle";
 import TailRiskExposure from "@/components/TailRiskExposure";
+import {
+  TopEdgesTile as TopEdgesTileMobile,
+  BookmakerMetricsTile as BookmakerMetricsTileMobile,
+} from "@/components/TopEdgesAndBookmakerTiles";
 import { useColors } from "@/hooks/useColors";
 import { apiFetch } from "@/lib/api";
 import { usePlacedBy } from "@/lib/placed-by-filter";
@@ -335,6 +339,9 @@ export default function DashboardScreen() {
           testID="card-recent-trades"
         />
       </View>
+
+      <TopEdgesTileMobile />
+      <BookmakerMetricsTileMobile />
 
       <TailRiskExposure days={period} period={period} />
 

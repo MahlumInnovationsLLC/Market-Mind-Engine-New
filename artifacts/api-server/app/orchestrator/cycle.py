@@ -498,6 +498,14 @@ async def _candidate_predictions(vertical: str, limit: int) -> list[dict[str, An
                         WHERE d.game_id = p.game_id
                           AND d.created_at > now() - interval '15 minutes'
                    )
+                   -- task #832: skip candidates the operator has
+                   -- snoozed via the Top-Edges tile.  Expired snoozes
+                   -- (snoozed_until <= now()) are NOT suppressed.
+                   AND NOT EXISTS (
+                       SELECT 1 FROM prediction_snoozes s
+                        WHERE s.prediction_id = p.id
+                          AND s.snoozed_until > now()
+                   )
                  ORDER BY abs(coalesce(p.edge, 0)) DESC NULLS LAST
                  LIMIT $1
                 """,
@@ -518,6 +526,12 @@ async def _candidate_predictions(vertical: str, limit: int) -> list[dict[str, An
                        SELECT 1 FROM swarm_debates d
                         WHERE d.game_id = p.game_id
                           AND d.created_at > now() - interval '15 minutes'
+                   )
+                   -- task #832: skip snoozed candidates (see above).
+                   AND NOT EXISTS (
+                       SELECT 1 FROM prediction_snoozes s
+                        WHERE s.prediction_id = p.id
+                          AND s.snoozed_until > now()
                    )
                  ORDER BY abs(coalesce(p.edge, 0)) DESC NULLS LAST
                  LIMIT $1

@@ -6558,3 +6558,390 @@ async def get_niche_sports_tile(*, days: int = 30) -> dict[str, Any]:
             }
         )
     return out
+
+
+
+# ============================================================================
+# Top Edges Today + Bookmaker Metrics tiles (task #832)
+# ============================================================================
+#
+# Two operator-dashboard tiles that read existing tables only:
+#
+#   * get_top_edges_today() — pending candidates ranked by EV edge %.
+#   * get_bookmaker_metrics(window) — sportsbook-grammar headline numbers
+#     over 7-day / 30-day / YTD windows.
+#
+# Both helpers swallow DB errors into an ``error`` field and return a
+# deterministic shape so a sick DB never blacks out the dashboard.
+
+_TOP_EDGES_LIMIT_DEFAULT = 25
+_TOP_EDGES_LIMIT_MAX = 200
+
+# Equivalent-units denominator: every $1 of P&L counted at 1u = $100
+# stake so the unit number is comparable to industry "+18.71u" callouts
+# even though our live sizing is fractional Kelly.  Labelled clearly
+# in the response so the operator can never mistake it for raw units.
+_BOOKMAKER_UNIT_DOLLARS = 100.0
+
+# Allowed window keys for get_bookmaker_metrics.  YTD is "current
+# calendar year so far" (UTC), not a rolling 365-day window.
+_BOOKMAKER_WINDOWS: tuple[str, ...] = ("7d", "30d", "ytd")
+
+
+def _bookmaker_window_clause(window: str) -> tuple[str, str]:
+    """Return ``(label, sql_predicate)`` for the trades.executed_at filter."""
+    w = (window or "7d").strip().lower()
+    if w == "30d":
+        return ("30d", "executed_at > now() - interval '30 days'")
+    if w == "ytd":
+        return ("ytd", "executed_at >= date_trunc('year', now())")
+    return ("7d", "executed_at > now() - interval '7 days'")
+
+
+async def _halted_verticals_lower() -> set[str]:
+    """Lowercase set of currently-halted verticals (best-effort)."""
+    try:
+        # Local import avoids a circular import at module load — dashboard
+        # is imported by main during startup before runtime_settings is wired.
+        from . import runtime_settings as _rs
+        halts = await _rs.get_vertical_halts()
+    except Exception as e:  # pragma: no cover — defensive
+        log.debug("halted_verticals read failed: %s", e)
+        return set()
+    return {(v or "").strip().lower() for v in halts.keys()}
+
+
+def _vertical_for_league(league: str | None) -> str:
+    """Best-effort vertical bucket for a predictions.league string.
+
+    We don't ship a single canonical mapping table, so fall back to a
+    coarse-grained classifier that covers the verticals the operator
+    halt UI actually exposes (sports / crypto / elections / tech_ai).
+    Anything we don't recognise lands in 'sports' so the Top-Edges
+    tile's halt-grey decoration never silently de-emphasises a row
+    just because the league string is novel.
+    """
+    lg = (league or "").strip().upper()
+    if not lg:
+        return "sports"
+    if lg in ("BTC", "ETH", "BTC1M", "ETH1M", "CRYPTO"):
+        return "crypto"
+    if lg.startswith("KX") or lg in ("ELECTIONS", "POLITICS"):
+        return "elections"
+    if lg in ("TECH", "TECH_AI", "AI"):
+        return "tech_ai"
+    return "sports"
+
+
+async def get_top_edges_today(
+    *, limit: int = _TOP_EDGES_LIMIT_DEFAULT
+) -> dict[str, Any]:
+    """Pending candidates ranked by EV edge %, capped at ``limit``.
+
+    Reads ``predictions`` rows that are:
+      * still pending (``game_time`` IS NULL OR in the future, no
+        ``settled_at`` yet),
+      * have a Kalshi market binding,
+      * have a non-null ``edge`` so we have something to rank by,
+      * not currently snoozed via ``prediction_snoozes``.
+
+    Each row carries a ``vertical_halted`` boolean so the tile can
+    grey out (but still display) candidates whose vertical the
+    operator has paused — per the architectural constraint in the
+    task brief.  ``edge_pct`` is exposed as the headline number.
+    """
+    limit = max(1, min(_TOP_EDGES_LIMIT_MAX, int(limit)))
+    out: dict[str, Any] = {
+        "limit": limit,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "items": [],
+        "halted_verticals": [],
+        "error": None,
+    }
+    halted = await _halted_verticals_lower()
+    out["halted_verticals"] = sorted(halted)
+    try:
+        rows = await db.fetch(
+            """
+            SELECT p.id,
+                   p.game_id,
+                   p.league,
+                   p.kalshi_market_id,
+                   p.kalshi_price::float            AS market_price,
+                   p.model_yes_prob::float          AS model_prob,
+                   p.home_win_prob::float           AS home_win_prob,
+                   p.confidence::float              AS confidence,
+                   p.edge::float                    AS edge,
+                   p.game_time,
+                   p.game_context,
+                   coalesce(s.snoozed_until, NULL)  AS snoozed_until
+              FROM predictions p
+              LEFT JOIN prediction_snoozes s
+                     ON s.prediction_id = p.id
+                    AND s.snoozed_until > now()
+             WHERE p.kalshi_market_id IS NOT NULL
+               AND p.edge IS NOT NULL
+               AND (p.settled_at IS NULL)
+               AND (p.game_time IS NULL OR p.game_time > now())
+               AND s.prediction_id IS NULL
+             ORDER BY abs(p.edge) DESC NULLS LAST
+             LIMIT $1
+            """,
+            limit,
+        )
+    except Exception as e:
+        log.warning("top_edges_today query failed: %s", e)
+        out["error"] = f"{type(e).__name__}: {e}"[:240]
+        return out
+
+    items: list[dict[str, Any]] = []
+    for r in rows:
+        league = (r.get("league") or "").strip().upper() or None
+        vertical = _vertical_for_league(league)
+        # game_context may carry a human-readable matchup label written
+        # by the producers; fall back to the kalshi market id so the tile
+        # always has *something* to print.
+        ctx = r.get("game_context") or {}
+        if isinstance(ctx, (str, bytes, bytearray)):
+            try:
+                ctx = json.loads(ctx)
+            except Exception:
+                ctx = {}
+        matchup = None
+        if isinstance(ctx, dict):
+            matchup = (
+                ctx.get("matchup")
+                or ctx.get("title")
+                or ctx.get("market_title")
+                or None
+            )
+        market_id = r.get("kalshi_market_id")
+        if not matchup:
+            matchup = str(market_id) if market_id else f"prediction#{r['id']}"
+        edge = r.get("edge")
+        items.append(
+            {
+                "prediction_id": int(r["id"]),
+                "matchup": str(matchup),
+                "league": league,
+                "vertical": vertical,
+                "vertical_halted": vertical in halted,
+                "model_prob": (
+                    float(r["model_prob"])
+                    if r.get("model_prob") is not None
+                    else (
+                        float(r["home_win_prob"])
+                        if r.get("home_win_prob") is not None
+                        else None
+                    )
+                ),
+                "market_price": (
+                    float(r["market_price"])
+                    if r.get("market_price") is not None
+                    else None
+                ),
+                "edge_pct": (
+                    round(float(edge) * 100.0, 4)
+                    if edge is not None
+                    else None
+                ),
+                "confidence": (
+                    float(r["confidence"])
+                    if r.get("confidence") is not None
+                    else None
+                ),
+                # Planned stake is owned by the executor; surface a
+                # null placeholder so the tile contract has a stable
+                # column and the executor-side enrichment can land
+                # later without a schema change.
+                "planned_stake": None,
+                "kalshi_market_id": (
+                    str(market_id) if market_id is not None else None
+                ),
+            }
+        )
+    out["items"] = items
+    return out
+
+
+async def get_bookmaker_metrics(
+    *, window: str = "7d"
+) -> dict[str, Any]:
+    """Sportsbook-grammar headline numbers over the requested window.
+
+    Returns:
+      * ``profit_factor``        — gross wins / gross losses on settled trades
+      * ``equivalent_unit_pnl``  — sum(pnl) / $100 (1u = $100 reference)
+      * ``win_rate``             — settled-pick hit rate, plus denominator ``n``
+      * ``top_confidence_today`` — max calibrated prob across today's
+        pending candidates
+      * ``highest_edge_today``   — max |edge| (as %) across today's
+        pending candidates
+      * ``picks_today``          — count of candidates created today,
+        plus a per-vertical split
+
+    All numbers come from existing tables — no new schema.  Open
+    positions are excluded from profit_factor / unit P&L per the
+    architectural constraint ("settled, fully-resolved trades only").
+    """
+    label, where_pred = _bookmaker_window_clause(window)
+    out: dict[str, Any] = {
+        "window": label,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "profit_factor": None,
+        "equivalent_unit_pnl": None,
+        "unit_dollars": _BOOKMAKER_UNIT_DOLLARS,
+        "win_rate": None,
+        "n_settled": 0,
+        "top_confidence_today": None,
+        "highest_edge_today": None,
+        "picks_today": {"total": 0, "by_vertical": []},
+        "error": None,
+    }
+
+    # --- Trade-derived headline numbers ------------------------------------
+    try:
+        row = await db.fetchrow(
+            f"""
+            SELECT
+              sum(CASE WHEN pnl > 0 THEN pnl ELSE 0 END)::float       AS gross_wins,
+              sum(CASE WHEN pnl < 0 THEN abs(pnl) ELSE 0 END)::float  AS gross_losses,
+              sum(pnl)::float                                          AS net_pnl,
+              count(*) FILTER (WHERE pnl IS NOT NULL)::int             AS n_settled,
+              count(*) FILTER (WHERE pnl > 0)::int                     AS n_wins
+              FROM trades
+             WHERE pnl IS NOT NULL
+               AND {where_pred}
+            """
+        )
+    except Exception as e:
+        log.warning("bookmaker_metrics trades query failed: %s", e)
+        out["error"] = f"{type(e).__name__}: {e}"[:240]
+        row = None
+
+    if row is not None:
+        gross_wins = float(row.get("gross_wins") or 0.0)
+        gross_losses = float(row.get("gross_losses") or 0.0)
+        net_pnl = float(row.get("net_pnl") or 0.0)
+        n_settled = int(row.get("n_settled") or 0)
+        n_wins = int(row.get("n_wins") or 0)
+        out["n_settled"] = n_settled
+        if gross_losses > 0:
+            out["profit_factor"] = round(gross_wins / gross_losses, 4)
+        elif gross_wins > 0:
+            # All trades were winners — infinite profit factor would
+            # be nonsense to render, so surface None and let the tile
+            # show "∞" / "(no losses)".
+            out["profit_factor"] = None
+        out["equivalent_unit_pnl"] = round(net_pnl / _BOOKMAKER_UNIT_DOLLARS, 4)
+        if n_settled > 0:
+            out["win_rate"] = round(n_wins / n_settled, 6)
+
+    # --- Pending-pool headline numbers (today only) ------------------------
+    try:
+        prow = await db.fetchrow(
+            """
+            SELECT
+              max(coalesce(model_yes_prob, home_win_prob))::float    AS top_conf,
+              max(abs(edge))::float                                  AS top_edge,
+              count(*)::int                                          AS n_today
+              FROM predictions
+             WHERE created_at >= date_trunc('day', now())
+               AND kalshi_market_id IS NOT NULL
+            """
+        )
+    except Exception as e:
+        log.warning("bookmaker_metrics pending query failed: %s", e)
+        if out["error"] is None:
+            out["error"] = f"{type(e).__name__}: {e}"[:240]
+        prow = None
+
+    if prow is not None:
+        if prow.get("top_conf") is not None:
+            out["top_confidence_today"] = round(float(prow["top_conf"]), 6)
+        if prow.get("top_edge") is not None:
+            out["highest_edge_today"] = round(float(prow["top_edge"]) * 100.0, 4)
+        out["picks_today"]["total"] = int(prow.get("n_today") or 0)
+
+    # --- Picks-today per-vertical split ------------------------------------
+    try:
+        by_v_rows = await db.fetch(
+            """
+            SELECT upper(coalesce(league, ''))  AS league,
+                   count(*)::int                AS n
+              FROM predictions
+             WHERE created_at >= date_trunc('day', now())
+               AND kalshi_market_id IS NOT NULL
+             GROUP BY league
+            """
+        )
+    except Exception as e:
+        log.warning("bookmaker_metrics picks_today by-vertical failed: %s", e)
+        by_v_rows = []
+
+    # Roll league counts up to the vertical bucket that the operator's
+    # halt-toggle UI actually exposes.
+    bucket: dict[str, int] = {}
+    for r in by_v_rows:
+        v = _vertical_for_league(r.get("league"))
+        bucket[v] = bucket.get(v, 0) + int(r.get("n") or 0)
+    out["picks_today"]["by_vertical"] = [
+        {"vertical": v, "n": bucket[v]} for v in sorted(bucket)
+    ]
+    return out
+
+
+async def snooze_prediction(
+    *,
+    prediction_id: int,
+    hours: float,
+    by_user: str | None = None,
+    by_email: str | None = None,
+    reason: str | None = None,
+) -> dict[str, Any]:
+    """Write/refresh a snooze flag for a single prediction.
+
+    Returns the snoozed-until ISO timestamp the executor and tile will
+    honour.  Latest write wins via ``ON CONFLICT (prediction_id)`` so
+    consecutive snoozes behave intuitively for the operator.
+    """
+    if prediction_id is None:
+        raise ValueError("prediction_id required")
+    try:
+        h = max(0.0, min(24.0 * 30.0, float(hours)))
+    except (TypeError, ValueError):
+        h = 1.0
+    out: dict[str, Any] = {
+        "prediction_id": int(prediction_id),
+        "snoozed_until": None,
+        "hours": h,
+        "error": None,
+    }
+    try:
+        row = await db.fetchrow(
+            """
+            INSERT INTO prediction_snoozes
+                (prediction_id, snoozed_until, by_user, by_email, reason)
+            VALUES ($1, now() + ($2::float || ' hours')::interval, $3, $4, $5)
+            ON CONFLICT (prediction_id) DO UPDATE
+              SET snoozed_until = EXCLUDED.snoozed_until,
+                  by_user       = EXCLUDED.by_user,
+                  by_email      = EXCLUDED.by_email,
+                  reason        = EXCLUDED.reason,
+                  updated_at    = now()
+            RETURNING to_char(snoozed_until,
+                              'YYYY-MM-DD"T"HH24:MI:SSZ') AS snoozed_until
+            """,
+            int(prediction_id),
+            float(h),
+            by_user,
+            by_email,
+            reason,
+        )
+    except Exception as e:
+        log.warning("snooze_prediction failed for id=%s: %s", prediction_id, e)
+        out["error"] = f"{type(e).__name__}: {e}"[:240]
+        return out
+    if row is not None:
+        out["snoozed_until"] = row["snoozed_until"]
+    return out

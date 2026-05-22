@@ -12,6 +12,8 @@ import SupabaseGrowthRetentionPanel from "@/components/dashboard/supabase-growth
 import EquityCharts from "@/components/dashboard/equity-charts";
 import HighlightsPanel from "@/components/dashboard/highlights-panel";
 import KpiSummaryBar from "@/components/dashboard/kpi-summary-bar";
+import TopEdgesTile from "@/components/dashboard/top-edges-tile";
+import BookmakerMetricsTile from "@/components/dashboard/bookmaker-metrics-tile";
 import MacroReleaseSurprises from "@/components/dashboard/macro-release-surprises";
 import LeaguesExposurePanel from "@/components/dashboard/leagues-exposure-panel";
 import OperatorControls from "@/components/dashboard/operator-controls";
@@ -80,6 +82,11 @@ export default function Dashboard() {
         </header>
 
         <KpiSummaryBar />
+
+        <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
+          <TopEdgesTile />
+          <BookmakerMetricsTile />
+        </div>
 
         <TailRiskExposurePanel />
 
