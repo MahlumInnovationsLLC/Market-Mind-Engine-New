@@ -1,8 +1,11 @@
-import { useSignIn } from "@clerk/expo";
+import { useSSO, useSignIn } from "@clerk/expo";
+import * as AuthSession from "expo-auth-session";
 import { Link, useRouter, type Href } from "expo-router";
-import React, { useState } from "react";
+import * as WebBrowser from "expo-web-browser";
+import React, { useCallback, useEffect, useState } from "react";
 import {
   ActivityIndicator,
+  Platform,
   Pressable,
   StyleSheet,
   Text,
@@ -13,8 +16,26 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 
 import { useColors } from "@/hooks/useColors";
 
+// Required for the OAuth flow to complete cleanly when the user
+// returns from the in-app browser. Safe to call at module scope.
+WebBrowser.maybeCompleteAuthSession();
+
+// Warm the in-app browser on Android so the Google consent screen
+// opens promptly when the operator taps "Continue with Google".
+function useWarmUpBrowser() {
+  useEffect(() => {
+    if (Platform.OS !== "android") return;
+    void WebBrowser.warmUpAsync();
+    return () => {
+      void WebBrowser.coolDownAsync();
+    };
+  }, []);
+}
+
 export default function SignInScreen() {
+  useWarmUpBrowser();
   const { isLoaded, signIn, setActive } = useSignIn();
+  const { startSSOFlow } = useSSO();
   const router = useRouter();
   const colors = useColors();
   const insets = useSafeAreaInsets();
@@ -23,6 +44,7 @@ export default function SignInScreen() {
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
+  const [ssoLoading, setSsoLoading] = useState(false);
 
   const submit = async () => {
     if (!isLoaded || !signIn) return;
@@ -46,6 +68,36 @@ export default function SignInScreen() {
     }
   };
 
+  // Google SSO via Clerk's native OAuth flow. The operator's web
+  // account is Google-OAuth-only (no password set), so the
+  // email/password form alone cannot sign them in on mobile —
+  // they need the same "Continue with Google" path the web app
+  // uses through Clerk's prebuilt <SignIn> component.
+  const signInWithGoogle = useCallback(async () => {
+    if (ssoLoading) return;
+    setError("");
+    setSsoLoading(true);
+    try {
+      const { createdSessionId, setActive: ssoSetActive } = await startSSOFlow({
+        strategy: "oauth_google",
+        redirectUrl: AuthSession.makeRedirectUri({ scheme: "axiommobile" }),
+      });
+      if (createdSessionId && ssoSetActive) {
+        await ssoSetActive({ session: createdSessionId });
+        router.replace("/(tabs)" as Href);
+      }
+    } catch (err: unknown) {
+      const clerkErr = err as { errors?: { longMessage?: string; message?: string }[] };
+      setError(
+        clerkErr.errors?.[0]?.longMessage ??
+          clerkErr.errors?.[0]?.message ??
+          "Google sign-in failed. Try again.",
+      );
+    } finally {
+      setSsoLoading(false);
+    }
+  }, [router, ssoLoading, startSSOFlow]);
+
   return (
     <View
       style={[
@@ -66,6 +118,35 @@ export default function SignInScreen() {
       </View>
 
       <View style={styles.form}>
+        <Pressable
+          onPress={signInWithGoogle}
+          disabled={ssoLoading || !isLoaded}
+          style={({ pressed }) => [
+            styles.ssoButton,
+            {
+              backgroundColor: colors.input,
+              borderColor: colors.border,
+              opacity: ssoLoading || !isLoaded ? 0.5 : pressed ? 0.85 : 1,
+            },
+          ]}
+        >
+          {ssoLoading ? (
+            <ActivityIndicator color={colors.foreground} />
+          ) : (
+            <Text style={[styles.ssoButtonText, { color: colors.foreground }]}>
+              CONTINUE WITH GOOGLE
+            </Text>
+          )}
+        </Pressable>
+
+        <View style={styles.dividerRow}>
+          <View style={[styles.dividerLine, { backgroundColor: colors.border }]} />
+          <Text style={[styles.dividerText, { color: colors.mutedForeground }]}>
+            OR
+          </Text>
+          <View style={[styles.dividerLine, { backgroundColor: colors.border }]} />
+        </View>
+
         <Text style={[styles.label, { color: colors.mutedForeground }]}>
           EMAIL
         </Text>
@@ -183,6 +264,29 @@ const styles = StyleSheet.create({
     fontFamily: "Inter_400Regular",
   },
   form: { gap: 4 },
+  ssoButton: {
+    paddingVertical: 16,
+    alignItems: "center",
+    borderWidth: 1,
+    marginBottom: 20,
+  },
+  ssoButtonText: {
+    fontSize: 13,
+    letterSpacing: 2,
+    fontFamily: "Inter_700Bold",
+  },
+  dividerRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    marginBottom: 20,
+    gap: 12,
+  },
+  dividerLine: { flex: 1, height: StyleSheet.hairlineWidth },
+  dividerText: {
+    fontSize: 10,
+    letterSpacing: 2,
+    fontFamily: "Inter_500Medium",
+  },
   label: {
     fontSize: 10,
     letterSpacing: 2,
