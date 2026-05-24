@@ -1,4 +1,4 @@
-import { lazy, Suspense, useEffect, useRef, useState } from "react";
+import { lazy, Suspense, useEffect, useRef } from "react";
 import {
   ClerkProvider,
   SignIn,
@@ -19,7 +19,6 @@ import {
   setAuthTokenGetter,
   setBaseUrl,
   setSilentRefreshHandler,
-  setUnauthorizedHandler,
   useGetMyAccess,
 } from "@workspace/api-client-react";
 import { resolveApiUrl } from "@/lib/api";
@@ -29,7 +28,6 @@ import { Skeleton } from "@/components/ui/skeleton";
 import NotFound from "@/pages/not-found";
 import PendingApproval from "@/pages/pending-approval";
 import MarketingPage from "@/pages/marketing";
-import SessionExpiredOverlay from "@/components/session-expired-overlay";
 import GlobalSearch from "@/components/global-search";
 import { AppShell } from "@/components/shell/app-shell";
 
@@ -382,7 +380,7 @@ function ClerkQueryClientCacheInvalidator() {
  * refreshing a stale Clerk JWT and retrying a 401'd request. The toast
  * dismisses as soon as the retry succeeds, so a brief refresh pause
  * isn't completely invisible to the operator. If the retry also 401s
- * the SessionExpired overlay takes over, so we just dismiss the toast.
+ * Clerk takes over the redirect to sign-in, so we just dismiss the toast.
  */
 function SilentRefreshToastBridge() {
   useEffect(() => {
@@ -421,35 +419,8 @@ function SilentRefreshToastBridge() {
   return null;
 }
 
-function SessionExpiredBridge({
-  onExpired,
-}: {
-  onExpired: () => void;
-}) {
-  const queryClient = useQueryClient();
-  const onExpiredRef = useRef(onExpired);
-
-  useEffect(() => {
-    onExpiredRef.current = onExpired;
-  }, [onExpired]);
-
-  useEffect(() => {
-    setUnauthorizedHandler(() => {
-      queryClient.cancelQueries();
-      queryClient.clear();
-      onExpiredRef.current();
-    });
-    return () => {
-      setUnauthorizedHandler(null);
-    };
-  }, [queryClient]);
-
-  return null;
-}
-
 export default function ClerkApp() {
   const [, setLocation] = useLocation();
-  const [sessionExpired, setSessionExpired] = useState(false);
 
   return (
     <ClerkProvider
@@ -477,7 +448,6 @@ export default function ClerkApp() {
         <ClerkApiTokenBridge />
         <ClerkQueryClientCacheInvalidator />
         <SilentRefreshToastBridge />
-        <SessionExpiredBridge onExpired={() => setSessionExpired(true)} />
         <TooltipProvider>
           {/* Suspense boundary covers the public route switch as well —
               several public routes (pricing, about, leaderboard, health,
@@ -525,11 +495,6 @@ export default function ClerkApp() {
           <Show when="signed-in">
             <GlobalSearch />
           </Show>
-          {sessionExpired && (
-            <SessionExpiredOverlay
-              onDismiss={() => setSessionExpired(false)}
-            />
-          )}
         </TooltipProvider>
       </QueryClientProvider>
     </ClerkProvider>
