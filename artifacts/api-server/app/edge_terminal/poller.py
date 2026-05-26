@@ -225,7 +225,17 @@ async def _one_tick() -> None:
             if row_id is not None:
                 inserted += 1
         except Exception as e:
-            log.warning("edge_terminal signal insert failed: %s", e)
+            log.warning(
+                "edge_terminal signal insert failed: %s: %r | sig keys=%s vertical=%r matchup=%r selection=%r signal_date=%r",
+                type(e).__name__,
+                e,
+                sorted(sig.keys()) if isinstance(sig, dict) else None,
+                sig.get("vertical") if isinstance(sig, dict) else None,
+                sig.get("matchup") if isinstance(sig, dict) else None,
+                sig.get("selection") if isinstance(sig, dict) else None,
+                sig.get("signal_date") if isinstance(sig, dict) else None,
+                exc_info=True,
+            )
 
     # Drain after every poll regardless of insert count so any signals
     # that were inserted-but-not-yet-placed on a prior crash still fire.

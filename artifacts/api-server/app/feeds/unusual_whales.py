@@ -189,7 +189,13 @@ async def _persist_signals(signal_type: str, rows: list[dict[str, Any]]) -> int:
                 db_rows,
             )
     except Exception as e:
-        log.warning("uw_signals upsert failed for %s: %s", signal_type, e)
+        log.warning(
+            "uw_signals upsert failed for %s: %s: %r",
+            signal_type,
+            type(e).__name__,
+            e,
+            exc_info=True,
+        )
         raise
     return len(db_rows)
 
