@@ -9,17 +9,29 @@ Auth comes from the ``EDGE_TERMINAL_EMAIL`` / ``EDGE_TERMINAL_PASSWORD``
 environment secrets only — credentials are never read from the DB or
 written to the repo.
 
-DOM contract (subject to refinement against the live site):
+DOM contract (verified live against app.edgeterminal.ai 2026-05-26):
 
-  * The dashboard renders one tile per pick.  Tiles carrying a
-    "signal" badge are the ones we want to fire on.  Selector:
-    ``[data-axiom-signal="true"], .signal-badge, .has-signal`` —
-    superset matched with ``OR`` so a UI refresh that renames the
-    class still resolves.
-  * Each tile exposes ``vertical``, ``matchup``, ``selection``,
-    ``model_prob``, ``market_price`` (or the Edge Terminal-native
-    edge%).  We read whichever attributes are present and fall back
-    to text parsing — see :func:`_extract_tile`.
+  * Sport sections render as a ``.section-header`` element (e.g.
+    text "NHL — PICKS RANKED BY EDGE") followed by a sequence of
+    ``div.game-row`` siblings/descendants.  We walk the document
+    in source order to map each row to its preceding header.
+  * Signal-badged rows are ``div.game-row`` elements that contain
+    a ``span.signal-tag`` child whose text reads "SIGNAL".  Non-
+    signal rows are ignored.
+  * Each signal row exposes its data positionally via class names:
+
+      .matchup .matchup-text   "Carolina Hurricanes @ Montréal Canadiens"
+      .market (first)          "SPREAD" / "TOTAL" / "ML"
+      .odds                    "-184"   (American odds)
+      .pick                    "Canadiens +1.5" / "OVER 25.5"
+      .market (second)         "81%"    (model win probability)
+      .edge-bar .ev            "+25.1%" (edge / EV%)
+
+  * The legacy ``data-axiom-signal`` / ``data-*`` attribute
+    contract is also still supported via :func:`_extract_tile`,
+    which the fixture tests exercise.  If the live site ever
+    adds those attributes back we'll prefer them over the
+    positional parse.
 
 The scraper is intentionally tolerant: missing optional fields are
 left as ``None``.  The poller still records the row so an operator
@@ -33,6 +45,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 from datetime import datetime, timezone
 from typing import Any
 
@@ -147,27 +160,22 @@ async def scrape_signals() -> list[dict[str, Any]]:
 
             # ---- Scrape signal-badged tiles ----
             #
-            # Superset selector: any element whose data-axiom-signal
-            # attribute is "true" OR whose class list contains a
-            # "signal" badge.  Operators can refine this once they
-            # see the live DOM.
-            tile_selector = (
-                "[data-axiom-signal='true'], "
-                ".signal-badge, .has-signal, "
-                "[data-signal='true']"
-            )
+            # Wait for the dashboard's row grid to render at all.  We
+            # don't gate on the signal selector here because "no
+            # signals right now" is a valid steady state and we want
+            # to return cleanly in that case, not stall the poller.
             try:
-                await page.wait_for_selector(tile_selector, timeout=10_000)
+                await page.wait_for_selector("div.game-row", timeout=10_000)
             except Exception:
-                # No signals on this poll — return empty cleanly.
                 return []
-            handles = await page.locator(tile_selector).all()
-            for h in handles:
-                try:
-                    row = await _extract_tile(h)
-                except Exception as e:  # pragma: no cover — per-tile guard
-                    log.warning("edge_terminal tile parse failed: %s", e)
-                    continue
+            # Single JS round-trip pulls every signal row + its
+            # preceding section header in document order.  Doing this
+            # in one evaluate (vs. one round-trip per handle/attr) is
+            # ~50x faster on a dashboard with ~40 signals and avoids
+            # serialising Playwright IPC for every field.
+            structured = await page.evaluate(_SIGNAL_EXTRACT_JS)
+            for raw in structured:
+                row = _row_from_structured(raw)
                 if row is None:
                     continue
                 out.append(row)
@@ -177,6 +185,242 @@ async def scrape_signals() -> list[dict[str, Any]]:
             except Exception:
                 pass
     return out
+
+
+# ---------------------------------------------------------------------
+# Live-DOM extraction (real app.edgeterminal.ai contract)
+# ---------------------------------------------------------------------
+
+# JS that walks the dashboard in document order, tracks the most recent
+# .section-header (so each row maps to its sport vertical), and emits a
+# structured record for every game-row carrying a .signal-tag chip.
+# Returned shape: list of dicts with header/matchup/market/odds/pick/
+# model_prob_text/edge_text/time_text/data_attrs.
+_SIGNAL_EXTRACT_JS = r"""
+() => {
+  const nodes = Array.from(
+    document.querySelectorAll('.section-header, div.game-row')
+  );
+  const txt = (el) => (el && el.innerText ? el.innerText.trim() : null);
+  let header = null;
+  const out = [];
+  for (const n of nodes) {
+    if (n.classList.contains('section-header')) {
+      const first = (n.innerText || '').split('\n')[0].trim();
+      header = first || null;
+      continue;
+    }
+    if (!n.querySelector('.signal-tag')) continue;
+    // Both the market kind ("SPREAD") and the model probability
+    // ("81%") share class="market" in the live DOM; we disambiguate
+    // by index: the first .market child is the market kind, the
+    // last is the probability.
+    const markets = n.querySelectorAll(':scope > .market');
+    const marketKind = markets.length > 0 ? txt(markets[0]) : null;
+    const modelProbText =
+      markets.length > 1 ? txt(markets[markets.length - 1]) : null;
+    // Capture any data-* attributes on the row or any ancestor (up
+    // to 4 levels) so we can prefer them if Edge Terminal ever
+    // restores the structured contract.
+    const dataAttrs = {};
+    let a = n;
+    for (let i = 0; i < 5 && a; i++, a = a.parentElement) {
+      for (const at of a.attributes || []) {
+        if (at.name.startsWith('data-') && !(at.name in dataAttrs)) {
+          dataAttrs[at.name] = at.value;
+        }
+      }
+    }
+    out.push({
+      header,
+      matchup: txt(n.querySelector('.matchup .matchup-text')),
+      market_kind: marketKind,
+      odds: txt(n.querySelector(':scope > .odds')),
+      pick: txt(n.querySelector(':scope > .pick')),
+      model_prob_text: modelProbText,
+      edge_text: txt(n.querySelector('.edge-bar .ev')),
+      time_text: txt(n.querySelector(':scope > .time')),
+      data_attrs: dataAttrs,
+    });
+  }
+  return out;
+}
+"""
+
+
+# ``NHL — PICKS RANKED BY EDGE`` → ``nhl``.  Tolerant to either em-dash
+# or hyphen and to extra trailing copy ("· 4 GAMES · 2 RECOMMENDED").
+_HEADER_VERTICAL_RE = re.compile(r"^\s*([A-Za-z0-9]+)\b")
+
+_MARKET_KIND_TO_PICK_TYPE = {
+    "SPREAD": "spread",
+    "TOTAL": "total",
+    "ML": "moneyline",
+    "MONEYLINE": "moneyline",
+}
+
+_PCT_RE = re.compile(r"-?\+?[\d.]+")
+
+
+def _parse_pct_to_fraction(s: str | None) -> float | None:
+    """Parse "81%" → 0.81; "+25.1%" → 0.251.  Returns None on junk."""
+    if not s:
+        return None
+    m = _PCT_RE.search(s)
+    if not m:
+        return None
+    try:
+        return float(m.group(0)) / 100.0
+    except ValueError:
+        return None
+
+
+def _parse_signed_pct(s: str | None) -> float | None:
+    """Parse "+25.1%" → 25.1; "-2.3%" → -2.3.  Returns None on junk."""
+    if not s:
+        return None
+    m = _PCT_RE.search(s)
+    if not m:
+        return None
+    try:
+        return float(m.group(0))
+    except ValueError:
+        return None
+
+
+def _parse_american_odds(s: str | None) -> float | None:
+    if not s:
+        return None
+    cleaned = s.strip().replace(",", "")
+    try:
+        return float(cleaned)
+    except ValueError:
+        return None
+
+
+def _infer_side(selection: str | None) -> str:
+    """Same mapping the data-attr path uses: Under/No/Below → NO."""
+    s = (selection or "").strip().lower()
+    if (
+        s.startswith("under ")
+        or s.startswith("no ")
+        or s.startswith("below ")
+        or s in ("under", "no")
+    ):
+        return "NO"
+    return "YES"
+
+
+def _vertical_from_header(header: str | None) -> str | None:
+    if not header:
+        return None
+    m = _HEADER_VERTICAL_RE.match(header)
+    if not m:
+        return None
+    return m.group(1).strip().lower() or None
+
+
+def _row_from_structured(raw: dict[str, Any]) -> dict[str, Any] | None:
+    """Convert a JS-extracted signal record into the executor's shape.
+
+    Returns ``None`` if the row is missing any of the dedup keys
+    (vertical / matchup / selection) — the poller drops these.
+    """
+    if not isinstance(raw, dict):
+        return None
+
+    data_attrs = raw.get("data_attrs") or {}
+
+    # Data-attr contract wins when present (Edge Terminal may restore
+    # it in the future); otherwise parse the positional class layout.
+    vertical = (
+        (data_attrs.get("data-vertical") or "").strip().lower()
+        or _vertical_from_header(raw.get("header"))
+    )
+    matchup = (data_attrs.get("data-matchup") or "").strip() or (
+        raw.get("matchup") or ""
+    ).strip()
+    selection = (data_attrs.get("data-selection") or "").strip() or (
+        raw.get("pick") or ""
+    ).strip()
+    if not (vertical and matchup and selection):
+        return None
+
+    market_kind_raw = (raw.get("market_kind") or "").strip().upper()
+    pick_type = (
+        (data_attrs.get("data-pick-type") or "").strip().lower()
+        or _MARKET_KIND_TO_PICK_TYPE.get(market_kind_raw)
+    )
+
+    side_attr = (data_attrs.get("data-side") or "").strip().upper()
+    side = side_attr if side_attr in ("YES", "NO") else _infer_side(selection)
+
+    # ``data-model-prob`` is historically a 0-1 fraction in fixtures.
+    model_prob: float | None
+    if data_attrs.get("data-model-prob"):
+        try:
+            model_prob = float(data_attrs["data-model-prob"])
+        except (TypeError, ValueError):
+            model_prob = _parse_pct_to_fraction(raw.get("model_prob_text"))
+    else:
+        model_prob = _parse_pct_to_fraction(raw.get("model_prob_text"))
+
+    edge_pct = (
+        _parse_signed_pct(data_attrs.get("data-edge"))
+        if data_attrs.get("data-edge")
+        else _parse_signed_pct(raw.get("edge_text"))
+    )
+    avg_odds = _parse_american_odds(
+        data_attrs.get("data-avg-odds")
+    ) or _parse_american_odds(raw.get("odds"))
+    ev_pct = (
+        _parse_signed_pct(data_attrs.get("data-ev"))
+        if data_attrs.get("data-ev")
+        else edge_pct
+    )
+
+    market_price: float | None
+    try:
+        market_price = (
+            float(data_attrs["data-market-price"])
+            if data_attrs.get("data-market-price")
+            else None
+        )
+    except (TypeError, ValueError):
+        market_price = None
+
+    return {
+        "vertical": vertical,
+        "matchup": matchup,
+        "selection": selection,
+        "side": side,
+        "signal_date": _today_utc_iso(),
+        "edge_pct": edge_pct,
+        "model_prob": model_prob,
+        "market_price": market_price,
+        "kalshi_ticker": (data_attrs.get("data-kalshi-ticker") or "").strip() or None,
+        "market_title": (data_attrs.get("data-market-title") or "").strip() or None,
+        "pick_type": pick_type,
+        "avg_odds": avg_odds,
+        "ev_pct": ev_pct,
+        "source_screenshot_url": (
+            data_attrs.get("data-screenshot-url") or ""
+        ).strip()
+        or None,
+        "kalshi_market_id": (
+            data_attrs.get("data-kalshi-market-id") or ""
+        ).strip()
+        or None,
+        "raw": {
+            "header": raw.get("header"),
+            "market_kind": raw.get("market_kind"),
+            "odds": raw.get("odds"),
+            "pick": raw.get("pick"),
+            "model_prob_text": raw.get("model_prob_text"),
+            "edge_text": raw.get("edge_text"),
+            "time_text": raw.get("time_text"),
+        },
+    }
 
 
 async def _extract_tile(handle: Any) -> dict[str, Any] | None:
