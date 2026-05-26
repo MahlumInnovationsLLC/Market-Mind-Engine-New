@@ -14,6 +14,20 @@ run = "pnpm --filter @workspace/api-server run dev"
 
 [services.production]
 
+[services.production.build]
+# Install Playwright's chromium binary so the edge_terminal scraper has
+# a browser to drive in production. Without this, every poller tick logs
+# ``unavailable: chromium launch failed: Executable doesn't exist`` and
+# zero signals/trades fire. System libs (libgbm, nss, dbus, ...) are
+# already provided by replit.nix.
+args = [
+  "/home/runner/workspace/.pythonlibs/bin/python3",
+  "-m",
+  "playwright",
+  "install",
+  "chromium",
+]
+
 [services.production.run]
 # L1 (this process supervisor) -> L2 (watchdog) -> uvicorn child.
 # The watchdog polls /api/healthz on port 8080 every 5s and restarts
