@@ -61,13 +61,15 @@ CREATE INDEX IF NOT EXISTS edge_terminal_signals_status_idx
 -- existing operator-flipped row wins via ON CONFLICT.  The dashboard
 -- read-side, the orchestrator scheduler, and the boot lifespan all
 -- read this row.
--- ``system_settings.value`` is declared ``text`` (see migration 0018), so
--- seed a plain string literal -- an earlier ``to_jsonb('edge_terminal')``
--- wrapper wrote the *jsonb-encoded* value ``"edge_terminal"`` (quoted)
--- into the text column, which then mis-compared against the bare string
--- ``edge_terminal`` every reader expects.
+-- ``system_settings.value`` is ``jsonb`` in production (an early
+-- out-of-band ALTER not captured by an alembic revision migrated the
+-- text column to jsonb).  A bare string literal therefore fails with
+-- ``invalid input syntax for type json: Token "edge_terminal" is
+-- invalid``, so the seed must be JSON-encoded.  ``to_jsonb('...'::text)``
+-- produces the literal ``"edge_terminal"`` jsonb value the readers in
+-- ``control.get_input_mode`` know how to unwrap.
 INSERT INTO system_settings (key, value, updated_at)
-VALUES ('app.input_mode', 'edge_terminal', now())
+VALUES ('app.input_mode', to_jsonb('edge_terminal'::text), now())
 ON CONFLICT (key) DO NOTHING;
 
 CREATE TABLE IF NOT EXISTS edge_terminal_poller_status (

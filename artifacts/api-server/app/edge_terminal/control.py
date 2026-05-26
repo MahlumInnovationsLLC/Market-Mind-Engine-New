@@ -47,16 +47,33 @@ _SETTING_KEY = "app.input_mode"
 
 async def get_input_mode() -> str:
     """Return the persisted input mode, defaulting to edge_terminal
-    on read-failure or empty row."""
+    on read-failure or empty row.
+
+    ``system_settings.value`` is ``jsonb`` in production, so values are
+    JSON-encoded (the literal ``"edge_terminal"`` with quotes).  We
+    accept either form -- a bare ``edge_terminal`` text value (dev/test
+    databases that never had the out-of-band ALTER) and a JSON-encoded
+    ``"edge_terminal"`` from prod -- by stripping a single layer of
+    JSON quoting before matching against ``VALID_INPUT_MODES``.
+    """
     try:
         v = await db.fetchval(
-            "SELECT value FROM system_settings WHERE key = $1",
+            "SELECT value::text FROM system_settings WHERE key = $1",
             _SETTING_KEY,
         )
     except Exception as e:  # pragma: no cover — defensive
         log.warning("input_mode read failed (defaulting edge_terminal): %s", e)
         return INPUT_MODE_EDGE_TERMINAL
-    s = (v or "").strip().lower()
+    s = (v or "").strip()
+    # Unwrap a single layer of JSON encoding -- e.g. '"edge_terminal"' or
+    # the bare 'edge_terminal' both end up as 'edge_terminal'.
+    if len(s) >= 2 and s[0] == '"' and s[-1] == '"':
+        try:
+            import json as _json
+            s = _json.loads(s)
+        except Exception:
+            s = s[1:-1]
+    s = s.strip().lower()
     if s not in VALID_INPUT_MODES:
         return INPUT_MODE_EDGE_TERMINAL
     return s
@@ -70,10 +87,15 @@ async def set_input_mode(mode: str) -> str:
         raise ValueError(
             f"input_mode must be one of {VALID_INPUT_MODES} (got {mode!r})"
         )
+    # ``system_settings.value`` is ``jsonb`` in prod -- JSON-encode the
+    # plain string via ``to_jsonb($2::text)`` so the insert works on
+    # either a text or jsonb column (text column happily stores the
+    # serialised ``"edge_terminal"`` with quotes, which get_input_mode
+    # unwraps on read).
     await db.execute(
         """
         INSERT INTO system_settings (key, value, updated_at)
-        VALUES ($1, $2, now())
+        VALUES ($1, to_jsonb($2::text), now())
         ON CONFLICT (key) DO UPDATE
           SET value = EXCLUDED.value,
               updated_at = EXCLUDED.updated_at

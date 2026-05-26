@@ -207,6 +207,16 @@ async def _one_tick() -> None:
         error = f"unavailable: {e}"
     except Exception as e:  # pragma: no cover — defensive
         error = f"scrape_failed: {e}"
+    # Always emit an INFO line so prod logs show the poller is alive
+    # and what each tick actually saw -- previously a silent
+    # ``ScraperUnavailable`` (no chromium installed in the deploy image)
+    # left zero footprint between the "poller started" line and the
+    # next restart, making the system look dead when it was just
+    # mis-configured.
+    if error:
+        log.warning("edge_terminal tick error: %s", error)
+    else:
+        log.info("edge_terminal tick: scraped %d signal(s)", len(signals))
 
     inserted = 0
     for sig in signals:
