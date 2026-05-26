@@ -61,7 +61,16 @@ async def drain_pending(limit: int = 50) -> dict[str, int]:
             failed += 1
             continue
         if outcome is None:
-            await _mark(sid, "skipped", "no matching kalshi market")
+            # _fire_one returns None for two distinct reasons:
+            #   1. resolver couldn't find a Kalshi ticker, or
+            #   2. it found one but Kelly sizing rounded to zero contracts.
+            # Re-resolve cheaply so the operator-visible reason isn't a lie.
+            ticker = await market_resolver.resolve(sig)
+            reason = (
+                "kelly sized to zero contracts" if ticker
+                else "no matching kalshi market"
+            )
+            await _mark(sid, "skipped", reason)
             skipped += 1
             continue
         await _mark(

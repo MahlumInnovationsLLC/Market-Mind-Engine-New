@@ -5,6 +5,7 @@ import {
 import { useFocusFromQuery } from "@/hooks/use-focus-from-query";
 import EdgeTerminalPnlTile from "@/components/dashboard/edge-terminal-pnl-tile";
 import EdgeTerminalRecentSignalsTile from "@/components/dashboard/edge-terminal-recent-signals";
+import EdgeTerminalSignalMatchesTile from "@/components/dashboard/edge-terminal-signal-matches";
 import InputModeToggle from "@/components/dashboard/input-mode-toggle";
 import {
   SourceFilterProvider,
@@ -117,6 +118,7 @@ function DashboardBody({ isAdmin }: { isAdmin: boolean }) {
               <EdgeTerminalPnlTile />
               {pipelineVisible ? <BookmakerMetricsTile /> : null}
             </div>
+            <EdgeTerminalSignalMatchesTile />
             <EdgeTerminalRecentSignalsTile />
           </>
         ) : null}

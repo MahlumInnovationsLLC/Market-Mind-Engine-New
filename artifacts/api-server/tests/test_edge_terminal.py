@@ -177,144 +177,183 @@ def test_kelly_missing_prob_returns_zero():
 # ---------------------------------------------------------------------
 
 def test_resolver_direct_ticker_passthrough(monkeypatch):
+    """Scraper-supplied tickers are trusted (DOM truth)."""
     from app.edge_terminal import market_resolver
 
-    async def _explode(*a, **k):  # would only be called on fallback
-        raise AssertionError("db.fetch should not be called")
-
     async def _ticker_known(_q, *args, **kwargs):
-        return 1  # ticker exists in markets cache
+        return 1
 
-    monkeypatch.setattr(market_resolver.db, "fetch", _explode)
+    async def _explode(*a, **k):
+        raise AssertionError("db.fetch should not be called on direct path")
+
     monkeypatch.setattr(market_resolver.db, "fetchval", _ticker_known)
+    monkeypatch.setattr(market_resolver.db, "fetch", _explode)
     out = _run(market_resolver.resolve({"kalshi_ticker": "KX-NBA-LAL-1"}))
     assert out == "KX-NBA-LAL-1"
 
 
-def test_resolver_unknown_direct_ticker_falls_through_to_title(monkeypatch):
-    """Audit fix: scraped tickers must be validated against the markets
-    cache; an unknown ticker falls through to the title-match path."""
-    from app.edge_terminal import market_resolver
-
-    async def _ticker_missing(_q, *args, **kwargs):
-        return None
-
-    async def _fake_fetch(_q, *args, **kwargs):
-        return [{"ticker": "KX-NBA-LAL-BOS", "title": "Lakers vs Celtics"}]
-
-    monkeypatch.setattr(market_resolver.db, "fetchval", _ticker_missing)
-    monkeypatch.setattr(market_resolver.db, "fetch", _fake_fetch)
-    out = _run(market_resolver.resolve({
-        "kalshi_ticker": "KX-STALE",
-        "matchup": "Lakers @ Celtics",
-        "selection": "Lakers",
-    }))
-    assert out == "KX-NBA-LAL-BOS"
-
-
-def test_resolver_anchors_on_longest_token(monkeypatch):
-    """Audit fix: ILIKE anchor must be the longest unique token, not
-    ``tokens[0]`` — otherwise short stopwords (vs/at/on) dump
-    unrelated markets into the scorer."""
+def test_resolver_uses_series_prefix_by_vertical_pick(monkeypatch):
+    """vertical=mlb + pick_type=moneyline → KXMLBGAME prefix only."""
     from app.edge_terminal import market_resolver
 
     captured: list[tuple[str, ...]] = []
 
     async def _fake_fetch(_q, *args, **kwargs):
         captured.append(args)
-        return []
+        return [{"ticker": "KXMLBGAME-26APR261415SEAOAK-OAK", "title": "Seattle vs Oakland Winner?"}]
 
-    async def _ticker_known(*a, **k):
+    async def _fetchval(*a, **k):
         return None
 
     monkeypatch.setattr(market_resolver.db, "fetch", _fake_fetch)
-    monkeypatch.setattr(market_resolver.db, "fetchval", _ticker_known)
-    _run(market_resolver.resolve({
-        "matchup": "vs at on",  # 3 short stopwords
-        "selection": "Manchester",
+    monkeypatch.setattr(market_resolver.db, "fetchval", _fetchval)
+    out = _run(market_resolver.resolve({
+        "vertical": "mlb", "pick_type": "moneyline",
+        "matchup": "Seattle Mariners @ Oakland Athletics",
+        "selection": "Athletics",
     }))
-    assert captured, "fetch should have been called"
-    assert "%manchester%" in captured[0][0].lower()
+    assert out == "KXMLBGAME-26APR261415SEAOAK-OAK"
+    assert captured and captured[0][0] == "KXMLBGAME-%"
 
 
-def test_resolver_token_overlap_picks_best(monkeypatch):
+def test_resolver_picks_team_match_in_same_series(monkeypatch):
+    """Of two MLB games, pick the one whose title mentions both teams."""
     from app.edge_terminal import market_resolver
 
     rows = [
-        {"ticker": "KX-NBA-LAL-BOS", "title": "Lakers vs Celtics — Lakers win"},
-        {"ticker": "KX-NBA-MIA-DEN", "title": "Heat vs Nuggets"},
+        {"ticker": "KXMLBGAME-XX-NYY", "title": "Yankees vs Royals Winner?"},
+        {"ticker": "KXMLBGAME-26APR261415SEAOAK-OAK", "title": "Seattle vs Oakland Winner?"},
     ]
 
-    async def _fake_fetch(_q, *args, **kwargs):
+    async def _fetch(*a, **k):
         return rows
 
-    async def _ticker_known(*a, **k):
+    async def _fetchval(*a, **k):
         return None
 
-    monkeypatch.setattr(market_resolver.db, "fetch", _fake_fetch)
-    monkeypatch.setattr(market_resolver.db, "fetchval", _ticker_known)
+    monkeypatch.setattr(market_resolver.db, "fetch", _fetch)
+    monkeypatch.setattr(market_resolver.db, "fetchval", _fetchval)
     out = _run(market_resolver.resolve({
-        "matchup": "Lakers @ Celtics", "selection": "Lakers",
+        "vertical": "mlb", "pick_type": "moneyline",
+        "matchup": "Seattle Mariners @ Oakland Athletics",
+        "selection": "Athletics",
     }))
-    assert out == "KX-NBA-LAL-BOS"
+    assert out == "KXMLBGAME-26APR261415SEAOAK-OAK"
 
 
-def test_resolver_returns_none_below_overlap_threshold(monkeypatch):
+def test_resolver_total_uses_line_number_bonus(monkeypatch):
+    """For totals, the numeric line should boost the right ticker."""
     from app.edge_terminal import market_resolver
 
-    rows = [{"ticker": "KX-FOO", "title": "Lakers parade attendance"}]
+    rows = [
+        {"ticker": "KXMLBTOTAL-26APR261415SEAOAK-8", "title": "Seattle vs Oakland: Total Runs"},
+        {"ticker": "KXMLBTOTAL-26APR261415SEAOAK-10", "title": "Seattle vs Oakland: Total Runs"},
+    ]
 
-    async def _fake_fetch(_q, *args, **kwargs):
+    async def _fetch(*a, **k):
         return rows
 
-    async def _ticker_known(*a, **k):
+    async def _fetchval(*a, **k):
         return None
 
-    monkeypatch.setattr(market_resolver.db, "fetch", _fake_fetch)
-    monkeypatch.setattr(market_resolver.db, "fetchval", _ticker_known)
-    # Only "lakers" overlaps the title; "warriors" and "win" do not.
+    monkeypatch.setattr(market_resolver.db, "fetch", _fetch)
+    monkeypatch.setattr(market_resolver.db, "fetchval", _fetchval)
     out = _run(market_resolver.resolve({
-        "matchup": "Warriors vs Suns", "selection": "Warriors win",
+        "vertical": "mlb", "pick_type": "total",
+        "matchup": "Seattle Mariners @ Oakland Athletics",
+        "selection": "UNDER 10",
+    }))
+    assert out == "KXMLBTOTAL-26APR261415SEAOAK-10"
+
+
+def test_resolver_returns_none_when_no_team_overlap(monkeypatch):
+    """If no candidate mentions the picked team, return None."""
+    from app.edge_terminal import market_resolver
+
+    async def _fetch(*a, **k):
+        return [{"ticker": "KXMLBGAME-XX-NYY", "title": "Yankees vs Royals Winner?"}]
+
+    async def _fetchval(*a, **k):
+        return None
+
+    monkeypatch.setattr(market_resolver.db, "fetch", _fetch)
+    monkeypatch.setattr(market_resolver.db, "fetchval", _fetchval)
+    # Disable live fallback by stubbing the Kalshi client path.
+    monkeypatch.setattr(market_resolver, "_live_candidates", lambda *a, **k: _noop_list())
+    out = _run(market_resolver.resolve({
+        "vertical": "mlb", "pick_type": "moneyline",
+        "matchup": "Warriors @ Suns", "selection": "Warriors",
     }))
     assert out is None
 
 
-def test_resolver_single_token_signal_allows_one_overlap(monkeypatch):
-    """Audit fix: crypto/forex picks naturally produce <2 unique tokens
-    (e.g. "BTC"); requiring 2 overlaps would always skip them."""
+async def _noop_list():
+    return []
+
+
+def test_resolver_unmapped_vertical_returns_none(monkeypatch):
     from app.edge_terminal import market_resolver
 
-    rows = [{"ticker": "KX-BTC-100K", "title": "BTC closes above 100k"}]
-
-    async def _fake_fetch(_q, *args, **kwargs):
-        return rows
-
-    async def _ticker_known(*a, **k):
+    async def _fetchval(*a, **k):
         return None
 
-    monkeypatch.setattr(market_resolver.db, "fetch", _fake_fetch)
-    monkeypatch.setattr(market_resolver.db, "fetchval", _ticker_known)
+    async def _fetch(*a, **k):
+        raise AssertionError("should not query cache when no prefix mapped")
+
+    monkeypatch.setattr(market_resolver.db, "fetchval", _fetchval)
+    monkeypatch.setattr(market_resolver.db, "fetch", _fetch)
     out = _run(market_resolver.resolve({
-        "matchup": "BTC", "selection": "",
+        "vertical": "obscure_sport", "pick_type": "moneyline",
+        "matchup": "A vs B", "selection": "A",
     }))
-    assert out == "KX-BTC-100K"
+    assert out is None
 
 
 def test_resolver_db_error_returns_none(monkeypatch):
+    """Cache-read DB errors must not crash — fall back to live, and if
+    that also yields nothing, return None gracefully."""
     from app.edge_terminal import market_resolver
 
     async def _boom(*a, **k):
         raise RuntimeError("db down")
 
-    async def _ticker_known(*a, **k):
+    async def _fetchval(*a, **k):
         return None
 
     monkeypatch.setattr(market_resolver.db, "fetch", _boom)
-    monkeypatch.setattr(market_resolver.db, "fetchval", _ticker_known)
+    monkeypatch.setattr(market_resolver.db, "fetchval", _fetchval)
+    monkeypatch.setattr(market_resolver, "_live_candidates", lambda *a, **k: _noop_list())
     out = _run(market_resolver.resolve({
+        "vertical": "mlb", "pick_type": "moneyline",
         "matchup": "Lakers @ Celtics", "selection": "Lakers",
     }))
     assert out is None
+
+
+def test_resolve_match_returns_structured_result(monkeypatch):
+    """resolve_match() is the new public surface used by the dashboard widget."""
+    from app.edge_terminal import market_resolver
+
+    rows = [
+        {"ticker": "KXMLBGAME-26APR261415SEAOAK-OAK", "title": "Seattle vs Oakland Winner?"},
+    ]
+
+    async def _fetch(*a, **k):
+        return rows
+
+    async def _fetchval(*a, **k):
+        return None
+
+    monkeypatch.setattr(market_resolver.db, "fetch", _fetch)
+    monkeypatch.setattr(market_resolver.db, "fetchval", _fetchval)
+    out = _run(market_resolver.resolve_match({
+        "vertical": "mlb", "pick_type": "moneyline",
+        "matchup": "Seattle Mariners @ Oakland Athletics",
+        "selection": "Athletics",
+    }))
+    assert out.ticker == "KXMLBGAME-26APR261415SEAOAK-OAK"
+    assert "matched via cache" in out.reason
+    assert out.candidates and out.candidates[0]["ticker"] == out.ticker
 
 
 # ---------------------------------------------------------------------

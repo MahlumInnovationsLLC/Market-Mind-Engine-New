@@ -7240,6 +7240,154 @@ async def get_edge_terminal_pnl() -> dict[str, Any]:
     return out
 
 
+async def get_edge_terminal_signal_matches(limit: int = 25) -> dict[str, Any]:
+    """Per-signal Kalshi market resolution + cross-ref to open positions.
+
+    For each recent Edge Terminal signal we re-run the resolver (so the
+    UI shows what would match *right now*, with current cache + live
+    Kalshi state) and bucket the result into:
+
+      * ``matched``   — resolver found a ticker
+      * ``unmatched`` — resolver returned None; the candidates list
+        explains what was considered and why nothing scored high enough
+
+    We also pull all currently-open Kalshi positions and mark which
+    open position (if any) matches each signal's resolved ticker so the
+    operator can see "signal X → position Y is live" or "position Z
+    has no Edge Terminal backing".
+    """
+    from .edge_terminal import market_resolver
+
+    limit = max(1, min(200, int(limit)))
+    out: dict[str, Any] = {
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "limit": limit,
+        "signals": [],
+        "open_positions": [],
+        "summary": {
+            "n_signals": 0,
+            "n_matched": 0,
+            "n_unmatched": 0,
+            "n_open_positions": 0,
+            "n_positions_with_signal": 0,
+        },
+        "error": None,
+    }
+    try:
+        sig_rows = await db.fetch(
+            """
+            SELECT id, seen_at, vertical, matchup, selection,
+                   signal_date, edge_pct, model_prob, market_price,
+                   kalshi_ticker, market_title,
+                   pick_type, avg_odds, ev_pct, side,
+                   status, status_reason, trades_id, placed_at
+            FROM edge_terminal_signals
+            ORDER BY id DESC
+            LIMIT $1
+            """,
+            limit,
+        )
+        pos_rows = await db.fetch(
+            """
+            SELECT id, market_id, vertical, side, quantity, avg_price,
+                   current_price, status, opened_at, trading_mode, exchange
+            FROM positions
+            WHERE status='open' AND exchange='kalshi'
+            ORDER BY opened_at DESC NULLS LAST
+            LIMIT 200
+            """,
+        )
+        # market_id IS the Kalshi ticker for kalshi positions.
+        open_by_ticker: dict[str, list[dict[str, Any]]] = {}
+        open_positions: list[dict[str, Any]] = []
+        for r in pos_rows:
+            d = dict(r)
+            for k in ("opened_at",):
+                v = d.get(k)
+                if hasattr(v, "isoformat"):
+                    d[k] = v.isoformat()
+            for k in ("avg_price", "current_price"):
+                v = d.get(k)
+                if v is not None:
+                    try:
+                        d[k] = float(v)
+                    except (TypeError, ValueError):
+                        d[k] = None
+            t = d.get("market_id") or ""
+            open_by_ticker.setdefault(str(t), []).append(d)
+            open_positions.append(d)
+
+        signals: list[dict[str, Any]] = []
+        n_matched = 0
+        positions_with_signal: set[int] = set()
+        for r in sig_rows:
+            sig = dict(r)
+            # Live re-resolve (cheap: cache hits short-circuit).
+            try:
+                rr = await market_resolver.resolve_match(sig)
+            except Exception as e:
+                rr = market_resolver.ResolveResult(None, f"resolver error: {e}", [])
+            ticker = rr.ticker
+            matched = ticker is not None
+            if matched:
+                n_matched += 1
+            linked = open_by_ticker.get(ticker or "", [])
+            for p in linked:
+                positions_with_signal.add(int(p["id"]))
+            for k in ("seen_at", "placed_at"):
+                v = sig.get(k)
+                if hasattr(v, "isoformat"):
+                    sig[k] = v.isoformat()
+            sd = sig.get("signal_date")
+            if hasattr(sd, "isoformat"):
+                sig["signal_date"] = sd.isoformat()
+            for k in ("avg_odds", "ev_pct", "edge_pct", "model_prob", "market_price"):
+                v = sig.get(k)
+                if v is not None:
+                    try:
+                        sig[k] = float(v)
+                    except (TypeError, ValueError):
+                        sig[k] = None
+            signals.append({
+                "id": sig.get("id"),
+                "seen_at": sig.get("seen_at"),
+                "vertical": sig.get("vertical"),
+                "matchup": sig.get("matchup"),
+                "selection": sig.get("selection"),
+                "pick_type": sig.get("pick_type"),
+                "side": sig.get("side"),
+                "avg_odds": sig.get("avg_odds"),
+                "ev_pct": sig.get("ev_pct"),
+                "edge_pct": sig.get("edge_pct"),
+                "status": sig.get("status"),
+                "status_reason": sig.get("status_reason"),
+                "resolved_ticker": ticker,
+                "resolved_reason": rr.reason,
+                "candidates": rr.candidates,
+                "linked_positions": linked,
+            })
+
+        unbacked_positions = [
+            p for p in open_positions if int(p["id"]) not in positions_with_signal
+        ]
+
+        out["signals"] = signals
+        out["open_positions"] = open_positions
+        out["unbacked_open_positions"] = unbacked_positions
+        out["summary"] = {
+            "n_signals": len(signals),
+            "n_matched": n_matched,
+            "n_unmatched": len(signals) - n_matched,
+            "n_open_positions": len(open_positions),
+            "n_positions_with_signal": len(positions_with_signal),
+            "n_unbacked_positions": len(unbacked_positions),
+        }
+    except Exception as e:
+        log.warning("edge_terminal_signal_matches query failed: %s", e)
+        out["error"] = f"{type(e).__name__}: {e}"[:240]
+    return out
+
+
 async def get_edge_terminal_recent_signals(limit: int = 25) -> dict[str, Any]:
     """Recent scraped signals (any status) for operator inspection."""
     limit = max(1, min(200, int(limit)))

@@ -6349,6 +6349,15 @@ async def dashboard_edge_terminal_signals(
     return await dashboard.get_edge_terminal_recent_signals(limit=limit)
 
 
+@app.get("/api/dashboard/edge-terminal-signal-matches")
+async def dashboard_edge_terminal_signal_matches(
+    limit: int = Query(default=25, ge=1, le=200),
+    _: object = Depends(require_approved_user),
+) -> dict[str, object]:
+    """Per-signal Kalshi resolver result + cross-ref to open positions."""
+    return await dashboard.get_edge_terminal_signal_matches(limit=limit)
+
+
 @app.get("/api/dashboard/bookmaker-metrics")
 async def dashboard_bookmaker_metrics(
     window: Literal["7d", "30d", "ytd"] = "7d",
