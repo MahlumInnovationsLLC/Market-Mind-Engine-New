@@ -225,6 +225,7 @@ PROTECTED_ROUTES: tuple[str, ...] = (
     "/api/edge-terminal/status",
     "/api/dashboard/edge-terminal-pnl",
     "/api/dashboard/edge-terminal-signals",
+    "/api/dashboard/edge-terminal-signal-matches",
 )
 
 # Mutating endpoints — auth-protected, accept POST / PUT / DELETE.  These
