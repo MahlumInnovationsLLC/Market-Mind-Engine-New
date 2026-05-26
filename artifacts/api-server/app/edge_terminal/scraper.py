@@ -168,6 +168,17 @@ async def scrape_signals() -> list[dict[str, Any]]:
                 await page.wait_for_selector("div.game-row", timeout=10_000)
             except Exception:
                 return []
+            # The row grid renders before the per-row `.signal-tag`
+            # chips hydrate — gating only on `div.game-row` causes the
+            # poller to fire the JS extract too early and find 0
+            # signals on every cycle.  Wait briefly for at least one
+            # signal chip; a timeout here is a legitimate
+            # "no signals right now" state, so swallow it and let the
+            # JS extract return [].
+            try:
+                await page.wait_for_selector(".signal-tag", timeout=5_000)
+            except Exception:
+                pass
             # Single JS round-trip pulls every signal row + its
             # preceding section header in document order.  Doing this
             # in one evaluate (vs. one round-trip per handle/attr) is

@@ -23,7 +23,7 @@ import json
 import logging
 import os
 import random
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -247,6 +247,21 @@ async def _insert_signal(sig: dict[str, Any]) -> int | None:
     # an explicit side hint.
     side_raw = sig.get("side")
     side = "NO" if isinstance(side_raw, str) and side_raw.strip().upper() == "NO" else "YES"
+    # asyncpg binds `DATE` parameters by calling `.toordinal()` on the
+    # Python value *before* the server-side `$4::date` cast runs, so a
+    # bare ISO string ("2026-05-26") raises
+    # "'str' object has no attribute 'toordinal'" and every signal is
+    # silently dropped.  Coerce here so the scraper can hand us either
+    # a `date` (live path) or an ISO string (fixture tests) without
+    # caring which.
+    signal_date_raw = sig.get("signal_date")
+    if isinstance(signal_date_raw, str):
+        try:
+            signal_date_val = date.fromisoformat(signal_date_raw)
+        except ValueError:
+            signal_date_val = None
+    else:
+        signal_date_val = signal_date_raw
     new_id = await db.fetchval(
         """
         INSERT INTO edge_terminal_signals (
@@ -268,7 +283,7 @@ async def _insert_signal(sig: dict[str, Any]) -> int | None:
         sig.get("vertical"),
         sig.get("matchup"),
         sig.get("selection"),
-        sig.get("signal_date"),
+        signal_date_val,
         sig.get("edge_pct"),
         sig.get("model_prob"),
         sig.get("market_price"),
