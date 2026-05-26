@@ -61,12 +61,13 @@ CREATE INDEX IF NOT EXISTS edge_terminal_signals_status_idx
 -- existing operator-flipped row wins via ON CONFLICT.  The dashboard
 -- read-side, the orchestrator scheduler, and the boot lifespan all
 -- read this row.
--- ``system_settings.value`` is jsonb, so the seed string must be JSON-encoded
--- (quoted) rather than a bare SQL string literal -- otherwise psycopg raises
--- ``invalid input syntax for type json: Token "edge_terminal" is invalid``
--- and the entire migration aborts on a fresh DB.
+-- ``system_settings.value`` is declared ``text`` (see migration 0018), so
+-- seed a plain string literal -- an earlier ``to_jsonb('edge_terminal')``
+-- wrapper wrote the *jsonb-encoded* value ``"edge_terminal"`` (quoted)
+-- into the text column, which then mis-compared against the bare string
+-- ``edge_terminal`` every reader expects.
 INSERT INTO system_settings (key, value, updated_at)
-VALUES ('app.input_mode', to_jsonb('edge_terminal'::text), now())
+VALUES ('app.input_mode', 'edge_terminal', now())
 ON CONFLICT (key) DO NOTHING;
 
 CREATE TABLE IF NOT EXISTS edge_terminal_poller_status (

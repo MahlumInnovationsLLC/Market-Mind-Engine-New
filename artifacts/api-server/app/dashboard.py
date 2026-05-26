@@ -7322,9 +7322,16 @@ async def get_edge_terminal_signal_matches(limit: int = 25) -> dict[str, Any]:
         positions_with_signal: set[int] = set()
         for r in sig_rows:
             sig = dict(r)
-            # Live re-resolve (cheap: cache hits short-circuit).
+            # Cache-only re-resolve -- this endpoint is polled every 30s
+            # with up to 200 signals; allowing a live Kalshi
+            # ``list_markets`` per signal would serialise ~N HTTPS
+            # round-trips on the event loop and jam /api/healthz (which
+            # in turn hangs Clerk auth verification in the browser).
+            # The poller's executor pass already attempted a live
+            # fallback and persisted the result on the signal row, so a
+            # cache miss here is a true miss.
             try:
-                rr = await market_resolver.resolve_match(sig)
+                rr = await market_resolver.resolve_match(sig, live_fallback=False)
             except Exception as e:
                 rr = market_resolver.ResolveResult(None, f"resolver error: {e}", [])
             ticker = rr.ticker

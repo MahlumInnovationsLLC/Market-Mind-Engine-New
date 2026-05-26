@@ -128,10 +128,15 @@ async def _fire_one(sig: dict[str, Any]) -> dict[str, Any] | None:
         side_price = price
         side_prob = model_prob
 
-    # Match paper.place_order's effective-mode resolution so sizing
-    # uses the live bankroll when the operator has flipped live mode.
-    effective_mode = (get_settings().trading_mode or "paper").strip().lower()
-    if effective_mode != "live":
+    # Match paper.place_order's effective-mode resolution so sizing uses
+    # the live bankroll when the operator has flipped the live-execute
+    # toggle.  ``resolve_trading_mode()`` reads the same
+    # ``system_settings.risk.trading_mode`` row the orchestrator's risk
+    # gate honours, so Edge Terminal and pipeline now agree on
+    # paper-vs-live without needing an env-var restart.
+    from ..risk.trading_mode import resolve_trading_mode
+    effective_mode = await resolve_trading_mode()
+    if effective_mode not in ("live", "paper"):
         effective_mode = "paper"
     bankroll = await cycle_module._latest_bankroll(trading_mode=effective_mode) or 0.0
     quantity, kelly_fraction = _quarter_kelly_quantity(
@@ -171,7 +176,7 @@ async def _fire_one(sig: dict[str, Any]) -> dict[str, Any] | None:
         open_positions_count=0,
         open_positions_notional_usd=0.0,
         open_positions_per_vertical_usd={},
-        operator_overrides={},
+        operator_overrides={"trading_mode": effective_mode},
         market_cooldown_until=None,
     )
     cand = {

@@ -93,17 +93,15 @@ async def get_status() -> dict[str, Any]:
     age_seconds: float | None = None
     if isinstance(last_ok, datetime):
         age_seconds = (_now() - last_ok).total_seconds()
+    # Always surface staleness when in edge_terminal mode -- the poller
+    # is expected to run continuously, so any gap > threshold is a real
+    # incident regardless of local clock.
     stale = (
         age_seconds is None or age_seconds > STALE_THRESHOLD_SECONDS
         if mode == control.INPUT_MODE_EDGE_TERMINAL
         else False
     )
     active = _in_active_window()
-    # When we're outside the configured active window the poller
-    # idles by design — surface that so the dashboard doesn't
-    # mis-report it as a fault.
-    if not active:
-        stale = False
     return {
         "input_mode": mode,
         "running": _task is not None and not _task.done(),
@@ -179,17 +177,11 @@ async def _loop() -> None:
                 log.debug(
                     "edge_terminal poller idle (input_mode=%s)", current_mode
                 )
-            elif not _in_active_window():
-                # Outside the 4am-10pm MT window — idle quietly.  We
-                # still re-check on the next tick so we wake up when
-                # the window opens.
-                log.debug(
-                    "edge_terminal poller idle (outside active window %02d-%02d %s)",
-                    ACTIVE_HOUR_START,
-                    ACTIVE_HOUR_END,
-                    ACTIVE_TZ,
-                )
             else:
+                # Poll continuously at the configured cadence -- the
+                # earlier 04:00-22:00 MT gate silently suppressed signals
+                # outside that window, which is wrong for a 24/7 sports
+                # board (UFC, live overnight games, intl. tennis).
                 await _one_tick()
         except asyncio.CancelledError:
             raise

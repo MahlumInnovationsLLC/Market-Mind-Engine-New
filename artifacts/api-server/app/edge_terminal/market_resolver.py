@@ -383,8 +383,18 @@ async def _live_candidates(prefixes: list[str]) -> list[dict[str, str]]:
 _MIN_SCORE = 5
 
 
-async def resolve_match(signal: dict[str, Any]) -> ResolveResult:
-    """Resolve a signal and return ticker + reason + scored candidates."""
+async def resolve_match(
+    signal: dict[str, Any],
+    *,
+    live_fallback: bool = True,
+) -> ResolveResult:
+    """Resolve a signal and return ticker + reason + scored candidates.
+
+    ``live_fallback=False`` skips the Kalshi ``list_markets`` call on a
+    cache miss -- callers that resolve dozens of signals per request
+    (e.g. the dashboard widget polled every 30s) MUST pass ``False`` so
+    they don't serialise N HTTP round-trips on the event loop.
+    """
     direct = (signal.get("kalshi_ticker") or "").strip()
     if direct:
         try:
@@ -433,7 +443,7 @@ async def resolve_match(signal: dict[str, Any]) -> ResolveResult:
     best_score, best = _rank(cands)
     used_live = False
 
-    if best_score < _MIN_SCORE:
+    if best_score < _MIN_SCORE and live_fallback:
         live = await _live_candidates(prefixes)
         if live:
             used_live = True
