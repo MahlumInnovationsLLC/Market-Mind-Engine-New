@@ -15,24 +15,15 @@ run = "pnpm --filter @workspace/api-server run dev"
 [services.production]
 
 [services.production.run]
-# L1 (this process supervisor) -> L2 (watchdog) -> uvicorn child.
-# The watchdog polls /api/healthz on port 8080 every 5s and restarts
-# uvicorn after 3 consecutive failures, with restart-storm rate limiting.
-# It also exposes a status endpoint on port 8099.
-#
-# Chromium install is launched in the BACKGROUND (note the trailing
-# ``&``) so uvicorn binds to :8080 immediately and the autoscale
-# startup probe passes -- baking chromium into the runtime image (via
-# a build hook) pushed the deploy past the 8 GiB image-size limit and
-# the publish failed. The download is ~150 MB and completes in
-# 10-30 seconds; the edge_terminal poller tolerates ``ScraperUnavailable``
-# errors with retries, so once the install finishes the very next
-# tick scrapes successfully.
-args = [
-  "sh",
-  "-c",
-  "(/home/runner/workspace/.pythonlibs/bin/python3 -m playwright install chromium >/tmp/playwright-install.log 2>&1 && echo \"playwright chromium install OK\" || echo \"playwright chromium install FAILED (see /tmp/playwright-install.log)\") & exec /home/runner/workspace/.pythonlibs/bin/python3 /home/runner/workspace/artifacts/api-server/scripts/watchdog.py --supervise --target http://127.0.0.1:8080/api/healthz -- /home/runner/workspace/.pythonlibs/bin/python3 -m uvicorn app.main:app --host 0.0.0.0 --port 8080 --app-dir /home/runner/workspace/artifacts/api-server",
-]
+# Production entrypoint.  All logic lives in ``scripts/start-prod.sh``
+# (background chromium install + watchdog-supervised uvicorn).  The
+# inline ``sh -c`` form that lived here previously caused the Reserved
+# VM (gce) promote step to hang at "Waiting for deployment to be
+# ready" -- the pid 1 supervisor on VM appears not to handle the
+# backgrounded subshell + ``exec`` pattern the same way Cloud Run does.
+# A real script file keeps the quoting auditable and the process tree
+# simple.
+args = ["/bin/sh", "/home/runner/workspace/artifacts/api-server/scripts/start-prod.sh"]
 
 [services.production.run.env]
 PORT = "8080"
