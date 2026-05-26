@@ -14,45 +14,28 @@ run = "pnpm --filter @workspace/api-server run dev"
 
 [services.production]
 
-[services.production.build]
-# Install Playwright's chromium binary so the edge_terminal scraper has
-# a browser to drive in production. Pinning PLAYWRIGHT_BROWSERS_PATH to
-# a workspace-relative dir (which IS copied into the runtime image)
-# guarantees the binary persists from build to run -- the previous attempt
-# wrote to $HOME/.cache/ms-playwright, which differed between build and
-# runtime containers, so chromium was effectively missing in prod.
-args = [
-  "/home/runner/workspace/.pythonlibs/bin/python3",
-  "-m",
-  "playwright",
-  "install",
-  "chromium",
-]
-
-[services.production.build.env]
-PLAYWRIGHT_BROWSERS_PATH = "/home/runner/workspace/.playwright-browsers"
-
 [services.production.run]
 # L1 (this process supervisor) -> L2 (watchdog) -> uvicorn child.
 # The watchdog polls /api/healthz on port 8080 every 5s and restarts
 # uvicorn after 3 consecutive failures, with restart-storm rate limiting.
 # It also exposes a status endpoint on port 8099.
 #
-# We wrap the watchdog launch in ``sh -c`` so we can re-run
-# ``playwright install chromium`` at every cold-start as a belt-and-
-# braces backup: if the build hook somehow failed to land the binary
-# (or the runtime image diverged) the install is idempotent and a
-# no-op when chromium is already present, so the scraper always has
-# a browser to drive.
+# Chromium install is launched in the BACKGROUND (note the trailing
+# ``&``) so uvicorn binds to :8080 immediately and the autoscale
+# startup probe passes -- baking chromium into the runtime image (via
+# a build hook) pushed the deploy past the 8 GiB image-size limit and
+# the publish failed. The download is ~150 MB and completes in
+# 10-30 seconds; the edge_terminal poller tolerates ``ScraperUnavailable``
+# errors with retries, so once the install finishes the very next
+# tick scrapes successfully.
 args = [
   "sh",
   "-c",
-  "/home/runner/workspace/.pythonlibs/bin/python3 -m playwright install chromium >/tmp/playwright-install.log 2>&1 || echo \"playwright install failed (see /tmp/playwright-install.log) -- proceeding anyway\"; exec /home/runner/workspace/.pythonlibs/bin/python3 /home/runner/workspace/artifacts/api-server/scripts/watchdog.py --supervise --target http://127.0.0.1:8080/api/healthz -- /home/runner/workspace/.pythonlibs/bin/python3 -m uvicorn app.main:app --host 0.0.0.0 --port 8080 --app-dir /home/runner/workspace/artifacts/api-server",
+  "(/home/runner/workspace/.pythonlibs/bin/python3 -m playwright install chromium >/tmp/playwright-install.log 2>&1 && echo \"playwright chromium install OK\" || echo \"playwright chromium install FAILED (see /tmp/playwright-install.log)\") & exec /home/runner/workspace/.pythonlibs/bin/python3 /home/runner/workspace/artifacts/api-server/scripts/watchdog.py --supervise --target http://127.0.0.1:8080/api/healthz -- /home/runner/workspace/.pythonlibs/bin/python3 -m uvicorn app.main:app --host 0.0.0.0 --port 8080 --app-dir /home/runner/workspace/artifacts/api-server",
 ]
 
 [services.production.run.env]
 PORT = "8080"
-PLAYWRIGHT_BROWSERS_PATH = "/home/runner/workspace/.playwright-browsers"
 
 [services.production.health.startup]
 path = "/api/healthz"
