@@ -56,7 +56,7 @@ log = logging.getLogger(__name__)
 EDGE_TERMINAL_URL = "https://app.edgeterminal.ai/dashboard"
 EDGE_TERMINAL_LOGIN_URL = "https://app.edgeterminal.ai/login"
 # Pin the navigation budget so a hung site never wedges the 60s poller.
-_NAV_TIMEOUT_MS = 25_000
+_NAV_TIMEOUT_MS = 60_000
 
 
 class ScraperNotConfigured(RuntimeError):
