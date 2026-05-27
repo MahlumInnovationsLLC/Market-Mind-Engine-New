@@ -217,10 +217,60 @@ async def _tick_once() -> None:
 
 
 async def _loop() -> None:
+    global _last_error
     while not _stop.is_set():
-        await _tick_once()
+        try:
+            await _tick_once()
+        except asyncio.CancelledError:
+            raise
+        except BaseException as e:  # noqa: BLE001 — tick must never kill loop
+            _last_error = f"tick crashed: {type(e).__name__}: {e}"
+            log.exception("bankroll sync tick raised — continuing")
         try:
             await asyncio.wait_for(_stop.wait(), timeout=_interval_seconds())
+        except asyncio.TimeoutError:
+            continue
+        except asyncio.CancelledError:
+            # A stray cancellation of the inner _stop.wait() future used
+            # to silently kill the loop, leaving the dashboard pinned at
+            # "SYNC STOPPED" with no log trail.  Only exit when _stop is
+            # *actually* set; otherwise keep polling.
+            if _stop.is_set():
+                return
+            log.warning(
+                "bankroll sync sleep cancelled but stop not set — continuing"
+            )
+            continue
+        else:
+            return
+
+
+async def _supervised_loop() -> None:
+    """Self-healing wrapper around :func:`_loop`.
+
+    If ``_loop`` ever returns or raises while ``_stop`` is not set, log
+    loudly and restart it after a short back-off so the dashboard never
+    gets stuck at "SYNC STOPPED" because of a one-shot transient
+    (DNS blip, Kalshi 5xx storm, stray ``CancelledError``, etc.).
+    """
+    backoff = 5.0
+    while not _stop.is_set():
+        try:
+            await _loop()
+            if _stop.is_set():
+                return
+            log.warning(
+                "bankroll sync loop returned unexpectedly — restarting in %ss",
+                backoff,
+            )
+        except asyncio.CancelledError:
+            raise
+        except BaseException:  # noqa: BLE001 — supervisor catches everything
+            log.exception(
+                "bankroll sync loop crashed — restarting in %ss", backoff
+            )
+        try:
+            await asyncio.wait_for(_stop.wait(), timeout=backoff)
         except asyncio.TimeoutError:
             continue
         else:
@@ -244,7 +294,7 @@ async def start() -> None:
         return
     _stop.clear()
     _started_at = time.time()
-    _task = asyncio.create_task(_loop(), name="bankroll-sync")
+    _task = asyncio.create_task(_supervised_loop(), name="bankroll-sync")
     log.info("bankroll sync started (interval=%ss)", _interval_seconds())
 
 
