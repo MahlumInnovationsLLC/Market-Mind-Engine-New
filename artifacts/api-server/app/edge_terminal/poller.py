@@ -240,7 +240,15 @@ async def _one_tick() -> None:
     # Drain after every poll regardless of insert count so any signals
     # that were inserted-but-not-yet-placed on a prior crash still fire.
     try:
-        await executor.drain_pending()
+        drain_counts = await executor.drain_pending()
+        log.info(
+            "edge_terminal drain: scraped=%d inserted=%d placed=%d skipped=%d failed=%d",
+            len(signals),
+            inserted,
+            int((drain_counts or {}).get("placed") or 0),
+            int((drain_counts or {}).get("skipped") or 0),
+            int((drain_counts or {}).get("failed") or 0),
+        )
     except Exception as e:
         log.exception("edge_terminal executor drain failed: %s", e)
         if not error:
