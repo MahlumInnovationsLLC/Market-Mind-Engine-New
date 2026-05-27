@@ -123,7 +123,18 @@ export default function KpiSummaryBar() {
   // input-mode toggle is flipped (task #846).  Falls back to the
   // operator's Manual / System / Both selection when both sources are
   // visible.
-  const placedBy = useEffectivePlacedBy();
+  // Per operator directive (May 2026): the headline KPI strip must
+  // always summarise the full last-7-day trading book so the dashboard
+  // never lands on an empty splash.  We still keep the source-filter
+  // context wired through the per-vertical and per-source panels below;
+  // only the headline strip is forced to "all" so the operator sees
+  // their actual P&L / volume / open positions regardless of which
+  // input mode (Edge Terminal / Pipeline) tab is selected.
+  // `_edgeAwarePlacedBy` is retained as a future hook in case we want
+  // an "Edge Terminal only" pill to override this again.
+  const _edgeAwarePlacedBy = useEffectivePlacedBy();
+  void _edgeAwarePlacedBy;
+  const placedBy = "all";
   const staleClass = useTileStaleClass();
   // Mirror the operator's vertical-strip selection so every equity-
   // derived tile (P&L Today, ROI, Volume, Sharpe) narrows in lock-step
