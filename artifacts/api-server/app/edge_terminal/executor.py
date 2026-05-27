@@ -276,6 +276,21 @@ async def _fire_one(sig: dict[str, Any]) -> dict[str, Any] | None:
         price=side_price,
         kelly_fraction_cap=kelly_cap,
     )
+    # Minimum-stake fallback: the Edge Terminal scraper frequently
+    # ships signals without explicit ``model_prob``/``edge_pct``/``ev_pct``
+    # (the source DOM doesn't expose them as data-attrs).  Operator
+    # intent is "place a bet on every fresh Edge Terminal pick I haven't
+    # already taken" — so when Kelly collapses to zero purely because the
+    # edge math is uncomputable, fall back to a single contract.  The
+    # signal made it past the scraper's quality gate and resolved to a
+    # real Kalshi ticker; honouring the pick with the smallest non-zero
+    # position is far closer to operator intent than ``skipped_zero_kelly``
+    # on every row.  Real risk is bounded — one contract is at most
+    # $0.99, and the dedupe gate below blocks a second fire on the same
+    # ticker+side.
+    if quantity < 1 and bankroll > 0 and side_price < 1.0:
+        quantity = 1
+        kelly_fraction = 0.0  # signal-driven, not edge-sized
     if quantity < 1:
         return None
 

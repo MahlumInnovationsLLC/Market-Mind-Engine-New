@@ -409,6 +409,51 @@ def test_fire_one_resolves_ticker_sizes_and_tags_at_insert(monkeypatch):
     assert placed[0]["kwargs"].get("placed_by") == "edge_terminal"
 
 
+def test_fire_one_min_stake_fallback_when_edge_metadata_missing(monkeypatch):
+    """Operator intent: every fresh Edge Terminal pick should produce a
+    real Kalshi order, even when the scraper didn't capture
+    model_prob/edge_pct/ev_pct (the source DOM frequently omits them).
+    When Kelly collapses to zero purely because the edge math is
+    uncomputable, the executor falls back to a single-contract stake so
+    the signal lands as a placed trade instead of silently skipping."""
+    from app.edge_terminal import executor
+
+    placed: list[dict[str, Any]] = []
+
+    async def _resolve(sig):
+        return "KX-MLB-OU-1"
+
+    async def _bankroll(trading_mode="paper"):
+        return 1000.0
+
+    async def _place_order(ctx, **kwargs):
+        placed.append({"ctx": ctx, "kwargs": kwargs})
+        return {"trades_id": 99, "status": "placed"}
+
+    monkeypatch.setattr(executor.market_resolver, "resolve", _resolve)
+    monkeypatch.setattr(executor.cycle_module, "_latest_bankroll", _bankroll)
+    monkeypatch.setattr(executor.paper_module, "place_order", _place_order)
+    monkeypatch.setattr(executor, "_already_placed", lambda *a, **k: _async_false())
+
+    # No model_prob, edge_pct, or ev_pct — pure signal with a market price.
+    sig = {
+        "id": 1,
+        "vertical": "sports",
+        "matchup": "CIN @ NYM",
+        "selection": "Over 8.5",
+        "market_price": 0.55,
+    }
+    out = _run(executor._fire_one(sig))
+    assert out is not None, "min-stake fallback must produce a placed trade"
+    ctx = placed[0]["ctx"]
+    assert ctx.intended_quantity == 1, "fallback stakes exactly one contract"
+    assert placed[0]["kwargs"].get("placed_by") == "edge_terminal"
+
+
+async def _async_false(*_a, **_k):
+    return False
+
+
 def test_fire_one_honors_no_side(monkeypatch):
     """Audit fix: a scraper-provided ``side='NO'`` must reach the
     RiskContext rather than being silently flipped to YES."""
