@@ -74,6 +74,24 @@ function fmtOdds(n: number | null | undefined): string {
   return v > 0 ? `+${Math.round(v)}` : `${Math.round(v)}`;
 }
 
+function positionBetDollars(p: LinkedPosition): number {
+  const qty = Number(p.quantity);
+  const px = Number(p.avg_price);
+  if (!Number.isFinite(qty) || !Number.isFinite(px)) return 0;
+  // Kalshi avg_price is in dollars (0.00–1.00) and quantity is # of
+  // contracts, so cost basis = qty × price dollars.
+  return qty * px;
+}
+
+function totalBetDollars(positions: LinkedPosition[]): number {
+  return positions.reduce((acc, p) => acc + positionBetDollars(p), 0);
+}
+
+function fmtUsd(n: number): string {
+  if (!Number.isFinite(n) || n <= 0) return "—";
+  return `$${n.toFixed(2)}`;
+}
+
 export default function EdgeTerminalSignalMatchesTile() {
   const { getToken, isSignedIn } = useAuth();
   const tokenFn = useCallback(
@@ -352,6 +370,7 @@ function MatchedTable({ rows }: { rows: SignalRow[] }) {
             <th className="py-1.5 pr-3 text-right">Odds</th>
             <th className="py-1.5 pr-3">Kalshi ticker</th>
             <th className="py-1.5 pr-3">Open position?</th>
+            <th className="py-1.5 pr-3 text-right">Bet</th>
             <th className="py-1.5 pr-3">Status</th>
           </tr>
         </thead>
@@ -396,6 +415,12 @@ function MatchedTable({ rows }: { rows: SignalRow[] }) {
                     </div>
                   ))
                 )}
+              </td>
+              <td
+                className="py-1.5 pr-3 text-right tabular-nums text-emerald-300"
+                data-testid={`edge-terminal-matched-bet-${s.id}`}
+              >
+                {fmtUsd(totalBetDollars(s.linked_positions))}
               </td>
               <td className="py-1.5 pr-3 text-muted-foreground">
                 {s.status}
