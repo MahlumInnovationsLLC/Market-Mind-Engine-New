@@ -144,7 +144,7 @@ export default function BankrollPanel() {
       <SectionHeader
         eyebrow="EXCHANGE"
         title="Live Kalshi balance"
-        subtitle="Cash + open-position mark — last 24h sync feed."
+        subtitle="Cash from /portfolio/balance — last 24h sync feed."
       />
 
       {isLoading ? (
@@ -165,29 +165,18 @@ export default function BankrollPanel() {
           <div className="flex flex-wrap items-end justify-between gap-3">
             <div>
               <div className="text-[10px] uppercase tracking-widest text-muted-foreground">
-                Total live balance
+                Kalshi cash (live)
               </div>
               <div
                 className="text-2xl font-bold tabular-nums text-foreground"
-                data-testid="bankroll-total-equity"
+                data-testid="bankroll-current-balance"
               >
-                {fmtCurrencyCents(
-                  data?.total_equity_cents ?? data?.current_balance_cents,
-                )}
+                {fmtCurrencyCents(data?.current_balance_cents)}
               </div>
               <div
                 className="mt-1 flex flex-wrap gap-x-3 gap-y-0.5 text-[10px] uppercase tracking-widest text-muted-foreground"
                 data-testid="bankroll-equity-breakdown"
               >
-                <span>
-                  Cash{" "}
-                  <span
-                    className="tabular-nums text-foreground"
-                    data-testid="bankroll-current-balance"
-                  >
-                    {fmtCurrencyCents(data?.current_balance_cents)}
-                  </span>
-                </span>
                 <span>
                   Open positions{" "}
                   <span
@@ -195,6 +184,15 @@ export default function BankrollPanel() {
                     data-testid="bankroll-open-position-value"
                   >
                     {fmtCurrencyCents(data?.open_position_value_cents)}
+                  </span>
+                </span>
+                <span>
+                  Total equity{" "}
+                  <span
+                    className="tabular-nums text-foreground"
+                    data-testid="bankroll-total-equity"
+                  >
+                    {fmtCurrencyCents(data?.total_equity_cents)}
                   </span>
                 </span>
               </div>

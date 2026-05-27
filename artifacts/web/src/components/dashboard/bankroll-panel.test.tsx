@@ -53,7 +53,7 @@ describe("BankrollPanel", () => {
     expect(screen.getByTestId("bankroll-current-balance")).toBeTruthy();
   });
 
-  it("renders total live balance = cash + open positions, with both broken out", () => {
+  it("headline shows live Kalshi cash; total-equity + open positions broken out", () => {
     state.data = {
       items: [],
       current_balance_cents: 5_079,
@@ -66,11 +66,13 @@ describe("BankrollPanel", () => {
       },
     };
     render(<BankrollPanel />);
-    expect(screen.getByTestId("bankroll-total-equity").textContent).toMatch(
-      /\$223\.14/,
-    );
+    // Headline tile is the live /portfolio/balance cash number — this
+    // is what operators expect to match Kalshi's UI exactly.
     expect(screen.getByTestId("bankroll-current-balance").textContent).toMatch(
       /\$50\.79/,
+    );
+    expect(screen.getByTestId("bankroll-total-equity").textContent).toMatch(
+      /\$223\.14/,
     );
     expect(
       screen.getByTestId("bankroll-open-position-value").textContent,
@@ -78,7 +80,7 @@ describe("BankrollPanel", () => {
     expect(screen.getByTestId("bankroll-equity-breakdown")).toBeTruthy();
   });
 
-  it("falls back to cash-only when total_equity_cents is null (degraded path)", () => {
+  it("renders cash even when open-position mark + total are unavailable", () => {
     state.data = {
       items: [],
       current_balance_cents: 5_079,
@@ -91,8 +93,11 @@ describe("BankrollPanel", () => {
       },
     };
     render(<BankrollPanel />);
-    expect(screen.getByTestId("bankroll-total-equity").textContent).toMatch(
+    expect(screen.getByTestId("bankroll-current-balance").textContent).toMatch(
       /\$50\.79/,
+    );
+    expect(screen.getByTestId("bankroll-total-equity").textContent).toMatch(
+      /—/,
     );
     expect(
       screen.getByTestId("bankroll-open-position-value").textContent,
