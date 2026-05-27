@@ -12,6 +12,7 @@ import logging
 from typing import Any
 
 from .. import db
+from .. import runtime_settings as runtime_settings_module
 from ..config import get_settings
 from ..orchestrator import cycle as cycle_module
 from ..orchestrator import paper as paper_module
@@ -22,13 +23,48 @@ from . import market_resolver
 log = logging.getLogger(__name__)
 
 
-# Quarter-Kelly: drop directly into the executor regardless of the
-# operator-tunable cap that the pipeline uses, because Edge Terminal
-# is operator-curated and we want a predictable, conservative size
-# per signal.
-KELLY_FRACTION = 0.25
+# Fallback Kelly fraction used only when neither an explicit operator
+# override (``system_settings.risk.kelly_fraction_cap``) nor an active
+# aggression mode (conservative/balanced/aggressive) is configured.
+# Matches the "balanced" profile so behaviour is unchanged for an
+# operator who has set neither knob.
+KELLY_FRACTION_FALLBACK = 0.25
 # Hard ceiling so a single mis-priced signal can't blow up the book.
 MAX_NOTIONAL_PCT_OF_BANKROLL = 0.05
+
+
+async def _resolve_kelly_fraction_cap() -> float:
+    """Read the operator-configured Kelly fraction cap.
+
+    Resolution mirrors the deterministic risk gate
+    (``risk.gates.gate_kelly_fraction``) so Edge Terminal and the
+    pipeline size with the same knob:
+
+      1. ``system_settings.risk.kelly_fraction_cap`` (explicit override)
+      2. ``MODE_PROFILES[aggression_mode]['kelly_fraction_cap']``
+         (0.15 / 0.25 / 0.40 for conservative / balanced / aggressive)
+      3. ``KELLY_FRACTION_FALLBACK`` (0.25)
+    """
+    try:
+        overrides = await cycle_module._load_operator_overrides()
+    except Exception as e:  # pragma: no cover - defensive
+        log.debug("edge_terminal kelly cap: overrides read failed: %s", e)
+        overrides = {}
+    explicit = overrides.get("kelly_fraction_cap")
+    if explicit is not None:
+        try:
+            return float(explicit)
+        except (TypeError, ValueError):
+            pass
+    try:
+        mode = await runtime_settings_module.get_aggression_mode()
+        profile = runtime_settings_module.profile_for(mode)
+        cap = profile.get("kelly_fraction_cap")
+        if cap is not None:
+            return float(cap)
+    except Exception as e:  # pragma: no cover - defensive
+        log.debug("edge_terminal kelly cap: mode read failed: %s", e)
+    return KELLY_FRACTION_FALLBACK
 
 
 async def drain_pending(limit: int = 50) -> dict[str, int]:
@@ -139,10 +175,12 @@ async def _fire_one(sig: dict[str, Any]) -> dict[str, Any] | None:
     if effective_mode not in ("live", "paper"):
         effective_mode = "paper"
     bankroll = await cycle_module._latest_bankroll(trading_mode=effective_mode) or 0.0
-    quantity, kelly_fraction = _quarter_kelly_quantity(
+    kelly_cap = await _resolve_kelly_fraction_cap()
+    quantity, kelly_fraction = _kelly_quantity(
         bankroll=bankroll,
         model_prob=side_prob,
         price=side_price,
+        kelly_fraction_cap=kelly_cap,
     )
     if quantity < 1:
         return None
@@ -199,18 +237,26 @@ async def _fire_one(sig: dict[str, Any]) -> dict[str, Any] | None:
     )
 
 
-def _quarter_kelly_quantity(
+def _kelly_quantity(
     *,
     bankroll: float,
     model_prob: float | None,
     price: float,
+    kelly_fraction_cap: float,
 ) -> tuple[int, float]:
-    """Return (quantity, fractional kelly) for the YES side.
+    """Return (quantity, fractional kelly) for the chosen side.
 
-    Returns (0, 0.0) when the math is unfavourable (kelly <=0) or the
-    bankroll is empty.
+    ``kelly_fraction_cap`` is the operator-configured Kelly fraction
+    (e.g. 0.15 / 0.25 / 0.40 for conservative / balanced / aggressive)
+    resolved from ``system_settings.risk.kelly_fraction_cap`` /
+    aggression mode — see :func:`_resolve_kelly_fraction_cap`.
+
+    Returns (0, 0.0) when the math is unfavourable (kelly <= 0), the
+    bankroll is empty, or the operator pinned the cap to 0.
     """
     if bankroll <= 0 or model_prob is None or price <= 0 or price >= 1:
+        return 0, 0.0
+    if kelly_fraction_cap <= 0:
         return 0, 0.0
     p = float(model_prob)
     b = (1.0 - price) / price
@@ -219,9 +265,30 @@ def _quarter_kelly_quantity(
     if kelly <= 0:
         return 0, 0.0
     notional_cap = bankroll * MAX_NOTIONAL_PCT_OF_BANKROLL
-    notional = min(bankroll * kelly * KELLY_FRACTION, notional_cap)
+    notional = min(bankroll * kelly * kelly_fraction_cap, notional_cap)
     qty = int(notional / price)
-    return max(0, qty), kelly * KELLY_FRACTION
+    return max(0, qty), kelly * kelly_fraction_cap
+
+
+def _quarter_kelly_quantity(
+    *,
+    bankroll: float,
+    model_prob: float | None,
+    price: float,
+) -> tuple[int, float]:
+    """Back-compat shim — quarter-Kelly sizing at the fallback cap.
+
+    Retained so existing call sites / tests that assumed the hardcoded
+    0.25 fraction continue to work; the live executor path now reads
+    the operator-tunable cap via :func:`_resolve_kelly_fraction_cap`
+    and calls :func:`_kelly_quantity` directly.
+    """
+    return _kelly_quantity(
+        bankroll=bankroll,
+        model_prob=model_prob,
+        price=price,
+        kelly_fraction_cap=KELLY_FRACTION_FALLBACK,
+    )
 
 
 async def _mark(
