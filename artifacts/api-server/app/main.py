@@ -182,6 +182,21 @@ async def lifespan(_: FastAPI):
         """
         nonlocal fill_task, polymarket_fill_task, settlement_tap_task
         nonlocal models_task, ready_watcher_task
+        # Give uvicorn a clear runway to bind the port and serve the
+        # very first /api/healthz probes before this task starts its
+        # long stretch of synchronous lazy imports + register_xxx_feed
+        # calls (which hold the GIL / event loop for minutes on a cold
+        # boot and would otherwise starve the platform startup probe).
+        # The Reserved-VM platform promote step fails fast if those
+        # initial 200s don't land; the internal watchdog has its own
+        # 1200s startup grace so a brief loop-block AFTER promote is
+        # tolerated.  Per the 2026-05-27 prod crash-loop.
+        log.info(
+            "[boot] sleeping 10s before heavy init so platform startup "
+            "probe lands a clean 200 first"
+        )
+        await asyncio.sleep(10.0)
+        log.info("[boot] runway elapsed, starting _do_boot body")
         # Initialise the asyncpg pool here (used to be on the lifespan
         # critical path, which let a single stalled Supabase TLS
         # handshake hold the port unbound for the whole watchdog grace
