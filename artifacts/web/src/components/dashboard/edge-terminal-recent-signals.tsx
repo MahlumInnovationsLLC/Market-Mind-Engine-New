@@ -59,18 +59,60 @@ function fmtTime(s: string | null | undefined): string {
 }
 
 function dispositionTone(d: string | null | undefined): string {
-  switch ((d || "").toLowerCase()) {
+  const v = (d || "").toLowerCase();
+  switch (v) {
     case "placed":
       return "border-emerald-500/40 bg-emerald-500/10 text-emerald-300";
+    case "skipped_already_placed":
+      // Deliberate "honored your existing position" — surface in the
+      // same emerald family as a placed trade so the operator can see
+      // at a glance that the executor agreed with their manual fill.
+      return "border-emerald-500/40 bg-emerald-500/10 text-emerald-200";
     case "skipped_unresolved":
     case "skipped_gate":
+    case "skipped_zero_kelly":
+    case "skipped_slippage":
       return "border-amber-500/40 bg-amber-500/10 text-amber-300";
     case "errored":
+    case "failed":
       return "border-rose-500/40 bg-rose-500/10 text-rose-300";
     case "pending":
       return "border-sky-500/40 bg-sky-500/10 text-sky-300";
     default:
+      if (v.startsWith("skipped"))
+        return "border-amber-500/40 bg-amber-500/10 text-amber-300";
       return "border-border bg-muted/30 text-muted-foreground";
+  }
+}
+
+// Operator-friendly label rendered in the STATUS column.  Backend
+// emits the structured ``skipped_*`` taxonomy; we collapse them here
+// so the table reads "ALREADY PLACED" / "NO MARKET" rather than the
+// raw enum.
+export function dispositionLabel(d: string | null | undefined): string {
+  const v = (d || "").toLowerCase();
+  switch (v) {
+    case "placed":
+      return "PLACED";
+    case "pending":
+      return "PENDING";
+    case "skipped_already_placed":
+      return "ALREADY PLACED";
+    case "skipped_unresolved":
+      return "NO MARKET";
+    case "skipped_zero_kelly":
+      return "ZERO KELLY";
+    case "skipped_slippage":
+      return "SLIPPAGE";
+    case "skipped_gate":
+      return "GATE";
+    case "skipped":
+      return "SKIPPED";
+    case "errored":
+    case "failed":
+      return "FAILED";
+    default:
+      return (d || "—").toUpperCase();
   }
 }
 
@@ -429,7 +471,7 @@ export default function EdgeTerminalRecentSignalsTile() {
                           <span
                             className={`inline-flex items-center rounded border px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wider ${dispositionTone(s.disposition)}`}
                           >
-                            {s.disposition ?? "—"}
+                            {dispositionLabel(s.disposition)}
                           </span>
                         </td>
                         <td className="py-1.5 pr-3 text-right">

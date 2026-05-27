@@ -19,6 +19,12 @@ from ..orchestrator import paper as paper_module
 from ..risk.gates import RiskContext
 from . import market_resolver
 
+try:
+    from ..kalshi.client import KalshiAPIError, KalshiClient
+except Exception:  # pragma: no cover - kalshi optional in some envs
+    KalshiClient = None  # type: ignore[assignment]
+    KalshiAPIError = Exception  # type: ignore[assignment,misc]
+
 
 log = logging.getLogger(__name__)
 
@@ -86,14 +92,36 @@ async def drain_pending(limit: int = 50) -> dict[str, int]:
     placed = 0
     failed = 0
     skipped = 0
+    already = 0
     for r in rows:
         sig = dict(r)
         sid = int(sig["id"])
         try:
             outcome = await _fire_one(sig)
+        except _SignalSkip as skip:
+            # Structured non-fire — already-placed dupe, OrderRejected
+            # gate, slippage refusal, etc.  Use a typed status so the UI
+            # can distinguish "we deliberately stood down" from a bug.
+            await _mark(sid, skip.status, skip.reason)
+            if skip.status == "skipped_already_placed":
+                already += 1
+            else:
+                skipped += 1
+            continue
         except Exception as e:
+            # Classify common, recoverable refusals as a structured
+            # ``skipped_*`` status instead of a generic ``failed`` so
+            # the operator can tell a slippage refusal from a bug.
+            cls, reason = _classify_exception(e)
+            if cls is not None:
+                await _mark(sid, cls, reason)
+                if cls == "skipped_already_placed":
+                    already += 1
+                else:
+                    skipped += 1
+                continue
             log.exception("edge_terminal fire failed for id=%s: %s", sid, e)
-            await _mark(sid, "failed", str(e))
+            await _mark(sid, "failed", reason)
             failed += 1
             continue
         if outcome is None:
@@ -102,11 +130,13 @@ async def drain_pending(limit: int = 50) -> dict[str, int]:
             #   2. it found one but Kelly sizing rounded to zero contracts.
             # Re-resolve cheaply so the operator-visible reason isn't a lie.
             ticker = await market_resolver.resolve(sig)
-            reason = (
-                "kelly sized to zero contracts" if ticker
-                else "no matching kalshi market"
-            )
-            await _mark(sid, "skipped", reason)
+            if ticker:
+                cls = "skipped_zero_kelly"
+                reason = "kelly sized to zero contracts"
+            else:
+                cls = "skipped_unresolved"
+                reason = "no matching kalshi market"
+            await _mark(sid, cls, reason)
             skipped += 1
             continue
         await _mark(
@@ -114,7 +144,47 @@ async def drain_pending(limit: int = 50) -> dict[str, int]:
             trades_id=outcome.get("trades_id"),
         )
         placed += 1
-    return {"placed": placed, "failed": failed, "skipped": skipped}
+    return {
+        "placed": placed,
+        "failed": failed,
+        "skipped": skipped,
+        "already_placed": already,
+    }
+
+
+class _SignalSkip(Exception):
+    """Structured skip emitted from ``_fire_one`` to drive ``_mark()``.
+
+    Carries a stable ``status`` string (one of ``skipped_already_placed``,
+    ``skipped_gate``, ``skipped_slippage``) plus a short ``reason`` so the
+    drain loop can record an honest disposition without re-deriving it.
+    """
+
+    def __init__(self, status: str, reason: str) -> None:
+        super().__init__(f"{status}: {reason}")
+        self.status = status
+        self.reason = reason
+
+
+def _classify_exception(e: BaseException) -> tuple[str | None, str]:
+    """Map a place_order exception to (status, reason).
+
+    Returns ``(None, msg)`` when the exception is genuinely unexpected
+    (treated as ``failed``), or a ``("skipped_*", reason)`` pair when
+    it's a known refusal (slippage guard, gate, market-closed, etc.)
+    so the operator UI doesn't show every routine standdown as a bug.
+    """
+    msg = (str(e) or type(e).__name__).strip()
+    low = msg.lower()
+    if "slippage" in low:
+        return "skipped_slippage", msg[:200]
+    if "orderrejected" in low or "order rejected" in low:
+        return "skipped_gate", msg[:200]
+    if "market closed" in low or "market_closed" in low:
+        return "skipped_gate", msg[:200]
+    if "duplicate" in low or "already" in low:
+        return "skipped_already_placed", msg[:200]
+    return None, msg[:200]
 
 
 async def _fire_one(sig: dict[str, Any]) -> dict[str, Any] | None:
@@ -130,8 +200,21 @@ async def _fire_one(sig: dict[str, Any]) -> dict[str, Any] | None:
     # downstream rather than be papered over.
     raw_price = sig.get("market_price")
     try:
-        price = float(raw_price) if raw_price is not None else 0.50
+        price = float(raw_price) if raw_price is not None else None
     except (TypeError, ValueError):
+        price = None
+
+    # When the scraper didn't capture a market price (the live Edge
+    # Terminal DOM frequently omits it; observed 2026-05-27 as the
+    # primary cause of "skipped: kelly sized to zero contracts"),
+    # back-fill from a fresh Kalshi quote so Kelly has a real ``p``
+    # to size against.  Without this, ``model_prob`` is underived,
+    # ``_kelly_quantity`` returns 0, and every signal silently skips.
+    if price is None:
+        live_price = await _fetch_live_kalshi_price(ticker)
+        if live_price is not None:
+            price = live_price
+    if price is None:
         price = 0.50
     price = max(0.01, min(0.99, price))
 
@@ -142,6 +225,17 @@ async def _fire_one(sig: dict[str, Any]) -> dict[str, Any] | None:
             model_prob = max(0.01, min(0.99, price + float(sig["edge_pct"]) / 100.0))
         except (TypeError, ValueError):
             model_prob = None
+    if model_prob is None and sig.get("ev_pct") is not None:
+        # EV% from the source is computed against the same market price,
+        # so ``p = price * (1 + ev_pct/100)`` recovers the model's
+        # probability when ``edge_pct`` wasn't separately reported.
+        try:
+            model_prob = max(
+                0.01,
+                min(0.99, price * (1.0 + float(sig["ev_pct"]) / 100.0)),
+            )
+        except (TypeError, ValueError):
+            pass
 
     # Side defaults to YES (historic behavior) but honors the scraper's
     # explicit ``side`` field when present so "Under"/"No" picks trade
@@ -184,6 +278,19 @@ async def _fire_one(sig: dict[str, Any]) -> dict[str, Any] | None:
     )
     if quantity < 1:
         return None
+
+    # Dedupe — if the operator already has live exposure on this
+    # ticker+side (manual Kalshi fill, prior pipeline trade, or a
+    # previous Edge Terminal drain), record a structured
+    # ``skipped_already_placed`` so the operator can see "we honored
+    # your existing position" instead of a generic skip or a duplicate
+    # buy.  Scoped to the same trading_mode to avoid cross-contaminating
+    # paper vs live books.
+    if await _already_placed(ticker, side, effective_mode):
+        raise _SignalSkip(
+            "skipped_already_placed",
+            f"open {side} position already exists on {ticker}",
+        )
 
     edge_signed = None
     if model_prob is not None:
@@ -289,6 +396,110 @@ def _quarter_kelly_quantity(
         price=price,
         kelly_fraction_cap=KELLY_FRACTION_FALLBACK,
     )
+
+
+async def _fetch_live_kalshi_price(ticker: str) -> float | None:
+    """Pull a fresh mid quote for ``ticker`` (YES coordinates, 0..1).
+
+    Used to back-fill ``market_price`` when the Edge Terminal scraper
+    didn't capture one.  Prefers the bid/ask mid; falls back to last
+    print.  Returns ``None`` (and logs) on any client error so the
+    caller can default to 0.50 rather than skip the signal.
+
+    Kalshi exposes both dollar-denominated floats (``yes_bid_dollars``)
+    and the legacy cent integers (``yes_bid``); we honour the modern
+    field first and only fall back to the cent path when the dollar
+    field is missing.
+    """
+    if KalshiClient is None:
+        return None
+    settings = get_settings()
+    if not getattr(settings, "kalshi_api_key_id", None):
+        return None
+    try:
+        client = KalshiClient()
+        try:
+            payload = await client.get_market(ticker)
+        finally:
+            close = getattr(client, "aclose", None)
+            if close is not None:
+                try:
+                    await close()
+                except Exception:  # pragma: no cover
+                    pass
+    except KalshiAPIError as e:
+        log.info("edge_terminal: get_market(%s) failed: %s", ticker, e)
+        return None
+    except Exception as e:  # pragma: no cover - defensive
+        log.info("edge_terminal: get_market(%s) error: %s", ticker, e)
+        return None
+
+    market = (payload or {}).get("market") or payload or {}
+
+    def _read(dollars_key: str, cents_key: str) -> float | None:
+        d = market.get(dollars_key)
+        if d is not None:
+            try:
+                return float(d)
+            except (TypeError, ValueError):
+                pass
+        c = market.get(cents_key)
+        if c is not None:
+            try:
+                return float(c) / 100.0
+            except (TypeError, ValueError):
+                pass
+        return None
+
+    bid = _read("yes_bid_dollars", "yes_bid")
+    ask = _read("yes_ask_dollars", "yes_ask")
+    if bid is not None and ask is not None and bid > 0 and ask > 0:
+        return (bid + ask) / 2.0
+    if ask is not None and ask > 0:
+        return ask
+    if bid is not None and bid > 0:
+        return bid
+    return _read("last_price_dollars", "last_price")
+
+
+async def _already_placed(
+    ticker: str, side: str, trading_mode: str
+) -> bool:
+    """True when the operator already holds open exposure on ticker+side.
+
+    Checks the ``positions`` table for any row with ``status='open'``
+    (or NULL — older rows pre-date the column) that matches the same
+    market and side in the same trading mode.  Used to suppress
+    duplicate Edge Terminal fires when the operator (or a prior drain)
+    has already taken the trade.
+    """
+    side_u = (side or "").upper()
+    try:
+        # Strict trading_mode match — legacy NULL rows would otherwise
+        # match both paper and live probes and cross-contaminate the
+        # dedupe.  A legacy NULL is treated as "not a dupe" so we err
+        # on the side of placing the operator's intended trade.
+        row = await db.fetchval(
+            """
+            SELECT 1
+              FROM positions
+             WHERE market_id = $1
+               AND UPPER(COALESCE(side, '')) = $2
+               AND COALESCE(status, 'open') = 'open'
+               AND trading_mode = $3
+               AND COALESCE(quantity, 0) <> 0
+             LIMIT 1
+            """,
+            ticker, side_u, trading_mode,
+        )
+    except Exception as e:
+        # Schema drift (e.g. missing trading_mode column in a fresh
+        # dev DB) shouldn't block the trade — log + treat as "no dupe".
+        log.warning(
+            "edge_terminal already-placed probe failed (fail-open): %s", e,
+        )
+        return False
+    return bool(row)
 
 
 async def _mark(
