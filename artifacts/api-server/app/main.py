@@ -565,6 +565,27 @@ async def lifespan(_: FastAPI):
         except Exception as e:
             log.warning("edge_terminal poller start failed: %s", e)
 
+        # Kick a calibrator refit at boot if none has ever run.  Without
+        # this the `calibrators` health card stays pinned at DOWN on a
+        # fresh deploy until the settlement scheduler's nightly cadence
+        # finally fires (~24h).  `maybe_refit` is a no-op when a recent
+        # refit already exists, so this is safe on warm boots.  Runs in
+        # the background so a slow fit doesn't block lifespan.
+        try:
+            from . import calibrators as _calibrators
+
+            async def _boot_calibrator_refit() -> None:
+                try:
+                    await _calibrators.maybe_refit()
+                except Exception as e:  # noqa: BLE001 — best effort
+                    log.warning("boot calibrator refit failed: %s", e)
+
+            asyncio.create_task(
+                _boot_calibrator_refit(), name="boot-calibrator-refit",
+            )
+        except Exception as e:  # noqa: BLE001
+            log.warning("boot calibrator refit scheduling failed: %s", e)
+
         # Settlement loop: closes finalized markets, writes post-mortems,
         # updates persona Brier, accumulates daily PnL, raises drift alerts.
         # Runs independent of trading-mode halts so feedback never stalls.

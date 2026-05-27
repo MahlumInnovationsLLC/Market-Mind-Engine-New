@@ -136,11 +136,27 @@ def test_stale_1m_bar_marks_card_down(monkeypatch):
 def test_missing_pair_marks_card_down(monkeypatch):
     monkeypatch.setenv("COINAPI_API_KEY", "x")
     monkeypatch.setattr(health_mod, "db", _StubDB([]))
+    # Bypass the 10-minute boot grace so "no bars" reports DOWN rather
+    # than DEGRADED — the grace only suppresses cold-boot flapping.
+    monkeypatch.setattr(health_mod, "_started_at", time.time() - 4000)
     card = _run(health_mod._probe_crypto_freshness())
     assert card["status"] == "down"
     # Every expected pair shows up as missing.
     assert all(p["status"] == "down" for p in card["extras"]["pairs"])
     assert card["extras"]["fresh_count"] == 0
+
+
+def test_missing_pair_during_boot_grace_marks_degraded(monkeypatch):
+    """During the first 10 minutes of process lifetime, an empty bar
+    table should report DEGRADED (not DOWN) so the SUBSYSTEM DOWN banner
+    doesn't flap every cold boot while the staggered crypto poller is
+    still warming up."""
+    monkeypatch.setenv("COINAPI_API_KEY", "x")
+    monkeypatch.setattr(health_mod, "db", _StubDB([]))
+    monkeypatch.setattr(health_mod, "_started_at", time.time())
+    card = _run(health_mod._probe_crypto_freshness())
+    assert card["status"] == "degraded"
+    assert all(p["status"] == "degraded" for p in card["extras"]["pairs"])
 
 
 def test_moderately_stale_marks_card_degraded(monkeypatch):

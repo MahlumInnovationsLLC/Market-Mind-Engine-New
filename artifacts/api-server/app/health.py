@@ -1515,6 +1515,15 @@ async def _probe_crypto_freshness() -> dict:
             continue
         latest[(str(r["symbol"]), str(r["granularity"]))] = ts
 
+    # Boot grace: the crypto poller is staggered up to 300s and the
+    # first 1m bar can take 30-90s to land after that.  Without a
+    # grace window the freshness card flaps to DOWN every cold boot
+    # for ~5-10 minutes, which is exactly the "SUBSYSTEM DOWN" banner
+    # the operator was seeing.  Downgrade "no bars" to ``degraded``
+    # for the first 10 minutes of process lifetime; after that, an
+    # empty table is a real outage.
+    boot_grace = (time.time() - _started_at) < 600
+
     pair_states: list[dict] = []
     worst = "ok"
     bad_summaries: list[str] = []
@@ -1523,9 +1532,9 @@ async def _probe_crypto_freshness() -> dict:
         yellow = max(seconds * 3, 120)
         red = max(seconds * 10, 600)
         if max_ts is None:
-            pair_status = "down"
+            pair_status = "degraded" if boot_grace else "down"
             age_seconds: float | None = None
-            note = "no bars"
+            note = "no bars (boot)" if boot_grace else "no bars"
         else:
             age_seconds = max(0.0, now - max_ts)
             if age_seconds <= yellow:

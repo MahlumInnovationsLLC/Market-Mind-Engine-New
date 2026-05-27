@@ -1444,10 +1444,64 @@ async def _tick_once(
 
 
 async def _loop() -> None:
+    global _last_error
     while not _stop.is_set():
-        await _tick_once()
+        try:
+            await _tick_once()
+        except asyncio.CancelledError:
+            raise
+        except BaseException as e:  # noqa: BLE001 — tick must never kill loop
+            _last_error = f"tick crashed: {type(e).__name__}: {e}"
+            log.exception("kalshi reconciler tick raised — continuing")
         try:
             await asyncio.wait_for(_stop.wait(), timeout=_interval_seconds())
+        except asyncio.TimeoutError:
+            continue
+        except asyncio.CancelledError:
+            # A stray cancellation of the inner sleep used to silently
+            # kill the loop, leaving the dashboard pinned at
+            # "kalshi_reconciler DOWN".  Only exit when _stop is
+            # actually set; otherwise keep ticking.
+            if _stop.is_set():
+                return
+            log.warning(
+                "kalshi reconciler sleep cancelled but stop not set — continuing"
+            )
+            continue
+        else:
+            return
+
+
+async def _supervised_loop() -> None:
+    """Self-healing wrapper around :func:`_loop`.
+
+    If ``_loop`` ever returns or raises while ``_stop`` is not set,
+    log loudly and restart after a short back-off so the operator
+    health card never gets stuck at "kalshi_reconciler DOWN" because
+    of a one-shot transient (Kalshi 5xx storm, DB blip, stray
+    ``CancelledError``).
+    """
+    global _last_error
+    backoff = 5.0
+    while not _stop.is_set():
+        try:
+            await _loop()
+            if _stop.is_set():
+                return
+            log.warning(
+                "kalshi reconciler loop returned unexpectedly — restarting in %ss",
+                backoff,
+            )
+            _last_error = f"loop returned unexpectedly; restarted in {backoff}s"
+        except asyncio.CancelledError:
+            raise
+        except BaseException as e:  # noqa: BLE001 — supervisor catches all
+            log.exception(
+                "kalshi reconciler loop crashed — restarting in %ss", backoff
+            )
+            _last_error = f"loop crashed: {type(e).__name__}: {e}"
+        try:
+            await asyncio.wait_for(_stop.wait(), timeout=backoff)
         except asyncio.TimeoutError:
             continue
         else:
@@ -1463,7 +1517,7 @@ async def start() -> None:
         return
     _stop.clear()
     _started_at = time.time()
-    _task = asyncio.create_task(_loop(), name="kalshi-reconciler")
+    _task = asyncio.create_task(_supervised_loop(), name="kalshi-reconciler")
     log.info("kalshi reconciler started (interval=%ss, tolerance=%s)",
              _interval_seconds(), _drift_tolerance())
 

@@ -59,7 +59,8 @@ class _CycleScheduler:
             if vertical in self._tasks and not self._tasks[vertical].done():
                 continue
             self._tasks[vertical] = asyncio.create_task(
-                self._loop(vertical), name=f"orchestrator-{vertical}"
+                self._supervised_loop(vertical),
+                name=f"orchestrator-{vertical}",
             )
         log.info(
             "orchestrator scheduler started: verticals=%s interval=%ss",
@@ -68,6 +69,42 @@ class _CycleScheduler:
         )
         for name, reason in skipped:
             log.warning("orchestrator vertical %s skipped: %s", name, reason)
+
+    async def _supervised_loop(self, vertical: str) -> None:
+        """Self-healing wrapper around :meth:`_loop`.
+
+        ``_loop`` is supposed to never exit on its own — but a stray
+        ``CancelledError`` from a sibling task or an exception thrown
+        outside the inner ``try`` (e.g. the READY-gate setup) used to
+        silently kill the vertical's task, flipping the orchestrator
+        health card to ``down`` until the API was restarted.  This
+        supervisor restarts the loop after a short back-off so the
+        operator dashboard never gets pinned at ORCHESTRATOR DOWN.
+        """
+        backoff = 5.0
+        while not self._stop.is_set():
+            try:
+                await self._loop(vertical)
+                if self._stop.is_set():
+                    return
+                log.warning(
+                    "orchestrator vertical %s loop returned unexpectedly — "
+                    "restarting in %ss",
+                    vertical, backoff,
+                )
+            except asyncio.CancelledError:
+                raise
+            except BaseException:  # noqa: BLE001 — supervisor catches all
+                log.exception(
+                    "orchestrator vertical %s loop crashed — restarting in %ss",
+                    vertical, backoff,
+                )
+            try:
+                await asyncio.wait_for(self._stop.wait(), timeout=backoff)
+            except asyncio.TimeoutError:
+                continue
+            else:
+                return
 
     async def stop(self) -> None:
         self._stop.set()
