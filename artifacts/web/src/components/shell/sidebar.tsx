@@ -166,6 +166,12 @@ export function ShellSidebar({ isAdmin, wsStatus }: ShellSidebarProps) {
           badge: openPositions > 0 ? openPositions : null,
           testId: "nav-positions",
         },
+        {
+          href: "/trends",
+          label: "Trends",
+          icon: TrendingUp,
+          testId: "nav-trends",
+        },
       ],
     },
     {
