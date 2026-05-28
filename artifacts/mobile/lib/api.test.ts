@@ -139,21 +139,58 @@ describe("apiFetch - response decoding", () => {
   });
 });
 
+describe("apiFetch - retry policy (Task #924)", () => {
+  it("retries a GET on 503 and returns the eventual 200 (transparent recovery)", async () => {
+    fetchMock
+      .mockResolvedValueOnce(new Response("", { status: 503 }))
+      .mockResolvedValueOnce(jsonResponse({ a: 1 }));
+    const out = await apiFetch<{ a: number }>("/api/foo");
+    expect(out).toEqual({ a: 1 });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("does NOT retry a POST on 503 by default (mutation safety)", async () => {
+    fetchMock.mockResolvedValueOnce(new Response("", { status: 503 }));
+    await expect(
+      apiFetch("/api/foo", { method: "POST", body: { x: 1 } }),
+    ).rejects.toMatchObject({ status: 503 });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("retries a POST when retryMutation: true is explicitly opted in", async () => {
+    fetchMock
+      .mockResolvedValueOnce(new Response("", { status: 503 }))
+      .mockResolvedValueOnce(jsonResponse({ ok: true }));
+    const out = await apiFetch("/api/foo", {
+      method: "POST",
+      body: { x: 1 },
+      retryMutation: true,
+    });
+    expect(out).toEqual({ ok: true });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+});
+
 describe("apiFetch - error path", () => {
   it("throws an ApiError carrying status, parsed body, and the echoed request id", async () => {
-    fetchMock.mockResolvedValueOnce(
-      jsonResponse(
-        { detail: "boom" },
-        {
-          status: 500,
-          headers: { [REQUEST_ID_HEADER]: "req-server-99" },
-        },
+    // GET retries on 5xx (Task #924). Use `mockResolvedValue` so every
+    // attempt returns the same 500 — the final retry surfaces the
+    // server-echoed request id we assert on.
+    fetchMock.mockImplementation(() =>
+      Promise.resolve(
+        jsonResponse(
+          { detail: "boom" },
+          {
+            status: 500,
+            headers: { [REQUEST_ID_HEADER]: "req-server-99" },
+          },
+        ),
       ),
     );
 
     let captured: ApiError | null = null;
     try {
-      await apiFetch("/api/foo");
+      await apiFetch("/api/foo", { noRetry: true });
     } catch (err) {
       captured = err as ApiError;
     }
@@ -169,7 +206,8 @@ describe("apiFetch - error path", () => {
 
   it("falls back to the request id we sent when the server omits the header", async () => {
     // Pass an explicit id so we can assert it's the one preserved on the
-    // error rather than the auto-generated one.
+    // error rather than the auto-generated one. `noRetry` short-circuits
+    // the 5xx retry loop so the test runs at the same speed as before.
     fetchMock.mockResolvedValueOnce(
       new Response("nope", { status: 503 }),
     );
@@ -177,6 +215,7 @@ describe("apiFetch - error path", () => {
     try {
       await apiFetch("/api/foo", {
         headers: { [REQUEST_ID_HEADER]: "client-mint-1" },
+        noRetry: true,
       });
     } catch (err) {
       captured = err as ApiError;

@@ -25,6 +25,8 @@ afterEach(() => {
 
 describe("apiFetch error handling", () => {
   it("captures the response x-request-id on the thrown ApiError", async () => {
+    // `noRetry` keeps this test focused on the error-shape contract
+    // without exercising the retry-fetch wrapper introduced in #924.
     fetchMock.mockResolvedValueOnce(
       new Response(JSON.stringify({ detail: "boom" }), {
         status: 500,
@@ -38,7 +40,7 @@ describe("apiFetch error handling", () => {
 
     let captured: ApiError | null = null;
     try {
-      await apiFetch("/api/widgets");
+      await apiFetch("/api/widgets", { noRetry: true });
     } catch (err) {
       captured = err as ApiError;
     }
@@ -55,13 +57,44 @@ describe("apiFetch error handling", () => {
 
     let captured: ApiError | null = null;
     try {
-      await apiFetch("/api/widgets");
+      await apiFetch("/api/widgets", { noRetry: true });
     } catch (err) {
       captured = err as ApiError;
     }
 
     expect(captured).toBeInstanceOf(ApiError);
     expect(captured?.requestId).toBeNull();
+  });
+});
+
+describe("apiFetch retry policy (Task #924)", () => {
+  it("retries a GET on 503 and returns the eventual 200", async () => {
+    fetchMock
+      .mockResolvedValueOnce(new Response("", { status: 503 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ ok: true }), { status: 200 }));
+    const out = await apiFetch<{ ok: boolean }>("/api/widgets");
+    expect(out).toEqual({ ok: true });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("does NOT retry a POST on 503 by default", async () => {
+    fetchMock.mockResolvedValueOnce(new Response("", { status: 503 }));
+    await expect(
+      apiFetch("/api/widgets", { method: "POST", body: { a: 1 } }),
+    ).rejects.toMatchObject({ status: 503 });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("retries a POST when retryMutation: true is opted in", async () => {
+    fetchMock
+      .mockResolvedValueOnce(new Response("", { status: 503 }))
+      .mockResolvedValueOnce(new Response("{}", { status: 200 }));
+    await apiFetch("/api/widgets", {
+      method: "POST",
+      body: { a: 1 },
+      retryMutation: true,
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 });
 

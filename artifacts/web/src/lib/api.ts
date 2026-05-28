@@ -8,6 +8,8 @@
  * lightweight while still flowing through the same Clerk JWT.
  */
 
+import { fetchWithRetry, isIdempotent } from "@workspace/retry-fetch";
+
 /**
  * Generate a request id (uuid4 hex, no dashes) attached to every outbound
  * request via the `x-request-id` header.  The backend echoes it on the
@@ -110,6 +112,19 @@ export type AuthTokenGetter = () => Promise<string | null | undefined>;
 export interface ApiFetchOptions extends Omit<RequestInit, "body"> {
   body?: unknown;
   getToken?: AuthTokenGetter;
+  /**
+   * Opt-in retry on a non-idempotent verb (POST/PUT/PATCH/DELETE).
+   * Idempotent verbs (GET/HEAD) are retried by default — set
+   * ``retryMutation: true`` to extend that to a specific mutation
+   * (e.g. an idempotent "POST that re-sends a notification we know is
+   * deduped server-side").  Has no effect for GET/HEAD.
+   */
+  retryMutation?: boolean;
+  /**
+   * Force-disable retries for this single call.  Useful when the
+   * caller wants a hard fail-fast (e.g. a quick liveness probe).
+   */
+  noRetry?: boolean;
 }
 
 /**
@@ -171,7 +186,14 @@ export async function apiFetch<T = unknown>(
   path: string,
   opts: ApiFetchOptions = {},
 ): Promise<T> {
-  const { body, getToken, headers: headersInit, ...init } = opts;
+  const {
+    body,
+    getToken,
+    headers: headersInit,
+    retryMutation,
+    noRetry,
+    ...init
+  } = opts;
   const url = resolveApiUrl(path);
   const headers = new Headers(headersInit ?? undefined);
   if (body !== undefined && !headers.has("content-type")) {
@@ -187,11 +209,23 @@ export async function apiFetch<T = unknown>(
     const token = await getToken();
     if (token) headers.set("authorization", `Bearer ${token}`);
   }
-  const res = await fetch(url, {
-    ...init,
-    headers,
-    body: body === undefined ? undefined : JSON.stringify(body),
-  });
+  // Retry policy: idempotent verbs retry by default; mutations only
+  // when explicitly opted in.  ``noRetry`` is the kill switch.  All
+  // calls flow through the shared helper so the dashboard's retry
+  // tile gets a single source of truth.
+  const method = (init.method ?? "GET").toUpperCase();
+  const retry = noRetry
+    ? false
+    : isIdempotent(method) || retryMutation === true;
+  const res = await fetchWithRetry(
+    url,
+    {
+      ...init,
+      headers,
+      body: body === undefined ? undefined : JSON.stringify(body),
+    },
+    { retry },
+  );
   let parsed: unknown = undefined;
   const text = await res.text();
   if (text) {

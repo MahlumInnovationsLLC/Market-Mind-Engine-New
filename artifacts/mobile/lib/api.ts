@@ -1,3 +1,5 @@
+import { fetchWithRetry, isIdempotent } from "@workspace/retry-fetch";
+
 const DOMAIN = process.env.EXPO_PUBLIC_DOMAIN;
 
 /**
@@ -81,9 +83,27 @@ export class ApiError extends Error {
 
 export async function apiFetch<T = unknown>(
   path: string,
-  opts: { method?: string; body?: unknown; headers?: Record<string, string> } = {},
+  opts: {
+    method?: string;
+    body?: unknown;
+    headers?: Record<string, string>;
+    /**
+     * Opt-in retry on a non-idempotent verb (POST/PUT/PATCH/DELETE).
+     * Idempotent verbs (GET/HEAD) are retried by default — set this
+     * to extend that to a mutation the server treats as idempotent.
+     */
+    retryMutation?: boolean;
+    /** Force-disable retries for this single call. */
+    noRetry?: boolean;
+  } = {},
 ): Promise<T> {
-  const { method = "GET", body, headers: extra = {} } = opts;
+  const {
+    method = "GET",
+    body,
+    headers: extra = {},
+    retryMutation,
+    noRetry,
+  } = opts;
   const headers: Record<string, string> = { accept: "application/json", ...extra };
   if (body !== undefined) headers["content-type"] = "application/json";
   if (_tokenGetter) {
@@ -99,11 +119,18 @@ export async function apiFetch<T = unknown>(
   headers[REQUEST_ID_HEADER] = requestId;
 
   const url = path.startsWith("http") ? path : `${BASE_URL}${path}`;
-  const res = await fetch(url, {
-    method,
-    headers,
-    body: body === undefined ? undefined : JSON.stringify(body),
-  });
+  const retry = noRetry
+    ? false
+    : isIdempotent(method) || retryMutation === true;
+  const res = await fetchWithRetry(
+    url,
+    {
+      method,
+      headers,
+      body: body === undefined ? undefined : JSON.stringify(body),
+    },
+    { retry },
+  );
   // The server echoes the id back; prefer that (in case middleware
   // rewrote it) but fall back to the one we sent so we always have one.
   const echoedId = res.headers.get(REQUEST_ID_HEADER) || requestId;
