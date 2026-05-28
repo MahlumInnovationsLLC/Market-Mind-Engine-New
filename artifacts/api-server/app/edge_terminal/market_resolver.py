@@ -33,6 +33,7 @@ from typing import Any
 from .. import db
 from ..config import get_settings
 from ..kalshi.client import KalshiAPIError, KalshiClient
+from . import llm_resolver
 
 
 log = logging.getLogger(__name__)
@@ -470,11 +471,24 @@ async def resolve_match(
     preview = [s for s in scored if int(s["score"]) > 0][:5]
 
     if best is None or best_score < _MIN_SCORE:
+        # Final tier: ask an LLM to pick from the candidate set. This
+        # rescues signals where the team isn't in ``_TEAM_ALIASES`` or
+        # the heuristic line-match misses (e.g. ATP/WTA player names,
+        # foreign soccer leagues, NCAA exotics). The LLM is constrained
+        # to tickers we showed it, so it can't hallucinate.
+        llm_ticker: str | None = None
+        llm_reason = ""
+        if live_fallback and scored:
+            llm_ticker, llm_reason = await llm_resolver.llm_pick(signal, scored)
+        if llm_ticker:
+            return ResolveResult(llm_ticker, llm_reason, preview)
         reason = (
             f"no kalshi market match — series={prefixes}, "
             f"candidates={len(cands)}, live_queried={used_live}, "
             f"top_score={best_score}"
         )
+        if llm_reason:
+            reason += f"; {llm_reason}"
         return ResolveResult(None, reason, preview)
     return ResolveResult(
         best["ticker"],
