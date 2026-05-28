@@ -2,6 +2,8 @@
 
 Stubs the asyncpg-style `db` accessor so we can exercise the bucket math
 and the empty-vertical fallback without a live Supabase connection.
+Routes batched (GROUP BY vertical) probes added in task #927 plus the
+remaining per-vertical CTEs (calibration buckets + daily sparkline).
 """
 from __future__ import annotations
 
@@ -14,7 +16,13 @@ from app import dashboard
 
 
 class _FakeDB:
-    """Routes db.fetch / fetchrow / fetchval based on substring match."""
+    """Routes db.fetch / fetchrow / fetchval based on substring match.
+
+    Task #927 collapsed the per-vertical N+1 into batched ``GROUP BY
+    vertical`` queries; this stub returns one row per vertical from the
+    same ``by_vertical`` dict the legacy stub used so the existing
+    fixtures still drive the new code path.
+    """
 
     def __init__(
         self,
@@ -24,35 +32,65 @@ class _FakeDB:
     ) -> None:
         self._by_vertical = by_vertical
         self._approved_debates_by_league = approved_debates_by_league or {}
+        self.fetch_calls: list[str] = []
+        self.fetchrow_calls: list[str] = []
+        self.fetchval_calls: list[str] = []
 
     async def fetchrow(self, query: str, *args: Any) -> Any:
-        # Trade aggregate query — first arg is the vertical.
-        if "FROM trades" in query and "calibration_snapshots" not in query:
-            v = args[0]
-            return self._by_vertical.get(v, {}).get("agg")
+        self.fetchrow_calls.append(query)
         return None
 
     async def fetchval(self, query: str, *args: Any) -> Any:
-        if "calibration_snapshots" in query:
-            v = args[0]
-            return self._by_vertical.get(v, {}).get("brier")
-        if "FROM positions" in query:
-            v = args[0]
-            return self._by_vertical.get(v, {}).get("open_exposure")
-        if "FROM trades" in query and "executed_at >= (now() AT TIME ZONE 'UTC')::date" in query:
-            v = args[0]
-            return self._by_vertical.get(v, {}).get("pnl_today")
+        self.fetchval_calls.append(query)
         return None
 
     async def fetch(self, query: str, *args: Any) -> list[dict[str, Any]]:
+        self.fetch_calls.append(query)
+        # Approved-debates roll-up grouped by league.
         if "FROM swarm_debates" in query and "approved = TRUE" in query:
             return [
                 {"league": lg, "n": n}
                 for lg, n in self._approved_debates_by_league.items()
             ]
+        # Per-vertical calibration / PIT buckets — these stay
+        # per-vertical (see helper comment in dashboard.py); first arg
+        # is the vertical name.
         if "bucketed" in query or "WITH settled" in query:
-            v = args[0]
+            v = args[0] if args else None
             return self._by_vertical.get(v, {}).get("bucket_rows", [])
+        # Per-vertical daily sparkline (also still per-vertical).
+        if "calendar" in query and "daily_pnl" in query:
+            return []
+        # Batched probes — return one row per vertical with the
+        # relevant slice of the fake data.
+        if "FROM calibration_snapshots" in query and "DISTINCT ON (vertical)" in query:
+            return [
+                {"vertical": v, "brier": d["brier"]}
+                for v, d in self._by_vertical.items()
+                if d.get("brier") is not None
+            ]
+        if "FROM positions" in query and "sum(notional)" in query:
+            return [
+                {"vertical": v, "exposure": d["open_exposure"]}
+                for v, d in self._by_vertical.items()
+                if d.get("open_exposure") is not None
+            ]
+        if "FROM trades" in query and "AS pnl_today" in query:
+            return [
+                {"vertical": v, "pnl_today": d["pnl_today"]}
+                for v, d in self._by_vertical.items()
+                if d.get("pnl_today") is not None
+            ]
+        if "FROM trades" in query and "GROUP BY vertical" in query:
+            # The strip's batched trade aggregate.
+            out: list[dict[str, Any]] = []
+            for v, d in self._by_vertical.items():
+                agg = d.get("agg")
+                if not agg:
+                    continue
+                row = {"vertical": v, **agg}
+                out.append(row)
+            return out
         return []
 
 
@@ -208,3 +246,45 @@ def test_strip_badges_open_exposure_pnl_today_and_debates(
     # the global "sports" bucket.
     assert by["soccer"]["approved_debates_today"] == 0
     assert by["combat-individual"]["approved_debates_today"] == 0
+
+
+def test_strip_query_count_is_constant_regardless_of_vertical_count(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Task #927 bench: the strip's per-vertical N+1 was collapsed into
+    a small constant number of batched probes plus one
+    calibration-bucket query and one daily-series query per vertical
+    (those two stay per-vertical because they need a complex CTE).
+
+    With ~N verticals registered, total fetch() calls should be:
+      4 batched (trade-agg, brier, exposure, pnl_today)
+    + 1 approved-debates roll-up
+    + N calibration-bucket queries
+    + N daily-series queries
+    = 5 + 2N
+
+    fetchrow() / fetchval() should be ZERO — the previous per-vertical
+    point queries have been eliminated."""
+    from app import verticals as _verticals
+
+    fake = _FakeDB({})
+    monkeypatch.setattr(dashboard, "db", fake)
+    out = _run(dashboard.get_vertical_performance(7))
+
+    n_verticals = len([v for v in out["verticals"]])
+    # Strip filters by `dashboard_strip_verticals()` not the full registry.
+    n_strip = len(_verticals.dashboard_strip_verticals() or ["sports", "weather", "crypto"])
+
+    expected_fetch = 5 + 2 * n_strip
+    assert len(fake.fetch_calls) == expected_fetch, (
+        f"expected {expected_fetch} batched fetch() calls, got "
+        f"{len(fake.fetch_calls)} (strip={n_strip}, registry={n_verticals})"
+    )
+    assert fake.fetchrow_calls == [], (
+        "task #927 should have eliminated all per-vertical fetchrow() "
+        f"point reads; got {fake.fetchrow_calls!r}"
+    )
+    assert fake.fetchval_calls == [], (
+        "task #927 should have eliminated all per-vertical fetchval() "
+        f"point reads; got {fake.fetchval_calls!r}"
+    )

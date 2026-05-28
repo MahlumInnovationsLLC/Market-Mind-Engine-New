@@ -2651,6 +2651,251 @@ async def get_trade_detail(
     return out
 
 
+# ---------------------------------------------------------------------------
+# Per-vertical batched fetch helpers (task #927).
+#
+# Both ``get_vertical_performance`` and ``get_verticals_overview`` used
+# to iterate the registry and issue 6+ probes per vertical (~60-120
+# round-trips per dashboard refresh).  Each helper below collapses one
+# of those probes into a single ``GROUP BY vertical`` / ``DISTINCT ON
+# (vertical)`` query and returns a dict keyed by vertical so the
+# caller can read the per-tile entry in O(1) without an extra round
+# trip.  Each is wrapped in try/except so a single SQL failure leaves
+# the corresponding field defaulted to its empty value but does NOT
+# blank the rest of the panel — matching the previous per-vertical
+# try/except semantics at the row level.
+# ---------------------------------------------------------------------------
+
+
+async def _vp_trade_aggs_by_vertical(
+    days: int, pb_bare: str, tm_bare: str
+) -> dict[str, dict[str, Any]]:
+    """Strip aggregate: count / pnl / wins / losses / win_rate per vertical
+    over the trailing ``days`` window (UTC calendar-day lower bound to
+    match the daily sparkline below)."""
+    try:
+        rows = await db.fetch(
+            f"""
+            SELECT vertical,
+                   count(*)::int                                    AS n,
+                   coalesce(sum(pnl), 0)::float                     AS pnl,
+                   sum((pnl > 0)::int)::int                         AS wins,
+                   sum((pnl < 0)::int)::int                         AS losses,
+                   (sum((pnl > 0)::int)::float
+                    / nullif(count(*) filter (where pnl is not null), 0))
+                                                                    AS win_rate
+              FROM trades
+             WHERE executed_at >= ((now() at time zone 'utc')::date - ($1::int - 1))
+               AND vertical IS NOT NULL
+               {pb_bare}{tm_bare}
+             GROUP BY vertical
+            """,
+            days,
+        )
+    except Exception as e:
+        log.warning("vertical_perf trade-agg batch: %s", e)
+        return {}
+    return {r["vertical"]: dict(r) for r in rows}
+
+
+async def _briers_by_vertical() -> dict[str, float]:
+    """Latest 24h Brier per vertical from ``calibration_snapshots``,
+    DISTINCT ON to keep one row per vertical."""
+    try:
+        rows = await db.fetch(
+            """
+            SELECT DISTINCT ON (vertical) vertical,
+                   brier_score::float AS brier
+              FROM calibration_snapshots
+             WHERE sub_category = '24h'
+               AND vertical IS NOT NULL
+             ORDER BY vertical, created_at DESC
+            """
+        )
+    except Exception as e:
+        log.warning("vertical brier batch: %s", e)
+        return {}
+    return {r["vertical"]: float(r["brier"]) for r in rows if r["brier"] is not None}
+
+
+async def _open_exposure_by_vertical(tm_bare: str) -> dict[str, float]:
+    """Open USD exposure (``sum(positions.notional)``) per vertical."""
+    try:
+        rows = await db.fetch(
+            f"""
+            SELECT vertical,
+                   coalesce(sum(notional), 0)::float AS exposure
+              FROM positions
+             WHERE coalesce(status, 'open') = 'open'
+               AND vertical IS NOT NULL
+               {tm_bare}
+             GROUP BY vertical
+            """
+        )
+    except Exception as e:
+        log.warning("vertical open_exposure batch: %s", e)
+        return {}
+    return {r["vertical"]: float(r["exposure"] or 0.0) for r in rows}
+
+
+async def _pnl_today_by_vertical(pb_bare: str, tm_bare: str) -> dict[str, float]:
+    """Today's (UTC) realized P&L per vertical."""
+    try:
+        rows = await db.fetch(
+            f"""
+            SELECT vertical,
+                   coalesce(sum(pnl), 0)::float AS pnl_today
+              FROM trades
+             WHERE executed_at >= (now() AT TIME ZONE 'UTC')::date
+               AND vertical IS NOT NULL
+               {pb_bare}{tm_bare}
+             GROUP BY vertical
+            """
+        )
+    except Exception as e:
+        log.warning("vertical pnl_today batch: %s", e)
+        return {}
+    return {r["vertical"]: float(r["pnl_today"] or 0.0) for r in rows}
+
+
+async def _open_positions_count_by_vertical(tm_bare: str) -> dict[str, int]:
+    """Count of open positions per vertical (overview tile)."""
+    try:
+        rows = await db.fetch(
+            f"""
+            SELECT vertical, count(*)::int AS n
+              FROM positions
+             WHERE coalesce(status, 'open') = 'open'
+               AND vertical IS NOT NULL
+               {tm_bare}
+             GROUP BY vertical
+            """
+        )
+    except Exception as e:
+        log.warning("vertical open_positions batch: %s", e)
+        return {}
+    return {r["vertical"]: int(r["n"] or 0) for r in rows}
+
+
+async def _vo_trade_aggs_by_vertical(
+    days: int, pb_bare: str, tm_bare: str
+) -> dict[str, dict[str, Any]]:
+    """Overview aggregate — like the strip's but with ``avg_edge`` and
+    the overview's wider ``now() - days`` lower bound."""
+    try:
+        rows = await db.fetch(
+            f"""
+            SELECT vertical,
+                   count(*)::int                                    AS n,
+                   coalesce(sum(pnl), 0)::float                     AS pnl,
+                   sum((pnl > 0)::int)::int                         AS wins,
+                   sum((pnl < 0)::int)::int                         AS losses,
+                   (sum((pnl > 0)::int)::float
+                    / nullif(count(*) filter (where pnl is not null), 0))
+                                                                    AS win_rate,
+                   avg(edge)::float                                 AS avg_edge
+              FROM trades
+             WHERE executed_at >= now() - ($1::int || ' days')::interval
+               AND vertical IS NOT NULL
+               {pb_bare}{tm_bare}
+             GROUP BY vertical
+            """,
+            days,
+        )
+    except Exception as e:
+        log.warning("verticals_overview trade-agg batch: %s", e)
+        return {}
+    return {r["vertical"]: dict(r) for r in rows}
+
+
+async def _daily_pnl_by_vertical(
+    days: int, pb_bare: str, tm_bare: str
+) -> dict[str, list[float]]:
+    """Daily P&L samples per vertical for the annualized Sharpe calc."""
+    try:
+        rows = await db.fetch(
+            f"""
+            SELECT vertical,
+                   date_trunc('day', executed_at)::date AS d,
+                   coalesce(sum(pnl), 0)::float          AS daily_pnl
+              FROM trades
+             WHERE executed_at >= now() - ($1::int || ' days')::interval
+               AND pnl IS NOT NULL
+               AND vertical IS NOT NULL
+               {pb_bare}{tm_bare}
+             GROUP BY vertical, d
+            """,
+            days,
+        )
+    except Exception as e:
+        log.warning("verticals_overview daily batch: %s", e)
+        return {}
+    out: dict[str, list[float]] = {}
+    for r in rows:
+        out.setdefault(r["vertical"], []).append(float(r["daily_pnl"] or 0.0))
+    return out
+
+
+async def _realized_edge_by_vertical(
+    days: int, pb_t: str, tm_t: str
+) -> dict[str, float]:
+    """Realized edge per vertical from settled postmortems."""
+    try:
+        rows = await db.fetch(
+            f"""
+            SELECT t.vertical                                     AS vertical,
+                   avg(
+                     CASE
+                       WHEN lower(coalesce(t.side,'')) IN ('no','n','sell')
+                         THEN ((1.0 - t.price) - (1.0 - pm.actual_outcome))
+                       ELSE (pm.actual_outcome - t.price)
+                     END
+                   )::float                                       AS realized
+              FROM trades t
+              JOIN trade_postmortems pm
+                ON pm.trade_id = coalesce(t.trade_id, t.id::text)
+             WHERE t.executed_at >= now() - ($1::int || ' days')::interval
+               AND pm.actual_outcome IS NOT NULL
+               AND t.price IS NOT NULL
+               AND t.vertical IS NOT NULL
+               {pb_t}{tm_t}
+             GROUP BY t.vertical
+            """,
+            days,
+        )
+    except Exception as e:
+        log.warning("verticals_overview realized_edge batch: %s", e)
+        return {}
+    return {r["vertical"]: float(r["realized"]) for r in rows if r["realized"] is not None}
+
+
+async def _last_cycle_by_vertical() -> dict[str, dict[str, Any]]:
+    """Most-recent ``trading_cycles`` row per vertical."""
+    try:
+        rows = await db.fetch(
+            """
+            SELECT DISTINCT ON (vertical)
+                   vertical,
+                   id,
+                   picks_evaluated,
+                   trades_placed,
+                   errors,
+                   to_char(started_at,   'YYYY-MM-DD"T"HH24:MI:SSZ') AS started_at,
+                   to_char(completed_at, 'YYYY-MM-DD"T"HH24:MI:SSZ') AS completed_at
+              FROM trading_cycles
+             WHERE vertical IS NOT NULL
+             ORDER BY vertical, started_at DESC NULLS LAST
+            """
+        )
+    except Exception as e:
+        log.warning("verticals_overview last_cycle batch: %s", e)
+        return {}
+    return {
+        r["vertical"]: {k: v for k, v in dict(r).items() if k != "vertical"}
+        for r in rows
+    }
+
+
 async def get_vertical_performance(
     days: int = 30,
     placed_by: str | None = None,
@@ -2731,6 +2976,19 @@ async def get_vertical_performance(
         for lg in _spec.leagues:
             non_sports_strip_leagues.add(lg)
 
+    # Task #927: collapse the per-vertical N+1 (one query per metric per
+    # vertical, ~30+ round-trips for the strip) into four batched GROUP
+    # BY queries below — every per-tile read in the loop is then an
+    # O(1) dict lookup.  The calibration/PIT bucket CTE (further down)
+    # and the per-vertical daily sparkline stay per-vertical because
+    # they're complex CTEs whose `vertical` filter is critical for the
+    # query planner to choose the (vertical, executed_at) index added
+    # in migration 0062.
+    trade_aggs_by_v = await _vp_trade_aggs_by_vertical(days, pb_bare, tm_bare)
+    briers_by_v = await _briers_by_vertical()
+    open_exposure_by_v = await _open_exposure_by_vertical(tm_bare)
+    pnl_today_by_v = await _pnl_today_by_vertical(pb_bare, tm_bare)
+
     out: list[dict[str, Any]] = []
     for vertical in verticals:
         entry: dict[str, Any] = {
@@ -2747,87 +3005,21 @@ async def get_vertical_performance(
             "pnl_today": 0.0,
             "approved_debates_today": 0,
         }
-        # Aggregate trade stats over the rolling window.  We use the
-        # same UTC calendar-day lower bound as the daily series below
-        # so the headline P&L matches the final point of the cumulative
-        # sparkline.
-        try:
-            agg = await db.fetchrow(
-                f"""
-                SELECT count(*)::int                                    AS n,
-                       coalesce(sum(pnl), 0)::float                     AS pnl,
-                       sum((pnl > 0)::int)::int                         AS wins,
-                       sum((pnl < 0)::int)::int                         AS losses,
-                       (sum((pnl > 0)::int)::float
-                        / nullif(count(*) filter (where pnl is not null), 0))
-                                                                        AS win_rate
-                  FROM trades
-                 WHERE vertical = $1
-                   AND executed_at >= ((now() at time zone 'utc')::date - ($2::int - 1))
-                   {pb_bare}{tm_bare}
-                """,
-                vertical, days,
-            )
-            if agg:
-                entry["trades"] = int(agg["n"] or 0)
-                entry["pnl"] = float(agg["pnl"] or 0.0)
-                entry["wins"] = int(agg["wins"] or 0)
-                entry["losses"] = int(agg["losses"] or 0)
-                entry["win_rate"] = (
-                    float(agg["win_rate"]) if agg["win_rate"] is not None else None
-                )
-        except Exception as e:
-            log.warning("vertical_perf trade-agg %s: %s", vertical, e)
 
-        # Latest 24h Brier from calibration_snapshots.
-        try:
-            entry["brier"] = await db.fetchval(
-                """
-                SELECT brier_score::float
-                  FROM calibration_snapshots
-                 WHERE vertical = $1 AND sub_category = '24h'
-                 ORDER BY created_at DESC
-                 LIMIT 1
-                """,
-                vertical,
-            )
-            if entry["brier"] is not None:
-                entry["brier"] = float(entry["brier"])
-        except Exception as e:
-            log.warning("vertical_perf brier %s: %s", vertical, e)
+        agg = trade_aggs_by_v.get(vertical)
+        if agg:
+            entry["trades"] = int(agg.get("n") or 0)
+            entry["pnl"] = float(agg.get("pnl") or 0.0)
+            entry["wins"] = int(agg.get("wins") or 0)
+            entry["losses"] = int(agg.get("losses") or 0)
+            wr = agg.get("win_rate")
+            entry["win_rate"] = float(wr) if wr is not None else None
 
-        # Open USD exposure — sum of `positions.notional` for currently
-        # open positions tagged with this vertical (task #450).
-        try:
-            n = await db.fetchval(
-                f"""
-                SELECT coalesce(sum(notional), 0)::float
-                  FROM positions
-                 WHERE vertical = $1
-                   AND coalesce(status, 'open') = 'open'
-                   {tm_bare}
-                """,
-                vertical,
-            )
-            entry["open_exposure_usd"] = float(n or 0.0)
-        except Exception as e:
-            log.warning("vertical_perf open_exposure %s: %s", vertical, e)
+        if vertical in briers_by_v:
+            entry["brier"] = briers_by_v[vertical]
 
-        # Today's realized P&L (UTC calendar day) for this vertical.
-        try:
-            n = await db.fetchval(
-                f"""
-                SELECT coalesce(sum(pnl), 0)::float
-                  FROM trades
-                 WHERE vertical = $1
-                   AND executed_at >= (now() AT TIME ZONE 'UTC')::date
-                   {pb_bare}{tm_bare}
-                """,
-                vertical,
-            )
-            entry["pnl_today"] = float(n or 0.0)
-        except Exception as e:
-            log.warning("vertical_perf pnl_today %s: %s", vertical, e)
+        entry["open_exposure_usd"] = float(open_exposure_by_v.get(vertical, 0.0))
+        entry["pnl_today"] = float(pnl_today_by_v.get(vertical, 0.0))
 
         # Approved-debate count today, attributed via league mapping.
         spec = _vertical_registry.get_spec(vertical)
@@ -3420,6 +3612,19 @@ async def get_verticals_overview(
         log.warning("verticals_overview halts read failed: %s", e)
         halts = {}
 
+    # Task #927: collapse the per-vertical N+1 (~6 queries × N verticals
+    # per refresh) into six batched GROUP BY / DISTINCT ON queries —
+    # every per-row read inside the loop is then an O(1) dict lookup.
+    trade_aggs_by_v = await _vo_trade_aggs_by_vertical(days, pb_bare, tm_bare)
+    briers_by_v = await _briers_by_vertical()
+    daily_by_v = await _daily_pnl_by_vertical(days, pb_bare, tm_bare)
+    open_pos_by_v = await _open_positions_count_by_vertical(tm_bare)
+    realized_by_v = await _realized_edge_by_vertical(days, pb_t, tm_t)
+    last_cycle_by_v = await _last_cycle_by_vertical()
+
+    import statistics as _stats
+    import math as _math
+
     out: list[dict[str, Any]] = []
     for spec in _vertical_registry.all_specs():
         vertical = spec.name
@@ -3447,147 +3652,37 @@ async def get_verticals_overview(
             "last_cycle": None,
         }
 
-        # Trade aggregates (wins / pnl / win_rate / count).
-        try:
-            agg = await db.fetchrow(
-                f"""
-                SELECT count(*)::int                                    AS n,
-                       coalesce(sum(pnl), 0)::float                     AS pnl,
-                       sum((pnl > 0)::int)::int                         AS wins,
-                       sum((pnl < 0)::int)::int                         AS losses,
-                       (sum((pnl > 0)::int)::float
-                        / nullif(count(*) filter (where pnl is not null), 0))
-                                                                        AS win_rate,
-                       avg(edge)::float                                 AS avg_edge
-                  FROM trades
-                 WHERE vertical = $1
-                   AND executed_at >= now() - ($2::int || ' days')::interval
-                   {pb_bare}{tm_bare}
-                """,
-                vertical, days,
-            )
-            if agg:
-                entry["trades"] = int(agg["n"] or 0)
-                entry["pnl"] = float(agg["pnl"] or 0.0)
-                entry["wins"] = int(agg["wins"] or 0)
-                entry["losses"] = int(agg["losses"] or 0)
-                if agg["win_rate"] is not None:
-                    entry["win_rate"] = float(agg["win_rate"])
-                if agg["avg_edge"] is not None:
-                    # ``trades.edge`` is stored in price-fraction units
-                    # (e.g. 0.04 = 4¢ on a $1 contract); convert to bps.
-                    entry["edge_predicted_bps"] = float(agg["avg_edge"]) * 10_000.0
-        except Exception as e:
-            log.warning("verticals_overview agg %s: %s", vertical, e)
+        agg = trade_aggs_by_v.get(vertical)
+        if agg:
+            entry["trades"] = int(agg.get("n") or 0)
+            entry["pnl"] = float(agg.get("pnl") or 0.0)
+            entry["wins"] = int(agg.get("wins") or 0)
+            entry["losses"] = int(agg.get("losses") or 0)
+            if agg.get("win_rate") is not None:
+                entry["win_rate"] = float(agg["win_rate"])
+            if agg.get("avg_edge") is not None:
+                # ``trades.edge`` is stored in price-fraction units
+                # (e.g. 0.04 = 4¢ on a $1 contract); convert to bps.
+                entry["edge_predicted_bps"] = float(agg["avg_edge"]) * 10_000.0
 
-        # Latest 24h Brier from calibration_snapshots.
-        try:
-            entry["brier"] = await db.fetchval(
-                """
-                SELECT brier_score::float
-                  FROM calibration_snapshots
-                 WHERE vertical = $1 AND sub_category = '24h'
-                 ORDER BY created_at DESC
-                 LIMIT 1
-                """,
-                vertical,
-            )
-            if entry["brier"] is not None:
-                entry["brier"] = float(entry["brier"])
-        except Exception as e:
-            log.warning("verticals_overview brier %s: %s", vertical, e)
+        if vertical in briers_by_v:
+            entry["brier"] = briers_by_v[vertical]
 
-        # Sharpe over daily realized P&L (annualized, 252 trading days).
-        try:
-            daily_rows = await db.fetch(
-                f"""
-                SELECT date_trunc('day', executed_at)::date AS d,
-                       coalesce(sum(pnl), 0)::float          AS daily_pnl
-                  FROM trades
-                 WHERE vertical = $1
-                   AND executed_at >= now() - ($2::int || ' days')::interval
-                   AND pnl IS NOT NULL
-                   {pb_bare}{tm_bare}
-                 GROUP BY d
-                """,
-                vertical, days,
-            )
-            samples = [float(r["daily_pnl"] or 0.0) for r in daily_rows]
-            if len(samples) >= 2:
-                import statistics as _stats
-                import math as _math
+        samples = daily_by_v.get(vertical, [])
+        if len(samples) >= 2:
+            mean = _stats.fmean(samples)
+            stdev = _stats.pstdev(samples)
+            if stdev > 0:
+                entry["sharpe"] = round(mean / stdev * _math.sqrt(252.0), 4)
 
-                mean = _stats.fmean(samples)
-                stdev = _stats.pstdev(samples)
-                if stdev > 0:
-                    entry["sharpe"] = round(mean / stdev * _math.sqrt(252.0), 4)
-        except Exception as e:
-            log.warning("verticals_overview sharpe %s: %s", vertical, e)
+        entry["open_positions"] = int(open_pos_by_v.get(vertical, 0))
 
-        # Open positions tagged with this vertical.
-        try:
-            n = await db.fetchval(
-                f"""
-                SELECT count(*)::int FROM positions
-                 WHERE vertical = $1
-                   AND coalesce(status,'open') = 'open'
-                   {tm_bare}
-                """,
-                vertical,
-            )
-            entry["open_positions"] = int(n or 0)
-        except Exception as e:
-            log.warning("verticals_overview open_positions %s: %s", vertical, e)
+        if vertical in realized_by_v:
+            entry["edge_realized_bps"] = float(realized_by_v[vertical]) * 10_000.0
 
-        # Realized edge (bps) from settled postmortems.
-        try:
-            row = await db.fetchrow(
-                f"""
-                SELECT
-                  avg(
-                    CASE
-                      WHEN lower(coalesce(t.side,'')) IN ('no','n','sell')
-                        THEN ((1.0 - t.price) - (1.0 - pm.actual_outcome))
-                      ELSE (pm.actual_outcome - t.price)
-                    END
-                  )::float                                          AS realized
-                  FROM trades t
-                  JOIN trade_postmortems pm
-                    ON pm.trade_id = coalesce(t.trade_id, t.id::text)
-                 WHERE t.vertical = $1
-                   AND t.executed_at >= now() - ($2::int || ' days')::interval
-                   AND pm.actual_outcome IS NOT NULL
-                   AND t.price IS NOT NULL
-                   {pb_t}{tm_t}
-                """,
-                vertical, days,
-            )
-            if row and row["realized"] is not None:
-                entry["edge_realized_bps"] = float(row["realized"]) * 10_000.0
-        except Exception as e:
-            log.warning("verticals_overview realized_edge %s: %s", vertical, e)
-
-        # Most-recent cycle row for this vertical.
-        try:
-            cyc = await db.fetchrow(
-                """
-                SELECT id,
-                       picks_evaluated,
-                       trades_placed,
-                       errors,
-                       to_char(started_at,   'YYYY-MM-DD"T"HH24:MI:SSZ') AS started_at,
-                       to_char(completed_at, 'YYYY-MM-DD"T"HH24:MI:SSZ') AS completed_at
-                  FROM trading_cycles
-                 WHERE vertical = $1
-                 ORDER BY started_at DESC NULLS LAST
-                 LIMIT 1
-                """,
-                vertical,
-            )
-            if cyc:
-                entry["last_cycle"] = dict(cyc)
-        except Exception as e:
-            log.warning("verticals_overview last_cycle %s: %s", vertical, e)
+        cyc = last_cycle_by_v.get(vertical)
+        if cyc:
+            entry["last_cycle"] = dict(cyc)
 
         out.append(entry)
 

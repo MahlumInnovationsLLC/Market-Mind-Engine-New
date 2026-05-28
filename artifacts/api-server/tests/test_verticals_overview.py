@@ -37,42 +37,59 @@ class _StubDb:
         self.executed: list[tuple[str, tuple[Any, ...]]] = []
 
     async def fetchrow(self, sql: str, *args: Any) -> dict[str, Any] | None:
-        v = args[0] if args else None
-        if "FROM trades" in sql and "AS realized" in sql:
-            r = self.realized.get(v)
-            return {"realized": r} if r is not None else {"realized": None}
-        if "FROM trades" in sql and "AS n" in sql:
-            agg = self.trades_per_vertical.get(v)
-            if not agg:
-                return {"n": 0, "pnl": 0.0, "wins": 0, "losses": 0, "win_rate": None, "avg_edge": None}
-            return {
-                "n": agg.get("n", 0),
-                "pnl": agg.get("pnl", 0.0),
-                "wins": agg.get("wins", 0),
-                "losses": agg.get("losses", 0),
-                "win_rate": agg.get("win_rate"),
-                "avg_edge": agg.get("avg_edge"),
-            }
-        if "FROM trading_cycles" in sql:
-            return self.cycles.get(v)
+        self.executed.append(("fetchrow", (sql, args)))
         return None
 
     async def fetchval(self, sql: str, *args: Any) -> Any:
-        v = args[0] if args else None
-        if "FROM calibration_snapshots" in sql:
-            return self.brier.get(v)
-        if "FROM positions" in sql:
-            return self.open_pos.get(v, 0)
+        self.executed.append(("fetchval", (sql, args)))
         return None
 
     async def fetch(self, sql: str, *args: Any) -> list[dict[str, Any]]:
-        # Daily P&L grouping
-        if "date_trunc('day'" in sql and "FROM trades" in sql:
-            v = args[0] if args else None
-            return [{"d": i, "daily_pnl": p} for i, p in enumerate(self.daily.get(v, []))]
-        # System-settings visibility read
+        # Task #927: per-vertical N+1 was collapsed into batched
+        # GROUP BY / DISTINCT ON probes. Route each by substring and
+        # return one row per vertical from the fixture dicts.
         if "FROM system_settings" in sql:
             return list(self.visibility_rows)
+        if "FROM calibration_snapshots" in sql and "DISTINCT ON (vertical)" in sql:
+            return [
+                {"vertical": v, "brier": b} for v, b in self.brier.items()
+            ]
+        if "FROM positions" in sql:
+            return [
+                {"vertical": v, "n": n} for v, n in self.open_pos.items()
+            ]
+        if "AS realized" in sql:
+            return [
+                {"vertical": v, "realized": r}
+                for v, r in self.realized.items()
+            ]
+        if "FROM trading_cycles" in sql:
+            return [
+                {"vertical": v, **c} for v, c in self.cycles.items()
+            ]
+        if (
+            "FROM trades" in sql
+            and "date_trunc('day'" in sql
+            and "GROUP BY vertical, d" in sql
+        ):
+            out: list[dict[str, Any]] = []
+            for v, samples in self.daily.items():
+                for i, p in enumerate(samples):
+                    out.append({"vertical": v, "d": i, "daily_pnl": p})
+            return out
+        if "FROM trades" in sql and "GROUP BY vertical" in sql:
+            out2: list[dict[str, Any]] = []
+            for v, agg in self.trades_per_vertical.items():
+                out2.append({
+                    "vertical": v,
+                    "n": agg.get("n", 0),
+                    "pnl": agg.get("pnl", 0.0),
+                    "wins": agg.get("wins", 0),
+                    "losses": agg.get("losses", 0),
+                    "win_rate": agg.get("win_rate"),
+                    "avg_edge": agg.get("avg_edge"),
+                })
+            return out2
         return []
 
     class _Conn:
@@ -232,13 +249,21 @@ def test_overview_partial_failure_does_not_blank_row(stub_db):
 
     target = _verticals.all_specs()[0].name
 
-    async def bad_fetchval(*a, **kw):
-        raise RuntimeError("simulated brier failure")
-
     # Trade aggregates still succeed:
     stub_db.trades_per_vertical = {target: {"n": 5, "pnl": 11.0, "wins": 3, "losses": 2,
                                              "win_rate": 0.6, "avg_edge": None}}
-    stub_db.fetchval = bad_fetchval  # type: ignore[assignment]
+
+    # Task #927: brier / open_positions are now batched fetch() probes
+    # — wrap fetch() to fail those two sql shapes while letting
+    # everything else (trade-agg, visibility, etc.) succeed.
+    original_fetch = stub_db.fetch
+
+    async def selective_fail(sql: str, *args: Any) -> list[dict[str, Any]]:
+        if "FROM calibration_snapshots" in sql or "FROM positions" in sql:
+            raise RuntimeError("simulated brier/open_positions failure")
+        return await original_fetch(sql, *args)
+
+    stub_db.fetch = selective_fail  # type: ignore[assignment]
 
     out = asyncio.run(dashboard.get_verticals_overview(days=7))
     entry = next(e for e in out["verticals"] if e["vertical"] == target)
