@@ -976,6 +976,7 @@ async def refit_all_leagues(
     restart picks up the fitted coefficients via ``load_all()`` rather
     than dropping back to the textbook fallback SDs.
     """
+    import asyncio
     import time as _time
     from datetime import datetime, timezone
 
@@ -991,7 +992,11 @@ async def refit_all_leagues(
             summary.skipped[league] = f"only {len(games)} games (need {min_games})"
             continue
         try:
-            reg = fit_regressor(league, games)
+            # ``fit_regressor`` is pure-numpy CPU work — offload to a
+            # thread so the asyncio event loop keeps serving /api/healthz
+            # (the production watchdog SIGKILLs the process after three
+            # 30-second probe timeouts).
+            reg = await asyncio.to_thread(fit_regressor, league, games)
         except Exception as e:
             summary.skipped[league] = f"fit_failed: {type(e).__name__}: {e}"
             continue
@@ -1009,8 +1014,11 @@ async def refit_all_leagues(
         # weights through the same training games and pin the one
         # that minimises holdout Brier.  Failures here only fall
         # back to the per-league default — never block the refit.
+        # ``tune_blend_weight`` runs a multi-weight grid backtest in
+        # numpy — easily multi-second per league.  Offload alongside
+        # ``fit_regressor`` to keep the event loop responsive.
         try:
-            tune = tune_blend_weight(league, games)
+            tune = await asyncio.to_thread(tune_blend_weight, league, games)
         except Exception as e:  # pragma: no cover — defensive
             log.warning("blend-weight tune failed for %s: %s", league, e)
             tune = None
