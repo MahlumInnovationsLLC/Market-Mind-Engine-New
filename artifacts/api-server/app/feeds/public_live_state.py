@@ -520,8 +520,16 @@ async def poll_public_live_state() -> int:
     # ``api-web.nhle.com/v1/score/now`` 307-redirects to a date-stamped
     # path (``/v1/score/<YYYY-MM-DD>``).  ESPN and MLB statsapi serve
     # 200s directly, so the flag is a no-op for them.
+    # ``timeout`` here is a number-of-seconds the caller passed in for
+    # per-request bounds; wrap it with explicit connect/read/write/pool
+    # so a hung TCP handshake or stuck response body can't freeze the
+    # event loop forever (task #922).
     async with httpx.AsyncClient(
-        timeout=timeout, headers=headers, follow_redirects=True,
+        timeout=httpx.Timeout(
+            timeout if isinstance(timeout, (int, float)) else 15.0,
+            connect=5.0, pool=5.0,
+        ),
+        headers=headers, follow_redirects=True,
     ) as client:
         # --- MLB official (preferred when Sportradar MLB key absent) --
         mlb_handled = False

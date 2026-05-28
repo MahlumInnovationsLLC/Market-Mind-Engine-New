@@ -2538,8 +2538,7 @@ async def admin_list_soccer_settlement_review(
     """
     lim = max(1, min(500, int(limit)))
     where = "WHERE resolved_at IS NULL" if only_unresolved else ""
-    pool = await db.get_pool()
-    rows = await pool.fetch(
+    rows = await db.fetch(
         f"""
         SELECT id, market_id, game_id, league,
                primary_source, primary_payload,
@@ -5465,9 +5464,8 @@ async def list_model_health_alerts(
     rows for audit purposes.
     """
     lim = max(1, min(500, int(limit)))
-    pool = await db.get_pool()
     if ack:
-        rows = await pool.fetch(
+        rows = await db.fetch(
             """
             SELECT id, vertical, alert_type, severity, metric_name,
                    metric_value, threshold, message, acknowledged,
@@ -5481,7 +5479,7 @@ async def list_model_health_alerts(
             lim,
         )
     else:
-        rows = await pool.fetch(
+        rows = await db.fetch(
             """
             SELECT id, vertical, alert_type, severity, metric_name,
                    metric_value, threshold, message, acknowledged,
@@ -8861,8 +8859,7 @@ async def _settlement_today_summary() -> dict[str, object]:
         "by_vertical": [],
     }
     try:
-        pool = await db.get_pool()
-        row = await pool.fetchrow(
+        row = await db.fetchrow(
             """
             SELECT COUNT(*)::int AS n,
                    COALESCE(SUM(pnl), 0)::float AS pnl
@@ -8873,7 +8870,7 @@ async def _settlement_today_summary() -> dict[str, object]:
         if row is not None:
             out["trades_settled"] = int(row["n"] or 0)
             out["realized_pnl"] = float(row["pnl"] or 0.0)
-        rows = await pool.fetch(
+        rows = await db.fetch(
             """
             SELECT vertical,
                    COUNT(*)::int AS trades_settled,

@@ -254,7 +254,9 @@ async def _fetch_scoreboard(
         return None
     try:
         async with httpx.AsyncClient(
-            timeout=httpx.Timeout(_HTTP_TIMEOUT_SECS, connect=3.0),
+            timeout=httpx.Timeout(
+                _HTTP_TIMEOUT_SECS, connect=3.0, pool=5.0,
+            ),
             headers={
                 "User-Agent": "axiom-predict/1.0 (+settlement-fallback)",
                 "Accept": "application/json",

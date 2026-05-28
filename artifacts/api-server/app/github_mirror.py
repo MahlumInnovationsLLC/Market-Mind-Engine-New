@@ -153,7 +153,10 @@ def _client(cfg: dict[str, str]) -> httpx.AsyncClient:
             "X-GitHub-Api-Version": "2022-11-28",
             "User-Agent": "axiom-predict-mirror/1.0",
         },
-        timeout=120.0,
+        # 120s read budget is high because we push gzipped JSONL
+        # archives, but connect/pool must stay tight so a stuck DNS
+        # or exhausted httpx pool fails fast (task #922).
+        timeout=httpx.Timeout(connect=5.0, read=120.0, write=120.0, pool=5.0),
     )
 
 

@@ -601,6 +601,7 @@ async def main() -> int:
     async with httpx.AsyncClient(
         headers={"User-Agent": "axiom-predict/calibrator-prior (+https://replit.com)"},
         follow_redirects=True,
+        timeout=httpx.Timeout(connect=5.0, read=30.0, write=30.0, pool=5.0),
     ) as client:
         # --- soccer ---
         for league, code in FOOTBALL_DATA_LEAGUES.items():

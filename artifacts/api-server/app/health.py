@@ -172,6 +172,25 @@ async def _probe_postgres() -> dict:
     try:
         ver = await asyncio.wait_for(db.fetchval("SELECT 1"), timeout=5.0)
         ms = round((time.time() - t0) * 1000, 1)
+        stats = db.pool_stats()
+        # Pool-saturation gating (task #922): if every connection has
+        # been in use continuously for >5s, the next caller is one
+        # spike away from a pool-acquire timeout. Flip DEGRADED before
+        # that happens so the on-call notices.
+        sat = stats.get("saturated_for_seconds")
+        if ver == 1 and isinstance(sat, (int, float)) and sat > 5.0:
+            return _card(
+                key="postgres",
+                label="Postgres (Supabase)",
+                category="live",
+                status="degraded",
+                detail=(
+                    f"pool saturated for {sat:.1f}s "
+                    f"(in_use={stats.get('in_use')}/{stats.get('configured_max')})"
+                ),
+                latency_ms=ms,
+                extras={"pool": stats},
+            )
         return _card(
             key="postgres",
             label="Postgres (Supabase)",
@@ -179,6 +198,7 @@ async def _probe_postgres() -> dict:
             status="ok" if ver == 1 else "degraded",
             detail="select 1 -> 1" if ver == 1 else f"select 1 -> {ver!r}",
             latency_ms=ms,
+            extras={"pool": stats},
         )
     except Exception as e:
         ms = round((time.time() - t0) * 1000, 1)

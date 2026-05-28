@@ -196,7 +196,10 @@ def _normalize(raw: list[dict[str, Any]] | dict[str, Any]) -> list[dict[str, Any
 async def _poll_outlier_bet() -> int:
     if not (os.environ.get("OUTLIERBET_EMAIL") and os.environ.get("OUTLIERBET_PASSWORD")):
         return 0
-    async with httpx.AsyncClient(follow_redirects=True) as client:
+    async with httpx.AsyncClient(
+        follow_redirects=True,
+        timeout=httpx.Timeout(connect=5.0, read=15.0, write=15.0, pool=5.0),
+    ) as client:
         # _ensure_session now raises on login failure (used to silently
         # return None) so the scheduler flips this feed to ``error``
         # with a real reason instead of green-with-zero-rows.
