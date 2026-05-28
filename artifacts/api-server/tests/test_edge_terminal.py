@@ -395,7 +395,7 @@ def test_fire_one_resolves_ticker_sizes_and_tags_at_insert(monkeypatch):
         "matchup": "LAL @ BOS",
         "selection": "Lakers",
         "edge_pct": 10.0,
-        "model_prob": 0.60,
+        "model_prob": 0.70,
         "market_price": 0.50,
     }
     out = _run(executor._fire_one(sig))
@@ -436,11 +436,14 @@ def test_fire_one_min_stake_fallback_when_edge_metadata_missing(monkeypatch):
     monkeypatch.setattr(executor, "_already_placed", lambda *a, **k: _async_false())
 
     # No model_prob, edge_pct, or ev_pct — pure signal with a market price.
+    # ``pick_type=moneyline`` bypasses the spread/total pre-filter so the
+    # min-stake fallback path is exercised regardless of selection text.
     sig = {
         "id": 1,
         "vertical": "sports",
         "matchup": "CIN @ NYM",
         "selection": "Over 8.5",
+        "pick_type": "moneyline",
         "market_price": 0.55,
     }
     out = _run(executor._fire_one(sig))
@@ -482,8 +485,12 @@ def test_fire_one_honors_no_side(monkeypatch):
         "selection": "Under 220.5",
         "side": "NO",
         # For NO side: kelly favourable when (1-p) > price, e.g.
-        # p=0.40, price=0.50 → NO has edge.
-        "model_prob": 0.40,
+        # p=0.30, price=0.50 → NO has edge AND clears the 65%
+        # per-side model-confidence floor (1-0.30 = 70%).
+        "model_prob": 0.30,
+        # Bypass spread/total pre-filter — the test exercises NO-side
+        # propagation, not market-type filtering.
+        "pick_type": "moneyline",
         "market_price": 0.50,
     }
     out = _run(executor._fire_one(sig))
@@ -525,6 +532,7 @@ def test_signal_side_roundtrips_db_to_executor(monkeypatch):
                 "market_title": args[8],
                 "raw": args[9],
                 "side": args[10],
+                "pick_type": args[11] if len(args) > 11 else None,
                 "status": "pending",
             }
             table[next_id["n"]] = row
@@ -548,6 +556,7 @@ def test_signal_side_roundtrips_db_to_executor(monkeypatch):
                     "kalshi_ticker": r["kalshi_ticker"],
                     "market_title": r["market_title"],
                     "side": r["side"],
+                    "pick_type": r.get("pick_type"),
                 }
                 for r in table.values()
                 if r["status"] == "pending"
@@ -588,10 +597,15 @@ def test_signal_side_roundtrips_db_to_executor(monkeypatch):
         "signal_date": "2026-05-22",
         "side": "no",  # lower-case from scraper → normalized to "NO"
         "edge_pct": 10.0,
-        "model_prob": 0.40,
+        # NO-side: 1-p = 0.70 clears the 65% confidence floor.
+        "model_prob": 0.30,
         "market_price": 0.50,
         "kalshi_ticker": None,
         "market_title": None,
+        # Round-trip test exercises side persistence, not market-type
+        # filtering — tag as moneyline so the new pre-filter lets it
+        # through to the executor.
+        "pick_type": "moneyline",
         "raw": {},
     }))
     assert table[1]["side"] == "NO", "poller must persist normalized side"
@@ -651,7 +665,8 @@ def test_signal_enrichment_fields_roundtrip_db(monkeypatch):
         "signal_date": "2026-05-22",
         "side": "YES",
         "edge_pct": 8.5,
-        "model_prob": 0.58,
+        # YES-side: 0.72 clears the 65% confidence floor.
+        "model_prob": 0.72,
         "market_price": 0.50,
         "kalshi_ticker": "KX-NBA-LAL-BOS",
         "market_title": "Lakers vs Celtics",

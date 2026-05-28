@@ -187,10 +187,67 @@ def _classify_exception(e: BaseException) -> tuple[str | None, str]:
     return None, msg[:200]
 
 
+_MIN_MODEL_CONFIDENCE = 0.65
+
+
+def _is_unsupported_market(sig: dict[str, Any]) -> str | None:
+    """Return a short reason when the signal is for a market Kalshi
+    doesn't list (sport spreads, totals, etc.) so we skip the expensive
+    resolver + slippage round-trip and surface an honest disposition.
+
+    Kalshi sports markets are overwhelmingly moneyline-style YES/NO; the
+    Edge Terminal scraper also ships spread and total picks ("Sox +1.5",
+    "UNDER 8") that have no Kalshi counterpart and were rejecting with
+    misleading ``no matching kalshi market`` / ``no liquidity`` reasons
+    on every poll.  Detect them up front and tag them with a stable
+    ``skipped_unsupported_market`` status so the operator can filter
+    them out of the queue.
+    """
+    pick_type = (sig.get("pick_type") or "").strip().lower()
+    if pick_type in {"spread", "total"}:
+        return f"unsupported market type: {pick_type}"
+    # When the scraper explicitly tagged the pick as moneyline (the only
+    # Kalshi-supported sports format) we trust it over the selection-
+    # text heuristic — otherwise legit moneyline picks like "Over Bears"
+    # or "Saints +Trinity" (proper-noun coincidence) would be dropped.
+    if pick_type == "moneyline":
+        return None
+    selection = (sig.get("selection") or "").strip().upper()
+    # Heuristic for sources that don't expose pick_type: leading
+    # OVER/UNDER → total; trailing +N / -N (e.g. "Sox +1.5") → spread.
+    if selection.startswith(("OVER ", "UNDER ")):
+        return "unsupported market type: total (inferred from selection)"
+    import re as _re
+    if _re.search(r"\s[+\-]\d", selection):
+        return "unsupported market type: spread (inferred from selection)"
+    return None
+
+
 async def _fire_one(sig: dict[str, Any]) -> dict[str, Any] | None:
+    # Cheap pre-filter: drop spread/total picks before paying the
+    # market_resolver + Kalshi REST + slippage-guard cost on a market
+    # that can't possibly match.
+    unsupported = _is_unsupported_market(sig)
+    if unsupported:
+        raise _SignalSkip("skipped_unsupported_market", unsupported)
+
     ticker = await market_resolver.resolve(sig)
     if not ticker:
         return None
+    # Persist the resolved ticker on the signal row so the operator-
+    # facing queue shows WHICH Kalshi market we matched (or didn't —
+    # NULL stays NULL when resolve returns None above).  Updated even
+    # when downstream gates (slippage, dedupe, confidence) reject so
+    # diagnosis is possible without re-running the resolver.
+    try:
+        await db.execute(
+            "UPDATE edge_terminal_signals SET kalshi_ticker = $2, updated_at = now() "
+            "WHERE id = $1 AND (kalshi_ticker IS DISTINCT FROM $2)",
+            int(sig["id"]),
+            ticker,
+        )
+    except Exception as e:  # pragma: no cover — defensive
+        log.debug("edge_terminal: ticker persist failed for sid=%s: %s", sig.get("id"), e)
 
     # Pricing — prefer scraped market_price, else assume a near-the-
     # money mid so the lifecycle's clamp keeps us in [0.01, 0.99].
@@ -236,6 +293,32 @@ async def _fire_one(sig: dict[str, Any]) -> dict[str, Any] | None:
             )
         except (TypeError, ValueError):
             pass
+
+    # Operator-mandated minimum model confidence floor (per-side, post-
+    # side-flip).  We compute the chosen side's probability first so a
+    # 60% model_prob on a ``NO`` selection (i.e. 40% YES) is correctly
+    # rejected from the NO side's perspective rather than passing the
+    # raw YES probability through.  Signals with no model_prob at all
+    # (scraper omitted it AND no edge/ev to infer from) bypass the
+    # floor — the min-stake fallback below already caps real risk at
+    # one contract for those.
+    raw_side_for_floor = (sig.get("side") or "YES")
+    side_for_floor = (
+        "NO" if str(raw_side_for_floor).strip().upper() == "NO" else "YES"
+    )
+    if model_prob is not None:
+        floor_prob = (
+            float(model_prob) if side_for_floor == "YES"
+            else 1.0 - float(model_prob)
+        )
+        if floor_prob < _MIN_MODEL_CONFIDENCE:
+            raise _SignalSkip(
+                "skipped_low_confidence",
+                (
+                    f"model confidence {floor_prob:.0%} below "
+                    f"{_MIN_MODEL_CONFIDENCE:.0%} floor"
+                ),
+            )
 
     # Side defaults to YES (historic behavior) but honors the scraper's
     # explicit ``side`` field when present so "Under"/"No" picks trade
