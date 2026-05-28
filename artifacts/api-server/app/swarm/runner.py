@@ -95,6 +95,12 @@ async def _publish(event: dict[str, Any]) -> None:
 _openai_client: Any = None
 _anthropic_client: Any = None
 
+# Both SDKs retry transient failures (connection errors, 408/409/429/5xx) with
+# exponential backoff internally; the default is 2 retries but we pin it
+# explicitly so swarm cycles survive a brief upstream blip instead of dropping
+# a persona's contribution.  Streaming requests retry on the initial connect.
+_LLM_MAX_RETRIES = 2
+
 
 def _get_openai():
     global _openai_client
@@ -104,7 +110,7 @@ def _get_openai():
         key = get_settings().openai_api_key
         if not key:
             raise RuntimeError("OPENAI_API_KEY not configured")
-        _openai_client = AsyncOpenAI(api_key=key)
+        _openai_client = AsyncOpenAI(api_key=key, max_retries=_LLM_MAX_RETRIES)
     return _openai_client
 
 
@@ -116,7 +122,9 @@ def _get_anthropic():
         key = get_settings().anthropic_api_key
         if not key:
             raise RuntimeError("ANTHROPIC_API_KEY not configured")
-        _anthropic_client = AsyncAnthropic(api_key=key)
+        _anthropic_client = AsyncAnthropic(
+            api_key=key, max_retries=_LLM_MAX_RETRIES
+        )
     return _anthropic_client
 
 

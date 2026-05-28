@@ -38,7 +38,14 @@ import httpx
 from fastapi import FastAPI, Request, Response
 from fastapi.responses import StreamingResponse
 
+from .http_retry import retry_request
+
 log = logging.getLogger(__name__)
+
+# Only idempotent verbs are safe to retry transparently — retrying a POST/PUT
+# etc. against Clerk's Frontend API could double-apply a mutation (e.g. create
+# a second session), so those stay single-shot.
+_RETRYABLE_CLERK_METHODS: frozenset[str] = frozenset({"GET", "HEAD"})
 
 CLERK_FAPI = "https://frontend-api.clerk.dev"
 CLERK_PROXY_PATH = "/api/__clerk"
@@ -198,13 +205,23 @@ def register_clerk_proxy(app: FastAPI) -> bool:
             client_ip=client_ip,
         )
 
-        try:
-            upstream = await client.request(
+        async def _do_upstream() -> httpx.Response:
+            return await client.request(
                 request.method,
                 target_path,
                 content=body if body else None,
                 headers=headers,
             )
+
+        try:
+            if request.method.upper() in _RETRYABLE_CLERK_METHODS:
+                upstream = await retry_request(
+                    _do_upstream,
+                    client_name="clerk_proxy",
+                    max_attempts=3,
+                )
+            else:
+                upstream = await _do_upstream()
         except httpx.HTTPError as exc:
             log.warning(
                 "clerk_proxy upstream error path=%s err=%s",

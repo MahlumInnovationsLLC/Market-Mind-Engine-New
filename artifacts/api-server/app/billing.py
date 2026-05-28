@@ -65,12 +65,24 @@ def stripe_configured() -> bool:
     return bool(os.environ.get("STRIPE_SECRET_KEY"))
 
 
+# Stripe's SDK has first-class retry support for transient network errors
+# (connection resets, 5xx, lock timeouts) and only ever retries requests
+# that are safe to retry — it sends an idempotency key on writes so a retried
+# create can't double-charge.  We enable it explicitly (default is 0) so a
+# blip talking to Stripe doesn't surface as a user-visible 502.
+_STRIPE_MAX_NETWORK_RETRIES = 2
+
+
 def _stripe_client() -> Any:
     """Return the configured Stripe SDK module (raises 503 if absent)."""
     key = os.environ.get("STRIPE_SECRET_KEY")
     if not key:
         raise HTTPException(status_code=503, detail="stripe is not configured")
     stripe.api_key = key
+    # Idempotent: setting these module-level attrs on every call is cheap and
+    # guarantees the retry policy is in force even if `stripe` was imported
+    # elsewhere first.
+    stripe.max_network_retries = _STRIPE_MAX_NETWORK_RETRIES
     return stripe
 
 
