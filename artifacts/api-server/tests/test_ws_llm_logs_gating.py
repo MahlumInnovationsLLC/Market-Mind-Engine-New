@@ -115,6 +115,18 @@ def test_ws_llm_logs_stays_open_for_pro_plus(
     payload = {"type": "test", "tier": tier, "marker": "live-stream-ok"}
 
     with client.websocket_connect("/api/ws/llm-logs?token=ignored") as ws:
+        # The handler now emits a `{"type":"hello"}` ack frame right
+        # after subscribing so the browser's seamless-rotation
+        # handshake has something to ack against.  Drain it first so
+        # the assertion below tests the actual published payload.
+        try:
+            hello = ws.receive_json()
+        except WebSocketDisconnect as e:  # pragma: no cover — regression guard
+            pytest.fail(
+                f"socket closed before hello for tier={tier} (code={e.code})"
+            )
+        assert hello.get("type") == "hello"
+        assert hello.get("channel") == "llm-logs"
         # Publish into the hub from the TestClient's portal so the
         # async publish runs on the server's loop.  The handler then
         # forwards the event to our open socket.

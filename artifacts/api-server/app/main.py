@@ -8493,6 +8493,8 @@ async def ws_llm_logs(ws: WebSocket) -> None:
             return
     q = llm_log_hub.subscribe(label="llm-logs")
     try:
+        from .auth import ws_send_hello
+        await ws_send_hello(ws, channel="llm-logs")
         while True:
             event = await q.get()
             await ws.send_json(event)
@@ -8775,6 +8777,8 @@ async def ws_pipeline(ws: WebSocket) -> None:
         return
     q = pipeline_event_hub.subscribe(label="pipeline")
     try:
+        from .auth import ws_send_hello
+        await ws_send_hello(ws, channel="pipeline")
         while True:
             event = await q.get()
             await ws.send_json(event)
@@ -9017,6 +9021,8 @@ async def ws_settlement(ws: WebSocket) -> None:
         return
     q = settlement_event_hub.subscribe(label="settlement")
     try:
+        from .auth import ws_send_hello
+        await ws_send_hello(ws, channel="settlement")
         while True:
             event = await q.get()
             await ws.send_json(event)
@@ -9486,6 +9492,8 @@ async def kalshi_event_stream(websocket: WebSocket):  # pragma: no cover - cover
         return
     q = await kalshi_bus.subscribe(label="kalshi-multiplex")
     try:
+        from .auth import ws_send_hello
+        await ws_send_hello(websocket, channel="kalshi")
         while True:
             msg = await q.get()
             await websocket.send_json(msg)
@@ -9622,6 +9630,8 @@ async def polymarket_event_stream(websocket: WebSocket):  # pragma: no cover
         return
     q = await polymarket_bus.bus.subscribe(label="polymarket-multiplex")
     try:
+        from .auth import ws_send_hello
+        await ws_send_hello(websocket, channel="polymarket")
         while True:
             msg = await q.get()
             await websocket.send_json(msg)
@@ -9916,6 +9926,8 @@ async def ws_positions(ws: WebSocket) -> None:
     p_q = pipeline_event_hub.subscribe(label="positions")
     s_q = settlement_event_hub.subscribe(label="positions")
     try:
+        from .auth import ws_send_hello
+        await ws_send_hello(ws, channel="positions")
         async def _drain(q, types):
             while True:
                 ev = await q.get()
@@ -9959,6 +9971,8 @@ async def ws_trades(ws: WebSocket) -> None:
     p_q = pipeline_event_hub.subscribe(label="trades")
     s_q = settlement_event_hub.subscribe(label="trades")
     try:
+        from .auth import ws_send_hello
+        await ws_send_hello(ws, channel="trades")
         async def _drain(q):
             while True:
                 ev = await q.get()
@@ -10000,6 +10014,8 @@ async def ws_alerts(ws: WebSocket) -> None:
     p_q = pipeline_event_hub.subscribe(label="alerts", policy="close")
     s_q = settlement_event_hub.subscribe(label="alerts", policy="close")
     try:
+        from .auth import ws_send_hello
+        await ws_send_hello(ws, channel="alerts")
         async def _drain(q):
             while True:
                 ev = await q.get()
@@ -10047,6 +10063,8 @@ async def ws_orderbook(ws: WebSocket, ticker: str) -> None:
     # overflow rather than silently dropping the head.
     q = await kalshi_bus.subscribe(label=f"orderbook:{target}", policy="close")
     try:
+        from .auth import ws_send_hello
+        await ws_send_hello(ws, channel=f"orderbook:{target}")
         while True:
             msg = await q.get()
             mt = msg.get("type") if isinstance(msg, dict) else None
@@ -10105,6 +10123,8 @@ async def ws_temperature(ws: WebSocket, city: str) -> None:
         return
     last_payload: dict | None = None
     try:
+        from .auth import ws_send_hello
+        await ws_send_hello(ws, channel=f"temperature:{city_code}")
         while True:
             try:
                 # `weather_open_meteo` is a feed-registry name, not a

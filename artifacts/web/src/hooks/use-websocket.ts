@@ -133,6 +133,13 @@ function jwtExpMs(token: string | null): number | null {
 const ROTATION_SAFETY_MS = 10_000;
 const ROTATION_FALLBACK_MS = 50_000;
 const ROTATION_MIN_MS = 5_000;
+// How long to wait for the server's `{"type":"hello"}` frame on a
+// rotation replacement socket before declaring the handshake failed.
+// The server sends the hello immediately after subscribing to the
+// hub, so a healthy LAN round-trip lands well under 1s.  5s leaves
+// generous slack for slow networks while still bounding the time we
+// hold an extra socket open per rotation.
+const ROTATION_ACK_TIMEOUT_MS = 5_000;
 
 function rotationDelayMs(token: string | null): number {
   const expMs = jwtExpMs(token);
@@ -164,6 +171,12 @@ export function useWebSocket(opts: UseWebSocketOptions): UseWebSocketResult {
   const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const countdownTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const rotateTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // In-flight rotation replacement socket + ack timer.  Tracked in
+  // refs (not just inside the `rotate()` closure) so that unmount,
+  // disable, and reconnect cleanups can force-close an opened-but-
+  // unacked replacement instead of leaking it.  See task #926.
+  const pendingRotationWsRef = useRef<WebSocket | null>(null);
+  const pendingAckTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const onMessageRef = useRef(onMessage);
   const stoppedRef = useRef(false);
   const lastUnauthorizedRef = useRef(false);
@@ -188,6 +201,35 @@ export function useWebSocket(opts: UseWebSocketOptions): UseWebSocketResult {
     if (rotateTimerRef.current) {
       clearTimeout(rotateTimerRef.current);
       rotateTimerRef.current = null;
+    }
+  }, []);
+
+  // Abort an in-flight rotation attempt: clear the ack-timeout timer
+  // and force-close the replacement socket if it was already opened
+  // but hasn't acked / swapped in.  Safe to call when no rotation is
+  // pending.  Caller is responsible for any failure-accounting it
+  // wants to record before calling (cleanup paths intentionally do
+  // not record a failure — the socket is being torn down deliberately).
+  const abortPendingRotation = useCallback(() => {
+    if (pendingAckTimerRef.current) {
+      clearTimeout(pendingAckTimerRef.current);
+      pendingAckTimerRef.current = null;
+    }
+    const pending = pendingRotationWsRef.current;
+    if (pending) {
+      pendingRotationWsRef.current = null;
+      // Detach handlers first so the imminent close doesn't try to
+      // run noteRotationFailure / scheduleRetry on a hook that's
+      // either unmounting or about to start a fresh attempt.
+      pending.onopen = null;
+      pending.onmessage = null;
+      pending.onerror = null;
+      pending.onclose = null;
+      try {
+        pending.close();
+      } catch {
+        // ignore
+      }
     }
   }, []);
 
@@ -240,6 +282,13 @@ export function useWebSocket(opts: UseWebSocketOptions): UseWebSocketResult {
           setStatus("unauthorized");
           return;
         }
+        // `hello` is the server-side rotation handshake frame (see
+        // `ws_send_hello` in api-server/auth.py).  On the initial
+        // connection it carries no user-visible payload — swallow it
+        // so it never lands in the events buffer or fires onMessage.
+        if (payload.type === "hello") {
+          return;
+        }
         setEvents((prev) => {
           const next = [...prev, payload!];
           return next.length > bufferSize
@@ -280,6 +329,10 @@ export function useWebSocket(opts: UseWebSocketOptions): UseWebSocketResult {
     // Cancel any pending timers for the previous attempt.
     teardownTimers();
     clearRotateTimer();
+    // Drop any in-flight rotation replacement — we're about to do a
+    // hard reconnect, so its eventual onclose must not retry against
+    // a stale generation.
+    abortPendingRotation();
     // Detach + close any existing socket so its handlers can't race
     // with the new generation.
     if (wsRef.current) {
@@ -310,7 +363,7 @@ export function useWebSocket(opts: UseWebSocketOptions): UseWebSocketResult {
     }
     wsRef.current = ws;
     attachHandlers(ws, gen, token, false);
-  }, [path, getToken, teardownTimers, clearRotateTimer, detach, attachHandlers]);
+  }, [path, getToken, teardownTimers, clearRotateTimer, abortPendingRotation, detach, attachHandlers]);
 
   // Open a fresh socket alongside the existing one and only swap when
   // the new one is open.  This is the "smart rotation" path that
@@ -332,6 +385,11 @@ export function useWebSocket(opts: UseWebSocketOptions): UseWebSocketResult {
     // Only rotate a fully-open socket.  If the current socket is
     // anything else, the regular reconnect path will handle it.
     if (!oldWs || oldWs.readyState !== WebSocket.OPEN) return;
+    // A prior rotation attempt may still have a replacement socket
+    // hanging around (e.g. opened-but-unacked, then we retried after
+    // ack-timeout).  Drop it before starting a fresh attempt so we
+    // don't end up holding two competing replacements.
+    abortPendingRotation();
 
     let token: string | null = null;
     let tokenError = false;
@@ -363,24 +421,53 @@ export function useWebSocket(opts: UseWebSocketOptions): UseWebSocketResult {
       }, ROTATION_MIN_MS);
       return;
     }
+    pendingRotationWsRef.current = nextWs;
 
     const newGen = generationRef.current + 1;
     let swapped = false;
+    // Single-shot guard for failure accounting: the ack-timeout path
+    // closes the socket itself, which fires onclose, which would
+    // otherwise call `noteRotationFailure` a second time and
+    // double-increment `rotationFailureCount` / clobber
+    // `lastRotationError`.
+    let failed = false;
+    const markFailed = (reason: string) => {
+      if (failed || swapped) return;
+      failed = true;
+      noteRotationFailure(reason);
+    };
 
-    nextWs.onopen = () => {
-      if (stoppedRef.current) {
-        try {
-          nextWs.close();
-        } catch {
-          // ignore
-        }
-        return;
+    const clearAckTimer = () => {
+      if (pendingAckTimerRef.current) {
+        clearTimeout(pendingAckTimerRef.current);
+        pendingAckTimerRef.current = null;
       }
-      // Promote the new socket: bump generation so the old socket's
-      // handlers (still bound to the previous gen) become no-ops, then
-      // detach + close it without triggering the reconnect flow.
-      generationRef.current = newGen;
+    };
+
+    const scheduleRetry = () => {
+      if (stoppedRef.current) return;
+      if (wsRef.current === oldWs && oldWs.readyState === WebSocket.OPEN) {
+        clearRotateTimer();
+        rotateTimerRef.current = setTimeout(() => {
+          void rotateRef.current();
+        }, ROTATION_MIN_MS);
+      }
+    };
+
+    // Promote the replacement socket to live: bump generation, detach
+    // + close the old socket, rebind handlers, schedule next rotation.
+    // Only invoked once we have proof the replacement is fully wired
+    // through (i.e. a hello/event frame was received from the server).
+    const performSwap = () => {
+      if (swapped || stoppedRef.current) return;
       swapped = true;
+      clearAckTimer();
+      // Hand ownership off the "pending" slot — the replacement is
+      // now the live socket and should be tracked via wsRef instead.
+      if (pendingRotationWsRef.current === nextWs) {
+        pendingRotationWsRef.current = null;
+      }
+      generationRef.current = newGen;
       detach(oldWs);
       try {
         oldWs.close();
@@ -392,9 +479,6 @@ export function useWebSocket(opts: UseWebSocketOptions): UseWebSocketResult {
       lastUnauthorizedRef.current = false;
       setCloseCode(null);
       setStatus("open");
-      // Surface a successful background refresh so the UI can flash
-      // a brief acknowledgement and operators have an inspectable
-      // counter to watch on long-lived sessions.
       setRotationCount((n) => n + 1);
       setLastRotationAt(Date.now());
       setRotationFailureCount(0);
@@ -405,39 +489,100 @@ export function useWebSocket(opts: UseWebSocketOptions): UseWebSocketResult {
       attachHandlers(nextWs, newGen, token, false);
       // attachHandlers only schedules rotation from its onopen, which
       // won't fire again on this already-open socket — so kick off the
-      // next rotation explicitly here. Otherwise long-lived sessions
-      // would rotate exactly once and then drift toward expiry.
+      // next rotation explicitly here.
       scheduleRotationRef.current(token);
     };
 
-    // Until swap, the new socket needs minimal handlers so we don't
-    // disturb UI state for the still-live old socket.
-    nextWs.onmessage = () => {
-      // Discard messages until swap; they'd be duplicates of the
-      // old socket anyway, since both authenticated as the same user.
+    nextWs.onopen = () => {
+      if (stoppedRef.current) {
+        try {
+          nextWs.close();
+        } catch {
+          // ignore
+        }
+        return;
+      }
+      // DON'T swap yet — wait for the server's `{"type":"hello"}` ack
+      // (or any other valid frame) so we know the connection survived
+      // past the TCP/TLS handshake into the producing handler.
+      // Without this, a load-balancer or proxy that kills the socket
+      // immediately after upgrade would leave us with a closed
+      // replacement AND a torn-down old socket — the exact race that
+      // logged `code 1006` from production.
+      clearAckTimer();
+      pendingAckTimerRef.current = setTimeout(() => {
+        pendingAckTimerRef.current = null;
+        if (swapped || stoppedRef.current) return;
+        markFailed(
+          `replacement socket opened but did not ack within ${
+            ROTATION_ACK_TIMEOUT_MS / 1000
+          }s`,
+        );
+        try {
+          nextWs.close();
+        } catch {
+          // ignore
+        }
+        scheduleRetry();
+      }, ROTATION_ACK_TIMEOUT_MS);
+    };
+
+    nextWs.onmessage = (msg) => {
+      if (swapped || stoppedRef.current) return;
+      // Any well-formed JSON frame counts as the handshake ack — the
+      // server sends `{"type":"hello"}` first, but a producer that
+      // races ahead with a real event would also be valid evidence
+      // the connection is healthy.  Malformed payloads are ignored so
+      // a stray garbage byte can't trigger a premature swap.
+      let payload: Record<string, unknown> | null = null;
+      try {
+        payload = JSON.parse((msg as MessageEvent).data as string);
+      } catch {
+        return;
+      }
+      if (!payload || typeof payload !== "object") return;
+      performSwap();
+      // If this frame is something the consumer cares about (i.e. not
+      // the hello), forward it through the normal path so we don't
+      // drop the very first event delivered immediately after swap.
+      if (payload.type !== "hello") {
+        setEvents((prev) => {
+          const next = [...prev, payload!];
+          return next.length > bufferSize
+            ? next.slice(next.length - bufferSize)
+            : next;
+        });
+        try {
+          onMessageRef.current?.(payload);
+        } catch {
+          // swallow handler errors
+        }
+      }
     };
     nextWs.onerror = () => {
       // Suppress; rely on onclose to decide what to do.
     };
     nextWs.onclose = (ev) => {
       if (swapped) return; // Post-swap closes are handled by attachHandlers.
-      // Rotation attempt failed before opening.  Old socket is still
+      clearAckTimer();
+      if (pendingRotationWsRef.current === nextWs) {
+        pendingRotationWsRef.current = null;
+      }
+      // Rotation attempt failed before swap.  Old socket is still
       // live; just retry rotation soon.  If the old socket also drops,
       // its onclose will trigger the normal reconnect path.
       if (stoppedRef.current) return;
-      noteRotationFailure(
+      // `markFailed` is single-shot: if ack-timeout already recorded
+      // the failure and then closed the socket itself, this onclose
+      // won't double-count.
+      markFailed(
         ev.code === 4401
           ? "replacement socket rejected (unauthorized)"
           : `replacement socket closed before swap (code ${ev.code || "n/a"})`,
       );
-      if (wsRef.current === oldWs && oldWs.readyState === WebSocket.OPEN) {
-        clearRotateTimer();
-        rotateTimerRef.current = setTimeout(() => {
-          void rotateRef.current();
-        }, ROTATION_MIN_MS);
-      }
+      scheduleRetry();
     };
-  }, [path, getToken, detach, attachHandlers, clearRotateTimer, noteRotationFailure]);
+  }, [path, bufferSize, getToken, abortPendingRotation, detach, attachHandlers, clearRotateTimer, noteRotationFailure]);
 
   const scheduleRotation = useCallback(
     (token: string | null) => {
@@ -498,6 +643,10 @@ export function useWebSocket(opts: UseWebSocketOptions): UseWebSocketResult {
     if (!enabled || !isSignedIn) {
       teardownTimers();
       clearRotateTimer();
+      // Drop any opened-but-unacked rotation replacement BEFORE we
+      // bump the generation, so its detached handlers don't get a
+      // chance to interact with the soon-to-be-stale state.
+      abortPendingRotation();
       // Bump generation so any in-flight onclose for the existing
       // socket cannot schedule another reconnect after we tear down.
       generationRef.current += 1;
@@ -520,6 +669,10 @@ export function useWebSocket(opts: UseWebSocketOptions): UseWebSocketResult {
       stoppedRef.current = true;
       teardownTimers();
       clearRotateTimer();
+      // Critical: an opened-but-unacked rotation replacement is held
+      // in `pendingRotationWsRef`, NOT `wsRef`.  Without this call the
+      // socket would leak across unmount (task #926).
+      abortPendingRotation();
       generationRef.current += 1;
       if (wsRef.current) {
         detach(wsRef.current);
@@ -531,7 +684,7 @@ export function useWebSocket(opts: UseWebSocketOptions): UseWebSocketResult {
         wsRef.current = null;
       }
     };
-  }, [enabled, isSignedIn, connect, teardownTimers, clearRotateTimer, detach]);
+  }, [enabled, isSignedIn, connect, teardownTimers, clearRotateTimer, abortPendingRotation, detach]);
 
   const lastEvent = events.length > 0 ? events[events.length - 1] : null;
 

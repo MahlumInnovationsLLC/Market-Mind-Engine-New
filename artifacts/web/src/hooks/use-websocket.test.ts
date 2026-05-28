@@ -198,16 +198,28 @@ describe("useWebSocket — proactive token rotation", () => {
     });
     expect(result.current.lastEvent).toEqual({ type: "tick", n: 1 });
 
-    // Now the new socket opens — hook should swap and quietly close
-    // the old one, status remains "open".
+    // Now the new socket opens — but the hook MUST NOT swap until the
+    // server's hello-ack arrives.  Old socket is still authoritative.
     act(() => {
       second.fireOpen();
+    });
+    observed.push(result.current.status);
+    expect(first.closeCalls).toHaveLength(0);
+    expect(first.readyState).toBe(MockWebSocket.OPEN);
+
+    // Server hello-ack lands — now the swap completes and the old
+    // socket is closed.  Status stays "open" throughout.
+    act(() => {
+      second.fireMessage({ type: "hello", ts: Date.now() });
     });
     observed.push(result.current.status);
 
     expect(result.current.status).toBe("open");
     expect(second.readyState).toBe(MockWebSocket.OPEN);
     expect(first.closeCalls.length).toBeGreaterThan(0);
+    // Hello frames must NOT pollute the event buffer surfaced to
+    // consumers — `lastEvent` still reflects the last real tick.
+    expect(result.current.lastEvent).toEqual({ type: "tick", n: 1 });
 
     // After swap, the post-swap close of the OLD socket must not
     // bubble through as a disconnect (its handlers were detached).
@@ -271,12 +283,188 @@ describe("useWebSocket — proactive token rotation", () => {
     expect(MockWebSocket.instances.length).toBeGreaterThanOrEqual(3);
     const third = MockWebSocket.instances[MockWebSocket.instances.length - 1];
 
-    // This retry succeeds: it opens, the swap completes, status holds.
+    // This retry succeeds: it opens, the server hello-ack lands, the
+    // swap completes, status holds.
     act(() => {
       third.fireOpen();
+      third.fireMessage({ type: "hello", ts: Date.now() });
     });
     expect(result.current.status).toBe("open");
     expect(first.closeCalls.length).toBeGreaterThan(0);
+
+    unmount();
+  });
+
+  it("retains the old socket when the replacement opens but never acks", async () => {
+    const expSeconds = Math.floor((Date.now() + 60_000) / 1000);
+    getTokenMock.mockResolvedValue(makeJwt(expSeconds));
+
+    const { result, unmount } = renderHook(() =>
+      useWebSocket({ path: "/ws" }),
+    );
+    await flushPromises();
+
+    const first = MockWebSocket.instances[0];
+    act(() => {
+      first.fireOpen();
+    });
+    expect(result.current.status).toBe("open");
+
+    // Trigger rotation.  Replacement opens but the server never sends
+    // its `hello` frame (e.g. load-balancer killed the upstream).
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(50_000);
+    });
+    expect(MockWebSocket.instances).toHaveLength(2);
+    const second = MockWebSocket.instances[1];
+
+    act(() => {
+      second.fireOpen();
+    });
+
+    // Old socket MUST remain untouched while we wait for the ack.
+    expect(first.closeCalls).toHaveLength(0);
+    expect(first.readyState).toBe(MockWebSocket.OPEN);
+    expect(result.current.status).toBe("open");
+
+    // Burn the 5s ACK timeout — the hook should close the stalled
+    // replacement, mark a rotation failure, and schedule a retry.
+    // Old socket stays live the entire time.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(5_001);
+    });
+    expect(second.closeCalls.length).toBeGreaterThan(0);
+    expect(first.closeCalls).toHaveLength(0);
+    expect(first.readyState).toBe(MockWebSocket.OPEN);
+    expect(result.current.status).toBe("open");
+    expect(result.current.rotationFailureCount).toBeGreaterThan(0);
+    expect(result.current.lastRotationError ?? "").toMatch(
+      /did not ack/i,
+    );
+
+    // A retry attempt should then fire on the ROTATION_MIN_MS (5s)
+    // timer; a fresh replacement appears and this one acks.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(5_500);
+    });
+    expect(MockWebSocket.instances.length).toBeGreaterThanOrEqual(3);
+    const third = MockWebSocket.instances[MockWebSocket.instances.length - 1];
+    act(() => {
+      third.fireOpen();
+      third.fireMessage({ type: "hello", ts: Date.now() });
+    });
+    expect(first.closeCalls.length).toBeGreaterThan(0);
+    expect(result.current.status).toBe("open");
+    // Successful rotation resets the failure counter.
+    expect(result.current.rotationFailureCount).toBe(0);
+    expect(result.current.lastRotationError).toBeNull();
+
+    unmount();
+  });
+
+  it("closes the opened-but-unacked replacement on unmount", async () => {
+    const expSeconds = Math.floor((Date.now() + 60_000) / 1000);
+    getTokenMock.mockResolvedValue(makeJwt(expSeconds));
+
+    const { result, unmount } = renderHook(() =>
+      useWebSocket({ path: "/ws" }),
+    );
+    await flushPromises();
+
+    const first = MockWebSocket.instances[0];
+    act(() => {
+      first.fireOpen();
+    });
+    expect(result.current.status).toBe("open");
+
+    // Trigger rotation; the replacement opens but never acks.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(50_000);
+    });
+    expect(MockWebSocket.instances).toHaveLength(2);
+    const second = MockWebSocket.instances[1];
+    act(() => {
+      second.fireOpen();
+    });
+    // Pre-condition: replacement is alive, ack-timer pending.
+    expect(second.closeCalls).toHaveLength(0);
+    expect(second.readyState).toBe(MockWebSocket.OPEN);
+
+    // Unmount mid-handshake — must close BOTH sockets, no leaks.
+    unmount();
+    expect(first.closeCalls.length).toBeGreaterThan(0);
+    expect(second.closeCalls.length).toBeGreaterThan(0);
+
+    // And the dangling ack-timer must not fire after unmount: bump
+    // time well past the ROTATION_ACK_TIMEOUT_MS and confirm no extra
+    // sockets get constructed by a retry path.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(30_000);
+    });
+    expect(MockWebSocket.instances).toHaveLength(2);
+  });
+
+  it("counts an ack-timeout rotation failure exactly once", async () => {
+    const expSeconds = Math.floor((Date.now() + 60_000) / 1000);
+    getTokenMock.mockResolvedValue(makeJwt(expSeconds));
+
+    const { result, unmount } = renderHook(() =>
+      useWebSocket({ path: "/ws" }),
+    );
+    await flushPromises();
+    const first = MockWebSocket.instances[0];
+    act(() => {
+      first.fireOpen();
+    });
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(50_000);
+    });
+    const second = MockWebSocket.instances[1];
+    act(() => {
+      second.fireOpen();
+    });
+
+    // Burn the ack-timeout.  Implementation calls close() which
+    // synchronously fires our MockWebSocket.onclose — so both the
+    // timeout path AND the onclose path race to record a failure.
+    // The single-shot `markFailed` guard must ensure only one lands.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(5_500);
+    });
+    expect(result.current.rotationFailureCount).toBe(1);
+    expect(result.current.lastRotationError ?? "").toMatch(/did not ack/i);
+
+    unmount();
+  });
+
+  it("filters server hello frames so they never reach the event buffer", async () => {
+    getTokenMock.mockResolvedValue("not-a-jwt");
+
+    const { result, unmount } = renderHook(() =>
+      useWebSocket({ path: "/ws" }),
+    );
+    await flushPromises();
+
+    const first = MockWebSocket.instances[0];
+    act(() => {
+      first.fireOpen();
+    });
+
+    // Server's initial hello on the freshly-connected socket — must be
+    // swallowed so it doesn't show up in `events` / `lastEvent`.
+    act(() => {
+      first.fireMessage({ type: "hello", ts: Date.now() });
+    });
+    expect(result.current.events).toHaveLength(0);
+    expect(result.current.lastEvent).toBeNull();
+
+    // A real event right after still lands normally.
+    act(() => {
+      first.fireMessage({ type: "tick", n: 1 });
+    });
+    expect(result.current.events).toHaveLength(1);
+    expect(result.current.lastEvent).toEqual({ type: "tick", n: 1 });
 
     unmount();
   });

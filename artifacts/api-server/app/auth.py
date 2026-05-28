@@ -571,6 +571,38 @@ async def require_admin(
     return user
 
 
+async def ws_send_hello(websocket, *, channel: str | None = None) -> None:
+    """Send a small ``{"type":"hello"}`` frame as proof the connection
+    is fully wired through to a producing handler.
+
+    The browser hook (``use-websocket.ts``) uses receipt of this frame
+    as the ack for its seamless token-rotation handshake: the
+    replacement socket is not promoted (and the old socket is not
+    closed) until this frame lands.  Without it, an opaque
+    ``code 1006`` close on the replacement between the TCP handshake
+    and the first real event would drop the user's subscription.
+
+    Best-effort: any send error is swallowed so a disconnect
+    mid-handshake never escapes into the caller's main loop.  Call
+    this right after subscribing to the relevant hub but before
+    entering the receive loop.
+    """
+    import time as _time
+
+    try:
+        payload: dict[str, object] = {
+            "type": "hello",
+            "ts": int(_time.time() * 1000),
+        }
+        if channel:
+            payload["channel"] = channel
+        await websocket.send_json(payload)
+    except Exception:
+        # Disconnect / closed transport during the handshake is a
+        # normal lifecycle event, not a bug to log.
+        pass
+
+
 async def ws_authenticate(websocket) -> "AuthedUser | None":
     """Shared WS auth helper: accept the upgrade first, then verify the
     Clerk JWT (passed as `?token=`) and confirm operator approval.
