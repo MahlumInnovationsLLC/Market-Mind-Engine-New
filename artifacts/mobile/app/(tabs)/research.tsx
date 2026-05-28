@@ -3,9 +3,9 @@ import { useRouter } from "expo-router";
 import React from "react";
 import {
   ActivityIndicator,
+  FlatList,
   Pressable,
   RefreshControl,
-  ScrollView,
   StyleSheet,
   Text,
   View,
@@ -147,22 +147,12 @@ export default function ResearchScreen() {
 
   const signalList = uw.data?.items ?? [];
 
-  return (
-    <ScrollView
-      style={{ backgroundColor: colors.background }}
-      contentContainerStyle={[
-        styles.container,
-        { paddingBottom: insets.bottom + 100 },
-      ]}
-      refreshControl={
-        <RefreshControl
-          refreshing={refreshing}
-          onRefresh={onRefresh}
-          tintColor={colors.primary}
-        />
-      }
-      testID="research-scroll"
-    >
+  // The screen renders as a single FlatList so only the on-screen UW signal
+  // cards stay mounted. The debates section (a short, capped top-10 list) and
+  // the section headers ride along in the list header, keeping a single
+  // scroll container with proper recycling for the long UW feed.
+  const ListHeader = (
+    <View style={{ gap: 8 }}>
       {debates.data?.delayed ? (
         <DelayedSignalsBanner
           delayMinutes={debates.data.delay_minutes}
@@ -239,43 +229,63 @@ export default function ResearchScreen() {
             No UW signals in the last 24 hours
           </Text>
         </Card>
-      ) : (
-        signalList.map((s) => (
-          <Card key={`uw-${s.id}`} style={styles.card}>
-            <View style={styles.rowHead}>
-              <Text
-                style={[styles.title, { color: colors.foreground }]}
-                numberOfLines={1}
-              >
-                {(s.ticker ?? "—").toUpperCase()}{" "}
-                <Text style={{ color: colors.mutedForeground }}>
-                  · {s.signal_type.toUpperCase()}
-                </Text>
+      ) : null}
+    </View>
+  );
+
+  return (
+    <FlatList
+      style={{ backgroundColor: colors.background }}
+      contentContainerStyle={[
+        styles.container,
+        { paddingBottom: insets.bottom + 100 },
+      ]}
+      data={signalList}
+      keyExtractor={(s) => `uw-${s.id}`}
+      ListHeaderComponent={ListHeader}
+      refreshControl={
+        <RefreshControl
+          refreshing={refreshing}
+          onRefresh={onRefresh}
+          tintColor={colors.primary}
+        />
+      }
+      testID="research-scroll"
+      renderItem={({ item: s }) => (
+        <Card style={styles.card}>
+          <View style={styles.rowHead}>
+            <Text
+              style={[styles.title, { color: colors.foreground }]}
+              numberOfLines={1}
+            >
+              {(s.ticker ?? "—").toUpperCase()}{" "}
+              <Text style={{ color: colors.mutedForeground }}>
+                · {s.signal_type.toUpperCase()}
               </Text>
-              <Text style={[styles.time, { color: colors.mutedForeground }]}>
-                {fmtRel(s.occurred_at ?? s.fetched_at)}
-              </Text>
-            </View>
-            {s.summary ? (
-              <Text
-                style={[styles.summary, { color: colors.foreground }]}
-                numberOfLines={2}
-              >
-                {s.summary}
-              </Text>
-            ) : null}
-            <View style={styles.statsRow}>
-              <Text style={[styles.stat, { color: colors.primary }]}>
-                size {fmtNum(s.size)}
-              </Text>
-              <Text style={[styles.stat, { color: colors.mutedForeground }]}>
-                px {fmtNum(s.price)}
-              </Text>
-            </View>
-          </Card>
-        ))
+            </Text>
+            <Text style={[styles.time, { color: colors.mutedForeground }]}>
+              {fmtRel(s.occurred_at ?? s.fetched_at)}
+            </Text>
+          </View>
+          {s.summary ? (
+            <Text
+              style={[styles.summary, { color: colors.foreground }]}
+              numberOfLines={2}
+            >
+              {s.summary}
+            </Text>
+          ) : null}
+          <View style={styles.statsRow}>
+            <Text style={[styles.stat, { color: colors.primary }]}>
+              size {fmtNum(s.size)}
+            </Text>
+            <Text style={[styles.stat, { color: colors.mutedForeground }]}>
+              px {fmtNum(s.price)}
+            </Text>
+          </View>
+        </Card>
       )}
-    </ScrollView>
+    />
   );
 }
 

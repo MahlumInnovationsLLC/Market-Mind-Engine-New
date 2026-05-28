@@ -1,16 +1,12 @@
-import { Fragment, useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
 import { Link, Redirect } from "wouter";
 import { useAuth } from "@clerk/react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import {
-  CartesianGrid,
-  Line,
-  LineChart,
-  ResponsiveContainer,
-  Tooltip,
-  XAxis,
-  YAxis,
-} from "recharts";
+// Recharts is lazy-loaded so it stays out of the main admin chunk until the
+// crypto-backtest trend is actually rendered.
+const CryptoBacktestTrendChart = lazy(
+  () => import("@/components/admin/crypto-backtest-trend-chart"),
+);
 import {
   apiFetch,
   REQUEST_ID_HEADER,
@@ -5886,70 +5882,16 @@ export function CryptoBacktestPanel() {
             className="h-32 w-full"
             data-testid="crypto-backtest-history-chart"
           >
-            <ResponsiveContainer width="100%" height="100%">
-              <LineChart
-                data={historySeries}
-                margin={{ top: 4, right: 8, bottom: 0, left: 0 }}
-              >
-                <CartesianGrid
-                  strokeDasharray="3 3"
-                  stroke="hsl(var(--border))"
-                  opacity={0.3}
+            <Suspense
+              fallback={
+                <div
+                  className="h-full w-full animate-pulse bg-muted/10"
+                  data-testid="crypto-backtest-history-chart-loading"
                 />
-                <XAxis
-                  dataKey="idx"
-                  tick={{ fontSize: 10, fill: "hsl(var(--muted-foreground))" }}
-                  tickLine={false}
-                  axisLine={false}
-                />
-                <YAxis
-                  tick={{ fontSize: 10, fill: "hsl(var(--muted-foreground))" }}
-                  tickLine={false}
-                  axisLine={false}
-                  width={36}
-                  domain={[0, "auto"]}
-                />
-                <Tooltip
-                  cursor={{ stroke: "hsl(var(--border))" }}
-                  contentStyle={{
-                    background: "hsl(var(--popover))",
-                    border: "1px solid hsl(var(--border))",
-                    fontSize: 11,
-                  }}
-                  labelFormatter={(_v, payload) => {
-                    const completed = payload?.[0]?.payload?.completed_at;
-                    return completed
-                      ? String(completed)
-                          .replace("T", " ")
-                          .replace(/\..*$/, "")
-                      : "";
-                  }}
-                  formatter={(value: number, name: string) => [
-                    typeof value === "number" ? value.toFixed(4) : value,
-                    name,
-                  ]}
-                />
-                <Line
-                  type="monotone"
-                  dataKey="brier"
-                  name="Brier"
-                  stroke="hsl(var(--primary))"
-                  strokeWidth={2}
-                  dot={false}
-                  isAnimationActive={false}
-                />
-                <Line
-                  type="monotone"
-                  dataKey="log_loss"
-                  name="Log loss"
-                  stroke="hsl(var(--accent-cyan, var(--primary)))"
-                  strokeWidth={2}
-                  strokeDasharray="4 2"
-                  dot={false}
-                  isAnimationActive={false}
-                />
-              </LineChart>
-            </ResponsiveContainer>
+              }
+            >
+              <CryptoBacktestTrendChart series={historySeries} />
+            </Suspense>
           </div>
         )}
       </div>

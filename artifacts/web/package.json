@@ -56,6 +56,7 @@
     "@types/react": "catalog:",
     "@types/react-dom": "catalog:",
     "@vitejs/plugin-react": "catalog:",
+    "@vitest/coverage-v8": "^4.1.5",
     "@workspace/api-client-react": "workspace:*",
     "@workspace/retry-fetch": "workspace:*",
     "axe-core": "^4.11.3",
@@ -83,12 +84,12 @@
     "vaul": "^1.1.2",
     "vite": "catalog:",
     "vitest": "^4.1.5",
-    "@vitest/coverage-v8": "^4.1.5",
     "wouter": "^3.3.5",
     "zod": "catalog:"
   },
   "dependencies": {
     "@clerk/react": "^6.4.2",
-    "@clerk/themes": "^2.4.57"
+    "@clerk/themes": "^2.4.57",
+    "@tanstack/react-virtual": "^3.13.26"
   }
 }

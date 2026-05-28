@@ -1,6 +1,7 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useLocation, useSearch } from "wouter";
 import { useQuery } from "@tanstack/react-query";
+import { useWindowVirtualizer } from "@tanstack/react-virtual";
 import { useAuth } from "@clerk/react";
 import {
   getGetRecentTradesQueryKey,
@@ -463,6 +464,32 @@ export default function PositionsPage() {
     }
   }
 
+  // Virtualize the positions table against the window scroll so only the rows
+  // near the viewport are mounted. Rows have variable height (commodity
+  // breakdowns, mark-to-market sub-rows), so we let the virtualizer measure
+  // each rendered row via `measureElement` rather than assuming a fixed size.
+  const tableRef = useRef<HTMLDivElement>(null);
+  const rowVirtualizer = useWindowVirtualizer({
+    count: sorted.length,
+    estimateSize: () => 56,
+    overscan: 8,
+    scrollMargin: tableRef.current?.offsetTop ?? 0,
+  });
+  const virtualRows = rowVirtualizer.getVirtualItems();
+  const paddingTop =
+    virtualRows.length > 0
+      ? Math.max(0, virtualRows[0].start - rowVirtualizer.options.scrollMargin)
+      : 0;
+  const paddingBottom =
+    virtualRows.length > 0
+      ? Math.max(
+          0,
+          rowVirtualizer.getTotalSize() -
+            (virtualRows[virtualRows.length - 1].end -
+              rowVirtualizer.options.scrollMargin),
+        )
+      : 0;
+
   const isLoading = positionsQ.isLoading || tradesQ.isLoading;
   const isError = positionsQ.isError;
 
@@ -597,7 +624,7 @@ export default function PositionsPage() {
             NO_POSITIONS_MATCH_FILTERS
           </div>
         ) : (
-          <div className="overflow-auto">
+          <div className="overflow-auto" ref={tableRef}>
             <table className="w-full text-xs">
               <thead className="border-b border-border text-[10px] uppercase tracking-widest text-muted-foreground">
                 <tr>
@@ -613,7 +640,13 @@ export default function PositionsPage() {
                 </tr>
               </thead>
               <tbody className="divide-y divide-border/50">
-                {sorted.map((r) => {
+                {paddingTop > 0 && (
+                  <tr aria-hidden="true">
+                    <td colSpan={9} style={{ height: paddingTop }} />
+                  </tr>
+                )}
+                {virtualRows.map((virtualRow) => {
+                  const r = sorted[virtualRow.index];
                   const clickable = !!r.tradeRef;
                   const onActivate = () => {
                     if (r.tradeRef) {
@@ -623,6 +656,8 @@ export default function PositionsPage() {
                   return (
                     <tr
                       key={r.market}
+                      data-index={virtualRow.index}
+                      ref={rowVirtualizer.measureElement}
                       data-testid={`row-position-${r.market}`}
                       className={`hover:bg-muted/20 ${clickable ? "cursor-pointer" : ""}`}
                       onClick={clickable ? onActivate : undefined}
@@ -744,6 +779,11 @@ export default function PositionsPage() {
                     </tr>
                   );
                 })}
+                {paddingBottom > 0 && (
+                  <tr aria-hidden="true">
+                    <td colSpan={9} style={{ height: paddingBottom }} />
+                  </tr>
+                )}
               </tbody>
             </table>
           </div>

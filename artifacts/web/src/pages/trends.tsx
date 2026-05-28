@@ -1,5 +1,6 @@
-import { useMemo } from "react";
+import { useMemo, useRef } from "react";
 import { useQuery } from "@tanstack/react-query";
+import { useWindowVirtualizer } from "@tanstack/react-virtual";
 import {
   getGetDashboardEdgeTerminalPnlQueryKey,
   getGetRecentTradesQueryKey,
@@ -119,6 +120,33 @@ export default function TrendsPage() {
       return Number.isNaN(ms) ? true : ms >= cutoff7dMs;
     });
   }, [tradesQ.data, cutoff7dMs]);
+
+  // Virtualize the trades table against the window scroll so only the rows
+  // near the viewport are mounted (the list can carry up to ~100 fills).
+  const tradesTableRef = useRef<HTMLDivElement>(null);
+  const tradesVirtualizer = useWindowVirtualizer({
+    count: trades.length,
+    estimateSize: () => 34,
+    overscan: 10,
+    scrollMargin: tradesTableRef.current?.offsetTop ?? 0,
+  });
+  const tradeVirtualRows = tradesVirtualizer.getVirtualItems();
+  const tradesPaddingTop =
+    tradeVirtualRows.length > 0
+      ? Math.max(
+          0,
+          tradeVirtualRows[0].start - tradesVirtualizer.options.scrollMargin,
+        )
+      : 0;
+  const tradesPaddingBottom =
+    tradeVirtualRows.length > 0
+      ? Math.max(
+          0,
+          tradesVirtualizer.getTotalSize() -
+            (tradeVirtualRows[tradeVirtualRows.length - 1].end -
+              tradesVirtualizer.options.scrollMargin),
+        )
+      : 0;
 
   // ── Aggregations from the 7-day trade list ───────────────────────
   const aggregates = useMemo(() => {
@@ -451,7 +479,7 @@ export default function TrendsPage() {
             No Edge Terminal trades in the last 7 days.
           </div>
         ) : (
-          <div className="overflow-x-auto">
+          <div className="overflow-x-auto" ref={tradesTableRef}>
             <table className="w-full min-w-[720px] text-left text-xs">
               <thead>
                 <tr className="border-b border-border/60 text-[10px] uppercase tracking-wider text-muted-foreground">
@@ -466,13 +494,21 @@ export default function TrendsPage() {
                 </tr>
               </thead>
               <tbody>
-                {trades.map((t) => {
+                {tradesPaddingTop > 0 && (
+                  <tr aria-hidden="true">
+                    <td colSpan={8} style={{ height: tradesPaddingTop }} />
+                  </tr>
+                )}
+                {tradeVirtualRows.map((virtualRow) => {
+                  const t = trades[virtualRow.index];
                   const qty = Number(t.quantity ?? 0);
                   const px = Number(t.price ?? 0);
                   const bet = Math.abs(qty) * px;
                   return (
                     <tr
                       key={`${t.id ?? t.market_id}-${t.executed_at}`}
+                      data-index={virtualRow.index}
+                      ref={tradesVirtualizer.measureElement}
                       data-testid={`trends-trade-row-${t.id ?? "x"}`}
                       className="border-b border-border/30 last:border-0"
                     >
@@ -507,6 +543,11 @@ export default function TrendsPage() {
                     </tr>
                   );
                 })}
+                {tradesPaddingBottom > 0 && (
+                  <tr aria-hidden="true">
+                    <td colSpan={8} style={{ height: tradesPaddingBottom }} />
+                  </tr>
+                )}
               </tbody>
             </table>
           </div>

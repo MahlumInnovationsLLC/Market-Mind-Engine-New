@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { lazy, Suspense, useEffect, useMemo, useState } from "react";
 import { Link } from "wouter";
 import { useAuth } from "@clerk/react";
 import { useQuery } from "@tanstack/react-query";
@@ -18,34 +18,89 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { TabBar, useTabState, type TabDef } from "@/components/shell/tab-bar";
-import { HealthPanel } from "@/pages/health";
+import { Skeleton } from "@/components/ui/skeleton";
 import { NotificationPrefsPanel } from "@/pages/settings-notifications";
-import {
-  AuditLogPanel,
-  CryptoAccuracyPanel,
-  CryptoBacktestPanel,
-  DcRhoFitterPanel,
-  EloUpdaterPanel,
-  GatekeeperModelPanel,
-  GatekeeperTuningPanel,
-  GithubMirrorPanel,
-  LeadsPanel,
-  ModelsPanel,
-  OperatorAlertPreferencesPanel,
-  PersonasPanel,
-  RcWebhookPanel,
-  RiskKnobsPanel,
-  RuntimePanel,
-  SoccerLivePredictionsPanel,
-  SoccerPerLegBrierPanel,
-  TechAiPromotionPanel,
-  TriggerCyclePanel,
-  UserManagementPanel,
-  VerticalHaltHistoryPanel,
-  VerticalHaltSchedulePanel,
-  VerticalHaltsPanel,
-  VerticalVisibilityPanel,
-} from "@/pages/admin";
+// Code-split the heavy admin/health surfaces. `admin.tsx` (~7.8k lines) and
+// `health.tsx` (~2.8k lines) are pulled in only when their tab is first
+// opened, so the default Health tab no longer ships the entire admin panel
+// graph in the System route chunk. Every admin panel below resolves to the
+// same `@/pages/admin` chunk, so the first admin tab loads it once.
+const adminModule = () => import("@/pages/admin");
+const HealthPanel = lazy(() =>
+  import("@/pages/health").then((m) => ({ default: m.HealthPanel })),
+);
+const AuditLogPanel = lazy(() =>
+  adminModule().then((m) => ({ default: m.AuditLogPanel })),
+);
+const CryptoAccuracyPanel = lazy(() =>
+  adminModule().then((m) => ({ default: m.CryptoAccuracyPanel })),
+);
+const CryptoBacktestPanel = lazy(() =>
+  adminModule().then((m) => ({ default: m.CryptoBacktestPanel })),
+);
+const DcRhoFitterPanel = lazy(() =>
+  adminModule().then((m) => ({ default: m.DcRhoFitterPanel })),
+);
+const EloUpdaterPanel = lazy(() =>
+  adminModule().then((m) => ({ default: m.EloUpdaterPanel })),
+);
+const GatekeeperModelPanel = lazy(() =>
+  adminModule().then((m) => ({ default: m.GatekeeperModelPanel })),
+);
+const GatekeeperTuningPanel = lazy(() =>
+  adminModule().then((m) => ({ default: m.GatekeeperTuningPanel })),
+);
+const GithubMirrorPanel = lazy(() =>
+  adminModule().then((m) => ({ default: m.GithubMirrorPanel })),
+);
+const LeadsPanel = lazy(() =>
+  adminModule().then((m) => ({ default: m.LeadsPanel })),
+);
+const ModelsPanel = lazy(() =>
+  adminModule().then((m) => ({ default: m.ModelsPanel })),
+);
+const OperatorAlertPreferencesPanel = lazy(() =>
+  adminModule().then((m) => ({ default: m.OperatorAlertPreferencesPanel })),
+);
+const PersonasPanel = lazy(() =>
+  adminModule().then((m) => ({ default: m.PersonasPanel })),
+);
+const RcWebhookPanel = lazy(() =>
+  adminModule().then((m) => ({ default: m.RcWebhookPanel })),
+);
+const RiskKnobsPanel = lazy(() =>
+  adminModule().then((m) => ({ default: m.RiskKnobsPanel })),
+);
+const RuntimePanel = lazy(() =>
+  adminModule().then((m) => ({ default: m.RuntimePanel })),
+);
+const SoccerLivePredictionsPanel = lazy(() =>
+  adminModule().then((m) => ({ default: m.SoccerLivePredictionsPanel })),
+);
+const SoccerPerLegBrierPanel = lazy(() =>
+  adminModule().then((m) => ({ default: m.SoccerPerLegBrierPanel })),
+);
+const TechAiPromotionPanel = lazy(() =>
+  adminModule().then((m) => ({ default: m.TechAiPromotionPanel })),
+);
+const TriggerCyclePanel = lazy(() =>
+  adminModule().then((m) => ({ default: m.TriggerCyclePanel })),
+);
+const UserManagementPanel = lazy(() =>
+  adminModule().then((m) => ({ default: m.UserManagementPanel })),
+);
+const VerticalHaltHistoryPanel = lazy(() =>
+  adminModule().then((m) => ({ default: m.VerticalHaltHistoryPanel })),
+);
+const VerticalHaltSchedulePanel = lazy(() =>
+  adminModule().then((m) => ({ default: m.VerticalHaltSchedulePanel })),
+);
+const VerticalHaltsPanel = lazy(() =>
+  adminModule().then((m) => ({ default: m.VerticalHaltsPanel })),
+);
+const VerticalVisibilityPanel = lazy(() =>
+  adminModule().then((m) => ({ default: m.VerticalVisibilityPanel })),
+);
 import LiveExecuteToggle from "@/components/telemetry/live-execute-toggle";
 import EmergencyStop from "@/components/telemetry/emergency-stop";
 import AccessRequests from "@/components/telemetry/access-requests";
@@ -183,6 +238,7 @@ export default function SystemPage() {
         />
       </header>
 
+      <Suspense fallback={<PanelFallback />}>
       {tab === "health" && (
         <div data-testid="panel-system-health">
           <HealthPanel />
@@ -458,6 +514,17 @@ export default function SystemPage() {
           </p>
         </GlassCard>
       )}
+      </Suspense>
+    </div>
+  );
+}
+
+function PanelFallback() {
+  return (
+    <div className="space-y-3" data-testid="panel-fallback" aria-busy="true">
+      <Skeleton className="h-8 w-48" />
+      <Skeleton className="h-40 w-full" />
+      <span className="sr-only">Loading panel…</span>
     </div>
   );
 }
