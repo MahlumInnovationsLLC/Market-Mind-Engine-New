@@ -97,6 +97,8 @@ from .settlement import (
     settlement_event_hub,
 )
 from .settlement import pipeline as settlement_pipeline
+from . import lifecycle as lifecycle_registry
+from .lifecycle import settlement_recent_tap as _lifecycle_settlement_tap
 from .swarm import llm_log_hub, refresh_persona_weights, run_debate
 from .swarm import profiles as swarm_profiles, toggles as swarm_toggles
 from .kalshi import (
@@ -175,7 +177,6 @@ async def lifespan(_: FastAPI):
     # init into _do_boot below and serve /api/healthz immediately.
     fill_task: asyncio.Task | None = None
     polymarket_fill_task: asyncio.Task | None = None
-    settlement_tap_task: asyncio.Task | None = None
     models_task: asyncio.Task | None = None
     ready_watcher_task: asyncio.Task | None = None
 
@@ -192,7 +193,7 @@ async def lifespan(_: FastAPI):
         every step is wrapped in try/except so a single sick
         dependency cannot stall the rest of boot.
         """
-        nonlocal fill_task, polymarket_fill_task, settlement_tap_task
+        nonlocal fill_task, polymarket_fill_task
         nonlocal models_task, ready_watcher_task
         # Give uvicorn a clear runway to bind the port and serve the
         # very first /api/healthz probes before this task starts its
@@ -610,9 +611,17 @@ async def lifespan(_: FastAPI):
         # market_settle_complete events in-process so the dashboard panel can
         # render history immediately on first paint (the WS only delivers
         # events that occur while a client is connected).
-        settlement_tap_task = asyncio.create_task(
-            _settlement_recent_tap(), name="settlement-recent-tap"
-        )
+        #
+        # Owned by :mod:`app.lifecycle`: per-loop restart-on-uncaught,
+        # exponential backoff, ``last_tick_at`` metric, and start/stop
+        # visible via ``/api/health/loops``.  Task #923.
+        try:
+            _lifecycle_settlement_tap.register_default_loops()
+            await lifecycle_registry.registry.start_one(
+                _lifecycle_settlement_tap.instance.name
+            )
+        except Exception as e:
+            log.warning("settlement_recent_tap lifecycle start failed: %s", e)
 
         # System-health collector + daily P&L summary scheduler.  Both are
         # background tasks that touch in-memory state only on success and
@@ -1062,15 +1071,13 @@ async def lifespan(_: FastAPI):
             await health.stop()
         except Exception as e:
             log.warning("health collector stop error: %s", e)
-        if settlement_tap_task is not None:
-            try:
-                settlement_tap_task.cancel()
-                try:
-                    await settlement_tap_task
-                except (asyncio.CancelledError, Exception):
-                    pass
-            except Exception as e:
-                log.warning("settlement tap stop error: %s", e)
+        # Lifecycle-registered native loops (settlement_recent_tap + any
+        # future migrants).  ``stop_all`` is bulkheaded so a hung stop on
+        # one loop does not block the rest of teardown.  Task #923.
+        try:
+            await lifecycle_registry.stop_all(per_loop_timeout=5.0)
+        except Exception as e:
+            log.warning("lifecycle.stop_all error: %s", e)
         try:
             await settlement_scheduler.stop()
         except Exception as e:
@@ -5298,6 +5305,43 @@ async def health_snapshot(
     return health.get_snapshot()
 
 
+@app.get("/api/health/loops")
+async def health_loops(
+    _: object = Depends(require_approved_user),
+) -> dict[str, object]:
+    """Per-loop state for every background loop registered through
+    :mod:`app.lifecycle`.  Each entry has ``state`` (registered /
+    starting / running / stopped / failed), ``last_error``,
+    ``restart_count``, and — for native loops — ``last_tick_at``.
+    Task #923 — replaces grepping process logs to figure out which
+    background loop fell over."""
+    return {"loops": lifecycle_registry.status()}
+
+
+class _LifecycleRestartRequest(BaseModel):
+    name: str = Field(..., min_length=1, max_length=128)
+
+
+@app.post("/api/health/loops/restart")
+async def health_loops_restart(
+    body: _LifecycleRestartRequest,
+    _: AuthedUser = Depends(require_admin),
+) -> dict[str, object]:
+    """Admin-only: stop + restart a single lifecycle loop.  Useful when
+    a loop has flipped to ``failed`` and the operator wants to retry
+    without bouncing the whole process."""
+    try:
+        ok = await lifecycle_registry.registry.restart_one(body.name)
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"unknown loop: {body.name!r}")
+    handle = lifecycle_registry.registry.get(body.name)
+    return {
+        "ok": ok,
+        "name": body.name,
+        "state": handle.to_dict() if handle is not None else None,
+    }
+
+
 _DEBUG_PROXY_HEADERS: tuple[str, ...] = (
     # Set by Replit's edge proxy and by virtually every reverse proxy in
     # existence (nginx, GCLB, AWS ALB, Cloudflare, Caddy, ...). Their
@@ -8756,63 +8800,12 @@ class SettlementSettleMarketRequest(BaseModel):
 _RECENT_SETTLEMENTS_LIMIT = 10
 
 
-async def _settlement_recent_tap() -> None:
-    """Long-lived subscriber on the settlement event hub that persists
-    `market_settle_complete` events to the `settlement_events` table so
-    the dashboard's recent-settlements panel survives API restarts and
-    is consistent across replicas.  Restarted on lifespan; cancellation
-    is the normal exit."""
-    q = settlement_event_hub.subscribe(label="recent-tap")
-    try:
-        while True:
-            ev = await q.get()
-            if isinstance(ev, dict) and ev.get("type") == "market_settle_complete":
-                await _record_recent_settlement(ev)
-    except asyncio.CancelledError:
-        raise
-    except Exception as e:  # pragma: no cover
-        log.warning("settlement recent tap exited: %s", e)
-    finally:
-        settlement_event_hub.unsubscribe(q)
-
-
-async def _record_recent_settlement(event: dict[str, object]) -> None:
-    """Persist a market_settle_complete event so the dashboard can show
-    recent settlements after a page reload or API restart.  Stores the
-    full event payload as JSONB plus a few hot columns for indexing /
-    debugging.  Failures are logged but do not propagate — the WS feed
-    still delivers the live event."""
-    try:
-        verticals = event.get("verticals")
-        if not isinstance(verticals, list):
-            verticals = None
-        else:
-            verticals = [str(v) for v in verticals]
-        outcome = event.get("outcome_yes")
-        outcome_int = int(outcome) if isinstance(outcome, (int, float)) else None
-        trades = event.get("trades_settled")
-        trades_int = int(trades) if isinstance(trades, (int, float)) else None
-        alerts = event.get("alerts_raised")
-        alerts_int = int(alerts) if isinstance(alerts, (int, float)) else None
-        market_id = event.get("market_id")
-        market_str = str(market_id) if market_id is not None else None
-        await db.execute(
-            """
-            INSERT INTO settlement_events (
-                event_type, market_id, outcome_yes, trades_settled,
-                alerts_raised, verticals, payload
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb)
-            """,
-            str(event.get("type") or "market_settle_complete"),
-            market_str,
-            outcome_int,
-            trades_int,
-            alerts_int,
-            verticals,
-            json.dumps(event, default=str),
-        )
-    except Exception as e:  # pragma: no cover
-        log.warning("settlement event persist failed: %s", e)
+# `_settlement_recent_tap` + `_record_recent_settlement` previously
+# lived here as an inline `while True` lifespan task.  Task #923 moved
+# them into :mod:`app.lifecycle.settlement_recent_tap` so the loop
+# inherits per-loop restart-on-uncaught, exponential backoff,
+# ``last_tick_at`` metric, and observability via ``/api/health/loops``.
+# Kept this stub comment so a grep for the old name lands here.
 
 
 async def _load_recent_settlements(limit: int = _RECENT_SETTLEMENTS_LIMIT) -> list[dict[str, object]]:
