@@ -39,6 +39,7 @@ from . import (
     mobile_notification_log_retention,
     model_rollback_log_retention,
     order_recovery_attempts_retention,
+    partitioned_table_retention,
     pipeline_events_retention,
     position_drift_resolutions_retention,
     precip_emos_observations_retention,
@@ -52,6 +53,7 @@ from . import (
     tech_evidence_retention,
     vertical_halt_history_retention,
 )
+from .partitioned_table_retention import INSTANCES as _PARTITION_DROP_INSTANCES
 
 
 log = logging.getLogger("axiom.retention_loops_v757")
@@ -92,6 +94,17 @@ DELETE_ONLY_MODULES: tuple[Any, ...] = (
 
 ALL_MODULES: tuple[Any, ...] = ARCHIVE_MODULES + DELETE_ONLY_MODULES
 
+# Partition-drop loops (task #921).  For tables that have been converted
+# to monthly RANGE partitions, dropping a partition is O(1) metadata vs.
+# the multi-million-row DELETE that ``DeleteOnlyRetention`` would issue.
+# They share the disabled-by-default posture so a fresh deploy doesn't
+# reclaim space until the operator has run the backfill and verified
+# counts (see ``docs/partition_migration_runbook.md``).  These don't
+# fit the one-module-per-loop ``ALL_MODULES`` shape because the
+# partition module owns multiple instances (one per parent table), so
+# we fan out into ``_PARTITION_DROP_INSTANCES`` from start/stop/states
+# below instead of adding them to ``ALL_MODULES``.
+
 
 def _name_of(module: Any) -> str:
     """Stable display name for log + dashboard rows."""
@@ -114,6 +127,12 @@ async def start_all() -> None:
             await module.start()
         except Exception as e:  # noqa: BLE001
             log.warning("retention loop %s start failed: %s", name, e)
+    # Partition-drop instances (task #921) — one module owns N instances.
+    for inst in _PARTITION_DROP_INSTANCES:
+        try:
+            await inst.start()
+        except Exception as e:  # noqa: BLE001
+            log.warning("partition retention %s start failed: %s", inst.name, e)
 
 
 async def stop_all() -> None:
@@ -124,6 +143,11 @@ async def stop_all() -> None:
             await module.stop()
         except Exception as e:  # noqa: BLE001
             log.warning("retention loop %s stop error: %s", name, e)
+    for inst in _PARTITION_DROP_INSTANCES:
+        try:
+            await inst.stop()
+        except Exception as e:  # noqa: BLE001
+            log.warning("partition retention %s stop error: %s", inst.name, e)
 
 
 def states() -> list[dict[str, Any]]:
@@ -139,4 +163,9 @@ def states() -> list[dict[str, Any]]:
                     "error": f"{type(e).__name__}: {e}",
                 }
             )
+    for inst in _PARTITION_DROP_INSTANCES:
+        try:
+            out.append(inst.state())
+        except Exception as e:  # noqa: BLE001
+            out.append({"name": inst.name, "error": f"{type(e).__name__}: {e}"})
     return out
