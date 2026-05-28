@@ -111,6 +111,37 @@ def _parse_ts(raw: Any) -> datetime | None:
         return None
 
 
+# Task #925: per-page parse-failure accounting.
+#
+# The four narrow ``try / except Exception: pass`` blocks below used to
+# silently drop a row whenever Kalshi shipped a malformed numeric field
+# (rare, but it happens during schema cutovers).  Each failure now bumps
+# the counter and emits a structured warning so the operator running
+# the backfill sees a per-page summary at the end instead of having to
+# diff `wc -l` of the response against the inserted row count.
+_parse_failures: dict[str, int] = {
+    "qty_count": 0,
+    "qty_count_fp": 0,
+    "yes_price_dollars": 0,
+    "yes_price_cents": 0,
+    "no_price_dollars": 0,
+    "no_price_cents": 0,
+}
+
+
+def _bump_parse_failure(field_name: str, raw: Any, exc: BaseException) -> None:
+    _parse_failures[field_name] = _parse_failures.get(field_name, 0) + 1
+    log.warning(
+        "backfill parse failure field=%s raw=%r error=%s: %s",
+        field_name, raw, type(exc).__name__, exc,
+    )
+
+
+def parse_failure_counts() -> dict[str, int]:
+    """Test-visible snapshot of the per-field parse-failure counters."""
+    return dict(_parse_failures)
+
+
 def _qty_dollars(fill: dict[str, Any]) -> tuple[Decimal | None, Decimal | None]:
     """Extract (quantity, fill_price_dollars) handling new + legacy schemas.
 
@@ -126,27 +157,49 @@ def _qty_dollars(fill: dict[str, Any]) -> tuple[Decimal | None, Decimal | None]:
     # quantity — count_fp is dollar-decimal contracts, NOT fixed-point cents
     qty: Decimal | None = None
     if fill.get("count") is not None:
-        try: qty = Decimal(str(fill["count"]))
-        except Exception: qty = None
+        try:
+            qty = Decimal(str(fill["count"]))
+        except Exception as e:
+            _bump_parse_failure("qty_count", fill.get("count"), e)
+            qty = None
     elif fill.get("count_fp") is not None:
-        try: qty = Decimal(str(fill["count_fp"]))
-        except Exception: qty = None
+        try:
+            qty = Decimal(str(fill["count_fp"]))
+        except Exception as e:
+            _bump_parse_failure("qty_count_fp", fill.get("count_fp"), e)
+            qty = None
     # price (Kalshi binary contracts settle 0–1)
     price: Decimal | None = None
     if side == "yes":
         if fill.get("yes_price_dollars") is not None:
-            try: price = Decimal(str(fill["yes_price_dollars"]))
-            except Exception: pass
+            try:
+                price = Decimal(str(fill["yes_price_dollars"]))
+            except Exception as e:
+                _bump_parse_failure(
+                    "yes_price_dollars", fill.get("yes_price_dollars"), e,
+                )
         elif fill.get("yes_price") is not None:
-            try: price = Decimal(str(fill["yes_price"])) / Decimal("100")
-            except Exception: pass
+            try:
+                price = Decimal(str(fill["yes_price"])) / Decimal("100")
+            except Exception as e:
+                _bump_parse_failure(
+                    "yes_price_cents", fill.get("yes_price"), e,
+                )
     elif side == "no":
         if fill.get("no_price_dollars") is not None:
-            try: price = Decimal(str(fill["no_price_dollars"]))
-            except Exception: pass
+            try:
+                price = Decimal(str(fill["no_price_dollars"]))
+            except Exception as e:
+                _bump_parse_failure(
+                    "no_price_dollars", fill.get("no_price_dollars"), e,
+                )
         elif fill.get("no_price") is not None:
-            try: price = Decimal(str(fill["no_price"])) / Decimal("100")
-            except Exception: pass
+            try:
+                price = Decimal(str(fill["no_price"])) / Decimal("100")
+            except Exception as e:
+                _bump_parse_failure(
+                    "no_price_cents", fill.get("no_price"), e,
+                )
     return qty, price
 
 
@@ -584,6 +637,16 @@ def main() -> int:
     print(f"  already in DB     : {stats['already_present']}")
     print(f"  rows inserted     : {stats['inserted']}{' (dry-run)' if args.dry_run else ''}")
     print(f"  skipped (no id)   : {stats['skipped_bad']}")
+    # Task #925: per-page parse-failure summary so an operator
+    # eyeballing the run sees malformed-row counts at the bottom of
+    # the report instead of having to grep the warning log.
+    pf = parse_failure_counts()
+    total_pf = sum(pf.values())
+    print(f"  parse failures    : {total_pf}")
+    if total_pf:
+        for field_name, count in sorted(pf.items()):
+            if count:
+                print(f"    - {field_name:<22s}: {count}")
     return 0
 
 

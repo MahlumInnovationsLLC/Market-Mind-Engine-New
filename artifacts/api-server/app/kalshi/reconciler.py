@@ -107,6 +107,54 @@ _last_orphan_skeletons: int = 0
 _last_snoozed_drifts: int = 0
 _total_orphan_skeletons: int = 0
 
+# ---------------------------------------------------------------------------
+# Swallowed-exception accounting (task #925).
+#
+# The reconciler is designed to swallow failures so a flaky Kalshi REST
+# endpoint can never take the trading process down — the next tick
+# simply retries.  That's still the right policy, but the previous code
+# left no audit trail beyond a debug/warning log line.  We now bump
+# ``_swallowed_total[phase]`` for each swallow and surface the totals
+# in :func:`state` so the ``kalshi_reconciler`` health card can DEGRADE
+# when the per-tick rate spikes (see
+# :func:`app.health._probe_kalshi_reconciler`).
+#
+# Phases:
+#   * ``orphan_resolution_update`` — drift-resolution row update after
+#     auto-creating a skeleton positions row.
+#   * ``list_drifts_query``        — operator-console drift list query.
+#   * ``list_drifts_title_enrich`` — best-effort market-title lookup
+#     for the drift list response.
+# ---------------------------------------------------------------------------
+
+_SWALLOW_PHASES: tuple[str, ...] = (
+    "orphan_resolution_update",
+    "list_drifts_query",
+    "list_drifts_title_enrich",
+)
+
+_swallowed_total: dict[str, int] = {p: 0 for p in _SWALLOW_PHASES}
+
+
+def _record_swallow(phase: str, exc: BaseException, *, context: str = "") -> None:
+    """Bump the per-phase swallow counter and emit a warning."""
+    if phase not in _swallowed_total:  # pragma: no cover — programmer error
+        log.error("reconciler._record_swallow unknown phase=%r", phase)
+        return
+    _swallowed_total[phase] += 1
+    log.warning(
+        "reconciler swallowed %s exception: %s: %s%s",
+        phase,
+        type(exc).__name__,
+        exc,
+        f" [{context}]" if context else "",
+    )
+
+
+def reconciler_swallowed_total() -> dict[str, int]:
+    """Snapshot of swallow totals keyed by phase."""
+    return dict(_swallowed_total)
+
 
 def state() -> dict[str, Any]:
     return {
@@ -128,6 +176,10 @@ def state() -> dict[str, Any]:
         "interval_seconds": _interval_seconds(),
         "drift_tolerance": _drift_tolerance(),
         "resolution_enabled": _resolution_enabled(),
+        # Task #925: surface cumulative swallowed-exception totals so
+        # the health card can flip DEGRADED on a spike (the probe in
+        # ``app.health`` tracks its own since-last-probe baseline).
+        "swallowed_total": dict(_swallowed_total),
     }
 
 
@@ -416,8 +468,9 @@ async def _create_orphan_skeleton(
             ticker, exchange,
         )
     except Exception as e:
-        log.debug("orphan-skeleton resolution update failed (%s): %s",
-                  ticker, e)
+        _record_swallow(
+            "orphan_resolution_update", e, context=f"ticker={ticker}",
+        )
 
     # Operators see the auto-skeleton in app logs and in /system →
     # reconciler (the resolution row above is the structured trace).
@@ -495,7 +548,10 @@ async def list_drifts(
             limit, exchange,
         )
     except Exception as e:
-        log.warning("list_drifts query failed: %s", e)
+        _record_swallow(
+            "list_drifts_query", e,
+            context=f"state={state} exchange={exchange}",
+        )
         return []
 
     out = [dict(r) for r in rows]
@@ -512,7 +568,10 @@ async def list_drifts(
             for r in out:
                 r["market_title"] = None
     except Exception as e:
-        log.debug("list_drifts title enrichment failed: %s", e)
+        _record_swallow(
+            "list_drifts_title_enrich", e,
+            context=f"rows={len(out)}",
+        )
         for r in out:
             r.setdefault("market_title", None)
     return out

@@ -31,6 +31,60 @@ log = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
+# Swallowed-exception accounting (task #925).
+#
+# Five sites in this module deliberately swallow exceptions so a flaky
+# write (postmortem, online-learning buffer, position close, EMOS stamp,
+# canary decrement) can never break the *settlement* of the trade
+# itself.  That is still correct — settlement is the contract — but the
+# previous code logged a warning and moved on, so a steady stream of
+# failures was invisible to the on-call.  We now bump a per-site counter
+# and emit a structured log line with enough context to grep.  Tests in
+# ``tests/test_settlement_pipeline.py`` inject failures at each site and
+# assert the counter advanced.
+#
+# These are intentionally process-local counters: settlement is a
+# single-process loop, the dashboard reads via ``settlement_swallow_counts()``,
+# and we don't want a transient logging glitch to take settle_market down.
+# ---------------------------------------------------------------------------
+
+_SWALLOW_SITES: tuple[str, ...] = (
+    "canary_decrement",
+    "postmortem_insert",
+    "online_learning_buffer_insert",
+    "precip_emos_stamp",
+    "position_close",
+)
+
+_swallow_counts: dict[str, int] = {site: 0 for site in _SWALLOW_SITES}
+
+
+def settlement_swallow_counts() -> dict[str, int]:
+    """Snapshot of swallowed-exception counters keyed by site name."""
+    return dict(_swallow_counts)
+
+
+def _record_swallow(site: str, exc: BaseException, *, context: str = "") -> None:
+    """Bump the per-site counter and emit a structured warning.
+
+    ``site`` MUST be one of ``_SWALLOW_SITES`` — passing anything else
+    is a programmer error (the counter dict would silently grow without
+    appearing in the dashboard's known-key list).
+    """
+    if site not in _swallow_counts:  # pragma: no cover — programmer error
+        log.error("settlement._record_swallow unknown site=%r", site)
+        return
+    _swallow_counts[site] += 1
+    log.warning(
+        "settlement swallowed %s exception: %s: %s%s",
+        site,
+        type(exc).__name__,
+        exc,
+        f" [{context}]" if context else "",
+    )
+
+
+# ---------------------------------------------------------------------------
 # 3-way (soccer h/d/a) helpers
 # ---------------------------------------------------------------------------
 
@@ -308,7 +362,7 @@ async def _settle_one_trade(
             from ..risk import canary as _canary
             await _canary.decrement_on_settle(trade)
         except Exception as e:  # pragma: no cover — defensive
-            log.warning("canary decrement on settle failed for %s: %s", tid, e)
+            _record_swallow("canary_decrement", e, context=f"trade_id={tid}")
 
     # Post-mortem (idempotent on trade_id — relies on the
     # `trade_postmortems_trade_id_key` unique constraint so concurrent
@@ -363,7 +417,7 @@ async def _settle_one_trade(
             }),
         )
     except Exception as e:
-        log.warning("postmortem insert failed for trade %s: %s", tid, e)
+        _record_swallow("postmortem_insert", e, context=f"trade_id={tid}")
 
     # Online learning buffer (idempotent on trade_id — relies on the
     # `online_learning_buffer_pkey` unique constraint so settlement
@@ -392,7 +446,9 @@ async def _settle_one_trade(
             trade.get("model_prob") is not None,
         )
     except Exception as e:
-        log.warning("online_learning_buffer insert failed for trade %s: %s", tid, e)
+        _record_swallow(
+            "online_learning_buffer_insert", e, context=f"trade_id={tid}",
+        )
 
     return {
         "trade_id": tid,
@@ -432,8 +488,8 @@ async def _stamp_precip_emos_observation(
             market_id, int(outcome_yes),
         )
     except Exception as e:
-        log.debug(
-            "precip_emos_observations stamp failed for %s: %s", market_id, e
+        _record_swallow(
+            "precip_emos_stamp", e, context=f"market_id={market_id}",
         )
 
 
@@ -452,7 +508,9 @@ async def _close_position(market_id: str, outcome_yes: int) -> None:
             market_id, float(outcome_yes),
         )
     except Exception as e:
-        log.warning("position close failed for %s: %s", market_id, e)
+        _record_swallow(
+            "position_close", e, context=f"market_id={market_id}",
+        )
 
 
 # ---------------------------------------------------------------------------

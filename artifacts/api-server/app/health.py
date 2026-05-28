@@ -336,6 +336,34 @@ def _probe_kalshi_cluster() -> dict:
     )
 
 
+# --- Reconciler swallowed-exception spike detector (task #925) ----------
+#
+# We keep the most-recently-seen ``sum(swallowed_total.values())`` here
+# so each probe call computes the *delta* since the last probe. A
+# delta ≥ ``RECONCILER_SWALLOW_DELTA_THRESHOLD`` flips the card DEGRADED
+# without polluting the reconciler module itself with health-state.
+_last_reconciler_swallow_total: int = 0
+RECONCILER_SWALLOW_DELTA_THRESHOLD = max(
+    1, int(os.environ.get("AXIOM_RECONCILER_SWALLOW_DELTA_THRESHOLD") or "3")
+)
+
+
+def _reconciler_swallow_delta(s: dict) -> int:
+    """Delta in cumulative swallow count since the previous probe call.
+
+    NB: must be called *exactly once* per probe — each call advances the
+    baseline.  The probe function captures the result in a local before
+    branching so the value can be re-used in the degraded-detail string
+    without double-consuming the delta.
+    """
+    global _last_reconciler_swallow_total
+    totals = s.get("swallowed_total") or {}
+    cur = sum(int(v or 0) for v in totals.values())
+    delta = max(0, cur - _last_reconciler_swallow_total)
+    _last_reconciler_swallow_total = cur
+    return delta
+
+
 def _probe_kalshi_reconciler() -> dict:
     """Surface the Kalshi position+fill reconciler's last-tick state.
 
@@ -376,11 +404,29 @@ def _probe_kalshi_reconciler() -> dict:
     elif age is not None and age > max(interval * 3, 180):
         status = "degraded"
         detail = f"stale: last tick {age:.0f}s ago"
-    elif drift > 0 or unknown > 0:
+    # Task #925: compute the swallow-delta exactly once per probe (the
+    # helper advances its baseline on every call).  We capture it here
+    # so the value is consumed regardless of which branch wins below —
+    # otherwise a drift/unknown probe would leave the delta to accrue
+    # into the *next* probe call and look like a spurious spike.
+    swallow_delta = _reconciler_swallow_delta(s)
+    if drift > 0 or unknown > 0:
         status = "degraded"
         detail = (
             f"last tick raised drift={drift}, unknown_fills={unknown} "
             f"(replayed={s.get('last_missed_fills') or 0})"
+        )
+    elif swallow_delta >= RECONCILER_SWALLOW_DELTA_THRESHOLD:
+        # The reconciler is *expected* to swallow Kalshi REST blips, but
+        # a sustained spike (≥ threshold swallows since the last probe)
+        # almost always means something is structurally broken — DB
+        # connectivity, a schema change, a bad token — and the on-call
+        # should see it on /system instead of having to grep logs for
+        # "reconciler swallowed".
+        status = "degraded"
+        detail = (
+            f"swallowed {swallow_delta} reconciler exception(s) since last probe "
+            f"(totals={sum((s.get('swallowed_total') or {}).values())})"
         )
     else:
         status = "ok"
