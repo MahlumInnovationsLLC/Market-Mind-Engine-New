@@ -133,6 +133,18 @@ async def _bg_best_effort(coro: Any, label: str) -> None:
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
+    # Loop-independent liveness sidecar: a tiny stdlib HTTP server in
+    # a daemon thread that the L2 watchdog probes instead of
+    # ``/api/healthz``.  When something blocks the asyncio event loop
+    # for >30 s (settlement refit, large batch INSERT, etc.) the
+    # sidecar still answers, so the watchdog stops SIGKILLing the
+    # process and triggering 15-30 s cold-boot outages on the public
+    # uptime monitor.
+    try:
+        from . import sidecar_healthz
+        sidecar_healthz.start_sidecar_healthz()
+    except Exception as e:  # pragma: no cover — defensive
+        log.warning("sidecar healthz failed to start: %s", e)
     log.info("axiom-predict api starting")
     settings = get_settings()  # noqa: F841 — early validation
     ready_gate.begin()

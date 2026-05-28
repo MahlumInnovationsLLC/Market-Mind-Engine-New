@@ -1552,8 +1552,28 @@ async def run_cycle(vertical: str = "sports") -> CycleResult:
     candidates: list[dict[str, Any]] = []
     candidates.extend(cached)
 
+    # Edge Terminal input-mode exclusivity (task #844 / Supabase-size
+    # reduction): when the operator has selected ``edge_terminal`` as
+    # the input source the pipeline must NOT place trades — only the
+    # scraper executor fires.  Resolve the mode here, BEFORE the swarm
+    # loop, so every fresh ``run_debate`` (and its accompanying
+    # ``swarm_debates`` + ``llm_predictions`` INSERTs, plus the LLM
+    # spend) is suppressed in edge_terminal mode.  We still walk the
+    # ``cached`` debates so the dashboard reflects what *would* have
+    # been considered, but produce zero new rows.
+    try:
+        from ..edge_terminal import control as _et_control
+        _input_mode_early = await _et_control.get_input_mode()
+    except Exception:  # pragma: no cover — defensive
+        _input_mode_early = "pipeline"
+    _skip_fresh_debates = _input_mode_early == "edge_terminal"
+
     # Run fresh debates serially to bound concurrent LLM cost.
     for pred in fresh_pool:
+        if _skip_fresh_debates:
+            # No new swarm_debates / llm_predictions rows while the
+            # operator is sourcing picks from Edge Terminal.
+            break
         if not (settings.openai_api_key and settings.anthropic_api_key):
             result.errors.append("swarm keys missing — skipped fresh debates")
             break

@@ -65,7 +65,7 @@ log "playwright install pid=$!"
 log "exec-ing watchdog -> uvicorn :8080"
 exec "$PY" "$WATCHDOG" \
   --supervise \
-  --target http://127.0.0.1:8080/api/healthz \
+  --target "http://127.0.0.1:${HEALTHZ_SIDECAR_PORT:-8081}/" \
   -- \
   "$PY" -m uvicorn app.main:app \
   --host 0.0.0.0 \
