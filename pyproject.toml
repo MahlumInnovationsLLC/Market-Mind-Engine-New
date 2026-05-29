@@ -40,6 +40,21 @@ dependencies = [
     "reportlab>=4.0",
 ]
 
+[tool.pytest.ini_options]
+# Treat RuntimeWarning as an error so "coroutine '...' was never awaited"
+# leaks (the classic symptom of async tests that drive coroutines on a
+# torn-down event loop) fail loudly instead of silently corrupting later
+# tests in the serial suite.  See artifacts/api-server/docs/async_test_patterns.md.
+filterwarnings = [
+    "error::RuntimeWarning",
+    # Pre-existing asyncpg `_send_one` coroutine leaks from a few legacy
+    # async tests (test_gates_tail_risk_policy, test_in_game_loop_mlb_predict)
+    # that exercise the real db helpers against a closed loop.  Those tests
+    # already pass and are out of scope for task #930; this targeted ignore
+    # keeps them green while still flagging *new* coroutine leaks elsewhere.
+    "ignore:coroutine '_send_one' was never awaited:RuntimeWarning",
+]
+
 [[tool.uv.index]]
 explicit = true
 name = "pytorch-cpu"

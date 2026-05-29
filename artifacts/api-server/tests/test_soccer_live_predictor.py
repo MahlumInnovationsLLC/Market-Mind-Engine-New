@@ -434,9 +434,15 @@ def test_cycle_persists_live_prediction_for_soccer(monkeypatch):
 
 
 def test_cycle_does_not_persist_for_unwired_sport(monkeypatch):
-    # MLB is the next unwired sport on the generic dispatcher now that
-    # NBA (task #878) and NHL (task #885) are both live; this
-    # exercises the "tag is_live but no model update" path.
+    # MLB has since been wired onto both the meta-model dispatcher
+    # (task #881) and the registry feature-builder path, so to keep
+    # exercising the "tag is_live but no model update" branch we stub
+    # both predictor entrypoints to yield nothing.  This also keeps the
+    # test hermetic: the wired MLB path otherwise reaches the live gate
+    # / registry predictor, which read module-level ``db`` state that is
+    # NOT routed through the ``_loop.db`` / ``_sl.db`` fakes below — in
+    # the full suite that real pool is bound to a torn-down event loop,
+    # which is the "Event loop is closed" leak this test used to hit.
     fake = _CycleFakeDB(
         rows=[{
             "market_id": "KX-MLB-A", "league": "MLB",
@@ -450,8 +456,29 @@ def test_cycle_does_not_persist_for_unwired_sport(monkeypatch):
     monkeypatch.setattr(_loop, "db", fake)
     monkeypatch.setattr(_sl, "db", fake)
 
+    calls = {"meta": 0, "registry": 0}
+
+    async def _no_meta_prediction(_row):
+        calls["meta"] += 1
+        return None
+
+    async def _no_registry_prediction(_row, **_kwargs):
+        calls["registry"] += 1
+        return None
+
+    monkeypatch.setattr(
+        _loop, "_predict_live_for_market_meta", _no_meta_prediction
+    )
+    monkeypatch.setattr(
+        _loop, "_predict_live_via_registry", _no_registry_prediction
+    )
+
     r = _run(_loop.run_in_game_cycle("mlb"))
     assert r.candidates_tagged == 1
     assert r.live_predictions_computed == 0
     assert r.live_predictions_persisted == 0
     assert fake.persist_calls == []
+    # Guard against the wiring silently regressing back to "unwired": the
+    # MLB path must actually reach a predictor entrypoint (which we stubbed
+    # to no-op), otherwise the no-persist result above would be meaningless.
+    assert calls["meta"] + calls["registry"] >= 1

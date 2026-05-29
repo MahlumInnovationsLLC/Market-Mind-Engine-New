@@ -9,6 +9,7 @@ the same pair within the TTL.
 from __future__ import annotations
 
 import asyncio
+import time
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -66,6 +67,13 @@ def fake_pipe(monkeypatch: pytest.MonkeyPatch) -> _FakeDedupe:
     # neutralise the COINAPI_API_KEY we just set.
     monkeypatch.setenv("COINAPI_API_KEY", "x")
     monkeypatch.delenv("AXIOM_COINAPI_DISABLED", raising=False)
+    # Step the process start time back past the 600s boot-grace window
+    # (app.health line ~1591).  Within the grace window an *empty*
+    # crypto_ohlcv table is intentionally downgraded "no bars" -> degraded
+    # instead of down, so the `down`-pair counters never accumulate and no
+    # alert fires.  The suite always runs inside that window, so without
+    # this the empty-table tests can never reach the alert threshold.
+    monkeypatch.setattr(health_mod, "_started_at", time.time() - 3600)
     # Reset per-test counters so tests are decoupled.
     health_mod._crypto_freshness_bad_counts.clear()
     return fake
