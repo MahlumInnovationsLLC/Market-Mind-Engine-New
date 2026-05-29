@@ -7,8 +7,9 @@ our local DB-of-record, and:
   * silently auto-corrects drifts within `AXIOM_RECONCILER_DRIFT_TOLERANCE`
     (default 0 contracts — the WS pipeline is the primary truth source,
     so any drift is an audit signal);
-  * raises a `model_health_alerts` row + dispatches a `drift` email when
-    the drift exceeds the tolerance (deduped per ticker for one hour);
+  * raises a `model_health_alerts` row when the drift exceeds the
+    tolerance (deduped per ticker for one hour; surfaced on the
+    operator dashboard, no email);
   * back-fills missed fills into `order_fills` and re-runs the same
     weighted-average rollup the WS handler uses, so a dropped fill
     event can never leave a position permanently mis-stated;
@@ -499,8 +500,8 @@ async def list_drifts(
       * ``last_alert_at`` / ``last_alert_severity`` /
         ``last_alert_message`` — the latest matching
         ``model_health_alerts`` row (``alert_type='position_drift'``,
-        ``metric_name=ticker``) so the operator sees the same context
-        the alert email contained.
+        ``metric_name=ticker``) so the operator sees the drift
+        context on the dashboard.
 
     ``state`` is one of ``open`` (default — actionable queue),
     ``snoozed``, ``resolved`` (any ``resolved_*`` terminal), or
@@ -615,9 +616,7 @@ async def accept_exchange_truth(
 
     # Steps 1-4 must commit or roll back as a single unit so we never
     # leave the DB half-reconciled (e.g. drift marked resolved while
-    # local positions still show the old quantity). Only the email
-    # notification at step 5 is best-effort outside the transaction —
-    # an SMTP hiccup must not undo a successful reconciliation.
+    # local positions still show the old quantity).
     side = "yes" if exch_qty > 0 else "no"
     qty = abs(exch_qty)
     synth_id = _accept_truth_synth_id(ticker, exchange)
@@ -718,28 +717,6 @@ async def accept_exchange_truth(
             "reason": f"transaction_failed:{type(e).__name__}",
         }
 
-    # 5. Confirmation email — best-effort, dedupe so a flurry of clicks
-    #    doesn't spam inboxes.
-    try:
-        from ..notifications import alerts as _alerts
-        if await _alerts.dedupe_or_skip(
-            "position_drift_resolved",
-            f"{ticker}:accept:{active['id']}",
-            ttl_seconds=3600,
-        ):
-            _alerts.position_drift_resolved(
-                ticker=ticker,
-                action="accept_exchange_truth",
-                local_qty=local_qty,
-                exchange_qty=exch_qty,
-                drift_qty=drift_qty,
-                resolver_email=resolver_email,
-                reason=reason,
-            )
-    except Exception as e:  # pragma: no cover
-        log.warning("position_drift_resolved email failed (%s): %s",
-                    ticker, e)
-
     return {
         "changed": True,
         "ticker": ticker,
@@ -834,26 +811,6 @@ async def snooze_drift(
     except Exception as e:
         log.warning("snooze_drift update failed (%s): %s", ticker, e)
         return {"changed": False, "ticker": ticker, "reason": f"db_error:{e}"}
-
-    try:
-        from ..notifications import alerts as _alerts
-        if await _alerts.dedupe_or_skip(
-            "position_drift_resolved",
-            f"{ticker}:snooze:{active['id']}",
-            ttl_seconds=3600,
-        ):
-            _alerts.position_drift_resolved(
-                ticker=ticker,
-                action="snooze",
-                local_qty=int(active["local_qty"] or 0),
-                exchange_qty=int(active["exchange_qty"] or 0),
-                drift_qty=int(active["drift_qty"] or 0),
-                resolver_email=resolver_email,
-                reason=reason,
-                snoozed_until=until_dt.isoformat(),
-            )
-    except Exception as e:  # pragma: no cover
-        log.warning("snooze confirmation email failed (%s): %s", ticker, e)
 
     return {
         "changed": True,
@@ -1007,22 +964,6 @@ async def _raise_position_drift_alert(
         log.warning("position_drift alert insert failed for %s: %s", ticker, e)
 
     if raised:
-        try:
-            from ..notifications import alerts as _alerts
-            if await _alerts.dedupe_or_skip(
-                "position_drift",
-                f"{metric_name}:{drift}",
-                ttl_seconds=3600,
-            ):
-                _alerts.drift(
-                    vertical="trading",
-                    metric=f"position_drift:{metric_name}",
-                    value=float(drift),
-                    threshold=float(tolerance),
-                    note=msg,
-                )
-        except Exception as e:  # pragma: no cover
-            log.warning("position_drift email dispatch failed: %s", e)
         _total_drift_alerts += 1
     return raised
 
