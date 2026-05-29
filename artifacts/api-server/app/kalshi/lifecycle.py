@@ -293,8 +293,25 @@ class OrderRequest:
             "count": int(self.count),
             "type": self.type,
             "client_order_id": self.client_order_id,
-            "time_in_force": self.time_in_force,
         }
+        # Kalshi's POST /portfolio/orders rejects a literal "GTC"/"IOC"
+        # ``time_in_force`` ("oneof" validation error): a resting
+        # good-till-cancelled order is the DEFAULT achieved by OMITTING the
+        # field, and the only explicit accepted value is ``fill_or_kill``.
+        # Map our internal enum accordingly so the live submit path is
+        # actually accepted by the venue instead of 400-ing on every order.
+        # Reject anything else (e.g. "IOC") rather than silently degrading
+        # to a resting GTC order — Kalshi has no IOC and a silent downgrade
+        # would leave an unintended live resting order on the book.
+        if self.time_in_force == "GTC":
+            pass  # resting default — omit the field
+        elif self.time_in_force == "FOK":
+            payload["time_in_force"] = "fill_or_kill"
+        else:
+            raise ValueError(
+                f"unsupported time_in_force for Kalshi: {self.time_in_force!r} "
+                "(expected 'GTC' or 'FOK')"
+            )
         if self.type == "limit":
             if self.limit_price_cents is None:
                 raise ValueError("limit_price_cents required for limit orders")

@@ -891,3 +891,40 @@ def test_duplicate_fill_event_is_suppressed(monkeypatch, _reset_lifecycle):
     assert len(filled) == 2
     # Position upsert also fired only twice.
     assert len(lifecycle._test_positions) == 2
+
+
+# ---------------------------------------------------------------------------
+# Kalshi time-in-force payload mapping (live-trading canary fix, Task #952).
+# Kalshi's POST /portfolio/orders 400s on a literal "GTC"/"IOC" time_in_force
+# ("oneof" validation): resting GTC is the default (omit the field) and the
+# only explicit accepted value is "fill_or_kill".
+# ---------------------------------------------------------------------------
+
+def _payload_req(tif: str) -> "lifecycle.OrderRequest":
+    return lifecycle.OrderRequest(
+        market_ticker="X-1",
+        side="yes",
+        action="buy",
+        count=1,
+        type="limit",
+        limit_price_cents=68,
+        client_order_id="tif-1",
+        time_in_force=tif,
+    )
+
+
+def test_to_kalshi_payload_omits_time_in_force_for_gtc():
+    payload = _payload_req("GTC").to_kalshi_payload()
+    assert "time_in_force" not in payload  # resting default == omit
+
+
+def test_to_kalshi_payload_maps_fok_to_fill_or_kill():
+    payload = _payload_req("FOK").to_kalshi_payload()
+    assert payload["time_in_force"] == "fill_or_kill"
+
+
+def test_to_kalshi_payload_rejects_ioc():
+    # IOC has no Kalshi equivalent — reject rather than silently degrade to
+    # a resting GTC order on the live book.
+    with pytest.raises(ValueError):
+        _payload_req("IOC").to_kalshi_payload()

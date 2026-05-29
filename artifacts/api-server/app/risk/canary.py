@@ -29,6 +29,7 @@ prematurely.
 """
 from __future__ import annotations
 
+import json
 import logging
 import os
 from datetime import datetime, timezone
@@ -201,7 +202,7 @@ async def ensure_initialized() -> int:
               updated_at = EXCLUDED.updated_at
         """,
         _KEY_INIT_AT,
-        now,
+        json.dumps(now),
     )
     log.info("canary initialized: remaining=%s init_at=%s", seed, now)
     return seed
@@ -237,7 +238,7 @@ async def reset(count: int | None = None) -> int:
               updated_at = EXCLUDED.updated_at
         """,
         _KEY_INIT_AT,
-        now,
+        json.dumps(now),
     )
     # Restart the post-canary ramp ceiling too so a re-flip gets the full
     # qty=1 -> tier -> full graduation, not just the qty=1 canary.
