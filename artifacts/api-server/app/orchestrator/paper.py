@@ -282,6 +282,7 @@ async def place_order(
     # the counter only when a *canary* trade settles (decrement on
     # placement would over-spend the counter on pre-fill cancels).
     canary_active = False
+    ramp_active = False
     if not paper:
         from ..risk import canary as _canary
         forced_qty, canary_active = await _canary.force_quantity_for_live(quantity)
@@ -291,6 +292,18 @@ async def place_order(
                 ctx.market_id, quantity, forced_qty,
             )
             quantity = forced_qty
+        else:
+            # Canary lifted — apply the gradual post-canary ramp ceiling
+            # (Task #952) so sizing steps qty=1 -> tier -> full instead of
+            # jumping straight to full Kelly size.
+            ramped_qty, ramp_active = await _canary.ramp_quantity_for_live(quantity)
+            if ramp_active and ramped_qty < quantity:
+                log.info(
+                    "ramp cap applied: market=%s intended=%s capped=%s",
+                    ctx.market_id, quantity, ramped_qty,
+                )
+            if ramp_active:
+                quantity = ramped_qty
     # Prefer the venue-specific quote when present so a Polymarket-routed
     # order isn't priced off a Kalshi mid (and vice-versa). Falls back to
     # ctx.current_price (historically the Kalshi mid) when the candidate
@@ -330,6 +343,11 @@ async def place_order(
         # canary trade so the counter reflects observed end-to-end
         # outcomes, not just placements.
         metadata["canary"] = True
+    elif ramp_active:
+        # Post-canary ramp tier (Task #952): the settlement pipeline calls
+        # ``risk.canary.decrement_ramp_on_settle`` once per settled ramp
+        # trade so the tier ceiling graduates on observed outcomes.
+        metadata["ramp"] = True
     try:
         cfg = get_league_config(ctx.league)
         if cfg is not None and cfg.three_way_market:

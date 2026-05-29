@@ -567,6 +567,19 @@ async def lifespan(_: FastAPI):
         except Exception as e:
             log.warning("orchestrator scheduler start failed: %s", e)
 
+        # Seed the post-canary live ramp ceiling (Task #952).  This is the
+        # belt-and-braces backup for a system that went live *before* the
+        # ramp landed: without an existing risk.ramp_remaining row the
+        # placement path fails closed to the smallest tier, so seeding the
+        # row here lets the ladder actually graduate.  Idempotent
+        # (ON CONFLICT DO NOTHING) and best-effort — never blocks lifespan.
+        try:
+            from .risk import canary as _canary
+
+            await _canary.ensure_ramp_initialized()
+        except Exception as e:
+            log.warning("ramp seed at boot failed: %s", e)
+
         # Edge Terminal scraper-input mode (task #844).  Defaults the
         # app.input_mode setting to edge_terminal on a fresh install
         # (migration 0055 seeds the row; ensure_seeded is the belt-

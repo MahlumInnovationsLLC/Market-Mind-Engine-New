@@ -361,6 +361,10 @@ async def _settle_one_trade(
         try:
             from ..risk import canary as _canary
             await _canary.decrement_on_settle(trade)
+            # Post-canary ramp accounting (Task #952): graduates the ramp
+            # tier ceiling on observed settlements.  Mutually exclusive
+            # with the canary flag at placement, so at most one fires.
+            await _canary.decrement_ramp_on_settle(trade)
         except Exception as e:  # pragma: no cover — defensive
             _record_swallow("canary_decrement", e, context=f"trade_id={tid}")
 

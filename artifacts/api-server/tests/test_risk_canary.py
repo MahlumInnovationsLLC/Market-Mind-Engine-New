@@ -307,3 +307,184 @@ def test_canary_stays_active_when_trades_rejected_pre_settle(
 
     # Counter still at 3 — rejections did not consume canary budget.
     assert fake_settings.rows["risk.canary_remaining"] == "3"
+
+
+# ---------------------------------------------------------------------------
+# Post-canary ramp ladder (Task #952)
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def default_ramp_env(monkeypatch):
+    """Pin the ramp ladder to the documented default (5,20 over 3
+    trades/tier => total 6) so tier math is deterministic regardless of
+    the ambient environment."""
+    monkeypatch.setenv("AXIOM_RAMP_CAPS", "5,20")
+    monkeypatch.setenv("AXIOM_RAMP_TIER_TRADES", "3")
+
+
+def test_ramp_caps_default(monkeypatch):
+    monkeypatch.delenv("AXIOM_RAMP_CAPS", raising=False)
+    assert canary._ramp_caps() == [5, 20]
+
+
+def test_ramp_caps_parse_sort_dedupe(monkeypatch):
+    monkeypatch.setenv("AXIOM_RAMP_CAPS", "20, 5, abc, 5, -3, 8")
+    assert canary._ramp_caps() == [5, 8, 20]
+
+
+def test_ramp_caps_falls_back_on_all_garbage(monkeypatch):
+    monkeypatch.setenv("AXIOM_RAMP_CAPS", "abc, -1, 0")
+    assert canary._ramp_caps() == [5, 20]
+
+
+def test_ramp_tier_trades_default_and_env(monkeypatch):
+    monkeypatch.delenv("AXIOM_RAMP_TIER_TRADES", raising=False)
+    assert canary._ramp_tier_trades() == 3
+    monkeypatch.setenv("AXIOM_RAMP_TIER_TRADES", "2")
+    assert canary._ramp_tier_trades() == 2
+    monkeypatch.setenv("AXIOM_RAMP_TIER_TRADES", "0")
+    assert canary._ramp_tier_trades() == 3
+    monkeypatch.setenv("AXIOM_RAMP_TIER_TRADES", "junk")
+    assert canary._ramp_tier_trades() == 3
+
+
+def test_ramp_total(default_ramp_env):
+    assert canary._ramp_total() == 6
+
+
+def test_ramp_fails_closed_when_unseeded(fake_settings, default_ramp_env):
+    """No row at all -> fail CLOSED to the smallest cap (active) so an
+    already-live system that predates the ramp cannot slip a full-size
+    order through before seeding creates the row."""
+    qty, active = asyncio.run(canary.ramp_quantity_for_live(42))
+    assert qty == 5
+    assert active is True
+
+
+def test_ramp_passthrough_when_exhausted(fake_settings, default_ramp_env):
+    fake_settings.rows["risk.ramp_remaining"] = "0"
+    qty, active = asyncio.run(canary.ramp_quantity_for_live(42))
+    assert qty == 42
+    assert active is False
+
+
+def test_ramp_first_tier_cap(fake_settings, default_ramp_env):
+    """remaining=6 (consumed 0) -> tier 0 -> cap 5."""
+    fake_settings.rows["risk.ramp_remaining"] = "6"
+    qty, active = asyncio.run(canary.ramp_quantity_for_live(42))
+    assert qty == 5
+    assert active is True
+
+
+def test_ramp_stays_first_tier_until_graduation(fake_settings, default_ramp_env):
+    """remaining=4 (consumed 2, still < tier_trades) -> tier 0 -> cap 5."""
+    fake_settings.rows["risk.ramp_remaining"] = "4"
+    qty, active = asyncio.run(canary.ramp_quantity_for_live(42))
+    assert qty == 5
+    assert active is True
+
+
+def test_ramp_second_tier_cap(fake_settings, default_ramp_env):
+    """remaining=3 (consumed 3 == tier_trades) -> tier 1 -> cap 20."""
+    fake_settings.rows["risk.ramp_remaining"] = "3"
+    qty, active = asyncio.run(canary.ramp_quantity_for_live(42))
+    assert qty == 20
+    assert active is True
+
+
+def test_ramp_active_even_when_intended_below_cap(fake_settings, default_ramp_env):
+    """A small intended order is still tagged active so the tier graduates
+    on its settlement."""
+    fake_settings.rows["risk.ramp_remaining"] = "6"
+    qty, active = asyncio.run(canary.ramp_quantity_for_live(2))
+    assert qty == 2
+    assert active is True
+
+
+def test_ramp_biases_safe_on_db_error(fake_settings, default_ramp_env):
+    fake_settings.fetchval_should_raise = True
+    qty, active = asyncio.run(canary.ramp_quantity_for_live(42))
+    assert qty == 5  # smallest cap
+    assert active is True
+
+
+def test_ramp_biases_safe_on_non_integer(fake_settings, default_ramp_env):
+    fake_settings.rows["risk.ramp_remaining"] = "not-a-number"
+    qty, active = asyncio.run(canary.ramp_quantity_for_live(42))
+    assert qty == 5
+    assert active is True
+
+
+def test_ensure_initialized_seeds_ramp(monkeypatch, fake_settings, default_ramp_env):
+    monkeypatch.delenv("AXIOM_CANARY_TRADES", raising=False)
+    asyncio.run(canary.ensure_initialized())
+    assert fake_settings.rows["risk.ramp_remaining"] == "6"
+
+
+def test_ensure_initialized_seeds_ramp_even_when_canary_exists(
+    monkeypatch, fake_settings, default_ramp_env
+):
+    """A system that initialized the canary before the ramp landed still
+    picks up the ramp budget on the next ensure_initialized."""
+    fake_settings.rows["risk.canary_remaining"] = "2"
+    out = asyncio.run(canary.ensure_initialized())
+    assert out == 2  # canary untouched
+    assert fake_settings.rows["risk.ramp_remaining"] == "6"
+
+
+def test_reset_restarts_ramp(fake_settings, default_ramp_env):
+    fake_settings.rows["risk.ramp_remaining"] = "1"
+    asyncio.run(canary.reset(7))
+    assert fake_settings.rows["risk.ramp_remaining"] == "6"
+
+
+def test_is_ramp_trade_recognizes_flag():
+    assert canary.is_ramp_trade({"ramp": True}) is True
+    assert canary.is_ramp_trade({"ramp": "true"}) is True
+    assert canary.is_ramp_trade({"ramp": 1}) is True
+    assert canary.is_ramp_trade({"ramp": False}) is False
+    assert canary.is_ramp_trade({"canary": True}) is False
+    assert canary.is_ramp_trade({}) is False
+    assert canary.is_ramp_trade(None) is False
+
+
+def test_decrement_ramp_skips_non_ramp(fake_settings):
+    fake_settings.rows["risk.ramp_remaining"] = "6"
+    out = asyncio.run(canary.decrement_ramp_on_settle({
+        "id": 1, "metadata": {"canary": True},
+    }))
+    assert out is False
+    assert fake_settings.rows["risk.ramp_remaining"] == "6"
+
+
+def test_decrement_ramp_decrements_ramp_trade(fake_settings):
+    fake_settings.rows["risk.ramp_remaining"] = "6"
+    out = asyncio.run(canary.decrement_ramp_on_settle({
+        "id": 7, "metadata": {"ramp": True},
+    }))
+    assert out is True
+    assert fake_settings.rows["risk.ramp_remaining"] == "5"
+
+
+def test_ramp_graduates_qty_one_to_five_to_twenty_to_full(
+    monkeypatch, fake_settings, default_ramp_env
+):
+    """End-to-end story: after the qty=1 canary lifts, the ramp steps the
+    ceiling 5 -> 20 -> full as live trades settle."""
+    asyncio.run(canary.ensure_initialized())  # seeds ramp_remaining=6
+    intended = 100
+    seen_caps: list[int] = []
+    for _ in range(6):
+        qty, active = asyncio.run(canary.ramp_quantity_for_live(intended))
+        assert active is True
+        seen_caps.append(qty)
+        asyncio.run(canary.decrement_ramp_on_settle({
+            "id": 0, "metadata": {"ramp": True},
+        }))
+    # First 3 capped at 5, next 3 at 20.
+    assert seen_caps == [5, 5, 5, 20, 20, 20]
+    # 7th placement: ramp exhausted -> full size.
+    qty, active = asyncio.run(canary.ramp_quantity_for_live(intended))
+    assert qty == 100
+    assert active is False
