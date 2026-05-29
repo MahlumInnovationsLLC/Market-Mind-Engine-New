@@ -107,8 +107,22 @@ def alert_recipients() -> list[str]:
     return deduped
 
 
+def server_token() -> str | None:
+    """Resolve the Postmark server token.
+
+    Accepts ``POSTMARK_SERVER_TOKEN`` (the canonical name) and falls
+    back to ``POSTMARK_SERVER_API_KEY`` — Postmark's own UI labels the
+    value "Server API token", so operators commonly store it under that
+    alias. Either name works so a fresh install doesn't silently no-op.
+    """
+    return (
+        os.environ.get("POSTMARK_SERVER_TOKEN")
+        or os.environ.get("POSTMARK_SERVER_API_KEY")
+    )
+
+
 def is_configured() -> bool:
-    return bool(os.environ.get("POSTMARK_SERVER_TOKEN"))
+    return bool(server_token())
 
 
 def status() -> dict:
@@ -189,7 +203,7 @@ async def _send_one(
     dry_run: bool = False,
     attachments: Sequence[Path | str] | None = None,
 ) -> _SendRecord:
-    token = os.environ.get("POSTMARK_SERVER_TOKEN")
+    token = server_token()
     from_email = os.environ.get("POSTMARK_FROM_EMAIL") or DEFAULT_FROM
     stream = os.environ.get("POSTMARK_MESSAGE_STREAM") or "outbound"
     now = time.time()
@@ -212,7 +226,7 @@ async def _send_one(
             to=to,
             subject=subject,
             ok=False,
-            skipped_reason="POSTMARK_SERVER_TOKEN not set",
+            skipped_reason="POSTMARK_SERVER_TOKEN/POSTMARK_SERVER_API_KEY not set",
         )
         log.info("postmark skipped (no token): to=%s subject=%r", to, subject)
         _record(rec)
