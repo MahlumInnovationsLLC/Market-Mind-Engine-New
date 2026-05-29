@@ -6414,6 +6414,20 @@ async def edge_terminal_status_route(
     return await edge_terminal.get_status()
 
 
+@app.post("/api/edge-terminal/self-check")
+async def edge_terminal_self_check_route(
+    _: object = Depends(require_approved_user),
+) -> dict[str, object]:
+    """On-demand scraper self-check (task #950).
+
+    Launches a fresh browser, logs in, and reports whether the scraper
+    can reach the badged-tile grid — returning a categorized outcome
+    (``ok`` / ``not_configured`` / ``browser_missing`` / ``login_failed``
+    / ``no_rows`` / ``error``) plus the live signal count.  Operator
+    button on the admin console; never put on the 30s health loop."""
+    return await edge_terminal.self_check()
+
+
 @app.get("/api/dashboard/edge-terminal-pnl")
 async def dashboard_edge_terminal_pnl(
     _: object = Depends(require_approved_user),

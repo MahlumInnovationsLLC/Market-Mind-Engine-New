@@ -49,6 +49,7 @@ import type {
   EdgeTerminalInputModeResponse,
   EdgeTerminalInputModeSetResponse,
   EdgeTerminalPnlResponse,
+  EdgeTerminalSelfCheckResponse,
   EdgeTerminalSignalsResponse,
   EdgeTerminalStatusResponse,
   EmergencyStopRequest,
@@ -1056,6 +1057,90 @@ export function useGetEdgeTerminalStatus<
 
   return { ...query, queryKey: queryOptions.queryKey };
 }
+
+/**
+ * @summary On-demand scraper self-check — launches a fresh browser, logs in, and reports whether the scraper can reach the badged-tile grid. Returns a categorized outcome (ok | not_configured | browser_missing | login_failed | no_rows | error) plus the live signal count. Operator button on the admin console.
+ */
+export const getPostEdgeTerminalSelfCheckUrl = () => {
+  return `/api/edge-terminal/self-check`;
+};
+
+export const postEdgeTerminalSelfCheck = async (
+  options?: RequestInit,
+): Promise<EdgeTerminalSelfCheckResponse> => {
+  return customFetch<EdgeTerminalSelfCheckResponse>(
+    getPostEdgeTerminalSelfCheckUrl(),
+    {
+      ...options,
+      method: "POST",
+    },
+  );
+};
+
+export const getPostEdgeTerminalSelfCheckMutationOptions = <
+  TError = ErrorType<unknown>,
+  TContext = unknown,
+>(options?: {
+  mutation?: UseMutationOptions<
+    Awaited<ReturnType<typeof postEdgeTerminalSelfCheck>>,
+    TError,
+    void,
+    TContext
+  >;
+  request?: SecondParameter<typeof customFetch>;
+}): UseMutationOptions<
+  Awaited<ReturnType<typeof postEdgeTerminalSelfCheck>>,
+  TError,
+  void,
+  TContext
+> => {
+  const mutationKey = ["postEdgeTerminalSelfCheck"];
+  const { mutation: mutationOptions, request: requestOptions } = options
+    ? options.mutation &&
+      "mutationKey" in options.mutation &&
+      options.mutation.mutationKey
+      ? options
+      : { ...options, mutation: { ...options.mutation, mutationKey } }
+    : { mutation: { mutationKey }, request: undefined };
+
+  const mutationFn: MutationFunction<
+    Awaited<ReturnType<typeof postEdgeTerminalSelfCheck>>,
+    void
+  > = () => {
+    return postEdgeTerminalSelfCheck(requestOptions);
+  };
+
+  return { mutationFn, ...mutationOptions };
+};
+
+export type PostEdgeTerminalSelfCheckMutationResult = NonNullable<
+  Awaited<ReturnType<typeof postEdgeTerminalSelfCheck>>
+>;
+
+export type PostEdgeTerminalSelfCheckMutationError = ErrorType<unknown>;
+
+/**
+ * @summary On-demand scraper self-check — launches a fresh browser, logs in, and reports whether the scraper can reach the badged-tile grid. Returns a categorized outcome (ok | not_configured | browser_missing | login_failed | no_rows | error) plus the live signal count. Operator button on the admin console.
+ */
+export const usePostEdgeTerminalSelfCheck = <
+  TError = ErrorType<unknown>,
+  TContext = unknown,
+>(options?: {
+  mutation?: UseMutationOptions<
+    Awaited<ReturnType<typeof postEdgeTerminalSelfCheck>>,
+    TError,
+    void,
+    TContext
+  >;
+  request?: SecondParameter<typeof customFetch>;
+}): UseMutationResult<
+  Awaited<ReturnType<typeof postEdgeTerminalSelfCheck>>,
+  TError,
+  void,
+  TContext
+> => {
+  return useMutation(getPostEdgeTerminalSelfCheckMutationOptions(options));
+};
 
 /**
  * @summary Edge Terminal P&L card — cumulative P&L on trades placed by the scraper executor since 2026-05-21 (`placed_by = 'edge_terminal' AND executed_at >= '2026-05-21'`).

@@ -446,6 +446,77 @@ def _probe_kalshi_reconciler() -> dict:
     )
 
 
+async def _probe_edge_terminal_poller() -> dict:
+    """Surface the Edge Terminal scraper poller's last-tick outcome (task #950).
+
+    Passive, cheap (a single status-row read — never launches a browser
+    on the 30s loop).  Cards:
+      * ``unconfigured`` when ``input_mode`` isn't ``edge_terminal``
+        (the poller is intentionally idle).
+      * ``down`` when the last tick couldn't run the scraper at all —
+        ``not_configured`` (creds missing) or ``browser_missing``
+        (chromium not installed in the deploy image yet).
+      * ``degraded`` when login failed, the DOM/selectors changed
+        (``no_rows``), the poller is stale, or any other tick error.
+      * ``ok`` when the last tick logged in and saw the row grid.
+    """
+    from .edge_terminal import poller as edge_terminal  # local import to avoid cycle
+
+    try:
+        s = await edge_terminal.get_status()
+    except Exception as e:  # pragma: no cover — defensive
+        return _card(
+            key="edge_terminal_poller",
+            label="Edge Terminal poller",
+            category="passive",
+            status="degraded",
+            detail=f"status read failed: {e}"[:240],
+        )
+    mode = s.get("input_mode")
+    if mode != "edge_terminal":
+        return _card(
+            key="edge_terminal_poller",
+            label="Edge Terminal poller",
+            category="passive",
+            status="unconfigured",
+            detail=f"input_mode={mode!r} (poller idle)",
+            extras=s,
+        )
+    category = s.get("last_error_category") or "ok"
+    last_error = s.get("last_error")
+    stale = bool(s.get("stale"))
+    age = s.get("age_seconds")
+    count = int(s.get("last_signal_count") or 0)
+    # Hard-down categories: the scraper literally cannot run.
+    if category in ("not_configured", "browser_missing"):
+        status = "down"
+        detail = last_error or category
+    elif category in ("login_failed", "no_rows", "error") or last_error:
+        status = "degraded"
+        detail = last_error or category
+    elif stale:
+        status = "degraded"
+        detail = (
+            f"stale: last ok {age:.0f}s ago"
+            if isinstance(age, (int, float))
+            else "stale: no successful poll yet"
+        )
+    else:
+        status = "ok"
+        detail = (
+            f"last tick ok [{category}] | signals={count}"
+            + (f" | last ok {age:.0f}s ago" if isinstance(age, (int, float)) else "")
+        )
+    return _card(
+        key="edge_terminal_poller",
+        label="Edge Terminal poller",
+        category="passive",
+        status=status,
+        detail=detail[:240],
+        extras=s,
+    )
+
+
 async def _probe_drift_resolution_queue() -> dict:
     """Surface the operator drift-resolution queue depth + oldest-open age.
 
@@ -2670,6 +2741,11 @@ async def _build_snapshot() -> _Snapshot:
     except Exception as e:  # pragma: no cover — defensive
         log.warning("drift_resolution_queue probe failed: %s", e)
         drift_queue_card = None
+    try:
+        edge_terminal_card = await _probe_edge_terminal_poller()
+    except Exception as e:  # pragma: no cover — defensive
+        log.warning("edge_terminal_poller probe failed: %s", e)
+        edge_terminal_card = None
     passive = [
         _probe_kalshi_ws(),
         _probe_kalshi_cluster(),
@@ -2691,6 +2767,8 @@ async def _build_snapshot() -> _Snapshot:
     ]
     if drift_queue_card is not None:
         passive.append(drift_queue_card)
+    if edge_terminal_card is not None:
+        passive.append(edge_terminal_card)
     # Side-effect-only evaluation: the operator console already
     # renders the "stale leaderboard" badge from the feed metadata,
     # so this evaluator emits no card — it just fires / auto-resolves

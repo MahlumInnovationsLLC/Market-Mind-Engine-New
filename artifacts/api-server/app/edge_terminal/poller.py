@@ -83,7 +83,7 @@ async def get_status() -> dict[str, Any]:
     try:
         r = await db.fetchrow(
             "SELECT last_poll_at, last_ok_at, last_error, "
-            "last_signal_count, updated_at "
+            "last_signal_count, last_error_category, updated_at "
             "FROM edge_terminal_poller_status WHERE id = 1"
         )
         row = dict(r) if r else None
@@ -108,6 +108,7 @@ async def get_status() -> dict[str, Any]:
         "last_poll_at": _iso(row.get("last_poll_at") if row else None),
         "last_ok_at": _iso(last_ok),
         "last_error": (row or {}).get("last_error"),
+        "last_error_category": (row or {}).get("last_error_category"),
         "last_signal_count": int((row or {}).get("last_signal_count") or 0),
         "age_seconds": age_seconds,
         "stale": stale,
@@ -187,7 +188,11 @@ async def _loop() -> None:
             raise
         except Exception as e:
             log.exception("edge_terminal poll tick failed: %s", e)
-            await _record_status(error=str(e), signal_count=0)
+            await _record_status(
+                error=str(e),
+                signal_count=0,
+                category=scraper.SCRAPE_ERROR,
+            )
         try:
             await asyncio.wait_for(_stop.wait(), timeout=_next_interval_seconds())
         except asyncio.TimeoutError:
@@ -199,14 +204,24 @@ async def _loop() -> None:
 async def _one_tick() -> None:
     signals: list[dict[str, Any]] = []
     error: str | None = None
+    # Every tick resolves to exactly one category (task #950) so the
+    # operator can tell *why* nothing traded — recorded on the status
+    # row, in logs, and surfaced on the dashboard tile.  ``ScraperLogin
+    # Failed`` subclasses ``ScraperUnavailable`` so it must be caught
+    # first to keep its precise ``login_failed`` category.
+    category = scraper.SCRAPE_OK
     try:
         signals = await scraper.scrape_signals()
     except scraper.ScraperNotConfigured as e:
-        error = f"not_configured: {e}"
+        category, error = scraper.SCRAPE_NOT_CONFIGURED, f"not_configured: {e}"
+    except scraper.ScraperLoginFailed as e:
+        category, error = scraper.SCRAPE_LOGIN_FAILED, f"login_failed: {e}"
     except scraper.ScraperUnavailable as e:
-        error = f"unavailable: {e}"
+        category, error = scraper.SCRAPE_BROWSER_MISSING, f"browser_missing: {e}"
+    except scraper.ScraperDOMChanged as e:
+        category, error = scraper.SCRAPE_NO_ROWS, f"no_rows: {e}"
     except Exception as e:  # pragma: no cover — defensive
-        error = f"scrape_failed: {e}"
+        category, error = scraper.SCRAPE_ERROR, f"scrape_failed: {e}"
     # Always emit an INFO line so prod logs show the poller is alive
     # and what each tick actually saw -- previously a silent
     # ``ScraperUnavailable`` (no chromium installed in the deploy image)
@@ -214,9 +229,13 @@ async def _one_tick() -> None:
     # next restart, making the system look dead when it was just
     # mis-configured.
     if error:
-        log.warning("edge_terminal tick error: %s", error)
+        log.warning("edge_terminal tick error [%s]: %s", category, error)
     else:
-        log.info("edge_terminal tick: scraped %d signal(s)", len(signals))
+        log.info(
+            "edge_terminal tick [%s]: scraped %d signal(s)",
+            category,
+            len(signals),
+        )
 
     inserted = 0
     for sig in signals:
@@ -265,8 +284,9 @@ async def _one_tick() -> None:
         log.exception("edge_terminal executor drain failed: %s", e)
         if not error:
             error = f"drain_failed: {e}"
+            category = scraper.SCRAPE_ERROR
 
-    await _record_status(error=error, signal_count=inserted)
+    await _record_status(error=error, signal_count=inserted, category=category)
 
 
 async def _insert_signal(sig: dict[str, Any]) -> int | None:
@@ -332,7 +352,12 @@ async def _insert_signal(sig: dict[str, Any]) -> int | None:
     return int(new_id) if new_id is not None else None
 
 
-async def _record_status(*, error: str | None, signal_count: int) -> None:
+async def _record_status(
+    *, error: str | None, signal_count: int, category: str = scraper.SCRAPE_OK
+) -> None:
+    # $1=error and $2=signal_count are positionally pinned — the dedupe
+    # tests assert ``status_updates == [(error, count), ...]`` reading
+    # only args[0:2], so the category is appended as $3 (additive).
     try:
         await db.execute(
             """
@@ -341,11 +366,13 @@ async def _record_status(*, error: str | None, signal_count: int) -> None:
                 last_ok_at = CASE WHEN $1::text IS NULL THEN now() ELSE last_ok_at END,
                 last_error = $1,
                 last_signal_count = $2,
+                last_error_category = $3,
                 updated_at = now()
             WHERE id = 1
             """,
             error,
             signal_count,
+            category,
         )
     except Exception as e:  # pragma: no cover — defensive
         log.warning("edge_terminal status update failed: %s", e)

@@ -204,6 +204,23 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/EdgeTerminalStatusResponse" }
 
+  /edge-terminal/self-check:
+    post:
+      operationId: postEdgeTerminalSelfCheck
+      tags: [edge-terminal]
+      summary: >-
+        On-demand scraper self-check — launches a fresh browser, logs
+        in, and reports whether the scraper can reach the badged-tile
+        grid. Returns a categorized outcome (ok | not_configured |
+        browser_missing | login_failed | no_rows | error) plus the live
+        signal count. Operator button on the admin console.
+      responses:
+        "200":
+          description: Self-check outcome
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/EdgeTerminalSelfCheckResponse" }
+
   /dashboard/edge-terminal-pnl:
     get:
       operationId: getDashboardEdgeTerminalPnl
@@ -1458,10 +1475,30 @@ components:
         last_poll_at: { type: string, nullable: true }
         last_ok_at: { type: string, nullable: true }
         last_error: { type: string, nullable: true }
+        last_error_category:
+          type: string
+          nullable: true
+          description: >-
+            Category of the most recent tick outcome: ok | not_configured
+            | browser_missing | login_failed | no_rows | error. Lets the
+            dashboard show *why* the scraper produced no trades.
         age_seconds: { type: number, nullable: true, description: "Seconds since last_ok_at; null when never succeeded." }
         stale: { type: boolean, description: "True when age_seconds > 120 (or no successful poll yet)." }
         running: { type: boolean }
       required: [stale, running]
+
+    EdgeTerminalSelfCheckResponse:
+      type: object
+      properties:
+        ok:
+          type: boolean
+          description: True only when the scraper logged in and reached the badged-tile grid.
+        category:
+          type: string
+          description: "ok | not_configured | browser_missing | login_failed | no_rows | error"
+        detail: { type: string, description: "Human-readable explanation of the outcome." }
+        signal_count: { type: integer, description: "Badged signals seen on this live check (may be 0 on a quiet board)." }
+      required: [ok, category, detail, signal_count]
 
     EdgeTerminalPnlResponse:
       type: object

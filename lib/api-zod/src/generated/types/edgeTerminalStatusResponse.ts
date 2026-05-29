@@ -10,6 +10,8 @@ export interface EdgeTerminalStatusResponse {
   last_poll_at?: string | null;
   last_ok_at?: string | null;
   last_error?: string | null;
+  /** Category of the most recent tick outcome: ok | not_configured | browser_missing | login_failed | no_rows | error. Lets the dashboard show *why* the scraper produced no trades. */
+  last_error_category?: string | null;
   /** Seconds since last_ok_at; null when never succeeded. */
   age_seconds?: number | null;
   /** True when age_seconds > 120 (or no successful poll yet). */

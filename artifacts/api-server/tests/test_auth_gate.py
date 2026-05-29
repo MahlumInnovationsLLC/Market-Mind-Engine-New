@@ -341,6 +341,8 @@ PROTECTED_MUTATING_ENDPOINTS: tuple[tuple[str, str], ...] = (
     ("POST", "/api/dashboard/candidates/{prediction_id}/fire"),
     # Task #844 — Edge Terminal input-mode toggle (Elite-only POST).
     ("POST", "/api/edge-terminal/input-mode"),
+    # Task #950 — on-demand scraper self-check (admin button).
+    ("POST", "/api/edge-terminal/self-check"),
 )
 
 # Path-only view of the mutating-endpoint inventory, used by the

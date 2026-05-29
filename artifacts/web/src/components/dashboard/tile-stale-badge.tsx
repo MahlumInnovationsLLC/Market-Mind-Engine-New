@@ -1,4 +1,7 @@
-import { useEdgeTerminalSourceStale } from "./source-filter-context";
+import {
+  edgeTerminalReason,
+  useEdgeTerminalSourceStale,
+} from "./source-filter-context";
 
 /**
  * Shared stale-source indicator used by every trade-derived dashboard
@@ -23,11 +26,14 @@ export function TileStaleBadge({
   className?: string;
   testId?: string;
 }) {
-  const { stale, ageSeconds } = useEdgeTerminalSourceStale();
+  const { stale, ageSeconds, category, lastError } =
+    useEdgeTerminalSourceStale();
   if (!stale) return null;
+  const reason = edgeTerminalReason(category, lastError);
   return (
     <div
       data-testid={testId}
+      title={reason}
       className={
         "mb-2 inline-flex items-center gap-1 rounded border border-amber-500/40 bg-amber-500/10 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wider text-amber-300" +
         (className ? ` ${className}` : "")

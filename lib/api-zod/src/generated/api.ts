@@ -404,6 +404,12 @@ export const GetEdgeTerminalStatusResponse = zod.object({
   last_poll_at: zod.string().nullish(),
   last_ok_at: zod.string().nullish(),
   last_error: zod.string().nullish(),
+  last_error_category: zod
+    .string()
+    .nullish()
+    .describe(
+      "Category of the most recent tick outcome: ok | not_configured | browser_missing | login_failed | no_rows | error. Lets the dashboard show \*why\* the scraper produced no trades.",
+    ),
   age_seconds: zod
     .number()
     .nullish()
@@ -412,6 +418,28 @@ export const GetEdgeTerminalStatusResponse = zod.object({
     .boolean()
     .describe("True when age_seconds > 120 (or no successful poll yet)."),
   running: zod.boolean(),
+});
+
+/**
+ * @summary On-demand scraper self-check — launches a fresh browser, logs in, and reports whether the scraper can reach the badged-tile grid. Returns a categorized outcome (ok | not_configured | browser_missing | login_failed | no_rows | error) plus the live signal count. Operator button on the admin console.
+ */
+export const PostEdgeTerminalSelfCheckResponse = zod.object({
+  ok: zod
+    .boolean()
+    .describe(
+      "True only when the scraper logged in and reached the badged-tile grid.",
+    ),
+  category: zod
+    .string()
+    .describe(
+      "ok | not_configured | browser_missing | login_failed | no_rows | error",
+    ),
+  detail: zod.string().describe("Human-readable explanation of the outcome."),
+  signal_count: zod
+    .number()
+    .describe(
+      "Badged signals seen on this live check (may be 0 on a quiet board).",
+    ),
 });
 
 /**

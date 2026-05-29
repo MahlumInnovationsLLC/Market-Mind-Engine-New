@@ -3,6 +3,7 @@ import {
   getGetEdgeTerminalInputModeQueryKey,
   useGetEdgeTerminalInputMode,
   useGetMySubscription,
+  usePostEdgeTerminalSelfCheck,
   useSetEdgeTerminalInputMode,
 } from "@workspace/api-client-react";
 
@@ -35,6 +36,12 @@ export default function InputModeToggle({
   const qc = useQueryClient();
   const { mode } = useInputMode();
   const { mutateAsync, isPending } = useSetEdgeTerminalInputMode();
+  const {
+    mutateAsync: runSelfCheck,
+    data: selfCheck,
+    isPending: selfCheckPending,
+    isError: selfCheckError,
+  } = usePostEdgeTerminalSelfCheck();
   // Tier gating mirrors the server-side `TIER_ELITE` requirement on
   // POST /api/edge-terminal/input-mode — without this the UI happily
   // shows the toggle to free/pro users and their click silently 403s
@@ -112,6 +119,46 @@ export default function InputModeToggle({
           />
           Show pipeline data
         </label>
+      ) : null}
+      {mode === "edge_terminal" ? (
+        <div className="inline-flex items-center gap-1">
+          <button
+            type="button"
+            data-testid="edge-terminal-self-check"
+            disabled={selfCheckPending}
+            onClick={() => {
+              void runSelfCheck();
+            }}
+            className={
+              "rounded border border-border px-2 py-1 text-[10px] uppercase tracking-wider text-muted-foreground hover:bg-muted" +
+              (selfCheckPending ? " cursor-wait opacity-60" : "")
+            }
+            title="Run a live scrape probe: log in and confirm badged tiles are visible."
+          >
+            {selfCheckPending ? "Checking…" : "Self-check"}
+          </button>
+          {selfCheckError ? (
+            <span
+              data-testid="edge-terminal-self-check-result"
+              className="text-[10px] text-rose-400"
+            >
+              Self-check request failed
+            </span>
+          ) : selfCheck ? (
+            <span
+              data-testid="edge-terminal-self-check-result"
+              title={selfCheck.detail}
+              className={
+                "text-[10px] " +
+                (selfCheck.ok ? "text-emerald-400" : "text-rose-400")
+              }
+            >
+              {selfCheck.ok
+                ? `OK · ${selfCheck.signal_count} signal${selfCheck.signal_count === 1 ? "" : "s"}`
+                : `Failed · ${selfCheck.category}`}
+            </span>
+          ) : null}
+        </div>
       ) : null}
     </div>
   );

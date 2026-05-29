@@ -8,6 +8,8 @@ Public surface used by the rest of the api-server:
   * :func:`start` / :func:`stop` — lifespan hooks; idempotent.
   * :func:`get_status` — surface for the dashboard's stale-poller
     indicator (>120s grey + last error).
+  * :func:`self_check` — on-demand "can the scraper log in and see
+    badged tiles?" probe used by the admin self-check button (task #950).
 """
 from __future__ import annotations
 
@@ -19,6 +21,7 @@ from .control import (
     set_input_mode,
 )
 from .poller import get_status, start, stop
+from .scraper import self_check
 
 
 __all__ = [
@@ -30,4 +33,5 @@ __all__ = [
     "get_status",
     "start",
     "stop",
+    "self_check",
 ]

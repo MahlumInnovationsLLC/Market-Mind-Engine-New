@@ -75,6 +75,7 @@ export * from "./edgeTerminalInputModeSetResponse";
 export * from "./edgeTerminalInputModeSetResponseMode";
 export * from "./edgeTerminalPnlResponse";
 export * from "./edgeTerminalPnlResponseByVerticalItem";
+export * from "./edgeTerminalSelfCheckResponse";
 export * from "./edgeTerminalSignalItem";
 export * from "./edgeTerminalSignalsResponse";
 export * from "./edgeTerminalStatusResponse";

@@ -127,6 +127,10 @@ export function useEdgeTerminalSourceStale(): {
   ageSeconds: number | null;
   /** True when the active source actually depends on the poller. */
   appliesToActiveSource: boolean;
+  /** Last poll-tick outcome category (task #950), e.g. login_failed. */
+  category: string | null;
+  /** Human-readable last error from the poller status row, if any. */
+  lastError: string | null;
 } {
   const { isEdgeTerminal, showPipelineData } = useSourceFilter();
   const appliesToActiveSource = isEdgeTerminal && !showPipelineData;
@@ -145,5 +149,31 @@ export function useEdgeTerminalSourceStale(): {
     ageSeconds:
       typeof data?.age_seconds === "number" ? data.age_seconds : null,
     appliesToActiveSource,
+    category: data?.last_error_category ?? null,
+    lastError: data?.last_error ?? null,
   };
+}
+
+/**
+ * Map a poll-tick category to a short, operator-friendly reason string
+ * for the stale-poller badge tooltip (task #950).
+ */
+export function edgeTerminalReason(
+  category: string | null,
+  lastError: string | null,
+): string {
+  switch (category) {
+    case "not_configured":
+      return "Scraper credentials not set (EDGE_TERMINAL_EMAIL / PASSWORD).";
+    case "browser_missing":
+      return "Headless browser unavailable in the runtime (chromium not installed yet).";
+    case "login_failed":
+      return "Login to Edge Terminal failed — check the scraper credentials.";
+    case "no_rows":
+      return "Logged in but found 0 game rows — the source page markup likely changed.";
+    case "error":
+      return lastError ?? "Scraper hit an unexpected error.";
+    default:
+      return lastError ?? "Poller has not reported a successful scrape recently.";
+  }
 }

@@ -270,11 +270,24 @@ export interface EdgeTerminalStatusResponse {
   last_poll_at?: string | null;
   last_ok_at?: string | null;
   last_error?: string | null;
+  /** Category of the most recent tick outcome: ok | not_configured | browser_missing | login_failed | no_rows | error. Lets the dashboard show *why* the scraper produced no trades. */
+  last_error_category?: string | null;
   /** Seconds since last_ok_at; null when never succeeded. */
   age_seconds?: number | null;
   /** True when age_seconds > 120 (or no successful poll yet). */
   stale: boolean;
   running: boolean;
+}
+
+export interface EdgeTerminalSelfCheckResponse {
+  /** True only when the scraper logged in and reached the badged-tile grid. */
+  ok: boolean;
+  /** ok | not_configured | browser_missing | login_failed | no_rows | error */
+  category: string;
+  /** Human-readable explanation of the outcome. */
+  detail: string;
+  /** Badged signals seen on this live check (may be 0 on a quiet board). */
+  signal_count: number;
 }
 
 export type EdgeTerminalPnlResponseByVerticalItem = {

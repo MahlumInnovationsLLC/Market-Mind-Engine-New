@@ -59,16 +59,65 @@ EDGE_TERMINAL_LOGIN_URL = "https://app.edgeterminal.ai/login"
 _NAV_TIMEOUT_MS = 60_000
 
 
+# ---------------------------------------------------------------------
+# Scrape outcome categories (task #950).
+#
+# Every poll tick resolves to exactly one of these so the operator can
+# tell *why* a tick produced no trades without grepping logs.  Surfaced
+# on the poller status row (``last_error_category``), in poller logs, on
+# the dashboard tile, and by the admin self-check.
+# ---------------------------------------------------------------------
+SCRAPE_OK = "ok"                       # logged in, rows present (>=0 signals)
+SCRAPE_NOT_CONFIGURED = "not_configured"  # creds missing
+SCRAPE_BROWSER_MISSING = "browser_missing"  # playwright/chromium unavailable
+SCRAPE_LOGIN_FAILED = "login_failed"   # creds rejected / still on /login
+SCRAPE_NO_ROWS = "no_rows"             # logged in but 0 game rows → likely DOM change
+SCRAPE_ERROR = "error"                 # anything else
+
+VALID_SCRAPE_CATEGORIES = (
+    SCRAPE_OK,
+    SCRAPE_NOT_CONFIGURED,
+    SCRAPE_BROWSER_MISSING,
+    SCRAPE_LOGIN_FAILED,
+    SCRAPE_NO_ROWS,
+    SCRAPE_ERROR,
+)
+
+
 class ScraperNotConfigured(RuntimeError):
     """Raised when credentials are missing.  The poller catches this
     and surfaces it on the status row so the operator sees a clear
     "set EDGE_TERMINAL_EMAIL/PASSWORD" message instead of a stack."""
 
+    category = SCRAPE_NOT_CONFIGURED
+
 
 class ScraperUnavailable(RuntimeError):
-    """Raised when Playwright / chromium isn't installed.  Recoverable
-    via ``pip install playwright && playwright install chromium`` —
-    the poller logs and the dashboard greys the tile."""
+    """Raised when Playwright / chromium isn't installed or the browser
+    fails to launch.  Recoverable via ``pip install playwright &&
+    playwright install chromium`` — the poller logs and the dashboard
+    greys the tile."""
+
+    category = SCRAPE_BROWSER_MISSING
+
+
+class ScraperLoginFailed(ScraperUnavailable):
+    """Raised when the browser launched fine but the Edge Terminal
+    login did not take (bad credentials, captcha, or the post-login
+    redirect never left ``/login``).  Subclasses ``ScraperUnavailable``
+    so existing ``except ScraperUnavailable`` callers still catch it,
+    but the poller handles it first to record the precise category."""
+
+    category = SCRAPE_LOGIN_FAILED
+
+
+class ScraperDOMChanged(RuntimeError):
+    """Raised when login succeeded and the dashboard loaded but zero
+    ``div.game-row`` elements rendered.  Edge Terminal is a 24/7 board,
+    so an empty grid almost always means the source markup/selectors
+    changed — surface it loudly instead of silently returning ``[]``."""
+
+    category = SCRAPE_NO_ROWS
 
 
 def _credentials() -> tuple[str, str]:
@@ -153,7 +202,7 @@ async def scrape_signals() -> list[dict[str, Any]]:
             except Exception:
                 final_url = ""
             if "/login" in final_url.lower():
-                raise ScraperUnavailable(
+                raise ScraperLoginFailed(
                     "edge terminal login failed — check EDGE_TERMINAL_EMAIL "
                     "/ EDGE_TERMINAL_PASSWORD secrets"
                 )
@@ -166,8 +215,11 @@ async def scrape_signals() -> list[dict[str, Any]]:
             # to return cleanly in that case, not stall the poller.
             try:
                 await page.wait_for_selector("div.game-row", timeout=10_000)
-            except Exception:
-                return []
+            except Exception as e:
+                raise ScraperDOMChanged(
+                    "logged in but found 0 game rows (div.game-row) — Edge "
+                    "Terminal markup/selectors likely changed"
+                ) from e
             # The row grid renders before the per-row `.signal-tag`
             # chips hydrate — gating only on `div.game-row` causes the
             # poller to fire the JS extract too early and find 0
@@ -196,6 +248,69 @@ async def scrape_signals() -> list[dict[str, Any]]:
             except Exception:
                 pass
     return out
+
+
+async def self_check() -> dict[str, Any]:
+    """Run a live, on-demand scrape and report a categorized outcome.
+
+    Unlike the 60s poller this launches a fresh browser every call, so
+    it's an admin-triggered action (a button on the operator console),
+    not something to put on the 30s health loop.  Returns:
+
+        {ok, category, detail, signal_count}
+
+    where ``category`` is one of ``VALID_SCRAPE_CATEGORIES`` and
+    ``ok`` is true only when the scraper logged in and saw the row grid
+    (``signal_count`` may legitimately be 0 on a quiet board).
+    """
+    try:
+        signals = await scrape_signals()
+    except ScraperNotConfigured as e:
+        return {
+            "ok": False,
+            "category": SCRAPE_NOT_CONFIGURED,
+            "detail": str(e),
+            "signal_count": 0,
+        }
+    except ScraperLoginFailed as e:
+        return {
+            "ok": False,
+            "category": SCRAPE_LOGIN_FAILED,
+            "detail": str(e),
+            "signal_count": 0,
+        }
+    except ScraperUnavailable as e:
+        return {
+            "ok": False,
+            "category": SCRAPE_BROWSER_MISSING,
+            "detail": str(e),
+            "signal_count": 0,
+        }
+    except ScraperDOMChanged as e:
+        return {
+            "ok": False,
+            "category": SCRAPE_NO_ROWS,
+            "detail": str(e),
+            "signal_count": 0,
+        }
+    except Exception as e:  # noqa: BLE001 — self-check must always answer
+        return {
+            "ok": False,
+            "category": SCRAPE_ERROR,
+            "detail": f"{type(e).__name__}: {e}"[:240],
+            "signal_count": 0,
+        }
+    n = len(signals)
+    return {
+        "ok": True,
+        "category": SCRAPE_OK,
+        "detail": (
+            f"logged in; saw {n} badged signal(s)"
+            if n
+            else "logged in; row grid present but 0 badged signals right now"
+        ),
+        "signal_count": n,
+    }
 
 
 # ---------------------------------------------------------------------
