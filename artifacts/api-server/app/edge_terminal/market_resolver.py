@@ -176,6 +176,13 @@ class ResolveResult:
     ticker: str | None
     reason: str
     candidates: list[dict[str, Any]] = field(default_factory=list)
+    # Structured disposition so callers can branch without parsing the
+    # human-readable ``reason`` string (which is free to change wording):
+    #   "matched"     — a ticker was resolved (direct/cache/live/llm)
+    #   "no_series"   — this vertical/pick_type has no Kalshi series mapped
+    #                   (genuinely unsupported market type)
+    #   "no_match"    — series exist but no candidate scored high enough
+    kind: str = "matched"
 
 
 def _tokens(s: str | None) -> set[str]:
@@ -405,8 +412,10 @@ async def resolve_match(
         except Exception:
             hit = None
         if hit is not None:
-            return ResolveResult(direct, "scraper-supplied ticker (cache hit)", [])
-        return ResolveResult(direct, "scraper-supplied ticker", [])
+            return ResolveResult(
+                direct, "scraper-supplied ticker (cache hit)", [], kind="matched",
+            )
+        return ResolveResult(direct, "scraper-supplied ticker", [], kind="matched")
 
     vertical = (signal.get("vertical") or "").lower().strip()
     pick_type = (signal.get("pick_type") or "moneyline").lower().strip()
@@ -419,6 +428,7 @@ async def resolve_match(
             None,
             f"no kalshi series mapped for vertical={vertical!r} pick_type={pick_type!r}",
             [],
+            kind="no_series",
         )
 
     away_t, home_t = _split_matchup(matchup)
@@ -481,7 +491,7 @@ async def resolve_match(
         if live_fallback and scored:
             llm_ticker, llm_reason = await llm_resolver.llm_pick(signal, scored)
         if llm_ticker:
-            return ResolveResult(llm_ticker, llm_reason, preview)
+            return ResolveResult(llm_ticker, llm_reason, preview, kind="matched")
         reason = (
             f"no kalshi market match — series={prefixes}, "
             f"candidates={len(cands)}, live_queried={used_live}, "
@@ -489,11 +499,12 @@ async def resolve_match(
         )
         if llm_reason:
             reason += f"; {llm_reason}"
-        return ResolveResult(None, reason, preview)
+        return ResolveResult(None, reason, preview, kind="no_match")
     return ResolveResult(
         best["ticker"],
         f"matched via {'live' if used_live else 'cache'} (score={best_score}, series={prefixes[0]})",
         preview,
+        kind="matched",
     )
 
 

@@ -409,6 +409,59 @@ def test_fire_one_resolves_ticker_sizes_and_tags_at_insert(monkeypatch):
     assert placed[0]["kwargs"].get("placed_by") == "edge_terminal"
 
 
+def test_fire_one_persists_decision_with_scraped_confidence_source(monkeypatch):
+    """Task #951: a badged ≥65% signal with an explicit model_prob reaches
+    place_order AND persists its deciding inputs (resolved ticker, decided
+    model_prob, signed edge, confidence_source='scraped', badge flag) via
+    the up-front ``_persist_decision`` UPDATE."""
+    from app.edge_terminal import executor
+
+    placed: list[dict[str, Any]] = []
+    decision: list[tuple[Any, ...]] = []
+
+    async def _resolve(sig):
+        return "KX-NBA-LAL-1"
+
+    async def _bankroll(trading_mode="paper"):
+        return 1000.0
+
+    async def _place_order(ctx, **kwargs):
+        placed.append({"ctx": ctx, "kwargs": kwargs})
+        return {"trades_id": 555, "status": "placed"}
+
+    async def _execute(q, *args):
+        if "decided_model_prob" in q:
+            decision.append(args)
+        return None
+
+    monkeypatch.setattr(executor.market_resolver, "resolve", _resolve)
+    monkeypatch.setattr(executor.cycle_module, "_latest_bankroll", _bankroll)
+    monkeypatch.setattr(executor.paper_module, "place_order", _place_order)
+    monkeypatch.setattr(executor.db, "execute", _execute)
+    monkeypatch.setattr(executor, "_already_placed", lambda *a, **k: _async_false())
+
+    sig = {
+        "id": 77,
+        "vertical": "sports",
+        "matchup": "LAL @ BOS",
+        "selection": "Lakers",
+        "model_prob": 0.70,
+        "market_price": 0.50,
+        "signal_badged": True,
+    }
+    out = _run(executor._fire_one(sig))
+    assert out is not None and out["trades_id"] == 555
+    assert decision, "decision inputs must be persisted up front"
+    # _persist_decision args: (sid, ticker, model_prob, edge, confidence_source, badged)
+    sid, ticker, model_prob, edge, source, badged = decision[0]
+    assert sid == 77
+    assert ticker == "KX-NBA-LAL-1"
+    assert abs(model_prob - 0.70) < 1e-9
+    assert abs(edge - 0.20) < 1e-9  # YES edge = model_prob - price
+    assert source == "scraped"
+    assert badged is True
+
+
 def test_fire_one_min_stake_fallback_when_edge_metadata_missing(monkeypatch):
     """Operator intent: every fresh Edge Terminal pick should produce a
     real Kalshi order, even when the scraper didn't capture
@@ -752,15 +805,79 @@ def test_active_window_includes_mountain_4am_to_10pm(monkeypatch):
     assert poller._in_active_window(mt(23, 30)) is False
 
 
-def test_fire_one_no_ticker_returns_none(monkeypatch):
-    from app.edge_terminal import executor
+def test_fire_one_unresolved_raises_skip_with_honest_reason(monkeypatch):
+    """Task #951: an unresolved signal no longer silently returns None —
+    it raises a structured ``skipped_unresolved`` carrying the resolver's
+    real reason so the operator queue isn't shown a guessed string."""
+    from app.edge_terminal import executor, market_resolver
 
     async def _resolve(sig):
         return None
 
+    async def _resolve_match(sig, **kwargs):
+        return market_resolver.ResolveResult(
+            None,
+            "no kalshi market match — series=['KXMLBGAME'], candidates=0",
+            [],
+            kind="no_match",
+        )
+
     monkeypatch.setattr(executor.market_resolver, "resolve", _resolve)
-    out = _run(executor._fire_one({"id": 1}))
-    assert out is None
+    monkeypatch.setattr(executor.market_resolver, "resolve_match", _resolve_match)
+    try:
+        _run(executor._fire_one({"id": 1, "vertical": "mlb", "pick_type": "moneyline"}))
+    except executor._SignalSkip as skip:
+        assert skip.status == "skipped_unresolved"
+        assert "no kalshi market match" in skip.reason
+    else:
+        raise AssertionError("expected _SignalSkip for an unresolved signal")
+
+
+def test_fire_one_unsupported_market_type_skips_with_reason(monkeypatch):
+    """Task #951: a vertical/pick_type with no Kalshi series mapped is
+    stood down as ``skipped_unsupported_market`` (not a generic skip)."""
+    from app.edge_terminal import executor, market_resolver
+
+    async def _resolve(sig):
+        return None
+
+    async def _resolve_match(sig, **kwargs):
+        # Wording is deliberately UNLIKE the production string to prove the
+        # executor branches on the structured ``kind`` and not on a fragile
+        # reason-text prefix.
+        return market_resolver.ResolveResult(
+            None,
+            "this vertical isn't tradeable on kalshi yet",
+            [],
+            kind="no_series",
+        )
+
+    monkeypatch.setattr(executor.market_resolver, "resolve", _resolve)
+    monkeypatch.setattr(executor.market_resolver, "resolve_match", _resolve_match)
+    try:
+        _run(executor._fire_one({"id": 1, "vertical": "cricket", "pick_type": "moneyline"}))
+    except executor._SignalSkip as skip:
+        assert skip.status == "skipped_unsupported_market"
+        assert "tradeable on kalshi" in skip.reason
+    else:
+        raise AssertionError("expected _SignalSkip for an unsupported market type")
+
+
+def test_fire_one_unbadged_signal_skips(monkeypatch):
+    """Task #951: the 'must be signal-badged' gate stands down a row
+    whose badge flag is explicitly false before any resolution cost."""
+    from app.edge_terminal import executor
+
+    async def _resolve(sig):
+        raise AssertionError("resolver must not run for an unbadged signal")
+
+    monkeypatch.setattr(executor.market_resolver, "resolve", _resolve)
+    try:
+        _run(executor._fire_one({"id": 1, "signal_badged": False}))
+    except executor._SignalSkip as skip:
+        assert skip.status == "skipped_not_badged"
+    else:
+        raise AssertionError("expected _SignalSkip for an unbadged signal")
 
 
 # ---------------------------------------------------------------------
@@ -788,15 +905,13 @@ def test_drain_pending_returns_by_status_breakdown(monkeypatch):
             return {"trades_id": 100}
         if sid == 2:
             raise executor._SignalSkip("skipped_low_confidence", "below floor")
-        return None  # sid 3 -> outcome None path
-
-    async def _resolve(sig):
-        return None  # outcome None + no ticker -> skipped_unresolved
+        # sid 3 -> unresolved now raises a structured skip carrying the
+        # resolver's honest reason rather than returning None.
+        raise executor._SignalSkip("skipped_unresolved", "no matching kalshi market")
 
     monkeypatch.setattr(executor.db, "fetch", _fetch)
     monkeypatch.setattr(executor.db, "execute", _execute)
     monkeypatch.setattr(executor, "_fire_one", _fire_one)
-    monkeypatch.setattr(executor.market_resolver, "resolve", _resolve)
 
     out = _run(executor.drain_pending())
     assert out["placed"] == 1

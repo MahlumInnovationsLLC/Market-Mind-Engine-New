@@ -321,13 +321,15 @@ async def _insert_signal(sig: dict[str, Any]) -> int | None:
             edge_pct, model_prob, market_price,
             kalshi_ticker, market_title, raw, status, side,
             pick_type, avg_odds, ev_pct,
-            source_screenshot_url, kalshi_market_id
+            source_screenshot_url, kalshi_market_id,
+            signal_badged
         ) VALUES (
             $1, $2, $3, $4::date,
             $5, $6, $7,
             $8, $9, $10::jsonb, 'pending', $11,
             $12, $13, $14,
-            $15, $16
+            $15, $16,
+            $17
         )
         ON CONFLICT (vertical, matchup, selection, signal_date) DO NOTHING
         RETURNING id
@@ -348,6 +350,11 @@ async def _insert_signal(sig: dict[str, Any]) -> int | None:
         sig.get("ev_pct"),
         sig.get("source_screenshot_url"),
         sig.get("kalshi_market_id"),
+        # Every row the scraper inserts came off a signal-badged tile, so
+        # default to True; honour an explicit flag if a future source
+        # supplies one.  Persisted so the executor's "must be badged"
+        # gate is auditable.
+        True if sig.get("signal_badged") is None else bool(sig.get("signal_badged")),
     )
     return int(new_id) if new_id is not None else None
 

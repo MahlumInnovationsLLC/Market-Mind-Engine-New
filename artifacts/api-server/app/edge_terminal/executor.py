@@ -81,7 +81,8 @@ async def drain_pending(limit: int = 50) -> dict[str, int]:
                edge_pct, model_prob, market_price,
                kalshi_ticker, market_title, side,
                pick_type, avg_odds, ev_pct,
-               source_screenshot_url, kalshi_market_id
+               source_screenshot_url, kalshi_market_id,
+               signal_badged
         FROM edge_terminal_signals
         WHERE status = 'pending'
         ORDER BY id ASC
@@ -138,19 +139,13 @@ async def drain_pending(limit: int = 50) -> dict[str, int]:
             failed += 1
             continue
         if outcome is None:
-            # _fire_one returns None for two distinct reasons:
-            #   1. resolver couldn't find a Kalshi ticker, or
-            #   2. it found one but Kelly sizing rounded to zero contracts.
-            # Re-resolve cheaply so the operator-visible reason isn't a lie.
-            ticker = await market_resolver.resolve(sig)
-            if ticker:
-                cls = "skipped_zero_kelly"
-                reason = "kelly sized to zero contracts"
-            else:
-                cls = "skipped_unresolved"
-                reason = "no matching kalshi market"
-            await _mark(sid, cls, reason)
-            _tally(cls)
+            # _fire_one now raises a structured ``_SignalSkip`` for every
+            # deliberate stand-down (unresolved market, unsupported type,
+            # zero-Kelly, low confidence, dupe), so a None return is an
+            # unexpected fall-through rather than a routine skip.  Record
+            # it honestly instead of guessing a reason via a re-resolve.
+            await _mark(sid, "skipped_unknown", "no order produced")
+            _tally("skipped_unknown")
             skipped += 1
             continue
         await _mark(
@@ -206,64 +201,32 @@ def _classify_exception(e: BaseException) -> tuple[str | None, str]:
 _MIN_MODEL_CONFIDENCE = 0.65
 
 
-def _is_unsupported_market(sig: dict[str, Any]) -> str | None:
-    """Return a short reason when the signal is for a market Kalshi
-    doesn't list (sport spreads, totals, etc.) so we skip the expensive
-    resolver + slippage round-trip and surface an honest disposition.
-
-    Kalshi sports markets are overwhelmingly moneyline-style YES/NO; the
-    Edge Terminal scraper also ships spread and total picks ("Sox +1.5",
-    "UNDER 8") that have no Kalshi counterpart and were rejecting with
-    misleading ``no matching kalshi market`` / ``no liquidity`` reasons
-    on every poll.  Detect them up front and tag them with a stable
-    ``skipped_unsupported_market`` status so the operator can filter
-    them out of the queue.
-    """
-    pick_type = (sig.get("pick_type") or "").strip().lower()
-    if pick_type in {"spread", "total"}:
-        return f"unsupported market type: {pick_type}"
-    # When the scraper explicitly tagged the pick as moneyline (the only
-    # Kalshi-supported sports format) we trust it over the selection-
-    # text heuristic — otherwise legit moneyline picks like "Over Bears"
-    # or "Saints +Trinity" (proper-noun coincidence) would be dropped.
-    if pick_type == "moneyline":
-        return None
-    selection = (sig.get("selection") or "").strip().upper()
-    # Heuristic for sources that don't expose pick_type: leading
-    # OVER/UNDER → total; trailing +N / -N (e.g. "Sox +1.5") → spread.
-    if selection.startswith(("OVER ", "UNDER ")):
-        return "unsupported market type: total (inferred from selection)"
-    import re as _re
-    if _re.search(r"\s[+\-]\d", selection):
-        return "unsupported market type: spread (inferred from selection)"
-    return None
-
-
 async def _fire_one(sig: dict[str, Any]) -> dict[str, Any] | None:
-    # Cheap pre-filter: drop spread/total picks before paying the
-    # market_resolver + Kalshi REST + slippage-guard cost on a market
-    # that can't possibly match.
-    unsupported = _is_unsupported_market(sig)
-    if unsupported:
-        raise _SignalSkip("skipped_unsupported_market", unsupported)
+    # "Must be signal-badged" gate.  Every row the scraper inserts came
+    # off a signal-tagged tile (the column defaults to True), but the
+    # explicit check makes the condition auditable and lets a future
+    # non-badged source be stood down with a clear reason rather than
+    # silently traded.
+    badged_raw = sig.get("signal_badged")
+    is_badged = True if badged_raw is None else bool(badged_raw)
+    if not is_badged:
+        raise _SignalSkip("skipped_not_badged", "signal is not badged")
 
     ticker = await market_resolver.resolve(sig)
     if not ticker:
-        return None
-    # Persist the resolved ticker on the signal row so the operator-
-    # facing queue shows WHICH Kalshi market we matched (or didn't —
-    # NULL stays NULL when resolve returns None above).  Updated even
-    # when downstream gates (slippage, dedupe, confidence) reject so
-    # diagnosis is possible without re-running the resolver.
-    try:
-        await db.execute(
-            "UPDATE edge_terminal_signals SET kalshi_ticker = $2, updated_at = now() "
-            "WHERE id = $1 AND (kalshi_ticker IS DISTINCT FROM $2)",
-            int(sig["id"]),
-            ticker,
-        )
-    except Exception as e:  # pragma: no cover — defensive
-        log.debug("edge_terminal: ticker persist failed for sid=%s: %s", sig.get("id"), e)
+        # No ticker — re-resolve via the structured surface so the
+        # operator-visible disposition carries the resolver's honest
+        # reason (no Kalshi series mapped for this vertical/pick_type vs
+        # a series exists but no candidate matched) instead of a single
+        # guessed string.  Spreads and totals are now *attempted* (the
+        # resolver maps KX…SPREAD / KX…TOTAL series and line-matches
+        # them); only genuinely unmapped market types fall into the
+        # ``skipped_unsupported_market`` bucket.
+        rr = await market_resolver.resolve_match(sig)
+        reason = rr.reason or "no matching kalshi market"
+        if rr.kind == "no_series":
+            raise _SignalSkip("skipped_unsupported_market", reason)
+        raise _SignalSkip("skipped_unresolved", reason)
 
     # Pricing — prefer scraped market_price, else assume a near-the-
     # money mid so the lifecycle's clamp keeps us in [0.01, 0.99].
@@ -291,11 +254,17 @@ async def _fire_one(sig: dict[str, Any]) -> dict[str, Any] | None:
         price = 0.50
     price = max(0.01, min(0.99, price))
 
+    # Resolve the model probability and record WHICH source produced it
+    # (``confidence_source``) so the deciding inputs are auditable on the
+    # signal row and the observability views can distinguish a scraper-
+    # reported probability from one we inferred from edge%/EV%.
     model_prob = sig.get("model_prob")
+    confidence_source = "scraped" if model_prob is not None else "none"
     if model_prob is None and sig.get("edge_pct") is not None:
         # If only edge% is known, infer p from edge: edge ≈ p - price.
         try:
             model_prob = max(0.01, min(0.99, price + float(sig["edge_pct"]) / 100.0))
+            confidence_source = "edge_inferred"
         except (TypeError, ValueError):
             model_prob = None
     if model_prob is None and sig.get("ev_pct") is not None:
@@ -307,24 +276,54 @@ async def _fire_one(sig: dict[str, Any]) -> dict[str, Any] | None:
                 0.01,
                 min(0.99, price * (1.0 + float(sig["ev_pct"]) / 100.0)),
             )
+            confidence_source = "ev_inferred"
         except (TypeError, ValueError):
             pass
 
-    # Operator-mandated minimum model confidence floor (per-side, post-
-    # side-flip).  We compute the chosen side's probability first so a
-    # 60% model_prob on a ``NO`` selection (i.e. 40% YES) is correctly
-    # rejected from the NO side's perspective rather than passing the
-    # raw YES probability through.  Signals with no model_prob at all
-    # (scraper omitted it AND no edge/ev to infer from) bypass the
-    # floor — the min-stake fallback below already caps real risk at
-    # one contract for those.
-    raw_side_for_floor = (sig.get("side") or "YES")
-    side_for_floor = (
-        "NO" if str(raw_side_for_floor).strip().upper() == "NO" else "YES"
+    # Side defaults to YES (historic behavior) but honors the scraper's
+    # explicit ``side`` field when present so "Under"/"No" picks trade
+    # the NO side of the Kalshi market.  Using the wrong side here
+    # would buy the opposite of the intended pick — the single most
+    # dangerous mis-trade this executor could make.
+    raw_side = (sig.get("side") or "YES")
+    side = "NO" if str(raw_side).strip().upper() == "NO" else "YES"
+
+    # Signed edge from the chosen side's perspective (None when we never
+    # recovered a model probability).  Computed here so it can be
+    # persisted alongside the other deciding inputs before any gate runs.
+    edge_signed = None
+    if model_prob is not None:
+        edge_signed = (
+            float(model_prob) - price if side == "YES"
+            else price - float(model_prob)
+        )
+
+    # Persist the deciding inputs (resolved ticker, model_prob, signed
+    # edge, confidence source, badge flag) up front — i.e. as soon as a
+    # decision actually exists — so every disposition that gets THIS far
+    # (placed, low-confidence, zero-Kelly, dupe) carries its deciding
+    # values without re-running the resolver or sizer.  Pre-resolution
+    # stand-downs (not-badged, unresolved, unsupported) have no model_prob
+    # yet; their status+reason are still recorded by drain via ``_mark``,
+    # and the badge flag was persisted by the poller at insert time.
+    await _persist_decision(
+        int(sig["id"]),
+        ticker=ticker,
+        model_prob=model_prob,
+        edge=edge_signed,
+        confidence_source=confidence_source,
+        badged=is_badged,
     )
+
+    # Operator-mandated minimum model confidence floor (per-side, post-
+    # side-flip).  A 60% model_prob on a ``NO`` selection (i.e. 40% YES)
+    # is correctly rejected from the NO side's perspective.  Signals with
+    # no model_prob at all (scraper omitted it AND no edge/ev to infer
+    # from) bypass the floor — the min-stake fallback below already caps
+    # real risk at one contract for those.
     if model_prob is not None:
         floor_prob = (
-            float(model_prob) if side_for_floor == "YES"
+            float(model_prob) if side == "YES"
             else 1.0 - float(model_prob)
         )
         if floor_prob < _MIN_MODEL_CONFIDENCE:
@@ -335,14 +334,6 @@ async def _fire_one(sig: dict[str, Any]) -> dict[str, Any] | None:
                     f"{_MIN_MODEL_CONFIDENCE:.0%} floor"
                 ),
             )
-
-    # Side defaults to YES (historic behavior) but honors the scraper's
-    # explicit ``side`` field when present so "Under"/"No" picks trade
-    # the NO side of the Kalshi market.  Using the wrong side here
-    # would buy the opposite of the intended pick — the single most
-    # dangerous mis-trade this executor could make.
-    raw_side = (sig.get("side") or "YES")
-    side = "NO" if str(raw_side).strip().upper() == "NO" else "YES"
 
     # Kelly is computed in the chosen side's coordinate system: NO at
     # the YES-quoted price=p costs (1-p) per contract and wins 1 when
@@ -391,7 +382,17 @@ async def _fire_one(sig: dict[str, Any]) -> dict[str, Any] | None:
         quantity = 1
         kelly_fraction = 0.0  # signal-driven, not edge-sized
     if quantity < 1:
-        return None
+        # Surface WHY sizing produced nothing rather than a single opaque
+        # "kelly sized to zero" — the operator needs to tell an empty
+        # bankroll apart from a degenerate price or a genuinely negative
+        # edge that the min-stake fallback intentionally declined.
+        if bankroll <= 0:
+            zero_reason = "no bankroll available for sizing"
+        elif side_price >= 1.0:
+            zero_reason = "side price at ceiling (>=1.0); no contracts affordable"
+        else:
+            zero_reason = "kelly sized to zero contracts"
+        raise _SignalSkip("skipped_zero_kelly", zero_reason)
 
     # Dedupe — if the operator already has live exposure on this
     # ticker+side (manual Kalshi fill, prior pipeline trade, or a
@@ -406,13 +407,6 @@ async def _fire_one(sig: dict[str, Any]) -> dict[str, Any] | None:
             f"open {side} position already exists on {ticker}",
         )
 
-    edge_signed = None
-    if model_prob is not None:
-        # Sign edge from the chosen side's perspective.
-        edge_signed = (
-            float(model_prob) - price if side == "YES"
-            else price - float(model_prob)
-        )
     ctx = RiskContext(
         market_id=ticker,
         side=side,
@@ -614,6 +608,42 @@ async def _already_placed(
         )
         return False
     return bool(row)
+
+
+async def _persist_decision(
+    sid: int,
+    *,
+    ticker: str | None,
+    model_prob: float | None,
+    edge: float | None,
+    confidence_source: str,
+    badged: bool,
+) -> None:
+    """Persist the deciding inputs for a signal so the operator queue and
+    observability views can explain every disposition without re-running
+    the resolver or sizer.
+
+    Best-effort: a persistence failure (schema drift on a fresh dev DB,
+    transient outage) must NOT block the trade, so we swallow + log.
+    ``kalshi_ticker`` is COALESCE'd so a NULL ticker never clobbers a
+    previously-resolved value.
+    """
+    try:
+        await db.execute(
+            """
+            UPDATE edge_terminal_signals
+            SET kalshi_ticker = COALESCE($2, kalshi_ticker),
+                decided_model_prob = $3,
+                decided_edge = $4,
+                confidence_source = $5,
+                signal_badged = $6,
+                updated_at = now()
+            WHERE id = $1
+            """,
+            sid, ticker, model_prob, edge, confidence_source, bool(badged),
+        )
+    except Exception as e:  # pragma: no cover — defensive
+        log.debug("edge_terminal: decision persist failed for sid=%s: %s", sid, e)
 
 
 async def _mark(
