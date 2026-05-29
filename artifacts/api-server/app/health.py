@@ -1486,96 +1486,6 @@ def _probe_orderbook_guard() -> dict:
     )
 
 
-# Per-pair consecutive "down" snapshot counters for the crypto bar
-# freshness card.  Keyed by (symbol, granularity).  When a pair stays
-# `down` for ``CRYPTO_FRESHNESS_ALERT_THRESHOLD`` consecutive snapshots
-# we fan a Postmark alert (deduped via the shared
-# ``notification_dedupe`` table) so the on-call is paged before the
-# predictor sees stale prices.
-_crypto_freshness_bad_counts: dict[tuple[str, str], int] = {}
-
-
-# How many consecutive snapshots a (symbol, granularity) pair must
-# stay `down` before we fan an operator alert.  Default 3 — at the
-# 30s health interval that's ~90s of being stuck.
-CRYPTO_FRESHNESS_ALERT_THRESHOLD = max(
-    1, int(os.environ.get("AXIOM_CRYPTO_FRESHNESS_ALERT_SNAPSHOTS") or "3")
-)
-
-
-# Dedupe TTL for the resulting Postmark alert.  We share the
-# ``notification_dedupe`` table with the rest of the alert helpers; one
-# alert per (symbol, granularity) per hour is plenty for a stale-feed
-# signal — bumping the cadence is a deliberate ops action.
-CRYPTO_FRESHNESS_ALERT_TTL_SECONDS = max(
-    60, int(os.environ.get("AXIOM_CRYPTO_FRESHNESS_ALERT_TTL_SECONDS") or "3600")
-)
-
-
-async def _maybe_dispatch_crypto_freshness_alert(
-    down_pairs: list[dict],
-) -> list[dict]:
-    """Update consecutive-down counters per (symbol, granularity) and
-    fire alerts for any pair that just crossed the threshold this
-    snapshot.  Returns the list of pair dicts that triggered an alert
-    (used by tests).
-    """
-    seen: set[tuple[str, str]] = set()
-    triggered: list[dict] = []
-    for p in down_pairs:
-        sym = str(p.get("symbol") or "")
-        gran = str(p.get("granularity") or "")
-        if not sym or not gran:
-            continue
-        key = (sym, gran)
-        seen.add(key)
-        prev = _crypto_freshness_bad_counts.get(key, 0)
-        cur = prev + 1
-        _crypto_freshness_bad_counts[key] = cur
-        if cur == CRYPTO_FRESHNESS_ALERT_THRESHOLD:
-            triggered.append({**p, "consecutive_snapshots": cur})
-
-    # Drop counters for pairs that recovered (not in this snapshot's
-    # down list) so a future relapse has to climb the threshold again.
-    stale = [k for k in _crypto_freshness_bad_counts if k not in seen]
-    for k in stale:
-        _crypto_freshness_bad_counts.pop(k, None)
-
-    if not triggered:
-        return []
-
-    from .notifications import alerts as _alerts
-
-    for p in triggered:
-        sym = str(p.get("symbol") or "?")
-        gran = str(p.get("granularity") or "?")
-        try:
-            ok = await _alerts.dedupe_or_skip(
-                "crypto_feed_silent",
-                f"{sym}:{gran}",
-                ttl_seconds=CRYPTO_FRESHNESS_ALERT_TTL_SECONDS,
-            )
-        except Exception as e:  # pragma: no cover — fail-open
-            log.warning("crypto-freshness dedupe failed: %s", e)
-            ok = True
-        if not ok:
-            continue
-        try:
-            _alerts.crypto_feed_silent(
-                symbol=sym,
-                granularity=gran,
-                expected_seconds=int(p.get("expected_seconds") or 0),
-                age_seconds=p.get("age_seconds"),
-                max_ts=p.get("max_ts"),
-                red_threshold_seconds=int(p.get("red_threshold_seconds") or 0),
-                consecutive_snapshots=int(p["consecutive_snapshots"]),
-            )
-        except Exception as e:  # pragma: no cover
-            log.warning("crypto-freshness alert dispatch failed: %s", e)
-
-    return triggered
-
-
 async def _probe_crypto_freshness() -> dict:
     """Per-symbol freshness check for the `crypto_ohlcv` bar table.
 
@@ -1710,14 +1620,6 @@ async def _probe_crypto_freshness() -> dict:
         )
         error_log("crypto_feed_freshness", detail[:240])
 
-    # Page the on-call once a (symbol, granularity) pair has been
-    # `down` for ``CRYPTO_FRESHNESS_ALERT_THRESHOLD`` consecutive
-    # snapshots.  Dispatch lives here (rather than the snapshot
-    # assembly loop) so the per-pair counter resets the moment a pair
-    # recovers, mirroring the WS-silent alert path.
-    down_pairs = [p for p in pair_states if p["status"] == "down"]
-    await _maybe_dispatch_crypto_freshness_alert(down_pairs)
-
     return _card(
         key="crypto_feed_freshness",
         label="Crypto feed freshness",
@@ -1728,7 +1630,6 @@ async def _probe_crypto_freshness() -> dict:
             "pairs": pair_states,
             "fresh_count": fresh,
             "total_count": total,
-            "stale_alert_threshold": CRYPTO_FRESHNESS_ALERT_THRESHOLD,
         },
     )
 
