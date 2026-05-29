@@ -93,6 +93,16 @@ async def drain_pending(limit: int = 50) -> dict[str, int]:
     failed = 0
     skipped = 0
     already = 0
+    # Per-terminal-status tally so the poller log and the operator
+    # "why aren't we trading" panel can break the drain down by reason
+    # (e.g. ``skipped_low_confidence: 8``) rather than a single opaque
+    # ``skipped`` bucket.  Keyed by the same enumerated status strings
+    # ``_mark`` persists on the signal row.
+    by_status: dict[str, int] = {}
+
+    def _tally(status: str) -> None:
+        by_status[status] = by_status.get(status, 0) + 1
+
     for r in rows:
         sig = dict(r)
         sid = int(sig["id"])
@@ -103,6 +113,7 @@ async def drain_pending(limit: int = 50) -> dict[str, int]:
             # gate, slippage refusal, etc.  Use a typed status so the UI
             # can distinguish "we deliberately stood down" from a bug.
             await _mark(sid, skip.status, skip.reason)
+            _tally(skip.status)
             if skip.status == "skipped_already_placed":
                 already += 1
             else:
@@ -115,6 +126,7 @@ async def drain_pending(limit: int = 50) -> dict[str, int]:
             cls, reason = _classify_exception(e)
             if cls is not None:
                 await _mark(sid, cls, reason)
+                _tally(cls)
                 if cls == "skipped_already_placed":
                     already += 1
                 else:
@@ -122,6 +134,7 @@ async def drain_pending(limit: int = 50) -> dict[str, int]:
                 continue
             log.exception("edge_terminal fire failed for id=%s: %s", sid, e)
             await _mark(sid, "failed", reason)
+            _tally("failed")
             failed += 1
             continue
         if outcome is None:
@@ -137,18 +150,21 @@ async def drain_pending(limit: int = 50) -> dict[str, int]:
                 cls = "skipped_unresolved"
                 reason = "no matching kalshi market"
             await _mark(sid, cls, reason)
+            _tally(cls)
             skipped += 1
             continue
         await _mark(
             sid, "placed", None,
             trades_id=outcome.get("trades_id"),
         )
+        _tally("placed")
         placed += 1
     return {
         "placed": placed,
         "failed": failed,
         "skipped": skipped,
         "already_placed": already,
+        "by_status": by_status,
     }
 
 
@@ -618,4 +634,14 @@ async def _mark(
         WHERE id = $1
         """,
         sid, status, reason, trades_id,
+    )
+    # Per-signal terminal-outcome log keyed on the stable signal id so a
+    # single pick can be followed end-to-end (insert -> drain -> mark)
+    # by grepping ``signal id=<sid>`` in the poller/executor logs.
+    log.info(
+        "edge_terminal signal id=%s -> %s%s%s",
+        sid,
+        status,
+        f" trades_id={trades_id}" if trades_id is not None else "",
+        f" ({reason})" if reason else "",
     )

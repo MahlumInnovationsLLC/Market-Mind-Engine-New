@@ -224,6 +224,16 @@ async def _one_tick() -> None:
             row_id = await _insert_signal(sig)
             if row_id is not None:
                 inserted += 1
+                # Per-signal insert log keyed on the stable id so a pick
+                # can be correlated end-to-end with its later
+                # ``edge_terminal signal id=<id> -> <status>`` mark line.
+                log.info(
+                    "edge_terminal signal id=%s inserted: vertical=%r matchup=%r selection=%r",
+                    row_id,
+                    sig.get("vertical") if isinstance(sig, dict) else None,
+                    sig.get("matchup") if isinstance(sig, dict) else None,
+                    sig.get("selection") if isinstance(sig, dict) else None,
+                )
         except Exception as e:
             log.warning(
                 "edge_terminal signal insert failed: %s: %r | sig keys=%s vertical=%r matchup=%r selection=%r signal_date=%r",
@@ -241,13 +251,15 @@ async def _one_tick() -> None:
     # that were inserted-but-not-yet-placed on a prior crash still fire.
     try:
         drain_counts = await executor.drain_pending()
+        by_status = (drain_counts or {}).get("by_status") or {}
         log.info(
-            "edge_terminal drain: scraped=%d inserted=%d placed=%d skipped=%d failed=%d",
+            "edge_terminal drain: scraped=%d inserted=%d placed=%d skipped=%d failed=%d by_status=%s",
             len(signals),
             inserted,
             int((drain_counts or {}).get("placed") or 0),
             int((drain_counts or {}).get("skipped") or 0),
             int((drain_counts or {}).get("failed") or 0),
+            dict(sorted(by_status.items())) if isinstance(by_status, dict) else by_status,
         )
     except Exception as e:
         log.exception("edge_terminal executor drain failed: %s", e)

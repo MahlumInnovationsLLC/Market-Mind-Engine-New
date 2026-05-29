@@ -761,3 +761,75 @@ def test_fire_one_no_ticker_returns_none(monkeypatch):
     monkeypatch.setattr(executor.market_resolver, "resolve", _resolve)
     out = _run(executor._fire_one({"id": 1}))
     assert out is None
+
+
+# ---------------------------------------------------------------------
+# Task #949: drain_pending per-reason breakdown + dashboard panel
+# ---------------------------------------------------------------------
+
+def test_drain_pending_returns_by_status_breakdown(monkeypatch):
+    """drain_pending tallies a per-terminal-status breakdown so the
+    poller log and the 'why aren't we trading' panel can show, e.g.,
+    placed=1 / skipped_low_confidence=1 / skipped_unresolved=1 instead
+    of a single opaque ``skipped`` bucket."""
+    from app.edge_terminal import executor
+
+    pending = [{"id": 1}, {"id": 2}, {"id": 3}]
+
+    async def _fetch(q, *a):
+        return pending
+
+    async def _execute(q, *a):
+        return None
+
+    async def _fire_one(sig):
+        sid = sig["id"]
+        if sid == 1:
+            return {"trades_id": 100}
+        if sid == 2:
+            raise executor._SignalSkip("skipped_low_confidence", "below floor")
+        return None  # sid 3 -> outcome None path
+
+    async def _resolve(sig):
+        return None  # outcome None + no ticker -> skipped_unresolved
+
+    monkeypatch.setattr(executor.db, "fetch", _fetch)
+    monkeypatch.setattr(executor.db, "execute", _execute)
+    monkeypatch.setattr(executor, "_fire_one", _fire_one)
+    monkeypatch.setattr(executor.market_resolver, "resolve", _resolve)
+
+    out = _run(executor.drain_pending())
+    assert out["placed"] == 1
+    assert out["skipped"] == 2
+    assert out["failed"] == 0
+    bs = out["by_status"]
+    assert bs.get("placed") == 1
+    assert bs.get("skipped_low_confidence") == 1
+    assert bs.get("skipped_unresolved") == 1
+
+
+def test_signal_matches_includes_reason_breakdown(monkeypatch):
+    """The matches endpoint surfaces a windowed per-status breakdown so
+    the operator panel can answer 'why aren't we trading' at a glance."""
+    from app import dashboard
+
+    async def _fetch(q, *a):
+        if "GROUP BY COALESCE(status" in q:
+            return [
+                {"status": "skipped_low_confidence", "count": 8},
+                {"status": "placed", "count": 2},
+                {"status": "skipped_unresolved", "count": 2},
+            ]
+        # No signals and no open positions for this test.
+        return []
+
+    monkeypatch.setattr(dashboard.db, "fetch", _fetch)
+    out = _run(dashboard.get_edge_terminal_signal_matches(limit=25))
+    assert out["error"] is None
+    assert out["window_hours"] == 24
+    breakdown = {r["status"]: r["count"] for r in out["reason_breakdown"]}
+    assert breakdown == {
+        "skipped_low_confidence": 8,
+        "placed": 2,
+        "skipped_unresolved": 2,
+    }

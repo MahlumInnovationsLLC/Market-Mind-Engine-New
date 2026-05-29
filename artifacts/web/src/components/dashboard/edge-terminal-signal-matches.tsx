@@ -49,6 +49,7 @@ type Summary = {
   n_positions_with_signal: number;
   n_unbacked_positions: number;
 };
+type ReasonCount = { status: string; count: number };
 type Response = {
   generated_at: string;
   limit: number;
@@ -56,8 +57,38 @@ type Response = {
   open_positions: Position[];
   unbacked_open_positions: Position[];
   summary: Summary;
+  window_hours?: number | null;
+  reason_breakdown?: ReasonCount[] | null;
   error: string | null;
 };
+
+const STATUS_LABELS: Record<string, string> = {
+  placed: "Placed",
+  pending: "Pending",
+  failed: "Failed",
+  skipped_low_confidence: "Below 65% confidence",
+  skipped_unsupported_market: "Unsupported market",
+  skipped_unresolved: "No Kalshi match",
+  skipped_zero_kelly: "Kelly sized to zero",
+  skipped_already_placed: "Already placed",
+  skipped_gate: "Blocked by risk gate",
+  skipped_slippage: "Slippage guard",
+  unknown: "Unknown",
+};
+
+function statusLabel(status: string): string {
+  return (
+    STATUS_LABELS[status] ??
+    status.replace(/^skipped_/, "").replace(/_/g, " ")
+  );
+}
+
+function statusTone(status: string): string {
+  if (status === "placed") return "text-emerald-300 border-emerald-500/40";
+  if (status === "failed") return "text-rose-400 border-rose-500/40";
+  if (status === "pending") return "text-accent-cyan border-accent-cyan/40";
+  return "text-amber-300 border-amber-500/40";
+}
 
 function fmtTime(s: string | null | undefined): string {
   if (!s) return "—";
@@ -192,6 +223,11 @@ export default function EdgeTerminalSignalMatchesTile() {
             />
           </div>
 
+          <ReasonBreakdownPanel
+            rows={data.reason_breakdown ?? []}
+            windowHours={data.window_hours ?? 24}
+          />
+
           <div className="mb-3 flex flex-wrap gap-2 text-xs">
             <TabBtn
               active={view === "unmatched"}
@@ -249,6 +285,54 @@ function SummaryCell({
         {label}
       </div>
       <div className={`text-lg font-semibold tabular-nums ${cls}`}>{value}</div>
+    </div>
+  );
+}
+
+function ReasonBreakdownPanel({
+  rows,
+  windowHours,
+}: {
+  rows: ReasonCount[];
+  windowHours: number;
+}) {
+  const total = useMemo(
+    () => rows.reduce((acc, r) => acc + (Number(r.count) || 0), 0),
+    [rows],
+  );
+  return (
+    <div
+      data-testid="edge-terminal-reason-breakdown"
+      className="mb-3 rounded border border-border bg-muted/10 px-3 py-2"
+    >
+      <div className="mb-1.5 flex items-baseline justify-between">
+        <div className="text-[10px] uppercase tracking-wider text-muted-foreground">
+          Why aren't we trading
+        </div>
+        <div className="text-[10px] text-muted-foreground">
+          {total} signal{total === 1 ? "" : "s"} · last {windowHours}h
+        </div>
+      </div>
+      {rows.length === 0 ? (
+        <div className="text-xs text-muted-foreground">
+          No signals scraped in the last {windowHours}h.
+        </div>
+      ) : (
+        <div className="flex flex-wrap gap-1.5">
+          {rows.map((r) => (
+            <span
+              key={r.status}
+              data-testid={`edge-terminal-reason-${r.status}`}
+              className={`rounded border px-2 py-0.5 text-[11px] ${statusTone(
+                r.status,
+              )}`}
+            >
+              {statusLabel(r.status)}{" "}
+              <span className="font-semibold tabular-nums">{r.count}</span>
+            </span>
+          ))}
+        </div>
+      )}
     </div>
   );
 }

@@ -7366,6 +7366,8 @@ async def get_edge_terminal_signal_matches(limit: int = 25) -> dict[str, Any]:
             "n_open_positions": 0,
             "n_positions_with_signal": 0,
         },
+        "window_hours": 24,
+        "reason_breakdown": [],
         "error": None,
     }
     try:
@@ -7484,6 +7486,34 @@ async def get_edge_terminal_signal_matches(limit: int = 25) -> dict[str, Any]:
             "n_positions_with_signal": len(positions_with_signal),
             "n_unbacked_positions": len(unbacked_positions),
         }
+        # "Why aren't we trading" panel: aggregate per-terminal-status
+        # counts over a recent window so the operator can see, at a
+        # glance, e.g. "12 badged signals this window, 8 below 65%, 2
+        # unresolved, 2 placed".  This is windowed (not limited to the
+        # ``limit`` rows shown above) so the headline reflects the true
+        # recent disposition mix even when the table is paginated.
+        window_hours = int(out.get("window_hours") or 24)
+        try:
+            breakdown_rows = await db.fetch(
+                """
+                SELECT COALESCE(status, 'unknown') AS status,
+                       COUNT(*)::int AS count
+                FROM edge_terminal_signals
+                WHERE seen_at >= now() - make_interval(hours => $1)
+                GROUP BY COALESCE(status, 'unknown')
+                ORDER BY count DESC, status ASC
+                """,
+                window_hours,
+            )
+            out["reason_breakdown"] = [
+                {"status": r["status"], "count": int(r["count"])}
+                for r in breakdown_rows
+            ]
+        except Exception as e:  # pragma: no cover - defensive
+            log.warning(
+                "edge_terminal_signal_matches breakdown query failed: %s", e
+            )
+            out["reason_breakdown"] = []
     except Exception as e:
         log.warning("edge_terminal_signal_matches query failed: %s", e)
         out["error"] = f"{type(e).__name__}: {e}"[:240]
