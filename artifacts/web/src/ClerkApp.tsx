@@ -7,6 +7,7 @@ import {
   useAuth,
   useClerk,
 } from "@clerk/react";
+import { publishableKeyFromHost } from "@clerk/react/internal";
 import { shadcn } from "@clerk/themes";
 import { Switch, Route, Redirect, useLocation } from "wouter";
 import {
@@ -97,7 +98,13 @@ function PageFallback() {
   );
 }
 
-const clerkPubKey = import.meta.env.VITE_CLERK_PUBLISHABLE_KEY;
+// REQUIRED — resolve the key from window.location.hostname so the same
+// build serves the production proxy domain. Using the raw env var here
+// makes Clerk fail to initialize behind the prod proxy (blank sign-in).
+const clerkPubKey = publishableKeyFromHost(
+  window.location.hostname,
+  import.meta.env.VITE_CLERK_PUBLISHABLE_KEY,
+);
 // Empty in dev, auto-set in prod by the platform.
 const clerkProxyUrl = import.meta.env.VITE_CLERK_PROXY_URL;
 

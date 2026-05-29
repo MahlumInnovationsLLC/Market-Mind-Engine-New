@@ -30,7 +30,10 @@ export default defineConfig({
   base: basePath,
   plugins: [
     react(),
-    tailwindcss(),
+    // optimize:false keeps lightningcss from reordering the nested @layer
+    // imports pulled in by @clerk/themes. Without it the Clerk UI renders
+    // invisible in production builds (blank sign-in screen).
+    tailwindcss({ optimize: false }),
     runtimeErrorOverlay(),
     ...(process.env.NODE_ENV !== "production" &&
     process.env.REPL_ID !== undefined
