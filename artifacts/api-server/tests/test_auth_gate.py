@@ -39,6 +39,8 @@ PROTECTED_ROUTES: tuple[str, ...] = (
     "/api/health/snapshot",
     "/api/health/errors",
     "/api/health/model-alerts",
+    # Task #923 — per-loop background lifecycle state (operator-only GET).
+    "/api/health/loops",
     # Task #739 — per-league surrogate-vs-V1 Brier deltas surfaced on
     # the operator dashboard, plus the underlying-JSON download.
     "/api/health/surrogate-backtest",
@@ -237,6 +239,8 @@ PROTECTED_ROUTES: tuple[str, ...] = (
 PROTECTED_MUTATING_ENDPOINTS: tuple[tuple[str, str], ...] = (
     ("POST", "/api/health/model-alerts/{alert_id}/ack"),
     ("POST", "/api/health/acknowledge-alert"),
+    # Task #923 — admin-only restart of a single lifecycle loop.
+    ("POST", "/api/health/loops/restart"),
     ("POST", "/api/admin/users/{clerk_user_id}/approved"),
     ("POST", "/api/admin/users/{clerk_user_id}/admin"),
     ("POST", "/api/billing/checkout-session"),

@@ -367,9 +367,19 @@ def test_registry_lists_all_22_loops_with_expected_split():
 
 def test_states_returns_one_row_per_loop():
     rows = retention_loops_v757.states()
-    assert len(rows) == 22
+    # 22 one-module-per-loop entries (ARCHIVE + DELETE_ONLY) plus the
+    # task #921 partition-drop instances, which ``states()`` fans out
+    # from ``_PARTITION_DROP_INSTANCES`` (one row per partitioned parent
+    # table: line_snapshots, odds_changes) without adding them to
+    # ``ALL_MODULES``.  22 + 2 = 24.
+    assert len(rows) == len(retention_loops_v757.ALL_MODULES) + len(
+        retention_loops_v757._PARTITION_DROP_INSTANCES
+    )
+    assert len(rows) == 24
+    # The partition-drop instances report their own ``partitioned-drop``
+    # flavor alongside the archive / delete-only one-module loops.
     flavors = {r["flavor"] for r in rows}
-    assert flavors == {"archive", "delete-only"}
+    assert flavors == {"archive", "delete-only", "partitioned-drop"}
 
 
 def test_start_all_does_not_raise_when_loops_disabled():
