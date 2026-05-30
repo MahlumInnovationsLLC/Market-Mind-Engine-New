@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import time
 from typing import Any
 
@@ -31,6 +32,37 @@ log = logging.getLogger(__name__)
 SHADOW_INTERVAL_SECONDS: float = 3600.0
 
 
+# Online-retrain and margin-regressor refits are heavy maintenance steps
+# (buffer drain + sklearn fits across every vertical / league).  They used
+# to run on *every* settlement tick (which can fire every few minutes),
+# stacking CPU + memory pressure on top of the resident predictors.  On a
+# single-process Reserved VM that sustained pressure starved the main app
+# port between ticks, so the platform health check timed out and recreated
+# the instance — surfacing as recurring full outages.  We now stagger them
+# onto their own (longer) cadence while the core trade-settlement cycle
+# keeps running every tick.  Both are best-effort/additive, so skipping a
+# tick only delays a refit; no settlement correctness depends on them.
+def _interval_from_env(name: str, default_seconds: float) -> float:
+    """Resolve a stagger interval (seconds) from ``name``; never negative.
+
+    A value of ``0`` means "run every settlement tick" (the old behaviour),
+    which lets an operator opt out of staggering without a code change.
+    """
+    try:
+        v = float(os.environ.get(name) or default_seconds)
+    except (TypeError, ValueError):
+        v = float(default_seconds)
+    return max(0.0, v)
+
+
+def _retrain_interval_seconds() -> float:
+    return _interval_from_env("AXIOM_RETRAIN_INTERVAL_SECONDS", 900.0)
+
+
+def _margin_refit_interval_seconds() -> float:
+    return _interval_from_env("AXIOM_MARGIN_REFIT_INTERVAL_SECONDS", 900.0)
+
+
 class _SettlementScheduler:
     def __init__(self) -> None:
         self._task: asyncio.Task[Any] | None = None
@@ -41,6 +73,35 @@ class _SettlementScheduler:
         # also drive a shadow cycle, so a cold deploy doesn't sit
         # idle for an hour before the first snapshot lands.
         self._last_shadow_at: float = 0.0
+        # Same `0.0`-means-run-on-first-tick contract for the staggered
+        # heavy maintenance steps (online retrain + margin refit), so a
+        # cold deploy still warms them once before settling into cadence.
+        self._last_retrain_at: float = 0.0
+        self._last_margin_refit_at: float = 0.0
+
+    def _should_run_retrain(self, now_mono: float) -> bool:
+        """True when the staggered retrain cadence is due (pure read).
+
+        ``_last_retrain_at == 0.0`` means "never run this process", so we
+        warm once on the first tick regardless of host uptime — without this
+        explicit check a freshly recreated VM (low ``monotonic()``) would
+        skip the warm-up until uptime crossed the interval.
+        """
+        if self._last_retrain_at == 0.0:
+            return True
+        return (now_mono - self._last_retrain_at) >= _retrain_interval_seconds()
+
+    def _should_run_margin_refit(self, now_mono: float) -> bool:
+        """True when the staggered margin-refit cadence is due (pure read).
+
+        Same ``0.0``-means-warm-once-on-cold-start contract as
+        :meth:`_should_run_retrain`.
+        """
+        if self._last_margin_refit_at == 0.0:
+            return True
+        return (
+            now_mono - self._last_margin_refit_at
+        ) >= _margin_refit_interval_seconds()
 
     def status(self) -> dict[str, Any]:
         s = get_settings()
@@ -156,25 +217,34 @@ class _SettlementScheduler:
         while not self._stop.is_set():
             try:
                 cr = await run_cycle()
+                # Single monotonic stamp for all staggered sub-steps this
+                # tick (retrain / margin refit / shadow), so their cadence
+                # gates compare against one consistent "now".
+                now_mono = time.monotonic()
                 # After settling fresh outcomes, drain the online-learning
                 # buffer and refit any vertical that crossed the warning
-                # threshold (or accumulated enough fresh signal).  Run
-                # in the same loop so we share the backoff/cadence logic
-                # and don't need a second long-lived task.
-                try:
-                    rr = await run_retrain_cycle()
-                    retrain_summary = {
-                        "started_at": rr.started_at,
-                        "completed_at": rr.completed_at,
-                        "duration_seconds": rr.duration_seconds,
-                        "verticals_examined": rr.verticals_examined,
-                        "verticals_retrained": rr.verticals_retrained,
-                        "rows_processed": rr.rows_processed,
-                        "errors": rr.errors,
-                    }
-                except Exception as e:
-                    log.exception("retrain cycle failed: %s", e)
-                    retrain_summary = {"error": f"{type(e).__name__}: {e}"}
+                # threshold (or accumulated enough fresh signal).  Staggered
+                # onto its own cadence (default 15m) so this heavy drain +
+                # sklearn fit doesn't run on every settlement tick and
+                # starve the main app port.  When not due we keep the prior
+                # summary instead of overwriting it (mirrors shadow below).
+                retrain_summary: dict[str, Any] | None = None
+                if self._should_run_retrain(now_mono):
+                    try:
+                        rr = await run_retrain_cycle()
+                        retrain_summary = {
+                            "started_at": rr.started_at,
+                            "completed_at": rr.completed_at,
+                            "duration_seconds": rr.duration_seconds,
+                            "verticals_examined": rr.verticals_examined,
+                            "verticals_retrained": rr.verticals_retrained,
+                            "rows_processed": rr.rows_processed,
+                            "errors": rr.errors,
+                        }
+                    except Exception as e:
+                        log.exception("retrain cycle failed: %s", e)
+                        retrain_summary = {"error": f"{type(e).__name__}: {e}"}
+                    self._last_retrain_at = now_mono
                 # Nightly per-league calibrator refit. The helper
                 # internally gates on a 24h cadence so this is cheap on
                 # every other cycle and only does work once per day.
@@ -186,13 +256,22 @@ class _SettlementScheduler:
                 # Refresh the per-league margin regressors against the
                 # latest finished games + closing lines so spread/total
                 # adjustments use freshly-fitted coefficients (not the
-                # cold-start defaults).  Best-effort — failures here
-                # never take down the settlement loop.
-                try:
-                    mr_summary = (await margin_regressor.refit_all_leagues()).as_dict()
-                except Exception as e:
-                    log.exception("margin regressor refit failed: %s", e)
-                    mr_summary = {"error": f"{type(e).__name__}: {e}"}
+                # cold-start defaults).  Staggered onto its own cadence
+                # (default 15m) for the same reason as retrain: the
+                # per-league sklearn fits are too heavy to run on every
+                # settlement tick.  Coefficients are slow-moving, so a
+                # 15m refresh is operationally equivalent.  Best-effort —
+                # failures here never take down the settlement loop.
+                mr_summary: dict[str, Any] | None = None
+                if self._should_run_margin_refit(now_mono):
+                    try:
+                        mr_summary = (
+                            await margin_regressor.refit_all_leagues()
+                        ).as_dict()
+                    except Exception as e:
+                        log.exception("margin regressor refit failed: %s", e)
+                        mr_summary = {"error": f"{type(e).__name__}: {e}"}
+                    self._last_margin_refit_at = now_mono
                 # Daily Dixon-Coles rho refit (task #900). Gated on a
                 # 24h cadence internally so this is a cheap no-op on
                 # every other settlement tick.
@@ -273,7 +352,6 @@ class _SettlementScheduler:
                 # operator visibility is preserved without breaking the
                 # core settlement cadence.
                 shadow_summary: dict[str, Any] | None = None
-                now_mono = time.monotonic()
                 if (now_mono - self._last_shadow_at) >= SHADOW_INTERVAL_SECONDS:
                     shadow_summary = await self._run_shadow_cycle()
                     self._last_shadow_at = now_mono
@@ -287,9 +365,11 @@ class _SettlementScheduler:
                     "persona_metrics_updated": cr.persona_metrics_updated,
                     "alerts_raised": cr.alerts_raised,
                     "errors": cr.errors,
-                    "retrain": retrain_summary,
+                    "retrain": retrain_summary or self._last.get("retrain"),
                     "calibrators": calib_summary,
-                    "margin_regressor": mr_summary,
+                    "margin_regressor": (
+                        mr_summary or self._last.get("margin_regressor")
+                    ),
                     "dc_rho_fitter": dc_rho_summary,
                     "soccer_baseline_fitter": soccer_baseline_summary,
                     "soccer_lambda_fitter": soccer_lambda_summary,

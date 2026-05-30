@@ -1,0 +1,1 @@
+- [Settlement scheduler cadence](settlement-scheduler-cadence.md) — heavy retrain/margin-refit staggered off every-tick to stop event-loop starvation; monotonic cold-start gate must treat last==0.0 as due.
