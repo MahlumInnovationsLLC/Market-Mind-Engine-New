@@ -47,6 +47,29 @@ log = logging.getLogger(__name__)
 # below is what the Edge Terminal scraper produces today; unknown
 # combinations fall back to a single GAME prefix (moneyline) on the
 # assumption that's the most common Kalshi listing.
+#
+# Soccer is the exception: Kalshi does NOT list a generic ``KXSOCCER*``
+# series (those tickers exist but carry no markets).  Instead every
+# competition has its own GAME / SPREAD / TOTAL series — EPL, LaLiga,
+# Serie A, Ligue 1, MLS, plus the European cups UCL / UEL (e.g.
+# ``KXUCLSPREAD-…PSGARS-…`` for a PSG vs Arsenal Champions League leg).
+# The scraper only tags the vertical as ``soccer`` (not the league), so
+# we fan every soccer pick out across all competition series and let the
+# team-name + line scorer latch onto the right one.  Bundesliga is kept
+# in the list even when off-season (an empty series just yields no
+# candidates).
+_SOCCER_GAME = [
+    "KXEPLGAME", "KXLALIGAGAME", "KXSERIEAGAME", "KXLIGUE1GAME",
+    "KXMLSGAME", "KXUCLGAME", "KXUELGAME", "KXBUNDESGAME",
+]
+_SOCCER_SPREAD = [
+    "KXEPLSPREAD", "KXLALIGASPREAD", "KXSERIEASPREAD", "KXLIGUE1SPREAD",
+    "KXMLSSPREAD", "KXUCLSPREAD", "KXUELSPREAD", "KXBUNDESSPREAD",
+]
+_SOCCER_TOTAL = [
+    "KXEPLTOTAL", "KXLALIGATOTAL", "KXSERIEATOTAL", "KXLIGUE1TOTAL",
+    "KXMLSTOTAL", "KXUCLTOTAL", "KXUELTOTAL", "KXBUNDESTOTAL",
+]
 _SERIES_BY_VERTICAL_PICK: dict[tuple[str, str], list[str]] = {
     ("mlb", "moneyline"): ["KXMLBGAME"],
     ("mlb", "spread"):    ["KXMLBSPREAD"],
@@ -66,8 +89,9 @@ _SERIES_BY_VERTICAL_PICK: dict[tuple[str, str], list[str]] = {
     ("nfl", "moneyline"): ["KXNFLGAME"],
     ("nfl", "spread"):    ["KXNFLSPREAD"],
     ("nfl", "total"):     ["KXNFLTOTAL"],
-    ("soccer", "moneyline"): ["KXSOCCERGAME", "KXEPLGAME", "KXBUNDESGAME", "KXLALIGAGAME"],
-    ("soccer", "total"):     ["KXSOCCERTOTAL"],
+    ("soccer", "moneyline"): _SOCCER_GAME,
+    ("soccer", "spread"):    _SOCCER_SPREAD,
+    ("soccer", "total"):     _SOCCER_TOTAL,
     ("tennis", "moneyline"): ["KXATPMATCH", "KXWTAMATCH"],
 }
 
@@ -391,6 +415,35 @@ async def _live_candidates(prefixes: list[str]) -> list[dict[str, str]]:
 _MIN_SCORE = 5
 
 
+def _has_team_overlap(
+    cand: dict[str, str],
+    *,
+    picked: set[str],
+    other: set[str],
+    picked_codes: set[str],
+    other_codes: set[str],
+) -> bool:
+    """True if ``cand`` mentions at least one of the signal's teams.
+
+    Used to vet the LLM fallback: the LLM is good at fuzzy team matching
+    but will happily latch a totals/over-under line onto an *unrelated*
+    fixture (e.g. matching ``UNDER 2.5`` for ``India @ Zimbabwe`` onto a
+    Ligue 1 Nantes–Toulouse total).  We refuse any LLM pick whose market
+    title/ticker shares no team token or alias code with the matchup, so
+    we never bet the wrong game just because the number lined up.
+    """
+    title = cand.get("title") or ""
+    ticker = cand.get("ticker") or ""
+    all_t = _tokens(title) | _tokens(ticker)
+    if (picked & all_t) or (other & all_t):
+        return True
+    hay = (title + " " + ticker).upper()
+    for c in picked_codes | other_codes:
+        if c and c.upper() in hay:
+            return True
+    return False
+
+
 async def resolve_match(
     signal: dict[str, Any],
     *,
@@ -491,7 +544,24 @@ async def resolve_match(
         if live_fallback and scored:
             llm_ticker, llm_reason = await llm_resolver.llm_pick(signal, scored)
         if llm_ticker:
-            return ResolveResult(llm_ticker, llm_reason, preview, kind="matched")
+            chosen_row = next(
+                (c for c in cands if c["ticker"] == llm_ticker), None
+            )
+            if chosen_row is not None and _has_team_overlap(
+                chosen_row,
+                picked=picked, other=other,
+                picked_codes=picked_codes, other_codes=other_codes,
+            ):
+                return ResolveResult(
+                    llm_ticker, llm_reason, preview, kind="matched",
+                )
+            # The LLM matched a market that names neither team — almost
+            # certainly a line-only false positive on an unrelated
+            # fixture.  Decline rather than place a bet on the wrong game.
+            llm_reason = (
+                f"llm pick {llm_ticker} rejected: market names neither "
+                f"team in {matchup!r}"
+            )
         reason = (
             f"no kalshi market match — series={prefixes}, "
             f"candidates={len(cands)}, live_queried={used_live}, "

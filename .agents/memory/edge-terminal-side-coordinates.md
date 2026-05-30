@@ -31,3 +31,30 @@ pick-relative.
 **How to apply:** any future change to Edge Terminal sizing/pricing/gating must keep
 model_prob and price in the *bought side's* coordinates end-to-end (floor → Kelly → edge
 → RiskContext → cand). Don't reintroduce a `1 - model_prob` flip.
+
+---
+
+# Soccer market resolution + LLM line-only false positives
+
+**Kalshi has no live generic `KXSOCCER*` series.** `KXSOCCERGAME/SPREAD/TOTAL`
+return empty. Soccer is listed per competition with full GAME/SPREAD/TOTAL:
+`KXEPL*, KXLALIGA*, KXSERIEA*, KXLIGUE1*, KXMLS*, KXUCL*, KXUEL*, KXBUNDES*`.
+Cross-league fixtures (e.g. PSG vs Arsenal) live under the cup series (KXUCL/KXUEL).
+So `_SERIES_BY_VERTICAL_PICK[("soccer", spread/total/moneyline)]` must fan across
+all competition series, not the empty generic ones. Cricket: only `KXIPL*` (club
+IPL) exists — internationals like India@Zimbabwe have NO Kalshi market.
+
+**LLM resolver guard — team overlap is mandatory.** `llm_pick` will happily latch
+a totals/over-under line onto an UNRELATED fixture (saw `UNDER 2.5` for
+India@Zimbabwe matched to a Ligue 1 Nantes–Toulouse total purely on the number).
+`resolve_match` now requires `_has_team_overlap(chosen_row, ...)` — the LLM-picked
+market's title/ticker must share ≥1 team token or alias code with the matchup, else
+it's rejected as no_match.
+
+**Why:** placing a bet on the wrong game is strictly worse than placing none. The
+hallucination guard (ticker∈candidates) is not enough — the wrong market CAN be a
+real candidate when many same-line totals exist across leagues.
+
+**How to apply:** never accept an LLM ticker without verifying it names a signal
+team. Any expansion of candidate breadth (more series) raises line-only collision
+risk — keep the overlap guard in lockstep.
