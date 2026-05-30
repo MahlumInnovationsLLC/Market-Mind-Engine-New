@@ -1,1 +1,2 @@
 - [Settlement scheduler cadence](settlement-scheduler-cadence.md) — heavy retrain/margin-refit staggered off every-tick to stop event-loop starvation; monotonic cold-start gate must treat last==0.0 as due.
+- [Edge Terminal NO-side coordinates](edge-terminal-side-coordinates.md) — model_prob is the pick's own win-prob (never flip to 1-mp for NO); NO orders gate/size/submit in NO coords (pick_price=1-yes_price), lifecycle stamps limit as no_price.

@@ -537,10 +537,10 @@ def test_fire_one_honors_no_side(monkeypatch):
         "matchup": "LAL @ BOS",
         "selection": "Under 220.5",
         "side": "NO",
-        # For NO side: kelly favourable when (1-p) > price, e.g.
-        # p=0.30, price=0.50 → NO has edge AND clears the 65%
-        # per-side model-confidence floor (1-0.30 = 70%).
-        "model_prob": 0.30,
+        # ``model_prob`` is the Under pick's own win-probability, so 0.72
+        # clears the 65% floor directly and the NO contract (price
+        # 1-0.50=0.50) carries positive edge (0.72 - 0.50).
+        "model_prob": 0.72,
         # Bypass spread/total pre-filter — the test exercises NO-side
         # propagation, not market-type filtering.
         "pick_type": "moneyline",
@@ -550,7 +550,7 @@ def test_fire_one_honors_no_side(monkeypatch):
     assert out is not None
     ctx = placed[0]["ctx"]
     assert ctx.side == "NO"
-    # Edge signed from the NO-side perspective: price - model_prob.
+    # Edge signed from the NO-side perspective: model_prob - (1 - price).
     assert ctx.edge is not None and ctx.edge > 0
 
 
@@ -650,8 +650,9 @@ def test_signal_side_roundtrips_db_to_executor(monkeypatch):
         "signal_date": "2026-05-22",
         "side": "no",  # lower-case from scraper → normalized to "NO"
         "edge_pct": 10.0,
-        # NO-side: 1-p = 0.70 clears the 65% confidence floor.
-        "model_prob": 0.30,
+        # ``model_prob`` is the Under pick's own win-prob; 0.72 clears the
+        # 65% confidence floor directly (no flip).
+        "model_prob": 0.72,
         "market_price": 0.50,
         "kalshi_ticker": None,
         "market_title": None,

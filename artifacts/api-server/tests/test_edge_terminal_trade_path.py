@@ -398,10 +398,10 @@ def test_already_placed_dedupe_skips(monkeypatch):
 
 
 def test_no_side_floor_rejects_sub_threshold_model_prob(monkeypatch):
-    """NO-side confidence floor uses ``1 - model_prob``: a 0.60
-    model_prob on a NO pick is 0.40 from the NO side's perspective —
-    below the 65% floor — so it's rejected as ``skipped_low_confidence``
-    (buying the wrong side here would be the worst mis-trade)."""
+    """``model_prob`` is the win-probability of the pick itself, so an
+    "Under"/"No" tile's number is already the NO side's confidence and is
+    NOT flipped.  A 0.60 model_prob NO pick is a 60% pick — below the 65%
+    floor — so it's rejected as ``skipped_low_confidence``."""
     from app.edge_terminal import executor
 
     fake = _FakeDB([_signal(id=15, side="NO", model_prob=0.60)])
@@ -418,15 +418,13 @@ def test_no_side_floor_rejects_sub_threshold_model_prob(monkeypatch):
     assert counts["placed"] == 0
     status, reason, _ = fake.marks[15]
     assert status == "skipped_low_confidence"
-    assert "40%" in reason  # 1 - 0.60, from the NO side's perspective
+    assert "60%" in reason  # the pick's own win-probability, not flipped
 
 
-def test_no_side_sizes_on_one_minus_model_prob(monkeypatch):
-    """NO-side sizing uses ``1 - model_prob`` too: a 0.30 model_prob on a
-    NO pick is 0.70 from the NO side, clears the floor, and sizes a real
-    Kelly position (>> the min-stake 1 contract).  If sizing wrongly used
-    model_prob directly (0.30) the NO edge would be negative → min-stake
-    1 contract, so a quantity well above 1 proves the side flip."""
+def test_no_side_low_model_prob_is_rejected_not_flipped(monkeypatch):
+    """Regression: a 0.30 model_prob NO pick is a 30%-win pick and MUST be
+    rejected.  The old code flipped it to 0.70 and placed a real (actually
+    -EV) order — the dangerous mis-trade this fix removes."""
     from app.edge_terminal import executor
 
     fake = _FakeDB([
@@ -441,10 +439,67 @@ def test_no_side_sizes_on_one_minus_model_prob(monkeypatch):
 
     counts = _run(executor.drain_pending())
 
+    assert fires == [], "a 30%-win NO pick must NOT place an order"
+    assert counts["placed"] == 0
+    status, reason, _ = fake.marks[16]
+    assert status == "skipped_low_confidence"
+    assert "30%" in reason
+
+
+def test_no_side_eligible_pick_sizes_and_places(monkeypatch):
+    """An eligible NO pick (0.72 model_prob, the Under's own win-prob) clears
+    the 65% floor and sizes a real Kelly position (>> the min-stake 1
+    contract) against the NO price ``1 - market_price``."""
+    from app.edge_terminal import executor
+
+    fake = _FakeDB([
+        _signal(id=17, side="NO", model_prob=0.72, market_price=0.50),
+    ])
+    monkeypatch.setattr(executor.db, "fetch", fake.fetch)
+    monkeypatch.setattr(executor.db, "execute", fake.execute)
+    monkeypatch.setattr(executor.db, "fetchval", fake.fetchval)
+
+    fires: list[dict[str, Any]] = []
+    _wire(monkeypatch, fires, ticker="KX-NBA-LAL-BOS")
+
+    counts = _run(executor.drain_pending())
+
     assert len(fires) == 1, "an eligible NO pick must place an order"
     assert fires[0]["ctx"].side == "NO"
     assert fires[0]["ctx"].intended_quantity > 1, (
-        "NO-side Kelly must size on 1 - model_prob, not the min-stake floor"
+        "NO-side Kelly must size on the pick's own win-prob, not min-stake"
     )
     assert counts["placed"] == 1
-    assert fake.marks[16][0] == "placed"
+    assert fake.marks[17][0] == "placed"
+
+
+def test_no_side_submits_at_no_price_not_yes_quote(monkeypatch):
+    """A NO order's submitted price must be in NO coordinates
+    (``1 - market_price``).  The lifecycle stamps ``limit_price_cents``
+    directly as ``no_price``, so submitting the YES quote (0.62) instead of
+    the NO price (0.38) would massively overpay for the NO contract."""
+    from app.edge_terminal import executor
+
+    fake = _FakeDB([
+        _signal(id=18, side="NO", model_prob=0.72, market_price=0.62),
+    ])
+    monkeypatch.setattr(executor.db, "fetch", fake.fetch)
+    monkeypatch.setattr(executor.db, "execute", fake.execute)
+    monkeypatch.setattr(executor.db, "fetchval", fake.fetchval)
+
+    fires: list[dict[str, Any]] = []
+    _wire(monkeypatch, fires, ticker="KX-NBA-LAL-BOS")
+
+    counts = _run(executor.drain_pending())
+
+    assert counts["placed"] == 1
+    ctx = fires[0]["ctx"]
+    assert ctx.side == "NO"
+    assert abs(ctx.current_price - 0.38) < 1e-9, (
+        "NO order must price off 1 - market_price, not the YES quote"
+    )
+    assert abs(fires[0]["kwargs"]["cand"]["kalshi_price"] - 0.38) < 1e-9
+    # Notional is in NO coordinates too (qty * NO price).
+    assert abs(
+        ctx.intended_notional_usd - ctx.intended_quantity * 0.38
+    ) < 1e-9

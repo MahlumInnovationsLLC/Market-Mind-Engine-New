@@ -254,32 +254,6 @@ async def _fire_one(sig: dict[str, Any]) -> dict[str, Any] | None:
         price = 0.50
     price = max(0.01, min(0.99, price))
 
-    # Resolve the model probability and record WHICH source produced it
-    # (``confidence_source``) so the deciding inputs are auditable on the
-    # signal row and the observability views can distinguish a scraper-
-    # reported probability from one we inferred from edge%/EV%.
-    model_prob = sig.get("model_prob")
-    confidence_source = "scraped" if model_prob is not None else "none"
-    if model_prob is None and sig.get("edge_pct") is not None:
-        # If only edge% is known, infer p from edge: edge ≈ p - price.
-        try:
-            model_prob = max(0.01, min(0.99, price + float(sig["edge_pct"]) / 100.0))
-            confidence_source = "edge_inferred"
-        except (TypeError, ValueError):
-            model_prob = None
-    if model_prob is None and sig.get("ev_pct") is not None:
-        # EV% from the source is computed against the same market price,
-        # so ``p = price * (1 + ev_pct/100)`` recovers the model's
-        # probability when ``edge_pct`` wasn't separately reported.
-        try:
-            model_prob = max(
-                0.01,
-                min(0.99, price * (1.0 + float(sig["ev_pct"]) / 100.0)),
-            )
-            confidence_source = "ev_inferred"
-        except (TypeError, ValueError):
-            pass
-
     # Side defaults to YES (historic behavior) but honors the scraper's
     # explicit ``side`` field when present so "Under"/"No" picks trade
     # the NO side of the Kalshi market.  Using the wrong side here
@@ -288,15 +262,58 @@ async def _fire_one(sig: dict[str, Any]) -> dict[str, Any] | None:
     raw_side = (sig.get("side") or "YES")
     side = "NO" if str(raw_side).strip().upper() == "NO" else "YES"
 
+    # Price of the side we actually buy, in that side's own coordinates.
+    # ``price`` above is the YES-quoted price; the NO contract costs
+    # ``1 - price``.  All probability/edge/sizing math below is done in
+    # the chosen side's coordinate system against this ``pick_price``.
+    pick_price = max(0.01, min(0.99, price if side == "YES" else 1.0 - price))
+
+    # Resolve the model probability and record WHICH source produced it
+    # (``confidence_source``) so the deciding inputs are auditable on the
+    # signal row and the observability views can distinguish a scraper-
+    # reported probability from one we inferred from edge%/EV%.
+    #
+    # ``model_prob`` is the probability that the *scraped pick* wins — i.e.
+    # already the win-probability of the side we buy.  An "Under"/"No" tile
+    # shows the model's confidence in the Under, which IS the NO side; it is
+    # NOT a YES-coordinate probability.  It must therefore never be flipped
+    # to ``1 - model_prob`` for NO picks: doing so gated and sized on the
+    # opposite side, rejecting genuine +EV NO picks and (worse) placing
+    # actually -EV ones (a 0.30 pick looked like 0.70).  The inference
+    # fallbacks recover it against ``pick_price`` so the edge%/EV% (reported
+    # for the pick) stay in the pick's coordinates too.
+    model_prob = sig.get("model_prob")
+    confidence_source = "scraped" if model_prob is not None else "none"
+    if model_prob is None and sig.get("edge_pct") is not None:
+        # If only edge% is known, infer p from edge: edge ≈ p - pick_price.
+        try:
+            model_prob = max(
+                0.01, min(0.99, pick_price + float(sig["edge_pct"]) / 100.0)
+            )
+            confidence_source = "edge_inferred"
+        except (TypeError, ValueError):
+            model_prob = None
+    if model_prob is None and sig.get("ev_pct") is not None:
+        # EV% from the source is computed against the pick's own price,
+        # so ``p = pick_price * (1 + ev_pct/100)`` recovers the model's
+        # probability when ``edge_pct`` wasn't separately reported.
+        try:
+            model_prob = max(
+                0.01,
+                min(0.99, pick_price * (1.0 + float(sig["ev_pct"]) / 100.0)),
+            )
+            confidence_source = "ev_inferred"
+        except (TypeError, ValueError):
+            pass
+
     # Signed edge from the chosen side's perspective (None when we never
-    # recovered a model probability).  Computed here so it can be
-    # persisted alongside the other deciding inputs before any gate runs.
+    # recovered a model probability).  ``model_prob`` already lives in the
+    # pick's coordinates, so edge is simply ``p - pick_price`` for both
+    # sides.  Computed here so it can be persisted alongside the other
+    # deciding inputs before any gate runs.
     edge_signed = None
     if model_prob is not None:
-        edge_signed = (
-            float(model_prob) - price if side == "YES"
-            else price - float(model_prob)
-        )
+        edge_signed = float(model_prob) - pick_price
 
     # Persist the deciding inputs (resolved ticker, model_prob, signed
     # edge, confidence source, badge flag) up front — i.e. as soon as a
@@ -315,17 +332,14 @@ async def _fire_one(sig: dict[str, Any]) -> dict[str, Any] | None:
         badged=is_badged,
     )
 
-    # Operator-mandated minimum model confidence floor (per-side, post-
-    # side-flip).  A 60% model_prob on a ``NO`` selection (i.e. 40% YES)
-    # is correctly rejected from the NO side's perspective.  Signals with
-    # no model_prob at all (scraper omitted it AND no edge/ev to infer
-    # from) bypass the floor — the min-stake fallback below already caps
-    # real risk at one contract for those.
+    # Operator-mandated minimum model confidence floor.  ``model_prob`` is
+    # already the win-probability of the pick we buy (NO picks included),
+    # so the floor is applied to it directly — a 60% pick is rejected on
+    # either side.  Signals with no model_prob at all (scraper omitted it
+    # AND no edge/ev to infer from) bypass the floor — the min-stake
+    # fallback below already caps real risk at one contract for those.
     if model_prob is not None:
-        floor_prob = (
-            float(model_prob) if side == "YES"
-            else 1.0 - float(model_prob)
-        )
+        floor_prob = float(model_prob)
         if floor_prob < _MIN_MODEL_CONFIDENCE:
             raise _SignalSkip(
                 "skipped_low_confidence",
@@ -335,18 +349,14 @@ async def _fire_one(sig: dict[str, Any]) -> dict[str, Any] | None:
                 ),
             )
 
-    # Kelly is computed in the chosen side's coordinate system: NO at
-    # the YES-quoted price=p costs (1-p) per contract and wins 1 when
-    # the YES outcome doesn't occur (prob = 1-model_prob).
-    if side == "NO":
-        side_price = max(0.01, min(0.99, 1.0 - price))
-        side_prob = (
-            None if model_prob is None
-            else max(0.01, min(0.99, 1.0 - float(model_prob)))
-        )
-    else:
-        side_price = price
-        side_prob = model_prob
+    # Kelly is computed in the chosen side's coordinate system.  Both the
+    # price (``pick_price``) and the win-probability (``model_prob``) are
+    # already expressed for the side we buy, so no flipping is needed.
+    side_price = pick_price
+    side_prob = (
+        None if model_prob is None
+        else max(0.01, min(0.99, float(model_prob)))
+    )
 
     # Match paper.place_order's effective-mode resolution so sizing uses
     # the live bankroll when the operator has flipped the live-execute
@@ -414,7 +424,13 @@ async def _fire_one(sig: dict[str, Any]) -> dict[str, Any] | None:
         league=None,
         market_type=None,
         matchup=sig.get("matchup"),
-        current_price=price,
+        # Price/notional/quote are all in the bought side's coordinates so
+        # the lifecycle stamps the correct limit: it applies
+        # ``limit_price_cents`` directly as ``no_price`` for NO orders, so a
+        # NO order MUST carry ``pick_price`` (1 - yes_price), not the YES
+        # quote — otherwise we'd bid the YES price for the NO contract and
+        # massively overpay.
+        current_price=pick_price,
         model_probability=model_prob,
         edge=edge_signed,
         confidence_band_low=None,
@@ -424,7 +440,7 @@ async def _fire_one(sig: dict[str, Any]) -> dict[str, Any] | None:
         swarm_recommended_action="BUY_YES",
         debate_id=None,
         intended_quantity=quantity,
-        intended_notional_usd=quantity * price,
+        intended_notional_usd=quantity * pick_price,
         bankroll_usd=bankroll,
         open_positions_count=0,
         open_positions_notional_usd=0.0,
@@ -433,7 +449,10 @@ async def _fire_one(sig: dict[str, Any]) -> dict[str, Any] | None:
         market_cooldown_until=None,
     )
     cand = {
-        "kalshi_price": price,
+        # Side-coordinate quote: the lifecycle turns this into
+        # ``limit_price_cents`` and stamps it as yes_price/no_price by side,
+        # so it must be ``pick_price`` (the price of the contract we buy).
+        "kalshi_price": pick_price,
         "source": "edge_terminal",
     }
     # Tag the trade as ``edge_terminal`` AT INSERT TIME by threading
