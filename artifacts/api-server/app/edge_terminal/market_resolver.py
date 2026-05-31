@@ -28,6 +28,7 @@ from __future__ import annotations
 import logging
 import re
 from dataclasses import dataclass, field
+from datetime import date, datetime
 from typing import Any
 
 from .. import db
@@ -185,6 +186,14 @@ _TEAM_ALIASES: dict[str, set[str]] = {
     "wizards": {"wsh", "was"},
 }
 
+# City/place words shared by co-located rivals (Yankees/Mets, Dodgers/Angels,
+# Cubs/White Sox, Giants/Padres). They cannot prove which side of a matchup a
+# market names, so the matchup-integrity check ignores them for side identity:
+# we require a *distinctive* token (the nickname) or a side-distinct code.
+# Erring toward "no match" here is intentional — a wrong-game trade is worse
+# than no trade.
+_GENERIC_PLACE_TOKENS = {"new", "york", "los", "angeles", "san", "chicago"}
+
 
 def _alias_codes(toks: set[str]) -> set[str]:
     out: set[str] = set()
@@ -226,6 +235,131 @@ def _split_matchup(matchup: str) -> tuple[set[str], set[str]]:
         all_t = _tokens(matchup)
         return all_t, all_t
     return _tokens(parts[0]), _tokens(parts[1])
+
+
+def _ordered_side_tokens(s: str) -> list[str]:
+    return [
+        w.lower()
+        for w in re.findall(r"[A-Za-z][A-Za-z0-9]{1,}", s or "")
+        if w.lower() not in _STOPWORDS
+    ]
+
+
+def _matchup_sides(matchup: str) -> tuple[list[str], list[str]]:
+    """Ordered token lists for the away/home sides (order preserved so we
+    can build acronyms like ``Paris Saint-Germain`` → ``PSG``)."""
+    parts = re.split(
+        r"\s+(?:@|vs\.?|at)\s+", matchup or "", maxsplit=1, flags=re.IGNORECASE,
+    )
+    if len(parts) != 2:
+        toks = _ordered_side_tokens(matchup)
+        return toks, toks
+    return _ordered_side_tokens(parts[0]), _ordered_side_tokens(parts[1])
+
+
+def _side_evidence(tokens: list[str]) -> tuple[set[str], set[str]]:
+    """Return ``(name_tokens, codes)`` used to detect one matchup side in
+    a market.  ``name_tokens`` are full words matched against the market's
+    title/ticker tokens; ``codes`` are short forms matched as substrings
+    inside the *ticker* (where Kalshi concatenates team codes, e.g.
+    ``PSGARS``).  Codes cover three abbreviation styles so we tolerate
+    Kalshi shorthand without a hand-maintained club map:
+
+      * curated aliases (``cleveland`` → ``cle``),
+      * the first three letters of each word (``arsenal`` → ``ars``),
+      * the ordered acronym of a multi-word side (``psg``).
+    """
+    tset = set(tokens)
+    # Don't expand aliases for shared city/place words — "york" aliases to
+    # every NY team (nyy/nym/nyr/nyi), which would let a Mets market satisfy
+    # a Yankees side.  The ordered acronym (NYY) and the nickname's own alias
+    # stay, and remain side-distinct (NYY != NYM).
+    codes: set[str] = set(_alias_codes(tset - _GENERIC_PLACE_TOKENS))
+    for t in tokens:
+        if len(t) >= 3:
+            codes.add(t[:3])
+    if len(tokens) >= 2:
+        codes.add("".join(t[0] for t in tokens))
+    return tset, codes
+
+
+def _side_present(
+    cand_tokens: set[str],
+    team_code_seg: str,
+    name_tokens: set[str],
+    codes: set[str],
+) -> bool:
+    """True if a matchup side appears in the candidate: a full-word token in
+    the title/ticker, or a short code inside the ticker's *team-code
+    segment* (``PSGARS``).  Codes are matched only against that segment —
+    not the whole ticker — so a trigram can't collide with the series
+    prefix or outcome suffix."""
+    if not name_tokens and not codes:
+        return True  # nothing to assert against — don't block
+    # A bare city/place word ("New York") is shared by co-located rivals and
+    # can't prove a side.  Match by name only when EVERY distinctive token is
+    # present — a single shared token ("Manchester" in both Manchester City
+    # and Manchester United) must not prove the side.  Abbreviated names that
+    # drop tokens (e.g. "PSG") are rescued by the ticker team-code segment
+    # below.
+    distinctive = name_tokens - _GENERIC_PLACE_TOKENS
+    if distinctive and distinctive <= cand_tokens:
+        return True
+    for c in codes:
+        if len(c) >= 2 and c.upper() in team_code_seg:
+            return True
+    return False
+
+
+_MONTHS = {
+    m: i for i, m in enumerate(
+        ["JAN", "FEB", "MAR", "APR", "MAY", "JUN",
+         "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"],
+        start=1,
+    )
+}
+_TICKER_DATE_RE = re.compile(r"-(\d{2})([A-Z]{3})(\d{2})")
+_TICKER_TEAMSEG_RE = re.compile(r"^\d{2}[A-Z]{3}\d{2}\d*([A-Z].*)$")
+
+
+def _ticker_team_code(ticker: str) -> str:
+    """Uppercased team-code segment of a Kalshi ticker — the chunk after the
+    embedded date/time and before the outcome suffix
+    (``…-26MAY30PSGARS-2`` → ``PSGARS``).  Falls back to the whole ticker
+    when no date-prefixed segment is found."""
+    for p in (ticker or "").split("-"):
+        m = _TICKER_TEAMSEG_RE.match(p)
+        if m:
+            return m.group(1).upper()
+    return (ticker or "").upper()
+
+
+def _ticker_date(ticker: str) -> date | None:
+    """Parse the ``YYMONDD`` date Kalshi embeds after the series prefix
+    (``KXMLBSPREAD-26MAY30PSGARS-…`` → 2026-05-30).  ``None`` if absent."""
+    m = _TICKER_DATE_RE.search(ticker or "")
+    if not m:
+        return None
+    month = _MONTHS.get(m.group(2))
+    if not month:
+        return None
+    try:
+        return date(2000 + int(m.group(1)), month, int(m.group(3)))
+    except ValueError:
+        return None
+
+
+def _coerce_date(v: Any) -> date | None:
+    if isinstance(v, datetime):
+        return v.date()
+    if isinstance(v, date):
+        return v
+    if isinstance(v, str) and v.strip():
+        try:
+            return date.fromisoformat(v.strip()[:10])
+        except ValueError:
+            return None
+    return None
 
 
 def _picked_team_tokens(
@@ -490,9 +624,41 @@ async def resolve_match(
     other_codes = _alias_codes(other)
     line = _extract_line(selection)
 
+    away_words, home_words = _matchup_sides(matchup)
+    away_name, away_codes = _side_evidence(away_words)
+    home_name, home_codes = _side_evidence(home_words)
+    signal_date = _coerce_date(signal.get("signal_date"))
+
+    def _date_ok(cand: dict[str, str]) -> bool:
+        # Reject markets dated to a different day than the signal's game.
+        # A team plays at most once per day, so picked-team + correct date
+        # almost uniquely identifies the market — this is what kills the
+        # stale/closed markets that fall into the "no liquidity" trap.
+        if signal_date is None:
+            return True
+        td = _ticker_date(cand.get("ticker") or "")
+        if td is None:
+            return True
+        return abs((td - signal_date).days) <= 1
+
+    def _both_teams(cand: dict[str, str]) -> bool:
+        # Require BOTH sides of the matchup to appear, so a market sharing
+        # only the picked team's code but with the WRONG opponent (e.g.
+        # WSH@CLE for a BOS@CLE signal) can never be matched.
+        title = cand.get("title") or ""
+        ticker = cand.get("ticker") or ""
+        cand_tokens = _tokens(title) | _tokens(ticker)
+        seg = _ticker_team_code(ticker)
+        return (
+            _side_present(cand_tokens, seg, away_name, away_codes)
+            and _side_present(cand_tokens, seg, home_name, home_codes)
+        )
+
     def _rank(rows: list[dict[str, str]]) -> tuple[int, dict[str, str] | None]:
         best_s, best = 0, None
         for r in rows:
+            if not (_date_ok(r) and _both_teams(r)):
+                continue
             sc = _score(
                 r,
                 picked=picked, other=other,
@@ -541,31 +707,32 @@ async def resolve_match(
         # to tickers we showed it, so it can't hallucinate.
         llm_ticker: str | None = None
         llm_reason = ""
-        if live_fallback and scored:
-            llm_ticker, llm_reason = await llm_resolver.llm_pick(signal, scored)
+        # Only let the LLM choose among markets dated to the signal's game
+        # — never resurrect a stale/closed fixture on a date mismatch.
+        scored_dated = [s for s in scored if _date_ok(s)]
+        if live_fallback and scored_dated:
+            llm_ticker, llm_reason = await llm_resolver.llm_pick(signal, scored_dated)
         if llm_ticker:
             chosen_row = next(
                 (c for c in cands if c["ticker"] == llm_ticker), None
             )
-            if chosen_row is not None and _has_team_overlap(
-                chosen_row,
-                picked=picked, other=other,
-                picked_codes=picked_codes, other_codes=other_codes,
-            ):
+            if chosen_row is not None and _both_teams(chosen_row):
                 return ResolveResult(
                     llm_ticker, llm_reason, preview, kind="matched",
                 )
-            # The LLM matched a market that names neither team — almost
-            # certainly a line-only false positive on an unrelated
+            # The LLM matched a market that doesn't name BOTH teams — a
+            # line-only false positive on an unrelated or wrong-opponent
             # fixture.  Decline rather than place a bet on the wrong game.
             llm_reason = (
-                f"llm pick {llm_ticker} rejected: market names neither "
-                f"team in {matchup!r}"
+                f"llm pick {llm_ticker} rejected: market does not name both "
+                f"teams in {matchup!r}"
             )
+        n_dated = sum(1 for c in cands if _date_ok(c))
+        n_both = sum(1 for c in cands if _date_ok(c) and _both_teams(c))
         reason = (
             f"no kalshi market match — series={prefixes}, "
-            f"candidates={len(cands)}, live_queried={used_live}, "
-            f"top_score={best_score}"
+            f"candidates={len(cands)}, date_ok={n_dated}, both_teams={n_both}, "
+            f"live_queried={used_live}, top_score={best_score}"
         )
         if llm_reason:
             reason += f"; {llm_reason}"

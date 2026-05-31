@@ -22,11 +22,10 @@ order built with the YES quote bids e.g. 62¢ for a NO contract that should cost
 
 **Why:** the old code assumed `model_prob = P(YES)` and flipped for NO, which rejected
 genuine +EV NO/Under picks as "low confidence" AND placed actually-EV-negative ones (a
-0.30 pick became 0.70 and traded). Live prod (frwhxftngijwcujqhltf, table
-`edge_terminal_signals`) showed zero trades placed in 24h; the UNDER 8.5 row with
-`model_prob=0.61` and scraped `edge_pct=+13.9` only makes sense if 0.61 is the Under's
-win prob, and YES picks have `model_prob ≈ implied(avg_odds)` — proving model_prob is
-pick-relative.
+0.30 pick became 0.70 and traded). Live prod showed zero trades placed in 24h; an
+UNDER row with `model_prob=0.61` and scraped `edge_pct=+13.9` only makes sense if 0.61
+is the Under's win prob, while YES picks have `model_prob ≈ implied(avg_odds)` — proving
+model_prob is pick-relative.
 
 **How to apply:** any future change to Edge Terminal sizing/pricing/gating must keep
 model_prob and price in the *bought side's* coordinates end-to-end (floor → Kelly → edge
@@ -44,17 +43,30 @@ So `_SERIES_BY_VERTICAL_PICK[("soccer", spread/total/moneyline)]` must fan acros
 all competition series, not the empty generic ones. Cricket: only `KXIPL*` (club
 IPL) exists — internationals like India@Zimbabwe have NO Kalshi market.
 
-**LLM resolver guard — team overlap is mandatory.** `llm_pick` will happily latch
-a totals/over-under line onto an UNRELATED fixture (saw `UNDER 2.5` for
-India@Zimbabwe matched to a Ligue 1 Nantes–Toulouse total purely on the number).
-`resolve_match` now requires `_has_team_overlap(chosen_row, ...)` — the LLM-picked
-market's title/ticker must share ≥1 team token or alias code with the matchup, else
-it's rejected as no_match.
+**Matchup integrity — BOTH teams + date, never one-team.** A resolver (heuristic
+*or* LLM) will latch a line onto the WRONG game: a totals number onto an unrelated
+fixture (UNDER 2.5 India@Zimbabwe → a Ligue 1 total), a right-pick-team/wrong-opponent
+market, or a stale market days off the signal date. One-team overlap is NOT enough.
+The accepted market must satisfy ALL of: (1) date within ±1 day of the signal; (2)
+BOTH matchup sides present — enforced identically at heuristic ranking AND LLM
+acceptance, not just ranking.
 
-**Why:** placing a bet on the wrong game is strictly worse than placing none. The
-hallucination guard (ticker∈candidates) is not enough — the wrong market CAN be a
-real candidate when many same-line totals exist across leagues.
+**Side identity is the subtle part (shared cities/words):**
+- Match short codes only inside the ticker's *team-code segment* (`…26MAY30PSGARS-2`
+  → `PSGARS`), never the whole ticker — series prefix/outcome suffix cause trigram
+  collisions.
+- City/place words shared by co-located rivals (new, york, los, angeles, san,
+  chicago) must NOT prove a side: don't expand their broad aliases (`york`→every NY
+  team code), and the ordered acronym (NYY, side-distinct from NYM) does the work.
+- A single shared *non-place* token must not prove a side either (Manchester City vs
+  Manchester United) — the name-token path requires ALL distinctive tokens present;
+  abbreviated names (PSG) are rescued by the team-code-segment match.
 
-**How to apply:** never accept an LLM ticker without verifying it names a signal
-team. Any expansion of candidate breadth (more series) raises line-only collision
-risk — keep the overlap guard in lockstep.
+**Why:** a bet on the wrong game is strictly worse than no bet. The hallucination
+guard (ticker∈candidates) is insufficient — the wrong market is often a real
+candidate when same-line totals or same-city/same-day fixtures coexist. Over-rejection
+(no trade) is the acceptable failure direction; a wrong-game trade is not.
+
+**How to apply:** keep BOTH-teams + date gating in lockstep with any widening of
+candidate breadth (more series, looser scoring). Prefer side-distinct evidence
+(acronym, nickname, code in the team segment) over city/shared tokens.

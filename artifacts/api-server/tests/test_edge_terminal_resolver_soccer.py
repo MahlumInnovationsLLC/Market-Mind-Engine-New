@@ -108,3 +108,178 @@ def test_resolve_match_accepts_llm_pick_that_names_a_team(monkeypatch):
 
     assert rr.kind == "matched"
     assert rr.ticker == cand["ticker"]
+
+
+# ---------------------------------------------------------------------------
+# Matchup-integrity guards: both-teams present + date sanity.
+# ---------------------------------------------------------------------------
+
+def test_ticker_date_parses_embedded_yymondd():
+    assert market_resolver._ticker_date(
+        "KXMLBSPREAD-26MAY261810WSHCLE-CLE2",
+    ).isoformat() == "2026-05-26"
+    assert market_resolver._ticker_date(
+        "KXUCLTOTAL-26MAY30PSGARS-2",
+    ).isoformat() == "2026-05-30"
+    assert market_resolver._ticker_date("KXATPMATCH-NODATE-ABC") is None
+
+
+def test_side_evidence_tolerates_kalshi_abbreviations():
+    # Acronym of a multi-word side ("Paris Saint-Germain" -> "psg") and the
+    # first-three-letters form ("arsenal" -> "ars") must both be generated,
+    # so a market that only abbreviates a club still matches.
+    _, codes = market_resolver._side_evidence(["paris", "saint", "germain"])
+    assert "psg" in codes
+    _, codes = market_resolver._side_evidence(["arsenal"])
+    assert "ars" in codes
+
+
+def test_resolve_match_rejects_wrong_opponent_same_series(monkeypatch):
+    # WSH@CLE shares the picked team's code (CLE) but is the WRONG game for a
+    # BOS@CLE signal — the opponent (Boston) appears nowhere, so it must be
+    # rejected rather than traded.
+    wrong = {
+        "ticker": "KXMLBSPREAD-26MAY311810WSHCLE-CLE2",
+        "title": "Washington Nationals vs Cleveland Guardians",
+    }
+    _wire_no_live(monkeypatch, cands=[wrong], llm_ticker=None)
+
+    rr = _run(market_resolver.resolve_match({
+        "vertical": "mlb", "pick_type": "spread",
+        "matchup": "Boston Red Sox @ Cleveland Guardians",
+        "selection": "Guardians +1.5", "signal_date": "2026-05-31",
+    }))
+
+    assert rr.kind == "no_match"
+    assert rr.ticker is None
+    assert "both_teams=0" in (rr.reason or "")
+
+
+def test_resolve_match_rejects_stale_dated_market(monkeypatch):
+    # Correct opponent but the market is dated five days before the signal's
+    # game — a stale/closed fixture that traps on "no liquidity". Reject it.
+    stale = {
+        "ticker": "KXMLBSPREAD-26MAY261810BOSCLE-CLE2",
+        "title": "Boston Red Sox vs Cleveland Guardians",
+    }
+    _wire_no_live(monkeypatch, cands=[stale], llm_ticker=None)
+
+    rr = _run(market_resolver.resolve_match({
+        "vertical": "mlb", "pick_type": "spread",
+        "matchup": "Boston Red Sox @ Cleveland Guardians",
+        "selection": "Guardians +1.5", "signal_date": "2026-05-31",
+    }))
+
+    assert rr.kind == "no_match"
+    assert "date_ok=0" in (rr.reason or "")
+
+
+def test_ticker_team_code_extracts_segment():
+    # Team-code segment is the chunk after date(+time) and before the
+    # outcome suffix — codes matched there can't collide with the series
+    # prefix or outcome.
+    assert market_resolver._ticker_team_code(
+        "KXUCLTOTAL-26MAY30PSGARS-2") == "PSGARS"
+    assert market_resolver._ticker_team_code(
+        "KXMLBSPREAD-26MAY311810BOSCLE-CLE2") == "BOSCLE"
+    assert market_resolver._ticker_team_code(
+        "KXWTAMATCH-26MAY27LYSCIR-CIR") == "LYSCIR"
+
+
+def test_resolve_match_llm_rejects_same_date_wrong_opponent(monkeypatch):
+    # The LLM picks a market on the CORRECT date that names the picked team
+    # but the WRONG opponent (Arsenal vs Tottenham for an Arsenal @ PSG
+    # signal). The both-teams guard at the LLM tier must reject it.
+    wrong = {
+        "ticker": "KXEPLTOTAL-26MAY30ARSTOT-2",
+        "title": "Arsenal vs Tottenham — total goals",
+    }
+    _wire_no_live(monkeypatch, cands=[wrong], llm_ticker=wrong["ticker"])
+
+    rr = _run(market_resolver.resolve_match({
+        "vertical": "soccer", "pick_type": "total",
+        "matchup": "Arsenal @ Paris Saint-Germain", "selection": "UNDER 2.5",
+        "signal_date": "2026-05-30",
+    }))
+
+    assert rr.kind == "no_match"
+    assert rr.ticker is None
+    assert "rejected" in (rr.reason or "")
+
+
+def test_resolve_match_rejects_shared_city_wrong_opponent(monkeypatch):
+    # A Yankees signal must NOT match a same-day Mets market: the shared
+    # "New York" tokens and the broad "york" alias are ignored for side
+    # identity, so the Mets ticker/title fails the Yankees side.
+    mets = {
+        "ticker": "KXMLBSPREAD-26MAY311810BOSNYM-NYM2",
+        "title": "Boston Red Sox vs New York Mets",
+    }
+    _wire_no_live(monkeypatch, cands=[mets], llm_ticker=mets["ticker"])
+
+    rr = _run(market_resolver.resolve_match({
+        "vertical": "mlb", "pick_type": "spread",
+        "matchup": "Boston Red Sox @ New York Yankees",
+        "selection": "Yankees -1.5", "signal_date": "2026-05-31",
+    }))
+
+    assert rr.kind == "no_match"
+    assert rr.ticker is None
+
+
+def test_resolve_match_accepts_shared_city_correct_opponent(monkeypatch):
+    # The genuine Yankees market (BOSNYY) still matches — tightening must not
+    # over-reject the correct same-city game.
+    yanks = {
+        "ticker": "KXMLBSPREAD-26MAY311810BOSNYY-NYY2",
+        "title": "Boston Red Sox vs New York Yankees",
+    }
+    _wire_no_live(monkeypatch, cands=[yanks], llm_ticker=yanks["ticker"])
+
+    rr = _run(market_resolver.resolve_match({
+        "vertical": "mlb", "pick_type": "spread",
+        "matchup": "Boston Red Sox @ New York Yankees",
+        "selection": "Yankees -1.5", "signal_date": "2026-05-31",
+    }))
+
+    assert rr.kind == "matched"
+    assert rr.ticker == yanks["ticker"]
+
+
+def test_resolve_match_rejects_shared_word_wrong_club(monkeypatch):
+    # Manchester City and Manchester United share the "Manchester" token but
+    # neither is a place word in the generic list. A single shared-token
+    # overlap must NOT prove the side: an Arsenal @ Man City signal must not
+    # match an Arsenal vs Man United market.
+    united = {
+        "ticker": "KXEPLSPREAD-26MAY30ARSMUN-MUN1",
+        "title": "Arsenal vs Manchester United",
+    }
+    _wire_no_live(monkeypatch, cands=[united], llm_ticker=united["ticker"])
+
+    rr = _run(market_resolver.resolve_match({
+        "vertical": "soccer", "pick_type": "spread",
+        "matchup": "Arsenal @ Manchester City",
+        "selection": "Manchester City -0.5", "signal_date": "2026-05-30",
+    }))
+
+    assert rr.kind == "no_match"
+    assert rr.ticker is None
+
+
+def test_resolve_match_accepts_correct_game_and_date(monkeypatch):
+    # Both teams present AND dated to the signal's game -> matched.
+    right = {
+        "ticker": "KXMLBSPREAD-26MAY311810BOSCLE-CLE2",
+        "title": "Boston Red Sox vs Cleveland Guardians",
+    }
+    _wire_no_live(monkeypatch, cands=[right], llm_ticker=None)
+
+    rr = _run(market_resolver.resolve_match({
+        "vertical": "mlb", "pick_type": "spread",
+        "matchup": "Boston Red Sox @ Cleveland Guardians",
+        "selection": "Guardians +1.5", "signal_date": "2026-05-31",
+    }))
+
+    assert rr.kind == "matched"
+    assert rr.ticker == right["ticker"]
