@@ -331,7 +331,51 @@ async def _insert_signal(sig: dict[str, Any]) -> int | None:
             $15, $16,
             $17
         )
-        ON CONFLICT (vertical, matchup, selection, signal_date) DO NOTHING
+        ON CONFLICT (vertical, matchup, selection, signal_date) DO UPDATE
+        -- Re-arm a previously-disposed pick *only* when it was stood down
+        -- as ``skipped_unresolved`` — i.e. the resolver found no live Kalshi
+        -- market at drain time.  Sports markets list on Kalshi only a few
+        -- hours before first pitch, but the Edge Terminal board badges the
+        -- pick much earlier, so the first drain of the day legitimately
+        -- finds "no live market yet".  Under the old ``DO NOTHING`` that
+        -- disposition was frozen for the whole UTC day (the dedupe index
+        -- blocks re-insert), so the pick never traded even once its market
+        -- opened minutes later — the root cause of "only BTC trades, no
+        -- MLB/sports".  Resetting to ``pending`` (and refreshing the
+        -- volatile odds/pricing so the retry sizes on fresh data) lets the
+        -- next drain fire it once the market is live.  The board only shows
+        -- current/upcoming games, so a settled game drops off the scrape
+        -- and stops re-arming naturally.
+        --
+        -- The WHERE guard is the safety boundary.  It is deliberately the
+        -- single ``skipped_unresolved`` status and NOT the broader
+        -- ``skipped_gate`` bucket: ``skipped_gate`` from an order-time
+        -- ``market_not_found`` is "overwhelmingly a settled/closed game"
+        -- (see executor._classify_exception), so re-arming it would re-retry
+        -- finished fixtures rather than fix anything; and ``order rejected``
+        -- / ``market closed`` gates are not transient market-availability.
+        -- It also never matches ``placed`` / ``skipped_already_placed``
+        -- (would double-bet a held position) nor the deterministic
+        -- stand-downs (``skipped_low_confidence`` /
+        -- ``skipped_unsupported_market`` / ``skipped_slippage`` /
+        -- ``skipped_zero_kelly`` / ``failed``) that retrying cannot change.
+        SET status        = 'pending',
+            status_reason = NULL,
+            edge_pct      = EXCLUDED.edge_pct,
+            model_prob    = EXCLUDED.model_prob,
+            market_price  = EXCLUDED.market_price,
+            kalshi_ticker = EXCLUDED.kalshi_ticker,
+            market_title  = EXCLUDED.market_title,
+            raw           = EXCLUDED.raw,
+            side          = EXCLUDED.side,
+            pick_type     = EXCLUDED.pick_type,
+            avg_odds      = EXCLUDED.avg_odds,
+            ev_pct        = EXCLUDED.ev_pct,
+            source_screenshot_url = EXCLUDED.source_screenshot_url,
+            kalshi_market_id      = EXCLUDED.kalshi_market_id,
+            signal_badged = EXCLUDED.signal_badged,
+            updated_at    = now()
+        WHERE edge_terminal_signals.status = 'skipped_unresolved'
         RETURNING id
         """,
         sig.get("vertical"),
