@@ -220,8 +220,11 @@ def test_odds_changes_rows_unaffected_by_outcome_column() -> None:
     changes_sql, changes_rows = conn.executemany_calls[1]
     assert "outcome" not in changes_sql.lower()
     assert len(changes_rows) == 2
-    # 6-tuple: game_id, book, market_type, line, odds, ts
-    assert all(len(r) == 6 for r in changes_rows)
+    # 5-tuple: game_id, book, market_type, line, odds.  The timestamp column
+    # is filled by SQL ``NOW()`` (see the INSERT), so it is NOT a bound param
+    # — a real datetime in-DB rather than an ISO string asyncpg would reject.
+    assert all(len(r) == 5 for r in changes_rows)
+    assert "now()" in changes_sql.lower()
 
 
 def test_missing_outcome_name_persists_as_null() -> None:

@@ -131,8 +131,6 @@ async def _persist_odds_payload(sport: str, games: list[dict[str, Any]]) -> int:
         return 0
     snapshot_rows: list[tuple] = []
     change_rows: list[tuple] = []
-    from datetime import datetime, timezone
-    now_iso = datetime.now(tz=timezone.utc).isoformat(timespec="seconds")
 
     for g in games:
         gid = str(g.get("id") or "")
@@ -167,7 +165,6 @@ async def _persist_odds_payload(sport: str, games: list[dict[str, Any]]) -> int:
                         gid, book, mtype,
                         str(line) if line is not None else None,
                         float(price) if price is not None else None,
-                        now_iso,
                     ))
 
     if not change_rows:
@@ -210,7 +207,7 @@ async def _persist_odds_payload(sport: str, games: list[dict[str, Any]]) -> int:
                 """
                 INSERT INTO odds_changes
                   (game_id, book, market_type, line, odds, timestamp)
-                VALUES ($1, $2, $3, $4, $5, $6)
+                VALUES ($1, $2, $3, $4, $5, NOW())
                 """,
                 change_rows,
             )
