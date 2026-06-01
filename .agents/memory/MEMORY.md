@@ -1,2 +1,4 @@
 - [Kalshi vertical discovery feeds](kalshi-vertical-discovery-feeds.md) — a vertical with no feed upserting predictions rows silently never trades, even with models wired.
+- [api-server has no hot-reload](api-server-no-reload.md) — edits to api-server Python need an explicit workflow restart; a standalone import test proves the file, not the running server.
+- [Kalshi market_not_found = clean skip](kalshi-market-not-found-skip.md) — settled/closed/wrong-ticker 404s skip cleanly (not "failed"); reason kept non-asserting so resolver bugs aren't masked.
 - [Slippage guard empty-side](slippage-guard-empty-side.md) — empty requested side allows resting limit by default (flag AXIOM_SLIPPAGE_GUARD_ALLOW_EMPTY_SIDE to hard-reject).

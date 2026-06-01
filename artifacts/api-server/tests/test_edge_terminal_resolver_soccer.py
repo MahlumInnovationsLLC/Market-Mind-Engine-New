@@ -283,3 +283,86 @@ def test_resolve_match_accepts_correct_game_and_date(monkeypatch):
 
     assert rr.kind == "matched"
     assert rr.ticker == right["ticker"]
+
+
+# --- dynamic tag-based series discovery -----------------------------------
+
+_FAKE_SPORTS_SERIES = [
+    {"ticker": "KXINTLFRIENDLYGAME", "tags": ["Soccer"]},
+    {"ticker": "KXINTLFRIENDLYSPREAD", "tags": ["Soccer"]},
+    {"ticker": "KXINTLFRIENDLYTOTAL", "tags": ["Soccer"]},
+    {"ticker": "KXUEFANLGAME", "tags": ["Soccer"]},
+    {"ticker": "KXEPLGAME", "tags": ["Soccer"]},
+    # Excluded bet-type variants that share our GAME/SPREAD/TOTAL suffix:
+    {"ticker": "KXEPL1HSPREAD", "tags": ["Soccer"]},     # half-time
+    {"ticker": "KXEPLTEAMTOTAL", "tags": ["Soccer"]},    # team total
+    {"ticker": "KXUCLBTTS", "tags": ["Soccer"]},         # both-teams-to-score
+    {"ticker": "KXNBASERIESSPREAD", "tags": ["Basketball"]},  # playoff series
+    # Wrong sport — must never appear for a soccer pick:
+    {"ticker": "KXMLBGAME", "tags": ["Baseball"]},
+    {"ticker": "KXATPGAME", "tags": ["Tennis"]},
+]
+
+
+def _wire_discovery(monkeypatch, series=_FAKE_SPORTS_SERIES):
+    async def _all(*, allow_network):
+        return list(series)
+
+    monkeypatch.setattr(market_resolver, "_all_sports_series", _all)
+
+
+def test_discover_series_filters_by_tag_and_suffix(monkeypatch):
+    _wire_discovery(monkeypatch)
+    game = _run(market_resolver._discover_series(
+        "soccer", "moneyline", allow_network=True))
+    assert "KXINTLFRIENDLYGAME" in game
+    assert "KXUEFANLGAME" in game
+    assert "KXEPLGAME" in game
+    # Wrong sport / wrong suffix excluded.
+    assert "KXMLBGAME" not in game
+    assert "KXATPGAME" not in game
+    assert "KXINTLFRIENDLYSPREAD" not in game
+
+
+def test_discover_series_excludes_non_full_game_variants(monkeypatch):
+    _wire_discovery(monkeypatch)
+    spread = _run(market_resolver._discover_series(
+        "soccer", "spread", allow_network=True))
+    assert "KXINTLFRIENDLYSPREAD" in spread
+    assert "KXEPL1HSPREAD" not in spread        # half-time
+    assert "KXNBASERIESSPREAD" not in spread    # playoff-series + wrong sport
+    total = _run(market_resolver._discover_series(
+        "soccer", "total", allow_network=True))
+    assert "KXINTLFRIENDLYTOTAL" in total
+    assert "KXEPLTEAMTOTAL" not in total        # team total
+
+
+def test_discover_series_only_enabled_verticals(monkeypatch):
+    _wire_discovery(monkeypatch)
+    # MLB/tennis are deliberately not auto-discovered (single precise series
+    # / MATCH-not-GAME), so discovery returns nothing for them.
+    assert _run(market_resolver._discover_series(
+        "mlb", "moneyline", allow_network=True)) == []
+    assert _run(market_resolver._discover_series(
+        "tennis", "moneyline", allow_network=True)) == []
+
+
+def test_resolve_match_unions_discovered_series(monkeypatch):
+    # An international friendly (never in the static soccer list) resolves
+    # because discovery surfaces KXINTLFRIENDLYGAME and the cache carries
+    # the matching market.
+    _wire_discovery(monkeypatch)
+    friendly = {
+        "ticker": "KXINTLFRIENDLYGAME-26JUN01AUTTUN-TUN",
+        "title": "Austria vs Tunisia Winner?",
+    }
+    _wire_no_live(monkeypatch, cands=[friendly], llm_ticker=None)
+
+    rr = _run(market_resolver.resolve_match({
+        "vertical": "soccer", "pick_type": "moneyline",
+        "matchup": "Tunisia @ Austria",
+        "selection": "Tunisia", "signal_date": "2026-06-01",
+    }))
+
+    assert rr.kind == "matched"
+    assert rr.ticker == friendly["ticker"]

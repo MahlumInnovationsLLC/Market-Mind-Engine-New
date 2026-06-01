@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import logging
 import re
+import time
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from typing import Any
@@ -95,6 +96,99 @@ _SERIES_BY_VERTICAL_PICK: dict[tuple[str, str], list[str]] = {
     ("soccer", "total"):     _SOCCER_TOTAL,
     ("tennis", "moneyline"): ["KXATPMATCH", "KXWTAMATCH"],
 }
+
+
+# ---------------------------------------------------------------------------
+# Dynamic series discovery (tag-based) — "assume Kalshi can trade anything".
+# ---------------------------------------------------------------------------
+# The static map above only knows a handful of leagues, so a perfectly
+# tradeable fixture in a competition we never hardcoded (international
+# friendlies, Nations League, World Cup, EFL Championship, Liga MX, …)
+# would hard-fail with "no kalshi series mapped".  Kalshi tags every
+# Sports series with its sport ("Soccer", "Baseball", …); we use that tag
+# to DISCOVER every series for a vertical + pick_type at runtime and union
+# it with the static list.  New competitions Kalshi adds are then covered
+# automatically with no code change.
+#
+# Scoped to soccer for now: soccer is the vertical with dozens of parallel
+# competitions (and the one that was silently dropping friendlies).  The
+# single-league sports (MLB/NHL/NBA/NFL) already resolve precisely from
+# their one static series, and tennis uses MATCH (not GAME) markets, so we
+# deliberately do NOT auto-discover those to avoid latching onto the wrong
+# market type.  Extend ``_VERTICAL_SPORT_TAG`` to widen coverage.
+_VERTICAL_SPORT_TAG: dict[str, str] = {
+    "soccer": "Soccer",
+}
+_PICK_TYPE_SUFFIX: dict[str, str] = {
+    "moneyline": "GAME",
+    "spread": "SPREAD",
+    "total": "TOTAL",
+}
+# Series whose ticker ends with our suffix but represent a DIFFERENT bet
+# (half-time, team totals, both-teams-to-score, playoff-series aggregates)
+# must be excluded so a single full-game pick never latches onto them.
+_SERIES_EXCLUDE_MARKERS = ("1H", "2H", "TEAMTOTAL", "BTTS", "SERIES")
+
+# In-process cache of the full Sports series list — it changes rarely, so
+# we refresh at most every few hours and never block the no-network
+# (dashboard) path on it.
+_SERIES_DISCOVERY_TTL = 6 * 3600.0  # seconds
+_sports_series_cache: dict[str, tuple[float, list[dict[str, Any]]]] = {}
+
+
+async def _all_sports_series(*, allow_network: bool) -> list[dict[str, Any]]:
+    """Return Kalshi's full ``category="Sports"`` series list, cached.
+
+    When the cache is cold and ``allow_network`` is False (the dashboard's
+    no-HTTP path) returns an empty list so we never serialise a series
+    fetch on that hot path.
+    """
+    now = time.monotonic()
+    cached = _sports_series_cache.get("sports")
+    if cached and (now - cached[0]) < _SERIES_DISCOVERY_TTL:
+        return cached[1]
+    if not allow_network:
+        return cached[1] if cached else []
+    settings = get_settings()
+    if not settings.kalshi_api_key_id or not settings.kalshi_private_key:
+        return cached[1] if cached else []
+    try:
+        async with KalshiClient(settings=settings, timeout=8.0) as c:
+            data = await c.list_series(category="Sports")
+    except Exception as e:  # noqa: BLE001 — never let discovery break resolve
+        log.warning("kalshi series discovery failed: %s", e)
+        return cached[1] if cached else []
+    series = data.get("series") if isinstance(data, dict) else None
+    if not isinstance(series, list):
+        series = []
+    _sports_series_cache["sports"] = (now, series)
+    return series
+
+
+async def _discover_series(
+    vertical: str, pick_type: str, *, allow_network: bool,
+) -> list[str]:
+    """Discover every Kalshi series ticker for ``vertical`` + ``pick_type``.
+
+    Filters the live Sports series list by the vertical's sport tag and the
+    pick_type's ticker suffix (GAME/SPREAD/TOTAL), dropping non-full-game
+    bet variants.  Returns ``[]`` for verticals we don't auto-discover.
+    """
+    tag = _VERTICAL_SPORT_TAG.get(vertical)
+    suffix = _PICK_TYPE_SUFFIX.get(pick_type)
+    if not tag or not suffix:
+        return []
+    out: list[str] = []
+    for s in await _all_sports_series(allow_network=allow_network):
+        ticker = (s.get("ticker") or "").upper()
+        if not ticker.endswith(suffix):
+            continue
+        if any(m in ticker for m in _SERIES_EXCLUDE_MARKERS):
+            continue
+        if tag not in (s.get("tags") or []):
+            continue
+        out.append(ticker)
+    return out
 
 
 _STOPWORDS = {
@@ -609,7 +703,20 @@ async def resolve_match(
     matchup = signal.get("matchup") or ""
     selection = signal.get("selection") or ""
 
-    prefixes = _SERIES_BY_VERTICAL_PICK.get((vertical, pick_type), [])
+    static_prefixes = _SERIES_BY_VERTICAL_PICK.get((vertical, pick_type), [])
+    # Union the static list with every series Kalshi tags for this sport +
+    # pick_type, so competitions we never hardcoded (international
+    # friendlies, Nations League, World Cup, …) still resolve.  Static
+    # entries stay first to preserve their preference order.
+    discovered = await _discover_series(
+        vertical, pick_type, allow_network=live_fallback,
+    )
+    seen_prefix: set[str] = set()
+    prefixes: list[str] = []
+    for p in (*static_prefixes, *discovered):
+        if p not in seen_prefix:
+            seen_prefix.add(p)
+            prefixes.append(p)
     if not prefixes:
         return ResolveResult(
             None,

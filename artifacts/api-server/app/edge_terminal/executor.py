@@ -193,6 +193,19 @@ def _classify_exception(e: BaseException) -> tuple[str | None, str]:
         return "skipped_gate", msg[:200]
     if "market closed" in low or "market_closed" in low:
         return "skipped_gate", msg[:200]
+    # The order endpoint answers ``404 market_not_found`` when the ticker
+    # is not an active tradeable market — overwhelmingly a settled/closed
+    # game (re-queued picks for fixtures that already ended), but it can
+    # also mean a stale/wrong ticker.  Either way the order is genuinely
+    # un-placeable, so skip cleanly rather than surfacing a red "Kalshi
+    # rejected order" failure.  The reason is left non-asserting (does not
+    # claim "settled") so a wrong-ticker resolver bug isn't masked behind
+    # a false settled-market label — it stays visible/investigable.
+    if "market_not_found" in low or "market not found" in low:
+        return (
+            "skipped_gate",
+            "Kalshi market not found — settled, closed, or ticker no longer open",
+        )
     if "duplicate" in low or "already" in low:
         return "skipped_already_placed", msg[:200]
     return None, msg[:200]

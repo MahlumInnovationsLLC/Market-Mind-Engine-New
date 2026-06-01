@@ -503,3 +503,28 @@ def test_no_side_submits_at_no_price_not_yes_quote(monkeypatch):
     assert abs(
         ctx.intended_notional_usd - ctx.intended_quantity * 0.38
     ) < 1e-9
+
+
+def test_classify_exception_settled_market_404_is_clean_skip():
+    """A finished game's market answers Kalshi 404 ``market_not_found``;
+    re-queued picks for fixtures that already ended must skip cleanly
+    rather than surface a red ``failed`` "Kalshi rejected order"."""
+    from app.edge_terminal import executor
+
+    cls, reason = executor._classify_exception(
+        RuntimeError(
+            "Kalshi rejected order: Kalshi API error 404: "
+            "{'error': {'code': 'market_not_found'}}"
+        )
+    )
+    assert cls == "skipped_gate"
+    low = reason.lower()
+    assert "not found" in low
+    assert "settled" in low or "closed" in low
+
+
+def test_classify_exception_unknown_error_still_fails():
+    from app.edge_terminal import executor
+
+    cls, _ = executor._classify_exception(RuntimeError("kaboom unexpected"))
+    assert cls is None

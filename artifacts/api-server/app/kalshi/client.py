@@ -283,6 +283,22 @@ class KalshiClient:
             params["cursor"] = cursor
         return await self._request("GET", "/markets", params=params)
 
+    async def list_series(
+        self, *, category: str | None = None
+    ) -> dict[str, Any]:
+        """List series via ``GET /series``.
+
+        ``category`` filters server-side (e.g. ``"Sports"``). Each series
+        object carries a ``tags`` list naming its sport (``"Soccer"``,
+        ``"Baseball"`` …) plus the series ``ticker`` — the Edge Terminal
+        resolver uses this to DISCOVER every competition series for a
+        vertical at runtime instead of hardcoding a league list.
+        """
+        params: dict[str, Any] = {}
+        if category:
+            params["category"] = category
+        return await self._request("GET", "/series", params=params)
+
     async def submit_order(self, payload: dict[str, Any]) -> dict[str, Any]:
         """Submit a new order. Caller is responsible for validating payload shape.
 
