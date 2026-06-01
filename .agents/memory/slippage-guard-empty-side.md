@@ -21,3 +21,23 @@ always emits limit `yes_price`/`no_price`).
 to restore the legacy hard-reject — keep this as an operational
 kill-switch. This loosening does NOT touch the full/partial-depth
 slippage-erosion math, only the zero-depth-on-our-side case.
+
+## Full-rest path must be gated on `book_known`
+
+A second flag `slippage_guard_rest_full_limit` (env
+`AXIOM_SLIPPAGE_GUARD_REST_FULL_LIMIT`, default True) rests the FULL
+limit-order size on a thin/partial-depth book instead of trimming to the
+immediately-fillable slice (the "why are my bets sub-$1?" fix — trimming
+shrank a Kelly-sized order to a 1-contract sub-dollar position).
+
+**Why:** a limit order's every fill is bounded by its own limit price
+(already inside the edge budget), so a thin book can never produce an
+out-of-budget fill — the remainder simply rests.
+
+**How to apply:** the full-rest branch MUST be gated on `book_known`
+(`if book_known and slippage_guard_rest_full_limit:`). An empty requested
+side reaches that branch with `book_known=False` only when the operator
+set `allow_empty_side=False` (their explicit hard-reject) — an ungated
+full-rest would silently override that kill-switch and let an empty-side
+order through. Keep the two flags independent: full-rest is for partial
+depth, allow_empty_side is for zero depth on our side.

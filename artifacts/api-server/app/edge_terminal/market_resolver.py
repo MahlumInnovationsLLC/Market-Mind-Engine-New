@@ -310,6 +310,12 @@ class ResolveResult:
     #                   (genuinely unsupported market type)
     #   "no_match"    — series exist but no candidate scored high enough
     kind: str = "matched"
+    # Recommended Kalshi side ("YES"/"NO") when the *resolver* — not the
+    # scraper — dictates it.  Set for spreads, where the handicap sign and the
+    # target market are coupled (a "+1.5" underdog cover is NO on the
+    # opponent's "wins by over 1.5" market, never YES on the pick team's).
+    # ``None`` means "no opinion — honour the scraper's side".
+    side: str | None = None
 
 
 def _tokens(s: str | None) -> set[str]:
@@ -488,6 +494,26 @@ def _extract_line(selection: str) -> float | None:
         return float(m.group(1))
     except ValueError:
         return None
+
+
+def _spread_sign(selection: str) -> int | None:
+    """Return the handicap sign of a spread selection.
+
+    ``+1`` for a "+1.5" underdog cover (e.g. "Giants +1.5"), ``-1`` for a
+    "-1.5" favourite (e.g. "Giants -1.5"), and ``None`` when no explicit
+    sign precedes the line number.
+
+    Kalshi lists spreads only as "<team> wins by over X.5 runs" markets, so:
+      * "-X.5" (favourite) = YES on the *pick team's* over-X.5 market;
+      * "+X.5" (underdog)  = NO  on the *opponent's*  over-X.5 market
+        (the pick covers unless the opponent wins by over X.5).
+    The sign therefore picks BOTH which team's market to target and which
+    side to buy — getting it wrong bets the exact opposite of the pick.
+    """
+    m = re.search(r"([-+])\s*\d+(?:\.\d+)?", selection or "")
+    if not m:
+        return None
+    return 1 if m.group(1) == "+" else -1
 
 
 def _score(
@@ -684,8 +710,19 @@ async def resolve_match(
     (e.g. the dashboard widget polled every 30s) MUST pass ``False`` so
     they don't serialise N HTTP round-trips on the event loop.
     """
+    pick_type = (signal.get("pick_type") or "moneyline").lower().strip()
+    selection = signal.get("selection") or ""
     direct = (signal.get("kalshi_ticker") or "").strip()
-    if direct:
+    # A scraper-supplied ticker is normally authoritative, but a SIGNED spread
+    # ("+X.5" / "-X.5") is the exception: the scraper resolves the handicap to
+    # the FAVOURITE's own "wins by over X.5" market, which is precisely the
+    # wrong-market / wrong-side bug this resolver exists to correct.  Force
+    # signed spreads through the sign-aware resolution below so the target
+    # market AND the side are derived here rather than trusting the scraper.
+    direct_ok = bool(direct) and not (
+        pick_type == "spread" and _spread_sign(selection) is not None
+    )
+    if direct_ok:
         try:
             hit = await db.fetchval(
                 "SELECT 1 FROM market_title_cache WHERE ticker=$1", direct,
@@ -699,9 +736,7 @@ async def resolve_match(
         return ResolveResult(direct, "scraper-supplied ticker", [], kind="matched")
 
     vertical = (signal.get("vertical") or "").lower().strip()
-    pick_type = (signal.get("pick_type") or "moneyline").lower().strip()
     matchup = signal.get("matchup") or ""
-    selection = signal.get("selection") or ""
 
     static_prefixes = _SERIES_BY_VERTICAL_PICK.get((vertical, pick_type), [])
     # Union the static list with every series Kalshi tags for this sport +
@@ -730,6 +765,27 @@ async def resolve_match(
     picked_codes = _alias_codes(picked)
     other_codes = _alias_codes(other)
     line = _extract_line(selection)
+
+    # Spread handicap sign couples the target market with the side.  Kalshi
+    # only lists "<team> wins by over X.5 runs" markets, so a "+X.5" underdog
+    # cover must be expressed as NO on the OPPONENT's over-X.5 market, while a
+    # "-X.5" favourite is YES on the PICK team's over-X.5 market.  For a "+"
+    # spread we therefore score toward the opponent's market (swap the
+    # picked/other evidence so the scorer rewards the opponent's tail code +
+    # line bucket) and recommend the NO side; for "-" we keep the pick team's
+    # market and recommend YES.  With no explicit sign we leave the side to the
+    # scraper (recommended_side=None) and score as before.
+    recommended_side: str | None = None
+    s_picked, s_other = picked, other
+    s_picked_codes, s_other_codes = picked_codes, other_codes
+    if pick_type == "spread":
+        sign = _spread_sign(selection)
+        if sign == 1:
+            s_picked, s_other = other, picked
+            s_picked_codes, s_other_codes = other_codes, picked_codes
+            recommended_side = "NO"
+        elif sign == -1:
+            recommended_side = "YES"
 
     away_words, home_words = _matchup_sides(matchup)
     away_name, away_codes = _side_evidence(away_words)
@@ -768,8 +824,8 @@ async def resolve_match(
                 continue
             sc = _score(
                 r,
-                picked=picked, other=other,
-                picked_codes=picked_codes, other_codes=other_codes,
+                picked=s_picked, other=s_other,
+                picked_codes=s_picked_codes, other_codes=s_other_codes,
                 pick_type=pick_type, line=line,
             )
             if sc > best_s:
@@ -795,8 +851,8 @@ async def resolve_match(
                 "title": c["title"],
                 "score": _score(
                     c,
-                    picked=picked, other=other,
-                    picked_codes=picked_codes, other_codes=other_codes,
+                    picked=s_picked, other=s_other,
+                    picked_codes=s_picked_codes, other_codes=s_other_codes,
                     pick_type=pick_type, line=line,
                 ),
             }
@@ -826,6 +882,7 @@ async def resolve_match(
             if chosen_row is not None and _both_teams(chosen_row):
                 return ResolveResult(
                     llm_ticker, llm_reason, preview, kind="matched",
+                    side=recommended_side,
                 )
             # The LLM matched a market that doesn't name BOTH teams — a
             # line-only false positive on an unrelated or wrong-opponent
@@ -849,6 +906,7 @@ async def resolve_match(
         f"matched via {'live' if used_live else 'cache'} (score={best_score}, series={prefixes[0]})",
         preview,
         kind="matched",
+        side=recommended_side,
     )
 
 

@@ -115,7 +115,15 @@ def _wire(monkeypatch, fires: list[dict[str, Any]], *, ticker: str | None):
     async def _resolve(sig):
         return ticker
 
-    async def _resolve_match(sig):
+    async def _resolve_match(sig, **kwargs):
+        # ``_fire_one`` resolves through ``resolve_match`` first, so this must
+        # mirror the ticker the legacy ``resolve`` surface would return: a
+        # matched result when a ticker is configured, else the structured
+        # no-match that drives the ``skipped_unresolved`` disposition.
+        if ticker:
+            return market_resolver.ResolveResult(
+                ticker, "matched", [], kind="matched",
+            )
         return market_resolver.ResolveResult(
             None, "no matching kalshi market", [], kind="no_match"
         )

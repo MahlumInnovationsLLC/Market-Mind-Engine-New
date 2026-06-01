@@ -29,6 +29,32 @@ def _run(coro):
         asyncio.set_event_loop(None)
 
 
+def _patch_resolver(monkeypatch, executor, resolve_fn, *, side=None):
+    """Patch BOTH resolver surfaces consistently.
+
+    ``_fire_one`` now resolves through ``resolve_match`` (one call yields the
+    ticker AND the resolver-recommended side), so tests that only patched the
+    legacy ``resolve`` string-surface must also stub ``resolve_match``.  This
+    derives the structured result from the same ``resolve_fn`` ticker so the
+    two surfaces never disagree.  ``side`` lets spread tests assert the
+    resolver-dictated YES/NO override.
+    """
+    market_resolver = executor.market_resolver
+
+    async def _resolve_match(sig, **kwargs):
+        ticker = await resolve_fn(sig)
+        if not ticker:
+            return market_resolver.ResolveResult(
+                None, "no matching kalshi market", [], kind="no_match",
+            )
+        return market_resolver.ResolveResult(
+            ticker, "matched", [], kind="matched", side=side,
+        )
+
+    monkeypatch.setattr(market_resolver, "resolve", resolve_fn)
+    monkeypatch.setattr(market_resolver, "resolve_match", _resolve_match)
+
+
 # ---------------------------------------------------------------------
 # control
 # ---------------------------------------------------------------------
@@ -384,7 +410,7 @@ def test_fire_one_resolves_ticker_sizes_and_tags_at_insert(monkeypatch):
             "now threaded through paper.place_order at insert time"
         )
 
-    monkeypatch.setattr(executor.market_resolver, "resolve", _resolve)
+    _patch_resolver(monkeypatch, executor, _resolve)
     monkeypatch.setattr(executor.cycle_module, "_latest_bankroll", _bankroll)
     monkeypatch.setattr(executor.paper_module, "place_order", _place_order)
     monkeypatch.setattr(executor.db, "execute", _execute)
@@ -434,7 +460,7 @@ def test_fire_one_persists_decision_with_scraped_confidence_source(monkeypatch):
             decision.append(args)
         return None
 
-    monkeypatch.setattr(executor.market_resolver, "resolve", _resolve)
+    _patch_resolver(monkeypatch, executor, _resolve)
     monkeypatch.setattr(executor.cycle_module, "_latest_bankroll", _bankroll)
     monkeypatch.setattr(executor.paper_module, "place_order", _place_order)
     monkeypatch.setattr(executor.db, "execute", _execute)
@@ -483,7 +509,7 @@ def test_fire_one_min_stake_fallback_when_edge_metadata_missing(monkeypatch):
         placed.append({"ctx": ctx, "kwargs": kwargs})
         return {"trades_id": 99, "status": "placed"}
 
-    monkeypatch.setattr(executor.market_resolver, "resolve", _resolve)
+    _patch_resolver(monkeypatch, executor, _resolve)
     monkeypatch.setattr(executor.cycle_module, "_latest_bankroll", _bankroll)
     monkeypatch.setattr(executor.paper_module, "place_order", _place_order)
     monkeypatch.setattr(executor, "_already_placed", lambda *a, **k: _async_false())
@@ -527,7 +553,7 @@ def test_fire_one_honors_no_side(monkeypatch):
         placed.append({"ctx": ctx, "kwargs": kwargs})
         return {"trades_id": 7, "status": "placed"}
 
-    monkeypatch.setattr(executor.market_resolver, "resolve", _resolve)
+    _patch_resolver(monkeypatch, executor, _resolve)
     monkeypatch.setattr(executor.cycle_module, "_latest_bankroll", _bankroll)
     monkeypatch.setattr(executor.paper_module, "place_order", _place_order)
 
@@ -552,6 +578,62 @@ def test_fire_one_honors_no_side(monkeypatch):
     assert ctx.side == "NO"
     # Edge signed from the NO-side perspective: model_prob - (1 - price).
     assert ctx.edge is not None and ctx.edge > 0
+
+
+def test_fire_one_resolver_side_overrides_scraper_for_plus_spread(monkeypatch):
+    """Live-money fix: for a "+1.5" underdog spread the resolver remaps to the
+    OPPONENT's "wins by over 1.5" market and dictates side=NO.  Even though the
+    scraper tile says YES, the executor must place NO on the resolved opponent
+    ticker — buying YES there bets the exact opposite of the pick.
+    """
+    from app.edge_terminal import executor
+
+    placed: list[dict[str, Any]] = []
+
+    async def _resolve(sig):
+        # Opponent's over-1.5 market (the resolver's remapped target).
+        return "KXMLBSPREAD-26MAY30SFMIL-MIL2"
+
+    async def _bankroll(trading_mode="paper"):
+        return 1000.0
+
+    async def _live_price(ticker):
+        # YES price of the opponent market = "MIL wins by over 1.5".
+        return 0.40
+
+    async def _place_order(ctx, **kwargs):
+        placed.append({"ctx": ctx, "kwargs": kwargs})
+        return {"trades_id": 31, "status": "placed"}
+
+    # Resolver dictates NO (the "+1.5" underdog-cover side on the opponent mkt).
+    _patch_resolver(monkeypatch, executor, _resolve, side="NO")
+    monkeypatch.setattr(executor.cycle_module, "_latest_bankroll", _bankroll)
+    monkeypatch.setattr(executor, "_fetch_live_kalshi_price", _live_price)
+    monkeypatch.setattr(executor.paper_module, "place_order", _place_order)
+
+    sig = {
+        "id": 1,
+        "vertical": "mlb",
+        "matchup": "San Francisco Giants @ Milwaukee Brewers",
+        "selection": "Giants +1.5",
+        "pick_type": "spread",
+        # Scraper tile side is YES — WRONG for a "+" spread; resolver overrides.
+        "side": "YES",
+        # Pick (Giants cover) win-prob; clears the 65% floor on the NO side.
+        "model_prob": 0.70,
+        # Deliberately set a scraped price in the PICK tile's coordinates — it
+        # must be discarded in favour of the resolved ticker's live quote.
+        "market_price": 0.95,
+    }
+    out = _run(executor._fire_one(sig))
+    assert out is not None
+    ctx = placed[0]["ctx"]
+    assert ctx.market_id == "KXMLBSPREAD-26MAY30SFMIL-MIL2"
+    assert ctx.side == "NO"
+    # NO-side edge = model_prob - (1 - live_yes) = 0.70 - (1 - 0.40) = +0.10,
+    # computed against the RESOLVED ticker's live quote (0.40), not the
+    # discarded scraped 0.95.
+    assert ctx.edge is not None and abs(ctx.edge - 0.10) < 1e-9
 
 
 def test_signal_side_roundtrips_db_to_executor(monkeypatch):
@@ -639,7 +721,7 @@ def test_signal_side_roundtrips_db_to_executor(monkeypatch):
         placed.append({"ctx": ctx, "kwargs": kwargs})
         return {"trades_id": 999, "status": "placed"}
 
-    monkeypatch.setattr(executor.market_resolver, "resolve", _resolve)
+    _patch_resolver(monkeypatch, executor, _resolve)
     monkeypatch.setattr(executor.cycle_module, "_latest_bankroll", _bankroll)
     monkeypatch.setattr(executor.paper_module, "place_order", _place_order)
 
@@ -872,7 +954,7 @@ def test_fire_one_unbadged_signal_skips(monkeypatch):
     async def _resolve(sig):
         raise AssertionError("resolver must not run for an unbadged signal")
 
-    monkeypatch.setattr(executor.market_resolver, "resolve", _resolve)
+    _patch_resolver(monkeypatch, executor, _resolve)
     try:
         _run(executor._fire_one({"id": 1, "signal_badged": False}))
     except executor._SignalSkip as skip:

@@ -2014,6 +2014,28 @@ async def _check_slippage_guard(req: OrderRequest, *, settings) -> dict[str, Any
         if erased_pct <= threshold_pct:
             return None
 
+    # Limit orders are self-protecting: every fill is bounded by the order's
+    # own limit price (buy fills <= limit, sell fills >= limit), and that
+    # limit already sits inside the edge-erosion budget (worst_acceptable =
+    # limit +/- budget).  So a thin / partial-depth book can never produce an
+    # out-of-budget fill for a limit order — the unfilled remainder simply
+    # rests.  Trimming it to the immediately-fillable slice silently shrinks a
+    # Kelly-sized order to a 1-contract, sub-dollar position on thin sports /
+    # tennis books (the exact "why are my bets sub-$1?" symptom).  Rest the
+    # full size instead.  Gated so operators can restore the strict slice-trim
+    # via AXIOM_SLIPPAGE_GUARD_REST_FULL_LIMIT=false.  Requires ``book_known``:
+    # when the requested side is empty we only reach here with
+    # allow_empty_side=False (the operator's explicit hard-reject), so the
+    # full-rest path must NOT override that and let an empty-side order through.
+    if book_known and getattr(settings, "slippage_guard_rest_full_limit", True):
+        log.info(
+            "slippage guard: %s on %s — limit @ %s¢ bounds every fill within "
+            "the edge budget; resting full size (%d) instead of trimming to a "
+            "fillable slice",
+            req.client_order_id, req.market_ticker, limit, requested,
+        )
+        return None
+
     # Either the book is too thin OR the full-size walk pushes past the
     # edge-erosion threshold. Compute the largest slice that still
     # respects the budget by walking only price levels whose taker-units

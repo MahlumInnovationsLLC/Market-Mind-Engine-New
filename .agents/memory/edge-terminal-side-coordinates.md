@@ -70,3 +70,32 @@ candidate when same-line totals or same-city/same-day fixtures coexist. Over-rej
 **How to apply:** keep BOTH-teams + date gating in lockstep with any widening of
 candidate breadth (more series, looser scoring). Prefer side-distinct evidence
 (acronym, nickname, code in the team segment) over city/shared tokens.
+
+---
+
+# Signed spreads: resolver owns BOTH the target market and the side
+
+Kalshi only lists "<team> wins by over X.5" markets — there is no native
+"covers the spread" market. So a handicap pick must be remapped:
+- **"+X.5"** (underdog cover) → resolve to the **OPPONENT's** over-X.5 market and
+  recommend **NO** (i.e. "opponent does NOT win by over X.5" ⇔ pick covers).
+- **"-X.5"** (favourite) → keep the **PICK team's** over-X.5 market, recommend **YES**.
+- **no sign** → leave side unset; honour the scraper.
+
+`market_resolver.resolve_match` carries this as `ResolveResult.side`; for "+" it
+swaps the picked/other team evidence so the scorer targets the opponent market.
+The executor overrides the tile side with `rr.side` when set, and re-quotes the
+resolved ticker live (the scraped price belongs to the wrong tile's coordinates).
+
+**Why:** the scraper resolves a signed spread to the FAVOURITE's own market with a
+YES tile — betting the exact opposite of the pick with live money. A scraper-supplied
+`kalshi_ticker` is normally authoritative, so the direct-ticker short-circuit in
+`resolve_match` re-introduced the bug for signed spreads.
+
+**How to apply:** for `pick_type=="spread"` with a non-None `_spread_sign`, DO NOT
+honour the scraper's direct ticker — force full sign-aware resolution so the target
+market and side are derived in the resolver. If resolution fails, return no_match
+(skip the trade) rather than falling back to the scraper ticker — a wrong-side spread
+trade is strictly worse than no trade. Unsigned spreads still honour the direct ticker.
+`model_prob` stays pick-relative (the NO side already represents the pick covering);
+do not flip it for the "+" → NO remap.

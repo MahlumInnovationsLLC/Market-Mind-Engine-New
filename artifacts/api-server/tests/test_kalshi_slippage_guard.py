@@ -64,6 +64,7 @@ def _settings(
     rest_fallback: bool = False,
     max_age_secs: float = 5.0,
     allow_empty_side: bool = True,
+    rest_full_limit: bool = False,
 ) -> SimpleNamespace:
     return SimpleNamespace(
         kalshi_api_key_id="kid",
@@ -81,6 +82,12 @@ def _settings(
         # limit rather than hard-rejected. Reject-path tests opt out with
         # allow_empty_side=False.
         slippage_guard_allow_empty_side=allow_empty_side,
+        # NOTE: defaults to False *in tests* (production default is True) so
+        # the legacy slice/trim path stays exercised by the existing
+        # slice-assertion tests.  The full-rest behaviour (don't trim a
+        # self-protecting limit order on a thin book) is covered explicitly
+        # by its own test which sets this True.
+        slippage_guard_rest_full_limit=rest_full_limit,
     )
 
 
@@ -331,6 +338,45 @@ def test_slippage_guard_slices_sell_when_book_too_low(monkeypatch, _reset):
     assert slice_md["sliced_slippage_cents"] == 0
 
 
+def test_slippage_guard_rests_full_size_for_limit_on_thin_book(monkeypatch, _reset):
+    """Production default (slippage_guard_rest_full_limit=True): a thin book
+    that would otherwise trim a 10-lot down to its 3-contract fillable slice
+    instead rests the FULL 10 lots.
+
+    A limit order is self-protecting — every fill is bounded by its own limit
+    price, which already sits inside the edge-erosion budget — so trimming it
+    needlessly shrinks a Kelly-sized order to a sub-dollar position on thin
+    sports / tennis books.  The unfilled remainder simply rests.
+    """
+    monkeypatch.setattr(
+        lifecycle,
+        "get_settings",
+        lambda: _settings(threshold_pct=50.0, rest_full_limit=True),
+    )
+
+    async def go():
+        # Same thin book as the slice test (only 3 of 10 fillable), but the
+        # full-rest flag is on, so NO slicing happens.
+        await kalshi_orderbook.orderbook_cache.apply_snapshot(
+            "X-RESTFULL", yes=[[40, 999]], no=[[60, 3]],
+        )
+        req = lifecycle.OrderRequest(
+            market_ticker="X-RESTFULL", side="yes", action="buy", count=10,
+            limit_price_cents=40, client_order_id="restfull-1",
+            context={"model_edge_cents": 4.0},
+        )
+        return await lifecycle.submit_order(req)
+
+    rec = _run(go())
+    # The order kept its full requested size — the guard never trimmed it.
+    assert rec.request.count == 10
+    submitted = [w for w in _reset if w["event_type"] == "submitted"]
+    assert submitted, "a submitted lifecycle event must be written"
+    # The guard did NOT attach slice metadata because it never trimmed.
+    ctx = submitted[0]["metadata"]["context"]
+    assert "sliced_by_slippage_guard" not in ctx
+
+
 def test_slippage_guard_slices_when_book_lacks_depth(monkeypatch, _reset):
     """Book covers only 3 of 10 requested contracts and they're all at the
     top price. Spec wants a 3-contract slice instead of a silent skip.
@@ -455,6 +501,37 @@ def test_slippage_guard_rejects_empty_side_when_flag_off(_reset):
         )
         return await lifecycle._check_slippage_guard(
             req, settings=_settings(threshold_pct=50.0, allow_empty_side=False),
+        )
+
+    md = _run(go())
+    assert md is not None
+    assert md["filled_available"] == 0
+    assert "no liquidity on requested side" in md["detail"]
+
+
+def test_slippage_guard_empty_side_reject_survives_full_rest_flag(_reset):
+    """Operator-control regression guard: the production-default full-rest
+    path (``rest_full_limit=True``) must NOT override an explicit empty-side
+    hard-reject (``allow_empty_side=False``).  An empty requested side reaches
+    the full-rest branch with ``book_known=False``; the branch is gated on
+    ``book_known`` so the order still hard-rejects instead of resting.
+    """
+    async def go():
+        await kalshi_orderbook.orderbook_cache.apply_snapshot(
+            "X-REJ-EMPTY-RFL", yes=[[40, 100]], no=[],
+        )
+        req = lifecycle.OrderRequest(
+            market_ticker="X-REJ-EMPTY-RFL", side="yes", action="buy", count=10,
+            limit_price_cents=40, client_order_id="rej-empty-rfl-1",
+            context={"model_edge_cents": 4.0},
+        )
+        return await lifecycle._check_slippage_guard(
+            req,
+            settings=_settings(
+                threshold_pct=50.0,
+                allow_empty_side=False,
+                rest_full_limit=True,
+            ),
         )
 
     md = _run(go())

@@ -174,6 +174,133 @@ def test_resolve_match_rejects_stale_dated_market(monkeypatch):
     assert "date_ok=0" in (rr.reason or "")
 
 
+def test_spread_sign_parses_plus_minus_and_absent():
+    # The handicap sign decides BOTH the target market and the side, so it
+    # must be parsed independently of the line magnitude.
+    assert market_resolver._spread_sign("Giants +1.5") == 1
+    assert market_resolver._spread_sign("Giants -1.5") == -1
+    assert market_resolver._spread_sign("Giants 1.5") is None
+    assert market_resolver._spread_sign("Giants") is None
+
+
+def test_resolve_match_plus_spread_targets_opponent_market_no_side(monkeypatch):
+    # "Giants +1.5" (SF underdog cover) must resolve to the OPPONENT's
+    # "wins by over 1.5" market and recommend NO — i.e. "Brewers do NOT win
+    # by over 1.5" — NOT YES on SF's own over-1.5 market.  Both teams' over-
+    # 1.5 markets are offered; the resolver must pick MIL2 + side NO.
+    sf = {
+        "ticker": "KXMLBSPREAD-26MAY30SFMIL-SF2",
+        "title": "San Francisco Giants vs Milwaukee Brewers",
+    }
+    mil = {
+        "ticker": "KXMLBSPREAD-26MAY30SFMIL-MIL2",
+        "title": "San Francisco Giants vs Milwaukee Brewers",
+    }
+    _wire_no_live(monkeypatch, cands=[sf, mil], llm_ticker=None)
+
+    rr = _run(market_resolver.resolve_match({
+        "vertical": "mlb", "pick_type": "spread",
+        "matchup": "San Francisco Giants @ Milwaukee Brewers",
+        "selection": "Giants +1.5", "signal_date": "2026-05-30",
+    }))
+
+    assert rr.kind == "matched"
+    assert rr.ticker == "KXMLBSPREAD-26MAY30SFMIL-MIL2"
+    assert rr.side == "NO"
+
+
+def test_resolve_match_minus_spread_targets_pick_market_yes_side(monkeypatch):
+    # "Giants -1.5" (SF favourite) keeps the PICK team's "wins by over 1.5"
+    # market and recommends YES — "SF wins by over 1.5".
+    sf = {
+        "ticker": "KXMLBSPREAD-26MAY30SFMIL-SF2",
+        "title": "San Francisco Giants vs Milwaukee Brewers",
+    }
+    mil = {
+        "ticker": "KXMLBSPREAD-26MAY30SFMIL-MIL2",
+        "title": "San Francisco Giants vs Milwaukee Brewers",
+    }
+    _wire_no_live(monkeypatch, cands=[sf, mil], llm_ticker=None)
+
+    rr = _run(market_resolver.resolve_match({
+        "vertical": "mlb", "pick_type": "spread",
+        "matchup": "San Francisco Giants @ Milwaukee Brewers",
+        "selection": "Giants -1.5", "signal_date": "2026-05-30",
+    }))
+
+    assert rr.kind == "matched"
+    assert rr.ticker == "KXMLBSPREAD-26MAY30SFMIL-SF2"
+    assert rr.side == "YES"
+
+
+def test_resolve_match_signed_spread_ignores_scraper_ticker(monkeypatch):
+    # A scraper-supplied kalshi_ticker is normally authoritative, BUT for a
+    # signed spread the scraper resolves "+1.5" to the favourite's own market
+    # (the wrong-market bug).  The resolver must IGNORE the direct ticker and
+    # run sign-aware resolution: "Giants +1.5" → opponent's MIL2 market + NO.
+    sf = {
+        "ticker": "KXMLBSPREAD-26MAY30SFMIL-SF2",
+        "title": "San Francisco Giants vs Milwaukee Brewers",
+    }
+    mil = {
+        "ticker": "KXMLBSPREAD-26MAY30SFMIL-MIL2",
+        "title": "San Francisco Giants vs Milwaukee Brewers",
+    }
+    _wire_no_live(monkeypatch, cands=[sf, mil], llm_ticker=None)
+
+    rr = _run(market_resolver.resolve_match({
+        "vertical": "mlb", "pick_type": "spread",
+        "matchup": "San Francisco Giants @ Milwaukee Brewers",
+        "selection": "Giants +1.5", "signal_date": "2026-05-30",
+        # Scraper points at the FAVOURITE's own market — must be discarded.
+        "kalshi_ticker": "KXMLBSPREAD-26MAY30SFMIL-SF2",
+    }))
+
+    assert rr.kind == "matched"
+    assert rr.ticker == "KXMLBSPREAD-26MAY30SFMIL-MIL2"
+    assert rr.side == "NO"
+
+
+def test_resolve_match_unsigned_spread_honours_scraper_ticker(monkeypatch):
+    # An UNSIGNED spread selection carries no handicap sign, so there is no
+    # side to derive — the scraper-supplied ticker stays authoritative and the
+    # direct short-circuit is honoured (side left unset).
+    async def _hit(*a, **k):
+        return 1
+
+    monkeypatch.setattr(market_resolver.db, "fetchval", _hit)
+
+    rr = _run(market_resolver.resolve_match({
+        "vertical": "mlb", "pick_type": "spread",
+        "matchup": "San Francisco Giants @ Milwaukee Brewers",
+        "selection": "Giants 1.5", "signal_date": "2026-05-30",
+        "kalshi_ticker": "KXMLBSPREAD-26MAY30SFMIL-SF2",
+    }))
+
+    assert rr.kind == "matched"
+    assert rr.ticker == "KXMLBSPREAD-26MAY30SFMIL-SF2"
+    assert rr.side is None
+
+
+def test_resolve_match_non_spread_leaves_side_unset(monkeypatch):
+    # A moneyline pick must not carry a resolver-dictated side — the scraper's
+    # side is honoured downstream.
+    cand = {
+        "ticker": "KXMLBGAME-26MAY30SFMIL-SF",
+        "title": "San Francisco Giants vs Milwaukee Brewers",
+    }
+    _wire_no_live(monkeypatch, cands=[cand], llm_ticker=None)
+
+    rr = _run(market_resolver.resolve_match({
+        "vertical": "mlb", "pick_type": "moneyline",
+        "matchup": "San Francisco Giants @ Milwaukee Brewers",
+        "selection": "Giants", "signal_date": "2026-05-30",
+    }))
+
+    assert rr.kind == "matched"
+    assert rr.side is None
+
+
 def test_ticker_team_code_extracts_segment():
     # Team-code segment is the chunk after date(+time) and before the
     # outcome suffix — codes matched there can't collide with the series

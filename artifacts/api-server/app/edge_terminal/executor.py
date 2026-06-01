@@ -225,17 +225,21 @@ async def _fire_one(sig: dict[str, Any]) -> dict[str, Any] | None:
     if not is_badged:
         raise _SignalSkip("skipped_not_badged", "signal is not badged")
 
-    ticker = await market_resolver.resolve(sig)
+    # Resolve once through the structured surface so a single call yields
+    # both the ticker AND the resolver-recommended side.  Spreads couple the
+    # two: the handicap sign decides which team's "wins by over X.5" market to
+    # target and whether to buy YES or NO, so the side cannot be left to the
+    # scraper for those.  ``rr.side`` is None for non-spread / unsigned picks,
+    # in which case the scraper's side is honoured below.
+    rr = await market_resolver.resolve_match(sig)
+    ticker = rr.ticker
     if not ticker:
-        # No ticker — re-resolve via the structured surface so the
-        # operator-visible disposition carries the resolver's honest
-        # reason (no Kalshi series mapped for this vertical/pick_type vs
-        # a series exists but no candidate matched) instead of a single
-        # guessed string.  Spreads and totals are now *attempted* (the
-        # resolver maps KX…SPREAD / KX…TOTAL series and line-matches
-        # them); only genuinely unmapped market types fall into the
-        # ``skipped_unsupported_market`` bucket.
-        rr = await market_resolver.resolve_match(sig)
+        # No ticker — the resolver's honest reason (no Kalshi series mapped
+        # for this vertical/pick_type vs a series exists but no candidate
+        # matched) drives the operator-visible disposition.  Spreads and
+        # totals are *attempted* (the resolver maps KX…SPREAD / KX…TOTAL
+        # series and line-matches them); only genuinely unmapped market types
+        # fall into the ``skipped_unsupported_market`` bucket.
         reason = rr.reason or "no matching kalshi market"
         if rr.kind == "no_series":
             raise _SignalSkip("skipped_unsupported_market", reason)
@@ -251,6 +255,15 @@ async def _fire_one(sig: dict[str, Any]) -> dict[str, Any] | None:
     try:
         price = float(raw_price) if raw_price is not None else None
     except (TypeError, ValueError):
+        price = None
+
+    # When the resolver remapped a spread to the OPPONENT's market (rr.side
+    # set), the scraped ``market_price`` belongs to the pick tile's market —
+    # a DIFFERENT Kalshi ticker in different coordinates — so it cannot be
+    # used to price the resolved ticker.  Discard it and quote the resolved
+    # ticker live instead; ``price`` is then the resolved ticker's YES price,
+    # which keeps the ``pick_price = 1 - price`` NO math below self-consistent.
+    if rr.side in ("YES", "NO"):
         price = None
 
     # When the scraper didn't capture a market price (the live Edge
@@ -274,6 +287,16 @@ async def _fire_one(sig: dict[str, Any]) -> dict[str, Any] | None:
     # dangerous mis-trade this executor could make.
     raw_side = (sig.get("side") or "YES")
     side = "NO" if str(raw_side).strip().upper() == "NO" else "YES"
+
+    # The resolver overrides the side when the market and side are coupled
+    # (spreads).  Kalshi lists only "<team> wins by over X.5" markets, so a
+    # "+1.5" underdog cover resolves to the OPPONENT's market and must be
+    # bought as NO ("opponent does NOT win by over 1.5"), while a "-1.5"
+    # favourite is YES on the pick team's market.  The scraper's ``side`` is
+    # the raw tile side and is wrong for "+"-spreads, so the resolver's
+    # explicit recommendation wins whenever it set one.
+    if rr.side in ("YES", "NO"):
+        side = rr.side
 
     # Price of the side we actually buy, in that side's own coordinates.
     # ``price`` above is the YES-quoted price; the NO contract costs

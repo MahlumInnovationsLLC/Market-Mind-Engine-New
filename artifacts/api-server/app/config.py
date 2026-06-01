@@ -201,6 +201,16 @@ class Settings:
     # order, never a bad fill.  Set False to restore the old hard-reject.
     # Default True.
     slippage_guard_allow_empty_side: bool
+    # When True the slippage guard does NOT trim a *limit* order on a thin /
+    # partial-depth book.  A limit order is self-protecting: every fill is
+    # bounded by its own limit price (buy fills <= limit, sell fills >=
+    # limit) and the limit already sits inside the edge-erosion budget
+    # (worst_acceptable = limit +/- budget), so the order can never fill
+    # outside the budget — the unfilled remainder simply rests.  Trimming it
+    # to the immediately-fillable slice needlessly shrinks Kelly-sized orders
+    # to a sub-dollar position on thin sports / tennis books.  Set False to
+    # restore the old behaviour (trim to the fillable slice).  Default True.
+    slippage_guard_rest_full_limit: bool
 
     # Verticals the orchestrator schedules.  One asyncio task per
     # vertical, each tick runs run_cycle(vertical) which scopes
@@ -435,6 +445,9 @@ def get_settings() -> Settings:
         ),
         slippage_guard_allow_empty_side=_truthy(
             os.environ.get("AXIOM_SLIPPAGE_GUARD_ALLOW_EMPTY_SIDE"), default=True
+        ),
+        slippage_guard_rest_full_limit=_truthy(
+            os.environ.get("AXIOM_SLIPPAGE_GUARD_REST_FULL_LIMIT"), default=True
         ),
         model_cache_dir=resolve_model_cache_dir(),
         model_cache_max_bytes=resolve_model_cache_max_bytes(),
