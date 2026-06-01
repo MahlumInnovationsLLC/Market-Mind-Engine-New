@@ -116,17 +116,25 @@ def _setup_executor_stubs(monkeypatch, fires: list[dict[str, Any]]):
     Kalshi / bankroll / risk gates.
 
     The signals these tests feed are eligible (signal-badged, model_prob
-    >= 0.65, resolvable ticker), so ``_fire_one`` runs the full placement
+    >= 0.60, resolvable ticker), so ``_fire_one`` runs the full placement
     path: trading-mode resolution, the Kelly-fraction cap lookup, and the
-    already-placed dedupe probe all sit *after* the 65% floor.  Stub each
+    already-placed dedupe probe all sit *after* the 60% floor.  Stub each
     so the test stays a pure unit test (no Postgres) and ``place_order``
     is the only chokepoint exercised.
     """
     from app.edge_terminal import executor
     from app.risk import trading_mode as trading_mode_module
 
+    from app.edge_terminal.market_resolver import ResolveResult
+
     async def _resolve(sig):
         return "KX-NBA-LAL-BOS"
+
+    async def _resolve_match(sig, **kwargs):
+        # Executor resolves through the structured ``resolve_match`` surface
+        # (ticker + resolver-recommended side).  side=None honours the
+        # scraper's side, matching the old bare-ticker stub's behaviour.
+        return ResolveResult("KX-NBA-LAL-BOS", "stub", [], kind="matched")
 
     async def _bankroll(trading_mode="paper"):
         return 1000.0
@@ -146,6 +154,7 @@ def _setup_executor_stubs(monkeypatch, fires: list[dict[str, Any]]):
         return {"trades_id": 1000 + len(fires), "status": "placed"}
 
     monkeypatch.setattr(executor.market_resolver, "resolve", _resolve)
+    monkeypatch.setattr(executor.market_resolver, "resolve_match", _resolve_match)
     monkeypatch.setattr(executor.cycle_module, "_latest_bankroll", _bankroll)
     monkeypatch.setattr(executor, "_resolve_kelly_fraction_cap", _kelly_cap)
     monkeypatch.setattr(executor, "_already_placed", _not_already_placed)
@@ -181,7 +190,7 @@ def test_poller_dedupes_repeat_scrape_via_unique_index(monkeypatch):
         "side": "YES",
         "signal_date": "2026-05-22",
         "edge_pct": 7.5,
-        # Eligible: clears the executor's 65% model-confidence floor so
+        # Eligible: clears the executor's 60% model-confidence floor so
         # the signal actually reaches place_order and the dedupe is real.
         "model_prob": 0.70,
         "market_price": 0.50,
@@ -241,7 +250,7 @@ def test_poller_dedupes_within_a_single_tick(monkeypatch):
         "side": "YES",
         "signal_date": "2026-05-22",
         "edge_pct": 3.1,
-        # Eligible: clears the 65% floor.  ``kalshi_ticker`` is None here
+        # Eligible: clears the 60% floor.  ``kalshi_ticker`` is None here
         # on purpose — the stubbed resolver still maps it to a ticker, so
         # the signal reaches place_order and the within-tick dedupe is
         # exercised for real.
@@ -287,7 +296,7 @@ def test_poller_distinct_signal_dates_are_not_deduped(monkeypatch):
         "selection": "Lakers",
         "side": "YES",
         "edge_pct": 7.5,
-        # Eligible: clears the 65% floor so both distinct-day signals
+        # Eligible: clears the 60% floor so both distinct-day signals
         # actually reach place_order (the point of this test).
         "model_prob": 0.70,
         "market_price": 0.50,

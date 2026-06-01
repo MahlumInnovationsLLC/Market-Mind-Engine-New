@@ -4,16 +4,16 @@ The two operator-mandated gates that decide whether an Edge Terminal
 pick becomes a real order are:
 
   1. the pick must be **signal-badged**, and
-  2. its model confidence (per chosen side) must clear the 65% floor,
+  2. its model confidence (per chosen side) must clear the 60% floor,
 
 after which it must **resolve to a Kalshi market** for an order to be
 placed.  These tests drive the executor end to end through
 ``drain_pending`` (the same entry point the poller uses) and assert:
 
-  * an eligible pick — badged, model_prob >= 0.65, resolvable — produces
+  * an eligible pick — badged, model_prob >= 0.60, resolvable — produces
     exactly one order via the ``paper.place_order`` chokepoint and is
     marked ``placed``;
-  * a sub-65% pick is **not** placed (``skipped_low_confidence``);
+  * a sub-60% pick is **not** placed (``skipped_low_confidence``);
   * a non-badged pick is **not** placed (``skipped_not_badged``);
   * an unresolvable pick is **not** placed (``skipped_unresolved``).
 
@@ -159,7 +159,7 @@ def _wire(monkeypatch, fires: list[dict[str, Any]], *, ticker: str | None):
 # Positive case — eligible pick produces an order
 # ---------------------------------------------------------------------
 
-def test_eligible_badged_65pct_pick_produces_order(monkeypatch):
+def test_eligible_badged_60pct_pick_produces_order(monkeypatch):
     from app.edge_terminal import executor
 
     fake = _FakeDB([_signal(id=1)])
@@ -187,10 +187,10 @@ def test_eligible_badged_65pct_pick_produces_order(monkeypatch):
 # Negative cases — ineligible picks must NOT place an order
 # ---------------------------------------------------------------------
 
-def test_sub_65pct_pick_does_not_place(monkeypatch):
+def test_sub_60pct_pick_does_not_place(monkeypatch):
     from app.edge_terminal import executor
 
-    fake = _FakeDB([_signal(id=2, model_prob=0.60)])
+    fake = _FakeDB([_signal(id=2, model_prob=0.55)])
     monkeypatch.setattr(executor.db, "fetch", fake.fetch)
     monkeypatch.setattr(executor.db, "execute", fake.execute)
     monkeypatch.setattr(executor.db, "fetchval", fake.fetchval)
@@ -200,7 +200,7 @@ def test_sub_65pct_pick_does_not_place(monkeypatch):
 
     counts = _run(executor.drain_pending())
 
-    assert fires == [], "a sub-65% pick must not place an order"
+    assert fires == [], "a sub-60% pick must not place an order"
     assert counts["placed"] == 0
     assert fake.marks[2][0] == "skipped_low_confidence"
 
@@ -246,7 +246,7 @@ def test_unresolved_pick_does_not_place(monkeypatch):
 # ---------------------------------------------------------------------
 # Bet-sizing fallbacks BELOW the gate (task #955)
 #
-# Task #953 (above) proved the badge + 65%-confidence gate end to end.
+# Task #953 (above) proved the badge + 60%-confidence gate end to end.
 # These extend that to the executor's *sizing* fallbacks: once a pick is
 # eligible, what decides whether it becomes a real order and at what
 # quantity.  Same pure-unit harness — DB, resolver, bankroll, kelly cap,
@@ -282,7 +282,7 @@ def test_min_stake_fallback_places_one_contract(monkeypatch):
 
 
 def test_min_stake_fallback_shadows_zero_kelly(monkeypatch):
-    """Even WITH a model_prob that clears the 65% floor, a Kelly result
+    """Even WITH a model_prob that clears the 60% floor, a Kelly result
     of zero (e.g. a non-positive edge) is shadowed by the min-stake
     fallback: with bankroll > 0 and side_price < 1.0 the pick still
     places exactly 1 contract rather than skipping.  Pins this so a
@@ -408,11 +408,11 @@ def test_already_placed_dedupe_skips(monkeypatch):
 def test_no_side_floor_rejects_sub_threshold_model_prob(monkeypatch):
     """``model_prob`` is the win-probability of the pick itself, so an
     "Under"/"No" tile's number is already the NO side's confidence and is
-    NOT flipped.  A 0.60 model_prob NO pick is a 60% pick — below the 65%
+    NOT flipped.  A 0.55 model_prob NO pick is a 55% pick — below the 60%
     floor — so it's rejected as ``skipped_low_confidence``."""
     from app.edge_terminal import executor
 
-    fake = _FakeDB([_signal(id=15, side="NO", model_prob=0.60)])
+    fake = _FakeDB([_signal(id=15, side="NO", model_prob=0.55)])
     monkeypatch.setattr(executor.db, "fetch", fake.fetch)
     monkeypatch.setattr(executor.db, "execute", fake.execute)
     monkeypatch.setattr(executor.db, "fetchval", fake.fetchval)
@@ -426,7 +426,7 @@ def test_no_side_floor_rejects_sub_threshold_model_prob(monkeypatch):
     assert counts["placed"] == 0
     status, reason, _ = fake.marks[15]
     assert status == "skipped_low_confidence"
-    assert "60%" in reason  # the pick's own win-probability, not flipped
+    assert "55%" in reason  # the pick's own win-probability, not flipped
 
 
 def test_no_side_low_model_prob_is_rejected_not_flipped(monkeypatch):
@@ -456,7 +456,7 @@ def test_no_side_low_model_prob_is_rejected_not_flipped(monkeypatch):
 
 def test_no_side_eligible_pick_sizes_and_places(monkeypatch):
     """An eligible NO pick (0.72 model_prob, the Under's own win-prob) clears
-    the 65% floor and sizes a real Kelly position (>> the min-stake 1
+    the 60% floor and sizes a real Kelly position (>> the min-stake 1
     contract) against the NO price ``1 - market_price``."""
     from app.edge_terminal import executor
 

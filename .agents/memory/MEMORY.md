@@ -3,3 +3,4 @@
 - [Kalshi market_not_found = clean skip](kalshi-market-not-found-skip.md) — settled/closed/wrong-ticker 404s skip cleanly (not "failed"); reason kept non-asserting so resolver bugs aren't masked.
 - [Slippage guard empty-side](slippage-guard-empty-side.md) — empty side allows resting limit by default; full-rest sizing path must be gated on book_known so it can't override the empty-side hard-reject.
 - [Edge Terminal side coordinates](edge-terminal-side-coordinates.md) — model_prob is pick-relative (never flip for NO); signed spreads: resolver owns target market + side, ignore scraper ticker for "+/-" spreads.
+- [Edge Terminal resolver stub surface](edge-terminal-resolver-stub.md) — executor resolves via resolve_match (not resolve); stubbing only resolve makes None-ticker signals silently skip (0 fires).

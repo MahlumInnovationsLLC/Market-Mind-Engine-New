@@ -436,7 +436,7 @@ def test_fire_one_resolves_ticker_sizes_and_tags_at_insert(monkeypatch):
 
 
 def test_fire_one_persists_decision_with_scraped_confidence_source(monkeypatch):
-    """Task #951: a badged ≥65% signal with an explicit model_prob reaches
+    """Task #951: a badged ≥60% signal with an explicit model_prob reaches
     place_order AND persists its deciding inputs (resolved ticker, decided
     model_prob, signed edge, confidence_source='scraped', badge flag) via
     the up-front ``_persist_decision`` UPDATE."""
@@ -564,7 +564,7 @@ def test_fire_one_honors_no_side(monkeypatch):
         "selection": "Under 220.5",
         "side": "NO",
         # ``model_prob`` is the Under pick's own win-probability, so 0.72
-        # clears the 65% floor directly and the NO contract (price
+        # clears the 60% floor directly and the NO contract (price
         # 1-0.50=0.50) carries positive edge (0.72 - 0.50).
         "model_prob": 0.72,
         # Bypass spread/total pre-filter — the test exercises NO-side
@@ -619,7 +619,7 @@ def test_fire_one_resolver_side_overrides_scraper_for_plus_spread(monkeypatch):
         "pick_type": "spread",
         # Scraper tile side is YES — WRONG for a "+" spread; resolver overrides.
         "side": "YES",
-        # Pick (Giants cover) win-prob; clears the 65% floor on the NO side.
+        # Pick (Giants cover) win-prob; clears the 60% floor on the NO side.
         "model_prob": 0.70,
         # Deliberately set a scraped price in the PICK tile's coordinates — it
         # must be discarded in favour of the resolved ticker's live quote.
@@ -733,7 +733,7 @@ def test_signal_side_roundtrips_db_to_executor(monkeypatch):
         "side": "no",  # lower-case from scraper → normalized to "NO"
         "edge_pct": 10.0,
         # ``model_prob`` is the Under pick's own win-prob; 0.72 clears the
-        # 65% confidence floor directly (no flip).
+        # 60% confidence floor directly (no flip).
         "model_prob": 0.72,
         "market_price": 0.50,
         "kalshi_ticker": None,
@@ -801,7 +801,7 @@ def test_signal_enrichment_fields_roundtrip_db(monkeypatch):
         "signal_date": "2026-05-22",
         "side": "YES",
         "edge_pct": 8.5,
-        # YES-side: 0.72 clears the 65% confidence floor.
+        # YES-side: 0.72 clears the 60% confidence floor.
         "model_prob": 0.72,
         "market_price": 0.50,
         "kalshi_ticker": "KX-NBA-LAL-BOS",

@@ -211,7 +211,7 @@ def _classify_exception(e: BaseException) -> tuple[str | None, str]:
     return None, msg[:200]
 
 
-_MIN_MODEL_CONFIDENCE = 0.65
+_MIN_MODEL_CONFIDENCE = 0.60
 
 
 async def _fire_one(sig: dict[str, Any]) -> dict[str, Any] | None:
@@ -370,7 +370,7 @@ async def _fire_one(sig: dict[str, Any]) -> dict[str, Any] | None:
 
     # Operator-mandated minimum model confidence floor.  ``model_prob`` is
     # already the win-probability of the pick we buy (NO picks included),
-    # so the floor is applied to it directly — a 60% pick is rejected on
+    # so the floor is applied to it directly — a sub-60% pick is rejected on
     # either side.  Signals with no model_prob at all (scraper omitted it
     # AND no edge/ev to infer from) bypass the floor — the min-stake
     # fallback below already caps real risk at one contract for those.

@@ -7488,7 +7488,7 @@ async def get_edge_terminal_signal_matches(limit: int = 25) -> dict[str, Any]:
         }
         # "Why aren't we trading" panel: aggregate per-terminal-status
         # counts over a recent window so the operator can see, at a
-        # glance, e.g. "12 badged signals this window, 8 below 65%, 2
+        # glance, e.g. "12 badged signals this window, 8 below 60%, 2
         # unresolved, 2 placed".  This is windowed (not limited to the
         # ``limit`` rows shown above) so the headline reflects the true
         # recent disposition mix even when the table is paginated.
