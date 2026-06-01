@@ -322,6 +322,17 @@ async def lifespan(_: FastAPI):
                     "kalshi_crypto_settlements feed registration failed: %s", e,
                 )
             try:
+                # Weather analog of the crypto/sports markets producers.
+                # Without this the orchestrator's _candidate_predictions
+                # returns 0 rows for the weather vertical because nothing
+                # else writes Kalshi-keyed rows under league='WEATHER'.
+                from .feeds.kalshi_weather_markets import register_kalshi_weather_markets_feed
+                register_kalshi_weather_markets_feed()
+            except Exception as e:
+                log.warning(
+                    "kalshi_weather_markets feed registration failed: %s", e,
+                )
+            try:
                 # Sports analog of the crypto markets producer.  Without
                 # this the orchestrator's _candidate_predictions returns
                 # 0 rows for every sports vertical because nothing else

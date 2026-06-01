@@ -191,6 +191,16 @@ class Settings:
     # to the previous degraded-allow behaviour (no REST call, guard
     # skipped). Default True.
     kalshi_orderbook_rest_fallback_enabled: bool
+    # When True the slippage guard treats an order whose *requested side*
+    # has no resting liquidity (the book snapshot exists but that side is
+    # empty) as allowed — the order is submitted as a resting limit at the
+    # already-edge-capped limit price rather than hard-rejected with
+    # "no liquidity on requested side".  This unblocks thin sports / tennis
+    # / weather books that have no standing asks at decision time; the limit
+    # price still caps overpay, so the worst case is an unfilled resting
+    # order, never a bad fill.  Set False to restore the old hard-reject.
+    # Default True.
+    slippage_guard_allow_empty_side: bool
 
     # Verticals the orchestrator schedules.  One asyncio task per
     # vertical, each tick runs run_cycle(vertical) which scopes
@@ -422,6 +432,9 @@ def get_settings() -> Settings:
         ),
         kalshi_orderbook_rest_fallback_enabled=_truthy(
             os.environ.get("AXIOM_KALSHI_ORDERBOOK_REST_FALLBACK"), default=True
+        ),
+        slippage_guard_allow_empty_side=_truthy(
+            os.environ.get("AXIOM_SLIPPAGE_GUARD_ALLOW_EMPTY_SIDE"), default=True
         ),
         model_cache_dir=resolve_model_cache_dir(),
         model_cache_max_bytes=resolve_model_cache_max_bytes(),

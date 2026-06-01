@@ -63,6 +63,7 @@ def _settings(
     *,
     rest_fallback: bool = False,
     max_age_secs: float = 5.0,
+    allow_empty_side: bool = True,
 ) -> SimpleNamespace:
     return SimpleNamespace(
         kalshi_api_key_id="kid",
@@ -75,6 +76,11 @@ def _settings(
         # without making a real network call. Tests that exercise the
         # REST fallback opt in explicitly + monkeypatch KalshiClient.
         kalshi_orderbook_rest_fallback_enabled=rest_fallback,
+        # Mirrors the production default (True): a book that exists but has
+        # no liquidity on the requested side is allowed through as a resting
+        # limit rather than hard-rejected. Reject-path tests opt out with
+        # allow_empty_side=False.
+        slippage_guard_allow_empty_side=allow_empty_side,
     )
 
 
@@ -381,9 +387,15 @@ def test_slippage_guard_full_reject_when_no_acceptable_levels(monkeypatch, _rese
 
 def test_slippage_guard_full_reject_when_side_empty(monkeypatch, _reset):
     """Book is known but the requested side has zero liquidity at any
-    price → no slice possible, reject (spec's "no depth at all" case).
+    price → no slice possible, reject — *with the empty-side allow flag
+    turned off* (the legacy hard-reject behaviour operators can restore
+    via AXIOM_SLIPPAGE_GUARD_ALLOW_EMPTY_SIDE=false).
     """
-    monkeypatch.setattr(lifecycle, "get_settings", lambda: _settings(threshold_pct=50.0))
+    monkeypatch.setattr(
+        lifecycle,
+        "get_settings",
+        lambda: _settings(threshold_pct=50.0, allow_empty_side=False),
+    )
 
     async def go():
         # BUY YES needs the no-book; we publish only yes-bids.
@@ -403,6 +415,73 @@ def test_slippage_guard_full_reject_when_side_empty(monkeypatch, _reset):
     assert md["reason"] == "slippage_guard"
     assert md["filled_available"] == 0
     assert "no liquidity" in md["detail"]
+
+
+def test_slippage_guard_allows_empty_side_when_flag_on(_reset):
+    """The loosened default: a known book whose *requested side* is empty
+    is allowed through (guard returns None) so the order can rest as a
+    limit instead of hard-rejecting. This is what lets thin sports /
+    tennis / weather books trade.
+    """
+    async def go():
+        # BUY YES needs the no-book; publish only yes-bids → empty side.
+        await kalshi_orderbook.orderbook_cache.apply_snapshot(
+            "X-ALLOW-EMPTY", yes=[[40, 100]], no=[],
+        )
+        req = lifecycle.OrderRequest(
+            market_ticker="X-ALLOW-EMPTY", side="yes", action="buy", count=10,
+            limit_price_cents=40, client_order_id="allow-empty-1",
+            context={"model_edge_cents": 4.0},
+        )
+        return await lifecycle._check_slippage_guard(
+            req, settings=_settings(threshold_pct=50.0, allow_empty_side=True),
+        )
+
+    assert _run(go()) is None
+
+
+def test_slippage_guard_rejects_empty_side_when_flag_off(_reset):
+    """With the flag off the guard restores the legacy hard-reject: it
+    returns a metadata dict whose detail flags the empty requested side.
+    """
+    async def go():
+        await kalshi_orderbook.orderbook_cache.apply_snapshot(
+            "X-REJ-EMPTY", yes=[[40, 100]], no=[],
+        )
+        req = lifecycle.OrderRequest(
+            market_ticker="X-REJ-EMPTY", side="yes", action="buy", count=10,
+            limit_price_cents=40, client_order_id="rej-empty-1",
+            context={"model_edge_cents": 4.0},
+        )
+        return await lifecycle._check_slippage_guard(
+            req, settings=_settings(threshold_pct=50.0, allow_empty_side=False),
+        )
+
+    md = _run(go())
+    assert md is not None
+    assert md["filled_available"] == 0
+    assert "no liquidity on requested side" in md["detail"]
+
+
+def test_slippage_guard_empty_side_allow_default_when_setting_absent(_reset):
+    """Defence-in-depth: a settings object that predates the flag (no
+    ``slippage_guard_allow_empty_side`` attribute at all) must default to
+    allow, matching the env-loader default, via the getattr fallback.
+    """
+    async def go():
+        await kalshi_orderbook.orderbook_cache.apply_snapshot(
+            "X-ALLOW-DEFAULT", yes=[[40, 100]], no=[],
+        )
+        req = lifecycle.OrderRequest(
+            market_ticker="X-ALLOW-DEFAULT", side="yes", action="buy", count=10,
+            limit_price_cents=40, client_order_id="allow-default-1",
+            context={"model_edge_cents": 4.0},
+        )
+        legacy = _settings(threshold_pct=50.0)
+        delattr(legacy, "slippage_guard_allow_empty_side")
+        return await lifecycle._check_slippage_guard(req, settings=legacy)
+
+    assert _run(go()) is None
 
 
 def test_slippage_guard_skips_when_no_cached_book(monkeypatch, _reset):
@@ -468,8 +547,17 @@ def test_slippage_guard_disabled_by_zero_threshold(monkeypatch, _reset):
 
 
 def test_slippage_guard_blocks_live_path_before_wire(monkeypatch, _reset):
-    """In live mode the guard must fire BEFORE we open the KalshiClient."""
-    monkeypatch.setattr(lifecycle, "get_settings", lambda: _settings(threshold_pct=50.0, mode="live"))
+    """In live mode the guard must fire BEFORE we open the KalshiClient.
+
+    Uses an empty-side book with the allow flag off so the guard takes
+    its hard-reject branch (the scenario this test guards against is a
+    reject leaking past the guard into a live wire call).
+    """
+    monkeypatch.setattr(
+        lifecycle,
+        "get_settings",
+        lambda: _settings(threshold_pct=50.0, mode="live", allow_empty_side=False),
+    )
 
     class _Boom:
         async def __aenter__(self):  # pragma: no cover — should not be called

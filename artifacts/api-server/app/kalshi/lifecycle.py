@@ -1987,6 +1987,21 @@ async def _check_slippage_guard(req: OrderRequest, *, settings) -> dict[str, Any
             )
             return None  # degraded — let the order through
         book_known = False  # book exists but the requested side is empty
+        # Loosen: when the requested side has no resting liquidity at all,
+        # allow the order through as a resting limit rather than hard-
+        # rejecting with "no liquidity on requested side".  The limit price
+        # is already capped by the edge budget, so the worst case is an
+        # unfilled resting order — never a bad fill.  This is what unblocks
+        # thin sports / tennis / weather books that carry no standing asks
+        # on our side at decision time.  Gated so operators can restore the
+        # old hard-reject via AXIOM_SLIPPAGE_GUARD_ALLOW_EMPTY_SIDE=false.
+        if getattr(settings, "slippage_guard_allow_empty_side", True):
+            log.info(
+                "slippage guard: %s on %s has no resting liquidity on the "
+                "requested side — allowing as resting limit @ %s¢",
+                req.client_order_id, req.market_ticker, limit,
+            )
+            return None
 
     # Full pass: book covers the whole order AND projected slippage stays
     # within the configured threshold. Short-circuit before doing slice math.
