@@ -801,15 +801,16 @@ async def submit_order(req: OrderRequest, *, force_paper: bool | None = None) ->
     guard = await _check_slippage_guard(req, settings=s)
     if guard is not None:
         slice_count = int(guard.get("slice_count") or 0)
-        # FOK orders are all-or-nothing by construction: never slice them
-        # into a partial fill (that would leave a smaller-than-intended
-        # position).  A FOK order whose full size can't clear the edge
-        # budget falls through to the reject branch below and is killed
-        # rather than trimmed.
+        # Marketable FOK is sized DOWN to the immediately-fillable depth
+        # (IOC-style).  Kalshi has no IOC order type, so instead of an
+        # all-or-nothing FOK that the venue kills with
+        # ``fill_or_kill_insufficient_resting_volume`` on a thin book, we
+        # submit a FOK for exactly what is resting within the edge budget:
+        # it fills instantly and leaves nothing on the book.  Resting (GTC)
+        # orders that reach here are trimmed the same way.
         if (
             slice_count > 0
             and slice_count < int(req.count)
-            and req.time_in_force != "FOK"
         ):
             # Don't reject — submit a smaller order that fits within the
             # configured edge-erosion budget. Stash slice provenance into
@@ -2004,7 +2005,14 @@ async def _check_slippage_guard(req: OrderRequest, *, settings) -> dict[str, Any
         # thin sports / tennis / weather books that carry no standing asks
         # on our side at decision time.  Gated so operators can restore the
         # old hard-reject via AXIOM_SLIPPAGE_GUARD_ALLOW_EMPTY_SIDE=false.
-        if getattr(settings, "slippage_guard_allow_empty_side", True):
+        # FOK is fill-now-or-kill: an empty requested side has nothing to
+        # take, so it must NOT be allowed through as a resting limit (that
+        # would leave a live resting order, or 409 on the wire).  Let FOK
+        # fall through to the slice-0 path below for a clean reject; only
+        # resting (GTC) orders use the empty-side allow.
+        if req.time_in_force != "FOK" and getattr(
+            settings, "slippage_guard_allow_empty_side", True
+        ):
             log.info(
                 "slippage guard: %s on %s has no resting liquidity on the "
                 "requested side — allowing as resting limit @ %s¢",
@@ -2036,7 +2044,16 @@ async def _check_slippage_guard(req: OrderRequest, *, settings) -> dict[str, Any
     # when the requested side is empty we only reach here with
     # allow_empty_side=False (the operator's explicit hard-reject), so the
     # full-rest path must NOT override that and let an empty-side order through.
-    if book_known and getattr(settings, "slippage_guard_rest_full_limit", True):
+    # FOK is excluded: its unfilled remainder does NOT rest (the venue
+    # kills it), so the "rest the full size" rationale only holds for
+    # resting (GTC) orders.  A marketable FOK must fall through to the
+    # slice path so it is sized to the fillable depth instead of being
+    # submitted full-size and killed on a thin book.
+    if (
+        book_known
+        and req.time_in_force != "FOK"
+        and getattr(settings, "slippage_guard_rest_full_limit", True)
+    ):
         log.info(
             "slippage guard: %s on %s — limit @ %s¢ bounds every fill within "
             "the edge budget; resting full size (%d) instead of trimming to a "

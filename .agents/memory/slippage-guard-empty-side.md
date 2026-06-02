@@ -41,3 +41,19 @@ set `allow_empty_side=False` (their explicit hard-reject) — an ungated
 full-rest would silently override that kill-switch and let an empty-side
 order through. Keep the two flags independent: full-rest is for partial
 depth, allow_empty_side is for zero depth on our side.
+
+## Both "allow as resting limit" paths are gated OFF for FOK
+
+Both the empty-side allow AND the rest_full_limit early-returns reason
+"the unfilled remainder simply rests" — true ONLY for GTC. A marketable
+FOK's remainder is KILLED by Kalshi, and a full-size FOK on a thin book
+gets a 409 `fill_or_kill_insufficient_resting_volume` (lost trade). So
+both early-returns carry `and req.time_in_force != "FOK"`: FOK falls
+through to the slice-to-depth path (sized to fillable depth, IOC-style),
+and FOK on an empty side falls through to a clean slice-0 reject. The
+submit-time slice branch also applies to FOK now (no longer excluded).
+
+**Why:** operator chose partial fills over missed trades on thin sports
+books. **How to apply:** any future guard change must keep these two
+"rest-the-limit" allows FOK-excluded, or a marketable FOK will silently
+rest or 409.

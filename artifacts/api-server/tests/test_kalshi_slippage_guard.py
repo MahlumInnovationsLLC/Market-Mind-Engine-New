@@ -936,3 +936,129 @@ def test_slippage_guard_degraded_allow_when_rest_disabled(monkeypatch, _reset):
     assert state["degraded_allow"] == 1
     assert state["rest_fallback"] == 0
     assert state["last_source"] == "degraded"
+
+
+# ---------------------------------------------------------------------------
+# Marketable FOK (IOC-style): size DOWN to the fillable depth instead of
+# resting the remainder or all-or-nothing killing the whole order.
+# ---------------------------------------------------------------------------
+
+def test_fok_slices_to_fillable_depth_on_thin_book(monkeypatch, _reset):
+    """The user's 409 fix: a FOK order on a thin book is sized down to the
+    immediately-fillable depth (3 of 10) instead of being submitted full and
+    killed by Kalshi with fill_or_kill_insufficient_resting_volume.
+
+    Production default has rest_full_limit=True; FOK must IGNORE that path
+    (its remainder does not rest) and slice instead.
+    """
+    monkeypatch.setattr(
+        lifecycle, "get_settings",
+        lambda: _settings(threshold_pct=50.0, rest_full_limit=True),
+    )
+
+    async def go():
+        await kalshi_orderbook.orderbook_cache.apply_snapshot(
+            "X-FOK-THIN", yes=[[40, 999]], no=[[60, 3]],  # buy yes -> 3 fillable
+        )
+        req = lifecycle.OrderRequest(
+            market_ticker="X-FOK-THIN", side="yes", action="buy", count=10,
+            limit_price_cents=40, client_order_id="fok-thin-1",
+            time_in_force="FOK",
+            context={"model_edge_cents": 4.0},
+        )
+        return await lifecycle.submit_order(req)
+
+    rec = _run(go())
+    assert rec.state == "filled"
+    assert rec.filled_count == 3  # sliced 10 -> 3, never killed
+    rejected = [w for w in _reset if w["event_type"] == "rejected"]
+    assert rejected == []
+    submitted = [w for w in _reset if w["event_type"] == "submitted"]
+    slice_md = submitted[0]["metadata"]["context"]["sliced_by_slippage_guard"]
+    assert slice_md["original_count"] == 10
+    assert slice_md["sliced_count"] == 3
+
+
+def test_fok_full_fill_passes_when_depth_sufficient(monkeypatch, _reset):
+    """FOK with plenty of depth at the limit price fills full size — the
+    guard short-circuits (filled >= requested) and never slices.
+    """
+    monkeypatch.setattr(
+        lifecycle, "get_settings",
+        lambda: _settings(threshold_pct=50.0, rest_full_limit=True),
+    )
+
+    async def go():
+        await kalshi_orderbook.orderbook_cache.apply_snapshot(
+            "X-FOK-FULL", yes=[[40, 500]], no=[[60, 500]],
+        )
+        req = lifecycle.OrderRequest(
+            market_ticker="X-FOK-FULL", side="yes", action="buy", count=10,
+            limit_price_cents=40, client_order_id="fok-full-1",
+            time_in_force="FOK",
+            context={"model_edge_cents": 4.0},
+        )
+        return await lifecycle.submit_order(req)
+
+    rec = _run(go())
+    assert rec.state == "filled"
+    assert rec.request.count == 10
+    submitted = [w for w in _reset if w["event_type"] == "submitted"]
+    assert "sliced_by_slippage_guard" not in submitted[0]["metadata"]["context"]
+
+
+def test_fok_rejects_empty_side_even_with_allow_flag_on(monkeypatch, _reset):
+    """FOK on an empty requested side must NOT be allowed through as a resting
+    limit (that would leave a live order / 409). Even with the production
+    default allow_empty_side=True, FOK falls through to a clean reject.
+    """
+    monkeypatch.setattr(
+        lifecycle, "get_settings",
+        lambda: _settings(threshold_pct=50.0, allow_empty_side=True),
+    )
+
+    async def go():
+        # BUY YES needs the no-book; publish only yes-bids → empty side.
+        await kalshi_orderbook.orderbook_cache.apply_snapshot(
+            "X-FOK-EMPTY", yes=[[40, 100]], no=[],
+        )
+        req = lifecycle.OrderRequest(
+            market_ticker="X-FOK-EMPTY", side="yes", action="buy", count=10,
+            limit_price_cents=40, client_order_id="fok-empty-1",
+            time_in_force="FOK",
+            context={"model_edge_cents": 4.0},
+        )
+        return await lifecycle.submit_order(req)
+
+    with pytest.raises(lifecycle.OrderRejected, match="slippage guard"):
+        _run(go())
+    md = [w for w in _reset if w["event_type"] == "rejected"][0]["metadata"]
+    assert md["reason"] == "slippage_guard"
+    assert "no liquidity on requested side" in md["detail"]
+
+
+def test_gtc_still_rests_full_size_on_thin_book(monkeypatch, _reset):
+    """Regression guard: a resting (GTC) order on the SAME thin book still
+    rests its full size when rest_full_limit=True — only FOK changed.
+    """
+    monkeypatch.setattr(
+        lifecycle, "get_settings",
+        lambda: _settings(threshold_pct=50.0, rest_full_limit=True),
+    )
+
+    async def go():
+        await kalshi_orderbook.orderbook_cache.apply_snapshot(
+            "X-GTC-THIN", yes=[[40, 999]], no=[[60, 3]],
+        )
+        req = lifecycle.OrderRequest(
+            market_ticker="X-GTC-THIN", side="yes", action="buy", count=10,
+            limit_price_cents=40, client_order_id="gtc-thin-1",
+            time_in_force="GTC",
+            context={"model_edge_cents": 4.0},
+        )
+        return await lifecycle.submit_order(req)
+
+    rec = _run(go())
+    assert rec.request.count == 10
+    submitted = [w for w in _reset if w["event_type"] == "submitted"]
+    assert "sliced_by_slippage_guard" not in submitted[0]["metadata"]["context"]
