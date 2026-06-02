@@ -179,14 +179,26 @@ async def _dispatch_via_lifecycle(
     if exchange == "kalshi":
         from ..kalshi import lifecycle as kalshi_lifecycle
 
+        # Operator directive: no resting orders.  Submit Kalshi orders
+        # fill-or-kill at a marketable price so they fill immediately and
+        # in full or are killed by the exchange — never left resting on the
+        # book.  ``marketable_buffer_cents`` is how far past the mid we will
+        # cross the spread (the price-protection ceiling for this buy); a
+        # spread wider than the buffer simply doesn't fill (FOK kill).
+        _s = get_settings()
+        kalshi_cents = cents
+        kalshi_tif: str = "GTC"
+        if _s.marketable_fok_enabled:
+            kalshi_tif = "FOK"
+            kalshi_cents = max(1, min(99, cents + int(_s.marketable_buffer_cents)))
         req = kalshi_lifecycle.OrderRequest(
             market_ticker=str(ctx.market_id or ""),
             side="yes" if side_norm == "yes" else "no",
             action="buy",
             count=quantity,
-            limit_price_cents=cents,
+            limit_price_cents=kalshi_cents,
             type="limit",
-            time_in_force="GTC",
+            time_in_force=kalshi_tif,
             vertical=ctx.vertical or "sports",
             context=context,
         )
@@ -283,7 +295,10 @@ async def place_order(
     # placement would over-spend the counter on pre-fill cancels).
     canary_active = False
     ramp_active = False
-    if not paper:
+    # Operator directive: every live trade is the full 5% of bankroll, so
+    # the post-cutover canary (force qty=1) and ramp caps are bypassed
+    # unless ``canary_ramp_enabled`` is explicitly turned back on.
+    if not paper and settings.canary_ramp_enabled:
         from ..risk import canary as _canary
         forced_qty, canary_active = await _canary.force_quantity_for_live(quantity)
         if canary_active:

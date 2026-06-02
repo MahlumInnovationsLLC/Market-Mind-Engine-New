@@ -9,6 +9,7 @@ tag we stamp on the resulting trade row.
 from __future__ import annotations
 
 import logging
+import math
 from typing import Any
 
 from .. import db
@@ -427,12 +428,12 @@ async def _fire_one(sig: dict[str, Any]) -> dict[str, Any] | None:
         # min-stake fallback any more: we never silently place a 1-contract
         # (sub-$1) order just because the 5% target rounds below a whole
         # contract — that was the source of the sub-$1 trades.
-        if bankroll <= 0:
+        if not math.isfinite(bankroll) or bankroll <= 0:
             zero_reason = "no bankroll available for sizing"
+        elif not math.isfinite(side_price) or side_price <= 0.0:
+            zero_reason = "side price non-positive; no contracts affordable"
         elif side_price >= 1.0:
             zero_reason = "side price at ceiling (>=1.0); no contracts affordable"
-        elif side_price <= 0.0:
-            zero_reason = "side price non-positive; no contracts affordable"
         else:
             zero_reason = (
                 f"5% of bankroll (${bankroll * FLAT_BANKROLL_FRACTION:.2f}) "
@@ -524,7 +525,13 @@ def _flat_fraction_quantity(
     signal rather than placing a sub-target (sub-$1) position.  ``price``
     is in dollars per contract (0..1, exclusive).
     """
-    if bankroll <= 0 or price <= 0 or price >= 1:
+    if (
+        not math.isfinite(bankroll)
+        or not math.isfinite(price)
+        or bankroll <= 0
+        or price <= 0
+        or price >= 1
+    ):
         return 0, fraction
     notional = bankroll * fraction
     qty = int(notional / price)

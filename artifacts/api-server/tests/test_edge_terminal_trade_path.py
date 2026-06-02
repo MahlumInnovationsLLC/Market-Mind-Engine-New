@@ -254,11 +254,12 @@ def test_unresolved_pick_does_not_place(monkeypatch):
 # real ``_fire_one`` sizing logic is the only thing under test.
 # ---------------------------------------------------------------------
 
-def test_min_stake_fallback_places_one_contract(monkeypatch):
-    """No model_prob / edge% / ev% to size from → Kelly collapses to
-    zero, but the pick is badged and resolved to a real ticker, so the
-    min-stake fallback honours operator intent with exactly **1**
-    contract (``kelly`` tagged 0.0 — signal-driven, not edge-sized)."""
+def test_flat_five_pct_sizes_full_position_when_edge_uncomputable(monkeypatch):
+    """No model_prob / edge% / ev% to size from → there is NO min-stake
+    single-contract fallback any more (that was the sub-$1 source the
+    operator banned).  A badged, resolvable pick is sized at a flat 5% of
+    bankroll instead: $1000 bankroll → $50 / $0.50 = 100 contracts, with
+    ``kelly`` tagged as the flat fraction (0.05)."""
     from app.edge_terminal import executor
 
     fake = _FakeDB([
@@ -274,19 +275,21 @@ def test_min_stake_fallback_places_one_contract(monkeypatch):
 
     counts = _run(executor.drain_pending())
 
-    assert len(fires) == 1, "an unsizable-but-eligible pick must place 1 contract"
-    assert fires[0]["ctx"].intended_quantity == 1
-    assert fires[0]["kwargs"].get("kelly") == 0.0
+    assert len(fires) == 1, "an eligible pick must place a flat-5% order"
+    # 5% of $1000 = $50 notional; $50 / $0.50 per contract = 100 contracts.
+    assert fires[0]["ctx"].intended_quantity == 100
+    assert fires[0]["ctx"].intended_quantity > 1, "no sub-$1 single-contract fallback"
+    assert fires[0]["kwargs"].get("kelly") == executor.FLAT_BANKROLL_FRACTION
     assert counts["placed"] == 1
     assert fake.marks[10][0] == "placed"
 
 
-def test_min_stake_fallback_shadows_zero_kelly(monkeypatch):
-    """Even WITH a model_prob that clears the 60% floor, a Kelly result
-    of zero (e.g. a non-positive edge) is shadowed by the min-stake
-    fallback: with bankroll > 0 and side_price < 1.0 the pick still
-    places exactly 1 contract rather than skipping.  Pins this so a
-    regression that silently drops these trades is caught."""
+def test_flat_five_pct_ignores_kelly_entirely(monkeypatch):
+    """Sizing is a flat 5% of bankroll regardless of the Kelly math: even
+    if the (now-unused) Kelly helper would size to zero, the pick is still
+    sized off the bankroll fraction and placed at full size — there is no
+    Kelly-driven down-size and no single-contract fallback.  Pins this so a
+    regression that reintroduces Kelly/min-stake sizing is caught."""
     from app.edge_terminal import executor
 
     fake = _FakeDB([_signal(id=11, model_prob=0.70)])
@@ -297,7 +300,8 @@ def test_min_stake_fallback_shadows_zero_kelly(monkeypatch):
     fires: list[dict[str, Any]] = []
     _wire(monkeypatch, fires, ticker="KX-NBA-LAL-BOS")
 
-    # Force Kelly to size to zero regardless of the (favourable) inputs.
+    # Even if the legacy Kelly helper collapses to zero, sizing no longer
+    # consults it — the flat 5% fraction is used unconditionally.
     def _zero_kelly(**kwargs):
         return 0, 0.0
 
@@ -305,8 +309,9 @@ def test_min_stake_fallback_shadows_zero_kelly(monkeypatch):
 
     counts = _run(executor.drain_pending())
 
-    assert len(fires) == 1, "min-stake fallback must shadow a zero-Kelly result"
-    assert fires[0]["ctx"].intended_quantity == 1
+    assert len(fires) == 1, "flat-5% sizing must place regardless of Kelly"
+    # 5% of $1000 = $50 / $0.50 = 100 contracts.
+    assert fires[0]["ctx"].intended_quantity == 100
     assert counts["placed"] == 1
     assert fake.marks[11][0] == "placed"
 
@@ -342,14 +347,13 @@ def test_zero_kelly_skip_no_bankroll(monkeypatch):
     assert reason == "no bankroll available for sizing"
 
 
-def test_zero_kelly_skip_kelly_sized_to_zero_reason(monkeypatch):
-    """The granular **kelly sized to zero contracts** reason is the
-    fall-through of the zero-Kelly reason selector.  For every finite
-    positive bankroll the min-stake fallback shadows it, so the only
-    input that reaches it is a non-finite bankroll (NaN) — which makes
-    BOTH the fallback guard (``bankroll > 0``) and the no-bankroll check
-    (``bankroll <= 0``) false.  Exercising it pins the if/elif/else
-    ordering of the reason selector against a future reshuffle."""
+def test_non_finite_bankroll_skips_cleanly(monkeypatch):
+    """A non-finite bankroll (NaN) must not crash the sizing math and must
+    never place an order: the flat-5% helper treats it as no usable
+    bankroll and the pick is recorded as ``skipped_zero_kelly`` with the
+    no-bankroll reason.  Pins the NaN guard so a degenerate bankroll can't
+    raise ``ValueError: cannot convert float NaN to integer`` and mask the
+    skip as a generic ``failed``."""
     from app.edge_terminal import executor
 
     fake = _FakeDB([
@@ -373,7 +377,7 @@ def test_zero_kelly_skip_kelly_sized_to_zero_reason(monkeypatch):
     assert counts["placed"] == 0
     status, reason, _ = fake.marks[13]
     assert status == "skipped_zero_kelly"
-    assert reason == "kelly sized to zero contracts"
+    assert reason == "no bankroll available for sizing"
 
 
 def test_already_placed_dedupe_skips(monkeypatch):

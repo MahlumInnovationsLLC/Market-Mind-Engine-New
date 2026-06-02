@@ -212,6 +212,25 @@ class Settings:
     # restore the old behaviour (trim to the fillable slice).  Default True.
     slippage_guard_rest_full_limit: bool
 
+    # --- marketable fill-or-kill execution (operator directive: no resting
+    # orders) -------------------------------------------------------------
+    # When True, Kalshi orders are submitted fill-or-kill (FOK) at a
+    # marketable price (mid + ``marketable_buffer_cents``) so they fill
+    # immediately and in full or are killed by the exchange — they never
+    # rest on the book.  The buffer caps how far past the mid we cross the
+    # spread; that ceiling IS the price protection (a spread wider than the
+    # buffer simply doesn't fill, and FOK kills the unfilled order rather
+    # than letting it rest).  Default True.
+    marketable_fok_enabled: bool
+    marketable_buffer_cents: int
+    # When False (the operator's current directive) the post-cutover canary
+    # (force qty=1 for the first N live trades) and the gradual ramp caps
+    # are bypassed, so every live trade is sized at the full intended
+    # quantity (flat 5% of bankroll) instead of a sub-$1 single contract.
+    # Set True to restore the qty=1 canary + ramp safety steps after a
+    # paper→live cutover.  Default False.
+    canary_ramp_enabled: bool
+
     # Verticals the orchestrator schedules.  One asyncio task per
     # vertical, each tick runs run_cycle(vertical) which scopes
     # candidate selection to that vertical's leagues.
@@ -448,6 +467,15 @@ def get_settings() -> Settings:
         ),
         slippage_guard_rest_full_limit=_truthy(
             os.environ.get("AXIOM_SLIPPAGE_GUARD_REST_FULL_LIMIT"), default=True
+        ),
+        marketable_fok_enabled=_truthy(
+            os.environ.get("AXIOM_MARKETABLE_FOK"), default=True
+        ),
+        marketable_buffer_cents=max(
+            0, min(99, int(os.environ.get("AXIOM_MARKETABLE_BUFFER_CENTS") or "3"))
+        ),
+        canary_ramp_enabled=_truthy(
+            os.environ.get("AXIOM_CANARY_RAMP_ENABLED"), default=False
         ),
         model_cache_dir=resolve_model_cache_dir(),
         model_cache_max_bytes=resolve_model_cache_max_bytes(),

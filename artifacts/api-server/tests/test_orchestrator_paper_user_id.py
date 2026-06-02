@@ -163,6 +163,8 @@ def test_kalshi_dispatch_stamps_operator_user_id(monkeypatch):
         lambda: SimpleNamespace(
             operator_user_id="user_operator_xyz",
             trading_mode="paper",
+            marketable_fok_enabled=True,
+            marketable_buffer_cents=3,
         ),
     )
 
@@ -247,12 +249,86 @@ def test_polymarket_dispatch_stamps_operator_user_id(monkeypatch):
     assert req.context.get("user_id") == "user_operator_poly"
 
 
+def _dispatch_kalshi_capture(monkeypatch, *, marketable_fok_enabled, buffer_cents):
+    """Run a Kalshi dispatch with the given marketable settings and return
+    the captured OrderRequest the lifecycle would have received."""
+    _paper._reset_operator_user_id_cache()
+    monkeypatch.setattr(
+        _paper, "get_settings",
+        lambda: SimpleNamespace(
+            operator_user_id=None,
+            trading_mode="paper",
+            marketable_fok_enabled=marketable_fok_enabled,
+            marketable_buffer_cents=buffer_cents,
+        ),
+    )
+
+    captured: dict[str, Any] = {}
+
+    async def _fake_submit(req, *, force_paper=None):
+        captured["req"] = req
+        return SimpleNamespace(
+            exchange_order_id="exo-fok",
+            state="filled",
+            filled_count=req.count,
+            avg_fill_price_cents=req.limit_price_cents,
+            order_id=req.client_order_id,
+        )
+
+    from app.kalshi import lifecycle as kalshi_lc
+    monkeypatch.setattr(kalshi_lc, "submit_order", _fake_submit)
+
+    asyncio.run(_paper._dispatch_via_lifecycle(
+        exchange="kalshi",
+        ctx=_ctx(),
+        cand=None,
+        side_norm="yes",
+        quantity=5,
+        price=0.42,
+        paper=True,
+        consensus=0.5,
+        edge=0.08,
+    ))
+    return captured["req"]
+
+
+def test_kalshi_dispatch_uses_marketable_fok_when_enabled(monkeypatch):
+    """Operator directive: no resting orders.  When marketable-FOK is on,
+    the Kalshi OrderRequest is fill-or-kill priced at mid + buffer (42¢ +
+    3¢ = 45¢) so it fills immediately/in full or is killed — never rests."""
+    req = _dispatch_kalshi_capture(
+        monkeypatch, marketable_fok_enabled=True, buffer_cents=3,
+    )
+    assert req.time_in_force == "FOK"
+    assert req.limit_price_cents == 45  # 42 mid + 3 buffer
+
+
+def test_kalshi_dispatch_caps_marketable_price_at_99(monkeypatch):
+    """A huge buffer can't push the limit past the 1..99 cent band."""
+    req = _dispatch_kalshi_capture(
+        monkeypatch, marketable_fok_enabled=True, buffer_cents=99,
+    )
+    assert req.time_in_force == "FOK"
+    assert req.limit_price_cents == 99
+
+
+def test_kalshi_dispatch_stays_gtc_when_marketable_disabled(monkeypatch):
+    """With the flag off, behaviour reverts to a resting GTC limit at the
+    unmodified mid price (the buffer is not applied)."""
+    req = _dispatch_kalshi_capture(
+        monkeypatch, marketable_fok_enabled=False, buffer_cents=3,
+    )
+    assert req.time_in_force == "GTC"
+    assert req.limit_price_cents == 42  # mid, no buffer
+
+
 def test_dispatch_omits_user_id_when_unresolved(monkeypatch):
     _paper._reset_operator_user_id_cache()
     monkeypatch.setattr(
         _paper, "get_settings",
         lambda: SimpleNamespace(
             operator_user_id=None, trading_mode="paper",
+            marketable_fok_enabled=True, marketable_buffer_cents=3,
         ),
     )
 
@@ -349,6 +425,7 @@ def test_bot_initiated_live_fill_emails_operator(monkeypatch):
         _paper, "get_settings",
         lambda: SimpleNamespace(
             operator_user_id=operator_user_id, trading_mode="live",
+            marketable_fok_enabled=True, marketable_buffer_cents=3,
         ),
     )
 

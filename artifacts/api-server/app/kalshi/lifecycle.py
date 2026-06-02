@@ -801,7 +801,16 @@ async def submit_order(req: OrderRequest, *, force_paper: bool | None = None) ->
     guard = await _check_slippage_guard(req, settings=s)
     if guard is not None:
         slice_count = int(guard.get("slice_count") or 0)
-        if slice_count > 0 and slice_count < int(req.count):
+        # FOK orders are all-or-nothing by construction: never slice them
+        # into a partial fill (that would leave a smaller-than-intended
+        # position).  A FOK order whose full size can't clear the edge
+        # budget falls through to the reject branch below and is killed
+        # rather than trimmed.
+        if (
+            slice_count > 0
+            and slice_count < int(req.count)
+            and req.time_in_force != "FOK"
+        ):
             # Don't reject — submit a smaller order that fits within the
             # configured edge-erosion budget. Stash slice provenance into
             # the request context so the existing `submitted` lifecycle
