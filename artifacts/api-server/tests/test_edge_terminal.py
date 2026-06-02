@@ -488,13 +488,13 @@ def test_fire_one_persists_decision_with_scraped_confidence_source(monkeypatch):
     assert badged is True
 
 
-def test_fire_one_min_stake_fallback_when_edge_metadata_missing(monkeypatch):
-    """Operator intent: every fresh Edge Terminal pick should produce a
-    real Kalshi order, even when the scraper didn't capture
+def test_fire_one_flat_five_pct_when_edge_metadata_missing(monkeypatch):
+    """Operator directive: every fired Edge Terminal pick is sized at a
+    flat 5% of bankroll — even when the scraper didn't capture
     model_prob/edge_pct/ev_pct (the source DOM frequently omits them).
-    When Kelly collapses to zero purely because the edge math is
-    uncomputable, the executor falls back to a single-contract stake so
-    the signal lands as a placed trade instead of silently skipping."""
+    There is NO single-contract min-stake fallback any more: the old
+    fallback forced a 1-contract (sub-$1) order, which is exactly the
+    sub-$1-trades symptom the operator told us to eliminate."""
     from app.edge_terminal import executor
 
     placed: list[dict[str, Any]] = []
@@ -516,7 +516,7 @@ def test_fire_one_min_stake_fallback_when_edge_metadata_missing(monkeypatch):
 
     # No model_prob, edge_pct, or ev_pct — pure signal with a market price.
     # ``pick_type=moneyline`` bypasses the spread/total pre-filter so the
-    # min-stake fallback path is exercised regardless of selection text.
+    # sizing path is exercised regardless of selection text.
     sig = {
         "id": 1,
         "vertical": "sports",
@@ -526,9 +526,14 @@ def test_fire_one_min_stake_fallback_when_edge_metadata_missing(monkeypatch):
         "market_price": 0.55,
     }
     out = _run(executor._fire_one(sig))
-    assert out is not None, "min-stake fallback must produce a placed trade"
+    assert out is not None, "flat-5% sizing must still produce a placed trade"
     ctx = placed[0]["ctx"]
-    assert ctx.intended_quantity == 1, "fallback stakes exactly one contract"
+    # 5% of $1000 = $50 notional; $50 / $0.55 per contract = 90 contracts.
+    expected_qty = int((1000.0 * executor.FLAT_BANKROLL_FRACTION) / 0.55)
+    assert ctx.intended_quantity == expected_qty, (
+        "must size at a flat 5% of bankroll, not a single sub-$1 contract"
+    )
+    assert ctx.intended_quantity > 1, "the sub-$1 single-contract fallback is gone"
     assert placed[0]["kwargs"].get("placed_by") == "edge_terminal"
 
 

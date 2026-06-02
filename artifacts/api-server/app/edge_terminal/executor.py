@@ -37,6 +37,14 @@ log = logging.getLogger(__name__)
 KELLY_FRACTION_FALLBACK = 0.25
 # Hard ceiling so a single mis-priced signal can't blow up the book.
 MAX_NOTIONAL_PCT_OF_BANKROLL = 0.05
+# Operator directive: size EVERY Edge Terminal trade at a flat fraction of
+# the live bankroll (NOT quarter-Kelly, and with NO single-contract
+# min-stake fallback).  The old Kelly path sized most signals far below
+# this and the min-stake fallback forced a 1-contract (sub-$1) position
+# whenever the edge math was uncomputable — the exact "why are we placing
+# sub-$1 trades?" symptom.  Equal to MAX_NOTIONAL_PCT_OF_BANKROLL so the
+# flat target also respects the hard ceiling.
+FLAT_BANKROLL_FRACTION = 0.05
 
 
 async def _resolve_kelly_fraction_cap() -> float:
@@ -405,39 +413,31 @@ async def _fire_one(sig: dict[str, Any]) -> dict[str, Any] | None:
     if effective_mode not in ("live", "paper"):
         effective_mode = "paper"
     bankroll = await cycle_module._latest_bankroll(trading_mode=effective_mode) or 0.0
-    kelly_cap = await _resolve_kelly_fraction_cap()
-    quantity, kelly_fraction = _kelly_quantity(
+    # Flat 5%-of-bankroll sizing (operator directive).  No quarter-Kelly,
+    # no min-stake single-contract fallback: every fired signal deploys the
+    # same fraction of the bankroll, and a signal that can't fund at least
+    # one whole contract at that target is skipped rather than down-sized to
+    # a sub-dollar position.
+    quantity, sizing_fraction = _flat_fraction_quantity(
         bankroll=bankroll,
-        model_prob=side_prob,
         price=side_price,
-        kelly_fraction_cap=kelly_cap,
     )
-    # Minimum-stake fallback: the Edge Terminal scraper frequently
-    # ships signals without explicit ``model_prob``/``edge_pct``/``ev_pct``
-    # (the source DOM doesn't expose them as data-attrs).  Operator
-    # intent is "place a bet on every fresh Edge Terminal pick I haven't
-    # already taken" — so when Kelly collapses to zero purely because the
-    # edge math is uncomputable, fall back to a single contract.  The
-    # signal made it past the scraper's quality gate and resolved to a
-    # real Kalshi ticker; honouring the pick with the smallest non-zero
-    # position is far closer to operator intent than ``skipped_zero_kelly``
-    # on every row.  Real risk is bounded — one contract is at most
-    # $0.99, and the dedupe gate below blocks a second fire on the same
-    # ticker+side.
-    if quantity < 1 and bankroll > 0 and side_price < 1.0:
-        quantity = 1
-        kelly_fraction = 0.0  # signal-driven, not edge-sized
     if quantity < 1:
-        # Surface WHY sizing produced nothing rather than a single opaque
-        # "kelly sized to zero" — the operator needs to tell an empty
-        # bankroll apart from a degenerate price or a genuinely negative
-        # edge that the min-stake fallback intentionally declined.
+        # Surface WHY sizing produced nothing.  Critically there is NO
+        # min-stake fallback any more: we never silently place a 1-contract
+        # (sub-$1) order just because the 5% target rounds below a whole
+        # contract — that was the source of the sub-$1 trades.
         if bankroll <= 0:
             zero_reason = "no bankroll available for sizing"
         elif side_price >= 1.0:
             zero_reason = "side price at ceiling (>=1.0); no contracts affordable"
+        elif side_price <= 0.0:
+            zero_reason = "side price non-positive; no contracts affordable"
         else:
-            zero_reason = "kelly sized to zero contracts"
+            zero_reason = (
+                f"5% of bankroll (${bankroll * FLAT_BANKROLL_FRACTION:.2f}) "
+                f"buys <1 contract at {side_price:.2f}/contract"
+            )
         raise _SignalSkip("skipped_zero_kelly", zero_reason)
 
     # Dedupe — if the operator already has live exposure on this
@@ -500,11 +500,35 @@ async def _fire_one(sig: dict[str, Any]) -> dict[str, Any] | None:
         debate_id=None,
         consensus=model_prob,
         edge=sig.get("edge_pct"),
-        kelly=kelly_fraction,
+        kelly=sizing_fraction,
         exchange="kalshi",
         cand=cand,
         placed_by="edge_terminal",
     )
+
+
+def _flat_fraction_quantity(
+    *,
+    bankroll: float,
+    price: float,
+    fraction: float = FLAT_BANKROLL_FRACTION,
+) -> tuple[int, float]:
+    """Whole-contract quantity that deploys ``fraction`` of bankroll.
+
+    Operator directive: every Edge Terminal trade is sized at a flat 5%
+    of the live bankroll, regardless of model edge — NOT quarter-Kelly,
+    and with NO single-contract min-stake fallback.
+
+    Returns ``(0, fraction)`` when the bankroll/price can't fund at least
+    one whole contract at the target notional, so the caller skips the
+    signal rather than placing a sub-target (sub-$1) position.  ``price``
+    is in dollars per contract (0..1, exclusive).
+    """
+    if bankroll <= 0 or price <= 0 or price >= 1:
+        return 0, fraction
+    notional = bankroll * fraction
+    qty = int(notional / price)
+    return max(0, qty), fraction
 
 
 def _kelly_quantity(
