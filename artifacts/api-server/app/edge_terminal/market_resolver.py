@@ -289,12 +289,67 @@ _TEAM_ALIASES: dict[str, set[str]] = {
 _GENERIC_PLACE_TOKENS = {"new", "york", "los", "angeles", "san", "chicago"}
 
 
+# Soccer national teams: lowercase name token -> Kalshi/FIFA 3-letter code.
+# Kalshi tickers abbreviate national sides with the FIFA code (Romania->ROU,
+# Netherlands->NED, Spain->ESP) which the generic first-three-letters
+# heuristic gets WRONG ("rom"/"net"/"spa"), so a perfectly tradeable
+# international fixture never matched.  Only single-token names + a handful of
+# safe distinctive tokens for multi-word nations are mapped; ambiguous tokens
+# (e.g. "korea", "congo") are deliberately omitted so we never prove the wrong
+# side.  Codes that already equal the first three letters are still listed so
+# the source of truth is explicit and collisions (Chile=CHI vs China=CHN,
+# India=IND vs Indonesia=IDN) resolve correctly.
+_SOCCER_NATIONS: dict[str, str] = {
+    # UEFA
+    "romania": "rou", "georgia": "geo", "spain": "esp", "netherlands": "ned",
+    "germany": "ger", "france": "fra", "england": "eng", "portugal": "por",
+    "italy": "ita", "belgium": "bel", "croatia": "cro", "switzerland": "sui",
+    "denmark": "den", "poland": "pol", "austria": "aut", "serbia": "srb",
+    "ukraine": "ukr", "sweden": "swe", "norway": "nor", "scotland": "sco",
+    "wales": "wal", "hungary": "hun", "turkey": "tur", "greece": "gre",
+    "czechia": "cze", "czech": "cze", "slovakia": "svk", "slovenia": "svn",
+    "russia": "rus", "finland": "fin", "iceland": "isl", "albania": "alb",
+    "armenia": "arm", "azerbaijan": "aze", "belarus": "blr", "bulgaria": "bul",
+    "bosnia": "bih", "cyprus": "cyp", "estonia": "est", "kazakhstan": "kaz",
+    "kosovo": "kvx", "latvia": "lva", "lithuania": "ltu", "luxembourg": "lux",
+    "malta": "mlt", "moldova": "mda", "montenegro": "mne", "macedonia": "mkd",
+    "israel": "isr", "andorra": "and", "liechtenstein": "lie",
+    "gibraltar": "gib", "northern": "nir",
+    # CONMEBOL
+    "brazil": "bra", "argentina": "arg", "uruguay": "uru", "colombia": "col",
+    "chile": "chi", "peru": "per", "ecuador": "ecu", "paraguay": "par",
+    "bolivia": "bol", "venezuela": "ven",
+    # CONCACAF
+    "usa": "usa", "mexico": "mex", "canada": "can", "honduras": "hon",
+    "panama": "pan", "jamaica": "jam",
+    # AFC
+    "japan": "jpn", "australia": "aus", "iran": "irn", "qatar": "qat",
+    "iraq": "irq", "china": "chn", "india": "ind", "indonesia": "idn",
+    "thailand": "tha", "vietnam": "vie", "uzbekistan": "uzb",
+    # CAF
+    "nigeria": "nga", "egypt": "egy", "morocco": "mar", "senegal": "sen",
+    "ghana": "gha", "cameroon": "cmr", "algeria": "alg", "tunisia": "tun",
+    "mali": "mli", "kenya": "ken",
+    # multi-word distinctive tokens
+    "saudi": "ksa", "ivory": "civ", "costa": "crc", "marino": "smr",
+}
+
+
 def _alias_codes(toks: set[str]) -> set[str]:
     out: set[str] = set()
     for t in toks:
         codes = _TEAM_ALIASES.get(t)
         if codes:
             out |= codes
+    return out
+
+
+def _nation_codes(toks: set[str]) -> set[str]:
+    out: set[str] = set()
+    for t in toks:
+        code = _SOCCER_NATIONS.get(t)
+        if code:
+            out.add(code)
     return out
 
 
@@ -375,6 +430,9 @@ def _side_evidence(tokens: list[str]) -> tuple[set[str], set[str]]:
     # a Yankees side.  The ordered acronym (NYY) and the nickname's own alias
     # stay, and remain side-distinct (NYY != NYM).
     codes: set[str] = set(_alias_codes(tset - _GENERIC_PLACE_TOKENS))
+    # FIFA national-team codes (Romania->ROU, Netherlands->NED) that the
+    # first-three-letters heuristic below would get wrong.
+    codes |= _nation_codes(tset)
     for t in tokens:
         if len(t) >= 3:
             codes.add(t[:3])
@@ -737,14 +795,29 @@ async def resolve_match(
 
     vertical = (signal.get("vertical") or "").lower().strip()
     matchup = signal.get("matchup") or ""
+    line = _extract_line(selection)
+    sign = _spread_sign(selection)
 
-    static_prefixes = _SERIES_BY_VERTICAL_PICK.get((vertical, pick_type), [])
+    # A soccer half-goal handicap is mathematically a MONEYLINE bet — a 0.5
+    # line can never push: "<team> -0.5" == that team must win; "<team> +0.5"
+    # == that team wins OR draws == the opponent does NOT win.  Kalshi lists no
+    # 0.5 spread market (only 1.5/2.5 "wins by over X.5" lines), so a "+0.5"
+    # underdog like "Romania +0.5" used to die as skipped_unresolved.  Route
+    # these to the 3-way GAME (winner) series and derive the side from the sign
+    # below.  Scoped to soccer because that's the vertical with a draw outcome.
+    soccer_ml_spread = (
+        vertical == "soccer" and pick_type == "spread"
+        and line is not None and abs(line) == 0.5 and sign is not None
+    )
+    effective_pick_type = "moneyline" if soccer_ml_spread else pick_type
+
+    static_prefixes = _SERIES_BY_VERTICAL_PICK.get((vertical, effective_pick_type), [])
     # Union the static list with every series Kalshi tags for this sport +
     # pick_type, so competitions we never hardcoded (international
     # friendlies, Nations League, World Cup, …) still resolve.  Static
     # entries stay first to preserve their preference order.
     discovered = await _discover_series(
-        vertical, pick_type, allow_network=live_fallback,
+        vertical, effective_pick_type, allow_network=live_fallback,
     )
     seen_prefix: set[str] = set()
     prefixes: list[str] = []
@@ -760,11 +833,29 @@ async def resolve_match(
             kind="no_series",
         )
 
-    away_t, home_t = _split_matchup(matchup)
-    picked, other = _picked_team_tokens(selection, away_t, home_t)
-    picked_codes = _alias_codes(picked)
-    other_codes = _alias_codes(other)
-    line = _extract_line(selection)
+    away_words, home_words = _matchup_sides(matchup)
+    away_name, away_codes = _side_evidence(away_words)
+    home_name, home_codes = _side_evidence(home_words)
+
+    # Pick which matchup side the selection names, then reuse the SAME rich
+    # code evidence (curated alias + FIFA nation code + first-three-letters +
+    # multi-word acronym) that the both-teams gate uses.  The old path scored
+    # with curated-alias codes ONLY, which are empty for soccer / international
+    # sides, so a market that genuinely named both teams scored 0 and was
+    # discarded.  Aligning the scorer with the gate is what lets soccer resolve.
+    sel_words = {t for t in _tokens(selection) if not _NUM_PREFIX.match(t)}
+    if sel_words & set(away_words):
+        picked, picked_codes = away_name, away_codes
+        other, other_codes = home_name, home_codes
+    elif sel_words & set(home_words):
+        picked, picked_codes = home_name, home_codes
+        other, other_codes = away_name, away_codes
+    else:
+        # Selection doesn't name a side (e.g. a totals OVER/UNDER) — require
+        # either team and score against the union so the title must still
+        # name the fixture.
+        picked = other = away_name | home_name
+        picked_codes = other_codes = away_codes | home_codes
 
     # Spread handicap sign couples the target market with the side.  Kalshi
     # only lists "<team> wins by over X.5 runs" markets, so a "+X.5" underdog
@@ -773,23 +864,20 @@ async def resolve_match(
     # spread we therefore score toward the opponent's market (swap the
     # picked/other evidence so the scorer rewards the opponent's tail code +
     # line bucket) and recommend the NO side; for "-" we keep the pick team's
-    # market and recommend YES.  With no explicit sign we leave the side to the
-    # scraper (recommended_side=None) and score as before.
+    # market and recommend YES.  A soccer 0.5 handicap routed to the winner
+    # market follows the same coupling: "+0.5" (win or draw) is NO on the
+    # OPPONENT's winner; "-0.5" (must win) is YES on the PICK team's winner.
+    # With no explicit sign we leave the side to the scraper and score as before.
     recommended_side: str | None = None
     s_picked, s_other = picked, other
     s_picked_codes, s_other_codes = picked_codes, other_codes
-    if pick_type == "spread":
-        sign = _spread_sign(selection)
+    if soccer_ml_spread or pick_type == "spread":
         if sign == 1:
             s_picked, s_other = other, picked
             s_picked_codes, s_other_codes = other_codes, picked_codes
             recommended_side = "NO"
         elif sign == -1:
             recommended_side = "YES"
-
-    away_words, home_words = _matchup_sides(matchup)
-    away_name, away_codes = _side_evidence(away_words)
-    home_name, home_codes = _side_evidence(home_words)
     signal_date = _coerce_date(signal.get("signal_date"))
 
     def _date_ok(cand: dict[str, str]) -> bool:
@@ -826,7 +914,7 @@ async def resolve_match(
                 r,
                 picked=s_picked, other=s_other,
                 picked_codes=s_picked_codes, other_codes=s_other_codes,
-                pick_type=pick_type, line=line,
+                pick_type=effective_pick_type, line=line,
             )
             if sc > best_s:
                 best_s, best = sc, r
@@ -853,7 +941,7 @@ async def resolve_match(
                     c,
                     picked=s_picked, other=s_other,
                     picked_codes=s_picked_codes, other_codes=s_other_codes,
-                    pick_type=pick_type, line=line,
+                    pick_type=effective_pick_type, line=line,
                 ),
             }
             for c in cands

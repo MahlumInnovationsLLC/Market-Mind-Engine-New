@@ -474,6 +474,113 @@ def test_discover_series_only_enabled_verticals(monkeypatch):
         "tennis", "moneyline", allow_network=True)) == []
 
 
+# ---------------------------------------------------------------------------
+# Soccer half-goal handicap == moneyline + FIFA nation codes.
+# ---------------------------------------------------------------------------
+
+def test_nation_codes_use_fifa_not_first_three_letters():
+    # Kalshi abbreviates national sides with the FIFA code, which the generic
+    # first-three-letters heuristic gets wrong for several nations.
+    assert market_resolver._nation_codes({"romania"}) == {"rou"}
+    assert market_resolver._nation_codes({"netherlands"}) == {"ned"}
+    assert market_resolver._nation_codes({"spain"}) == {"esp"}
+    # Collisions resolve to distinct codes.
+    assert market_resolver._nation_codes({"chile"}) == {"chi"}
+    assert market_resolver._nation_codes({"china"}) == {"chn"}
+    assert market_resolver._nation_codes({"india"}) == {"ind"}
+    assert market_resolver._nation_codes({"indonesia"}) == {"idn"}
+
+
+def test_side_evidence_includes_fifa_nation_code():
+    # The FIFA code must be in the code set so a market whose ticker uses it
+    # (GEOROU) is recognised as naming Romania.
+    _, codes = market_resolver._side_evidence(["romania"])
+    assert "rou" in codes
+    _, codes = market_resolver._side_evidence(["georgia"])
+    assert "geo" in codes
+
+
+# The real Kalshi market set for Romania @ Georgia: a 3-way winner market and
+# 1.5/2.5 spread lines — there is NO 0.5 spread market.
+_GEOROU_GAME = [
+    {"ticker": "KXINTLFRIENDLYGAME-26JUN02GEOROU-GEO",
+     "title": "Georgia vs Romania Winner?"},
+    {"ticker": "KXINTLFRIENDLYGAME-26JUN02GEOROU-ROU",
+     "title": "Georgia vs Romania Winner?"},
+    {"ticker": "KXINTLFRIENDLYGAME-26JUN02GEOROU-TIE",
+     "title": "Georgia vs Romania Winner?"},
+]
+_GEOROU_SPREAD = [
+    {"ticker": "KXINTLFRIENDLYSPREAD-26JUN02GEOROU-GEO1",
+     "title": "Georgia wins by over 1.5 goals?"},
+    {"ticker": "KXINTLFRIENDLYSPREAD-26JUN02GEOROU-GEO2",
+     "title": "Georgia wins by over 2.5 goals?"},
+    {"ticker": "KXINTLFRIENDLYSPREAD-26JUN02GEOROU-ROU1",
+     "title": "Romania wins by over 1.5 goals?"},
+    {"ticker": "KXINTLFRIENDLYSPREAD-26JUN02GEOROU-ROU2",
+     "title": "Romania wins by over 2.5 goals?"},
+]
+
+
+def test_soccer_plus_half_spread_routes_to_winner_market_no_side(monkeypatch):
+    # "Romania +0.5" (underdog win-or-draw) has no 0.5 spread market.  It is
+    # mathematically NO on the OPPONENT's winner: "Georgia does NOT win" ==
+    # Romania wins or draws.  Must resolve to the Georgia winner market + NO.
+    _wire_no_live(monkeypatch, cands=list(_GEOROU_GAME), llm_ticker=None)
+    rr = _run(market_resolver.resolve_match({
+        "vertical": "soccer", "pick_type": "spread",
+        "matchup": "Romania @ Georgia", "selection": "Romania +0.5",
+        "signal_date": "2026-06-02",
+    }))
+    assert rr.kind == "matched"
+    assert rr.ticker == "KXINTLFRIENDLYGAME-26JUN02GEOROU-GEO"
+    assert rr.side == "NO"
+
+
+def test_soccer_minus_half_spread_routes_to_pick_winner_yes_side(monkeypatch):
+    # "Romania -0.5" (must win) is YES on the PICK team's winner market.
+    _wire_no_live(monkeypatch, cands=list(_GEOROU_GAME), llm_ticker=None)
+    rr = _run(market_resolver.resolve_match({
+        "vertical": "soccer", "pick_type": "spread",
+        "matchup": "Romania @ Georgia", "selection": "Romania -0.5",
+        "signal_date": "2026-06-02",
+    }))
+    assert rr.kind == "matched"
+    assert rr.ticker == "KXINTLFRIENDLYGAME-26JUN02GEOROU-ROU"
+    assert rr.side == "YES"
+
+
+def test_soccer_non_half_spread_still_uses_spread_series(monkeypatch):
+    # A 1.5 handicap is a genuine spread and must NOT be rerouted to the
+    # winner market — "Romania -1.5" stays YES on Romania's over-1.5 line.
+    _wire_no_live(monkeypatch, cands=list(_GEOROU_SPREAD), llm_ticker=None)
+    rr = _run(market_resolver.resolve_match({
+        "vertical": "soccer", "pick_type": "spread",
+        "matchup": "Romania @ Georgia", "selection": "Romania -1.5",
+        "signal_date": "2026-06-02",
+    }))
+    assert rr.kind == "matched"
+    assert rr.ticker == "KXINTLFRIENDLYSPREAD-26JUN02GEOROU-ROU1"
+    assert rr.side == "YES"
+
+
+def test_soccer_plus_half_spread_scores_over_tie(monkeypatch):
+    # The winner market set shares one title across GEO/ROU/TIE, so the tail
+    # code is the only differentiator: targeting Georgia (for "Romania +0.5")
+    # must out-score the TIE leg, never matching the draw by accident.
+    _wire_no_live(monkeypatch, cands=list(_GEOROU_GAME), llm_ticker=None)
+    rr = _run(market_resolver.resolve_match({
+        "vertical": "soccer", "pick_type": "spread",
+        "matchup": "Romania @ Georgia", "selection": "Romania +0.5",
+        "signal_date": "2026-06-02",
+    }))
+    by_tkr = {c["ticker"]: c["score"] for c in rr.candidates}
+    geo = by_tkr["KXINTLFRIENDLYGAME-26JUN02GEOROU-GEO"]
+    tie = by_tkr["KXINTLFRIENDLYGAME-26JUN02GEOROU-TIE"]
+    rou = by_tkr["KXINTLFRIENDLYGAME-26JUN02GEOROU-ROU"]
+    assert geo > tie and geo > rou
+
+
 def test_resolve_match_unions_discovered_series(monkeypatch):
     # An international friendly (never in the static soccer list) resolves
     # because discovery surfaces KXINTLFRIENDLYGAME and the cache carries
