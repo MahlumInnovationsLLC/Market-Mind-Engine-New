@@ -4,6 +4,7 @@
 - [Slippage guard empty-side](slippage-guard-empty-side.md) — empty side allows resting limit by default; full-rest sizing path must be gated on book_known so it can't override the empty-side hard-reject.
 - [Edge Terminal side coordinates](edge-terminal-side-coordinates.md) — model_prob is pick-relative (never flip for NO); signed spreads: resolver owns target market + side, ignore scraper ticker for "+/-" spreads.
 - [Edge Terminal resolver stub surface](edge-terminal-resolver-stub.md) — executor resolves via resolve_match (not resolve); stubbing only resolve makes None-ticker signals silently skip (0 fires).
+- [Edge Terminal poller silent stall](edge-terminal-poller-silent-stall.md) — single-task poller wedges forever on any unbounded await (esp. Playwright); bound every tick await with asyncio.wait_for; trust last_poll_at recency, not process liveness.
 - [Marketable FOK + canary bypass](marketable-fok-and-canary-bypass.md) — Kalshi live orders are FOK (mid+buffer, no slice); canary off by default; AXIOM_MARKETABLE_FOK off silently re-enables resting GTC.
 - [Edge Terminal signal diagnostics](edge-terminal-signal-diagnostics.md) — signals live in Supabase (not Replit DB; query via app.db pool); "trades not firing" is usually the 65% confidence floor, not a bug; real skipped_unresolved is tennis/soccer not MLB.
 - [Edge Terminal re-arm boundary](edge-terminal-rearm-boundary.md) — ON CONFLICT re-arms ONLY skipped_unresolved; never placed (double-bet) or skipped_gate (settled games).

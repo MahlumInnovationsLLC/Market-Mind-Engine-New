@@ -44,6 +44,27 @@ POLL_INTERVAL_MAX_SECONDS = 60
 # light up the dashboard.
 STALE_THRESHOLD_SECONDS = POLL_INTERVAL_MAX_SECONDS * 2
 
+# Hard wall-clock cap on a single scrape.  Playwright's per-navigation
+# timeout is 60s and there are several navigation/selector waits, so a
+# healthy-but-slow scrape stays well under this; anything longer means a
+# wedged chromium call (launch/close/IPC) that would otherwise hang the
+# single poller task *forever* with no exception raised — exactly the
+# silent-stall failure mode where the status row freezes on its last OK
+# tick and the loop never advances.  On timeout we cancel the scrape,
+# record an error category, and let the next tick try a fresh browser.
+SCRAPE_TICK_TIMEOUT_SECONDS = float(
+    os.environ.get("AXIOM_EDGE_TERMINAL_SCRAPE_TIMEOUT_SECONDS", "150")
+)
+
+# The drain (resolve + place orders) is the *other* unbounded await on the
+# single poller task: a wedged Kalshi HTTP call or DB query would stall the
+# loop just like a hung scrape.  Bound it too so one stuck order can't freeze
+# all future polling; on timeout we log and let the next tick re-drain (any
+# inserted-but-unplaced signals are picked up again — drain is idempotent).
+DRAIN_TICK_TIMEOUT_SECONDS = float(
+    os.environ.get("AXIOM_EDGE_TERMINAL_DRAIN_TIMEOUT_SECONDS", "150")
+)
+
 # Active-hours window: only scrape between 04:00 and 22:00 Mountain
 # Time.  Edge Terminal doesn't publish overnight, and we'd rather idle
 # than burn login attempts on an empty board.  Honours DST via
@@ -211,7 +232,15 @@ async def _one_tick() -> None:
     # first to keep its precise ``login_failed`` category.
     category = scraper.SCRAPE_OK
     try:
-        signals = await scraper.scrape_signals()
+        signals = await asyncio.wait_for(
+            scraper.scrape_signals(), timeout=SCRAPE_TICK_TIMEOUT_SECONDS
+        )
+    except asyncio.TimeoutError:
+        category, error = (
+            scraper.SCRAPE_ERROR,
+            f"scrape_timeout: exceeded {SCRAPE_TICK_TIMEOUT_SECONDS:.0f}s "
+            "(wedged chromium) — cancelled, retrying next tick",
+        )
     except scraper.ScraperNotConfigured as e:
         category, error = scraper.SCRAPE_NOT_CONFIGURED, f"not_configured: {e}"
     except scraper.ScraperLoginFailed as e:
@@ -269,7 +298,9 @@ async def _one_tick() -> None:
     # Drain after every poll regardless of insert count so any signals
     # that were inserted-but-not-yet-placed on a prior crash still fire.
     try:
-        drain_counts = await executor.drain_pending()
+        drain_counts = await asyncio.wait_for(
+            executor.drain_pending(), timeout=DRAIN_TICK_TIMEOUT_SECONDS
+        )
         by_status = (drain_counts or {}).get("by_status") or {}
         log.info(
             "edge_terminal drain: scraped=%d inserted=%d placed=%d skipped=%d failed=%d by_status=%s",

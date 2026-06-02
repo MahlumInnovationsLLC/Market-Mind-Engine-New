@@ -10,9 +10,9 @@ description: How to inspect live edge_terminal_signals data, and what "trades no
 
 # "Sports/MLB trades not firing" is usually NOT a bug
 **Why:** Most sports picks are skipped for legitimate, by-design reasons, not resolution failures. Classify by `status` + `status_reason` before assuming a bug:
-- `skipped_low_confidence` — model prob below the 65% floor (a deliberate live-money risk gate). This is the dominant MLB skip reason; lots of picks sit at 60-64%.
+- `skipped_low_confidence` — model prob below the 60% floor (a deliberate live-money risk gate). This is the dominant MLB skip reason; lots of picks sit just under 60%.
 - `skipped_slippage` — "no liquidity on requested side" (correct guard).
 - `placed` — it IS trading.
 - `skipped_unresolved` — the only status that signals a real resolve/market-availability gap.
 
-**How to apply:** Query `SELECT vertical,status,count(*) ... GROUP BY` first. As of mid-2026 the real `skipped_unresolved` backlog is in **tennis and soccer**, not MLB. MLB resolves fine — Kalshi lists open MLB markets ~3-6 days ahead (`KXMLBGAME/SPREAD/TOTAL`, status filter `open` returns them; `active`/`unopened` are invalid filter values → HTTP 400), and next-day games scraped today resolve to the correct future ticker. Lowering the 65% confidence floor is a risk change — never do it without explicit user consent.
+**How to apply:** Query `SELECT vertical,status,count(*) ... GROUP BY` first. As of mid-2026 the real `skipped_unresolved` backlog is in **tennis and soccer**, not MLB. MLB resolves fine — Kalshi lists open MLB markets ~3-6 days ahead (`KXMLBGAME/SPREAD/TOTAL`, status filter `open` returns them; `active`/`unopened` are invalid filter values → HTTP 400), and next-day games scraped today resolve to the correct future ticker. Lowering the 60% confidence floor is a risk change — never do it without explicit user consent.

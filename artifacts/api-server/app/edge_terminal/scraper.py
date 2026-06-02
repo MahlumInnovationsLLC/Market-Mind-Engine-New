@@ -43,6 +43,7 @@ scraper returns an empty list and the poller surfaces a clear
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import re
@@ -243,9 +244,15 @@ async def scrape_signals() -> list[dict[str, Any]]:
                     continue
                 out.append(row)
         finally:
+            # Bound the close: a wedged chromium ``browser.close()`` has no
+            # internal timeout and will hang the awaiting poller task
+            # *forever* (the rest of the process — incl. the healthz
+            # sidecar — keeps answering, so the watchdog never restarts and
+            # the poller silently stops scraping with status frozen on its
+            # last successful tick).  Cap it so a stuck close can't wedge us.
             try:
-                await browser.close()
-            except Exception:
+                await asyncio.wait_for(browser.close(), timeout=20.0)
+            except (asyncio.TimeoutError, Exception):
                 pass
     return out
 
