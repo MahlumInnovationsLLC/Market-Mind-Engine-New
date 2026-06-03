@@ -378,18 +378,30 @@ async def _insert_signal(sig: dict[str, Any]) -> int | None:
         -- current/upcoming games, so a settled game drops off the scrape
         -- and stops re-arming naturally.
         --
-        -- The WHERE guard is the safety boundary.  It is deliberately the
-        -- single ``skipped_unresolved`` status and NOT the broader
-        -- ``skipped_gate`` bucket: ``skipped_gate`` from an order-time
-        -- ``market_not_found`` is "overwhelmingly a settled/closed game"
-        -- (see executor._classify_exception), so re-arming it would re-retry
+        -- The WHERE guard is the safety boundary.  It re-arms two
+        -- *transient* dispositions and nothing else:
+        --   * ``skipped_unresolved`` — the resolver found no live Kalshi
+        --     market yet (sports list hours before first pitch);
+        --   * ``skipped_slippage`` — the requested side was empty / too thin
+        --     to fill within the edge budget at decision time.  Early-morning
+        --     sports books are thin and THICKEN as the session opens, so a
+        --     slippage stand-down is a "come back when the book is deeper"
+        --     condition, NOT a permanent "no edge".  Re-arming lets a later
+        --     drain re-price on fresh depth and fire once it is fillable —
+        --     the fix for "checks the edge once at dawn then forgets it".
+        --     (The resting-backstop sweep also flips an unfilled empty-side
+        --     GTC back to ``skipped_slippage`` so it feeds this same retry.)
+        -- It deliberately excludes the broader ``skipped_gate`` bucket:
+        -- ``skipped_gate`` from an order-time ``market_not_found`` is
+        -- "overwhelmingly a settled/closed game" (see
+        -- executor._classify_exception), so re-arming it would re-retry
         -- finished fixtures rather than fix anything; and ``order rejected``
         -- / ``market closed`` gates are not transient market-availability.
         -- It also never matches ``placed`` / ``skipped_already_placed``
         -- (would double-bet a held position) nor the deterministic
         -- stand-downs (``skipped_low_confidence`` /
-        -- ``skipped_unsupported_market`` / ``skipped_slippage`` /
-        -- ``skipped_zero_kelly`` / ``failed``) that retrying cannot change.
+        -- ``skipped_unsupported_market`` / ``skipped_zero_kelly`` /
+        -- ``failed``) that retrying cannot change.
         SET status        = 'pending',
             status_reason = NULL,
             edge_pct      = EXCLUDED.edge_pct,
@@ -406,7 +418,7 @@ async def _insert_signal(sig: dict[str, Any]) -> int | None:
             kalshi_market_id      = EXCLUDED.kalshi_market_id,
             signal_badged = EXCLUDED.signal_badged,
             updated_at    = now()
-        WHERE edge_terminal_signals.status = 'skipped_unresolved'
+        WHERE edge_terminal_signals.status IN ('skipped_unresolved', 'skipped_slippage')
         RETURNING id
         """,
         sig.get("vertical"),

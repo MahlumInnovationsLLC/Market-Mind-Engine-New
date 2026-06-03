@@ -505,9 +505,20 @@ def test_to_kalshi_payload_routes_yes_vs_no_price():
 class _FakeKalshiClient:
     """Stand-in for ``KalshiClient`` used in live-path tests."""
 
-    def __init__(self, *, ack=None, raises: Exception | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        ack=None,
+        raises: Exception | None = None,
+        cancel_resp: dict[str, Any] | None = None,
+        get_order_resp: dict[str, Any] | None = None,
+        get_order_raises: Exception | None = None,
+    ) -> None:
         self.ack = ack or {"order": {"order_id": "exo-xyz"}}
         self.raises = raises
+        self.cancel_resp = cancel_resp if cancel_resp is not None else {"ok": True}
+        self.get_order_resp = get_order_resp if get_order_resp is not None else {}
+        self.get_order_raises = get_order_raises
         self.calls: list[dict[str, Any]] = []
 
     async def __aenter__(self):
@@ -524,7 +535,13 @@ class _FakeKalshiClient:
 
     async def cancel_order(self, order_id):
         self.calls.append({"cancel": order_id})
-        return {"ok": True}
+        return self.cancel_resp
+
+    async def get_order(self, order_id):
+        self.calls.append({"get_order": order_id})
+        if self.get_order_raises is not None:
+            raise self.get_order_raises
+        return self.get_order_resp
 
 
 def test_live_order_records_resting(monkeypatch, _reset_lifecycle):
@@ -717,6 +734,133 @@ def test_cancel_resting_paper_order(monkeypatch, _reset_lifecycle):
 def test_cancel_unknown_raises():
     with pytest.raises(lifecycle.OrderRejected, match="no resting order"):
         _run(lifecycle.cancel_order("ghost"))
+
+
+def test_cancel_reconciles_venue_partial_fill(monkeypatch, _reset_lifecycle):
+    """Double-bet guard: a live cancel must fold the venue-reported fill count
+    into the record BEFORE it leaves ``_resting``.
+
+    The race: a resting backstop takes a partial fill at the venue, but the WS
+    fill event is delayed — so the in-memory ``filled_count`` is still 0 when
+    the stale sweep cancels it. Once Kalshi confirms the cancel no further fills
+    can land, and the cancel response reflects the true fill state. If we trust
+    the stale in-memory 0 we would re-arm the signal and re-buy exposure we
+    already hold. Reconciling from the cancel response closes the race.
+    """
+    monkeypatch.setattr(lifecycle, "get_settings", lambda: _make_settings("live"))
+    # Cancel response: venue says 2 contracts executed (1 maker + 1 taker)
+    # even though our in-memory record never saw a WS fill.
+    fake = _FakeKalshiClient(
+        cancel_resp={"order": {"order_id": "exo-9", "maker_fill_count": 1,
+                               "taker_fill_count": 1}}
+    )
+    monkeypatch.setattr(lifecycle.kalshi_client, "KalshiClient", lambda **kw: fake)
+
+    req = lifecycle.OrderRequest(
+        market_ticker="X-1", side="yes", action="buy", count=5,
+        limit_price_cents=50, client_order_id="rest-9",
+    )
+    rec = lifecycle.OrderRecord(
+        order_id="rest-9", request=req, paper=False, state="resting",
+        exchange_order_id="exo-9",
+    )
+    rec.filled_count = 0  # WS fill not yet delivered
+    lifecycle._resting["rest-9"] = rec
+
+    out = _run(lifecycle.cancel_order("rest-9"))
+
+    assert out["state"] == "canceled"
+    assert "rest-9" not in lifecycle._resting
+    # Authoritative venue truth folded in — re-arm logic now sees a held
+    # position and will NOT re-fire the signal.
+    assert rec.filled_count == 2
+
+
+def test_cancel_falls_back_to_get_order_for_fill_count(monkeypatch, _reset_lifecycle):
+    """When the cancel response carries no fill count, cancel_order asks the
+    venue directly (GET /portfolio/orders/{id}) and reconciles from that."""
+    monkeypatch.setattr(lifecycle, "get_settings", lambda: _make_settings("live"))
+    fake = _FakeKalshiClient(
+        cancel_resp={"ok": True},  # silent on fills
+        get_order_resp={"order": {"order_id": "exo-11", "filled_count": 4}},
+    )
+    monkeypatch.setattr(lifecycle.kalshi_client, "KalshiClient", lambda **kw: fake)
+
+    req = lifecycle.OrderRequest(
+        market_ticker="X-1", side="yes", action="buy", count=5,
+        limit_price_cents=50, client_order_id="rest-11",
+    )
+    rec = lifecycle.OrderRecord(
+        order_id="rest-11", request=req, paper=False, state="resting",
+        exchange_order_id="exo-11",
+    )
+    rec.filled_count = 0  # WS not delivered
+    lifecycle._resting["rest-11"] = rec
+
+    _run(lifecycle.cancel_order("rest-11"))
+
+    assert rec.filled_count == 4
+    assert rec.fill_count_authoritative is True
+    assert {"get_order": "exo-11"} in fake.calls
+
+
+def test_cancel_authoritative_zero_from_get_order_allows_rearm(
+    monkeypatch, _reset_lifecycle
+):
+    """A confirmed zero from the GET fallback marks the count authoritative so
+    the backstop re-arm path may safely treat it as a clean zero."""
+    monkeypatch.setattr(lifecycle, "get_settings", lambda: _make_settings("live"))
+    fake = _FakeKalshiClient(
+        cancel_resp={"ok": True},
+        get_order_resp={"order": {"order_id": "exo-12", "maker_fill_count": 0,
+                                  "taker_fill_count": 0}},
+    )
+    monkeypatch.setattr(lifecycle.kalshi_client, "KalshiClient", lambda **kw: fake)
+
+    req = lifecycle.OrderRequest(
+        market_ticker="X-1", side="yes", action="buy", count=5,
+        limit_price_cents=50, client_order_id="rest-12",
+    )
+    rec = lifecycle.OrderRecord(
+        order_id="rest-12", request=req, paper=False, state="resting",
+        exchange_order_id="exo-12",
+    )
+    lifecycle._resting["rest-12"] = rec
+
+    _run(lifecycle.cancel_order("rest-12"))
+
+    assert rec.filled_count == 0
+    assert rec.fill_count_authoritative is True
+
+
+def test_cancel_unknown_fill_marks_non_authoritative(monkeypatch, _reset_lifecycle):
+    """If NEITHER the cancel response NOR the GET fallback yields a fill count
+    (e.g. the lookup errors), the record is flagged non-authoritative so the
+    re-arm path refuses to treat the count as a clean zero — unknown != zero."""
+    monkeypatch.setattr(lifecycle, "get_settings", lambda: _make_settings("live"))
+    fake = _FakeKalshiClient(
+        cancel_resp={"ok": True},
+        get_order_raises=RuntimeError("lookup timeout"),
+    )
+    monkeypatch.setattr(lifecycle.kalshi_client, "KalshiClient", lambda **kw: fake)
+
+    req = lifecycle.OrderRequest(
+        market_ticker="X-1", side="yes", action="buy", count=5,
+        limit_price_cents=50, client_order_id="rest-13",
+    )
+    rec = lifecycle.OrderRecord(
+        order_id="rest-13", request=req, paper=False, state="resting",
+        exchange_order_id="exo-13",
+    )
+    lifecycle._resting["rest-13"] = rec
+
+    out = _run(lifecycle.cancel_order("rest-13"))
+
+    # Cancel still succeeds — the lookup failure must not surface as a cancel
+    # failure (the order really was canceled at the venue).
+    assert out["state"] == "canceled"
+    assert "rest-13" not in lifecycle._resting
+    assert rec.fill_count_authoritative is False
 
 
 def test_handle_ws_fill_marks_resting_filled(monkeypatch, _reset_lifecycle):

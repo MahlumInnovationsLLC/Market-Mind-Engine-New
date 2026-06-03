@@ -505,6 +505,7 @@ async def _fire_one(sig: dict[str, Any]) -> dict[str, Any] | None:
         exchange="kalshi",
         cand=cand,
         placed_by="edge_terminal",
+        signal_id=sig.get("id"),
     )
 
 

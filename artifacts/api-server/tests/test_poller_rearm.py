@@ -28,9 +28,12 @@ from typing import Any
 
 
 # Statuses the poller's ON CONFLICT DO UPDATE ... WHERE clause re-arms.
-# Kept in lockstep with the SQL in ``poller._insert_signal`` — exactly one
-# transient market-availability status, nothing else.
-_REARM_STATUSES = {"skipped_unresolved"}
+# Kept in lockstep with the SQL in ``poller._insert_signal`` — the two
+# *transient* dispositions, nothing else:
+#   * skipped_unresolved — resolver found no live market yet
+#   * skipped_slippage   — side was empty / too thin to fill at decision time;
+#     the early book thickens later, so "come back when it's deeper".
+_REARM_STATUSES = {"skipped_unresolved", "skipped_slippage"}
 
 
 def _run(coro):
@@ -326,3 +329,64 @@ def test_skipped_gate_pick_is_never_rearmed(monkeypatch):
     assert fake.conflicts == 1, "skipped_gate conflict behaves like DO NOTHING"
     assert len(fires) == 0, "a settled-game gate must not re-fire"
     assert fake.rows[1]["status"] == "skipped_gate", "status stays frozen"
+
+
+def test_slippage_pick_is_rearmed_and_fires_when_book_thickens(monkeypatch):
+    """``skipped_slippage`` (empty / too-thin side at decision time) is a
+    transient liquidity stand-down: the early book thickens as the session
+    opens, so a re-scrape must re-arm the row and a later drain fires it once
+    it's fillable.  This is the "come back later instead of forgetting the
+    edge" behavior the operator asked for."""
+    from datetime import date
+
+    from app.edge_terminal import poller, executor
+    from app.edge_terminal.market_resolver import ResolveResult
+
+    fake = _FakeSignalsTable()
+    monkeypatch.setattr(poller.db, "fetchval", fake.fetchval)
+    monkeypatch.setattr(poller.db, "execute", fake.execute)
+    monkeypatch.setattr(executor.db, "fetch", fake.fetch)
+    monkeypatch.setattr(executor.db, "execute", fake.execute)
+
+    # Pre-seed a row already stood down as skipped_slippage for this exact key.
+    sig = _signal()
+    sig_date = date.fromisoformat(sig["signal_date"])
+    key = (sig["vertical"], sig["matchup"], sig["selection"], sig_date)
+    fake.rows[1] = {
+        "id": 1,
+        "vertical": sig["vertical"],
+        "matchup": sig["matchup"],
+        "selection": sig["selection"],
+        "signal_date": sig_date,
+        "edge_pct": sig["edge_pct"],
+        "model_prob": sig["model_prob"],
+        "market_price": sig["market_price"],
+        "kalshi_ticker": "KXMLBSPREAD-26JUN011910KCCIN-CIN2",
+        "market_title": None,
+        "side": sig["side"],
+        "status": "skipped_slippage",
+        "status_reason": "requested side empty / too thin to fill within budget",
+        "trades_id": None,
+    }
+    fake.unique[key] = 1
+    fake._next_id = 2
+
+    async def _scrape():
+        return [_signal()]
+
+    monkeypatch.setattr(poller.scraper, "scrape_signals", _scrape)
+
+    async def _resolver(sig, **kwargs):
+        return ResolveResult(
+            "KXMLBSPREAD-26JUN011910KCCIN-CIN2", "matched", [], kind="matched"
+        )
+
+    fires: list[dict[str, Any]] = []
+    _setup_executor_stubs(monkeypatch, fires, _resolver)
+
+    _run(poller._one_tick())  # re-scrape of a skipped_slippage row
+
+    assert fake.rearms == 1, "transient slippage skip must be re-armed on re-scrape"
+    assert len(fake.rows) == 1, "re-arm must not create a duplicate row"
+    assert len(fires) == 1, "re-armed pick fires once the book is fillable"
+    assert fake.rows[1]["status"] == "placed"

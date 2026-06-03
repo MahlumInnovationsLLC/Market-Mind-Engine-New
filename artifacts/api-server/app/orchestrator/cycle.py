@@ -158,6 +158,89 @@ def _resolve_resting_max_age(vertical: str, overrides: dict[str, Any]) -> float:
     return float(DEFAULT_RESTING_ORDER_MAX_AGE_SECS)
 
 
+# Empty-side hybrid backstop orders (slippage guard converted a marketable
+# FOK on an empty book into a resting GTC) get a deliberately longer default
+# TTL than ordinary resting orders: the whole point of the backstop is to sit
+# on a thin/early book and wait for it to thicken, so killing it at the normal
+# ~30s sweep would defeat it.  10 minutes by default.
+DEFAULT_BACKSTOP_RESTING_MAX_AGE_SECS = 600
+
+
+def _resolve_backstop_max_age(vertical: str, overrides: dict[str, Any]) -> float:
+    """Resolve the max-age TTL (seconds) for empty-side hybrid backstop
+    resting orders in ``vertical``.
+
+    Same precedence shape as ``_resolve_resting_max_age`` but keyed on the
+    backstop-specific override / env so operators can let the backstop sit
+    longer (or shorter) than ordinary resting orders without affecting them:
+      1. ``risk.resting_backstop_max_age_secs.<vertical>`` system_settings row
+      2. ``risk.resting_backstop_max_age_secs`` system_settings row (global)
+      3. ``AXIOM_SLIPPAGE_GUARD_BACKSTOP_MAX_AGE_SECS`` env var
+      4. ``DEFAULT_BACKSTOP_RESTING_MAX_AGE_SECS`` module constant
+
+    Falls back to the ordinary resting TTL only when that is *longer* than
+    the resolved backstop TTL, so a backstop is never swept sooner than a
+    plain resting order would be.
+    """
+    import os as _os
+    per_vert_key = f"resting_backstop_max_age_secs.{vertical}"
+    candidates: list[Any] = [
+        overrides.get(per_vert_key),
+        overrides.get("resting_backstop_max_age_secs"),
+        _os.environ.get("AXIOM_SLIPPAGE_GUARD_BACKSTOP_MAX_AGE_SECS"),
+        DEFAULT_BACKSTOP_RESTING_MAX_AGE_SECS,
+    ]
+    resolved: float | None = None
+    for v in candidates:
+        if v is None or v == "":
+            continue
+        try:
+            resolved = float(v)
+        except (TypeError, ValueError):
+            continue
+        break
+    if resolved is None:
+        resolved = float(DEFAULT_BACKSTOP_RESTING_MAX_AGE_SECS)
+    return max(resolved, _resolve_resting_max_age(vertical, overrides))
+
+
+async def _rearm_backstop_signal(signal_id: int, order_id: str) -> None:
+    """Flip an Edge Terminal signal back to ``skipped_slippage`` after its
+    empty-side backstop GTC was cancelled UNFILLED.
+
+    ``skipped_slippage`` is re-armable by the poller (see poller.py), so this
+    feeds the cancelled-unfilled backstop straight back into the retry loop —
+    on a later poll it re-prices on fresh book depth and re-fires once the
+    market is fillable, instead of being stranded forever as ``placed``.
+
+    Guarded ``status = 'placed'`` so we never clobber a signal that has since
+    moved on (e.g. a partial fill recorded it elsewhere) and never re-arm a
+    signal that already holds a position.  Failures are swallowed: the sweep
+    must proceed even if the re-arm write fails.
+    """
+    try:
+        await db.execute(
+            """
+            UPDATE edge_terminal_signals
+               SET status        = 'skipped_slippage',
+                   status_reason = 'resting backstop expired unfilled — re-arm for retry',
+                   updated_at    = now()
+             WHERE id = $1
+               AND status = 'placed'
+            """,
+            int(signal_id),
+        )
+        log.info(
+            "re-armed edge signal %s after unfilled backstop %s expired",
+            signal_id, order_id,
+        )
+    except Exception as e:  # noqa: BLE001 — sweep must proceed on failure
+        log.warning(
+            "re-arm of edge signal %s (order %s) failed: %s",
+            signal_id, order_id, e,
+        )
+
+
 async def _cancel_stale_resting_orders(
     vertical: str, overrides: dict[str, Any]
 ) -> dict[str, int]:
@@ -172,6 +255,7 @@ async def _cancel_stale_resting_orders(
     who want to opt a vertical out of auto-cancellation entirely.
     """
     max_age = _resolve_resting_max_age(vertical, overrides)
+    backstop_max_age = _resolve_backstop_max_age(vertical, overrides)
     kalshi_lifecycle.record_stale_resting_scan()
     if max_age <= 0:
         return {"scanned": 0, "cancelled": 0, "failed": 0, "max_age": int(max_age)}
@@ -191,8 +275,14 @@ async def _cancel_stale_resting_orders(
         if getattr(rec.request, "vertical", None) and rec.request.vertical != vertical:
             continue
         scanned += 1
+        # Empty-side hybrid backstop orders rest deliberately to wait for a
+        # thin book to thicken, so they earn a longer TTL than ordinary
+        # resting orders before the sweep reclaims them.
+        ctx_dict = getattr(rec.request, "context", None) or {}
+        is_backstop = bool(ctx_dict.get("rest_empty_side_backstop"))
+        order_max_age = backstop_max_age if is_backstop else max_age
         age_secs = (now - rec.created_at).total_seconds()
-        if age_secs <= max_age:
+        if age_secs <= order_max_age:
             continue
         try:
             await kalshi_lifecycle.cancel_order(rec.order_id)
@@ -207,6 +297,26 @@ async def _cancel_stale_resting_orders(
             continue
         cancelled += 1
         kalshi_lifecycle.record_stale_resting_cancelled(rec.order_id)
+        # A backstop GTC that expired with an AUTHORITATIVE zero fills holds no
+        # position, so the cancel above leaves nothing live on the book: it is
+        # now safe to re-arm its Edge Terminal signal for a fresh retry
+        # (double-bet-safe because we only re-arm AFTER a confirmed cancel of an
+        # unfilled order).  A partial/full fill (filled_count > 0) is left as
+        # ``placed`` — we hold real exposure and must not re-buy it.  If the
+        # cancel could NOT confirm the venue fill count (fill_count_authoritative
+        # is False), we treat the count as UNKNOWN, not zero, and refuse to
+        # re-arm: better a missed retry than a double-bet on live money.
+        if (
+            is_backstop
+            and bool(getattr(rec, "fill_count_authoritative", True))
+            and int(getattr(rec, "filled_count", 0) or 0) == 0
+        ):
+            sid = ctx_dict.get("edge_signal_id")
+            if sid is not None:
+                try:
+                    await _rearm_backstop_signal(int(sid), rec.order_id)
+                except (TypeError, ValueError):
+                    pass
     return {
         "scanned": scanned,
         "cancelled": cancelled,

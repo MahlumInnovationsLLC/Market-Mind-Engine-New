@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 
@@ -46,6 +47,52 @@ def _make_record(order_id: str, age_secs: float, vertical: str = "sports"):
         request=req,
         created_at=datetime.now(timezone.utc) - timedelta(seconds=age_secs),
     )
+
+
+def _make_backstop_record(
+    order_id: str,
+    age_secs: float,
+    *,
+    signal_id: int | None,
+    filled_count: int = 0,
+    fill_count_authoritative: bool = True,
+    vertical: str = "sports",
+):
+    """An empty-side hybrid backstop record: tagged ``rest_empty_side_backstop``
+    in its request context and carrying the originating Edge Terminal
+    ``edge_signal_id`` so the sweep can re-arm it when it expires unfilled.
+
+    ``fill_count_authoritative`` mirrors the flag ``cancel_order`` sets: when
+    False the sweep must treat the fill count as UNKNOWN (not zero) and refuse
+    to re-arm."""
+    ctx: dict[str, Any] = {"rest_empty_side_backstop": True}
+    if signal_id is not None:
+        ctx["edge_signal_id"] = signal_id
+    req = SimpleNamespace(
+        vertical=vertical,
+        limit_price_cents=50,
+        context=ctx,
+    )
+    return SimpleNamespace(
+        order_id=order_id,
+        request=req,
+        filled_count=filled_count,
+        fill_count_authoritative=fill_count_authoritative,
+        created_at=datetime.now(timezone.utc) - timedelta(seconds=age_secs),
+    )
+
+
+def _capture_rearm_execute(monkeypatch):
+    """Patch ``db.execute`` to record the re-arm UPDATEs the sweep issues."""
+    rearms: list[tuple[str, tuple[Any, ...]]] = []
+
+    async def _execute(q, *a):
+        if "UPDATE edge_terminal_signals" in q:
+            rearms.append((q, a))
+        return "UPDATE 1"
+
+    monkeypatch.setattr(cycle_mod.db, "execute", _execute)
+    return rearms
 
 
 def _install_resting(monkeypatch, records, cancel_side_effect=None):
@@ -100,6 +147,46 @@ def test_resolve_age_per_vertical_override_beats_global():
     assert cycle_mod._resolve_resting_max_age("sports", ov) == 300.0
     # Other verticals still see the global value.
     assert cycle_mod._resolve_resting_max_age("crypto", ov) == 45.0
+
+
+# ---------------------------------------------------------------------------
+# _resolve_backstop_max_age precedence (empty-side hybrid backstop TTL)
+# ---------------------------------------------------------------------------
+
+def test_resolve_backstop_age_default(monkeypatch):
+    monkeypatch.delenv("AXIOM_SLIPPAGE_GUARD_BACKSTOP_MAX_AGE_SECS", raising=False)
+    monkeypatch.delenv("AXIOM_RESTING_ORDER_MAX_AGE_SECS", raising=False)
+    assert cycle_mod._resolve_backstop_max_age("sports", {}) == float(
+        cycle_mod.DEFAULT_BACKSTOP_RESTING_MAX_AGE_SECS
+    )
+
+
+def test_resolve_backstop_age_env(monkeypatch):
+    monkeypatch.setenv("AXIOM_SLIPPAGE_GUARD_BACKSTOP_MAX_AGE_SECS", "900")
+    assert cycle_mod._resolve_backstop_max_age("sports", {}) == 900.0
+
+
+def test_resolve_backstop_age_override_beats_env(monkeypatch):
+    monkeypatch.setenv("AXIOM_SLIPPAGE_GUARD_BACKSTOP_MAX_AGE_SECS", "900")
+    ov = {"resting_backstop_max_age_secs": 450}
+    assert cycle_mod._resolve_backstop_max_age("sports", ov) == 450.0
+
+
+def test_resolve_backstop_age_per_vertical_override_beats_global():
+    ov = {
+        "resting_backstop_max_age_secs": 450,
+        "resting_backstop_max_age_secs.sports": 1200,
+    }
+    assert cycle_mod._resolve_backstop_max_age("sports", ov) == 1200.0
+    assert cycle_mod._resolve_backstop_max_age("crypto", ov) == 450.0
+
+
+def test_backstop_age_never_shorter_than_plain_resting(monkeypatch):
+    """If an operator sets a short backstop TTL but a long plain TTL, the
+    backstop must not be swept sooner than a plain resting order would be."""
+    monkeypatch.setenv("AXIOM_SLIPPAGE_GUARD_BACKSTOP_MAX_AGE_SECS", "30")
+    ov = {"resting_order_max_age_secs": 300}
+    assert cycle_mod._resolve_backstop_max_age("sports", ov) == 300.0
 
 
 # ---------------------------------------------------------------------------
@@ -176,6 +263,88 @@ def test_sweep_only_touches_matching_vertical(monkeypatch):
     stats = _run(cycle_mod._cancel_stale_resting_orders("sports", {}))
     assert cancelled == ["sports-stale"]
     assert stats["scanned"] == 1  # crypto order was filtered out before counting
+
+
+def test_backstop_outlives_normal_resting_ttl(monkeypatch):
+    """A backstop order older than the normal TTL but younger than the
+    longer backstop TTL is left resting — it gets time for the thin book to
+    thicken, whereas an ordinary resting order of the same age is swept."""
+    plain = _make_record("plain-1", age_secs=120)  # > 30s default → swept
+    backstop = _make_backstop_record("bk-1", age_secs=120, signal_id=42)  # < 600s
+    cancelled = _install_resting(monkeypatch, [plain, backstop])
+    rearms = _capture_rearm_execute(monkeypatch)
+    stats = _run(cycle_mod._cancel_stale_resting_orders("sports", {}))
+    assert cancelled == ["plain-1"], "backstop must outlive the normal TTL"
+    assert stats["scanned"] == 2
+    assert stats["cancelled"] == 1
+    assert rearms == [], "a backstop still within its TTL is not re-armed"
+
+
+def test_unfilled_backstop_cancelled_after_ttl_rearms_signal(monkeypatch):
+    """Once the backstop TTL elapses, an UNFILLED backstop is cancelled and
+    its Edge Terminal signal is re-armed (flipped to ``skipped_slippage``,
+    which the poller re-arms) so the edge is retried — not stranded as a
+    terminal ``placed`` that never trades."""
+    backstop = _make_backstop_record(
+        "bk-2", age_secs=700, signal_id=99, filled_count=0
+    )
+    cancelled = _install_resting(monkeypatch, [backstop])
+    rearms = _capture_rearm_execute(monkeypatch)
+    stats = _run(cycle_mod._cancel_stale_resting_orders("sports", {}))
+    assert cancelled == ["bk-2"]
+    assert stats["cancelled"] == 1
+    assert len(rearms) == 1, "unfilled backstop must re-arm its signal"
+    q, args = rearms[0]
+    assert "skipped_slippage" in q
+    assert "status = 'placed'" in q, "re-arm must be guarded on placed (no double-bet)"
+    assert args == (99,)
+
+
+def test_partially_filled_backstop_is_not_rearmed(monkeypatch):
+    """A backstop that took even a partial fill holds a real position, so it
+    is cancelled (TTL elapsed) but its signal is NOT re-armed — re-firing
+    would double-bet the held exposure."""
+    backstop = _make_backstop_record(
+        "bk-3", age_secs=700, signal_id=7, filled_count=2
+    )
+    cancelled = _install_resting(monkeypatch, [backstop])
+    rearms = _capture_rearm_execute(monkeypatch)
+    stats = _run(cycle_mod._cancel_stale_resting_orders("sports", {}))
+    assert cancelled == ["bk-3"], "TTL elapsed → still cancelled"
+    assert stats["cancelled"] == 1
+    assert rearms == [], "a backstop holding a position must never be re-armed"
+
+
+def test_backstop_with_unknown_fill_count_is_not_rearmed(monkeypatch):
+    """If the cancel could not confirm the venue fill count
+    (``fill_count_authoritative`` is False), the sweep must NOT re-arm even
+    though the in-memory count reads zero — unknown != zero, so re-arming could
+    double-bet a position the venue actually filled."""
+    backstop = _make_backstop_record(
+        "bk-5", age_secs=700, signal_id=55, filled_count=0,
+        fill_count_authoritative=False,
+    )
+    cancelled = _install_resting(monkeypatch, [backstop])
+    rearms = _capture_rearm_execute(monkeypatch)
+    stats = _run(cycle_mod._cancel_stale_resting_orders("sports", {}))
+    assert cancelled == ["bk-5"], "TTL elapsed → still cancelled"
+    assert stats["cancelled"] == 1
+    assert rearms == [], "unknown fill state must never be treated as clean zero"
+
+
+def test_unfilled_backstop_without_signal_id_is_not_rearmed(monkeypatch):
+    """A backstop with no ``edge_signal_id`` (e.g. a non-Edge-Terminal
+    resting order that happened to be tagged) is cancelled but cannot be
+    re-armed — there's no signal to flip, and the sweep must not crash."""
+    backstop = _make_backstop_record(
+        "bk-4", age_secs=700, signal_id=None, filled_count=0
+    )
+    cancelled = _install_resting(monkeypatch, [backstop])
+    rearms = _capture_rearm_execute(monkeypatch)
+    stats = _run(cycle_mod._cancel_stale_resting_orders("sports", {}))
+    assert cancelled == ["bk-4"]
+    assert stats["cancelled"] == 1
+    assert rearms == []
 
 
 def test_sweep_disabled_when_max_age_zero(monkeypatch):

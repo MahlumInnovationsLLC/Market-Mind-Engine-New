@@ -334,6 +334,12 @@ class OrderRecord:
     avg_fill_price_cents: int | None = None
     over_filled: bool = False
     created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    # True when ``filled_count`` is backed by an authoritative source (paper
+    # sim, WS fill rollup, or a venue cancel/get-order reconciliation). Set
+    # False only when a live cancel could NOT determine the venue fill count —
+    # double-bet-sensitive callers (backstop re-arm) must then treat the count
+    # as unknown, NOT as a clean zero.
+    fill_count_authoritative: bool = True
 
     def to_dict(self) -> dict[str, Any]:
         d = {
@@ -810,7 +816,17 @@ async def submit_order(req: OrderRequest, *, force_paper: bool | None = None) ->
         rest_price = int(req.limit_price_cents or 0)
         if s.marketable_fok_enabled:
             rest_price = max(1, min(99, rest_price - int(s.marketable_buffer_cents)))
-        req = _dc_replace(req, time_in_force="GTC", limit_price_cents=rest_price)
+        # Tag the converted request so the orchestrator's stale-resting sweep
+        # can (a) grant it a longer TTL than a normal resting order — give the
+        # thin book time to thicken and take it — and (b) re-arm its Edge
+        # Terminal signal for a fresh retry if it expires unfilled, instead of
+        # leaving it stranded as a terminal ``placed`` that never trades.
+        req = _dc_replace(
+            req,
+            time_in_force="GTC",
+            limit_price_cents=rest_price,
+            context={**(req.context or {}), "rest_empty_side_backstop": True},
+        )
         log.info(
             "slippage guard: resting %s on %s as GTC limit @ %s¢ "
             "(empty-side hybrid — no resting liquidity to take under FOK)",
@@ -1309,6 +1325,37 @@ async def _attempt_submit_recovery(
     return record
 
 
+def _extract_venue_filled_count(resp: Any) -> int | None:
+    """Best-effort authoritative fill count from a Kalshi cancel / get-order
+    response.
+
+    Returns ``None`` when the response carries no recognisable fill field, so
+    callers keep their in-memory count rather than wrongly assuming zero. The
+    canonical Kalshi order shape splits executed contracts into maker + taker
+    legs; some responses also volunteer a flat ``filled_count`` / ``executed_count``.
+    """
+    if not isinstance(resp, dict):
+        return None
+    order = resp.get("order")
+    if not isinstance(order, dict):
+        order = resp
+    for key in ("filled_count", "executed_count"):
+        v = order.get(key)
+        if v is not None:
+            try:
+                return int(v)
+            except (TypeError, ValueError):
+                continue
+    maker = order.get("maker_fill_count")
+    taker = order.get("taker_fill_count")
+    if maker is not None or taker is not None:
+        try:
+            return int(maker or 0) + int(taker or 0)
+        except (TypeError, ValueError):
+            return None
+    return None
+
+
 async def cancel_order(client_order_id: str) -> dict[str, Any]:
     """Cancel a resting order. Paper orders fill instantly so are never resting."""
     async with _resting_lock:
@@ -1319,13 +1366,42 @@ async def cancel_order(client_order_id: str) -> dict[str, Any]:
     if rec.paper:
         rec.state = "canceled"
     else:
+        venue_filled: int | None = None
+        venue_oid = rec.exchange_order_id or client_order_id
         try:
             async with kalshi_client.KalshiClient(settings=s) as c:
-                await c.cancel_order(rec.exchange_order_id or client_order_id)
+                resp = await c.cancel_order(venue_oid)
+                rec.state = "canceled"
+                # Authoritative fill reconciliation. Once Kalshi confirms the
+                # cancel, no further fills can land on this order, so the
+                # response reflects its FINAL fill state. Fold the venue count
+                # in BEFORE we drop the record from `_resting`, so a partial
+                # fill the WS hasn't yet delivered cannot be mistaken for
+                # zero-fill by double-bet-sensitive callers (backstop re-arm).
+                venue_filled = _extract_venue_filled_count(resp)
+                if venue_filled is None:
+                    # Cancel response carried no fill count — ask the venue
+                    # directly rather than guess. "Unknown" must never be
+                    # treated as "zero" on live money.
+                    try:
+                        follow = await c.get_order(venue_oid)
+                        venue_filled = _extract_venue_filled_count(follow)
+                    except Exception as e:  # noqa: BLE001 — lookup is best-effort
+                        log.warning(
+                            "post-cancel fill lookup failed for %s: %s",
+                            client_order_id, e,
+                        )
         except Exception as e:
             log.warning("cancel failed for %s: %s", client_order_id, e)
             raise OrderRejected(f"cancel failed: {e}") from e
-        rec.state = "canceled"
+        if venue_filled is not None:
+            rec.filled_count = max(int(rec.filled_count or 0), venue_filled)
+            rec.fill_count_authoritative = True
+        else:
+            # Could not confirm the venue fill count from either the cancel
+            # response or a follow-up lookup. Mark the count non-authoritative
+            # so the backstop re-arm path refuses to treat it as a clean zero.
+            rec.fill_count_authoritative = False
 
     async with _resting_lock:
         _resting.pop(client_order_id, None)

@@ -153,6 +153,7 @@ async def _dispatch_via_lifecycle(
     paper: bool,
     consensus: float | None,
     edge: float | None,
+    signal_id: int | None = None,
 ) -> dict[str, Any]:
     """Submit through the chosen venue's lifecycle.submit_order.
 
@@ -168,6 +169,11 @@ async def _dispatch_via_lifecycle(
         "model_edge": edge,
         "vertical": ctx.vertical or "sports",
     }
+    # Stamp the originating Edge Terminal signal id so the stale-resting
+    # sweep can re-arm the exact signal if an empty-side backstop GTC
+    # expires unfilled (instead of stranding it as a terminal ``placed``).
+    if signal_id is not None:
+        context["edge_signal_id"] = int(signal_id)
     # Stamp the operator's clerk_user_id so the lifecycle's
     # `handle_ws_fill` notification path can resolve a recipient and
     # deliver per-user trade-confirmation emails on bot-driven live
@@ -249,6 +255,7 @@ async def place_order(
     exchange: str = "kalshi",
     cand: dict | None = None,
     placed_by: str = "orchestrator",
+    signal_id: int | None = None,
 ) -> dict[str, Any]:
     """Place a paper (or live) trade routed to ``exchange``.
 
@@ -414,6 +421,7 @@ async def place_order(
         paper=paper,
         consensus=consensus,
         edge=edge,
+        signal_id=signal_id,
     )
 
     try:
