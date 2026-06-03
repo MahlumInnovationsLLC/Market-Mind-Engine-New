@@ -57,3 +57,37 @@ submit-time slice branch also applies to FOK now (no longer excluded).
 books. **How to apply:** any future guard change must keep these two
 "rest-the-limit" allows FOK-excluded, or a marketable FOK will silently
 rest or 409.
+
+## HYBRID: empty-side FOK converts to resting GTC (no-trades fix)
+
+A pure marketable-FOK regime starves at thin early-morning books: when
+the requested side is EMPTY there is nothing to take, every FOK is killed,
+and a whole morning of signals dies with "no liquidity on requested side"
+(`market_price=None`). Kalshi has NO IOC, so there is no take-what's-there
+order type to fall back on. The operator-approved HYBRID keeps marketable
+FOK on liquid books but, when the requested side is empty, converts that
+ONE order to a resting GTC limit instead of killing it.
+
+**Mechanics (behavior, not line numbers):**
+- Guard: when `worst is None and filled==0` with a snapshot present (empty
+  requested side) AND the order is FOK AND the hybrid flag is on, the guard
+  returns a sentinel `{"rest_empty_side_as_gtc": True, ...}` instead of
+  falling to the slice-0 "no liquidity" reject.
+- `submit_order`: on that sentinel it rewrites the OrderRequest
+  `time_in_force` FOK→GTC and STRIPS `marketable_buffer_cents` from
+  `limit_price_cents` (only when `marketable_fok_enabled`), then sets
+  `guard=None` so the order proceeds and rests. Stripping the buffer
+  matters: the buffer is a cross-the-spread allowance that only makes sense
+  when taking; a resting order should sit at the edge-capped price.
+
+**Why strip the buffer:** the marketable buffer crosses the spread to take
+liquidity. With nothing to take, the buffer would just overpay on a
+resting order, eroding edge for no reason.
+
+**How to apply:** gated by `Settings.slippage_guard_rest_empty_side_fok`
+(env `AXIOM_SLIPPAGE_GUARD_REST_EMPTY_SIDE_FOK`, default True). When OFF,
+empty-side FOK reverts to the clean slice-0 reject (legacy kill). The
+liquid-book path (`book_known=True`) is untouched — FOK there still fills
+or slices, never flips to GTC (locked by a regression test). In PAPER mode
+the converted GTC is then rejected by the fill sim as `paper_no_liquidity`
+(expected); in LIVE mode it rests on the real book.

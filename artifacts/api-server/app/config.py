@@ -211,6 +211,16 @@ class Settings:
     # to a sub-dollar position on thin sports / tennis books.  Set False to
     # restore the old behaviour (trim to the fillable slice).  Default True.
     slippage_guard_rest_full_limit: bool
+    # When True, an order that would be a marketable FOK but whose *requested
+    # side* is EMPTY (no resting liquidity at all to take) is converted to a
+    # resting GTC limit at the edge-capped price instead of being killed.
+    # Kalshi has no IOC order type, so an empty book can only be traded by
+    # resting — this is the hybrid that keeps marketable FOK on liquid books
+    # while still placing trades on thin / early sports books that carry no
+    # standing asks at decision time.  The resting limit drops the marketable
+    # cross-spread buffer (there is nothing to cross), so it can never overpay.
+    # Set False to restore the strict FOK kill on empty sides.  Default True.
+    slippage_guard_rest_empty_side_fok: bool
 
     # --- marketable fill-or-kill execution (operator directive: no resting
     # orders) -------------------------------------------------------------
@@ -467,6 +477,9 @@ def get_settings() -> Settings:
         ),
         slippage_guard_rest_full_limit=_truthy(
             os.environ.get("AXIOM_SLIPPAGE_GUARD_REST_FULL_LIMIT"), default=True
+        ),
+        slippage_guard_rest_empty_side_fok=_truthy(
+            os.environ.get("AXIOM_SLIPPAGE_GUARD_REST_EMPTY_SIDE_FOK"), default=True
         ),
         marketable_fok_enabled=_truthy(
             os.environ.get("AXIOM_MARKETABLE_FOK"), default=True

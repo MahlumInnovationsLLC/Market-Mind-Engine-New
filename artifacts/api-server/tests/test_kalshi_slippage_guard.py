@@ -65,6 +65,9 @@ def _settings(
     max_age_secs: float = 5.0,
     allow_empty_side: bool = True,
     rest_full_limit: bool = False,
+    rest_empty_side_fok: bool = True,
+    marketable_fok: bool = False,
+    buffer_cents: int = 3,
 ) -> SimpleNamespace:
     return SimpleNamespace(
         kalshi_api_key_id="kid",
@@ -88,6 +91,16 @@ def _settings(
         # self-protecting limit order on a thin book) is covered explicitly
         # by its own test which sets this True.
         slippage_guard_rest_full_limit=rest_full_limit,
+        # Hybrid (operator directive): a marketable FOK whose requested side
+        # is empty is converted to a resting GTC limit instead of being
+        # killed.  Defaults True (matches the env-loader default); the
+        # kill-path test opts out with rest_empty_side_fok=False.
+        slippage_guard_rest_empty_side_fok=rest_empty_side_fok,
+        # Only read by submit_order's empty-side conversion (to strip the
+        # marketable cross-spread buffer); off by default in tests so the
+        # existing slice/reject paths are unaffected.
+        marketable_fok_enabled=marketable_fok,
+        marketable_buffer_cents=buffer_cents,
     )
 
 
@@ -561,6 +574,159 @@ def test_slippage_guard_empty_side_allow_default_when_setting_absent(_reset):
     assert _run(go()) is None
 
 
+def test_slippage_guard_rests_empty_side_under_fok_when_flag_on(_reset):
+    """Hybrid: a marketable FOK whose requested side is empty would be killed
+    by the venue (nothing to take).  With the flag on the guard signals the
+    caller to convert it to a resting GTC limit instead, so thin / early
+    sports books still trade.
+    """
+    async def go():
+        # BUY YES needs the no-book; publish only yes-bids → empty side.
+        await kalshi_orderbook.orderbook_cache.apply_snapshot(
+            "X-FOK-REST", yes=[[40, 100]], no=[],
+        )
+        req = lifecycle.OrderRequest(
+            market_ticker="X-FOK-REST", side="yes", action="buy", count=10,
+            limit_price_cents=43, time_in_force="FOK",
+            client_order_id="fok-rest-1", context={"model_edge_cents": 4.0},
+        )
+        return await lifecycle._check_slippage_guard(
+            req,
+            settings=_settings(threshold_pct=50.0, rest_empty_side_fok=True),
+        )
+
+    md = _run(go())
+    assert md is not None
+    assert md.get("rest_empty_side_as_gtc") is True
+
+
+def test_slippage_guard_kills_empty_side_under_fok_when_flag_off(_reset):
+    """With the hybrid flag off the FOK kill is restored: an empty requested
+    side falls through to the slice-0 reject with "no liquidity" rather than
+    resting.  (allow_empty_side does not apply — the order is FOK, not GTC.)
+    """
+    async def go():
+        await kalshi_orderbook.orderbook_cache.apply_snapshot(
+            "X-FOK-KILL", yes=[[40, 100]], no=[],
+        )
+        req = lifecycle.OrderRequest(
+            market_ticker="X-FOK-KILL", side="yes", action="buy", count=10,
+            limit_price_cents=43, time_in_force="FOK",
+            client_order_id="fok-kill-1", context={"model_edge_cents": 4.0},
+        )
+        return await lifecycle._check_slippage_guard(
+            req,
+            settings=_settings(threshold_pct=50.0, rest_empty_side_fok=False),
+        )
+
+    md = _run(go())
+    assert md is not None
+    assert not md.get("rest_empty_side_as_gtc")
+    assert "no liquidity on requested side" in md["detail"]
+
+
+def test_slippage_guard_empty_side_fok_converts_to_resting_gtc(monkeypatch, _reset):
+    """End-to-end: submit_order converts an empty-side marketable FOK into a
+    resting GTC limit and strips the marketable cross-spread buffer so the
+    order rests at the model's edge-capped price (43¢ − 3¢ buffer = 40¢),
+    never killed and never rejected.
+    """
+    monkeypatch.setattr(
+        lifecycle,
+        "get_settings",
+        lambda: _settings(
+            threshold_pct=50.0, marketable_fok=True, buffer_cents=3,
+        ),
+    )
+
+    async def go():
+        await kalshi_orderbook.orderbook_cache.apply_snapshot(
+            "X-FOK-E2E", yes=[[40, 100]], no=[],
+        )
+        req = lifecycle.OrderRequest(
+            market_ticker="X-FOK-E2E", side="yes", action="buy", count=10,
+            limit_price_cents=43, time_in_force="FOK",
+            client_order_id="fok-e2e-1", context={"model_edge_cents": 4.0},
+        )
+        return await lifecycle.submit_order(req)
+
+    rec = _run(go())
+    # The guard converted FOK → resting GTC and stripped the buffer (43 → 40)
+    # rather than killing the order.
+    assert rec.request.time_in_force == "GTC"
+    assert rec.request.limit_price_cents == 40
+    # It was NOT killed by the slippage guard / FOK kill.  (In paper mode the
+    # fill sim then rejects an empty-book resting order with `paper_no_liquidity`;
+    # in live mode the GTC order simply rests on the real book.)
+    reasons = [
+        w["metadata"].get("reason")
+        for w in _reset
+        if w["event_type"] == "rejected"
+    ]
+    assert "slippage_guard" not in reasons
+
+
+def test_slippage_guard_liquid_book_fok_stays_fok(monkeypatch, _reset):
+    """Safety regression: the empty-side hybrid must NOT touch FOK orders on a
+    LIQUID book.  When depth exists the guard passes (book_known=True) and the
+    order is submitted as-is — its time_in_force stays FOK and it is never
+    silently flipped to a resting GTC.
+    """
+    monkeypatch.setattr(
+        lifecycle, "get_settings",
+        lambda: _settings(threshold_pct=50.0, marketable_fok=True, buffer_cents=3),
+    )
+
+    async def go():
+        # BUY YES at 40¢ ⇒ taker needs no-bids at 60¢; 500 deep ⇒ full fill.
+        await kalshi_orderbook.orderbook_cache.apply_snapshot(
+            "X-LIQ-FOK", yes=[[40, 500]], no=[[60, 500]],
+        )
+        req = lifecycle.OrderRequest(
+            market_ticker="X-LIQ-FOK", side="yes", action="buy", count=10,
+            limit_price_cents=40, time_in_force="FOK",
+            client_order_id="liq-fok-1", context={"model_edge_cents": 4.0},
+        )
+        return await lifecycle.submit_order(req)
+
+    rec = _run(go())
+    assert rec.request.time_in_force == "FOK"  # never flipped to GTC
+    assert rec.request.limit_price_cents == 40  # buffer not stripped
+    rejected = [w for w in _reset if w["event_type"] == "rejected"]
+    assert rejected == []
+
+
+@pytest.mark.parametrize("buffer_cents,expected_rest_price", [(0, 43), (7, 36)])
+def test_slippage_guard_empty_side_fok_buffer_strip_arithmetic(
+    monkeypatch, _reset, buffer_cents, expected_rest_price
+):
+    """Lock the de-buffer arithmetic on conversion: the resting GTC limit is
+    the marketable limit minus ``marketable_buffer_cents`` (clamped 1..99).
+    Zero buffer leaves the price untouched; a wider buffer strips more.
+    """
+    monkeypatch.setattr(
+        lifecycle, "get_settings",
+        lambda: _settings(
+            threshold_pct=50.0, marketable_fok=True, buffer_cents=buffer_cents,
+        ),
+    )
+
+    async def go():
+        await kalshi_orderbook.orderbook_cache.apply_snapshot(
+            "X-FOK-BUF", yes=[[40, 100]], no=[],
+        )
+        req = lifecycle.OrderRequest(
+            market_ticker="X-FOK-BUF", side="yes", action="buy", count=10,
+            limit_price_cents=43, time_in_force="FOK",
+            client_order_id="fok-buf-1", context={"model_edge_cents": 4.0},
+        )
+        return await lifecycle.submit_order(req)
+
+    rec = _run(go())
+    assert rec.request.time_in_force == "GTC"
+    assert rec.request.limit_price_cents == expected_rest_price
+
+
 def test_slippage_guard_skips_when_no_cached_book(monkeypatch, _reset):
     """No WS snapshot for the ticker: degraded-mode pass-through.
 
@@ -1007,14 +1173,18 @@ def test_fok_full_fill_passes_when_depth_sufficient(monkeypatch, _reset):
     assert "sliced_by_slippage_guard" not in submitted[0]["metadata"]["context"]
 
 
-def test_fok_rejects_empty_side_even_with_allow_flag_on(monkeypatch, _reset):
-    """FOK on an empty requested side must NOT be allowed through as a resting
-    limit (that would leave a live order / 409). Even with the production
-    default allow_empty_side=True, FOK falls through to a clean reject.
+def test_fok_rejects_empty_side_when_hybrid_disabled(monkeypatch, _reset):
+    """With the hybrid OFF (rest_empty_side_fok=False), the strict FOK kill is
+    restored end-to-end: a FOK on an empty requested side is NOT allowed
+    through as a resting limit (that would leave a live order / 409); it falls
+    through to a clean slippage-guard reject.  allow_empty_side=True does not
+    apply — the order is FOK, not GTC.
     """
     monkeypatch.setattr(
         lifecycle, "get_settings",
-        lambda: _settings(threshold_pct=50.0, allow_empty_side=True),
+        lambda: _settings(
+            threshold_pct=50.0, allow_empty_side=True, rest_empty_side_fok=False,
+        ),
     )
 
     async def go():

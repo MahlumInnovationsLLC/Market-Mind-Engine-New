@@ -799,6 +799,24 @@ async def submit_order(req: OrderRequest, *, force_paper: bool | None = None) ->
     # would erase more than `slippage_guard_max_edge_pct` of the model edge,
     # reject before submission with reason=`slippage_guard`.
     guard = await _check_slippage_guard(req, settings=s)
+    if guard is not None and guard.get("rest_empty_side_as_gtc"):
+        # Empty requested side under marketable FOK: convert to a resting GTC
+        # limit at the edge-capped price.  Strip the marketable cross-spread
+        # buffer that was added for taking — there is nothing to cross on an
+        # empty side, so the order should rest at the model's edge-derived
+        # limit and can never overpay.  This is the hybrid empty-book path
+        # (operator chose: trade thin books rather than place zero trades).
+        from dataclasses import replace as _dc_replace
+        rest_price = int(req.limit_price_cents or 0)
+        if s.marketable_fok_enabled:
+            rest_price = max(1, min(99, rest_price - int(s.marketable_buffer_cents)))
+        req = _dc_replace(req, time_in_force="GTC", limit_price_cents=rest_price)
+        log.info(
+            "slippage guard: resting %s on %s as GTC limit @ %s¢ "
+            "(empty-side hybrid — no resting liquidity to take under FOK)",
+            req.client_order_id, req.market_ticker, rest_price,
+        )
+        guard = None
     if guard is not None:
         slice_count = int(guard.get("slice_count") or 0)
         # Marketable FOK is sized DOWN to the immediately-fillable depth
@@ -2005,11 +2023,8 @@ async def _check_slippage_guard(req: OrderRequest, *, settings) -> dict[str, Any
         # thin sports / tennis / weather books that carry no standing asks
         # on our side at decision time.  Gated so operators can restore the
         # old hard-reject via AXIOM_SLIPPAGE_GUARD_ALLOW_EMPTY_SIDE=false.
-        # FOK is fill-now-or-kill: an empty requested side has nothing to
-        # take, so it must NOT be allowed through as a resting limit (that
-        # would leave a live resting order, or 409 on the wire).  Let FOK
-        # fall through to the slice-0 path below for a clean reject; only
-        # resting (GTC) orders use the empty-side allow.
+        # Resting (GTC) orders with an empty requested side are allowed
+        # through to rest at the edge-capped limit.
         if req.time_in_force != "FOK" and getattr(
             settings, "slippage_guard_allow_empty_side", True
         ):
@@ -2019,6 +2034,28 @@ async def _check_slippage_guard(req: OrderRequest, *, settings) -> dict[str, Any
                 req.client_order_id, req.market_ticker, limit,
             )
             return None
+        # Hybrid (operator directive): a marketable FOK whose requested side
+        # is EMPTY has nothing to take and would be killed by the venue —
+        # placing zero trades on thin / early sports books that carry no
+        # standing asks at decision time.  Kalshi has no IOC, so the only way
+        # to trade an empty book is to rest.  Signal the caller to convert
+        # this single order to a resting GTC limit (at the edge-capped price,
+        # with the marketable cross-spread buffer stripped) instead of
+        # killing it.  Gated via AXIOM_SLIPPAGE_GUARD_REST_EMPTY_SIDE_FOK;
+        # set False to restore the strict FOK kill on empty sides.
+        if req.time_in_force == "FOK" and getattr(
+            settings, "slippage_guard_rest_empty_side_fok", True
+        ):
+            log.info(
+                "slippage guard: %s on %s has no resting liquidity on the "
+                "requested side under marketable FOK — converting to a "
+                "resting GTC limit (empty-side hybrid)",
+                req.client_order_id, req.market_ticker,
+            )
+            return {
+                "rest_empty_side_as_gtc": True,
+                "detail": "empty requested side — resting as GTC limit",
+            }
 
     # Full pass: book covers the whole order AND projected slippage stays
     # within the configured threshold. Short-circuit before doing slice math.

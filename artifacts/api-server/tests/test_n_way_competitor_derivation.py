@@ -268,6 +268,7 @@ def _patch_paper_for_place_order(
         _paper, "get_settings",
         lambda: SimpleNamespace(
             operator_user_id="user_op_test", trading_mode="paper",
+            marketable_fok_enabled=False, marketable_buffer_cents=3,
         ),
     )
 
