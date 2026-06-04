@@ -8,4 +8,5 @@
 - [Marketable FOK + canary bypass](marketable-fok-and-canary-bypass.md) — Kalshi has no IOC; marketable FOK is SIZED DOWN to fillable depth (IOC emulation), takes partial fills, never rests; canary off by default; AXIOM_MARKETABLE_FOK off re-enables resting GTC.
 - [Edge Terminal signal diagnostics](edge-terminal-signal-diagnostics.md) — signals live in Supabase (not Replit DB; query via app.db pool); "trades not firing" is usually the 60% confidence floor, not a bug; real skipped_unresolved is tennis/soccer not MLB.
 - [Edge Terminal re-arm boundary](edge-terminal-rearm-boundary.md) — ON CONFLICT re-arms ONLY skipped_unresolved; never placed (double-bet) or skipped_gate (settled games).
+- [Pipeline-exempt verticals](pipeline-exempt-verticals.md) — AXIOM_PIPELINE_VERTICALS runs one vertical's full pipeline+placement while global input_mode=edge_terminal; boot-once READY gate parks ALL verticals; input_mode must fail CLOSED.
 - [Soccer half-goal == moneyline + FIFA codes](soccer-half-goal-and-fifa-codes.md) — soccer "+/-0.5" routes to the winner market (no 0.5 spread exists); team codes are FIFA not first-3-letters; scorer must use the gate's code evidence.

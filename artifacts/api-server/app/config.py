@@ -246,6 +246,18 @@ class Settings:
     # candidate selection to that vertical's leagues.
     orchestrator_verticals: tuple[str, ...]
 
+    # Verticals that run the FULL LLM pipeline (debates + 12 gates +
+    # trade placement) even while the global ``app.input_mode`` system
+    # setting is ``edge_terminal``.  Edge Terminal is a sports-odds
+    # scraper and never produces signals for verticals like weather, so
+    # those verticals would otherwise never trade while the operator
+    # keeps the rest of the book on Edge Terminal.  Verticals listed
+    # here are ALSO exempted from the global READY gate: their cycle
+    # loop unparks on a vertical-scoped readiness check (DB + secrets +
+    # models ready + the vertical's own discovery feed has polled)
+    # instead of waiting for every realtime feed.  Default empty.
+    pipeline_verticals: tuple[str, ...]
+
     # Model artifact cache (persistent across container restarts).
     # Populated from AXIOM_MODEL_CACHE_DIR or DEFAULT_MODEL_CACHE_DIR.
     model_cache_dir: Path
@@ -360,6 +372,31 @@ def get_settings() -> Settings:
             f"{unknown!r}; registered: {sorted(_vertical_registry.names())}"
         )
 
+    # Verticals that keep running the full pipeline (and placing trades)
+    # even while the global input_mode is edge_terminal.  Validated the
+    # same way; must be a subset of the scheduled verticals so we never
+    # promise pipeline execution for a vertical the scheduler never
+    # spawns a loop for.
+    pipeline_raw = os.environ.get("AXIOM_PIPELINE_VERTICALS", "")
+    pipeline_verticals = tuple(
+        v.strip().lower() for v in pipeline_raw.split(",") if v.strip()
+    )
+    unknown_pipeline = [
+        v for v in pipeline_verticals if not _vertical_registry.has(v)
+    ]
+    if unknown_pipeline:
+        raise RuntimeError(
+            "AXIOM_PIPELINE_VERTICALS contains unknown vertical(s) "
+            f"{unknown_pipeline!r}; registered: {sorted(_vertical_registry.names())}"
+        )
+    not_scheduled = [v for v in pipeline_verticals if v not in verticals]
+    if not_scheduled:
+        raise RuntimeError(
+            "AXIOM_PIPELINE_VERTICALS contains vertical(s) not in "
+            f"AXIOM_ORCHESTRATOR_VERTICALS: {not_scheduled!r}; scheduled: "
+            f"{sorted(verticals)}"
+        )
+
     kalshi_env = os.environ.get("KALSHI_ENV", "demo").strip().lower()
     if kalshi_env not in ("demo", "prod", "production"):
         raise RuntimeError(f"KALSHI_ENV must be 'demo' or 'prod' (got {kalshi_env!r})")
@@ -457,6 +494,7 @@ def get_settings() -> Settings:
             0, int(os.environ.get("AXIOM_MAX_FRESH_DEBATES_PER_CYCLE") or "1")
         ),
         orchestrator_verticals=verticals,
+        pipeline_verticals=pipeline_verticals,
         settlement_enabled=_truthy(
             os.environ.get("AXIOM_SETTLEMENT_ENABLED"), default=True
         ),

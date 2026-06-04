@@ -117,6 +117,7 @@ AXIOM_TRADING_MODE = "live"
 AXIOM_COINAPI_DISABLED = "1"
 OPERATOR_AUTO_APPROVE_EMAIL_DOMAINS = "example.com"
 POSTMARK_FROM_EMAIL = "colter@mahluminnovations.com"
+AXIOM_PIPELINE_VERTICALS = "weather"
 
 [userenv.production]
 AXIOM_SKIP_ALEMBIC_AT_STARTUP = "1"

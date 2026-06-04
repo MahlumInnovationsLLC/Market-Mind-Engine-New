@@ -325,6 +325,22 @@ async def _cancel_stale_resting_orders(
     }
 
 
+async def _resolve_input_mode() -> str:
+    """Resolve the operator's Edge Terminal input mode, failing CLOSED.
+
+    A control-plane read error returns ``"edge_terminal"`` so a transient
+    blip never opens the live-money placement path for a non-exempt
+    vertical.  Pipeline-exempt verticals ignore this value anyway (their
+    skips are gated off regardless), so failing closed only ever holds a
+    non-exempt vertical back from placing — never the reverse.
+    """
+    try:
+        from ..edge_terminal import control as _et_control
+        return await _et_control.get_input_mode()
+    except Exception:
+        return "edge_terminal"
+
+
 async def _latest_bankroll(trading_mode: str = "live") -> float | None:
     """Most recent bankroll, in dollars, scoped to ``trading_mode``.
 
@@ -1671,12 +1687,24 @@ async def run_cycle(vertical: str = "sports") -> CycleResult:
     # spend) is suppressed in edge_terminal mode.  We still walk the
     # ``cached`` debates so the dashboard reflects what *would* have
     # been considered, but produce zero new rows.
-    try:
-        from ..edge_terminal import control as _et_control
-        _input_mode_early = await _et_control.get_input_mode()
-    except Exception:  # pragma: no cover — defensive
-        _input_mode_early = "pipeline"
-    _skip_fresh_debates = _input_mode_early == "edge_terminal"
+    # Per-vertical pipeline exemption (e.g. weather): a vertical listed in
+    # ``pipeline_verticals`` runs the full LLM pipeline and PLACES trades
+    # even while the global input_mode is edge_terminal, because the Edge
+    # Terminal scraper never produces signals for it.
+    _vertical_pipeline_exempt = vertical in settings.pipeline_verticals
+    # Resolve the operator's input mode ONCE per cycle and reuse it for
+    # BOTH the fresh-debate suppression and the placement skip below.
+    # Two independent reads could disagree if the control-plane query
+    # fails transiently; combined with a fail-OPEN default that could let
+    # a non-exempt vertical place live trades while the operator is
+    # actually in edge_terminal mode.  Fail CLOSED (treat a read error as
+    # edge_terminal) so a control-plane blip never opens the live-money
+    # placement path for a non-exempt vertical.  Pipeline-exempt verticals
+    # (e.g. weather) are unaffected — their skips are gated off regardless.
+    _input_mode = await _resolve_input_mode()
+    _skip_fresh_debates = (
+        _input_mode == "edge_terminal" and not _vertical_pipeline_exempt
+    )
 
     # Run fresh debates serially to bound concurrent LLM cost.
     for pred in fresh_pool:
@@ -1745,17 +1773,15 @@ async def run_cycle(vertical: str = "sports") -> CycleResult:
         except Exception as e:
             log.debug("line enrichment failed for %s: %s", cand.get("game_id"), e)
 
-    # Edge Terminal input-mode exclusivity (task #844): when the operator
-    # has selected ``edge_terminal`` as the input source, the LLM
-    # pipeline must NOT place trades — only the scraper executor fires.
-    # Short-circuit BEFORE the candidate loop so we don't waste CPU
-    # running 12 gates per candidate just to throw the result away.
-    try:
-        from ..edge_terminal import control as _et_control
-        _input_mode = await _et_control.get_input_mode()
-    except Exception:  # pragma: no cover — defensive
-        _input_mode = "pipeline"
-    _edge_terminal_active = _input_mode == "edge_terminal"
+    # Edge Terminal input-mode exclusivity: when the operator has selected
+    # ``edge_terminal`` as the input source, the LLM pipeline must NOT
+    # place trades — only the scraper executor fires.  Reuses the single
+    # ``_input_mode`` resolved above (no second read that could disagree).
+    # Pipeline-exempt verticals (e.g. weather) place trades even in
+    # edge_terminal mode — see ``_vertical_pipeline_exempt`` above.
+    _edge_terminal_active = (
+        _input_mode == "edge_terminal" and not _vertical_pipeline_exempt
+    )
 
     # 3) Evaluate every candidate against the 12 gates.
     for cand in candidates:
