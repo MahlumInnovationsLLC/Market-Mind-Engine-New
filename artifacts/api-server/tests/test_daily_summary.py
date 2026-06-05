@@ -293,6 +293,46 @@ def test_subject_unchanged_by_new_sections() -> None:
     assert "realized +$12.34" in res["subject"]
 
 
+def test_renders_placed_trades_text_and_html() -> None:
+    res = alerts.daily_pnl_summary(
+        **{
+            **_BASE_KW,
+            "trades_placed_today": 2,
+            "placed_trades": [
+                {
+                    "market_ticker": "KXMLBGAME-25-NYY",
+                    "market_title": "Yankees win",
+                    "vertical": "mlb",
+                    "side": "YES",
+                    "action": "buy",
+                    "quantity": 10.0,
+                    "price_cents": 62,
+                    "trading_mode": "live",
+                    "placed_by": "edge_terminal",
+                    "model_prob": 0.71,
+                },
+            ],
+        }
+    )
+    # overview count
+    assert "trades_placed_today" in res["body_preview"]
+    # text section
+    assert "Trades placed today" in res["body_preview"]
+    assert "KXMLBGAME-25-NYY" in res["body_preview"]
+    assert "edge_terminal" in res["body_preview"]
+    assert "62¢" in res["body_preview"]
+    # html section
+    assert "Trades placed today" in res["html_preview"]
+    assert "KXMLBGAME-25-NYY" in res["html_preview"]
+    assert "edge_terminal" in res["html_preview"]
+
+
+def test_placed_trades_section_degrades_when_empty() -> None:
+    res = alerts.daily_pnl_summary(**{**_BASE_KW, "placed_trades": []})
+    assert "(no trades placed today)" in res["body_preview"]
+    assert "No trades placed today." in res["html_preview"]
+
+
 # ---------------------------------------------------------------------------
 # collect_summary — per-persona aggregation from analyst_verdicts JSON
 # ---------------------------------------------------------------------------

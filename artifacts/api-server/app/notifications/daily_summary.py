@@ -118,6 +118,8 @@ async def collect_summary(date_utc: str) -> dict[str, Any]:
         "realized_pnl_cents": 0,
         "unrealized_pnl_cents": 0,
         "trades_settled": 0,
+        "trades_placed_today": 0,
+        "placed_trades": [],
         "fills_today": 0,
         "open_positions": 0,
         "cycles_completed": 0,
@@ -175,6 +177,53 @@ async def collect_summary(date_utc: str) -> dict[str, Any]:
         out["fills_today"] = int(n or 0)
     except Exception as e:
         error_log("daily_summary.fills", f"{type(e).__name__}: {e}")
+    # Trades PLACED today (across paper + live, every source). The
+    # realized/settled query above only counts trades that have already
+    # settled, so live Edge Terminal placements that haven't resolved
+    # yet were invisible and the digest read "no trades". Surface every
+    # row written to ``trades`` with today's ``executed_at`` so the
+    # email shows the day's actual order flow — Edge Terminal included.
+    try:
+        rows = await db.fetch(
+            """
+            SELECT market_id                            AS market_ticker,
+                   market_title,
+                   vertical,
+                   side,
+                   action,
+                   coalesce(quantity, 0)::float         AS quantity,
+                   coalesce(price, 0)::float            AS price,
+                   trading_mode,
+                   coalesce(placed_by, 'orchestrator')  AS placed_by,
+                   model_prob,
+                   executed_at
+              FROM trades
+             WHERE date_trunc('day', executed_at AT TIME ZONE 'UTC') = $1::text::date
+             ORDER BY executed_at DESC
+             LIMIT 100
+            """,
+            date_utc,
+        )
+        out["placed_trades"] = [
+            {
+                "market_ticker": r["market_ticker"],
+                "market_title": r["market_title"],
+                "vertical": r["vertical"],
+                "side": (r["side"] or "").upper(),
+                "action": r["action"],
+                "quantity": float(r["quantity"] or 0.0),
+                "price_cents": int(round(float(r["price"] or 0.0) * 100)),
+                "trading_mode": r["trading_mode"],
+                "placed_by": r["placed_by"],
+                "model_prob": (
+                    float(r["model_prob"]) if r["model_prob"] is not None else None
+                ),
+            }
+            for r in rows
+        ]
+        out["trades_placed_today"] = len(out["placed_trades"])
+    except Exception as e:
+        error_log("daily_summary.placed_trades", f"{type(e).__name__}: {e}")
     # Drift alerts today
     try:
         n = await db.fetchval(

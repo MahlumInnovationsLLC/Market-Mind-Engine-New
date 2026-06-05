@@ -3713,6 +3713,8 @@ def daily_pnl_summary(
     halts_today: int,
     drift_alerts_today: int,
     slippage_guard_rejects_today: int = 0,
+    trades_placed_today: int = 0,
+    placed_trades: list[dict[str, Any]] | None = None,
     top_movers: list[dict[str, Any]] | None = None,
     by_vertical: list[dict[str, Any]] | None = None,
     by_persona: list[dict[str, Any]] | None = None,
@@ -3730,6 +3732,7 @@ def daily_pnl_summary(
         ("realized_pnl", fmt_cents(realized_pnl_cents)),
         ("unrealized_pnl", fmt_cents(unrealized_pnl_cents)),
         ("trades_settled", trades_settled),
+        ("trades_placed_today", trades_placed_today),
         ("fills_today", fills_today),
         ("open_positions", open_positions),
         ("cycles_completed", cycles_completed),
@@ -3738,6 +3741,7 @@ def daily_pnl_summary(
         ("slippage_guard_rejects_today", slippage_guard_rejects_today),
     ]
     body = "Daily Axiom-Predict summary.\n\n" + _format_lines(rows) + "\n"
+    body += _render_placed_trades(placed_trades)
     if top_movers:
         body += "\nTop position movers:\n"
         for m in top_movers[:10]:
@@ -3752,6 +3756,7 @@ def daily_pnl_summary(
     html_body = _render_daily_pnl_summary_html(
         date_utc=date_utc,
         summary_rows=rows,
+        placed_trades=placed_trades,
         top_movers=top_movers,
         by_vertical=by_vertical,
         by_persona=by_persona,
@@ -3761,6 +3766,40 @@ def daily_pnl_summary(
     return _dispatch(
         subject, body, tag="daily-summary", dry_run=dry_run, html_body=html_body
     )
+
+
+def _fmt_trade_price(price_cents: Any) -> str:
+    return f"{int(price_cents)}¢" if isinstance(price_cents, (int, float)) else "  -  "
+
+
+def _render_placed_trades(rows: list[dict[str, Any]] | None) -> str:
+    """Plain-text list of trades PLACED today (Edge Terminal + pipeline).
+
+    Distinct from the settled-PnL view above: a freshly placed live
+    trade has no realized PnL yet, so this is what surfaces same-day
+    Edge Terminal order flow that would otherwise read as "no trades".
+    """
+    out = "\nTrades placed today (Edge Terminal + pipeline):\n"
+    if not rows:
+        out += "  (no trades placed today)\n"
+        return out
+    header = (
+        f"  {'market':<26} {'vert':<8} {'side':>4} {'act':>8} "
+        f"{'qty':>6} {'price':>6} {'mode':>5} {'source':<14}\n"
+    )
+    out += header
+    for r in rows:
+        out += (
+            f"  {str(r.get('market_ticker') or '?'):<26} "
+            f"{str(r.get('vertical') or '?'):<8} "
+            f"{str(r.get('side') or '?'):>4} "
+            f"{str(r.get('action') or '?'):>8} "
+            f"{float(r.get('quantity') or 0.0):>6.0f} "
+            f"{_fmt_trade_price(r.get('price_cents')):>6} "
+            f"{str(r.get('trading_mode') or '?'):>5} "
+            f"{str(r.get('placed_by') or '?'):<14}\n"
+        )
+    return out
 
 
 def _render_by_vertical(
@@ -4015,10 +4054,50 @@ def _render_slippage_guard_offenders_html(
     return title + _html_table(headers, body_rows)
 
 
+def _render_placed_trades_html(rows: list[dict[str, Any]] | None) -> str:
+    """HTML table of trades PLACED today (Edge Terminal + pipeline)."""
+    title = (
+        '<h3 style="margin:24px 0 8px 0;font-size:14px;color:#111827;">'
+        "Trades placed today</h3>"
+    )
+    if not rows:
+        return (
+            title
+            + '<p style="margin:0 0 8px 0;font-size:13px;color:#6B7280;">'
+            "No trades placed today.</p>"
+        )
+    headers = [
+        ("Market", "left"),
+        ("Vertical", "left"),
+        ("Side", "right"),
+        ("Action", "right"),
+        ("Qty", "right"),
+        ("Price", "right"),
+        ("Mode", "right"),
+        ("Source", "left"),
+    ]
+    body_rows = []
+    for r in rows:
+        pc = r.get("price_cents")
+        price_s = f"{int(pc)}¢" if isinstance(pc, (int, float)) else "-"
+        body_rows.append([
+            _html_escape(r.get("market_ticker") or "?"),
+            _html_escape(r.get("vertical") or "?"),
+            _html_escape(r.get("side") or "?"),
+            _html_escape(r.get("action") or "?"),
+            _html_escape(f"{float(r.get('quantity') or 0.0):.0f}"),
+            _html_escape(price_s),
+            _html_escape(r.get("trading_mode") or "?"),
+            _html_escape(r.get("placed_by") or "?"),
+        ])
+    return title + _html_table(headers, body_rows)
+
+
 def _render_daily_pnl_summary_html(
     *,
     date_utc: str,
     summary_rows: list[tuple[str, Any]],
+    placed_trades: list[dict[str, Any]] | None = None,
     top_movers: list[dict[str, Any]] | None,
     by_vertical: list[dict[str, Any]] | None,
     by_persona: list[dict[str, Any]] | None,
@@ -4058,6 +4137,7 @@ def _render_daily_pnl_summary_html(
             + _html_table(mover_headers, mover_rows)
         )
 
+    placed_trades_html = _render_placed_trades_html(placed_trades)
     by_vertical_html = _render_by_vertical_html(by_vertical, fmt_cents)
     by_persona_html = _render_by_persona_html(by_persona)
     slippage_html = _render_slippage_guard_offenders_html(slippage_guard_offenders)
@@ -4077,6 +4157,7 @@ def _render_daily_pnl_summary_html(
         <tr>
           <td style="padding:20px 24px;">
             {overview_html}
+            {placed_trades_html}
             {movers_html}
             {by_vertical_html}
             {by_persona_html}

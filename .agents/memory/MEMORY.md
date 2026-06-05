@@ -10,3 +10,4 @@
 - [Edge Terminal re-arm boundary](edge-terminal-rearm-boundary.md) — ON CONFLICT re-arms ONLY skipped_unresolved; never placed (double-bet) or skipped_gate (settled games).
 - [Pipeline-exempt verticals](pipeline-exempt-verticals.md) — AXIOM_PIPELINE_VERTICALS runs one vertical's full pipeline+placement while global input_mode=edge_terminal; boot-once READY gate parks ALL verticals; input_mode must fail CLOSED.
 - [Soccer half-goal == moneyline + FIFA codes](soccer-half-goal-and-fifa-codes.md) — soccer "+/-0.5" routes to the winner market (no 0.5 spread exists); team codes are FIFA not first-3-letters; scorer must use the gate's code evidence.
+- [Daily email & staleness paging](daily-email-and-staleness-paging.md) — day-end email counted only SETTLED trades (read "no trades"); placed≠settled needs its own executed_at view; live-state staleness pager gated off in edge_terminal mode.
