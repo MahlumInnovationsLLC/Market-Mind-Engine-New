@@ -36,3 +36,9 @@ id = "xrlv8Pr9htRZZc7uhrvyH"
 uri = "file://docs/AXIOM_ARCHITECTURE_AND_LESSONS.md"
 type = "text"
 title = "Axiom — Architecture & Lessons Learned"
+
+[[outputs]]
+id = "pnQPe9XXtI_gALbcMCZeK"
+uri = "file://docs/AXIOM_DASHBOARD_OVERVIEW_AND_FEED.md"
+type = "text"
+title = "Axiom Predict — Advanced Overview & Feed Tab Spec"
