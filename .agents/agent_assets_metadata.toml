@@ -30,3 +30,9 @@ id = "tHoZn5XYQiN9V1J8DAJ3Y"
 uri = "file://attached_assets/outlier_code_form.png"
 type = "image"
 title = "Step 2: after submitting email, it asks for a 6-digit code emailed to you"
+
+[[outputs]]
+id = "xrlv8Pr9htRZZc7uhrvyH"
+uri = "file://docs/AXIOM_ARCHITECTURE_AND_LESSONS.md"
+type = "text"
+title = "Axiom — Architecture & Lessons Learned"
