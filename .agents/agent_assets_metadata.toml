@@ -42,3 +42,9 @@ id = "pnQPe9XXtI_gALbcMCZeK"
 uri = "file://docs/AXIOM_DASHBOARD_OVERVIEW_AND_FEED.md"
 type = "text"
 title = "Axiom Predict — Advanced Overview & Feed Tab Spec"
+
+[[outputs]]
+id = "NRkRinOUPy5dW-WOpzCng"
+uri = "file://docs/AXIOM_KALSHI_CONNECTION_AND_DATA.md"
+type = "text"
+title = "Axiom — Kalshi Connection, Data Flow & Live Display"
